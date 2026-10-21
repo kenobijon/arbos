@@ -20,7 +20,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.6.90"
+version = "0.6.98"
 edition = "2021"
 license = "UNLICENSED"
 publish = false
@@ -32,7 +32,7 @@ arbos-client = { path = "crates/arbos-client" }
 arbos-matrix = { path = "crates/arbos-matrix" }
 arbos-ffi = { path = "crates/arbos-ffi" }
 arbos-update = { path = "crates/arbos-update" }
-# Pin lockstep with apps/ios loro-swift exactVersion 1.16.2 until loro-swift is removed.
+# Exact pin: arbos-core, the relay box and the Swift client (through ArbosFFI) must agree on the Loro encoding.
 loro = "=1.16.2"
 uniffi = "=0.32.2"
 

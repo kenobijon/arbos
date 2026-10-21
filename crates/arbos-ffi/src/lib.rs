@@ -16,6 +16,7 @@ use serde_json::Value;
 
 uniffi::setup_scaffolding!();
 
+pub mod avatar;
 pub mod matrix;
 
 /// Frame decode, doc import, or writer failure. Sans-IO session has no transport errors.

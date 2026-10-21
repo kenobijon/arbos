@@ -66,3 +66,7 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSWindow", "NSResponder", "NSDockTile"] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "UNUserNotificationCenter", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationAttachment", "UNNotificationSound", "UNNotificationTrigger", "UNNotificationAction", "UNNotificationCategory"] }
 objc2-authentication-services = { version = "0.3", default-features = false, features = ["std", "block2", "ASWebAuthenticationSession", "ASFoundation"] }
+
+[dev-dependencies]
+# `#[gpui::test]` for the composer: a headless app, keystrokes into a real window, no display needed.
+gpui = { git = "https://github.com/zeronsh/zui", rev = "361ff20b919fdfb80199ee6d9aed725300cb7d54", features = ["test-support"] }

@@ -4825,6 +4825,33 @@ fn seed_people_docs(shared: &Arc<Shared>) {
         "Thanks both. I will do the run-through at 3 and post notes here.",
         base + 400_000,
     ));
+    // A reply the model provider refused (feedback lium-empty-reply-2026-10-21): the box
+    // writes an empty text part plus the `model_refused` line; the transcript shows the line
+    // in the agent's bubble instead of a bare "answering @…" header.
+    let _ = group.insert_message(&human_message(
+        GROUP_LAUNCH,
+        &sara,
+        "@arbos can you also pull the churn numbers for slide 6?",
+        base + 420_000,
+    ));
+    let mut refused = human_message(GROUP_LAUNCH, &sara, "", base + 425_000);
+    refused.role = Role::Assistant;
+    refused.status = MessageStatus::Error;
+    refused.sender = format!("agent:{PROJECT_ARBOS}");
+    refused.sender_name = Some("Arbos".into());
+    refused.sender_handle = Some("arbos".into());
+    refused.sender_avatar = None;
+    refused.asked_by_handle = Some("sara".into());
+    refused.owner_handle = Some(ME_HANDLE.into());
+    refused.parts = vec![
+        text_part(""),
+        Part::Error {
+            id: new_id(),
+            code: "model_refused".into(),
+            message: "I couldn't answer that: the model provider declined the request. Ask me again in a moment.".into(),
+        },
+    ];
+    let _ = group.insert_message(&refused);
     group.commit();
     add_doc(shared, group);
 }

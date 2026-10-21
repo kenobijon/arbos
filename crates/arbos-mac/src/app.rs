@@ -255,6 +255,10 @@ pub struct AppState {
     pub typing: HashMap<Id, (String, u64)>,
     /// Decoded avatars by `avatar_url`; `None` while a fetch is in flight.
     pub avatars: HashMap<String, Option<Arc<RenderImage>>>,
+    /// The dominant colour of each decoded avatar (by URL; the relay's URL
+    /// carries the user id and a version, so a new picture is a new key) for
+    /// the bar on the sender's bubbles. Absent = colourless picture → D79.
+    pub accents: HashMap<String, arbos_core::avatar::Accent>,
     /// A DM just started from the sheet: select it when it arrives.
     awaiting_dm: Option<String>,
     /// A people group just created: select it when those handles appear.
@@ -593,6 +597,7 @@ impl AppState {
             people_error: None,
             typing: HashMap::new(),
             avatars: HashMap::new(),
+            accents: HashMap::new(),
             awaiting_dm: None,
             awaiting_group: None,
             invite_target: None,
@@ -1096,7 +1101,15 @@ impl AppState {
                 cx.notify();
             }
             SyncEvent::Avatar { url, bytes } => {
-                let image = decode_image(&bytes).map(Arc::new);
+                // One decode serves both the picture and the bubble-bar colour.
+                let rgba = decode_rgba(&bytes);
+                if let Some(accent) = rgba.as_ref().and_then(|img| {
+                    let (w, h) = img.dimensions();
+                    arbos_core::avatar::dominant_accent(img.as_raw(), w, h)
+                }) {
+                    self.accents.insert(url.clone(), accent);
+                }
+                let image = rgba.and_then(bgra_frame).map(Arc::new);
                 self.avatars.insert(url, image);
                 cx.notify();
             }
@@ -5004,6 +5017,19 @@ impl AppState {
         self.avatars.get(url).cloned().flatten()
     }
 
+    /// The bar colour for a person's bubbles: their picture's dominant colour
+    /// once it has loaded, else the midpoint of their D79 disc gradient.
+    pub fn sender_accent(&self, person: &Person, theme: &crate::ui::theme::Theme) -> gpui::Hsla {
+        match self.accents.get(&person.avatar_url) {
+            Some(accent) => crate::ui::avatars::accent_color(*accent, theme),
+            None => crate::ui::avatars::accent_fallback(
+                crate::ui::avatars::person_seed(person),
+                None,
+                theme,
+            ),
+        }
+    }
+
     pub(crate) fn want_avatar(&mut self, url: String) {
         if url.is_empty() || self.avatars.contains_key(&url) {
             return;
@@ -6399,7 +6425,16 @@ fn mime_for_path(path: &std::path::Path) -> &'static str {
 
 /// PNG/JPEG/GIF/WebP/ICO → BGRA frame for GPUI (`RenderImage` is BGRA).
 pub fn decode_image(bytes: &[u8]) -> Option<RenderImage> {
-    let img = image::load_from_memory(bytes).ok()?.into_rgba8();
+    decode_rgba(bytes).and_then(bgra_frame)
+}
+
+/// PNG/JPEG/GIF/WebP/ICO → RGBA pixels.
+fn decode_rgba(bytes: &[u8]) -> Option<image::RgbaImage> {
+    Some(image::load_from_memory(bytes).ok()?.into_rgba8())
+}
+
+/// RGBA pixels → the BGRA frame GPUI draws.
+fn bgra_frame(img: image::RgbaImage) -> Option<RenderImage> {
     let (w, h) = img.dimensions();
     let mut raw = img.into_raw();
     for px in raw.chunks_exact_mut(4) {

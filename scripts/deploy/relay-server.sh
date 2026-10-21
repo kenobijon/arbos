@@ -139,7 +139,11 @@ if [[ -n "$IMPORT_DATA" ]]; then
   rsync -a --delete "$IMPORT_DATA/" "$DATA_DIR/"
   echo "imported relay data from $IMPORT_DATA"
 fi
-chown -R arbos:arbos "$DATA_DIR"; chmod 0750 "$DATA_DIR"
+# Own the data dir — but never descend into the user sandboxes' /work images mounted under
+# $DATA_DIR/boxes/<user>/mnt (D89): their files belong to the sandbox's own users, and a
+# recursive chown there breaks every workspace at the next start. `-xdev` stays on this fs.
+find "$DATA_DIR" -xdev -not -path "$DATA_DIR/boxes/*/mnt" \( ! -user arbos -o ! -group arbos \) -exec chown arbos:arbos {} + 2>/dev/null || true
+chmod 0750 "$DATA_DIR"
 
 # ---- 3. env file (secrets) -------------------------------------------------------------------------
 say "env file"
@@ -164,6 +168,10 @@ fi
 # Chats on Matrix (D88, scripts/deploy/matrix): the homeserver next to the relay and the three
 # appservice token pairs. ARBOS_MATRIX itself (off|dual|on) is an operator switch, never read from
 # the vault: it is kept from the env file and defaults to off.
+# Host fleet (D89): operator switches for gVisor sandboxes on this host, kept from the env file.
+FLEET_KEYS=(ARBOS_DEFAULT_PROVIDER ARBOS_LOCAL_BOX_IMAGE ARBOS_HOST_MAX_BOXES ARBOS_HOST_MIN_FREE_DISK_GB
+  ARBOS_HOST_EVICT_MIN_AVAILABLE_GB ARBOS_HOST_EVICT_MAX_SWAP_GB ARBOS_HOST_EVICT_LOAD
+  ARBOS_BOX_CPUS ARBOS_BOX_MEM_GB ARBOS_BOX_WORK_GB ARBOS_BOX_PIDS ARBOS_BOX_NETWORK ARBOS_BOX_DNS ARBOS_BOX_RUNTIME)
 MATRIX_KEYS=(ARBOS_MATRIX ARBOS_MATRIX_HS_URL ARBOS_MATRIX_SERVER_NAME ARBOS_MATRIX_AS_TOKEN_USERS ARBOS_MATRIX_HS_TOKEN_USERS
   ARBOS_MATRIX_AS_TOKEN_AGENTS ARBOS_MATRIX_HS_TOKEN_AGENTS ARBOS_MATRIX_AS_TOKEN_BRIDGES ARBOS_MATRIX_HS_TOKEN_BRIDGES)
 if command -v op >/dev/null 2>&1 && [[ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]]; then
@@ -174,7 +182,7 @@ fi
 # keep values already in the env file when nothing new was supplied
 if [[ -f "$ENV_FILE" ]]; then
   keep() { local k=$1; [[ -n "${!k:-}" ]] || printf -v "$k" '%s' "$(sed -n "s/^$k=//p" "$ENV_FILE" | head -1)"; }
-  for k in OPENROUTER_API_KEY OPENAI_API_KEY DAYTONA_API_KEY ARBOS_RELAY_ADMIN_TOKEN ARBOS_RELAY_KEY ARBOS_JWT_KEY ARBOS_GITHUB_CLIENT_ID ARBOS_GITHUB_CLIENT_SECRET ARBOS_DAYTONA_SNAPSHOT LIVEKIT_URL LIVEKIT_API_KEY LIVEKIT_API_SECRET "${MATRIX_KEYS[@]}"; do keep "$k"; done
+  for k in OPENROUTER_API_KEY OPENAI_API_KEY DAYTONA_API_KEY ARBOS_RELAY_ADMIN_TOKEN ARBOS_RELAY_KEY ARBOS_JWT_KEY ARBOS_GITHUB_CLIENT_ID ARBOS_GITHUB_CLIENT_SECRET ARBOS_DAYTONA_SNAPSHOT LIVEKIT_URL LIVEKIT_API_KEY LIVEKIT_API_SECRET "${MATRIX_KEYS[@]}" "${FLEET_KEYS[@]}"; do keep "$k"; done
 fi
 [[ -n "${DAYTONA_API_KEY:-}" ]] || echo "WARNING: DAYTONA_API_KEY is empty — new projects will get process boxes"
 [[ -n "${OPENROUTER_API_KEY:-}${OPENAI_API_KEY:-}" ]] || echo "WARNING: no model provider key"
@@ -210,6 +218,10 @@ EOF
 if [[ -n "${LIVEKIT_API_KEY:-}" && -n "${LIVEKIT_API_SECRET:-}" ]]; then
   printf 'LIVEKIT_URL=%s\nLIVEKIT_API_KEY=%s\nLIVEKIT_API_SECRET=%s\n' "${LIVEKIT_URL:-wss://livekit.arbos.life}" "$LIVEKIT_API_KEY" "$LIVEKIT_API_SECRET" >> "$ENV_FILE"
 fi
+# Host fleet (D89): only the keys that have a value; ARBOS_DEFAULT_PROVIDER unset means Daytona.
+for k in "${FLEET_KEYS[@]}"; do
+  [[ -z "${!k:-}" ]] || printf '%s=%s\n' "$k" "${!k}" >> "$ENV_FILE"
+done
 # Matrix (D88): only the keys that have a value; ARBOS_MATRIX unset means off.
 for k in "${MATRIX_KEYS[@]}"; do
   [[ -z "${!k:-}" ]] || printf '%s=%s\n' "$k" "${!k}" >> "$ENV_FILE"

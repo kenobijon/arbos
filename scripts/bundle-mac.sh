@@ -61,10 +61,11 @@ echo "==> building $BIN $VERSION for: $TARGETS"
 export ARBOS_BUILD="$BUILD"   # compiled in: update::current_version()
 export ARBOS_DEFAULT_UPDATE_CHANNEL="${ARBOS_DEFAULT_UPDATE_CHANNEL:-edge}"   # compiled in: update::feed_url()
 BINS=()
+TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 for t in $TARGETS; do
   rustup target add "$t" >/dev/null
   cargo build --release --locked -p "$BIN" --target "$t"
-  BINS+=("$ROOT/target/$t/release/$BIN")
+  BINS+=("$TARGET_DIR/$t/release/$BIN")
 done
 
 mkdir -p "$DIST"

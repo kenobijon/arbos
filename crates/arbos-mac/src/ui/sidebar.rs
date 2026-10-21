@@ -27,11 +27,13 @@ use crate::ui::theme::{
 };
 
 /// The drag strip beside the traffic lights (collapse + "+" on the right).
+/// Twice the former height so the top-of-window catchment matches the chat
+/// header ([feedback app-01M5G7QDRZASSTRMK524NDMQ2R]).
 fn top_strip() -> f32 {
     if cfg!(target_os = "macos") {
-        38.0
+        76.0
     } else {
-        34.0
+        68.0
     }
 }
 

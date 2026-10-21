@@ -14,6 +14,9 @@ name: Release
 #           published in this same run (marked latest, own appcast.xml):
 #             https://github.com/<repo>/releases/latest/download/appcast.xml
 #           A hand-pushed tag v<version> (Cargo.toml already bumped) still works.
+#           Hotfix: a revert, or a commit marked `hotfix:` / `[hotfix]`, pushed
+#           to main is released by the push trigger at once, ahead of its CI
+#           (target ≤ 15 min tag→published; v0.6.93 took 30).
 #           Set the repository variable ARBOS_AUTO_STABLE=0 to go back to edge
 #           builds per push.
 #   edge    workflow_dispatch channel=edge (or ARBOS_AUTO_STABLE=0 per push).
@@ -61,6 +64,9 @@ on:
     branches: [main]
   push:
     tags: ["v*"]
+    # Hotfix fast path: a revert or `hotfix`-marked commit pushed to main is released at once,
+    # ahead of its CI (auto-stable.sh with ARBOS_HOTFIX_ONLY=1; any other push ends in the plan job).
+    branches: [main]
   schedule:
     # Backstop for continuous delivery: a green commit whose Release run was lost
     # (cancelled while pending, main moved during the bump) ships within 15 min.
@@ -94,7 +100,9 @@ permissions:
   packages: write
 
 concurrency:
-  group: release-${{ github.event_name == 'push' && github.ref || 'main' }}
+  # Tag pushes and hotfix pushes get their own group: a hotfix must never wait behind, or be cancelled
+  # by, the pending run of the regular path (GitHub keeps one pending run per group).
+  group: release-${{ github.event_name == 'push' && (startsWith(github.ref, 'refs/tags/') && github.ref || format('hotfix-{0}', github.sha)) || 'main' }}
   cancel-in-progress: false
 
 env:
@@ -130,6 +138,8 @@ jobs:
         env:
           EVENT: ${{ github.event_name }}
           REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          PUSHED_SHA: ${{ github.sha }}
           IN_CHANNEL: ${{ inputs.channel }}
           IN_PUBLISH: ${{ inputs.publish }}
           IN_PROMOTE: ${{ inputs.promote }}
@@ -144,13 +154,24 @@ jobs:
           auto=false
           case "$EVENT" in
             push)
-              channel=stable
-              version="${REF_NAME#v}"
-              if [[ "$version" != "$base"* ]]; then
-                echo "::error title=Tag does not match Cargo.toml::tag $REF_NAME but Cargo.toml says $base. Bump the workspace version first."
-                exit 1
+              if [[ "$REF_TYPE" == branch ]]; then
+                # A push to main: only a hotfix (revert / `hotfix` mark) is released here, at once and
+                # without debounce; everything else waits for its green CI (the workflow_run path).
+                if [[ "$AUTO_STABLE" == 0 ]]; then
+                  channel=none; version="$base.$build"; publish=false
+                else
+                  auto=true; channel=auto; version="$base.$build"; publish=true
+                  export ARBOS_HOTFIX_ONLY=1 ARBOS_PUSHED_SHA="$PUSHED_SHA" ARBOS_RELEASE_DEBOUNCE_S=0
+                fi
+              else
+                channel=stable
+                version="${REF_NAME#v}"
+                if [[ "$version" != "$base"* ]]; then
+                  echo "::error title=Tag does not match Cargo.toml::tag $REF_NAME but Cargo.toml says $base. Bump the workspace version first."
+                  exit 1
+                fi
+                publish=true
               fi
-              publish=true
               ;;
             workflow_dispatch)
               channel="${IN_CHANNEL:-auto}"
@@ -233,10 +254,22 @@ jobs:
           export PATH="$HOME/.cargo/bin:$PATH"
           rustup show active-toolchain || rustup toolchain install
           rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      # GitHub-hosted runner: nothing survives the job, so the registry and target dir come from the
+      # Actions cache. Self-hosted (the EC2 Mac): the disk is persistent, so the build goes to a target
+      # dir outside the workspace and the cache action is skipped — saving the cache took 4.5 min of the
+      # 30-min tag→published lead time of the v0.6.93 hotfix (P0 #1208), restoring it took minutes more.
       - uses: Swatinem/rust-cache@v2
+        if: runner.environment != 'self-hosted'
         with:
           key: release-macos
           cache-on-failure: true
+      - name: Persistent target dir on the self-hosted runner
+        if: runner.environment == 'self-hosted'
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/arbos-release-target"
+          echo "CARGO_TARGET_DIR=$HOME/arbos-release-target" >> "$GITHUB_ENV"
+          echo "target dir: $HOME/arbos-release-target ($(du -sh "$HOME/arbos-release-target" 2>/dev/null | cut -f1) so far)"
       # The certificate goes into a throwaway keychain in $RUNNER_TEMP and is
       # removed by the last step whatever happens. No tracing in these steps.
       - name: Import the Developer ID certificate
@@ -263,6 +296,14 @@ jobs:
             echo "ARBOS_KEYCHAINS_WERE=$ARBOS_KEYCHAINS_WERE"
           } >> "$GITHUB_ENV"
           echo "identity: $ARBOS_SIGN_IDENTITY"
+      # Typing + Enter in the composer must not crash the app (#1208: v0.6.89–v0.6.92 shipped that way;
+      # the gate compiled the app but never ran it). The headless GPUI tests are the hard gate; the
+      # scripted smoke adds a real-app check when the runner's session can drive it.
+      - name: Composer type-and-Enter tests
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo test -p arbos-mac --locked enter_tests
       - name: Build, sign, notarize, staple
         id: build
         env:
@@ -305,8 +346,12 @@ jobs:
             echo "::error title=Not notarized::notary credentials were present but the build was not notarized."
             exit 1
           fi
-          rm -rf dist/Arbos.app
           echo "macOS: version $ARBOS_VERSION, signing $ARBOS_SIGNING, notarized $ARBOS_NOTARIZED, stapled $ARBOS_STAPLED" >> "$GITHUB_STEP_SUMMARY"
+      - name: Composer type-and-Enter smoke (built app)
+        run: |
+          set -euo pipefail
+          scripts/feedback/mac-enter-smoke.sh dist/Arbos.app/Contents/MacOS/arbos-mac | tee -a "$GITHUB_STEP_SUMMARY"
+          rm -rf dist/Arbos.app
       - name: Put the keychain back
         if: always()
         run: |
