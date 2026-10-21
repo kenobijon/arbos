@@ -398,24 +398,29 @@ impl RoomSession {
         let Ok(header) = serde_json::from_value::<ErrorHeader>(frame.header) else {
             return;
         };
-        if header.code == "lagging" && self.phase == Phase::Live {
-            let req = RowsReq {
-                after: self.cursor,
-                exclude_own: true,
-            };
-            let h = serde_json::to_value(&req).expect("rows_req");
-            self.push(RoomAction::SendFrame(Self::encode(
-                FrameType::RowsReq,
-                h,
-                Vec::new(),
-            )));
-        } else {
-            self.push(RoomAction::SessionError {
-                code: header.code,
-                message: header.message,
-            });
-            self.close_for_reconnect(Some(self.last_now_ms));
+        if header.code == "lagging" {
+            // Live: ask again with the same excludeOwn as finish_handshake /
+            // Swift Room (own rows may exist only on the relay). Mid-handshake
+            // (WaitState / WaitCheckpoint): ignore — finish_handshake resyncs.
+            if self.phase == Phase::Live {
+                let req = RowsReq {
+                    after: self.cursor,
+                    exclude_own: false,
+                };
+                let h = serde_json::to_value(&req).expect("rows_req");
+                self.push(RoomAction::SendFrame(Self::encode(
+                    FrameType::RowsReq,
+                    h,
+                    Vec::new(),
+                )));
+            }
+            return;
         }
+        self.push(RoomAction::SessionError {
+            code: header.code,
+            message: header.message,
+        });
+        self.close_for_reconnect(Some(self.last_now_ms));
     }
 
     fn on_presence(&mut self, frame: Frame) {
@@ -744,6 +749,80 @@ mod tests {
         assert_eq!(s.cursor(), 5);
         let cont = s.drain_actions();
         assert!(take_sends(&cont).iter().any(|f| f.ty == FrameType::RowsReq));
+    }
+
+    fn lagging_frame() -> Vec<u8> {
+        Frame::new(
+            FrameType::Error,
+            json!({ "code": "lagging", "message": "behind" }),
+            Vec::new(),
+        )
+        .encode()
+        .to_vec()
+    }
+
+    #[test]
+    fn lagging_while_live_rows_req_include_own() {
+        let mut s = RoomSession::new("dev:me", "proj/chat", 4, Vec::new());
+        s.on_open(1_000);
+        let _ = s.drain_actions();
+        s.on_frame(&state_frame(0, Vec::new()));
+        let _ = s.drain_actions();
+        assert!(s.is_live());
+
+        s.on_frame(&lagging_frame());
+        let actions = s.drain_actions();
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, RoomAction::ScheduleReconnect { .. })),
+            "lagging while Live must not reconnect"
+        );
+        let sends = take_sends(&actions);
+        assert_eq!(sends.len(), 1);
+        assert_eq!(sends[0].ty, FrameType::RowsReq);
+        assert_eq!(
+            sends[0].header.get("after").and_then(Value::as_i64),
+            Some(4)
+        );
+        assert_eq!(
+            sends[0].header.get("excludeOwn").and_then(Value::as_bool),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn lagging_while_wait_state_ignored_then_one_rows_req() {
+        let mut s = RoomSession::new("dev:me", "proj/chat", 0, Vec::new());
+        s.on_open(1_000);
+        let _ = s.drain_actions();
+        // Mid-handshake: lagging must not reconnect or send ROWS_REQ.
+        s.on_frame(&lagging_frame());
+        let mid = s.drain_actions();
+        assert!(mid.is_empty(), "lagging in WaitState is ignored");
+        assert!(!s.is_live());
+        assert!(!mid
+            .iter()
+            .any(|a| matches!(a, RoomAction::ScheduleReconnect { .. })));
+
+        s.on_frame(&state_frame(0, Vec::new()));
+        let after = s.drain_actions();
+        assert!(s.is_live());
+        let rows: Vec<_> = take_sends(&after)
+            .into_iter()
+            .filter(|f| f.ty == FrameType::RowsReq)
+            .collect();
+        assert_eq!(rows.len(), 1, "finish_handshake sends one ROWS_REQ");
+        assert_eq!(
+            rows[0].header.get("excludeOwn").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert!(
+            !after
+                .iter()
+                .any(|a| matches!(a, RoomAction::ScheduleReconnect { .. })),
+            "no reconnect after lagging-then-STATE"
+        );
     }
 
     #[test]

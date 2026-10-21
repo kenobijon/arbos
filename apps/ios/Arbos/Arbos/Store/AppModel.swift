@@ -56,6 +56,32 @@ private enum StoreKey {
 
 private let pushLog = Logger(subsystem: "com.unarbos.arbos.ios", category: "pushes")
 
+/// What AppModel uses from a room connection (concrete `Room` today).
+@MainActor
+protocol RoomSync: AnyObject {
+    var projectId: Id { get }
+    var roomChat: String { get }
+    var cursor: Int64 { get }
+    var focused: Bool { get set }
+    var inCall: String? { get set }
+
+    var onLink: ((Link) -> Void)? { get set }
+    var onBoxState: ((BoxState, String?) -> Void)? { get set }
+    var onCaughtUp: (() -> Void)? { get set }
+    var onAcked: (() -> Void)? { get set }
+    var onDocPaint: (() -> Void)? { get set }
+    var onPresence: (([String: Any]) -> Void)? { get set }
+    var presenceUser: () -> (id: String, handle: String)? { get set }
+    var onPendingChanged: (([(String, Data)]) -> Void)? { get set }
+    var onCursorMoved: (() -> Void)? { get set }
+
+    func start()
+    func stop()
+    func wake(reason: String)
+}
+
+extension Room: RoomSync {}
+
 @MainActor
 final class AppModel: ObservableObject {
     /// The hosted relay; self-hosters change it under Advanced.
@@ -342,7 +368,8 @@ final class AppModel: ObservableObject {
     /// The relay client, for feature extensions in other files.
     var relay: RelayAPI { api }
     private var docs: [Id: ChatDoc] = [:]
-    private var rooms: [Id: Room] = [:]
+    /// Room connection AppModel drives (concrete `Room` today; shared core later).
+    private var rooms: [Id: any RoomSync] = [:]
     /// Client-minted message ids whose push the relay has not `ACK`ed (S3),
     /// keyed by chat id so one room's ACK cannot leave another chat's bubble faint.
     private var unacked: [Id: Set<Id>] = [:]
