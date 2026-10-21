@@ -45,6 +45,9 @@ pub struct Touched {
     /// The `messages` list itself changed (insert/delete): re-read everything.
     pub list_changed: bool,
     pub messages: BTreeSet<usize>,
+    /// Anything outside `messages` (project doc maps, `commands`, `meta`, …).
+    /// Mirrors Swift `ChatDoc.Touched.other` so UniFFI clients lose nothing.
+    pub other: bool,
 }
 
 /// Map a root diff to message indexes. Paths look like
@@ -71,6 +74,14 @@ pub fn touched(event: &DiffEvent<'_>) -> Touched {
             }
         }
         if !saw_messages {
+            // A diff whose target is the root `messages` list itself (empty path
+            // to that container) is a list change; anything else is `other`.
+            match diff.target {
+                loro::ContainerID::Root { name, .. } if name.as_str() == "messages" => {
+                    out.list_changed = true;
+                }
+                _ => out.other = true,
+            }
             continue;
         }
         match found {

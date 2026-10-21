@@ -659,6 +659,7 @@
 			repositoryURL = "https://github.com/loro-dev/loro-swift";
 			requirement = {
 				kind = exactVersion;
+				/* Pin lockstep with workspace Cargo.toml loro = "=1.16.2" until loro-swift is removed. */
 				version = 1.16.2;
 			};
 		};
