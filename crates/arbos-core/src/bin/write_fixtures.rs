@@ -7,10 +7,10 @@
 use std::fs;
 use std::path::PathBuf;
 
-use arbos_core::doc::{ChatDoc, MessageStatus, UserMessageOpts};
+use arbos_core::doc::{message_text, ChatDoc, MessageStatus, UserMessageOpts};
 use arbos_core::wire::{Ack, BoxState, Frame, FrameType, Hello, PushHeader, RowHeader, State};
 use arbos_core::PROTO_VERSION;
-use loro::{Container, LoroList, LoroMap, LoroText, ValueOrContainer};
+use loro::{LoroList, LoroMap, LoroText};
 use serde_json::json;
 
 fn fixtures_dir() -> PathBuf {
@@ -108,6 +108,17 @@ fn write_chat_doc(dir: &std::path::Path) {
     let part_id = doc.start_assistant_message("msg-assistant", "msg-user", "dev:fixture");
     doc.append_text("msg-assistant", &part_id, "assistant says hi");
     doc.finish_message("msg-assistant", MessageStatus::Done);
+    // One hidden tool part so Swift shape tests see `hiddenParts` / hiddenCount.
+    doc.add_tool_part(
+        "msg-assistant",
+        "call-fixture-1",
+        "search",
+        &json!({ "q": "hi" }),
+        "no hits",
+        None,
+        None,
+        false,
+    );
 
     doc.transact(|d| {
         d.append_system_line(
@@ -165,23 +176,23 @@ fn write_chat_doc(dir: &std::path::Path) {
     let snap = doc.snapshot();
     fs::write(dir.join("chat_doc.bin"), &snap).expect("chat_doc.bin");
 
-    // Side-car expected shape (kinds / text / projected reactions) for the Rust
-    // test and the upcoming Swift check.
-    let list = doc.messages_list();
+    // Side-car expected shape (kinds / text / projected reactions / hiddenCount)
+    // for the Rust test and the Swift check. Built from the same projected_rows
+    // path the FFI uses.
     let mut expected = Vec::new();
-    for i in 0..list.len() {
-        let Some(ValueOrContainer::Container(Container::Map(m))) = list.get(i) else {
-            continue;
-        };
-        let mut json = serde_json::to_value(m.get_deep_value()).unwrap();
-        arbos_core::doc::project_hidden_parts(&mut json);
-        arbos_core::doc::project_reactions(&mut json);
+    for json in doc.projected_rows() {
+        let hidden_count = json
+            .get("hiddenParts")
+            .and_then(|h| h.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0);
         expected.push(json!({
             "id": json["id"],
             "role": json["role"],
             "text": message_text(&json),
             "greeting": json.get("greeting").cloned().unwrap_or(json!(null)),
             "answersQuestionId": json.get("answersQuestionId").cloned().unwrap_or(json!(null)),
+            "hiddenCount": hidden_count,
             "reactions": json.get("reactions").cloned().unwrap_or(json!({})),
         }));
     }
@@ -190,20 +201,6 @@ fn write_chat_doc(dir: &std::path::Path) {
         serde_json::to_vec_pretty(&expected).unwrap(),
     )
     .expect("expected json");
-}
-
-fn message_text(row: &serde_json::Value) -> String {
-    row.get("parts")
-        .and_then(|p| p.as_array())
-        .map(|parts| {
-            parts
-                .iter()
-                .filter(|p| p.get("kind").and_then(|k| k.as_str()) == Some("text"))
-                .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
-                .collect::<Vec<_>>()
-                .join("")
-        })
-        .unwrap_or_default()
 }
 
 fn main() {

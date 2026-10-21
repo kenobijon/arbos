@@ -206,14 +206,31 @@ final class ChatDoc {
     /// Toggle one emoji reaction for `sender` on a message. Several emojis may
     /// sit on the same message. CRDT shape: flat `"emoji|sender" → true` under
     /// `reactions` (matches arbos-core; survives concurrent same-emoji first-react).
-    /// Does not commit.
+    /// Un-react also clears a legacy nested emoji-bucket entry when present.
+    /// Turning a reaction off is a no-op when the `reactions` map is missing
+    /// (does not create containers). Does not commit.
     func toggleReaction(messageId: Id, emoji: String, sender: String) throws {
         guard !emoji.isEmpty, !sender.isEmpty, let map = findMessage(messageId) else { return }
-        let reactions = try map.getOrCreateContainer(key: "reactions", child: LoroMap())
         let key = "\(emoji)|\(sender)"
-        if case .bool(true) = reactions.get(key: key)?.asValue() {
+        let existing = map.get(key: "reactions")?.asLoroMap()
+        var isOn = false
+        if let reactions = existing {
+            if case .bool(true) = reactions.get(key: key)?.asValue() {
+                isOn = true
+            } else if let bucket = reactions.get(key: emoji)?.asLoroMap(),
+                      case .bool(true) = bucket.get(key: sender)?.asValue() {
+                isOn = true
+            }
+        }
+        if isOn {
+            // Match core `set_reaction(..., on=false)`: no-op without a map.
+            guard let reactions = existing else { return }
             try reactions.delete(key: key)
+            if let bucket = reactions.get(key: emoji)?.asLoroMap() {
+                try bucket.delete(key: sender)
+            }
         } else {
+            let reactions = try map.getOrCreateContainer(key: "reactions", child: LoroMap())
             try reactions.insert(key: key, v: true)
         }
     }
