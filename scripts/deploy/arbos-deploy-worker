@@ -494,6 +494,28 @@ newest_green() {
   NEWEST_GREEN=""
 }
 
+roll_unit_running() {
+  # `systemctl is-active` says "activating", not "active", for the whole run of a oneshot unit —
+  # so every tick during a 15–40 minute roll tried a second systemd-run, which failed with "already
+  # loaded", and the tick exited 1 ("Failed to start arbos-deploy.service" once a minute, 22:00–22:50
+  # Oct 21). Running = active, activating or deactivating.
+  case "$(systemctl show -p ActiveState --value arbos-deploy-agentd.service 2>/dev/null)" in
+    active|activating|deactivating|reloading) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+start_roll_unit() {
+  # A finished (failed) transient unit stays loaded until reset; clear it, then start the roll.
+  systemctl reset-failed arbos-deploy-agentd.service 2>/dev/null || true
+  if ! systemd-run --unit=arbos-deploy-agentd --collect --quiet \
+      --property=Type=oneshot --property=StandardOutput=journal \
+      "$0" roll-image "$1"; then
+    log "agentd: could not start the roll unit for $1 (still loaded?); next tick retries"
+    return 1
+  fi
+}
+
 auto_requests() {
   local kind head deployed enabled
   head="$(newest_green)"
@@ -594,7 +616,7 @@ handle_request() {
     voice)
       if deploy_voice "$full"; then rm -f "$file"; fi ;;
     agentd)
-      if systemctl is-active --quiet arbos-deploy-agentd.service; then
+      if roll_unit_running; then
         return 0
       fi
       if [[ "$(sed -n 's/^sha=//p' "$STATE/agentd.rolling" 2>/dev/null)" == "$full" ]]; then
@@ -602,9 +624,7 @@ handle_request() {
         rm -f "$file"
         return 0
       fi
-      systemd-run --unit=arbos-deploy-agentd --collect --quiet \
-        --property=Type=oneshot --property=StandardOutput=journal \
-        "$0" roll-image "$full"
+      start_roll_unit "$full" || return 0
       event agentd "$full" roll_started "image build + snapshot + roll started"
       log "agentd: roll of $full started (unit arbos-deploy-agentd)" ;;
   esac
@@ -612,13 +632,14 @@ handle_request() {
 
 continue_roll_if_due() {
   [[ -f "$STATE/agentd.rolling" ]] || return 0
-  systemctl is-active --quiet arbos-deploy-agentd.service && return 0
+  roll_unit_running && return 0
   local at
   at="$(sed -n 's/^at=//p' "$STATE/agentd.rolling" | head -1)"
   (( $(date -u +%s) - ${at:-0} >= ROLL_RETRY_EVERY_S )) || return 0
+  systemctl reset-failed arbos-deploy-agentd.service 2>/dev/null || true
   systemd-run --unit=arbos-deploy-agentd --collect --quiet \
     --property=Type=oneshot --property=StandardOutput=journal \
-    "$0" roll-continue
+    "$0" roll-continue || { log "agentd: could not start the roll-continue unit; next tick retries"; return 0; }
   log "agentd: another roll pass started for $(sed -n 's/^sha=//p' "$STATE/agentd.rolling" | head -1)"
 }
 
@@ -647,7 +668,7 @@ status() {
   echo "queue:"; ls -l "$QUEUE" 2>/dev/null | tail -n +2 || true
   for f in "$QUEUE"/*; do [[ -f "$f" ]] && { echo "  $(basename "$f"): $(tr '\n' ' ' < "$f")"; }; done
   echo "failed:"; for f in "$STATE"/failed/*; do [[ -f "$f" ]] && echo "  $(basename "$f"): $(tr '\n' ' ' < "$f")"; done
-  echo "agentd roll unit: $(systemctl is-active arbos-deploy-agentd.service 2>/dev/null || true)"
+  echo "agentd roll unit: $(systemctl show -p ActiveState --value arbos-deploy-agentd.service 2>/dev/null || true)"
   [[ -f "$STATE/agentd.rolling" ]] && echo "agentd roll pending: $(tr '\n' ' ' < "$STATE/agentd.rolling")"
   echo "events (last 5):"; tail -n 5 "$EVENTS" 2>/dev/null || true
   echo "last log lines:"; tail -n 15 "$LOG" 2>/dev/null || true
