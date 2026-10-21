@@ -172,6 +172,54 @@ impl Client {
         }
     }
 
+    /// Mint a real access token + device for an app device (`m.login.application_service`;
+    /// the users registration has no MSC4190). Returns `(access_token, matrix device id)`.
+    pub async fn login_appservice(
+        &self,
+        mxid: &str,
+        device_id: &str,
+    ) -> MxResult<(String, String)> {
+        let body = json!({
+            "type": "m.login.application_service",
+            "identifier": { "type": "m.id.user", "user": mxid },
+            "device_id": device_id,
+            "initial_device_display_name": "Arbos",
+        });
+        let v = self
+            .call(
+                Method::POST,
+                "/_matrix/client/v3/login",
+                Some(mxid),
+                None,
+                Some(&body),
+            )
+            .await?;
+        match (v["access_token"].as_str(), v["device_id"].as_str()) {
+            (Some(t), Some(d)) => Ok((t.to_owned(), d.to_owned())),
+            _ => Err(MatrixError::Shape("login without access_token".into())),
+        }
+    }
+
+    /// `POST /logout` with a device's own token (not the appservice token).
+    pub async fn logout_token(&self, token: &str) -> MxResult<()> {
+        let resp = self
+            .http
+            .post(format!("{}/_matrix/client/v3/logout", self.cfg.hs_url))
+            .bearer_auth(token)
+            .json(&json!({}))
+            .send()
+            .await?;
+        if resp.status().is_success() || resp.status() == StatusCode::UNAUTHORIZED {
+            Ok(())
+        } else {
+            Err(MatrixError::Api {
+                status: resp.status(),
+                errcode: String::new(),
+                error: "logout failed".into(),
+            })
+        }
+    }
+
     pub async fn set_displayname(&self, mxid: &str, name: &str) -> MxResult<()> {
         let path = format!("/_matrix/client/v3/profile/{}/displayname", enc(mxid));
         self.call(

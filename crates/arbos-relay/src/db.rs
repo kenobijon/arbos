@@ -550,6 +550,8 @@ impl Db {
         crate::db_secrets::migrate_secrets(&c);
         c.execute_batch(crate::matrix::db::MATRIX_SCHEMA)?;
         crate::matrix::db::migrate_matrix(&c);
+        c.execute_batch(crate::matrix::servers_db::SERVERS_SCHEMA)?;
+        crate::matrix::servers_db::migrate_servers(&c);
         c.execute_batch(
             "CREATE TABLE IF NOT EXISTS goals (
                id TEXT PRIMARY KEY, project_id TEXT NOT NULL, chat_id TEXT,
