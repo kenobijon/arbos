@@ -42,12 +42,13 @@ pub fn split_blocks(source: &str) -> Vec<Block> {
             flush(&mut paragraph, &mut blocks);
             continue;
         }
-        if let Some(rest) = trimmed.strip_prefix("```") {
+        // Leading spaces are fine (iOS parity; CommonMark allows a short indent).
+        if let Some(rest) = trimmed.trim_start().strip_prefix("```") {
             flush(&mut paragraph, &mut blocks);
             let lang = rest.trim().to_string();
             let mut code = String::new();
             for code_line in lines.by_ref() {
-                if code_line.trim_end().starts_with("```") {
+                if code_line.trim_end().trim_start().starts_with("```") {
                     break;
                 }
                 if !code.is_empty() {
@@ -320,9 +321,69 @@ fn merge(a: InlineStyle, b: InlineStyle) -> InlineStyle {
 /// "have. Checking"), between a lowercase run and an uppercase sentence start
 /// ("findingsDon't" → "findings Don't"), and drop a trailing short tool-narration
 /// sentence ("Checking the latest…") so the bubble stays prose-only.
+///
+/// Fenced ``` code blocks are left untouched so identifiers like `obj.Value`
+/// stay intact inside the fence.
 pub fn polish_assistant_prose(text: &str) -> String {
     let without_tail = strip_trailing_tool_narration(text);
-    fix_glued_sentence_spaces(&without_tail)
+    polish_outside_fences(&without_tail, fix_glued_sentence_spaces)
+}
+
+/// Run `polish` on prose only; copy fenced code blocks through unchanged.
+fn polish_outside_fences(text: &str, polish: impl Fn(&str) -> String) -> String {
+    let mut out = String::with_capacity(text.len() + 8);
+    let mut lines = text.lines().peekable();
+    let mut prose: Vec<&str> = Vec::new();
+    let ends_with_newline = text.ends_with('\n');
+
+    let flush_prose = |prose: &mut Vec<&str>, out: &mut String| {
+        if prose.is_empty() {
+            return;
+        }
+        let chunk = prose.join("\n");
+        prose.clear();
+        let polished = polish(&chunk);
+        if polished.is_empty() {
+            return;
+        }
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(&polished);
+    };
+
+    while let Some(line) = lines.next() {
+        if line.trim_end().trim_start().starts_with("```") {
+            flush_prose(&mut prose, &mut out);
+            if !out.is_empty() && !out.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str(line);
+            out.push('\n');
+            for code_line in lines.by_ref() {
+                out.push_str(code_line);
+                out.push('\n');
+                if code_line.trim_end().trim_start().starts_with("```") {
+                    break;
+                }
+            }
+            continue;
+        }
+        prose.push(line);
+    }
+    flush_prose(&mut prose, &mut out);
+    if ends_with_newline && !out.ends_with('\n') {
+        out.push('\n');
+    } else if !ends_with_newline && out.ends_with('\n') && !text.is_empty() {
+        out.pop();
+    }
+    out
+}
+
+/// True when `text` contains at least one fenced ``` code block opener.
+pub fn has_fenced_code(text: &str) -> bool {
+    text.lines()
+        .any(|line| line.trim_end().trim_start().starts_with("```"))
 }
 
 /// True when `chars[i]` (lowercase) is glued to an uppercase letter that starts a new

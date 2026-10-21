@@ -26,6 +26,7 @@
 		A14BB8E6904C5D3D5CFFCA56 /* Keychain.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A8BC5FCD045299B0D7D13D /* Keychain.swift */; };
 		A156C11ABF2E8C649148533D /* RelayAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E592B43CC1234959AF2E63 /* RelayAPI.swift */; };
 		A15C00000000000000000009 /* SessionRoom.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15C00000000000000000008 /* SessionRoom.swift */; };
+		A15C0000000000000000000D /* CoreChatDoc.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15C0000000000000000000C /* CoreChatDoc.swift */; };
 		A1B0F9F54DB2257BA4BA7B63 /* AgentProfileView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A124D4FA40F4E5025A2B2C9D /* AgentProfileView.swift */; };
 		A143D97A2803EDDA4BEA6B67 /* Avatar.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1EE5A7A5FF12E4EF7FE7B27 /* Avatar.swift */; };
 		A11149E871067930CB116885 /* CallView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1686D5A87F44B94E76A8761 /* CallView.swift */; };
@@ -63,6 +64,7 @@
 		A15A00000000000000000004 /* CoreFixturesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000003 /* CoreFixturesTests.swift */; };
 		A15A00000000000000000013 /* ReactionToggleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000012 /* ReactionToggleTests.swift */; };
 		A15C0000000000000000000B /* SessionRoomTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15C0000000000000000000A /* SessionRoomTests.swift */; };
+		A15C0000000000000000000F /* CoreChatDocParityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15C0000000000000000000E /* CoreChatDocParityTests.swift */; };
 		A15C00000000000000000004 /* ArbosFFI in Frameworks */ = {isa = PBXBuildFile; productRef = A15C00000000000000000002 /* ArbosFFI */; };
 		A15C00000000000000000005 /* ArbosFFI in Frameworks */ = {isa = PBXBuildFile; productRef = A15C00000000000000000003 /* ArbosFFI */; };
 		A15C00000000000000000006 /* ArbosFFI in Embed Frameworks */ = {isa = PBXBuildFile; productRef = A15C00000000000000000002 /* ArbosFFI */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
@@ -133,6 +135,7 @@
 		A1A8BC5FCD045299B0D7D13D /* Keychain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Keychain.swift; sourceTree = "<group>"; };
 		A1E592B43CC1234959AF2E63 /* RelayAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RelayAPI.swift; sourceTree = "<group>"; };
 		A15C00000000000000000008 /* SessionRoom.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionRoom.swift; sourceTree = "<group>"; };
+		A15C0000000000000000000C /* CoreChatDoc.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoreChatDoc.swift; sourceTree = "<group>"; };
 		A124D4FA40F4E5025A2B2C9D /* AgentProfileView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentProfileView.swift; sourceTree = "<group>"; };
 		A1EE5A7A5FF12E4EF7FE7B27 /* Avatar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Avatar.swift; sourceTree = "<group>"; };
 		A1686D5A87F44B94E76A8761 /* CallView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallView.swift; sourceTree = "<group>"; };
@@ -169,6 +172,7 @@
 		A15A00000000000000000003 /* CoreFixturesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoreFixturesTests.swift; sourceTree = "<group>"; };
 		A15A00000000000000000012 /* ReactionToggleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReactionToggleTests.swift; sourceTree = "<group>"; };
 		A15C0000000000000000000A /* SessionRoomTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionRoomTests.swift; sourceTree = "<group>"; };
+		A15C0000000000000000000E /* CoreChatDocParityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoreChatDocParityTests.swift; sourceTree = "<group>"; };
 		A15C00000000000000000001 /* ArbosFFI */ = {isa = PBXFileReference; lastKnownFileType = wrapper; name = ArbosFFI; path = ../../../packages/ArbosFFI; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
@@ -303,6 +307,7 @@
 				A1E592B43CC1234959AF2E63,
 				A1112911C0D615A9C335C0EF,
 				A15C00000000000000000008,
+				A15C0000000000000000000C,
 			);
 			path = Sync;
 			sourceTree = "<group>";
@@ -350,6 +355,7 @@
 				A15A00000000000000000003 /* CoreFixturesTests.swift */,
 				A15A00000000000000000012 /* ReactionToggleTests.swift */,
 				A15C0000000000000000000A /* SessionRoomTests.swift */,
+				A15C0000000000000000000E /* CoreChatDocParityTests.swift */,
 			);
 			path = ArbosTests;
 			sourceTree = "<group>";
@@ -520,6 +526,7 @@
 				A156C11ABF2E8C649148533D /* RelayAPI.swift in Sources */,
 				A115819FE05076AF542EABF0 /* SecretsAPI.swift in Sources */,
 				A15C00000000000000000009 /* SessionRoom.swift in Sources */,
+				A15C0000000000000000000D /* CoreChatDoc.swift in Sources */,
 				A1B0F9F54DB2257BA4BA7B63 /* AgentProfileView.swift in Sources */,
 				A143D97A2803EDDA4BEA6B67 /* Avatar.swift in Sources */,
 				A11149E871067930CB116885 /* CallView.swift in Sources */,
@@ -565,6 +572,7 @@
 				A15A00000000000000000004 /* CoreFixturesTests.swift in Sources */,
 				A15A00000000000000000013 /* ReactionToggleTests.swift in Sources */,
 				A15C0000000000000000000B /* SessionRoomTests.swift in Sources */,
+				A15C0000000000000000000F /* CoreChatDocParityTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
