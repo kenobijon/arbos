@@ -435,6 +435,42 @@ enum DeviceCmd {
 }
 
 #[derive(Subcommand, Debug)]
+enum MatrixCmd {
+    /// Mode, homeserver reachability, outbox depth, rooms and events mirrored, flipped users.
+    Status {
+        /// Also list parked (failed) jobs.
+        #[arg(long)]
+        failed: bool,
+    },
+    /// Queue existing chats into the homeserver: rooms, members, history with original timestamps.
+    Backfill {
+        #[arg(long)]
+        user: Option<String>,
+        #[arg(long)]
+        chat: Option<String>,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        rooms_only: bool,
+    },
+    /// Shadow-compare the relay against the homeserver (the stage B gate).
+    Shadow {
+        #[arg(long)]
+        chat: Option<String>,
+        /// Also compare per-user unread counts.
+        #[arg(long)]
+        unread: bool,
+        /// Print the newest nightly report instead of running one.
+        #[arg(long)]
+        last: bool,
+    },
+    /// Per-user read flip (`on` serves that user's reads from the homeserver; `off` rolls back).
+    Reads { user: String, state: String },
+    /// Put parked jobs back in the queue and retry everything that is waiting.
+    Retry,
+}
+
+#[derive(Subcommand, Debug)]
 enum AdminCmd {
     /// Every account with balance, caps, today's spend, and machine state.
     Users,
@@ -483,6 +519,12 @@ enum AdminCmd {
     DeleteBox { user: String },
     /// Calls: LiveKit configured?, live calls with participants, the last 20 ended calls.
     Calls,
+    /// Chats on Matrix (D88): `status [--failed]`, `backfill [--user <id>] [--chat <id> [--project <id>]] [--rooms-only]`,
+    /// `shadow [--chat <id>] [--unread]`, `reads <user> on|off`, `retry`.
+    Matrix {
+        #[command(subcommand)]
+        cmd: MatrixCmd,
+    },
     /// iOS push: `status` lists whether APNs is configured and every registered device token;
     /// `test --user <id> | --device <id>` sends one plain alert and prints APNs' answer.
     Push {
@@ -502,6 +544,22 @@ enum AdminCmd {
         action: String,
         #[arg(long)]
         reason: Option<String>,
+    },
+    /// Host fleet (D89): `status` shows host pressure, capacity, every gvisor sandbox with live
+    /// stats, the waitlist and recent evictions; `cap <n>` sets how many always-on sandboxes the
+    /// host accepts (persisted).
+    Fleet {
+        #[arg(value_parser = ["status", "cap"])]
+        action: String,
+        /// New `max_boxes` for `cap`.
+        n: Option<usize>,
+    },
+    /// Waitlist (D89): `list` shows who is in line; `admit <user>` lets one user through now
+    /// (refused while the host is full).
+    Waitlist {
+        #[arg(value_parser = ["list", "admit"])]
+        action: String,
+        user: Option<String>,
     },
 }
 
@@ -918,6 +976,71 @@ async fn main() -> Result<()> {
                     "{}",
                     serde_json::to_string_pretty(&admin.get("/admin/calls").await?)?
                 ),
+                AdminCmd::Matrix { cmd } => {
+                    let v = match cmd {
+                        MatrixCmd::Status { failed } => {
+                            admin
+                                .get(if failed {
+                                    "/admin/matrix/status?failed=1"
+                                } else {
+                                    "/admin/matrix/status"
+                                })
+                                .await?
+                        }
+                        MatrixCmd::Backfill {
+                            user,
+                            chat,
+                            project,
+                            rooms_only,
+                        } => {
+                            admin
+                                .post(
+                                    "/admin/matrix/backfill",
+                                    &serde_json::json!({
+                                        "user_id": user, "chat_id": chat, "project_id": project, "rooms_only": rooms_only,
+                                    }),
+                                )
+                                .await?
+                        }
+                        MatrixCmd::Shadow { chat, unread, last } => {
+                            let mut q = Vec::new();
+                            if last {
+                                q.push("last=1".to_owned());
+                            }
+                            if let Some(c) = chat {
+                                q.push(format!("chat={c}"));
+                            }
+                            if unread {
+                                q.push("unread=1".to_owned());
+                            }
+                            let path = if q.is_empty() {
+                                "/admin/matrix/shadow".to_owned()
+                            } else {
+                                format!("/admin/matrix/shadow?{}", q.join("&"))
+                            };
+                            admin.get(&path).await?
+                        }
+                        MatrixCmd::Reads { user, state } => {
+                            let on = match state.as_str() {
+                                "on" => true,
+                                "off" => false,
+                                other => anyhow::bail!("reads takes on or off, not {other:?}"),
+                            };
+                            admin
+                                .put(
+                                    &format!("/admin/matrix/reads/{user}"),
+                                    &serde_json::json!({ "on": on }),
+                                )
+                                .await?
+                        }
+                        MatrixCmd::Retry => {
+                            admin
+                                .post("/admin/matrix/retry", &serde_json::json!({}))
+                                .await?
+                        }
+                    };
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                }
                 AdminCmd::Push {
                     action,
                     user,
@@ -947,6 +1070,36 @@ async fn main() -> Result<()> {
                                     &serde_json::json!({ "on": on == "on", "reason": reason }),
                                 )
                                 .await?
+                        }
+                    };
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                }
+                AdminCmd::Fleet { action, n } => {
+                    let v = match action.as_str() {
+                        "cap" => {
+                            let n = n.ok_or_else(|| anyhow::anyhow!("cap needs a number"))?;
+                            admin
+                                .put("/admin/fleet", &serde_json::json!({ "max_boxes": n }))
+                                .await?
+                        }
+                        _ => admin.get("/admin/fleet").await?,
+                    };
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                }
+                AdminCmd::Waitlist { action, user } => {
+                    let v = match action.as_str() {
+                        "admit" => {
+                            let u = user.ok_or_else(|| anyhow::anyhow!("admit needs a user id"))?;
+                            admin
+                                .post(
+                                    &format!("/admin/waitlist/{u}/admit"),
+                                    &serde_json::json!({}),
+                                )
+                                .await?
+                        }
+                        _ => {
+                            let f = admin.get("/admin/fleet").await?;
+                            serde_json::json!({ "capacity": f.get("capacity"), "waitlist": f.get("waitlist") })
                         }
                     };
                     println!("{}", serde_json::to_string_pretty(&v)?);

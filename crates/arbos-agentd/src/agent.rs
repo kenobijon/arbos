@@ -2504,18 +2504,12 @@ impl Agent {
         self.turn_running.store(false, Ordering::SeqCst);
         keepalive.abort();
 
-        // Whatever the filter still holds back at the end of the turn is judged and written.
+        // Whatever the filter still holds back at the end of the turn is judged and written
+        // as one complete bubble (no token stream).
         {
             let mut tl = self.turn.lock().await;
             if let Some(t) = tl.as_mut() {
-                let held = t.prose.flush();
-                if !held.is_empty() {
-                    self.stage_text(host, t, &held).await;
-                }
-                let final_text = std::mem::take(&mut t.act_buffer);
-                if !final_text.trim().is_empty() {
-                    self.write_text(host, t, final_text.trim_start()).await;
-                }
+                self.flush_staged_text(host, t).await;
             }
         }
         let turn = self.turn.lock().await.take();
@@ -3012,8 +3006,8 @@ impl Agent {
                         content_index: _,
                     } => {
                         if t.route_call_id.is_some() && t.route.is_none() {
-                            // The ack streams first (schema order) and becomes its own bubble;
-                            // a short `reply` streams into the same row as today.
+                            // The ack buffers first (schema order) and becomes its own bubble;
+                            // a short `reply` lands as one complete block when the string closes.
                             let ack = t.ack_extractor.feed(delta);
                             if !ack.is_empty() {
                                 if t.metrics.ttft_ms.is_none() {
@@ -3025,6 +3019,9 @@ impl Agent {
                             let text = t.reply_extractor.feed(delta);
                             if !text.is_empty() {
                                 self.append_text(host, t, &text).await;
+                            }
+                            if t.reply_extractor.is_done() {
+                                self.flush_staged_text(host, t).await;
                             }
                         }
                     }
@@ -3449,13 +3446,24 @@ impl Agent {
         Ok(())
     }
 
-    /// Reply turns stream straight into the doc; act turns hold the text until the turn settles
-    /// (only what follows the last tool call is the answer).
-    async fn stage_text(&self, host: &SharedHost, t: &mut TurnState, text: &str) {
-        if matches!(t.route, Some(ValidRoute::Act { .. })) {
-            t.act_buffer.push_str(text);
-        } else {
-            self.write_text(host, t, text).await;
+    /// Hold prose until the bubble is complete so the chat never streams token-by-token
+    /// (feedback AFyd_3zYZ2uaRwPk9_7_rMs). Ack and `send_message` already land as whole
+    /// bubbles; act turns already buffered mid-tools — reply turns do the same now, and
+    /// only what follows the last tool call is the answer on an act turn.
+    async fn stage_text(&self, _host: &SharedHost, t: &mut TurnState, text: &str) {
+        t.act_buffer.push_str(text);
+    }
+
+    /// Judge held prose and write the staged buffer as one complete bubble.
+    async fn flush_staged_text(&self, host: &SharedHost, t: &mut TurnState) {
+        let held = t.prose.flush();
+        if !held.is_empty() {
+            self.stage_text(host, t, &held).await;
+        }
+        let final_text = std::mem::take(&mut t.act_buffer);
+        let cleaned = ProseFilter::clean_prose(final_text.trim());
+        if !cleaned.is_empty() {
+            self.write_text(host, t, &cleaned).await;
         }
     }
 

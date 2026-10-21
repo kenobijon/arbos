@@ -93,6 +93,11 @@ url_preview_enabled: false
 enable_metrics: false
 serve_server_wellknown: false
 
+# The relay answers unread counts for flipped users from an initial /sync (stage B): a cached
+# initial-sync response (default 2 min) would make a read mark take minutes to show.
+caches:
+  sync_response_cache_duration: 0
+
 user_directory:
   enabled: true
   search_all_users: true

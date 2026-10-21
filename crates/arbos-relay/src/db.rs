@@ -544,10 +544,15 @@ impl Db {
         c.execute_batch(crate::db_calls::CALLS_SCHEMA)?;
         crate::db_calls::migrate_calls(&c);
         c.execute_batch(crate::db_voice::VOICE_SCHEMA)?;
+        c.execute_batch(crate::db_fleet::FLEET_SCHEMA)?;
         crate::db_voice::migrate_voice(&c);
         Self::migrate_vault_items_per_user(&c)?;
         c.execute_batch(crate::db_secrets::SECRETS_SCHEMA)?;
         crate::db_secrets::migrate_secrets(&c);
+        c.execute_batch(crate::matrix::db::MATRIX_SCHEMA)?;
+        crate::matrix::db::migrate_matrix(&c);
+        c.execute_batch(crate::matrix::servers_db::SERVERS_SCHEMA)?;
+        crate::matrix::servers_db::migrate_servers(&c);
         c.execute_batch(
             "CREATE TABLE IF NOT EXISTS goals (
                id TEXT PRIMARY KEY, project_id TEXT NOT NULL, chat_id TEXT,

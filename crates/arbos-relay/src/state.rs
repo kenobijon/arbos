@@ -39,6 +39,11 @@ pub struct Config {
     pub agentd_bin: PathBuf,
     pub local_box_image: String,
     pub box_idle_grace_ms: i64,
+    /// `ARBOS_DEFAULT_PROVIDER`: where a user without a box gets one (`daytona|process|docker|gvisor`);
+    /// unset = Daytona when configured, else a local process. D89 sets `gvisor` on the relay host.
+    pub default_provider: Option<String>,
+    /// Host fleet knobs (D89).
+    pub fleet: crate::fleet::FleetCfg,
     /// `ARBOS_CONNECTORS_MOCK=1`: connectors answer with canned data (F1).
     pub connectors_mock: bool,
     /// `ARBOS_CHANNELS_MOCK=1`: channel sends land in `channel_outbox`; `/channels/mock/inbound` is open (F7).
@@ -182,6 +187,12 @@ pub struct AppState {
     /// user_id → last HTTP call from that user's box (`/box/hello`, `/box/projects`,
     /// `/box/keepalive`). A box with no project opens no room socket; this is its heartbeat.
     pub box_http_seen: Arc<Mutex<HashMap<String, i64>>>,
+    /// Users whose box said "turn running" in its last keepalive, with the time (D89: eviction skips them).
+    pub turn_running: Arc<Mutex<HashMap<String, i64>>>,
+    /// Sandboxes evicted under host pressure (D89), with the time; only the user's own activity wakes them.
+    pub evicted: Arc<Mutex<HashMap<String, i64>>>,
+    /// Last host pressure sample (D89), for `/admin/fleet`.
+    pub fleet_pressure: Arc<Mutex<Option<crate::fleet::Pressure>>>,
     /// Agent voice calls (Phase 2): caps and the LiveKit agent name.
     pub voice: Arc<crate::voice::VoiceCfg>,
     /// user_id → the box's `WS /box/voice` link (tool calls and transcript rows to agentd).
@@ -192,6 +203,8 @@ pub struct AppState {
     pub voice_worker: Arc<Mutex<Option<serde_json::Value>>>,
     /// device_id → the app version it last reported (`X-Arbos-Client`), see `releases.rs`.
     pub client_seen: Arc<crate::releases::ClientSeen>,
+    /// Chats on Matrix (D88): mode, homeserver tokens and the outbox wake-up.
+    pub matrix: Arc<crate::matrix::Matrix>,
 }
 
 /// The agent's current activity as the box last reported it.
@@ -384,6 +397,8 @@ pub(crate) mod test_support {
             agentd_bin: "arbos-agentd".into(),
             local_box_image: String::new(),
             box_idle_grace_ms: 0,
+            default_provider: None,
+            fleet: crate::fleet::FleetCfg::default(),
             connectors_mock: true,
             channels_mock: true,
             openai_images_base: String::new(),
@@ -442,11 +457,15 @@ pub(crate) mod test_support {
             presence_seen: Arc::new(Mutex::new(HashMap::new())),
             activity: Arc::new(Mutex::new(HashMap::new())),
             box_http_seen: Arc::new(Mutex::new(HashMap::new())),
+            turn_running: Arc::new(Mutex::new(HashMap::new())),
+            evicted: Arc::new(Mutex::new(HashMap::new())),
+            fleet_pressure: Arc::new(Mutex::new(None)),
             voice: Arc::new(crate::voice::VoiceCfg::default()),
             voice_conns: Arc::new(Mutex::new(HashMap::new())),
             voice_dispatched: Arc::new(Mutex::new(HashMap::new())),
             voice_worker: Arc::new(Mutex::new(None)),
             client_seen: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            matrix: crate::matrix::Matrix::new(crate::matrix::Config::off()),
         }
     }
 }
