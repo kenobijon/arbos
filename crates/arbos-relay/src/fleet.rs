@@ -59,6 +59,10 @@ pub struct FleetCfg {
     pub box_dns: Vec<String>,
     pub helper_image: String,
     pub runtime: String,
+    /// Registry path the agent image is pulled from; the tag is the version in the relay's
+    /// default snapshot name (`arbos-agent-0.1.55` → `<repo>:0.1.55`), so the CD image roll that
+    /// switches `ARBOS_DAYTONA_SNAPSHOT` drives host sandboxes too.
+    pub image_repo: String,
 }
 
 impl Default for FleetCfg {
@@ -77,8 +81,36 @@ impl Default for FleetCfg {
             box_dns: vec!["1.1.1.1".into(), "8.8.8.8".into()],
             helper_image: "ubuntu:24.04".into(),
             runtime: "runsc".into(),
+            image_repo: "ghcr.io/unarbos/arbos/arbos-agent".into(),
         }
     }
+}
+
+/// The image a sandbox runs for a given snapshot name. `ARBOS_LOCAL_BOX_IMAGE` set to anything
+/// but its `arbos-agent:dev` default pins one image (dev relays); otherwise the version in the
+/// snapshot name picks the registry tag.
+pub fn image_for_snapshot(cfg: &FleetCfg, local_box_image: &str, snapshot: &str) -> String {
+    if !local_box_image.is_empty() && local_box_image != "arbos-agent:dev" {
+        return local_box_image.to_owned();
+    }
+    let ver = snapshot
+        .rsplit_once('-')
+        .map(|(_, v)| v)
+        .unwrap_or(snapshot);
+    format!("{}:{}", cfg.image_repo, ver)
+}
+
+/// Snapshot name the relay's default points at (what `boxes.snapshot` records for every box).
+pub fn current_snapshot(state: &AppState) -> String {
+    state.cfg.daytona_snapshot.clone()
+}
+
+pub fn current_image(state: &AppState) -> String {
+    image_for_snapshot(
+        &state.cfg.fleet,
+        &state.cfg.local_box_image,
+        &state.cfg.daytona_snapshot,
+    )
 }
 
 impl FleetCfg {
@@ -119,6 +151,7 @@ impl FleetCfg {
                 .collect(),
             helper_image: text("ARBOS_BOX_HELPER_IMAGE", &d.helper_image),
             runtime: text("ARBOS_BOX_RUNTIME", &d.runtime),
+            image_repo: text("ARBOS_BOX_IMAGE_REPO", &d.image_repo),
         }
     }
 }
@@ -575,32 +608,60 @@ pub async fn create_box(
     box_token: &str,
     mcp_token: &str,
 ) -> Result<()> {
+    let snapshot = sb
+        .snapshot
+        .clone()
+        .unwrap_or_else(|| current_snapshot(state));
+    let image = image_for_snapshot(&state.cfg.fleet, &state.cfg.local_box_image, &snapshot);
     let name = container_name(user_id);
     sb.sandbox_id = Some(name.clone());
     sb.device_id = format!("box:{name}");
-    sb.snapshot = Some(state.cfg.local_box_image.clone());
+    sb.snapshot = Some(snapshot);
     state.db.upsert_box(sb)?;
     boxes::save_local_tokens(state, user_id, box_token, mcp_token)?;
     let mnt = ensure_work_mounted(state, user_id).await?;
-    seed_etc(&mnt, &state.cfg.local_box_image).await?;
+    seed_etc(&mnt, &image).await?;
     let resolv = resolv_path(state)?;
     if container_exists(&name).await {
         // A stale container from an earlier life (relay DB reset, failed create): replace it.
         let _ = docker(&s(&["rm", "-f", &name])).await;
     }
     let env = boxes::box_env(state, user_id, box_token, mcp_token, &state.cfg.public_url);
-    let args = run_args(
-        &state.cfg.fleet,
-        &name,
-        &mnt,
-        &resolv,
-        &state.cfg.local_box_image,
-        &env,
-    );
+    let args = run_args(&state.cfg.fleet, &name, &mnt, &resolv, &image, &env);
     docker(&args).await?;
     record_port(sb, &name).await?;
     state.db.upsert_box(sb)?;
-    let _ = state.db.fleet_event("created", Some(user_id), &name);
+    let _ = state
+        .db
+        .fleet_event("created", Some(user_id), &format!("{name} ({image})"));
+    Ok(())
+}
+
+/// Image roll for one sandbox: stop and remove the container, start a new one from `snapshot`
+/// on the same `/work` image (files, agent memory, per-project users all stay). Seconds, no copy.
+pub async fn recreate_with_snapshot(state: &AppState, user_id: &str, snapshot: &str) -> Result<()> {
+    let mut sb = state
+        .db
+        .user_box(user_id)?
+        .ok_or_else(|| anyhow!("no box for user {user_id}"))?;
+    let (bt, mt) =
+        boxes::load_local_tokens(state, user_id)?.ok_or_else(|| anyhow!("local tokens missing"))?;
+    let name = sb
+        .sandbox_id
+        .clone()
+        .unwrap_or_else(|| container_name(user_id));
+    let from = sb.snapshot.clone();
+    if container_exists(&name).await {
+        let _ = stop_box(&name, 30).await;
+        let _ = remove_container(&name).await;
+    }
+    sb.snapshot = Some(snapshot.to_owned());
+    create_box(state, user_id, &mut sb, &bt, &mt).await?;
+    let _ = state.db.fleet_event(
+        "upgraded",
+        Some(user_id),
+        &format!("{} → {snapshot}", from.unwrap_or_default()),
+    );
     Ok(())
 }
 
@@ -924,7 +985,7 @@ pub async fn admin_fleet(State(state): State<AppState>, principal: Principal) ->
             "cpus": state.cfg.fleet.box_cpus, "mem_gb": state.cfg.fleet.box_mem_gb,
             "work_gb": state.cfg.fleet.box_work_gb, "pids": state.cfg.fleet.box_pids,
             "runtime": state.cfg.fleet.runtime, "network": state.cfg.fleet.box_network,
-            "image": state.cfg.local_box_image,
+            "image": current_image(&state), "snapshot": current_snapshot(&state),
         },
         "sandboxes": sandboxes,
         "waitlist": state.db.waitlist().unwrap_or_default(),
@@ -1109,6 +1170,24 @@ mod tests {
         assert_eq!(a.last().map(String::as_str), Some("img:1"));
         assert_eq!(container_name("gh_108417131"), "arbos-box-gh_108417131");
         assert_eq!(container_name("Odd/Id"), "arbos-box-odd-id");
+    }
+
+    #[test]
+    fn image_follows_the_snapshot_version_unless_pinned() {
+        let cfg = FleetCfg::default();
+        assert_eq!(
+            image_for_snapshot(&cfg, "arbos-agent:dev", "arbos-agent-0.1.55"),
+            "ghcr.io/unarbos/arbos/arbos-agent:0.1.55"
+        );
+        assert_eq!(
+            image_for_snapshot(&cfg, "", "arbos-agent-0.1.56"),
+            "ghcr.io/unarbos/arbos/arbos-agent:0.1.56"
+        );
+        assert_eq!(
+            image_for_snapshot(&cfg, "my-registry/agent:test", "arbos-agent-0.1.56"),
+            "my-registry/agent:test",
+            "an explicit image pins"
+        );
     }
 
     #[test]

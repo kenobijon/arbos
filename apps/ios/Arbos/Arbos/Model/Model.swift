@@ -127,9 +127,21 @@ struct Machine: Equatable {
         }
     }
 
+    /// Settings › Machine › "Where it runs" (D89): the host sandbox is "Hosted on arbos.life";
+    /// other providers show their name. "Change machine" (GPU, your computer) comes later.
+    var whereItRuns: String {
+        switch provider {
+        case "gvisor": return "Hosted on arbos.life"
+        case "daytona": return "Hosted · Daytona"
+        case "process", "docker": return "Relay host"
+        case "": return "Hosted on arbos.life"
+        default: return provider.prefix(1).uppercased() + provider.dropFirst()
+        }
+    }
+
     static func specLine(cpu: Int?, memGib: Int?, diskGib: Int?, klass: String?, provider: String?) -> String {
         var parts: [String] = []
-        if let provider, !provider.isEmpty { parts.append(provider.prefix(1).uppercased() + provider.dropFirst()) }
+        if let provider, !provider.isEmpty, provider != "gvisor" { parts.append(provider.prefix(1).uppercased() + provider.dropFirst()) }
         if let cpu { parts.append("\(cpu) vCPU") }
         if let memGib { parts.append("\(memGib) GiB") }
         if let diskGib { parts.append("\(diskGib) GiB disk") }
