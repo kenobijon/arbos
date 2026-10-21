@@ -237,13 +237,35 @@ pub fn run(state: &AppState, scope: Scope) -> Report {
                 .filter(|c| c.unread > 0)
                 .map(|c| c.chat_id)
                 .collect();
-            for cm in state
+            // People chats by membership; project chats as owner or guest.
+            let mut mine: Vec<String> = state
                 .db
                 .chats_of_member(&format!("user:{u}"))
                 .unwrap_or_default()
-            {
-                if wanted.contains(&cm.chat.id) && !unread.contains(&cm.chat.id) {
-                    state.matrix.read(state, &cm.chat.id, &u);
+                .into_iter()
+                .map(|cm| cm.chat.id)
+                .collect();
+            let mut projects: Vec<String> = state
+                .db
+                .projects_of_user(&u)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|p| p.id)
+                .collect();
+            projects.extend(state.db.shared_project_ids(&u).unwrap_or_default());
+            for p in projects {
+                mine.extend(
+                    state
+                        .db
+                        .list_chats(&p)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|c| c.id),
+                );
+            }
+            for chat_id in mine {
+                if wanted.contains(&chat_id) && !unread.contains(&chat_id) {
+                    state.matrix.read(state, &chat_id, &u);
                     rep.reads_queued += 1;
                 }
             }
