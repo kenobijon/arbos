@@ -1,5 +1,5 @@
 // Driven by ArbosFFI.RoomSession over URLSession (crdt-sync §7.2a).
-// The Loro doc stays in loro-swift (`ChatDoc`); this type only moves bytes and actions.
+// The chat doc is the core doc (`CoreChatDoc`); this type only moves bytes and actions.
 
 import Foundation
 import ArbosFFI
@@ -18,7 +18,7 @@ final class SessionRoom {
     let projectId: Id
     let key: Id
     let roomChat: String
-    let doc: ChatDoc
+    let doc: CoreChatDoc
 
     var onLink: ((Link) -> Void)?
     var onBoxState: ((BoxState, String?) -> Void)?
@@ -72,7 +72,7 @@ final class SessionRoom {
     /// Production path: wiring `RelayAPI` into the three closures the
     /// designated init uses for tests.
     convenience init(
-        projectId: Id, key: Id, roomChat: String, doc: ChatDoc, api: RelayAPI,
+        projectId: Id, key: Id, roomChat: String, doc: CoreChatDoc, api: RelayAPI,
         cursor: Int64 = 0, pending: [(String, Data)] = [], deviceId: @escaping () -> String
     ) {
         let openDelegate = RoomSocketOpenDelegate()
@@ -102,7 +102,7 @@ final class SessionRoom {
 
     /// Designated init: inject URL / socket / checkpoint for tests.
     init(
-        projectId: Id, key: Id, roomChat: String, doc: ChatDoc,
+        projectId: Id, key: Id, roomChat: String, doc: CoreChatDoc,
         roomURL: @escaping (String) -> URL?,
         makeSocket: @escaping (URL) -> RoomSocket,
         fetchCheckpoint: @escaping (String) async throws -> (Int64, Data),

@@ -351,7 +351,7 @@ final class AppModel: ObservableObject {
     private var api: RelayAPI
     /// The relay client, for feature extensions in other files.
     var relay: RelayAPI { api }
-    private var docs: [Id: ChatDoc] = [:]
+    private var docs: [Id: CoreChatDoc] = [:]
     /// Room connection AppModel drives (`SessionRoom` / shared client core).
     private var rooms: [Id: SessionRoom] = [:]
     /// Client-minted message ids whose push the relay has not `ACK`ed (S3),
@@ -577,7 +577,7 @@ final class AppModel: ObservableObject {
     }
 
     /// D82 first login: the live doc of a chat (nil until its room exists).
-    func liveDoc(_ chatId: Id) -> ChatDoc? { docs[chatId] }
+    func liveDoc(_ chatId: Id) -> CoreChatDoc? { docs[chatId] }
 
     /// D82 first login: `POST /projects` for the account's first agent.
     func createFirstProject(name: String) async throws {
@@ -1067,9 +1067,9 @@ final class AppModel: ObservableObject {
         let started = Date()
         // Import and the Loro → Message conversion run off the main thread; the
         // main actor only receives finished docs and message arrays.
-        let docs: [(DeviceStore.SavedDoc, ChatDoc, [Message]?)] = await Task.detached(priority: .userInitiated) {
+        let docs: [(DeviceStore.SavedDoc, CoreChatDoc, [Message]?)] = await Task.detached(priority: .userInitiated) {
             saved.compactMap { s in
-                let doc = ChatDoc(key: s.key)
+                let doc = CoreChatDoc(key: s.key)
                 do {
                     try doc.importUpdate(s.snapshot)
                 } catch {
@@ -1164,9 +1164,9 @@ final class AppModel: ObservableObject {
     /// `restored`: a doc imported from the on-device store with the relay
     /// cursor it was saved at and the pushes the relay never ACKed.
     private func ensureRoom(projectId: Id, key: Id, roomChat: String,
-                            restored: (doc: ChatDoc, cursor: Int64, pending: [(String, Data)], messages: [Message]?)? = nil) {
+                            restored: (doc: CoreChatDoc, cursor: Int64, pending: [(String, Data)], messages: [Message]?)? = nil) {
         guard rooms[key] == nil else { return }
-        let doc = restored?.doc ?? ChatDoc(key: key)
+        let doc = restored?.doc ?? CoreChatDoc(key: key)
         let isProjectDoc = roomChat == projectDocChatId
         docs[key] = doc
         doc.onChange { [weak self] touched in
@@ -1907,7 +1907,7 @@ final class AppModel: ObservableObject {
 
     /// Insert + pushCommand + commit for a people chat. `alreadyUnacked` when the caller
     /// reserved the id before an attachment upload.
-    private func commitPeople(chatId: String, doc: ChatDoc, messageId: Id, text: String,
+    private func commitPeople(chatId: String, doc: CoreChatDoc, messageId: Id, text: String,
                               author: ChatDoc.Author, mentions: [String], reply: String?,
                               attachments: [Attachment], alreadyUnacked: Bool = false) {
         if !alreadyUnacked { markUnacked(chatId: chatId, messageId: messageId) }
