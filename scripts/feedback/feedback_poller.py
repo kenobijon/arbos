@@ -1040,6 +1040,10 @@ class Loop:
         """The deferred-area comment for this feedback, or None. A rule written as "ios: <regex>" or
         "mac: <regex>" applies only to feedback aimed at that app."""
         text = info.get("comment") or ""
+        if len(text.strip()) > 400 and info.get("source") in ("app", "mac"):
+            # A long technical report filed from the app (a worker's spec, e.g. Ken's shared-core steps) is a work
+            # item, not a tester asking for a deferred feature; the owner-decision rules match short asks.
+            return None
         for pat, comment in self.cfg.deferred:
             m = re.match(r"^(ios|mac):\s*(.+)$", pat, re.I)
             if m:
