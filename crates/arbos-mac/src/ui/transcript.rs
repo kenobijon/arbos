@@ -63,6 +63,8 @@ const SENDER_LANE: f32 = SENDER_DISC + SENDER_DISC_GAP;
 /// Messages for Mac fades a row's hover-only affordances (time, react glyph)
 /// in and out rather than snapping them.
 const HOVER_FADE_MS: f32 = 150.0;
+/// How long the hover copy glyph stays a checkmark after a successful copy.
+const COPY_FEEDBACK_MS: u64 = 2_000;
 
 /// Which bubble row the pointer is over, and the one it just left, with the
 /// moment each happened: the fade is computed from those at render time.
@@ -360,6 +362,8 @@ pub struct Transcript {
     /// Messages whose sender differs from the one before: their first row opens
     /// the wider turn gap.
     turn_starts: HashSet<Id>,
+    /// Message whose hover copy glyph is showing a checkmark, and when it started.
+    copied_feedback: Option<(Id, Instant)>,
 }
 
 impl Transcript {
@@ -399,6 +403,7 @@ impl Transcript {
             hover: HoverFade::default(),
             selection,
             turn_starts: HashSet::new(),
+            copied_feedback: None,
         }
     }
 
@@ -641,10 +646,26 @@ impl Transcript {
             .map(|m| m.plain_text())
     }
 
-    fn copy_message(&self, message_id: &Id, cx: &mut Context<Self>) {
+    fn copy_message(&mut self, message_id: &Id, cx: &mut Context<Self>) {
         if let Some(text) = self.message_plain(message_id, cx) {
             if !text.is_empty() {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                self.copied_feedback = Some((message_id.clone(), Instant::now()));
+                cx.notify();
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(COPY_FEEDBACK_MS))
+                        .await;
+                    let _ = this.update(cx, |this, cx| {
+                        if this.copied_feedback.as_ref().is_some_and(|(_, at)| {
+                            at.elapsed() >= Duration::from_millis(COPY_FEEDBACK_MS)
+                        }) {
+                            this.copied_feedback = None;
+                            cx.notify();
+                        }
+                    });
+                })
+                .detach();
             }
         }
     }
@@ -719,6 +740,7 @@ impl Transcript {
     }
 
     /// Hover-only reply + copy glyphs beside a bubble (fade with the row).
+    /// After a successful copy the glyph becomes a checkmark for a moment.
     fn hover_reply_copy(
         &self,
         row_id: &str,
@@ -730,7 +752,18 @@ impl Transcript {
         let chat_id = self.chat_id.clone();
         let reply_msg = message_id.clone();
         let copy_msg = message_id.clone();
-        let btn = |id: SharedString, glyph: &'static str| {
+        let just_copied = self.copied_feedback.as_ref().is_some_and(|(id, at)| {
+            id == message_id && at.elapsed() < Duration::from_millis(COPY_FEEDBACK_MS)
+        });
+        // Keep the checkmark readable even if the pointer leaves mid-feedback.
+        let copy_opacity = if just_copied { 1.0 } else { opacity };
+        let copy_glyph = if just_copied { "check" } else { "copy" };
+        let copy_color = if just_copied {
+            theme.online
+        } else {
+            theme.text_muted
+        };
+        let btn = |id: SharedString, glyph: &'static str, opacity: f32, color: gpui::Hsla| {
             div()
                 .id(id)
                 .size(px(24.0))
@@ -742,27 +775,36 @@ impl Transcript {
                 .cursor_pointer()
                 .opacity(opacity)
                 .hover(|s| s.bg(theme.surface_2))
-                .child(icon(glyph, 16.0, theme.text_muted))
+                .child(icon(glyph, 16.0, color))
         };
         div()
             .flex()
             .items_center()
             .gap(px(2.0))
             .child(
-                btn(SharedString::from(format!("{row_id}#reply")), "reply").on_click(cx.listener(
-                    move |_, _, _, cx| {
-                        if let Some(chat_id) = chat_id.clone() {
-                            cx.emit(TranscriptEvent::Reply {
-                                chat_id,
-                                message_id: reply_msg.clone(),
-                            });
-                        }
-                    },
-                )),
+                btn(
+                    SharedString::from(format!("{row_id}#reply")),
+                    "reply",
+                    opacity,
+                    theme.text_muted,
+                )
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    if let Some(chat_id) = chat_id.clone() {
+                        cx.emit(TranscriptEvent::Reply {
+                            chat_id,
+                            message_id: reply_msg.clone(),
+                        });
+                    }
+                })),
             )
             .child(
-                btn(SharedString::from(format!("{row_id}#copy")), "copy")
-                    .on_click(cx.listener(move |this, _, _, cx| this.copy_message(&copy_msg, cx))),
+                btn(
+                    SharedString::from(format!("{row_id}#copy")),
+                    copy_glyph,
+                    copy_opacity,
+                    copy_color,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| this.copy_message(&copy_msg, cx))),
             )
     }
 
