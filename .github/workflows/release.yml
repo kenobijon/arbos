@@ -284,6 +284,14 @@ jobs:
             echo "ARBOS_KEYCHAINS_WERE=$ARBOS_KEYCHAINS_WERE"
           } >> "$GITHUB_ENV"
           echo "identity: $ARBOS_SIGN_IDENTITY"
+      # Typing + Enter in the composer must not crash the app (#1208: v0.6.89–v0.6.92 shipped that way;
+      # the gate compiled the app but never ran it). The headless GPUI tests are the hard gate; the
+      # scripted smoke adds a real-app check when the runner's session can drive it.
+      - name: Composer type-and-Enter tests
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo test -p arbos-mac --locked enter_tests
       - name: Build, sign, notarize, staple
         id: build
         env:
@@ -326,8 +334,12 @@ jobs:
             echo "::error title=Not notarized::notary credentials were present but the build was not notarized."
             exit 1
           fi
-          rm -rf dist/Arbos.app
           echo "macOS: version $ARBOS_VERSION, signing $ARBOS_SIGNING, notarized $ARBOS_NOTARIZED, stapled $ARBOS_STAPLED" >> "$GITHUB_STEP_SUMMARY"
+      - name: Composer type-and-Enter smoke (built app)
+        run: |
+          set -euo pipefail
+          scripts/feedback/mac-enter-smoke.sh dist/Arbos.app/Contents/MacOS/arbos-mac | tee -a "$GITHUB_STEP_SUMMARY"
+          rm -rf dist/Arbos.app
       - name: Put the keychain back
         if: always()
         run: |

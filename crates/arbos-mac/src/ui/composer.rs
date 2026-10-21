@@ -67,6 +67,7 @@ actions!(
         Cut,
         Escape,
         AcceptMention,
+        PrevMention,
     ]
 );
 
@@ -74,6 +75,8 @@ pub const MAX_LINES: usize = 10;
 pub const COMPOSER_RADIUS: f32 = COMPOSER_HEIGHT / 2.0;
 
 pub type SubmitHandler = Rc<dyn Fn(&mut Window, &mut App)>;
+/// Returns true when the @-mention menu handled the key (skip caret / send).
+pub type MentionKeyHandler = Rc<dyn Fn(&mut App) -> bool>;
 const INPUT_LINE_HEIGHT: f32 = LINE_HEIGHT;
 const INPUT_FONT_SIZE: f32 = TEXT_BODY;
 
@@ -111,8 +114,12 @@ pub struct ComposerInput {
     /// Runs deferred, after this entity's update ends, so the owner may read
     /// and update the input freely.
     pub on_submit: Option<SubmitHandler>,
-    /// Tab with an `@` token under the caret (D72 mention completion).
-    pub on_tab: Option<SubmitHandler>,
+    /// Tab / Down while the `@` mention menu is open: move the highlight down.
+    pub on_mention_next: Option<MentionKeyHandler>,
+    /// Shift+Tab / Up while the `@` mention menu is open: move the highlight up.
+    pub on_mention_prev: Option<MentionKeyHandler>,
+    /// Enter while the `@` mention menu is open: accept the highlighted row.
+    pub on_mention_accept: Option<MentionKeyHandler>,
     /// Multi-line editors (skill bodies): Enter inserts a newline instead of
     /// submitting.
     pub enter_inserts_newline: bool,
@@ -135,7 +142,9 @@ impl ComposerInput {
             is_selecting: false,
             scroll_y: 0.0,
             on_submit: None,
-            on_tab: None,
+            on_mention_next: None,
+            on_mention_prev: None,
+            on_mention_accept: None,
             enter_inserts_newline: false,
             masked: false,
             text_center: false,
@@ -240,15 +249,70 @@ impl ComposerInput {
             self.replace_text_in_range(None, "\n", window, cx);
             return;
         }
-        if let Some(cb) = self.on_submit.clone() {
-            window.defer(cx, move |window, cx| cb(window, cx));
-        }
+        // The mention handlers read and update this very entity (the Composer owns it), and an action
+        // handler runs while the entity is leased: calling them here is a re-entrant lease, which GPUI
+        // answers with a panic — every Enter crashed Mac v0.6.89/v0.6.90 (#1208). Everything the owner
+        // does with the text runs deferred, after this update ends; only "is a mention open" is decided
+        // here, from our own text.
+        let accept = self
+            .on_mention_accept
+            .clone()
+            .filter(|_| self.open_mention_token().is_some());
+        let submit = self.on_submit.clone();
+        window.defer(cx, move |window, cx| {
+            if let Some(cb) = accept {
+                if cb(cx) {
+                    return;
+                }
+            }
+            if let Some(cb) = submit {
+                cb(window, cx);
+            }
+        });
     }
 
     fn accept_mention(&mut self, _: &AcceptMention, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(cb) = self.on_tab.clone() {
-            window.defer(cx, move |window, cx| cb(window, cx));
+        self.defer_mention_key(self.on_mention_next.clone(), window, cx);
+    }
+
+    fn prev_mention(&mut self, _: &PrevMention, window: &mut Window, cx: &mut Context<Self>) {
+        self.defer_mention_key(self.on_mention_prev.clone(), window, cx);
+    }
+
+    /// The trailing `@token` the mention menu is open for (an `@` at a word start, no whitespace after
+    /// it) — the same rule as `Composer::mention_query`, decided from our own text so no owner code
+    /// runs while this entity is leased.
+    pub fn open_mention_token(&self) -> Option<&str> {
+        let text = self.text();
+        let at = text.rfind('@')?;
+        let token = &text[at + 1..];
+        if token.contains(char::is_whitespace) {
+            return None;
         }
+        if at > 0 && !text[..at].ends_with(char::is_whitespace) {
+            return None;
+        }
+        Some(token)
+    }
+
+    /// Hand a mention-menu key to the owner, deferred (see `send`). True when a mention is open and the
+    /// key was handed over; false when the caller should treat the key as plain editing.
+    fn defer_mention_key(
+        &self,
+        cb: Option<MentionKeyHandler>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.open_mention_token().is_none() {
+            return false;
+        }
+        let Some(cb) = cb else {
+            return false;
+        };
+        window.defer(cx, move |_, cx| {
+            let _ = cb(cx);
+        });
+        true
     }
 
     /// Replace the trailing `@token` with `@handle ` (mention completion).
@@ -296,7 +360,10 @@ impl ComposerInput {
         self.move_to(self.next_word_boundary(self.cursor_offset()), cx);
     }
 
-    fn up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
+    fn up(&mut self, _: &Up, window: &mut Window, cx: &mut Context<Self>) {
+        if self.defer_mention_key(self.on_mention_prev.clone(), window, cx) {
+            return;
+        }
         if self.selected_range.is_empty() {
             self.move_to(self.offset_for_vertical_move(true), cx);
         } else {
@@ -304,7 +371,10 @@ impl ComposerInput {
         }
     }
 
-    fn down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
+    fn down(&mut self, _: &Down, window: &mut Window, cx: &mut Context<Self>) {
+        if self.defer_mention_key(self.on_mention_next.clone(), window, cx) {
+            return;
+        }
         if self.selected_range.is_empty() {
             self.move_to(self.offset_for_vertical_move(false), cx);
         } else {
@@ -1229,6 +1299,7 @@ impl Render for ComposerInput {
             .cursor(CursorStyle::IBeam)
             .on_action(cx.listener(Self::send))
             .on_action(cx.listener(Self::accept_mention))
+            .on_action(cx.listener(Self::prev_mention))
             .on_action(cx.listener(Self::newline))
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))
@@ -1332,6 +1403,10 @@ pub struct Composer {
     /// S8 shake when the user hits Cmd+W on the pinned tab; also reused for
     /// the empty-send nudge.
     pub nudge_at: Option<u64>,
+    /// Highlighted row in the `@` mention menu (Tab / arrows move it).
+    mention_selected: usize,
+    /// Last `@token` query; when it changes, selection resets to the first row.
+    mention_query_seen: Option<String>,
 }
 
 impl EventEmitter<ComposerEvent> for Composer {}
@@ -1340,13 +1415,27 @@ impl Composer {
     pub fn new(state: Entity<AppState>, voice: Entity<Voice>, cx: &mut Context<Self>) -> Self {
         let input = cx.new(ComposerInput::new);
         let weak = cx.weak_entity();
-        let weak_tab = weak.clone();
+        let weak_next = weak.clone();
+        let weak_prev = weak.clone();
+        let weak_accept = weak.clone();
         input.update(cx, |input, _| {
             input.on_submit = Some(Rc::new(move |window, cx| {
                 let _ = weak.update(cx, |composer, cx| composer.submit(window, cx));
             }));
-            input.on_tab = Some(Rc::new(move |_window, cx| {
-                let _ = weak_tab.update(cx, |composer, cx| composer.accept_first_mention(cx));
+            input.on_mention_next = Some(Rc::new(move |cx| {
+                weak_next
+                    .update(cx, |composer, cx| composer.mention_move(1, cx))
+                    .unwrap_or(false)
+            }));
+            input.on_mention_prev = Some(Rc::new(move |cx| {
+                weak_prev
+                    .update(cx, |composer, cx| composer.mention_move(-1, cx))
+                    .unwrap_or(false)
+            }));
+            input.on_mention_accept = Some(Rc::new(move |cx| {
+                weak_accept
+                    .update(cx, |composer, cx| composer.accept_selected_mention(cx))
+                    .unwrap_or(false)
             }));
         });
         cx.observe(&state, |_, _, cx| cx.notify()).detach();
@@ -1390,6 +1479,8 @@ impl Composer {
             drafts: std::collections::HashMap::new(),
             open_picker: None,
             nudge_at: None,
+            mention_selected: 0,
+            mention_query_seen: None,
         }
     }
 
@@ -1612,21 +1703,14 @@ impl Composer {
 
     /// The `@token` being typed at the end of the input, if any.
     fn mention_query(&self, cx: &App) -> Option<String> {
-        let text = self.input.read(cx).text();
-        let at = text.rfind('@')?;
-        let token = &text[at + 1..];
-        if token.contains(char::is_whitespace) {
-            return None;
-        }
-        // Only at a word start: "@" preceded by nothing or whitespace.
-        if at > 0 && !text[..at].ends_with(char::is_whitespace) {
-            return None;
-        }
-        Some(token.to_lowercase())
+        self.input
+            .read(cx)
+            .open_mention_token()
+            .map(str::to_lowercase)
     }
 
     /// People and agents of the current space matching the `@token`:
-    /// (handle, label, is_agent).
+    /// (handle, label, is_agent). Typing after `@` filters by handle or name.
     fn mention_candidates(&self, cx: &App) -> Vec<(String, String, bool)> {
         let Some(query) = self.mention_query(cx) else {
             return Vec::new();
@@ -1640,7 +1724,9 @@ impl Composer {
         }
         let mut out: Vec<(String, String, bool)> = Vec::new();
         for a in &space.agents {
-            if a.handle.starts_with(&query) {
+            let handle_l = a.handle.to_lowercase();
+            let name_l = a.name.to_lowercase();
+            if query.is_empty() || handle_l.starts_with(&query) || name_l.starts_with(&query) {
                 out.push((
                     a.handle.clone(),
                     format!("{} · owned by @{}", a.name, a.owner_handle),
@@ -1649,7 +1735,9 @@ impl Composer {
             }
         }
         for p in &space.people {
-            if p.handle.to_lowercase().starts_with(&query) {
+            let handle_l = p.handle.to_lowercase();
+            let name_l = p.name.as_deref().unwrap_or("").to_lowercase();
+            if query.is_empty() || handle_l.starts_with(&query) || name_l.starts_with(&query) {
                 out.push((p.handle.clone(), p.name.clone().unwrap_or_default(), false));
             }
         }
@@ -1663,17 +1751,61 @@ impl Composer {
         out
     }
 
-    fn accept_first_mention(&mut self, cx: &mut Context<Self>) {
-        if let Some((handle, _, _)) = self.mention_candidates(cx).into_iter().next() {
-            self.input
-                .update(cx, |input, cx| input.complete_mention(&handle, cx));
-            cx.notify();
+    /// Keep `mention_selected` in range for the current `@token` filter.
+    fn sync_mention_selection(&mut self, candidates_len: usize, query: Option<&str>) {
+        if self.mention_query_seen.as_deref() != query {
+            self.mention_query_seen = query.map(str::to_string);
+            self.mention_selected = 0;
         }
+        if candidates_len == 0 {
+            self.mention_selected = 0;
+        } else if self.mention_selected >= candidates_len {
+            self.mention_selected = candidates_len - 1;
+        }
+    }
+
+    /// Tab / ↓ or Shift+Tab / ↑ through the `@` list. Returns true when the menu
+    /// was open and handled the key.
+    fn mention_move(&mut self, delta: i32, cx: &mut Context<Self>) -> bool {
+        let query = self.mention_query(cx);
+        let candidates = self.mention_candidates(cx);
+        if candidates.is_empty() {
+            self.sync_mention_selection(0, None);
+            return false;
+        }
+        self.sync_mention_selection(candidates.len(), query.as_deref());
+        let len = candidates.len() as i32;
+        let next = (self.mention_selected as i32 + delta).rem_euclid(len) as usize;
+        self.mention_selected = next;
+        cx.notify();
+        true
+    }
+
+    /// Enter accepts the highlighted `@` row. Returns true when it did.
+    fn accept_selected_mention(&mut self, cx: &mut Context<Self>) -> bool {
+        let query = self.mention_query(cx);
+        let candidates = self.mention_candidates(cx);
+        if candidates.is_empty() {
+            self.sync_mention_selection(0, None);
+            return false;
+        }
+        self.sync_mention_selection(candidates.len(), query.as_deref());
+        let Some((handle, _, _)) = candidates.get(self.mention_selected) else {
+            return false;
+        };
+        let handle = handle.clone();
+        self.input
+            .update(cx, |input, cx| input.complete_mention(&handle, cx));
+        self.mention_selected = 0;
+        self.mention_query_seen = None;
+        cx.notify();
+        true
     }
 
     fn render_mentions(
         &self,
         candidates: Vec<(String, String, bool)>,
+        selected: usize,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
@@ -1700,7 +1832,7 @@ impl Composer {
                     .py(px(5.0))
                     .rounded(px(6.0))
                     .cursor_pointer()
-                    .when(i == 0, |el| el.bg(theme.surface_2))
+                    .when(i == selected, |el| el.bg(theme.surface_2))
                     .hover(|s| s.bg(theme.surface_2))
                     .child(
                         div()
@@ -1724,6 +1856,8 @@ impl Composer {
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.input
                             .update(cx, |input, cx| input.complete_mention(&h, cx));
+                        this.mention_selected = 0;
+                        this.mention_query_seen = None;
                         cx.notify();
                     })),
             );
@@ -1734,7 +1868,7 @@ impl Composer {
                 .pt(px(2.0))
                 .text_size(px(10.5))
                 .text_color(theme.text_faint)
-                .child("Tab completes the first match"),
+                .child("↑↓ or Tab to move · Enter to select"),
         );
         div()
             .absolute()
@@ -2277,10 +2411,11 @@ impl Render for Composer {
             }
         }
 
-        column = column.child(frosted(field_radius, PANEL_BLUR, field));
-
         // One muted line about the voice path while it is doing something (or
         // when it had to fall back: no microphone, mock relay), or the link.
+        // Overlay just above the field so the pill does not jump when the note
+        // appears (a flow child above or below would shift the bottom-pinned
+        // composer).
         let note = voice_notice
             .filter(|_| recording || transcribing || voice_mode)
             .or_else(|| {
@@ -2289,22 +2424,32 @@ impl Render for Composer {
                         .to_string()
                 })
             });
+        let mut field_wrap = div().relative().w_full();
         if let Some(note) = note {
-            column = column.child(
+            field_wrap = field_wrap.child(
                 div()
-                    .pl(px(16.0))
+                    .absolute()
+                    .left(px(16.0))
+                    .right(px(16.0))
+                    .top(px(-(TEXT_TINY + 6.0)))
                     .text_size(px(TEXT_TINY))
                     .text_color(theme.text_muted)
                     .child(note),
             );
         }
+        column = column.child(field_wrap.child(frosted(field_radius, PANEL_BLUR, field)));
 
         if let Some(picker) = self.open_picker {
             column = column.child(glass::popover(self.render_picker_menu(picker, cx)));
         }
+        let query = self.mention_query(cx);
         let mentions = self.mention_candidates(cx);
-        if !mentions.is_empty() {
-            column = column.child(glass::popover(self.render_mentions(mentions, cx)));
+        if mentions.is_empty() {
+            self.sync_mention_selection(0, None);
+        } else {
+            self.sync_mention_selection(mentions.len(), query.as_deref());
+            let selected = self.mention_selected;
+            column = column.child(glass::popover(self.render_mentions(mentions, selected, cx)));
         }
         column
     }
@@ -2493,5 +2638,118 @@ mod tests {
         assert_eq!(line_end(text, 11), text.len());
         assert_eq!(line_start(SENTENCE, SENTENCE.len()), 0);
         assert_eq!(line_end(SENTENCE, 0), SENTENCE.len());
+    }
+}
+
+#[cfg(test)]
+mod enter_tests {
+    //! Typing in the composer and pressing Enter must never crash the app (#1208, Mac v0.6.89/v0.6.90).
+    //! The Composer wires mention-menu callbacks into `ComposerInput` that read and update the input
+    //! entity itself; the input is leased while its own action handler runs, so those callbacks have to
+    //! run deferred. These tests install callbacks of exactly that shape and press the keys in a real
+    //! (headless) window.
+    use super::*;
+    use gpui::{Action, TestAppContext, VisualTestContext};
+    use std::cell::Cell;
+
+    fn input_with_owner_callbacks(
+        cx: &mut TestAppContext,
+    ) -> (Entity<ComposerInput>, &mut VisualTestContext, Rc<Cell<u32>>) {
+        let submitted = Rc::new(Cell::new(0u32));
+        cx.update(|cx| {
+            let theme = crate::ui::theme::Theme::for_pref(
+                crate::ui::theme::AppearancePref::Dark,
+                crate::ui::theme::Surface::Matte,
+                cx,
+            );
+            cx.set_global(theme);
+            crate::ui::motion::PulseClock::init(cx);
+        });
+        let (input, vcx) = cx.add_window_view(|_, cx| ComposerInput::new(cx));
+        let weak = input.downgrade();
+        let count = submitted.clone();
+        vcx.update(|_, cx| {
+            input.update(cx, |input, _| {
+                input.on_submit = Some(Rc::new(move |_, _| count.set(count.get() + 1)));
+                // What `Composer` does: read the input (mention query), and complete into it when a row is chosen.
+                let w1 = weak.clone();
+                input.on_mention_accept = Some(Rc::new(move |cx| {
+                    let Some(e) = w1.upgrade() else { return false };
+                    let has_at = e.read(cx).text().contains('@');
+                    if has_at {
+                        e.update(cx, |i, cx| i.complete_mention("sam", cx));
+                    }
+                    has_at
+                }));
+                let w2 = weak.clone();
+                input.on_mention_next = Some(Rc::new(move |cx| {
+                    w2.upgrade()
+                        .map(|e| e.read(cx).text().contains('@'))
+                        .unwrap_or(false)
+                }));
+                let w3 = weak.clone();
+                input.on_mention_prev = Some(Rc::new(move |cx| {
+                    w3.upgrade()
+                        .map(|e| e.read(cx).text().contains('@'))
+                        .unwrap_or(false)
+                }));
+            });
+        });
+        let handle = vcx.update(|_, cx| input.read(cx).focus_handle(cx));
+        vcx.update(|window, cx| window.focus(&handle, cx));
+        vcx.run_until_parked();
+        (input, vcx, submitted)
+    }
+
+    #[gpui::test]
+    fn typing_then_enter_submits_without_crashing(cx: &mut TestAppContext) {
+        let (input, cx, submitted) = input_with_owner_callbacks(cx);
+        cx.simulate_input("hello from the enter test");
+        cx.dispatch_action(Send);
+        cx.run_until_parked();
+        assert_eq!(submitted.get(), 1, "Enter must submit the text once");
+        assert_eq!(
+            cx.update(|_, cx| input.read(cx).text().to_string()),
+            "hello from the enter test"
+        );
+    }
+
+    #[gpui::test]
+    fn enter_with_an_open_mention_completes_instead_of_sending(cx: &mut TestAppContext) {
+        let (input, cx, submitted) = input_with_owner_callbacks(cx);
+        cx.simulate_input("hi @sa");
+        cx.dispatch_action(Send);
+        cx.run_until_parked();
+        assert_eq!(
+            submitted.get(),
+            0,
+            "Enter on an open @mention accepts the row, it does not send"
+        );
+        let text = cx.update(|_, cx| input.read(cx).text().to_string());
+        assert!(
+            text.starts_with("hi @sam"),
+            "the mention was completed: {text:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn mention_keys_without_a_mention_are_plain_editing(cx: &mut TestAppContext) {
+        let (input, cx, submitted) = input_with_owner_callbacks(cx);
+        cx.simulate_input("plain text");
+        let keys: [Box<dyn Action>; 4] = [
+            Box::new(Up),
+            Box::new(Down),
+            Box::new(AcceptMention),
+            Box::new(PrevMention),
+        ];
+        for action in keys {
+            cx.update(|window, cx| window.dispatch_action(action, cx));
+            cx.run_until_parked();
+        }
+        assert_eq!(submitted.get(), 0);
+        assert_eq!(
+            cx.update(|_, cx| input.read(cx).text().to_string()),
+            "plain text"
+        );
     }
 }

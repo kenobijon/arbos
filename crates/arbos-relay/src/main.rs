@@ -14,16 +14,19 @@ mod daytona;
 mod db;
 mod db_accounts;
 mod db_calls;
+mod db_fleet;
 mod db_people;
 mod db_push;
 mod db_secrets;
 mod db_voice;
 mod feedback;
+mod fleet;
 mod goals;
 mod groups;
 mod images;
 mod livekit;
 mod local;
+mod matrix;
 mod migrate;
 mod notify;
 mod people;
@@ -213,6 +216,8 @@ async fn main() -> anyhow::Result<()> {
         agentd_bin: args.agentd_bin.clone(),
         local_box_image: args.local_box_image.clone(),
         box_idle_grace_ms: 30_000,
+        default_provider: env_nonempty("ARBOS_DEFAULT_PROVIDER"),
+        fleet: fleet::FleetCfg::from_env(),
         connectors_mock: std::env::var("ARBOS_CONNECTORS_MOCK").is_ok_and(|v| v == "1"),
         channels_mock: std::env::var("ARBOS_CHANNELS_MOCK").is_ok_and(|v| v == "1"),
         image_mock: std::env::var("ARBOS_IMAGE_MOCK").is_ok_and(|v| v == "1"),
@@ -299,11 +304,15 @@ async fn main() -> anyhow::Result<()> {
         presence_seen: Arc::new(Mutex::new(HashMap::new())),
         activity: Arc::new(Mutex::new(HashMap::new())),
         box_http_seen: Arc::new(Mutex::new(HashMap::new())),
+        turn_running: Arc::new(Mutex::new(HashMap::new())),
+        evicted: Arc::new(Mutex::new(HashMap::new())),
+        fleet_pressure: Arc::new(Mutex::new(None)),
         voice: Arc::new(voice::cfg_from_env(&data_dir_for_voice)),
         voice_conns: Arc::new(Mutex::new(HashMap::new())),
         voice_dispatched: Arc::new(Mutex::new(HashMap::new())),
         voice_worker: Arc::new(Mutex::new(None)),
         client_seen: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        matrix: matrix::Matrix::new(matrix::Config::from_env()?),
     };
     tracing::info!(auth_mode = auth_mode.as_str(), public_url = %state.cfg.public_url, "sign-in");
     if state.cfg.connectors_mock {
@@ -341,10 +350,13 @@ async fn main() -> anyhow::Result<()> {
     routines::spawn_scheduler(state.clone()).await;
     channels::spawn_pollers(state.clone()).await;
     credits::spawn_meter(state.clone()).await;
+    fleet::spawn_fleet_tasks(state.clone()).await;
     boxes::spawn_always_on(state.clone()).await;
     upgrade::spawn_history_sweeper(state.clone()).await;
     secrets::spawn_sweeper(state.clone()).await;
     calls::spawn_sweeper(state.clone()).await;
+    matrix::worker::spawn(state.clone());
+    matrix::shadow::spawn_nightly(state.clone());
     boxes::spawn_project_purge(state.clone()).await;
 
     let app = Router::new()
@@ -387,6 +399,73 @@ async fn main() -> anyhow::Result<()> {
         .route("/admin/calls", get(calls::admin_calls))
         .route("/admin/usage/{purpose}", get(admin::usage_by_purpose))
         .route("/admin/release", post(releases::admin_release))
+        // Chats on Matrix (D88): the relay is Synapse's appservice, push gateway and operator.
+        .route(
+            "/_matrix/app/v1/transactions/{txn}",
+            put(matrix::appservice::transaction),
+        )
+        .route(
+            "/_matrix/app/v1/users/{user}",
+            get(matrix::appservice::user_query),
+        )
+        .route(
+            "/_matrix/app/v1/rooms/{alias}",
+            get(matrix::appservice::room_query),
+        )
+        .route("/_matrix/app/v1/ping", post(matrix::appservice::ping))
+        .route(
+            "/_matrix/push/v1/notify",
+            post(matrix::appservice::push_notify),
+        )
+        .route("/me/matrix", get(matrix::servers::me_matrix))
+        .route(
+            "/_matrix/client/{*rest}",
+            axum::routing::any(matrix::servers::proxy),
+        )
+        .route(
+            "/servers",
+            get(matrix::servers::list).post(matrix::servers::create),
+        )
+        .route("/servers/join", post(matrix::servers::join))
+        .route(
+            "/servers/{id}",
+            get(matrix::servers::get)
+                .patch(matrix::servers::patch)
+                .delete(matrix::servers::delete),
+        )
+        .route(
+            "/servers/{id}/channels",
+            post(matrix::servers::channel_create),
+        )
+        .route(
+            "/servers/{id}/channels/{cid}",
+            axum::routing::patch(matrix::servers::channel_patch)
+                .delete(matrix::servers::channel_delete),
+        )
+        .route(
+            "/servers/{id}/invite/reset",
+            post(matrix::servers::invite_reset),
+        )
+        .route(
+            "/servers/{id}/members/{uid}",
+            put(matrix::servers::member_role).delete(matrix::servers::member_remove),
+        )
+        .route("/servers/{id}/leave", post(matrix::servers::leave))
+        .route("/s/{code}", get(matrix::servers::landing))
+        .route("/admin/matrix/status", get(matrix::appservice::status))
+        .route("/admin/matrix/backfill", post(matrix::appservice::backfill))
+        .route(
+            "/admin/matrix/shadow",
+            get(matrix::appservice::shadow_compare),
+        )
+        .route(
+            "/admin/matrix/retry",
+            post(matrix::appservice::retry_failed),
+        )
+        .route(
+            "/admin/matrix/reads/{user}",
+            put(matrix::appservice::set_reads),
+        )
         .route("/admin/installs", get(releases::admin_installs))
         .route("/releases/current", get(releases::current))
         .route("/box/voice", get(voice::ws_box_voice))
@@ -533,6 +612,14 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/admin/push", get(admin::push_status))
         .route("/admin/push/test", post(admin::push_test))
+        .route(
+            "/admin/fleet",
+            get(fleet::admin_fleet).put(fleet::admin_fleet_update),
+        )
+        .route(
+            "/admin/waitlist/{id}/admit",
+            post(fleet::admin_waitlist_admit),
+        )
         .route("/admin/users", get(admin::list_users))
         .route("/admin/users/test", post(admin::create_test_user))
         .route("/admin/users/{id}", delete(admin::delete_test_user))

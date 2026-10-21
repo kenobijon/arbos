@@ -1,7 +1,13 @@
 //! My pane: profile + every app setting (mockup g), drawn with the shared
 //! pane kit so it matches the person and group panes row for row.
 
-use gpui::{div, prelude::*, px, Div, IntoElement, Stateful};
+use std::cell::Cell;
+use std::rc::Rc;
+
+use gpui::{
+    canvas, div, prelude::*, px, Bounds, Context, Div, DragMoveEvent, IntoElement, MouseButton,
+    MouseDownEvent, Pixels, Render, Stateful, Window,
+};
 
 use crate::model::{now_ms, MachineState};
 use crate::ui::glass;
@@ -11,7 +17,22 @@ use crate::ui::people;
 use crate::ui::profiles::{self, kit};
 use crate::ui::shell::{fmt_uptime, human_bytes, SettingsPage, Shell};
 use crate::ui::sidebar;
-use crate::ui::theme::{AppearancePref, Surface, Theme, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
+use crate::ui::theme::{
+    AppearancePref, Surface, Theme, GLASS_OPACITY_MAX, GLASS_OPACITY_MIN, TEXT_BODY, TEXT_SMALL,
+    TEXT_TINY,
+};
+
+/// Drag payload for the Appearance glass-opacity slider (no preview view).
+#[derive(Clone)]
+struct GlassOpacityDrag;
+
+struct GlassOpacityDragGhost;
+
+impl Render for GlassOpacityDragGhost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
 
 /// The open page of my pane.
 pub(super) fn page(shell: &Shell, cx: &mut gpui::Context<Shell>) -> Stateful<Div> {
@@ -317,7 +338,7 @@ impl Shell {
 
         // ----- Appearance page body ----------------------------------------------
         let appearance_body = {
-            let group = settings_group(&theme)
+            let mut group = settings_group(&theme)
                 .child(seg_row(
                     "Theme",
                     div().flex().gap(px(2.0)).children(
@@ -369,13 +390,109 @@ impl Shell {
                         ),
                     &theme,
                 ));
+            // Opacity slider only while Glass is selected (the tint has no
+            // effect on Matte).
+            if theme.surface == Surface::Glass {
+                let opacity = theme
+                    .glass_opacity
+                    .clamp(GLASS_OPACITY_MIN, GLASS_OPACITY_MAX);
+                let frac = ((opacity - GLASS_OPACITY_MIN)
+                    / (GLASS_OPACITY_MAX - GLASS_OPACITY_MIN))
+                    .clamp(0.0, 1.0);
+                let pct = format!("{}%", (opacity * 100.0).round() as i32);
+                let track_bounds = Rc::new(Cell::new(Bounds::<Pixels>::default()));
+                let track_for_down = track_bounds.clone();
+                let track_for_paint = track_bounds.clone();
+                let slider = div()
+                    .id("glass-opacity-slider")
+                    .flex_1()
+                    .h(px(28.0))
+                    .relative()
+                    .flex()
+                    .items_center()
+                    .child(
+                        div()
+                            .w_full()
+                            .h(px(4.0))
+                            .rounded_full()
+                            .bg(theme.border)
+                            .overflow_hidden()
+                            .child(
+                                div()
+                                    .h_full()
+                                    .rounded_full()
+                                    .bg(theme.accent)
+                                    .w(gpui::relative(frac.max(0.02))),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .items_center()
+                            .child(div().w(gpui::relative(frac)))
+                            .child(
+                                div()
+                                    .ml(px(-8.0))
+                                    .size(px(16.0))
+                                    .rounded_full()
+                                    .bg(theme.primary)
+                                    .border_1()
+                                    .border_color(theme.field_border)
+                                    .shadow_md(),
+                            ),
+                    )
+                    .child(
+                        canvas(
+                            move |bounds, _, _| track_for_paint.set(bounds),
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .inset_0(),
+                    )
+                    .cursor_pointer()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            this.set_glass_opacity_at(ev.position.x, track_for_down.get(), cx);
+                        }),
+                    )
+                    .on_drag(GlassOpacityDrag, |_, _, _, cx| {
+                        cx.new(|_| GlassOpacityDragGhost)
+                    })
+                    .on_drag_move(cx.listener(
+                        |this, ev: &DragMoveEvent<GlassOpacityDrag>, _, cx| {
+                            this.set_glass_opacity_at(ev.event.position.x, ev.bounds, cx);
+                        },
+                    ));
+                group = group.child(
+                    glass::row("Opacity", &theme).child(slider).child(
+                        div()
+                            .flex_shrink_0()
+                            .w(px(44.0))
+                            .text_size(px(TEXT_BODY))
+                            .text_color(theme.text_muted)
+                            .child(pct),
+                    ),
+                );
+            }
             div()
                 .flex()
                 .flex_col()
                 .gap(px(22.0))
                 .child(group)
                 .child(footnote(
-                    if glass_ok {
+                    if theme.surface == Surface::Glass {
+                        if glass_ok {
+                            "Glass: window vibrancy and frosted panels. Opacity sets how strong the tint is over the blur."
+                                .into()
+                        } else {
+                            "Glass here: frosted panels only; window vibrancy needs macOS. Opacity sets the tint strength."
+                                .into()
+                        }
+                    } else if glass_ok {
                         "Glass: window vibrancy and frosted panels.".into()
                     } else {
                         "Glass here: frosted panels only; window vibrancy needs macOS.".into()

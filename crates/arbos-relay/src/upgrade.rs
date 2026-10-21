@@ -35,7 +35,7 @@ const MAX_WORK_MIB: i64 = 3500;
 
 /// Is the box behind the relay's default snapshot?
 pub fn image_outdated(state: &AppState, sb: &crate::db::Sandbox) -> bool {
-    sb.provider == "daytona"
+    (sb.provider == "daytona" || sb.provider == "gvisor")
         && sb
             .snapshot
             .as_deref()
@@ -74,9 +74,13 @@ pub async fn start(state: &AppState, user_id: &str, force: bool) -> Result<bool>
         .db
         .user_box(user_id)?
         .ok_or_else(|| anyhow!("no box for user {user_id}"))?;
-    if Provider::parse(&sb.provider) != Some(Provider::Daytona) {
+    let provider = Provider::parse(&sb.provider);
+    if provider == Some(Provider::Gvisor) {
+        return start_gvisor(state, user_id, &sb, force).await;
+    }
+    if provider != Some(Provider::Daytona) {
         return Err(anyhow!(
-            "only Daytona boxes can be upgraded (this one is {})",
+            "only Daytona and gvisor boxes can be upgraded (this one is {})",
             sb.provider
         ));
     }
@@ -124,6 +128,74 @@ pub async fn start(state: &AppState, user_id: &str, force: bool) -> Result<bool>
             }
             Err(e) => {
                 tracing::error!(user = %user, error = %format!("{e:#}"), "box upgrade failed");
+                let _ = state2.db.record_audit(
+                    "relay-admin",
+                    "box_upgrade_failed",
+                    &json!({ "ts": now_ms(), "user_id": user, "error": format!("{e:#}") }),
+                );
+                state2
+                    .set_box_state(
+                        &user,
+                        BoxState::Error,
+                        Some(&format!("upgrade failed: {e}")),
+                    )
+                    .await;
+            }
+        }
+    });
+    Ok(true)
+}
+
+/// gVisor sandbox (D89): the image roll is a container recreate on the same `/work` image —
+/// seconds, nothing copied. Same status surface (`upgrading`, audit rows) as the Daytona path.
+async fn start_gvisor(
+    state: &AppState,
+    user_id: &str,
+    sb: &crate::db::Sandbox,
+    force: bool,
+) -> Result<bool> {
+    let target = state
+        .db
+        .user_snapshot(user_id)?
+        .unwrap_or_else(|| state.cfg.daytona_snapshot.clone());
+    if !force && sb.snapshot.as_deref() == Some(target.as_str()) {
+        return Ok(false);
+    }
+    {
+        let mut running = state.upgrading.lock().await;
+        if running.contains_key(user_id) {
+            return Ok(false);
+        }
+        running.insert(
+            user_id.to_owned(),
+            UpgradeStatus {
+                phase: "recreating".into(),
+                since: now_ms(),
+                from_snapshot: sb.snapshot.clone(),
+                to_snapshot: target.clone(),
+            },
+        );
+    }
+    let state2 = state.clone();
+    let user = user_id.to_owned();
+    tokio::spawn(async move {
+        let t0 = Instant::now();
+        state2
+            .set_box_state(&user, BoxState::Waking, Some("upgrading: recreating"))
+            .await;
+        let outcome = crate::fleet::recreate_with_snapshot(&state2, &user, &target).await;
+        state2.upgrading.lock().await.remove(&user);
+        match outcome {
+            Ok(()) => {
+                tracing::info!(user = %user, target, ms = t0.elapsed().as_millis() as i64, "gvisor box upgraded");
+                let _ = state2.db.record_audit(
+                    "relay-admin",
+                    "box_upgrade",
+                    &json!({ "ts": now_ms(), "user_id": user, "report": { "provider": "gvisor", "to": target }, "ms": t0.elapsed().as_millis() as i64 }),
+                );
+            }
+            Err(e) => {
+                tracing::error!(user = %user, error = %format!("{e:#}"), "gvisor box upgrade failed");
                 let _ = state2.db.record_audit(
                     "relay-admin",
                     "box_upgrade_failed",
