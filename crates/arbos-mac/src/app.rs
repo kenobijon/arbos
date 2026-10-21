@@ -308,6 +308,10 @@ pub struct AppState {
     /// auto-hides; the header toggle (or ⌘B) floats it over the chat instead.
     pub sidebar_overlay: bool,
     pub details_open: Option<DetailsTarget>,
+    /// Expanded chat-image preview (click the attachment thumbnail).
+    pub image_preview: Option<Arc<RenderImage>>,
+    /// Blob key whose thumbnail is loading so the expanded preview can open.
+    image_preview_pending: Option<String>,
     pub new_project_open: bool,
     /// Debug: per-message "Show details" disclosures in the transcript.
     pub show_details: bool,
@@ -588,6 +592,8 @@ impl AppState {
             rail_collapsed: false,
             sidebar_overlay: false,
             details_open: None,
+            image_preview: None,
+            image_preview_pending: None,
             new_project_open: false,
             show_details: false,
             machine: Machine::default(),
@@ -1110,7 +1116,12 @@ impl AppState {
             }
             SyncEvent::Thumbnail { key, bytes } => {
                 if let Some(image) = decode_image(&bytes) {
-                    self.thumbnails.insert(key, Arc::new(image));
+                    let image = Arc::new(image);
+                    if self.image_preview_pending.as_ref() == Some(&key) {
+                        self.image_preview_pending = None;
+                        self.image_preview = Some(image.clone());
+                    }
+                    self.thumbnails.insert(key, image);
                     if let Some(chat_id) = self.active_chat_id() {
                         cx.emit(AppEvent::TranscriptChanged { chat_id });
                     }
@@ -1118,6 +1129,9 @@ impl AppState {
                 }
             }
             SyncEvent::ThumbnailFailed { key } => {
+                if self.image_preview_pending.as_ref() == Some(&key) {
+                    self.image_preview_pending = None;
+                }
                 self.thumbnails_failed.insert(key);
                 if let Some(chat_id) = self.active_chat_id() {
                     cx.emit(AppEvent::TranscriptChanged { chat_id });
@@ -3299,6 +3313,45 @@ impl AppState {
 
     pub fn close_details(&mut self, cx: &mut Context<Self>) {
         self.details_open = None;
+        cx.notify();
+    }
+
+    /// Open the expanded image preview with an already-decoded thumbnail.
+    pub fn open_image_preview(&mut self, image: Arc<RenderImage>, cx: &mut Context<Self>) {
+        self.image_preview_pending = None;
+        self.image_preview = Some(image);
+        cx.notify();
+    }
+
+    /// Close the expanded image preview (backdrop, ×, or Escape).
+    pub fn close_image_preview(&mut self, cx: &mut Context<Self>) {
+        self.image_preview = None;
+        self.image_preview_pending = None;
+        cx.notify();
+    }
+
+    /// True while the lightbox is up (showing an image or waiting on a fetch).
+    pub fn image_preview_open(&self) -> bool {
+        self.image_preview.is_some() || self.image_preview_pending.is_some()
+    }
+
+    /// Open an attachment image in the lightbox; fetch the thumbnail when missing.
+    pub fn preview_attachment_image(&mut self, key: String, cx: &mut Context<Self>) {
+        if let Some(image) = self.thumbnails.get(&key).cloned() {
+            self.open_image_preview(image, cx);
+            return;
+        }
+        if key.starts_with("local:") {
+            return;
+        }
+        let Some(project_id) = self.selected_project.clone() else {
+            return;
+        };
+        self.image_preview = None;
+        self.image_preview_pending = Some(key.clone());
+        self.thumbnails_failed.remove(&key);
+        self.thumbnails_requested.insert(key.clone());
+        self.command(ClientCommand::FetchThumbnail { project_id, key });
         cx.notify();
     }
 
