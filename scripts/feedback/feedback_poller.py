@@ -105,6 +105,7 @@ ASSET_RELEASE_TAG = "feedback-screenshots"
 RELAY_DEPLOYED_SHA_FILE = "/etc/arbos/relay.deployed-sha"  # written by scripts/deploy/relay-server.sh
 INSTALL_SIGNAL_SINCE = "2026-10-19T22:00:00Z"  # relay records X-Arbos-Client versions since then (D85)
 DEPLOY_HOOK = "/usr/local/bin/arbos-deploy-hook"  # CD worker's hook: `<relay|agentd|voice> <sha>`, idempotent, debounced; called directly (no sudo)
+DEPLOY_QUEUE = os.environ.get("ARBOS_DEPLOY_QUEUE", "/var/lib/arbos-feedback/deploy-requests")  # the hook's queue: one file per kind
 USER_AGENT = "arbos-feedback-poller/1 (+https://github.com/unarbos/arbos)"
 
 TERMINAL = {"shipped", "failed", "ignored", "rejected", "duplicate", "no_change", "handed_off", "deferred"}
@@ -2530,12 +2531,30 @@ class Loop:
             return
         self.close_fixed(fid, st)
 
+    @staticmethod
+    def queued_deploy_sha(kind: str) -> str | None:
+        """The sha currently queued for `kind` by the CD hook (one file per kind), or None."""
+        try:
+            for line in Path(DEPLOY_QUEUE, kind).read_text().splitlines():
+                if line.startswith("sha="):
+                    return line[4:].strip() or None
+        except OSError:
+            return None
+        return None
+
     def request_deploys(self, fid: str, kinds: list[str], sha: str) -> None:
         """Ask the CD hook to deploy the relay / roll the image / redeploy voice for a landed fix. Only speeds the
         hook's own 1-min main watcher up; "live" is still judged from the reported shas (watch_deploys)."""
         if not os.path.exists(DEPLOY_HOOK) or not sha:
             return
         for kind in kinds:
+            # The queue holds one sha per kind and the last write wins. Never replace a queued request that already
+            # contains this fix with an older commit (22:01 Oct 21: the worker's "newest green" request b22f22b6 was
+            # overwritten by a branch commit from 21:22, resetting the debounce and pointing the deploy backwards).
+            queued = self.queued_deploy_sha(kind)
+            if queued and queued != sha and self.gh.contains(queued, sha):
+                log(f"[{fid}] deploy {kind}: queued {queued[:8]} already carries {sha[:8]}; not requested again")
+                continue
             try:
                 # Direct call: the unit runs with NoNewPrivileges, so no sudo; the hook queues the request under
                 # /var/lib/arbos-feedback/deploy-requests/ (inside the unit's ReadWritePaths) for the CD worker.
