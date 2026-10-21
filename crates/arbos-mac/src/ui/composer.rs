@@ -2411,10 +2411,11 @@ impl Render for Composer {
             }
         }
 
-        column = column.child(frosted(field_radius, PANEL_BLUR, field));
-
         // One muted line about the voice path while it is doing something (or
         // when it had to fall back: no microphone, mock relay), or the link.
+        // Overlay just above the field so the pill does not jump when the note
+        // appears (a flow child above or below would shift the bottom-pinned
+        // composer).
         let note = voice_notice
             .filter(|_| recording || transcribing || voice_mode)
             .or_else(|| {
@@ -2423,15 +2424,20 @@ impl Render for Composer {
                         .to_string()
                 })
             });
+        let mut field_wrap = div().relative().w_full();
         if let Some(note) = note {
-            column = column.child(
+            field_wrap = field_wrap.child(
                 div()
-                    .pl(px(16.0))
+                    .absolute()
+                    .left(px(16.0))
+                    .right(px(16.0))
+                    .top(px(-(TEXT_TINY + 6.0)))
                     .text_size(px(TEXT_TINY))
                     .text_color(theme.text_muted)
                     .child(note),
             );
         }
+        column = column.child(field_wrap.child(frosted(field_radius, PANEL_BLUR, field)));
 
         if let Some(picker) = self.open_picker {
             column = column.child(glass::popover(self.render_picker_menu(picker, cx)));
