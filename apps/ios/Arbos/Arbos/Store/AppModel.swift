@@ -415,7 +415,8 @@ final class AppModel: ObservableObject {
 
     init() {
         LaunchClock.mark("app-init")
-        sharedRoomSession = sharedRoomSessionSetting || DebugHooks.sharedRoomSession
+        // Read UserDefaults directly — cannot touch `sharedRoomSessionSetting` before this `let` is set.
+        sharedRoomSession = UserDefaults.standard.bool(forKey: "sharedRoomSession") || DebugHooks.sharedRoomSession
         #if DEBUG
         if let scale = DebugHooks.textScale, TextScale.steps.contains(where: { abs($0 - CGFloat(scale)) < 0.001 }) {
             textScaleSetting = scale
