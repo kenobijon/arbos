@@ -1919,7 +1919,7 @@ final class AppModel: ObservableObject {
                 mentions.append(agent.member)
             }
         }
-        let author = ChatDoc.Author(sender: "user:\(me.id)", handle: me.login, name: me.name, avatar: me.avatarUrl)
+        let author = CoreChatDoc.Author(sender: "user:\(me.id)", handle: me.login, name: me.name, avatar: me.avatarUrl)
         let messageId = newId()
         // Text-only: write on this turn (same as project `write`) so the push leaves
         // before we return. Deferring every send into a Task left bubbles faint when
@@ -1949,7 +1949,7 @@ final class AppModel: ObservableObject {
     /// Insert + pushCommand + commit for a people chat. `alreadyUnacked` when the caller
     /// reserved the id before an attachment upload.
     private func commitPeople(chatId: String, doc: CoreChatDoc, messageId: Id, text: String,
-                              author: ChatDoc.Author, mentions: [String], reply: String?,
+                              author: CoreChatDoc.Author, mentions: [String], reply: String?,
                               attachments: [Attachment], alreadyUnacked: Bool = false) {
         if !alreadyUnacked { markUnacked(chatId: chatId, messageId: messageId) }
         do {

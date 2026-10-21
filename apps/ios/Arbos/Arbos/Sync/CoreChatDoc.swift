@@ -4,6 +4,15 @@
 import Foundation
 import ArbosFFI
 
+/// What a root-level diff touched, mapped to message indexes.
+struct Touched {
+    /// The `messages` list itself changed (insert/delete): re-read everything.
+    var listChanged = false
+    var messages = Set<Int>()
+    /// Anything outside `messages` (project doc maps, `commands`).
+    var other = false
+}
+
 /// Loro chat replica backed by `ArbosFFI.ChatDoc` (shared core writers/readers).
 final class CoreChatDoc {
     let key: Id
@@ -21,6 +30,9 @@ final class CoreChatDoc {
 
     /// Nothing imported or written yet (a fresh replica is not worth saving).
     var isEmpty: Bool { doc.isEmpty() }
+
+    /// Encoded oplog version vector (checkpoint frontier bytes).
+    var oplogVersion: Data { doc.oplogVersion() }
 
     func commit() { doc.commit() }
 
@@ -64,9 +76,16 @@ final class CoreChatDoc {
 
     // MARK: Writing
 
+    struct Author {
+        var sender: String
+        var handle: String?
+        var name: String?
+        var avatar: String?
+    }
+
     func insertUserMessage(
         id: Id, text: String, deviceId: String, attachments: [Attachment] = [],
-        author: ChatDoc.Author? = nil, mentions: [String] = [], replyTo: String? = nil
+        author: Author? = nil, mentions: [String] = [], replyTo: String? = nil
     ) throws {
         let opts = UserMessageOptsRecord(
             attachments: attachments.map {

@@ -1,7 +1,6 @@
 import XCTest
 @testable import Arbos
 import ArbosFFI
-import Loro
 
 /// Fake WebSocket for `SessionRoom`: records outbound frames, delivers inbound
 /// frames (or errors) into `receive()`, and fires `onOpen` on demand.
@@ -89,12 +88,12 @@ final class SessionRoomTests: XCTestCase {
         let sockets = SocketFactory()
         let fetches = FetchGate()
 
-        let other = Arbos.ChatDoc(key: "other")
+        let other = CoreChatDoc(key: "other")
         try other.insertUserMessage(
             id: "m1", text: "x", deviceId: "d", author: .init(sender: "u")
         )
         other.commit()
-        let frontier = other.doc.oplogVv().encode()
+        let frontier = other.oplogVersion
         let staleBytes = try other.exportSnapshot()
 
         let doc = CoreChatDoc(key: "chat")
