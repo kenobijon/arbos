@@ -38,6 +38,8 @@ Config comes from the environment (systemd EnvironmentFile=/etc/arbos/feedback.e
   GITHUB_TOKEN, GITHUB_REPO (owner/name)
   FEEDBACK_PRIORITY (comma-separated emails / @handles) + FEEDBACK_PRIORITY_FILE (one per line): go first,
       no per-tester cap. FEEDBACK_BLOCKLIST_FILE (one email / @handle per line): dropped, logged.
+  FEEDBACK_INTERNAL_FILE (/etc/arbos/feedback-internal.txt, one email / @handle per line): internal testers,
+      FEEDBACK_INTERNAL_MAX_PER_DAY (40) launches a day instead of FEEDBACK_TESTER_MAX_PER_DAY (20).
   ARBOS_RELAY_URL + ARBOS_RELAY_ADMIN_TOKEN: Mac sheet intake (GET /admin/feedback)
   OPENROUTER_API_KEY + FEEDBACK_SCREEN_MODEL (openai/gpt-4o-mini): the malicious-intent screen
   FEEDBACK_STATE_DIR (default /var/lib/arbos-feedback), FEEDBACK_KILL_FILE
@@ -173,6 +175,8 @@ class Config:
     min_interval_s: int
     max_per_day: int
     tester_max_per_day: int
+    internal_max_per_day: int
+    internal: set[str]
     tester_max_wait_min: int
     dedupe_days: int
     topics: list[tuple[int, str]]
@@ -206,6 +210,8 @@ class Config:
         priority = listed("FEEDBACK_PRIORITY", "FEEDBACK_PRIORITY_FILE", "/etc/arbos/feedback-priority.txt")
         priority |= listed("FEEDBACK_ALLOWLIST", "FEEDBACK_ALLOWLIST_FILE", "/etc/arbos/feedback-allowlist.txt")
         blocklist = listed("FEEDBACK_BLOCKLIST", "FEEDBACK_BLOCKLIST_FILE", "/etc/arbos/feedback-blocklist.txt")
+        # Internal testers (owner decision 2026-10-21: Jacob, Ken, Robert, Etienne) get a higher daily launch cap.
+        internal = listed("FEEDBACK_INTERNAL", "FEEDBACK_INTERNAL_FILE", "/etc/arbos/feedback-internal.txt")
         # Deferred product areas: "<regex> :: <comment>" per line; matching feedback gets its issue,
         # the label `deferred` and the comment, and no agent (for a feature intentionally switched off).
         # Empty by default; rules come and go with product decisions.
@@ -254,6 +260,8 @@ class Config:
             min_interval_s=int(env.get("FEEDBACK_MIN_INTERVAL_S", "90")),
             max_per_day=int(env.get("FEEDBACK_MAX_PER_DAY", "120")),
             tester_max_per_day=int(env.get("FEEDBACK_TESTER_MAX_PER_DAY", "20")),
+            internal_max_per_day=int(env.get("FEEDBACK_INTERNAL_MAX_PER_DAY", "40")),
+            internal=internal,
             tester_max_wait_min=int(env.get("FEEDBACK_TESTER_MAX_WAIT_MIN", "30")),
             topics=topics,
             deferred=deferred,
@@ -951,6 +959,16 @@ class Loop:
             return "@" + info["handle"].lower()
         return f"source:{info.get('source')}"
 
+    def is_internal(self, st: dict) -> bool:
+        """Internal tester (Jacob, Ken, Robert, Etienne — /etc/arbos/feedback-internal.txt): 40 launches/day instead of 20."""
+        keys = {(st.get("tester_key") or "").lower()}
+        info = self.store.submission(st["id"]) if st.get("id") else {}
+        if info.get("handle"):
+            keys.add("@" + info["handle"].lower())
+        if info.get("email"):
+            keys.add(info["email"].lower())
+        return bool(keys & self.cfg.internal)
+
     def tier(self, info: dict) -> str:
         """priority (Jacob: first in line, no per-tester cap) | tester | blocked."""
         keys = {self.tester_key(info)}
@@ -1128,8 +1146,9 @@ class Loop:
             return f"{self.cfg.max_per_day} launches already today"
         if st and st.get("tier") != "priority":
             key = st.get("tester_key") or ""
-            if key and self.store.launches_today(key) >= self.cfg.tester_max_per_day:
-                return f"{self.cfg.tester_max_per_day} launches already today for this tester"
+            cap = self.cfg.internal_max_per_day if self.is_internal(st) else self.cfg.tester_max_per_day
+            if key and self.store.launches_today(key) >= cap:
+                return f"{cap} launches already today for this tester"
         return None
 
     # ---- malicious-intent screen -------------------------------------------------------------
