@@ -73,6 +73,8 @@ const SETTINGS_WIDTH: f32 = crate::ui::profiles::SHEET_WIDTH;
 pub(crate) enum SettingsPage {
     #[default]
     Root,
+    /// Hidden from Settings until credits UI ships again.
+    #[allow(dead_code)]
     Credits,
     Machine,
     Appearance,
@@ -80,8 +82,14 @@ pub(crate) enum SettingsPage {
     Updates,
     About,
     Connectors,
+    /// Hidden from Settings until routines UI ships again.
+    #[allow(dead_code)]
     Routines,
+    /// Hidden from Settings until channels UI ships again.
+    #[allow(dead_code)]
     Channels,
+    /// Hidden from Settings until skills UI ships again.
+    #[allow(dead_code)]
     Skills,
     ThisMac,
     Secrets,
