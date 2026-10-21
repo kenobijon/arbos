@@ -1419,7 +1419,10 @@ pub async fn box_hello(
     boxes::box_seen_http(&state, user_id).await;
     if let Some(url) = &b.url {
         if let Ok(Some(mut sb)) = state.db.user_box(user_id) {
-            if sb.provider != "daytona" {
+            // Only a process box's own URL is reachable from the relay. Daytona boxes have a
+            // preview URL, container boxes (docker, gvisor) a published host port; the URL a
+            // container reports is its in-namespace address.
+            if sb.provider == "process" {
                 sb.box_url = Some(url.clone());
                 let _ = state.db.upsert_box(&sb);
             }

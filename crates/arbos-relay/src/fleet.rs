@@ -356,6 +356,12 @@ pub fn run_args(
             "type=bind,src={},dst=/home/daytona",
             mnt_dir.join(".home").display()
         ),
+        // `/etc` is a writable, persistent copy of the image's `/etc` inside the user's image:
+        // agentd's per-project Unix users (`useradd`) must survive restarts, and the rootfs stays
+        // read-only.
+        "--mount".into(),
+        format!("type=bind,src={},dst=/etc", mnt_dir.join(".etc").display()),
+        "--shm-size=256m".into(),
         "-v".into(),
         format!("{}:/etc/resolv.conf:ro", resolv.display()),
         format!("--cpus={}", cfg.box_cpus),
@@ -471,7 +477,7 @@ async fn ensure_work_mounted(state: &AppState, user_id: &str) -> Result<PathBuf>
          d=$(losetup -j \"$img\" | cut -d: -f1 | head -1); \
          [ -n \"$d\" ] || d=$(losetup --find --show \"$img\"); \
          mountpoint -q \"$mnt\" || mount -o discard,nosuid,nodev \"$d\" \"$mnt\"; \
-         mkdir -p \"$mnt/.home\"; chown 1000:1000 \"$mnt\" \"$mnt/.home\"; echo \"$d\"",
+         mkdir -p \"$mnt/.home\" \"$mnt/.etc\"; chown 1000:1000 \"$mnt\" \"$mnt/.home\"; echo \"$d\"",
         u = user_id
     );
     let dev = helper(state, &script).await?;
@@ -489,6 +495,34 @@ pub async fn unmount_work(state: &AppState, user_id: &str) -> Result<()> {
         u = user_id
     );
     helper(state, &script).await.map(|_| ())
+}
+
+/// First boot of a user's image: copy the agent image's `/etc` into `<mnt>/.etc` so the sandbox
+/// can mount it writable (per-project users, groups) while the rootfs stays read-only.
+async fn seed_etc(mnt: &Path, image: &str) -> Result<()> {
+    let etc = mnt.join(".etc");
+    if etc.join("passwd").exists() {
+        return Ok(());
+    }
+    // `cp -a` from inside the image itself: `docker cp` refuses /etc's relative symlinks.
+    docker(&[
+        "run".into(),
+        "--rm".into(),
+        "-u".into(),
+        "0".into(),
+        "--network".into(),
+        "none".into(),
+        "--mount".into(),
+        format!("type=bind,src={},dst=/seed", etc.display()),
+        "--entrypoint".into(),
+        "cp".into(),
+        image.into(),
+        "-a".into(),
+        "/etc/.".into(),
+        "/seed/".into(),
+    ])
+    .await
+    .map(|_| ())
 }
 
 fn resolv_path(state: &AppState) -> Result<PathBuf> {
@@ -548,6 +582,7 @@ pub async fn create_box(
     state.db.upsert_box(sb)?;
     boxes::save_local_tokens(state, user_id, box_token, mcp_token)?;
     let mnt = ensure_work_mounted(state, user_id).await?;
+    seed_etc(&mnt, &state.cfg.local_box_image).await?;
     let resolv = resolv_path(state)?;
     if container_exists(&name).await {
         // A stale container from an earlier life (relay DB reset, failed create): replace it.
@@ -1063,6 +1098,8 @@ mod tests {
             "--cap-drop=NET_RAW",
             "type=bind,src=/d/boxes/u/mnt,dst=/work",
             "type=bind,src=/d/boxes/u/mnt/.home,dst=/home/daytona",
+            "type=bind,src=/d/boxes/u/mnt/.etc,dst=/etc",
+            "--shm-size=256m",
             "/d/boxes/resolv.conf:/etc/resolv.conf:ro",
             "-p 127.0.0.1::7788",
             "-e ARBOS_USER_ID=u",
