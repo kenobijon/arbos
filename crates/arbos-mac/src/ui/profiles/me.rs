@@ -36,18 +36,11 @@ impl Shell {
         let profile_tab = state.profile_tab;
         let custom_avatar = state.has_custom_avatar();
         let notify_on = state.notifier.enabled;
-        let skill_count = state.skills.len();
         let secrets_value = if state.secrets.loaded {
             state.secrets.row_value()
         } else {
             String::new()
         };
-        let connectors_connected = state
-            .connectors
-            .items
-            .iter()
-            .filter(|c| c.status == crate::model::ConnectorStatus::Connected)
-            .count();
         let store_usage = state.store_usage;
         let update = state.update.clone();
         let update_failed = matches!(update.phase, crate::update::UpdatePhase::Failed { .. });
@@ -131,15 +124,6 @@ impl Shell {
             Surface::Glass => "Glass",
         };
         let appearance_summary = format!("{} · {surface_label}", theme.pref.label());
-        let credits_summary = account
-            .as_ref()
-            .filter(|a| a.balance_usd > 0.0 || a.daily_cap_usd.is_some())
-            .map(|a| format!("${:.0} left", a.balance_usd));
-        let connectors_summary = if connectors_connected == 0 {
-            None
-        } else {
-            Some(format!("{connectors_connected} connected"))
-        };
         let on_this_mac = if store_usage.1 == 0 {
             "Nothing saved yet".to_string()
         } else {
@@ -826,81 +810,30 @@ impl Shell {
                     cx,
                 )),
         );
-        // Credits · Connected apps · Secrets.
-        let mut account_group = group(&theme);
-        if account.is_some() {
-            account_group = account_group.child(page_row(
-                "settings-credits",
-                "creditcard",
-                SettingsPage::Credits,
-                credits_summary.clone(),
-                false,
-                &theme,
-                cx,
-            ));
-        }
-        account_group = account_group
-            .child(page_row(
-                "settings-connectors",
-                "link",
-                SettingsPage::Connectors,
-                connectors_summary,
-                false,
-                &theme,
-                cx,
-            ))
-            .child(page_row(
-                "settings-secrets",
-                "key",
-                SettingsPage::Secrets,
-                Some(secrets_value),
-                true,
-                &theme,
-                cx,
-            ));
-        body = body.child(account_group);
-        // Routines · Channels · Skills · On this Mac.
+        // Secrets (Credits · Connected apps hidden until implemented).
+        body = body.child(group(&theme).child(page_row(
+            "settings-secrets",
+            "key",
+            SettingsPage::Secrets,
+            Some(secrets_value),
+            true,
+            &theme,
+            cx,
+        )));
+        // On this Mac (Routines · Channels · Skills hidden until implemented).
         body = body.child(
-            group(&theme)
-                .child(page_row(
-                    "settings-routines",
-                    "sparkles",
-                    SettingsPage::Routines,
-                    None,
-                    false,
+            group(&theme).child(
+                kit::nav_row(
+                    "settings-local",
+                    "window",
+                    "On this Mac",
+                    Some(on_this_mac),
                     &theme,
-                    cx,
-                ))
-                .child(page_row(
-                    "settings-channels",
-                    "globe",
-                    SettingsPage::Channels,
-                    None,
-                    false,
-                    &theme,
-                    cx,
-                ))
-                .child(page_row(
-                    "settings-skills",
-                    "cpu",
-                    SettingsPage::Skills,
-                    Some(format!("{skill_count} in library")),
-                    false,
-                    &theme,
-                    cx,
-                ))
-                .child(
-                    kit::nav_row(
-                        "settings-local",
-                        "window",
-                        "On this Mac",
-                        Some(on_this_mac),
-                        &theme,
-                    )
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.open_settings_page(SettingsPage::ThisMac, window, cx)
-                    })),
-                ),
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.open_settings_page(SettingsPage::ThisMac, window, cx)
+                })),
+            ),
         );
         // Machine · Updates.
         body = body.child(

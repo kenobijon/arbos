@@ -1,0 +1,112 @@
+# Synapse for Arbos (D88). Rendered by scripts/deploy/matrix/setup.sh into
+# /etc/arbos-matrix/synapse/homeserver.yaml. Unmodified upstream Synapse: config and modules only.
+#
+# Words: server_name is baked into every user and room id and can never change; public_baseurl is
+# where clients reach the client API (the relay proxies /_matrix/client/*); the appservices are the
+# relay itself (it creates users, mints device tokens and receives every event).
+
+server_name: "@SERVER_NAME@"
+public_baseurl: "@PUBLIC_BASEURL@"
+pid_file: /data/homeserver.pid
+signing_key_path: /data/@SERVER_NAME@.signing.key
+log_config: /data/log.config
+media_store_path: /data/media_store
+report_stats: false
+suppress_key_server_warning: true
+
+# One client-API listener on loopback; no federation listener at all (closed federation, §2.4).
+listeners:
+  - port: @CLIENT_PORT@
+    bind_addresses: ["127.0.0.1"]
+    type: http
+    tls: false
+    x_forwarded: true
+    resources:
+      - names: [client]
+        compress: false
+
+database:
+  name: psycopg2
+  args:
+    user: synapse
+    password: "@PG_PASSWORD@"
+    database: synapse
+    host: 127.0.0.1
+    port: @PG_PORT@
+    cp_min: 5
+    cp_max: 10
+
+registration_shared_secret: "@REGISTRATION_SHARED_SECRET@"
+macaroon_secret_key: "@MACAROON_SECRET_KEY@"
+form_secret: "@FORM_SECRET@"
+
+# Nobody registers; the relay creates every user through the arbos-users appservice (§2.3).
+enable_registration: false
+enable_registration_without_verification: false
+allow_guest_access: false
+enable_3pid_lookup: false
+password_config:
+  enabled: false
+
+# Presence, typing and activity stay on the relay's WebSocket rooms (§3.1).
+presence:
+  enabled: false
+
+# Closed federation: only ourselves (§2.4). The whitelist keeps every join local even if a
+# federation listener were ever added by mistake.
+federation_domain_whitelist:
+  - "@SERVER_NAME@"
+allow_public_rooms_over_federation: false
+allow_public_rooms_without_auth: false
+trusted_key_servers: []
+limit_remote_rooms:
+  enabled: true
+  complexity: 1.0
+
+# Room version 12 (Hydra): creators keep infinite power (MSC4289), room ids are hashes (MSC4291).
+default_room_version: "12"
+
+# Join storms (§6.1): tuned up from Synapse's default 1/10; appservices are never rate limited.
+rc_joins_per_room:
+  per_second: 10
+  burst_count: 200
+rc_joins:
+  local:
+    per_second: 10
+    burst_count: 200
+  remote:
+    per_second: 0.01
+    burst_count: 10
+rc_message:
+  per_second: 10
+  burst_count: 50
+rc_invites:
+  per_room:
+    per_second: 10
+    burst_count: 200
+  per_user:
+    per_second: 10
+    burst_count: 200
+
+max_upload_size: 50M
+url_preview_enabled: false
+enable_metrics: false
+serve_server_wellknown: false
+
+user_directory:
+  enabled: true
+  search_all_users: true
+  prefer_local_users: true
+
+# The three relay appservices (§2.6): users, agents, bridges.
+app_service_config_files:
+  - /data/appservices/arbos-users.yaml
+  - /data/appservices/arbos-agents.yaml
+  - /data/appservices/arbos-bridges.yaml
+
+# Encrypted appservices (stage D, §2.5): device masquerading and to-device delivery in
+# transactions. Harmless while nothing is encrypted; MSC4190 is set per registration.
+experimental_features:
+  msc3202_device_masquerading: true
+  msc3202_transaction_extensions: true
+  msc2409_to_device_messages_enabled: true

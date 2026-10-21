@@ -1,0 +1,24 @@
+# One appservice registration for Synapse (D88 §2.6). Rendered three times by
+# scripts/deploy/matrix/setup.sh (arbos-users, arbos-agents, arbos-bridges). The url is the relay:
+# Synapse appends /_matrix/app/v1/… and authenticates with hs_token; the relay acts as the
+# appservice's users with as_token. Both tokens are root-only on this host and in the relay env.
+id: "@ID@"
+url: "@URL@"
+as_token: "@AS_TOKEN@"
+hs_token: "@HS_TOKEN@"
+sender_localpart: "@SENDER_LOCALPART@"
+rate_limited: false
+namespaces:
+  users:
+@USER_NAMESPACES@
+  aliases:
+@ALIAS_NAMESPACES@
+  rooms: []
+# Ephemeral events (read receipts, typing) and to-device messages ride in transactions.
+receive_ephemeral: true
+de.sorunome.msc2409.push_ephemeral: true
+org.matrix.msc3202: true
+# Device management as the appservice (PUT /devices/{id}) for agents and bridge ghosts, which never
+# log in. Off for arbos-users: people's app devices get real tokens through /login
+# (m.login.application_service), which MSC4190 forbids.
+io.element.msc4190: @MSC4190@
