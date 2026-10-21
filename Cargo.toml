@@ -2,10 +2,12 @@
 resolver = "2"
 members = [
     "crates/arbos-core",
-    # App-only sans-IO room session. Only arbos-mac may depend on it for now
-    # (Swift/UniFFI later). arbos-relay, arbos-agentd, arbosctl, and arbos-local
-    # must not.
+    # App-only sans-IO room session. Only arbos-mac and arbos-ffi may depend on
+    # it. arbos-relay, arbos-agentd, arbosctl, and arbos-local must not.
     "crates/arbos-client",
+    # UniFFI / Swift bindings over arbos-client + core. The only crate that
+    # names Swift or uniffi.
+    "crates/arbos-ffi",
     "crates/arbos-relay",
     "crates/arbos-agentd",
     "crates/arbosctl",
@@ -24,7 +26,11 @@ rust-version = "1.85"
 [workspace.dependencies]
 arbos-core = { path = "crates/arbos-core" }
 arbos-client = { path = "crates/arbos-client" }
+arbos-ffi = { path = "crates/arbos-ffi" }
 arbos-update = { path = "crates/arbos-update" }
+# Pin lockstep with apps/ios loro-swift exactVersion 1.16.2 until loro-swift is removed.
+loro = "=1.16.2"
+uniffi = "=0.32.2"
 
 anyhow = "1"
 thiserror = "2"
@@ -40,7 +46,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 bytes = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
-loro = "1.16"
 ulid = "1"
 uuid = { version = "1", features = ["v4"] }
 sha2 = "0.10"

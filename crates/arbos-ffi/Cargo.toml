@@ -1,0 +1,24 @@
+[package]
+name = "arbos-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+description = "UniFFI bindings over arbos-client and arbos-core for the Swift client"
+
+[lib]
+crate-type = ["staticlib", "lib"]
+name = "arbos_ffi"
+
+[dependencies]
+arbos-core.workspace = true
+arbos-client.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+# Only this crate may depend on uniffi (workspace pin =0.32.2).
+uniffi.workspace = true
+loro.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

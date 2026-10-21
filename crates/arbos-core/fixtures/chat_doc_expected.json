@@ -1,0 +1,58 @@
+[
+  {
+    "answersQuestionId": null,
+    "greeting": null,
+    "id": "msg-user",
+    "reactions": {
+      "👍": {
+        "user:ken": true
+      }
+    },
+    "role": "user",
+    "text": "hello from user"
+  },
+  {
+    "answersQuestionId": null,
+    "greeting": null,
+    "id": "msg-assistant",
+    "reactions": {},
+    "role": "assistant",
+    "text": "assistant says hi"
+  },
+  {
+    "answersQuestionId": null,
+    "greeting": null,
+    "id": "msg-system",
+    "reactions": {},
+    "role": "system",
+    "text": "Sam joined the call"
+  },
+  {
+    "answersQuestionId": null,
+    "greeting": true,
+    "id": "msg-greeting",
+    "reactions": {},
+    "role": "assistant",
+    "text": "Hi, I'm Arbos."
+  },
+  {
+    "answersQuestionId": "q-1",
+    "greeting": null,
+    "id": "msg-answer",
+    "reactions": {},
+    "role": "user",
+    "text": "42"
+  },
+  {
+    "answersQuestionId": null,
+    "greeting": null,
+    "id": "msg-legacy-react",
+    "reactions": {
+      "🎉": {
+        "user:legacy": true
+      }
+    },
+    "role": "user",
+    "text": "legacy reactions row"
+  }
+]

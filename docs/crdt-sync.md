@@ -8,6 +8,8 @@ This document is drawn from the code as it exists today:
 | --- | --- |
 | Shared Loro chat writes (box / core) | `crates/arbos-core/src/doc.rs` |
 | App sans-IO room session | `crates/arbos-client/src/room.rs` (`RoomSession`) |
+| UniFFI / Swift bindings | `crates/arbos-ffi` (wraps client + core; produces xcframework) |
+| Golden doc / wire fixtures | `crates/arbos-core/fixtures/` |
 | Mac Loro replica | `crates/arbos-mac/src/sync/doc.rs` |
 | iOS Loro replica | `apps/ios/Arbos/Arbos/Sync/ChatDoc.swift` |
 | Binary room frames | `crates/arbos-core/src/wire.rs`, `apps/ios/Arbos/Arbos/Sync/Frame.swift` |
@@ -20,7 +22,16 @@ This document is drawn from the code as it exists today:
 
 - **`arbos-core`** — ids, `wire` (including `wire::room_name`), the Loro chat-doc schema, writers, `project_reactions`, and `touched`. Shared by the box, relay, and every client.
 - **`arbos-client`** — app-only sans-IO `RoomSession` (handshake, catch-up, pending PUSH, reconnect backoff, held wake/presence). Depends on `arbos-core`. No tokio, tungstenite, or HTTP.
-- **Who may depend on `arbos-client`:** device apps only (`arbos-mac` today; Swift/UniFFI later). **`arbos-relay`, `arbos-agentd`, `arbosctl`, and `arbos-local` must not.** CI enforces this with `cargo tree -i arbos-client`.
+- **`arbos-ffi`** — UniFFI layer over `arbos-client` and the core pieces Swift needs. The only crate that names Swift or `uniffi`. Builds an xcframework + generated Swift bindings (`scripts/build-xcframework.sh`).
+- **Who may depend on `arbos-client`:** device apps and the FFI crate (`arbos-mac`, `arbos-ffi`). **`arbos-relay`, `arbos-agentd`, `arbosctl`, and `arbos-local` must not.** CI enforces this with `cargo tree -i arbos-client`.
+
+### arbos-ffi / xcframework
+
+- **Who builds it:** a Mac with Xcode (CI Mac job or by hand). Linux CI only type-checks / tests the Rust crate; it does not produce the Apple artifact.
+- **How:** from the repo root, `./scripts/build-xcframework.sh`. The script `rustup target add`s `aarch64-apple-ios` and `aarch64-apple-ios-sim`, builds `arbos-ffi` for both, runs `uniffi-bindgen` pinned to the same version as the workspace `uniffi` crate (`=0.32.2`), and writes `ArbosFFI.xcframework` plus `ArbosFFI.swift` under `target/xcframework/` (override with `OUT_DIR=`).
+- **Version tie-in:** ship the xcframework under the **same release tag** as the Mac app (workspace `version`). Bump them together; do not publish an FFI binary from a different commit than the Mac build it pairs with.
+- **Size:** the device staticlib is on the order of **~5–15 MiB** before Xcode link/strip (Loro dominates). Expect a few MiB added to the iOS app after dead-strip; re-check `wc -c` on `libarbos_ffi.a` after each release build.
+- **Loro pin:** workspace `loro = "=1.16.2"` stays lockstep with the Xcode `loro-swift` `exactVersion` 1.16.2 until `loro-swift` is removed from the iOS project.
 
 The relay never parses Loro bytes. It stores opaque **rows** and optional **checkpoints**, and forwards them on WebSocket rooms.
 
