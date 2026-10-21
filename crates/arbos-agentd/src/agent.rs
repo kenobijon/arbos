@@ -2448,7 +2448,7 @@ impl Agent {
                 &asker,
                 &recent,
                 &prompt_memory,
-                self.cfg.memory_pack_compact(),
+                self.cfg.walk_options(),
             )
             .await
     }
