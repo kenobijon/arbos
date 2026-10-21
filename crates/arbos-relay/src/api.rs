@@ -194,10 +194,9 @@ pub async fn create_project(
     let provider = match b.provider.as_deref() {
         Some(p) => Provider::parse(p).ok_or((
             StatusCode::BAD_REQUEST,
-            "provider must be daytona|process|docker".to_owned(),
+            "provider must be daytona|process|docker|gvisor".to_owned(),
         ))?,
-        None if state.daytona.is_some() => Provider::Daytona,
-        None => Provider::Process,
+        None => boxes::default_provider(&state),
     };
     let now = now_ms();
     let id = ulid();
@@ -932,14 +931,17 @@ pub async fn machine_start(State(state): State<AppState>, principal: Principal) 
     }
     let _ = state.db.set_box_held(&user_id, false);
     if state.db.user_box(&user_id).map_err(internal)?.is_none() {
-        let provider = if state.daytona.is_some() {
-            Provider::Daytona
-        } else {
-            Provider::Process
-        };
-        boxes::ensure_user_box(&state, &user_id, provider)
-            .await
-            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("box create: {e}")))?;
+        let provider = boxes::default_provider(&state);
+        match boxes::ensure_user_box(&state, &user_id, provider).await {
+            Ok(_) => {}
+            Err(e) if e.to_string() == crate::fleet::WAITLISTED => {
+                return Err((
+                    StatusCode::CONFLICT,
+                    "waitlisted: the host is full; you are in line for a machine".into(),
+                ));
+            }
+            Err(e) => return Err((StatusCode::BAD_GATEWAY, format!("box create: {e}"))),
+        }
     }
     boxes::ensure_awake(&state, &user_id, "api").await;
     let (bs, since) = state.box_state(&user_id).await;
@@ -1038,9 +1040,18 @@ pub async fn admin_delete_user_box(
     if sb.provider != "daytona" {
         let _ = boxes::stop_box(&state, &id, true).await;
     }
+    if sb.provider == "gvisor" {
+        // The container goes; the user's /work image stays on disk (D89: never delete user data).
+        // A re-created box picks the image up again.
+        let name = sb.sandbox_id.clone().unwrap_or_default();
+        let _ = crate::fleet::remove_container(&name).await;
+        let _ = crate::fleet::unmount_work(&state, &id).await;
+        deleted_sandbox = Some(name);
+    }
     state.db.delete_box_row(&id).map_err(internal)?;
     state.box_states.write().await.remove(&id);
     state.box_conns.lock().await.remove(&id);
+    state.evicted.lock().await.remove(&id);
     let _ = state.db.record_audit(
         "relay-admin",
         "box_deleted",

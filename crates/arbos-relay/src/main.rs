@@ -14,11 +14,13 @@ mod daytona;
 mod db;
 mod db_accounts;
 mod db_calls;
+mod db_fleet;
 mod db_people;
 mod db_push;
 mod db_secrets;
 mod db_voice;
 mod feedback;
+mod fleet;
 mod goals;
 mod groups;
 mod images;
@@ -214,6 +216,8 @@ async fn main() -> anyhow::Result<()> {
         agentd_bin: args.agentd_bin.clone(),
         local_box_image: args.local_box_image.clone(),
         box_idle_grace_ms: 30_000,
+        default_provider: env_nonempty("ARBOS_DEFAULT_PROVIDER"),
+        fleet: fleet::FleetCfg::from_env(),
         connectors_mock: std::env::var("ARBOS_CONNECTORS_MOCK").is_ok_and(|v| v == "1"),
         channels_mock: std::env::var("ARBOS_CHANNELS_MOCK").is_ok_and(|v| v == "1"),
         image_mock: std::env::var("ARBOS_IMAGE_MOCK").is_ok_and(|v| v == "1"),
@@ -300,6 +304,9 @@ async fn main() -> anyhow::Result<()> {
         presence_seen: Arc::new(Mutex::new(HashMap::new())),
         activity: Arc::new(Mutex::new(HashMap::new())),
         box_http_seen: Arc::new(Mutex::new(HashMap::new())),
+        turn_running: Arc::new(Mutex::new(HashMap::new())),
+        evicted: Arc::new(Mutex::new(HashMap::new())),
+        fleet_pressure: Arc::new(Mutex::new(None)),
         voice: Arc::new(voice::cfg_from_env(&data_dir_for_voice)),
         voice_conns: Arc::new(Mutex::new(HashMap::new())),
         voice_dispatched: Arc::new(Mutex::new(HashMap::new())),
@@ -343,6 +350,7 @@ async fn main() -> anyhow::Result<()> {
     routines::spawn_scheduler(state.clone()).await;
     channels::spawn_pollers(state.clone()).await;
     credits::spawn_meter(state.clone()).await;
+    fleet::spawn_fleet_tasks(state.clone()).await;
     boxes::spawn_always_on(state.clone()).await;
     upgrade::spawn_history_sweeper(state.clone()).await;
     secrets::spawn_sweeper(state.clone()).await;
@@ -604,6 +612,14 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/admin/push", get(admin::push_status))
         .route("/admin/push/test", post(admin::push_test))
+        .route(
+            "/admin/fleet",
+            get(fleet::admin_fleet).put(fleet::admin_fleet_update),
+        )
+        .route(
+            "/admin/waitlist/{id}/admit",
+            post(fleet::admin_waitlist_admit),
+        )
         .route("/admin/users", get(admin::list_users))
         .route("/admin/users/test", post(admin::create_test_user))
         .route("/admin/users/{id}", delete(admin::delete_test_user))
