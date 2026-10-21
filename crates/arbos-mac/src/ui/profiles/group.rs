@@ -127,12 +127,13 @@ pub(super) fn page(
     let tabs = tab_bar(&TABS, tab, &theme, cx);
     let body_tab = match tab {
         0 => {
+            // Mock b: "Add members" is a card of its own above the member list.
+            let mut add = None;
             let mut list = card(&theme);
-            // Add members: people and agents through the one picker.
             let sid = space.id.clone();
             let i_own = !space.is_guest();
             if is_people || i_own {
-                list = list.child(
+                add = Some(
                     kit::row(
                         "profile-add-members",
                         kit::Leading::Glyph("person-plus"),
@@ -298,7 +299,11 @@ pub(super) fn page(
                     })),
                 );
             }
-            list
+            div()
+                .flex()
+                .flex_col()
+                .children(add.map(|row| card(&theme).child(row)))
+                .child(list)
         }
         _ => {
             // Library: images first, then files — one place for everything shared.
