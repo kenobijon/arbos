@@ -579,15 +579,22 @@ class GitHub:
         return self.later_run("ios.yml", "push", sha, since_iso)
 
     def later_release(self, sha: str, since_iso: str) -> dict | None:
-        return self.later_run("release.yml", "workflow_run", sha, since_iso)
+        # A hand-tagged hotfix (`git tag vX.Y.Z` on a bump commit, P0 #1208 → v0.6.93) runs release.yml
+        # on the tag ref with event `push`; it ships the fix just like an auto-stable run on main does.
+        return self.later_run("release.yml", "workflow_run", sha, since_iso, tags_too=True)
 
-    def later_run(self, workflow: str, event: str, sha: str, since_iso: str) -> dict | None:
-        """The earliest successful run of `workflow` on main, started after `since_iso`, whose commit
-        contains `sha` (a run cancelled by a newer push still ships in that newer build)."""
-        q = urllib.parse.urlencode({"branch": "main", "status": "success", "created": f">={since_iso}", "per_page": 30})
-        runs = self.repo_api("GET", f"/actions/workflows/{workflow}/runs?{q}").get("workflow_runs", [])
+    def later_run(self, workflow: str, event: str, sha: str, since_iso: str, tags_too: bool = False) -> dict | None:
+        """The earliest successful run of `workflow` on main (or, with `tags_too`, on a vX.Y.Z tag), started
+        after `since_iso`, whose commit contains `sha` (a run cancelled by a newer push still ships in that
+        newer build)."""
+        q = {"status": "success", "created": f">={since_iso}", "per_page": 30}
+        if not tags_too:
+            q["branch"] = "main"
+        runs = self.repo_api("GET", f"/actions/workflows/{workflow}/runs?{urllib.parse.urlencode(q)}").get("workflow_runs", [])
         for r in sorted(runs, key=lambda r: r["run_started_at"]):
-            if r.get("event") != event:
+            on_main = r.get("head_branch") == "main" and r.get("event") == event
+            on_tag = tags_too and r.get("event") == "push" and re.fullmatch(r"v\d+\.\d+\.\d+", r.get("head_branch") or "")
+            if not (on_main or on_tag):
                 continue
             try:
                 cmp = self.repo_api("GET", f"/compare/{sha}...{r['head_sha']}")
