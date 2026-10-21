@@ -158,9 +158,20 @@ pub fn run(state: &AppState, scope: Scope) -> Report {
                 None
             }
         };
-        // A project tab that never had a message gets no room: it would only be noise.
-        if doc.is_none() && project_id.is_some() {
+        // A project tab that never had a message gets no room: it would only be noise (a doc
+        // with only `meta` rows counts as empty). One made by mistake is closed again.
+        let has_messages = doc.as_ref().is_some_and(|d| !d.projected_rows().is_empty());
+        if !has_messages && project_id.is_some() {
             rep.skipped_empty += 1;
+            if state
+                .db
+                .matrix_room(&chat_id)
+                .ok()
+                .flatten()
+                .is_some_and(|r| r.closed_at.is_none())
+            {
+                state.matrix.close_chat(state, &chat_id);
+            }
             continue;
         }
         state.matrix.enqueue(
@@ -376,7 +387,21 @@ mod doc_tests {
         let mut state = test_state(AuthMode::Github);
         dual(&mut state);
         let (owner, _) = person(&state, 2002);
-        project_of(&state, &owner, "Empty");
+        let project = project_of(&state, &owner, "Empty");
+        // A doc with only meta (what a fresh tab has) is still empty.
+        let chat_id = state.db.list_chats(&project).expect("chats")[0].id.clone();
+        let doc = ChatDoc::new(Some(9), false);
+        doc.init_meta(&chat_id, &project, 1);
+        let bytes = doc.export_updates_since(&Default::default());
+        state
+            .db
+            .append_row(
+                &wire::room_name(&project, &chat_id),
+                "box1",
+                &ulid(),
+                &bytes,
+            )
+            .expect("row");
         let rep = run(
             &state,
             Scope {
