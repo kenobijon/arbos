@@ -984,6 +984,66 @@ pub struct TurnState {
     pub prompt_text: String,
     /// Skills injected into this turn's working set (recorded once, in the Details drawer).
     pub skills_used: Vec<String>,
+    /// The model call ended in an error (`message_end` with `stopReason: error`, or a streamed
+    /// `error` event). pi 1.2 reports provider errors — a refusal, a context overflow, a 5xx —
+    /// only on the final message, so this is the only place they surface.
+    pub model_error: Option<ModelError>,
+    /// Fresh-session retry after a refusal already happened this turn (at most one).
+    pub session_rotated: bool,
+}
+
+/// How the model call failed, as pi reported it.
+#[derive(Clone, Debug)]
+pub struct ModelError {
+    /// Provider text (Anthropic's stop explanation, an HTTP body, …). Never shown as is.
+    pub detail: String,
+    /// `stop_reason: refusal` — the provider declined this context, not a transient failure.
+    pub refusal: bool,
+}
+
+impl ModelError {
+    /// Build from a pi assistant message that ended with `stopReason: error`. An `aborted` stop
+    /// is agentd's own doing (user stop, turn deadline) and is announced where it happens.
+    pub fn from_message(message: &Value) -> Option<Self> {
+        if message.get("stopReason").and_then(Value::as_str)? != "error" {
+            return None;
+        }
+        let raw = message.get("rawStopReason").and_then(Value::as_str);
+        let detail = message
+            .get("errorMessage")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or("provider error")
+            .to_owned();
+        let lower = detail.to_ascii_lowercase();
+        Some(Self {
+            refusal: raw == Some("refusal")
+                || lower.contains("refus")
+                || lower.contains("was blocked")
+                || lower.contains("terms of service"),
+            detail,
+        })
+    }
+
+    /// One short line for the chat, first person like the limit announcements (#1037).
+    pub fn chat_line(&self) -> String {
+        if self.refusal {
+            return "I couldn't answer that: the model provider declined the request. Ask me again in a moment.".to_owned();
+        }
+        if let Some((notice, _)) = classify_hard_limit(&self.detail) {
+            return notice.to_owned();
+        }
+        "I couldn't answer that: the model call failed. Ask me again in a moment.".to_owned()
+    }
+
+    /// Error-part code the clients key on.
+    pub fn code(&self) -> &'static str {
+        if self.refusal {
+            "model_refused"
+        } else {
+            "model_error"
+        }
+    }
 }
 
 impl TurnState {
@@ -1022,6 +1082,8 @@ impl TurnState {
             from_voice,
             prompt_text: String::new(),
             skills_used: Vec::new(),
+            model_error: None,
+            session_rotated: false,
         }
     }
 }
@@ -1279,6 +1341,14 @@ impl Agent {
                 .set_chat_session_path(chat_id, &existing.display().to_string())?;
             return Ok(existing);
         }
+        self.new_session_file(chat_id)
+    }
+
+    /// A brand-new pi session file for `chat_id`, recorded as the chat's session. The previous
+    /// file (if any) stays on disk: T3 and the memory tree already hold its history.
+    fn new_session_file(&self, chat_id: &str) -> Result<std::path::PathBuf> {
+        let dir = self.cfg.pi_sessions_dir();
+        std::fs::create_dir_all(&dir)?;
         let ts = chrono::Utc::now().format("%Y-%m-%dT%H-%M-%S-%3fZ");
         let path = dir.join(format!("{ts}_{chat_id}.jsonl"));
         let header = json!({ "type": "session", "version": 3, "id": chat_id, "timestamp": chrono::Utc::now().to_rfc3339(), "cwd": self.cfg.work_dir });
@@ -1447,6 +1517,38 @@ impl Agent {
             return Ok(());
         }
         let path = self.session_file_for(chat_id)?;
+        self.switch_session_to(chat_id, &path).await
+    }
+
+    /// Replace the chat's model window: a fresh pi session file, switched to at once. Used after
+    /// a provider refusal, which is bound to the window's content, not to the user's message.
+    async fn rotate_chat_session(self: &Arc<Self>, chat_id: &str) -> Result<()> {
+        let previous = self
+            .store
+            .chat(chat_id)?
+            .and_then(|c| c.pi_session_path)
+            .unwrap_or_default();
+        let path = self.new_session_file(chat_id)?;
+        *self.current_chat.lock().await = None;
+        self.switch_session_to(chat_id, &path).await?;
+        tracing::warn!(chat_id, previous = %previous, fresh = %path.display(), "fresh pi session after a model refusal");
+        self.append_audit(
+            "session_rotated",
+            json!({ "chat_id": chat_id, "reason": "model_refused", "previous": previous, "fresh": path.display().to_string() }),
+        );
+        let _ = self.store.t3_append(
+            chat_id,
+            None,
+            Some(chat_id),
+            "compaction",
+            Some("system"),
+            "pi session replaced after a model refusal (history stays in the memory tree)",
+            None,
+        );
+        Ok(())
+    }
+
+    async fn switch_session_to(&self, chat_id: &str, path: &std::path::Path) -> Result<()> {
         let pi = self.pi().await?;
         let t0 = Instant::now();
         pi.call_ok(RpcCommand::SwitchSession {
@@ -2497,10 +2599,28 @@ impl Agent {
                 TurnKind::SubagentResult { .. } | TurnKind::ApprovalOutcome { .. } => String::new(),
             },
             skills_used: Vec::new(),
+            model_error: None,
+            session_rotated: false,
         });
         self.turn_running.store(true, Ordering::SeqCst);
         let keepalive = self.spawn_keepalive();
-        let result = self.run_main_turn(chat_id, host, prompt_text).await;
+        let mut result = self.run_main_turn(chat_id, host, prompt_text).await;
+        // A refusal is the provider declining this model window, not this question: the same
+        // session answers the same way every time (Lium, 2026-10-21: six turns in a row, 208–242k
+        // tokens each, zero output). The chat history lives in the memory tree, so rebuild the
+        // window — a fresh pi session for this chat — and ask once more before failing visibly.
+        if result.is_ok() && self.refusal_wants_fresh_session().await {
+            match self.rotate_chat_session(chat_id).await {
+                Ok(()) => {
+                    if let Some(t) = self.turn.lock().await.as_mut() {
+                        t.model_error = None;
+                        t.session_rotated = true;
+                    }
+                    result = self.run_main_turn(chat_id, host, prompt_text).await;
+                }
+                Err(e) => tracing::warn!(chat_id, error = %e, "fresh session after refusal"),
+            }
+        }
         self.turn_running.store(false, Ordering::SeqCst);
         keepalive.abort();
 
@@ -2536,16 +2656,36 @@ impl Agent {
             TurnKind::SubagentResult { .. } => "subagent_result",
             TurnKind::ApprovalOutcome { .. } => "approval_outcome",
         };
-        let (final_status, err_text) = match &result {
+        let (mut final_status, err_text) = match &result {
             Ok(()) => (MessageStatus::Done, None),
             Err(e) => (MessageStatus::Error, Some(e.to_string())),
         };
+        // The model call failed and the user got no answer: say so in the bubble, never a blank
+        // row (feedback lium-empty-reply-2026-10-21). A partial answer before the failure stays.
+        let model_failed = turn
+            .model_error
+            .as_ref()
+            .filter(|_| err_text.is_none() && !turn.stopped && turn.streamed_text.trim().is_empty())
+            .cloned();
+        if model_failed.is_some() {
+            final_status = MessageStatus::Error;
+        }
         let (talking_model, _) = self.live_models().await;
         let room_name;
         {
             let mut h = host.lock().await;
             if let Some(e) = &err_text {
                 h.doc.add_error_part(&assistant_msg_id, "turn_failed", e);
+            }
+            if let Some(m) = &model_failed {
+                h.doc
+                    .add_error_part(&assistant_msg_id, m.code(), &m.chat_line());
+                h.doc.add_hidden_part(
+                    &assistant_msg_id,
+                    "model_error_detail",
+                    &m.detail,
+                    &json!({ "refusal": m.refusal, "sessionRotated": turn.session_rotated }),
+                );
             }
             if turn.activity.is_some() {
                 h.doc.set_activity(&assistant_msg_id, None);
@@ -2568,6 +2708,19 @@ impl Agent {
         }
         if turn.activity.is_some() {
             self.post_activity(chat_id, None);
+        }
+        if let Some(m) = &model_failed {
+            tracing::warn!(chat_id, refusal = m.refusal, session_rotated = turn.session_rotated, detail = %m.detail, "model call failed; error line shown in chat");
+            self.append_audit(
+                "model_call_failed",
+                json!({
+                    "chat_id": chat_id,
+                    "message_id": assistant_msg_id,
+                    "refusal": m.refusal,
+                    "session_rotated": turn.session_rotated,
+                    "detail": m.detail.chars().take(400).collect::<String>(),
+                }),
+            );
         }
         // One notification per turn: the result, or the ack when the turn ended on it.
         let announce = if turn.streamed_text.trim().is_empty() {
@@ -3037,21 +3190,21 @@ impl Agent {
                     | AssistantEvent::Done { .. }
                     | AssistantEvent::Unknown => {}
                     AssistantEvent::Error { error, .. } => {
-                        let err_text = error
-                            .as_ref()
-                            .map(|e| e.to_string())
-                            .unwrap_or_else(|| "provider error".into());
-                        {
-                            let mut h = host.lock().await;
-                            h.doc
-                                .add_error_part(&t.assistant_msg_id, "model_error", &err_text);
-                        }
-                        if let Some((notice, escalate)) = classify_hard_limit(&err_text) {
-                            if escalate {
-                                t.escalate = true;
-                            }
-                            // Visible chat line: never stop silently on a hard limit.
-                            self.write_text(host, t, notice).await;
+                        // `error` is the failed assistant message itself (pi-ai shape; an
+                        // `aborted` stop is ours and stays quiet); older builds sent a string.
+                        let m = match error {
+                            Some(v) if v.get("stopReason").is_some() => ModelError::from_message(v),
+                            Some(v) => Some(ModelError {
+                                detail: v.to_string(),
+                                refusal: false,
+                            }),
+                            None => Some(ModelError {
+                                detail: "provider error".into(),
+                                refusal: false,
+                            }),
+                        };
+                        if let Some(m) = m {
+                            self.note_model_error(host, t, m).await;
                         }
                     }
                 }
@@ -3206,6 +3359,11 @@ impl Agent {
             Event::MessageEnd { message } => {
                 if message.get("role").and_then(Value::as_str) == Some("assistant") {
                     t.metrics.add_model_call(message.get("usage"));
+                    // pi 1.2 never streams an `error` event: a refusal, a context overflow or a
+                    // provider 5xx arrive only here, as `stopReason: error` on the final message.
+                    if let Some(m) = ModelError::from_message(message) {
+                        self.note_model_error(host, t, m).await;
+                    }
                 }
             }
             Event::AgentSettled { .. } => return Ok(true),
@@ -3654,6 +3812,38 @@ impl Agent {
             })),
         );
         Ok(id)
+    }
+
+    /// Record a failed model call on the turn. Hard limits (#1037) are announced at once in the
+    /// chat; everything else is judged when the turn ends — a refusal may still be retried in a
+    /// fresh session, and a partial answer before the failure needs no extra line.
+    async fn note_model_error(&self, host: &SharedHost, t: &mut TurnState, m: ModelError) {
+        if t.model_error.is_some() {
+            return;
+        }
+        tracing::warn!(chat_id = %t.chat_id, refusal = m.refusal, detail = %m.detail, "model call ended in error");
+        if !m.refusal {
+            if let Some((notice, escalate)) = classify_hard_limit(&m.detail) {
+                if escalate {
+                    t.escalate = true;
+                }
+                // Visible chat line: never stop silently on a hard limit.
+                self.write_text(host, t, notice).await;
+            }
+        }
+        t.model_error = Some(m);
+    }
+
+    /// The turn ended on a provider refusal with nothing shown and has not been retried yet.
+    async fn refusal_wants_fresh_session(&self) -> bool {
+        let tl = self.turn.lock().await;
+        let Some(t) = tl.as_ref() else {
+            return false;
+        };
+        !t.stopped
+            && !t.session_rotated
+            && t.streamed_text.trim().is_empty()
+            && t.model_error.as_ref().is_some_and(|m| m.refusal)
     }
 
     /// Post a one- or two-sentence hard-limit notice into the live chat row (never silent).
