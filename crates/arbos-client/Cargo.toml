@@ -9,4 +9,5 @@ description = "App-side sans-IO room session (Mac / future UniFFI). Not for rela
 
 [dependencies]
 arbos-core.workspace = true
+serde.workspace = true
 serde_json.workspace = true
