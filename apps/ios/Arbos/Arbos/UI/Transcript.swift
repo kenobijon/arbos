@@ -181,6 +181,10 @@ enum Transcript {
                     if t.count <= 80 { return t }
                     return String(t.prefix(80)) + "…"
                 }()
+                // Error parts wait until the prose is known: under a real answer they stay the
+                // chip with Retry; on an answer with no words they become the words.
+                var errors: [(id: Id, code: String, text: String)] = []
+                let rowsBeforeParts = chunk.count
                 for (pix, part) in message.parts.enumerated() {
                     switch part {
                     case .text(let id, let text):
@@ -224,14 +228,49 @@ enum Transcript {
                     case .attachment(let id, let a):
                         chunk.append(attachmentRow(id: "\(message.id)#\(id)", message: message, a: a, projectId: projectId, fromUser: false))
                     case .error(let id, let code, let text):
-                        chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant, kind: .error(code: code, message: text)))
+                        errors.append((id: id, code: code, text: text))
                     case .status, .tool, .subagentResult, .reasoning, .unknown:
                         break
                     }
                 }
-                if message.status == .error && !message.hasErrorPart {
-                    chunk.append(Row(id: "\(message.id)#failed", messageId: message.id, role: .assistant,
-                                     kind: .error(code: "turn_failed", message: "The agent could not finish this turn.")))
+                // A finished reply that shows nothing — no prose, no card, no attachment — used
+                // to vanish here (Mac: a bare "answering @…" header; Lium in the "Testing"
+                // group, 2026-10-21). Say so in the bubble, plainly, like the limit
+                // announcements: the error part's own line when the box wrote one, else a
+                // stock line. A row that only did work (tool calls) may end without words —
+                // its answer came as a progress bubble — so only an all-empty row gets the
+                // stock line.
+                let showsNothing = chunk.count == rowsBeforeParts
+                let finished = message.status == .done || message.status == .error
+                let onlyEmpty = message.parts.allSatisfy { part in
+                    switch part {
+                    case .text, .status, .error: return true
+                    case .tool, .attachment, .question, .subagentResult, .reasoning, .unknown: return false
+                    }
+                }
+                let failed = !errors.isEmpty || message.status == .error
+                if showsNothing, finished, !streaming, failed || onlyEmpty {
+                    let line: String = {
+                        if let first = errors.first?.text.trimmingCharacters(in: .whitespacesAndNewlines), !first.isEmpty {
+                            return first
+                        }
+                        let name = (message.senderName ?? "").trimmingCharacters(in: .whitespaces)
+                        return "\(name.isEmpty ? "The agent" : name) didn't answer. Ask again."
+                    }()
+                    let blocks: [Block] = [.paragraph(line)]
+                    if people, let h = message.senderHandle {
+                        chunk.append(Row(id: "\(message.id)#failed", messageId: message.id, role: .assistant,
+                                         kind: .member(blocks: blocks, live: false, handle: h,
+                                                       avatar: message.senderAvatar,
+                                                       replyHandle: replyHandle, replyPreview: replyPreview)))
+                    } else {
+                        chunk.append(Row(id: "\(message.id)#failed", messageId: message.id, role: .assistant,
+                                         kind: .assistant(blocks: blocks, live: false, caption: nil)))
+                    }
+                } else {
+                    for e in errors {
+                        chunk.append(Row(id: "\(message.id)#\(e.id)", messageId: message.id, role: .assistant, kind: .error(code: e.code, message: e.text)))
+                    }
                 }
             }
             guard !chunk.isEmpty else { continue }
