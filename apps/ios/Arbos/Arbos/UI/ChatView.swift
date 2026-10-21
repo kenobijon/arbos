@@ -291,7 +291,7 @@ struct ChatView: View {
                 .padding(.horizontal, composerSideInset)
                 .animation(.easeOut(duration: 0.25), value: composerFocused)
                 .padding(.top, 8)
-                .padding(.bottom, composerFocused ? 0 : 2)
+                .padding(.bottom, composerFocused ? 8 : 2)
                 .background(alignment: .top) {
                     LinearGradient(colors: [theme.bg.opacity(0), theme.bg], startPoint: .top, endPoint: .bottom)
                         .frame(height: 24)
