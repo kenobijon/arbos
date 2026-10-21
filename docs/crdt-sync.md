@@ -15,7 +15,7 @@ This document is drawn from the code as it exists today:
 | Binary room frames | `crates/arbos-core/src/wire.rs`, `apps/ios/Arbos/Arbos/Sync/Frame.swift` |
 | Protocol version | `arbos_core::PROTO_VERSION`, iOS `protoVersion` |
 | Mac HTTP + room client | `crates/arbos-mac/src/sync/relay.rs` |
-| iOS HTTP + room client | `apps/ios/Arbos/Arbos/Sync/RelayAPI.swift`, `Room.swift` |
+| iOS HTTP + room client | `apps/ios/Arbos/Arbos/Sync/RelayAPI.swift`, `SessionRoom.swift` (drives arbos-client `RoomSession`) |
 | Relay rooms / REST | `crates/arbos-relay/src/rooms.rs`, `api.rs`, `blobs.rs`, `main.rs` |
 
 ### Core vs client crates

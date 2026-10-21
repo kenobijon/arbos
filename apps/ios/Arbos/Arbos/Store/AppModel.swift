@@ -56,32 +56,6 @@ private enum StoreKey {
 
 private let pushLog = Logger(subsystem: "com.unarbos.arbos.ios", category: "pushes")
 
-/// What AppModel uses from a room connection (concrete `Room` today).
-@MainActor
-protocol RoomSync: AnyObject {
-    var projectId: Id { get }
-    var roomChat: String { get }
-    var cursor: Int64 { get }
-    var focused: Bool { get set }
-    var inCall: String? { get set }
-
-    var onLink: ((Link) -> Void)? { get set }
-    var onBoxState: ((BoxState, String?) -> Void)? { get set }
-    var onCaughtUp: (() -> Void)? { get set }
-    var onAcked: (() -> Void)? { get set }
-    var onDocPaint: (() -> Void)? { get set }
-    var onPresence: (([String: Any]) -> Void)? { get set }
-    var presenceUser: () -> (id: String, handle: String)? { get set }
-    var onPendingChanged: (([(String, Data)]) -> Void)? { get set }
-    var onCursorMoved: (() -> Void)? { get set }
-
-    func start()
-    func stop()
-    func wake(reason: String)
-}
-
-extension Room: RoomSync {}
-
 @MainActor
 final class AppModel: ObservableObject {
     /// The hosted relay; self-hosters change it under Advanced.
@@ -93,17 +67,11 @@ final class AppModel: ObservableObject {
     @Published var appearanceSetting: String = UserDefaults.standard.string(forKey: "appearance") ?? Appearance.system.rawValue {
         didSet { UserDefaults.standard.set(appearanceSetting, forKey: "appearance") }
     }
-    /// TestFlight switch: dial with SessionRoom (shared client core). Absent key → false.
-    @Published var sharedRoomSessionSetting: Bool = UserDefaults.standard.bool(forKey: "sharedRoomSession") {
-        didSet { UserDefaults.standard.set(sharedRoomSessionSetting, forKey: "sharedRoomSession") }
-    }
-    /// Frozen at init from the setting or `ARBOS_SHARED_ROOM_SESSION=1`. Rooms never switch type mid-run.
-    let sharedRoomSession: Bool
-    /// Sum of SessionRoom reconnect / state_timeout counters (About page test surface).
+    /// Sum of SessionRoom reconnect / state_timeout counters (About page).
     var sharedRoomStats: (reconnects: Int, timeouts: Int) {
         var reconnects = 0
         var timeouts = 0
-        for case let room as SessionRoom in rooms.values {
+        for room in rooms.values {
             reconnects += room.reconnects
             timeouts += room.stateTimeouts
         }
@@ -384,8 +352,8 @@ final class AppModel: ObservableObject {
     /// The relay client, for feature extensions in other files.
     var relay: RelayAPI { api }
     private var docs: [Id: ChatDoc] = [:]
-    /// Room connection AppModel drives (concrete `Room` today; shared core later).
-    private var rooms: [Id: any RoomSync] = [:]
+    /// Room connection AppModel drives (`SessionRoom` / shared client core).
+    private var rooms: [Id: SessionRoom] = [:]
     /// Client-minted message ids whose push the relay has not `ACK`ed (S3),
     /// keyed by chat id so one room's ACK cannot leave another chat's bubble faint.
     private var unacked: [Id: Set<Id>] = [:]
@@ -415,8 +383,8 @@ final class AppModel: ObservableObject {
 
     init() {
         LaunchClock.mark("app-init")
-        // Read UserDefaults directly — cannot touch `sharedRoomSessionSetting` before this `let` is set.
-        sharedRoomSession = UserDefaults.standard.bool(forKey: "sharedRoomSession") || DebugHooks.sharedRoomSession
+        // Drop the retired SessionRoom TestFlight switch so it does not linger.
+        UserDefaults.standard.removeObject(forKey: "sharedRoomSession")
         #if DEBUG
         if let scale = DebugHooks.textScale, TextScale.steps.contains(where: { abs($0 - CGFloat(scale)) < 0.001 }) {
             textScaleSetting = scale
@@ -1224,17 +1192,9 @@ final class AppModel: ObservableObject {
                 }
             }
         }
-        let room: any RoomSync
-        if sharedRoomSession {
-            room = SessionRoom(projectId: projectId, key: key, roomChat: roomChat, doc: doc, api: api,
+        let room = SessionRoom(projectId: projectId, key: key, roomChat: roomChat, doc: doc, api: api,
                                cursor: restored?.cursor ?? 0, pending: restored?.pending ?? []) { [weak self] in
-                self?.deviceId ?? "ios:unpaired"
-            }
-        } else {
-            room = Room(projectId: projectId, key: key, roomChat: roomChat, doc: doc, api: api,
-                        cursor: restored?.cursor ?? 0, pending: restored?.pending ?? []) { [weak self] in
-                self?.deviceId ?? "ios:unpaired"
-            }
+            self?.deviceId ?? "ios:unpaired"
         }
         room.onCursorMoved = { [weak self] in self?.markDirty(key) }
         room.onPendingChanged = { [weak self] batches in self?.store?.savePending(key: key, batches: batches) }
