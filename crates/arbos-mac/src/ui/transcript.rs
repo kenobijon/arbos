@@ -882,6 +882,7 @@ impl Transcript {
                 let quote_header = quote.map(|q| self.quote_header(&row.id, q, text_color));
                 // Triple-backtick fences render as code cards (same as agent
                 // replies); other text stays plain so "# heading" is still literal.
+                // Bare `http(s)://…` URLs are still accented and clickable.
                 let body =
                     user_message_body(&row.id, &text, text_color, &theme, &bubble_selectable);
                 let bubble = self
@@ -1133,7 +1134,18 @@ impl Transcript {
                 .pb(px(STAMP_PAD_BOTTOM))
                 .text_size(px(TEXT_SMALL))
                 .text_color(theme.text_muted)
-                .child(label)
+                // System / time lines can carry a tracking URL; paint and open
+                // it like a chat link.
+                .child(styled_text(
+                    &format!("{}.s", row.id),
+                    &label,
+                    theme.text_muted,
+                    &theme,
+                    None,
+                    now,
+                    0,
+                    &selectable,
+                ))
                 .into_any_element(),
             RowKind::Reactions {
                 reactions,
@@ -2287,7 +2299,8 @@ fn sans_font(theme: &Theme) -> gpui::Font {
     }
 }
 
-/// Unstyled selectable text (a user bubble): one run in the body font.
+/// Selectable user-bubble text: literal (no bold/italic/heading paint) except
+/// bare `http(s)://…` URLs, which get accent + underline and open on click.
 fn plain_text(
     id: &str,
     text: &str,
@@ -2295,17 +2308,79 @@ fn plain_text(
     theme: &Theme,
     selectable: &Selectable,
 ) -> AnyElement {
-    let runs = vec![TextRun {
-        len: text.len(),
-        font: sans_font(theme),
-        color,
-        background_color: None,
-        underline: None,
-        strikethrough: None,
-    }];
+    let font = sans_font(theme);
+    let mut full = String::new();
+    let mut runs: Vec<TextRun> = Vec::new();
+    let mut links: Vec<(std::ops::Range<usize>, String)> = Vec::new();
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0usize;
+    let mut plain = String::new();
+
+    let flush_plain = |plain: &mut String,
+                       full: &mut String,
+                       runs: &mut Vec<TextRun>,
+                       font: &gpui::Font,
+                       color: gpui::Hsla| {
+        if plain.is_empty() {
+            return;
+        }
+        runs.push(TextRun {
+            len: plain.len(),
+            font: font.clone(),
+            color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        });
+        full.push_str(plain);
+        plain.clear();
+    };
+
+    while i < chars.len() {
+        let is_url = chars[i] == 'h'
+            && (slice_starts_at(&chars, i, "https://") || slice_starts_at(&chars, i, "http://"));
+        if is_url {
+            flush_plain(&mut plain, &mut full, &mut runs, &font, color);
+            let end = (i..chars.len())
+                .find(|&j| chars[j].is_whitespace() || chars[j] == ')' || chars[j] == '"')
+                .unwrap_or(chars.len());
+            let mut url_end = end;
+            while url_end > i && matches!(chars[url_end - 1], '.' | ',' | ';' | ':') {
+                url_end -= 1;
+            }
+            let url: String = chars[i..url_end].iter().collect();
+            let start = full.len();
+            links.push((start..start + url.len(), url.clone()));
+            runs.push(TextRun {
+                len: url.len(),
+                font: font.clone(),
+                color: theme.accent,
+                background_color: None,
+                underline: Some(gpui::UnderlineStyle {
+                    color: Some(Theme::with_alpha(theme.accent, 0.6)),
+                    thickness: px(1.0),
+                    wavy: false,
+                }),
+                strikethrough: None,
+            });
+            full.push_str(&url);
+            i = url_end;
+            continue;
+        }
+        plain.push(chars[i]);
+        i += 1;
+    }
+    flush_plain(&mut plain, &mut full, &mut runs, &font, color);
+
     selectable
-        .text(id.to_string(), text.to_string(), runs)
+        .text(id.to_string(), full, runs)
+        .with_links(links)
         .into_any_element()
+}
+
+fn slice_starts_at(chars: &[char], at: usize, needle: &str) -> bool {
+    let n: Vec<char> = needle.chars().collect();
+    at + n.len() <= chars.len() && chars[at..at + n.len()] == n[..]
 }
 
 /// User / people-chat bubble body: plain prose, or prose mixed with fenced
