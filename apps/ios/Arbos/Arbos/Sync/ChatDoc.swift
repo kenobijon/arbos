@@ -12,15 +12,6 @@
 import Foundation
 import Loro
 
-/// What a root-level diff touched, mapped to message indexes.
-struct Touched {
-    /// The `messages` list itself changed (insert/delete): re-read everything.
-    var listChanged = false
-    var messages = Set<Int>()
-    /// Anything outside `messages` (project doc maps, `commands`).
-    var other = false
-}
-
 final class ChatDoc {
     let key: Id
     let doc: LoroDoc

@@ -64,7 +64,6 @@
 		A15A00000000000000000004 /* CoreFixturesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000003 /* CoreFixturesTests.swift */; };
 		A15A00000000000000000013 /* ReactionToggleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000012 /* ReactionToggleTests.swift */; };
 		A15C0000000000000000000B /* SessionRoomTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15C0000000000000000000A /* SessionRoomTests.swift */; };
-		A15C0000000000000000000F /* CoreChatDocParityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15C0000000000000000000E /* CoreChatDocParityTests.swift */; };
 		A15C00000000000000000004 /* ArbosFFI in Frameworks */ = {isa = PBXBuildFile; productRef = A15C00000000000000000002 /* ArbosFFI */; };
 		A15C00000000000000000005 /* ArbosFFI in Frameworks */ = {isa = PBXBuildFile; productRef = A15C00000000000000000003 /* ArbosFFI */; };
 		A15C00000000000000000006 /* ArbosFFI in Embed Frameworks */ = {isa = PBXBuildFile; productRef = A15C00000000000000000002 /* ArbosFFI */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
@@ -172,7 +171,6 @@
 		A15A00000000000000000003 /* CoreFixturesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoreFixturesTests.swift; sourceTree = "<group>"; };
 		A15A00000000000000000012 /* ReactionToggleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReactionToggleTests.swift; sourceTree = "<group>"; };
 		A15C0000000000000000000A /* SessionRoomTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionRoomTests.swift; sourceTree = "<group>"; };
-		A15C0000000000000000000E /* CoreChatDocParityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoreChatDocParityTests.swift; sourceTree = "<group>"; };
 		A15C00000000000000000001 /* ArbosFFI */ = {isa = PBXFileReference; lastKnownFileType = wrapper; name = ArbosFFI; path = ../../../packages/ArbosFFI; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
@@ -355,7 +353,6 @@
 				A15A00000000000000000003 /* CoreFixturesTests.swift */,
 				A15A00000000000000000012 /* ReactionToggleTests.swift */,
 				A15C0000000000000000000A /* SessionRoomTests.swift */,
-				A15C0000000000000000000E /* CoreChatDocParityTests.swift */,
 			);
 			path = ArbosTests;
 			sourceTree = "<group>";
@@ -572,7 +569,6 @@
 				A15A00000000000000000004 /* CoreFixturesTests.swift in Sources */,
 				A15A00000000000000000013 /* ReactionToggleTests.swift in Sources */,
 				A15C0000000000000000000B /* SessionRoomTests.swift in Sources */,
-				A15C0000000000000000000F /* CoreChatDocParityTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

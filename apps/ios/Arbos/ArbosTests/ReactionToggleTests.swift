@@ -1,12 +1,12 @@
 import XCTest
 @testable import Arbos
-import Loro
 
-/// Swift `toggleReaction` must match core `set_reaction` for flat keys and
-/// legacy nested emoji buckets (un-react on old rows).
+/// Swift `toggleReaction` must match core `set_reaction` for flat keys.
+/// Legacy nested emoji buckets are covered by crates/arbos-ffi
+/// `toggle_reaction_flat_twice_and_legacy_once_clear`.
 final class ReactionToggleTests: XCTestCase {
     func testUnReactClearsFlatKey() throws {
-        let doc = Arbos.ChatDoc(key: "react-flat")
+        let doc = CoreChatDoc(key: "react-flat")
         try doc.insertUserMessage(id: "m1", text: "hi", deviceId: "dev", author: .init(sender: "user:ken"))
         try doc.toggleReaction(messageId: "m1", emoji: "👍", sender: "user:ken")
         doc.commit()
@@ -17,41 +17,8 @@ final class ReactionToggleTests: XCTestCase {
         XCTAssertTrue(doc.readAll().first?.reactions.isEmpty == true)
     }
 
-    func testUnReactClearsLegacyNestedBucket() throws {
-        let doc = Arbos.ChatDoc(key: "react-legacy")
-        // Build a pre-flat-shape row: reactions → { "🎉": { "user:legacy": true } }.
-        let list = doc.messages
-        let map = try list.insertContainer(pos: list.len(), child: LoroMap())
-        try map.insert(key: "id", v: "m-legacy")
-        try map.insert(key: "role", v: "user")
-        try map.insert(key: "sender", v: "user:legacy")
-        try map.insert(key: "status", v: "done")
-        try map.insert(key: "deviceId", v: "dev")
-        try map.insert(key: "createdAt", v: nowMs())
-        let reactions = try map.insertContainer(key: "reactions", child: LoroMap())
-        let bucket = try reactions.insertContainer(key: "🎉", child: LoroMap())
-        try bucket.insert(key: "user:legacy", v: true)
-        let parts = try map.insertContainer(key: "parts", child: LoroList())
-        let part = try parts.insertContainer(pos: parts.len(), child: LoroMap())
-        try part.insert(key: "id", v: "p1")
-        try part.insert(key: "kind", v: "text")
-        let text = try part.insertContainer(key: "text", child: LoroText())
-        try text.pushStr(s: "legacy")
-        doc.commit()
-
-        let before = doc.readAll()
-        XCTAssertEqual(before.first?.reactions.first?.emoji, "🎉")
-        XCTAssertEqual(before.first?.reactions.first?.senders, ["user:legacy"])
-
-        try doc.toggleReaction(messageId: "m-legacy", emoji: "🎉", sender: "user:legacy")
-        doc.commit()
-
-        let after = doc.readAll()
-        XCTAssertTrue(after.first?.reactions.isEmpty == true, "legacy bucket entry must clear on un-react")
-    }
-
     func testToggleOnThenOffMatchesCoreFlatShape() throws {
-        let doc = Arbos.ChatDoc(key: "react-roundtrip")
+        let doc = CoreChatDoc(key: "react-roundtrip")
         try doc.insertUserMessage(id: "m2", text: "hi", deviceId: "dev", author: .init(sender: "user:ken"))
         try doc.toggleReaction(messageId: "m2", emoji: "❤️", sender: "user:ken")
         doc.commit()
