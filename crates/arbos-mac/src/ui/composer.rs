@@ -2624,78 +2624,79 @@ mod enter_tests {
     //! Typing in the composer and pressing Enter must never crash the app (#1208, Mac v0.6.89/v0.6.90).
     //! The Composer wires mention-menu callbacks into `ComposerInput` that read and update the input
     //! entity itself; the input is leased while its own action handler runs, so those callbacks have to
-    //! run deferred. This test installs callbacks of exactly that shape and presses the keys.
+    //! run deferred. These tests install callbacks of exactly that shape and press the keys in a real
+    //! (headless) window.
     use super::*;
-    use gpui::{AnyWindowHandle, Focusable as _, TestAppContext, VisualContext as _};
+    use gpui::{Action, Focusable as _, TestAppContext, VisualTestContext};
     use std::cell::Cell;
 
-    fn input_with_owner_callbacks(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<ComposerInput>, Rc<Cell<u32>>) {
+    fn input_with_owner_callbacks(
+        cx: &mut TestAppContext,
+    ) -> (Entity<ComposerInput>, &mut VisualTestContext, Rc<Cell<u32>>) {
         let submitted = Rc::new(Cell::new(0u32));
-        let window = cx.add_window(|_, cx| cx.new(ComposerInput::new));
-        let input: Entity<ComposerInput> = cx.update_window(window.into(), |root, _, _| root.downcast::<ComposerInput>().unwrap()).unwrap();
+        let (input, vcx) = cx.add_window_view(|_, cx| ComposerInput::new(cx));
         let weak = input.downgrade();
         let count = submitted.clone();
-        input.update(&mut cx.app.borrow_mut(), |input, _| {
-            input.on_submit = Some(Rc::new(move |_, _| count.set(count.get() + 1)));
-            // What `Composer` does: read the input (mention query), and complete into it when a row is chosen.
-            let w1 = weak.clone();
-            input.on_mention_accept = Some(Rc::new(move |cx| {
-                let Some(e) = w1.upgrade() else { return false };
-                let has_at = e.read(cx).text().contains('@');
-                if has_at {
-                    e.update(cx, |i, cx| i.complete_mention("sam", cx));
-                }
-                has_at
-            }));
-            let w2 = weak.clone();
-            input.on_mention_next = Some(Rc::new(move |cx| w2.upgrade().map(|e| e.read(cx).text().contains('@')).unwrap_or(false)));
-            let w3 = weak.clone();
-            input.on_mention_prev = Some(Rc::new(move |cx| w3.upgrade().map(|e| e.read(cx).text().contains('@')).unwrap_or(false)));
+        vcx.update(|_, cx| {
+            input.update(cx, |input, _| {
+                input.on_submit = Some(Rc::new(move |_, _| count.set(count.get() + 1)));
+                // What `Composer` does: read the input (mention query), and complete into it when a row is chosen.
+                let w1 = weak.clone();
+                input.on_mention_accept = Some(Rc::new(move |cx| {
+                    let Some(e) = w1.upgrade() else { return false };
+                    let has_at = e.read(cx).text().contains('@');
+                    if has_at {
+                        e.update(cx, |i, cx| i.complete_mention("sam", cx));
+                    }
+                    has_at
+                }));
+                let w2 = weak.clone();
+                input.on_mention_next = Some(Rc::new(move |cx| {
+                    w2.upgrade().map(|e| e.read(cx).text().contains('@')).unwrap_or(false)
+                }));
+                let w3 = weak.clone();
+                input.on_mention_prev = Some(Rc::new(move |cx| {
+                    w3.upgrade().map(|e| e.read(cx).text().contains('@')).unwrap_or(false)
+                }));
+            });
         });
-        (window.into(), input, submitted)
-    }
-
-    fn focus(cx: &mut TestAppContext, window: AnyWindowHandle, input: &Entity<ComposerInput>) {
-        cx.update_window(window, |_, w, cx| {
-            let handle = input.read(cx).focus_handle(cx);
-            w.focus(&handle, cx);
-        })
-        .unwrap();
-        cx.run_until_parked();
+        let handle = vcx.update(|_, cx| input.read(cx).focus_handle(cx));
+        vcx.update(|window, cx| window.focus(&handle, cx));
+        vcx.run_until_parked();
+        (input, vcx, submitted)
     }
 
     #[gpui::test]
     fn typing_then_enter_submits_without_crashing(cx: &mut TestAppContext) {
-        let (window, input, submitted) = input_with_owner_callbacks(cx);
-        focus(cx, window, &input);
-        cx.simulate_input(window, "hello from the enter test");
-        cx.dispatch_action(window, Send);
+        let (input, cx, submitted) = input_with_owner_callbacks(cx);
+        cx.simulate_input("hello from the enter test");
+        cx.dispatch_action(Send);
         cx.run_until_parked();
         assert_eq!(submitted.get(), 1, "Enter must submit the text once");
-        assert_eq!(input.read(&cx.app.borrow()).text(), "hello from the enter test");
+        assert_eq!(cx.update(|_, cx| input.read(cx).text().to_string()), "hello from the enter test");
     }
 
     #[gpui::test]
     fn enter_with_an_open_mention_completes_instead_of_sending(cx: &mut TestAppContext) {
-        let (window, input, submitted) = input_with_owner_callbacks(cx);
-        focus(cx, window, &input);
-        cx.simulate_input(window, "hi @sa");
-        cx.dispatch_action(window, Send);
+        let (input, cx, submitted) = input_with_owner_callbacks(cx);
+        cx.simulate_input("hi @sa");
+        cx.dispatch_action(Send);
         cx.run_until_parked();
         assert_eq!(submitted.get(), 0, "Enter on an open @mention accepts the row, it does not send");
-        assert!(input.read(&cx.app.borrow()).text().starts_with("hi @sam"), "the mention was completed");
+        let text = cx.update(|_, cx| input.read(cx).text().to_string());
+        assert!(text.starts_with("hi @sam"), "the mention was completed: {text:?}");
     }
 
     #[gpui::test]
     fn mention_keys_without_a_mention_are_plain_editing(cx: &mut TestAppContext) {
-        let (window, input, submitted) = input_with_owner_callbacks(cx);
-        focus(cx, window, &input);
-        cx.simulate_input(window, "plain text");
-        for action in [Box::new(Up) as Box<dyn Action>, Box::new(Down), Box::new(AcceptMention), Box::new(PrevMention)] {
-            cx.update_window(window, |_, w, cx| w.dispatch_action(action, cx)).unwrap();
+        let (input, cx, submitted) = input_with_owner_callbacks(cx);
+        cx.simulate_input("plain text");
+        let keys: [Box<dyn Action>; 4] = [Box::new(Up), Box::new(Down), Box::new(AcceptMention), Box::new(PrevMention)];
+        for action in keys {
+            cx.update(|window, cx| window.dispatch_action(action, cx));
             cx.run_until_parked();
         }
         assert_eq!(submitted.get(), 0);
-        assert_eq!(input.read(&cx.app.borrow()).text(), "plain text");
+        assert_eq!(cx.update(|_, cx| input.read(cx).text().to_string()), "plain text");
     }
 }
