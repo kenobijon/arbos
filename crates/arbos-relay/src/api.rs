@@ -866,13 +866,23 @@ pub async fn machine(State(state): State<AppState>, principal: Principal) -> Api
         .and_then(|s| s.snapshot.clone())
         .or(state.db.user_snapshot(&user_id).map_err(internal)?)
         .unwrap_or_else(|| state.cfg.daytona_snapshot.clone());
-    // Class from the snapshot when Daytona answers; the known default otherwise.
-    let (mut cpu, mut mem, mut disk) = (4_i64, 8_i64, 10_i64);
-    if let Some(dt) = &state.daytona {
-        if let Ok(snap) = dt.get_snapshot(&snapshot_name).await {
-            cpu = snap.cpu.unwrap_or(cpu);
-            mem = snap.mem.unwrap_or(mem);
-            disk = snap.disk.unwrap_or(disk);
+    // Class from the snapshot when Daytona answers; the known default otherwise. A host sandbox
+    // (D89) reports the fleet caps.
+    let gvisor = sb.as_ref().is_some_and(|s| s.provider == "gvisor")
+        || (sb.is_none() && boxes::default_provider(&state) == Provider::Gvisor);
+    let (mut cpu, mut mem, mut disk) = if gvisor {
+        let f = &state.cfg.fleet;
+        (f.box_cpus as i64, f.box_mem_gb as i64, f.box_work_gb as i64)
+    } else {
+        (4_i64, 8_i64, 10_i64)
+    };
+    if !gvisor {
+        if let Some(dt) = &state.daytona {
+            if let Ok(snap) = dt.get_snapshot(&snapshot_name).await {
+                cpu = snap.cpu.unwrap_or(cpu);
+                mem = snap.mem.unwrap_or(mem);
+                disk = snap.disk.unwrap_or(disk);
+            }
         }
     }
     let projects = state.db.projects_of_user(&user_id).map_err(internal)?;
