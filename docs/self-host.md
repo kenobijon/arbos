@@ -188,3 +188,25 @@ Our own LiveKit runs on the relay host in Docker; `scripts/deploy/livekit/setup.
 **TURN/TLS on 443 with one IP.** Caddy owns 443 for the sites, and LiveKit always advertises its TURN/TLS server as `turns:<turn.domain>:443` (the `tls_port` only chooses the local listener). So the :443 Caddy is built with the [caddy-l4](https://github.com/mholt/caddy-l4) module (`scripts/deploy/livekit/build-caddy.sh`, xcaddy) and its global `servers :443 { listener_wrappers { layer4 … } }` block hands every TLS connection whose SNI is `turn.arbos.life` — except ACME `acme-tls/1` challenges, which Caddy keeps so it can renew that certificate — untouched to LiveKit's TURN/TLS listener on 127.0.0.1:5349; LiveKit terminates TLS with the certificate `arbos-livekit-sync-cert` copied from Caddy. Everything else on 443 is HTTPS as before (HTTP/3 on UDP 443 is unaffected). Verified from an outside host with every other port to the server dropped by iptables: a publisher and a subscriber joined over `turns:turn.arbos.life:443` alone with 0% loss. DNS: `livekit` and `turn` are DNS-only A records (no Cloudflare proxy) — the TLS-ALPN challenge and TURN both need the real address.
 
 Checks after `setup.sh`: `curl https://livekit.arbos.life/` prints `OK`; `lk room list --url wss://livekit.arbos.life --api-key … --api-secret …` works from anywhere; `lk load-test --room t --publishers 1 --subscribers 1` joins two participants; the relay log says `LiveKit calls on` after its restart.
+
+## 10. Chats on Matrix (Synapse, D88)
+
+Arbos is moving every chat onto a [Matrix](https://matrix.org) room underneath the relay (design: the Project's `matrix-cutover-design.md`; users never see the word Matrix). The relay stays the only thing the apps talk to; it maps `chat_id ↔ room_id`, creates users through an appservice, and dual-writes every chat into the homeserver first (stage A) before any read is served from it (stage B, per-user flag).
+
+### 10.1 The arbos.life deployment (`scripts/deploy/matrix/`)
+
+Ring 0 runs [Synapse](https://github.com/element-hq/synapse) (community edition, unmodified, AGPL-3.0; config and modules only) with PostgreSQL on the relay host in Docker, at zero extra cost. `scripts/deploy/matrix/setup.sh` (root, idempotent) reproduces it:
+
+| piece | where | notes |
+|---|---|---|
+| homeserver | `ghcr.io/element-hq/synapse:v1.163.0`, `docker-compose.yml`, host networking, `restart: unless-stopped`, json logs rotated 5×20 MiB | wrapped by `arbos-matrix.service` (systemd, after Docker); client API on `127.0.0.1:7708` only; no federation listener, port 8448 closed |
+| database | `postgres:16` on `127.0.0.1:7709`, data in `/var/lib/arbos-matrix/postgres`, `LC_COLLATE=C` | the shadow-compare job reads it too |
+| config | `/etc/arbos-matrix/synapse/homeserver.yaml` from `homeserver.yaml.tmpl`; tokens in `/etc/arbos-matrix/matrix.env` (root only) | `server_name: arbos.life` (fixed forever), `public_baseurl: https://relay.arbos.life/`, registration off, presence off, room version 12 default, `federation_domain_whitelist: [arbos.life]`, `rc_joins_per_room 10/s burst 200` |
+| appservices | `/etc/arbos-matrix/synapse/appservices/{arbos-users,arbos-agents,arbos-bridges}.yaml` from `appservice.yaml.tmpl`, `url: http://127.0.0.1:7700` (the relay) | users `@gh_*`/`@u_*` (non-exclusive; `/login` allowed so app devices get real tokens), agents `@_a_*`/`@_x_*` and bridges `@_b_*` (exclusive, MSC4190 device management, MSC3202/MSC2409 flags on) |
+| media | `/var/lib/arbos-matrix/media` (uid 991) | object storage comes with ring 2 |
+| signing key | `/etc/arbos-matrix/synapse/arbos.life.signing.key`, generated once by `setup.sh` | never regenerate |
+| secrets | vault item **Arbos Matrix** (one field per `ARBOS_MATRIX_*` name); `relay-server.sh` carries the homeserver URL, server name and the six appservice tokens into `/etc/arbos/relay.env` | `ARBOS_MATRIX=off|dual|on` is an operator switch in `relay.env`, never read from the vault; default off |
+
+Checks after `setup.sh`: `curl http://127.0.0.1:7708/health` prints `OK`; `curl http://127.0.0.1:7708/_matrix/client/versions` lists the spec versions; `docker logs arbos-matrix-synapse` shows the three appservices; a `POST /_matrix/client/v3/register {type: m.login.application_service, username: gh_x}` with the users `as_token` returns a user id, token and device id.
+
+Kill switch for the relay side: `sudo touch /etc/arbos/matrix.disabled` stops dual-writes (the outbox keeps queueing); `sudo rm` it to resume.

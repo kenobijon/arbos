@@ -1,0 +1,53 @@
+# Synapse + PostgreSQL for Arbos chats (D88, ring 0), next to the relay. Installed to
+# /etc/arbos-matrix/docker-compose.yml by scripts/deploy/matrix/setup.sh and run by the
+# arbos-matrix.service systemd unit it writes, so it restarts with the box and with Docker.
+#
+# host networking, like LiveKit: Synapse must reach the relay's appservice receiver on
+# 127.0.0.1:7700, and the relay reaches Synapse on 127.0.0.1:7708. Both listeners bind to
+# loopback only; nothing here is reachable from outside (closed federation, no 8448).
+# Postgres listens on 127.0.0.1:7709 for Synapse (and for arbosctl admin matrix shadow).
+services:
+  postgres:
+    image: postgres:16
+    container_name: arbos-matrix-postgres
+    restart: unless-stopped
+    network_mode: host
+    command: ["postgres", "-c", "listen_addresses=127.0.0.1", "-c", "port=7709"]
+    env_file: /etc/arbos-matrix/postgres.env
+    volumes:
+      - /var/lib/arbos-matrix/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 7709 -U synapse"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  synapse:
+    image: ghcr.io/element-hq/synapse:v1.163.0
+    container_name: arbos-matrix-synapse
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SYNAPSE_CONFIG_DIR: /data
+      SYNAPSE_CONFIG_PATH: /data/homeserver.yaml
+    volumes:
+      - /etc/arbos-matrix/synapse:/data
+      - /var/lib/arbos-matrix/media:/data/media_store
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:7708/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
