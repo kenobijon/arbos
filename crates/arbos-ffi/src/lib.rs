@@ -16,13 +16,19 @@ use serde_json::Value;
 
 uniffi::setup_scaffolding!();
 
-/// Frame decode or doc import failure. Sans-IO session has no transport errors.
+/// Frame decode, doc import, or writer failure. Sans-IO session has no transport errors.
 #[derive(Debug, Clone, thiserror::Error, uniffi::Error)]
 pub enum FfiError {
     #[error("{0}")]
     Decode(String),
     #[error("{0}")]
     Import(String),
+    #[error("{0}")]
+    Write(String),
+}
+
+fn write_err(e: impl ToString) -> FfiError {
+    FfiError::Write(e.to_string())
 }
 
 /// Pending PUSH batch (owned; replaces `(String, Vec<u8>)` over the FFI).
@@ -359,11 +365,72 @@ pub struct Touched {
     pub other: bool,
 }
 
+/// One attachment on a client user message (maps to core `UserAttachment`).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct UserAttachmentRecord {
+    pub name: String,
+    pub mime: String,
+    pub kind: Option<String>,
+    pub blob_ref: Option<String>,
+}
+
+impl From<UserAttachmentRecord> for doc::UserAttachment {
+    fn from(r: UserAttachmentRecord) -> Self {
+        Self {
+            name: r.name,
+            mime: r.mime,
+            kind: r.kind,
+            blob_ref: r.blob_ref,
+        }
+    }
+}
+
+/// Options for [`ChatDoc::insert_user_message`] (maps to core `UserMessageOpts`).
+#[derive(Debug, Clone, PartialEq, Eq, Default, uniffi::Record)]
+pub struct UserMessageOptsRecord {
+    pub attachments: Vec<UserAttachmentRecord>,
+    pub mentions: Vec<String>,
+    pub reply_to: Option<String>,
+    pub sender: Option<String>,
+    pub sender_handle: Option<String>,
+    pub sender_name: Option<String>,
+    pub sender_avatar: Option<String>,
+}
+
+impl From<UserMessageOptsRecord> for doc::UserMessageOpts {
+    fn from(r: UserMessageOptsRecord) -> Self {
+        Self {
+            attachments: r.attachments.into_iter().map(Into::into).collect(),
+            mentions: r.mentions,
+            reply_to: r.reply_to,
+            sender: r.sender,
+            sender_handle: r.sender_handle,
+            sender_name: r.sender_name,
+            sender_avatar: r.sender_avatar,
+            answers_question_id: None,
+        }
+    }
+}
+
+/// Whether `sender` currently holds `emoji` on a message (flat key or legacy bucket).
+fn reaction_is_on(doc: &CoreChatDoc, message_id: &str, emoji: &str, sender: &str) -> bool {
+    let Some(map) = doc.find_message(message_id) else {
+        return false;
+    };
+    let mut json = serde_json::to_value(map.get_deep_value()).unwrap_or(Value::Null);
+    doc::project_reactions(&mut json);
+    json.get("reactions")
+        .and_then(|r| r.get(emoji))
+        .and_then(|bucket| bucket.get(sender))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
 /// Foreign callback: Swift implements this instead of `ChatDoc.onChange`.
 ///
 /// The callback runs on the caller's thread (the thread that called
-/// [`ChatDoc::apply`], [`ChatDoc::snapshot`], or
-/// [`ChatDoc::export_updates_since`]), after the doc lock is released.
+/// [`ChatDoc::apply`], [`ChatDoc::snapshot`], [`ChatDoc::export_updates_since`],
+/// or [`ChatDoc::commit`]), after the doc lock is released.
 #[uniffi::export(foreign)]
 pub trait DocChangeListener: Send + Sync {
     fn on_change(&self, touched: Touched);
@@ -477,12 +544,129 @@ impl ChatDoc {
         serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into())
     }
 
+    /// Number of rows in the `messages` list.
+    pub fn message_count(&self) -> u64 {
+        self.lock_doc().messages_list().len() as u64
+    }
+
+    /// One projected message row (`project_hidden_parts` + `project_reactions`),
+    /// same shape as an element of [`Self::read_rows_json`].
+    pub fn read_message_json(&self, index: u64) -> Option<String> {
+        let rows = self.lock_doc().projected_rows();
+        rows.get(index as usize)
+            .map(|row| serde_json::to_string(row).unwrap_or_else(|_| "null".into()))
+    }
+
+    /// JSON object for a root map (`settings`, `meta`, …).
+    pub fn read_map_json(&self, name: String) -> String {
+        let doc = self.lock_doc();
+        let map = doc.doc.get_map(name.as_str());
+        let json =
+            serde_json::to_value(map.get_deep_value()).unwrap_or(Value::Object(Default::default()));
+        serde_json::to_string(&json).unwrap_or_else(|_| "{}".into())
+    }
+
+    /// True when the replica has no oplog ops yet (nothing imported or written).
+    pub fn is_empty(&self) -> bool {
+        self.lock_doc().doc.oplog_frontiers().is_empty()
+    }
+
+    /// Append a user message. Does not commit.
+    pub fn insert_user_message(
+        &self,
+        id: String,
+        text: String,
+        device_id: String,
+        opts: UserMessageOptsRecord,
+    ) -> Result<(), FfiError> {
+        let core_opts = doc::UserMessageOpts::from(opts);
+        self.lock_doc()
+            .append_user_message(&id, &text, &device_id, &core_opts)
+            .map_err(write_err)
+    }
+
+    /// Append a system line. Does not commit. `link_id` is core's optional `callId`.
+    pub fn insert_system_line(
+        &self,
+        id: String,
+        text: String,
+        device_id: String,
+        link_id: Option<String>,
+    ) -> Result<(), FfiError> {
+        self.lock_doc()
+            .append_system_line(&id, &text, &device_id, link_id.as_deref())
+            .map_err(write_err)
+    }
+
+    /// Append a D82 assistant greeting. Does not commit.
+    pub fn insert_assistant_greeting(
+        &self,
+        id: String,
+        text: String,
+        device_id: String,
+        project_id: String,
+        agent_name: String,
+    ) -> Result<(), FfiError> {
+        self.lock_doc()
+            .append_greeting(&id, &text, &device_id, &project_id, &agent_name)
+            .map_err(write_err)
+    }
+
+    /// Toggle one emoji reaction for `sender`. Does not commit.
+    ///
+    /// Reads current state through [`doc::project_reactions`] (flat
+    /// `"emoji|sender"` or legacy bucket), then calls core `set_reaction`
+    /// with the opposite.
+    pub fn toggle_reaction(
+        &self,
+        message_id: String,
+        emoji: String,
+        sender: String,
+    ) -> Result<(), FfiError> {
+        let doc = self.lock_doc();
+        let on = reaction_is_on(&doc, &message_id, &emoji, &sender);
+        doc.set_reaction(&message_id, &emoji, &sender, !on)
+            .map_err(write_err)
+    }
+
+    /// Append a `commands` row. Does not commit. Returns the new command id.
+    /// `payload_json` must be a JSON object.
+    pub fn add_command(
+        &self,
+        kind: String,
+        payload_json: String,
+        device_id: String,
+    ) -> Result<String, FfiError> {
+        let payload: Value = serde_json::from_str(&payload_json).map_err(write_err)?;
+        if !payload.is_object() {
+            return Err(FfiError::Write("payload_json must be a JSON object".into()));
+        }
+        Ok(self.lock_doc().push_command(&kind, payload, &device_id))
+    }
+
+    /// Mirror the model picker into project `settings`. Does not commit.
+    pub fn set_model_settings(&self, model: String, effort: String) -> Result<(), FfiError> {
+        self.lock_doc()
+            .set_model_settings(&model, &effort)
+            .map_err(write_err)
+    }
+
+    /// Commit pending writes, then deliver queued change events after the lock
+    /// is released (same 5a rule as [`Self::apply`]).
+    pub fn commit(&self) {
+        {
+            self.lock_doc().doc.commit();
+        }
+        self.flush_pending();
+    }
+
     /// Subscribe to root diffs; maps through core [`doc::touched`].
     ///
     /// Events are queued while the doc lock is held and delivered on the
     /// caller's thread after [`Self::apply`] / [`Self::snapshot`] /
-    /// [`Self::export_updates_since`] release the guard (so a Swift listener
-    /// that calls [`Self::read_rows_json`] does not deadlock).
+    /// [`Self::export_updates_since`] / [`Self::commit`] release the guard
+    /// (so a Swift listener that calls [`Self::read_rows_json`] does not
+    /// deadlock).
     pub fn on_change(&self, listener: Arc<dyn DocChangeListener>) {
         *self.lock_listener() = Some(listener);
         let pending = self.pending.clone();
@@ -514,6 +698,7 @@ pub fn room_path(project_id: String, chat_id: String, is_people: bool) -> String
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::path::PathBuf;
 
     fn state_frame(checkpoint_seq: i64) -> Vec<u8> {
         let header = json!({
@@ -628,5 +813,162 @@ mod tests {
             !listener.rows.lock().unwrap().is_empty(),
             "listener should have fired after snapshot"
         );
+    }
+
+    #[test]
+    fn insert_user_message_reads_back_attachment_mentions_reply() {
+        let doc = ChatDoc::open();
+        assert!(doc.is_empty());
+        doc.insert_user_message(
+            "m1".into(),
+            "hello".into(),
+            "dev:1".into(),
+            UserMessageOptsRecord {
+                attachments: vec![UserAttachmentRecord {
+                    name: "photo.jpg".into(),
+                    mime: "image/jpeg".into(),
+                    kind: Some("image".into()),
+                    blob_ref: Some("blob:1".into()),
+                }],
+                mentions: vec!["user:a".into(), "user:b".into()],
+                reply_to: Some("m0".into()),
+                sender: Some("user:me".into()),
+                sender_handle: Some("me".into()),
+                sender_name: Some("Me".into()),
+                sender_avatar: None,
+            },
+        )
+        .unwrap();
+        doc.commit();
+        assert_eq!(doc.message_count(), 1);
+        let row: Value = serde_json::from_str(&doc.read_message_json(0).unwrap()).unwrap();
+        assert_eq!(row["role"], "user");
+        assert_eq!(row["sender"], "user:me");
+        assert_eq!(row["senderHandle"], "me");
+        assert_eq!(row["senderName"], "Me");
+        assert_eq!(row["replyTo"], "m0");
+        assert_eq!(row["mentions"], json!(["user:a", "user:b"]));
+        let parts = row["parts"].as_array().unwrap();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["kind"], "attachment");
+        assert_eq!(parts[0]["attachment"]["name"], "photo.jpg");
+        assert_eq!(parts[0]["attachment"]["mime"], "image/jpeg");
+        assert_eq!(parts[0]["attachment"]["kind"], "image");
+        assert_eq!(parts[0]["attachment"]["ref"], "blob:1");
+        assert_eq!(parts[1]["kind"], "text");
+        assert_eq!(parts[1]["text"], "hello");
+    }
+
+    #[test]
+    fn toggle_reaction_flat_twice_and_legacy_once_clear() {
+        let doc = ChatDoc::open();
+        doc.insert_user_message(
+            "m-flat".into(),
+            "hi".into(),
+            "dev".into(),
+            UserMessageOptsRecord::default(),
+        )
+        .unwrap();
+        doc.toggle_reaction("m-flat".into(), "👍".into(), "user:a".into())
+            .unwrap();
+        doc.toggle_reaction("m-flat".into(), "👍".into(), "user:a".into())
+            .unwrap();
+        doc.commit();
+        let flat: Value = serde_json::from_str(&doc.read_message_json(0).unwrap()).unwrap();
+        let flat_reacts = flat.get("reactions").cloned().unwrap_or(json!({}));
+        assert!(
+            flat_reacts
+                .get("👍")
+                .and_then(|b| b.get("user:a"))
+                .is_none(),
+            "flat toggle twice should leave no reaction: {flat_reacts}"
+        );
+
+        let fixture = std::fs::read(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../arbos-core/fixtures/chat_doc.bin"),
+        )
+        .expect("chat_doc.bin");
+        let legacy_doc = ChatDoc::open_from_snapshot(fixture).unwrap();
+        // msg-legacy-react is the last row with 🎉 / user:legacy.
+        legacy_doc
+            .toggle_reaction("msg-legacy-react".into(), "🎉".into(), "user:legacy".into())
+            .unwrap();
+        legacy_doc.commit();
+        let n = legacy_doc.message_count();
+        let mut found = false;
+        for i in 0..n {
+            let row: Value =
+                serde_json::from_str(&legacy_doc.read_message_json(i).unwrap()).unwrap();
+            if row["id"] == "msg-legacy-react" {
+                let reacts = row.get("reactions").cloned().unwrap_or(json!({}));
+                assert!(
+                    reacts
+                        .get("🎉")
+                        .and_then(|b| b.get("user:legacy"))
+                        .is_none(),
+                    "legacy toggle once should clear: {reacts}"
+                );
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "msg-legacy-react missing from fixture");
+    }
+
+    #[test]
+    fn add_command_returns_pending_id() {
+        let doc = ChatDoc::open();
+        let id = doc
+            .add_command(
+                "send".into(),
+                r#"{"messageId":"m1"}"#.into(),
+                "dev:1".into(),
+            )
+            .unwrap();
+        assert!(!id.is_empty());
+        doc.commit();
+        let commands = doc.lock_doc().to_json()["commands"].clone();
+        let list = commands.as_array().expect("commands list");
+        let row = list
+            .iter()
+            .find(|c| c["id"] == id)
+            .expect("command id in list");
+        assert_eq!(row["kind"], "send");
+        assert_eq!(row["status"], "pending");
+        assert_eq!(row["payload"]["messageId"], "m1");
+    }
+
+    struct CommitListener {
+        hits: Mutex<Vec<Touched>>,
+    }
+
+    impl DocChangeListener for CommitListener {
+        fn on_change(&self, touched: Touched) {
+            self.hits.lock().unwrap().push(touched);
+        }
+    }
+
+    #[test]
+    fn commit_after_write_notifies_listener_once_list_changed() {
+        let doc = Arc::new(ChatDoc::open());
+        let listener = Arc::new(CommitListener {
+            hits: Mutex::new(Vec::new()),
+        });
+        doc.on_change(listener.clone());
+        doc.insert_user_message(
+            "m1".into(),
+            "hi".into(),
+            "dev".into(),
+            UserMessageOptsRecord::default(),
+        )
+        .unwrap();
+        assert!(
+            listener.hits.lock().unwrap().is_empty(),
+            "writers must not notify before commit"
+        );
+        doc.commit();
+        let hits = listener.hits.lock().unwrap();
+        assert_eq!(hits.len(), 1, "commit should notify exactly once");
+        assert!(hits[0].list_changed, "insert should set list_changed");
     }
 }
