@@ -989,6 +989,9 @@ pub async fn delete_project(
             "only the owner can delete a project".into(),
         ));
     }
+    // Leave people chats while the project row is still live, then soft-delete. A deleted
+    // agent must not linger as an @mention ghost (no wake, possible leftover "is working").
+    crate::people::detach_agent_from_people_chats(&state, &p.id, &p.user_id);
     if !state.db.soft_delete_project(&p.id).map_err(internal)? {
         return Err((StatusCode::NOT_FOUND, "no such project".to_owned()));
     }

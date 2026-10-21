@@ -1969,9 +1969,10 @@ final class AppModel: ObservableObject {
 
     /// `@slug` tokens that name a member: agents by their mention slug, people by handle.
     /// `@everyone` / `@all` and a leading "hey everyone" (etc.) address every agent in the chat.
+    /// Soft-deleted agents (no nested `project`) are skipped — they cannot wake or reply.
     static func mentions(in text: String, members: [ChatMember]) -> [String] {
         var out: [String] = []
-        let agents = members.filter(\.isAgent)
+        let agents = members.filter { $0.isAgent && $0.project != nil }
         func appendAgents() {
             for a in agents where !out.contains(a.member) { out.append(a.member) }
         }
@@ -1986,7 +1987,10 @@ final class AppModel: ObservableObject {
                 if !out.contains(a.member) { out.append(a.member) }
                 continue
             }
-            if let m = members.first(where: { $0.handle.lowercased() == slug || ($0.isAgent && mentionSlug($0.project?.name ?? "") == slug) }) {
+            if let m = members.first(where: {
+                $0.handle.lowercased() == slug
+                    || ($0.isAgent && $0.project != nil && mentionSlug($0.project?.name ?? "") == slug)
+            }) {
                 if !out.contains(m.member) { out.append(m.member) }
             }
         }
@@ -2064,7 +2068,7 @@ final class AppModel: ObservableObject {
     static func namedAgents(in text: String, members: [ChatMember]) -> [String] {
         // Person @handle still wins; display-name-only collisions do not suppress the agent.
         if !namedPeopleByHandle(in: text, members: members).isEmpty { return [] }
-        let agents = members.filter(\.isAgent)
+        let agents = members.filter { $0.isAgent && $0.project != nil }
         guard !agents.isEmpty else { return [] }
         var lower = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !lower.isEmpty else { return [] }
