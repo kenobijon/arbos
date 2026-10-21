@@ -584,6 +584,11 @@ impl ComposerInput {
 
     /// Byte offset one wrapped line above/below the caret, keeping column when
     /// the layout is known; falls back to hard newlines before the first paint.
+    ///
+    /// Past the first/last wrapped line, jump to document start/end (macOS
+    /// text-field behaviour). Without that, a point below the last line is
+    /// still hit-tested on that line and `closest_index_for_position` can
+    /// return 0 — so Shift+Down selected left instead of right.
     fn offset_for_vertical_move(&self, up: bool) -> usize {
         let cursor = self.cursor_offset();
         let Some(layout) = self.layout.as_ref() else {
@@ -602,6 +607,17 @@ impl ComposerInput {
         };
         let lh = px(INPUT_LINE_HEIGHT);
         let target_y = if up { pos.y - lh } else { pos.y + lh };
+        if up && target_y < px(0.0) {
+            return 0;
+        }
+        let height = px(layout
+            .lines
+            .iter()
+            .map(|(_, line)| f32::from(line.size(lh).height))
+            .sum::<f32>());
+        if !up && target_y >= height {
+            return self.content.len();
+        }
         let window_pos = point(layout.bounds.left() + pos.x, layout.bounds.top() + target_y);
         index_for_position(
             &layout.lines,
