@@ -280,10 +280,11 @@ impl Shared {
         self.people.lock().unwrap().contains(chat_id)
     }
 
-    /// The `/blob/{slot}/{key}` slot for a chat or project id. People chats keep their blobs
-    /// under `people:<chat_id>` (people-chats API §2) — a people chat's "project id" in this
-    /// client is its chat id, which the relay knows no project for (403). Every blob read and
-    /// write goes through here so uploads and fetches always agree.
+    /// The `/blob/{slot}/{key}` slot for a **project id** or a **people chat id**.
+    /// People chats keep their blobs under `people:<chat_id>` (people-chats API §2).
+    /// Project chats use the project id — pass that, not the chat id (a chat id is not a
+    /// project the relay knows, so PUT/GET would 403). Every blob read and write goes
+    /// through here so uploads and fetches always agree.
     fn blob_slot(&self, id: &str) -> String {
         if id.starts_with(PEOPLE_BLOB_PREFIX) || !self.is_people(id) {
             id.to_owned()
@@ -3027,8 +3028,15 @@ async fn send_message(
     reply_to: Option<String>,
 ) {
     let project_id = project_of(&shared, &chat_id).unwrap_or_default();
-    // People chats keep their blobs under `people:<chat_id>` and have no box to wake.
-    let blob_slot = shared.blob_slot(&chat_id);
+    // People chats keep their blobs under `people:<chat_id>`; project chats under the
+    // project id (same slot agentd and the thumbnail fetch use). `blob_slot` expects a
+    // project id or a people chat id — never a project chat's own id (the relay would
+    // 403 the PUT and the attachment would land with no `ref`).
+    let blob_slot = shared.blob_slot(if shared.is_people(&chat_id) {
+        &chat_id
+    } else {
+        &project_id
+    });
     let mut user_attachments: Vec<UserAttachment> = Vec::new();
     for path in attachments {
         let name = path
