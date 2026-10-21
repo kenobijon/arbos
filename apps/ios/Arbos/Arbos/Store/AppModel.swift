@@ -67,15 +67,18 @@ final class AppModel: ObservableObject {
     @Published var appearanceSetting: String = UserDefaults.standard.string(forKey: "appearance") ?? Appearance.system.rawValue {
         didSet { UserDefaults.standard.set(appearanceSetting, forKey: "appearance") }
     }
-    /// Sum of SessionRoom reconnect / state_timeout counters (About page).
-    var sharedRoomStats: (reconnects: Int, timeouts: Int) {
+    /// Sum of SessionRoom reconnect / state_timeout counters (About page),
+    /// plus the most recent non-nil room `lastError`.
+    var sharedRoomStats: (reconnects: Int, timeouts: Int, lastError: String?) {
         var reconnects = 0
         var timeouts = 0
+        var lastError: String?
         for room in rooms.values {
             reconnects += room.reconnects
             timeouts += room.stateTimeouts
+            if let err = room.lastError { lastError = err }
         }
-        return (reconnects, timeouts)
+        return (reconnects, timeouts, lastError)
     }
     /// Glass is the iPhone default (D10 amendment, 2026-10-17: Grok's header
     /// blurs the transcript under it). The key is only written when the user
@@ -1242,6 +1245,9 @@ final class AppModel: ObservableObject {
                 if let callId = header["in_call"] as? String { self?.peerInCall(callId, chatId: key) }
             }
         }
+        room.onUnavailable = { [weak self] in
+            Task { await self?.refreshPeople() }
+        }
         rooms[key] = room
         if let restored {
             // Paint from disk now; the room's backfill only adds what is new.
@@ -1642,6 +1648,20 @@ final class AppModel: ObservableObject {
                 peopleUnread.remove(c.id)
             }
             for c in list { ensureRoom(projectId: peopleSlot, key: c.id, roomChat: c.id) }
+            // Drop rooms/docs for people chats the relay no longer lists so a
+            // restored chat cannot reconnect forever on HTTP 403.
+            let listed = Set(list.map(\.id))
+            for key in Set(rooms.keys).union(docs.keys) {
+                guard !listed.contains(key) else { continue }
+                guard rooms[key]?.projectId == peopleSlot else { continue }
+                rooms[key]?.stop()
+                rooms[key] = nil
+                docs[key] = nil
+                messages[key] = nil
+                roomLinks[key] = nil
+                unacked[key] = nil
+                forgetDoc(key)
+            }
             savePeopleCache(raw)
         } catch {
             // Relays without people chats (older) answer 404; stay quiet.

@@ -8,6 +8,7 @@ import Loro
 @MainActor
 final class FakeSocket: RoomSocket {
     var onOpen: (() -> Void)?
+    var httpStatus: Int?
     private(set) var sent: [Data] = []
     private var receiveWaiters: [CheckedContinuation<Data, Error>] = []
     private var pending: [Result<Data, Error>] = []
@@ -47,7 +48,8 @@ final class FakeSocket: RoomSocket {
         }
     }
 
-    func failReceive(_ error: Error = URLError(.networkConnectionLost)) {
+    func failReceive(_ error: Error = URLError(.networkConnectionLost), httpStatus: Int? = nil) {
+        if let httpStatus { self.httpStatus = httpStatus }
         if !receiveWaiters.isEmpty {
             receiveWaiters.removeFirst().resume(throwing: error)
         } else {
@@ -136,6 +138,56 @@ final class SessionRoomTests: XCTestCase {
 
         XCTAssertTrue(doc.isEmpty, "stale checkpoint must not be imported after reconnect")
         XCTAssertLessThan(room.cursor, Int64(9), "cursor must stay below the newer checkpointSeq")
+        room.stop()
+    }
+
+    func testHttp403DoesNotReconnect() async throws {
+        let sockets = SocketFactory()
+        let room = SessionRoom(
+            projectId: "people",
+            key: "chat-gone",
+            roomChat: "chat-gone",
+            doc: CoreChatDoc(key: "chat-gone"),
+            roomURL: { _ in URL(string: "wss://example.test/r")! },
+            makeSocket: { sockets.make($0) },
+            fetchCheckpoint: { _ in (0, Data()) },
+            deviceId: { "dev:me" }
+        )
+        room.start()
+        try await waitUntil { sockets.sockets.count == 1 }
+        let sock = try XCTUnwrap(sockets.current)
+        sock.failReceive(httpStatus: 403)
+        try await waitUntil { room.lastError != nil }
+        // Brief settle: must not dial again after the terminal 403.
+        for _ in 0..<20 {
+            await Task.yield()
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(sockets.sockets.count, 1, "HTTP 403 must not open a second socket")
+        let err = try XCTUnwrap(room.lastError)
+        XCTAssertTrue(err.contains("HTTP 403"), "lastError=\(err)")
+        room.stop()
+    }
+
+    func testPlainReceiveErrorStillReconnects() async throws {
+        let sockets = SocketFactory()
+        let room = SessionRoom(
+            projectId: "proj",
+            key: "chat",
+            roomChat: "chat",
+            doc: CoreChatDoc(key: "chat"),
+            roomURL: { _ in URL(string: "wss://example.test/r")! },
+            makeSocket: { sockets.make($0) },
+            fetchCheckpoint: { _ in (0, Data()) },
+            deviceId: { "dev:me" }
+        )
+        room.start()
+        try await waitUntil { sockets.sockets.count == 1 }
+        let sock = try XCTUnwrap(sockets.current)
+        sock.fireOpen()
+        try await waitUntil { !sock.sent.isEmpty }
+        sock.failReceive()
+        try await waitUntil { sockets.sockets.count == 2 }
         room.stop()
     }
 
