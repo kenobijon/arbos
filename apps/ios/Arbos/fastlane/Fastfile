@@ -107,6 +107,20 @@ platform :ios do
       "CODE_SIGNING_ALLOWED=NO")
   end
 
+  # Unit tests (ArbosTests). Needs the gitignored xcframework from
+  # `./scripts/build-xcframework.sh` at repo-root `target/xcframework/`.
+  # Same project, scheme, and simulator destination as `sim`; only the Test
+  # action builds ArbosTests (not Run / Archive).
+  desc "Run ArbosTests on the iOS simulator (no signing); requires target/xcframework"
+  lane :test do
+    xc = File.expand_path("../../../../target/xcframework/ArbosFFI.xcframework", __dir__)
+    UI.user_error!("missing #{xc} — run ./scripts/build-xcframework.sh from the repo root first") unless File.directory?(xc)
+    xcodebuild_logged("test",
+      "cd .. && xcodebuild test -project #{PROJECT} -scheme #{SCHEME} -configuration Debug " \
+      "-destination 'platform=iOS Simulator,name=iPhone 17' -derivedDataPath '#{out_dir}/dd' #{spm_flags}" \
+      "CODE_SIGNING_ALLOWED=NO")
+  end
+
   desc "Unsigned Release archive (what CI keeps even when no Apple secret is set)"
   lane :archive do
     number = build_number

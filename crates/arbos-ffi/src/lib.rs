@@ -1,19 +1,17 @@
-//! UniFFI surface for the Swift client (crdt-sync shared-client step 4b).
+//! UniFFI surface for the Swift client (crdt-sync shared-client step 4b / 5a).
 //!
 //! This is the only crate that names Swift or `uniffi`. It wraps
 //! [`arbos_client::RoomSession`] and the parts of `arbos-core` the Swift app
 //! needs. Core and client stay free of UniFFI derives.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use arbos_client::room::{
     self as client_room, RoomAction as ClientAction, RoomSession as ClientSession,
 };
-use arbos_core::doc::{
-    self, decode_vv, encode_vv, project_hidden_parts, project_reactions, ChatDoc as CoreChatDoc,
-};
+use arbos_core::doc::{self, decode_vv, encode_vv, ChatDoc as CoreChatDoc};
 use arbos_core::wire::{self, Frame, FrameType as WireFrameType};
-use loro::{Container, Subscription, ValueOrContainer};
+use loro::Subscription;
 use serde_json::Value;
 
 uniffi::setup_scaffolding!();
@@ -229,6 +227,13 @@ pub struct RoomSession {
     inner: Mutex<ClientSession>,
 }
 
+impl RoomSession {
+    /// Recover a poisoned lock instead of panicking across the FFI.
+    fn lock(&self) -> MutexGuard<'_, ClientSession> {
+        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
 #[uniffi::export]
 impl RoomSession {
     #[uniffi::constructor]
@@ -240,17 +245,15 @@ impl RoomSession {
     }
 
     pub fn room(&self) -> String {
-        self.inner.lock().expect("room").room().to_string()
+        self.lock().room().to_string()
     }
 
     pub fn cursor(&self) -> i64 {
-        self.inner.lock().expect("cursor").cursor()
+        self.lock().cursor()
     }
 
     pub fn pending(&self) -> Vec<PendingPush> {
-        self.inner
-            .lock()
-            .expect("pending")
+        self.lock()
             .pending()
             .iter()
             .map(|(batch_id, bytes)| PendingPush {
@@ -261,29 +264,23 @@ impl RoomSession {
     }
 
     pub fn backoff_ms(&self) -> u64 {
-        self.inner.lock().expect("backoff").backoff().as_millis() as u64
+        self.lock().backoff().as_millis() as u64
     }
 
     pub fn reconnect_after_ms(&self) -> u64 {
-        self.inner
-            .lock()
-            .expect("reconnect_after")
-            .reconnect_after()
-            .as_millis() as u64
+        self.lock().reconnect_after().as_millis() as u64
     }
 
     pub fn is_live(&self) -> bool {
-        self.inner.lock().expect("is_live").is_live()
+        self.lock().is_live()
     }
 
     pub fn is_closed(&self) -> bool {
-        self.inner.lock().expect("is_closed").is_closed()
+        self.lock().is_closed()
     }
 
     pub fn drain_actions(&self) -> Vec<RoomAction> {
-        self.inner
-            .lock()
-            .expect("drain")
+        self.lock()
             .drain_actions()
             .into_iter()
             .map(RoomAction::from)
@@ -291,67 +288,55 @@ impl RoomSession {
     }
 
     pub fn on_open(&self, now_ms: u64) {
-        self.inner.lock().expect("on_open").on_open(now_ms);
+        self.lock().on_open(now_ms);
     }
 
     pub fn on_frame(&self, bytes: Vec<u8>) {
-        self.inner.lock().expect("on_frame").on_frame(&bytes);
+        self.lock().on_frame(&bytes);
     }
 
     pub fn on_local_commit(&self, bytes: Vec<u8>) {
-        self.inner
-            .lock()
-            .expect("on_local_commit")
-            .on_local_commit(bytes);
+        self.lock().on_local_commit(bytes);
     }
 
     pub fn on_tick(&self, now_ms: u64) {
-        self.inner.lock().expect("on_tick").on_tick(now_ms);
+        self.lock().on_tick(now_ms);
     }
 
     pub fn on_close(&self, now_ms: u64) {
-        self.inner.lock().expect("on_close").on_close(now_ms);
+        self.lock().on_close(now_ms);
     }
 
     pub fn on_checkpoint(&self, seq: i64) {
-        self.inner.lock().expect("on_checkpoint").on_checkpoint(seq);
+        self.lock().on_checkpoint(seq);
     }
 
     pub fn on_checkpoint_skipped(&self) {
-        self.inner
-            .lock()
-            .expect("on_checkpoint_skipped")
-            .on_checkpoint_skipped();
+        self.lock().on_checkpoint_skipped();
     }
 
     pub fn on_checkpoint_failed(&self) {
-        self.inner
-            .lock()
-            .expect("on_checkpoint_failed")
-            .on_checkpoint_failed();
+        self.lock().on_checkpoint_failed();
     }
 
     pub fn prepare_reconnect(&self) {
-        self.inner
-            .lock()
-            .expect("prepare_reconnect")
-            .prepare_reconnect();
+        self.lock().prepare_reconnect();
     }
 
     pub fn wake(&self, reason: String) {
-        self.inner.lock().expect("wake").wake(reason);
+        self.lock().wake(reason);
     }
 
     /// `presence_header` is a JSON object string (open-ended: typing, in_call, …).
     pub fn presence(&self, presence_header: String) {
         let header = parse_presence_header(&presence_header);
-        self.inner.lock().expect("presence").presence(header);
+        self.lock().presence(header);
     }
 
     /// Same header shape as [`Self::presence`]; sets / clears the `typing` field.
     pub fn typing(&self, presence_header: String, active: bool) {
         let header = parse_presence_header(&presence_header);
-        self.inner.lock().expect("typing").typing(header, active);
+        self.lock().typing(header, active);
     }
 }
 
@@ -371,6 +356,10 @@ pub struct Touched {
 }
 
 /// Foreign callback: Swift implements this instead of `ChatDoc.onChange`.
+///
+/// The callback runs on the caller's thread (the thread that called
+/// [`ChatDoc::apply`], [`ChatDoc::snapshot`], or
+/// [`ChatDoc::export_updates_since`]), after the doc lock is released.
 #[uniffi::export(foreign)]
 pub trait DocChangeListener: Send + Sync {
     fn on_change(&self, touched: Touched);
@@ -381,6 +370,48 @@ pub trait DocChangeListener: Send + Sync {
 pub struct ChatDoc {
     inner: Mutex<CoreChatDoc>,
     subs: Mutex<Vec<Subscription>>,
+    /// Touched events queued while the doc lock is held; flushed after drop.
+    pending: Arc<Mutex<Vec<Touched>>>,
+    listener: Arc<Mutex<Option<Arc<dyn DocChangeListener>>>>,
+}
+
+impl ChatDoc {
+    /// Recover a poisoned doc lock instead of panicking across the FFI.
+    fn lock_doc(&self) -> MutexGuard<'_, CoreChatDoc> {
+        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn lock_subs(&self) -> MutexGuard<'_, Vec<Subscription>> {
+        self.subs.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn lock_pending(&self) -> MutexGuard<'_, Vec<Touched>> {
+        self.pending.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn lock_listener(&self) -> MutexGuard<'_, Option<Arc<dyn DocChangeListener>>> {
+        self.listener.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Deliver queued change notifications after the doc lock is dropped.
+    fn flush_pending(&self) {
+        let queued = std::mem::take(&mut *self.lock_pending());
+        let Some(listener) = self.lock_listener().clone() else {
+            return;
+        };
+        for touched in queued {
+            listener.on_change(touched);
+        }
+    }
+
+    fn new_wrapped(doc: CoreChatDoc) -> Self {
+        Self {
+            inner: Mutex::new(doc),
+            subs: Mutex::new(Vec::new()),
+            pending: Arc::new(Mutex::new(Vec::new())),
+            listener: Arc::new(Mutex::new(None)),
+        }
+    }
 }
 
 #[uniffi::export]
@@ -388,10 +419,7 @@ impl ChatDoc {
     /// Empty replica (random Loro peer, matching Mac/iOS client behaviour).
     #[uniffi::constructor]
     pub fn open() -> Self {
-        Self {
-            inner: Mutex::new(CoreChatDoc::new(None, false)),
-            subs: Mutex::new(Vec::new()),
-        }
+        Self::new_wrapped(CoreChatDoc::new(None, false))
     }
 
     /// Import a full snapshot into a new replica.
@@ -399,81 +427,76 @@ impl ChatDoc {
     pub fn open_from_snapshot(snapshot: Vec<u8>) -> Result<Self, FfiError> {
         let doc = CoreChatDoc::from_snapshot(None, false, &snapshot)
             .map_err(|e| FfiError::Import(e.to_string()))?;
-        Ok(Self {
-            inner: Mutex::new(doc),
-            subs: Mutex::new(Vec::new()),
-        })
+        Ok(Self::new_wrapped(doc))
     }
 
     /// Import update or snapshot bytes.
     pub fn apply(&self, bytes: Vec<u8>) -> Result<(), FfiError> {
-        self.inner
-            .lock()
-            .expect("apply")
-            .import(&bytes)
-            .map(|_| ())
-            .map_err(|e| FfiError::Import(e.to_string()))
+        let result = {
+            self.lock_doc()
+                .import(&bytes)
+                .map(|_| ())
+                .map_err(|e| FfiError::Import(e.to_string()))
+        };
+        self.flush_pending();
+        result
     }
 
     /// Updates since an encoded version vector (`oplog_version` / frontier bytes).
     pub fn export_updates_since(&self, from_vv: Vec<u8>) -> Vec<u8> {
         let vv = decode_vv(&from_vv).unwrap_or_default();
-        self.inner
-            .lock()
-            .expect("export_updates_since")
-            .export_updates_since(&vv)
+        let out = self.lock_doc().export_updates_since(&vv);
+        self.flush_pending();
+        out
     }
 
     pub fn snapshot(&self) -> Vec<u8> {
-        self.inner.lock().expect("snapshot").snapshot()
+        let out = self.lock_doc().snapshot();
+        self.flush_pending();
+        out
     }
 
     /// Encoded oplog version vector (frontier bytes).
     pub fn oplog_version(&self) -> Vec<u8> {
-        let vv = self.inner.lock().expect("oplog_version").oplog_vv();
+        let vv = self.lock_doc().oplog_vv();
         encode_vv(&vv)
     }
 
     pub fn contains_frontier(&self, frontier: Vec<u8>) -> bool {
-        self.inner
-            .lock()
-            .expect("contains_frontier")
-            .contains_frontier(&frontier)
+        self.lock_doc().contains_frontier(&frontier)
     }
 
     /// Message rows as a JSON array, with `project_hidden_parts` and
     /// `project_reactions` already applied.
     pub fn read_rows_json(&self) -> String {
-        let doc = self.inner.lock().expect("read_rows_json");
-        let list = doc.messages_list();
-        let mut rows = Vec::with_capacity(list.len());
-        for i in 0..list.len() {
-            let Some(ValueOrContainer::Container(Container::Map(m))) = list.get(i) else {
-                continue;
-            };
-            let mut json = serde_json::to_value(m.get_deep_value()).unwrap_or(Value::Null);
-            project_hidden_parts(&mut json);
-            project_reactions(&mut json);
-            rows.push(json);
-        }
+        let rows = self.lock_doc().projected_rows();
         serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into())
     }
 
     /// Subscribe to root diffs; maps through core [`doc::touched`].
+    ///
+    /// Events are queued while the doc lock is held and delivered on the
+    /// caller's thread after [`Self::apply`] / [`Self::snapshot`] /
+    /// [`Self::export_updates_since`] release the guard (so a Swift listener
+    /// that calls [`Self::read_rows_json`] does not deadlock).
     pub fn on_change(&self, listener: Arc<dyn DocChangeListener>) {
+        *self.lock_listener() = Some(listener);
+        let pending = self.pending.clone();
         let sub = {
-            let doc = self.inner.lock().expect("on_change");
-            let listener = listener.clone();
+            let doc = self.lock_doc();
             doc.doc.subscribe_root(Arc::new(move |event| {
                 let t = doc::touched(&event);
-                listener.on_change(Touched {
-                    list_changed: t.list_changed,
-                    messages: t.messages.iter().map(|i| *i as u64).collect(),
-                    other: t.other,
-                });
+                pending
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(Touched {
+                        list_changed: t.list_changed,
+                        messages: t.messages.iter().map(|i| *i as u64).collect(),
+                        other: t.other,
+                    });
             }))
         };
-        self.subs.lock().expect("subs").push(sub);
+        self.lock_subs().push(sub);
     }
 }
 
@@ -539,7 +562,7 @@ mod tests {
     fn chat_doc_round_trip_snapshot() {
         let doc = ChatDoc::open();
         {
-            let guard = doc.inner.lock().unwrap();
+            let guard = doc.lock_doc();
             guard.transact(|d| {
                 d.append_user_message(
                     "m1",
@@ -555,5 +578,51 @@ mod tests {
         let rows: Value = serde_json::from_str(&loaded.read_rows_json()).unwrap();
         assert_eq!(rows[0]["role"], "user");
         assert_eq!(rows[0]["parts"][0]["text"], "hi");
+    }
+
+    struct RecordingListener {
+        rows: Mutex<Vec<usize>>,
+        doc: Arc<ChatDoc>,
+    }
+
+    impl DocChangeListener for RecordingListener {
+        fn on_change(&self, _touched: Touched) {
+            // Re-enter the doc on the same thread; must not deadlock.
+            let json = self.doc.read_rows_json();
+            let parsed: Value = serde_json::from_str(&json).unwrap();
+            self.rows
+                .lock()
+                .unwrap()
+                .push(parsed.as_array().map(|a| a.len()).unwrap_or(0));
+        }
+    }
+
+    #[test]
+    fn change_callback_does_not_deadlock_on_reentrant_read() {
+        let doc = Arc::new(ChatDoc::open());
+        let listener = Arc::new(RecordingListener {
+            rows: Mutex::new(Vec::new()),
+            doc: doc.clone(),
+        });
+        doc.on_change(listener.clone());
+
+        {
+            let guard = doc.lock_doc();
+            guard.transact(|d| {
+                d.append_user_message(
+                    "m1",
+                    "hi",
+                    "dev",
+                    &arbos_core::doc::UserMessageOpts::default(),
+                )
+                .unwrap();
+            });
+        }
+        // snapshot commits and emits; flush runs after the lock drops.
+        let _ = doc.snapshot();
+        assert!(
+            !listener.rows.lock().unwrap().is_empty(),
+            "listener should have fired after snapshot"
+        );
     }
 }

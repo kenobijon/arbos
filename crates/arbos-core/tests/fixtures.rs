@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use arbos_core::doc::{project_hidden_parts, project_reactions, ChatDoc};
+use arbos_core::doc::{message_text, ChatDoc};
 use arbos_core::wire::{Ack, Frame, FrameType, Hello, PushHeader, RowHeader, State};
 use serde_json::Value;
 
@@ -14,39 +14,20 @@ fn load(name: &str) -> Vec<u8> {
     std::fs::read(fixtures_dir().join(name)).unwrap_or_else(|e| panic!("read {name}: {e}"))
 }
 
-fn message_text(row: &Value) -> String {
-    row.get("parts")
-        .and_then(|p| p.as_array())
-        .map(|parts| {
-            parts
-                .iter()
-                .filter(|p| p.get("kind").and_then(|k| k.as_str()) == Some("text"))
-                .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
-                .collect::<Vec<_>>()
-                .join("")
-        })
-        .unwrap_or_default()
-}
-
 #[test]
 fn fixtures_chat_doc_and_frames() {
     let mut doc = ChatDoc::new(Some(99), false);
     doc.import(&load("chat_doc.bin")).unwrap();
 
     let expected: Vec<Value> = serde_json::from_slice(&load("chat_doc_expected.json")).unwrap();
-    let messages = doc.to_json()["messages"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
+    let messages = doc.projected_rows();
     assert_eq!(messages.len(), expected.len());
 
     for (i, exp) in expected.iter().enumerate() {
-        let mut json = messages[i].clone();
-        project_hidden_parts(&mut json);
-        project_reactions(&mut json);
+        let json = &messages[i];
         assert_eq!(json["id"], exp["id"], "row {i} id");
         assert_eq!(json["role"], exp["role"], "row {i} role");
-        assert_eq!(message_text(&json), exp["text"], "row {i} text");
+        assert_eq!(message_text(json), exp["text"], "row {i} text");
         if !exp["greeting"].is_null() {
             assert_eq!(json["greeting"], exp["greeting"], "row {i} greeting");
         }
@@ -56,14 +37,22 @@ fn fixtures_chat_doc_and_frames() {
                 "row {i} answersQuestionId"
             );
         }
+        let hidden_count = json
+            .get("hiddenParts")
+            .and_then(|h| h.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0);
+        assert_eq!(hidden_count, exp["hiddenCount"], "row {i} hiddenCount");
         assert_eq!(json["reactions"], exp["reactions"], "row {i} reactions");
     }
 
     // Spot-check kinds the fixture was built to cover.
     assert_eq!(expected[0]["id"], "msg-user");
     assert_eq!(expected[0]["reactions"]["👍"]["user:ken"], true);
+    assert_eq!(expected[0]["hiddenCount"], 0);
     assert_eq!(expected[1]["id"], "msg-assistant");
     assert_eq!(expected[1]["role"], "assistant");
+    assert_eq!(expected[1]["hiddenCount"], 1);
     assert_eq!(expected[2]["id"], "msg-system");
     assert_eq!(expected[3]["greeting"], true);
     assert_eq!(expected[4]["answersQuestionId"], "q-1");

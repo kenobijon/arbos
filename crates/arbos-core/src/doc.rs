@@ -125,6 +125,21 @@ pub fn reaction_key(emoji: &str, sender: &str) -> String {
     format!("{emoji}{REACTION_KEY_SEP}{sender}")
 }
 
+/// Concatenate text parts of a projected (or raw) message row JSON.
+pub fn message_text(row: &Value) -> String {
+    row.get("parts")
+        .and_then(|p| p.as_array())
+        .map(|parts| {
+            parts
+                .iter()
+                .filter(|p| p.get("kind").and_then(|k| k.as_str()) == Some("text"))
+                .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join("")
+        })
+        .unwrap_or_default()
+}
+
 /// Reader projection: expand flat `reactions` keys (`"emoji|sender" → true`)
 /// into `emoji → { sender → true }` for UI / serde. Also folds legacy nested
 /// emoji-bucket maps so both shapes read the same. Call before deserializing
@@ -488,6 +503,25 @@ impl ChatDoc {
 
     pub fn to_json(&self) -> Value {
         lv_to_json(&self.doc.get_deep_value())
+    }
+
+    /// Message rows as JSON, with [`project_hidden_parts`] and
+    /// [`project_reactions`] already applied. Used by the FFI
+    /// `read_rows_json`, fixture writer, and fixture tests so those
+    /// projections cannot drift apart.
+    pub fn projected_rows(&self) -> Vec<Value> {
+        let list = self.messages_list();
+        let mut rows = Vec::with_capacity(list.len());
+        for i in 0..list.len() {
+            let Some(ValueOrContainer::Container(Container::Map(m))) = list.get(i) else {
+                continue;
+            };
+            let mut json = serde_json::to_value(m.get_deep_value()).unwrap_or(Value::Null);
+            project_hidden_parts(&mut json);
+            project_reactions(&mut json);
+            rows.push(json);
+        }
+        rows
     }
 
     fn find_map(list: &LoroList, id: &str) -> Option<LoroMap> {
