@@ -415,6 +415,12 @@ impl Agent {
         let prev = self.settings.models.read().await.clone();
         // Remember first so a respawn / system-prompt rewrite reads the new slots.
         *self.settings.models.write().await = m.clone();
+        // The new models need their context-window override before pi (re)reads models.json.
+        if let Err(e) =
+            crate::workspace::write_models_json(&self.cfg, &m.talking.id, &m.subagent.id)
+        {
+            tracing::warn!(error = %e, "models.json rewrite after a model change");
+        }
         let mut switched = prev.talking.id == m.talking.id;
         if let Ok(pi) = self.pi_child().await {
             if prev.talking.id != m.talking.id {
