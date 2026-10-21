@@ -277,7 +277,18 @@ impl Shared {
     }
 
     fn is_people(&self, chat_id: &str) -> bool {
-        self.people.lock().unwrap().contains(chat_id)
+        if self.people.lock().unwrap().contains(chat_id) {
+            return true;
+        }
+        // Cold start can restore people spaces from KEY_PROJECTS before KEY_PEOPLE
+        // is populated (or when that key is empty). Project kind is the source of
+        // truth for Dm/Group — without this, room_loop dials `{chat}/{chat}` instead
+        // of `people/{chat}` and never joins the room iOS uses.
+        self.projects
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|p| p.id == chat_id && p.is_people())
     }
 
     /// The `/blob/{slot}/{key}` slot for a **project id** or a **people chat id**.
@@ -931,7 +942,19 @@ fn load_store(shared: &Arc<Shared>) {
     if projects.is_empty() {
         return;
     }
-    shared.people.lock().unwrap().extend(people);
+    // Seed the people-id set from both KEY_PEOPLE and project kinds *before*
+    // ensure_room / room_loop. room_loop used to re-check is_people on every
+    // dial; after RoomSession it bakes the path once — an empty HashSet on
+    // cold start left Mac on the wrong room forever (iOS always dials people/).
+    {
+        let mut ids = shared.people.lock().unwrap();
+        ids.extend(people);
+        for p in &projects {
+            if p.is_people() {
+                ids.insert(p.id.clone());
+            }
+        }
+    }
     *shared.projects.lock().unwrap() = projects.clone();
     *shared.chats.lock().unwrap() = chats;
     let _ = shared.events.send(SyncEvent::Projects(projects.clone()));
@@ -2502,10 +2525,24 @@ async fn room_loop(
     mut local_rx: mpsc::UnboundedReceiver<Vec<u8>>,
     mut cmd_rx: mpsc::UnboundedReceiver<RoomCmd>,
 ) {
-    let is_people = shared.people.lock().unwrap().contains(&room_chat);
+    let is_people = shared.is_people(&room_chat);
     let room = room::room_path(&project_id, &room_chat, is_people);
     let mut session = RoomSession::new(shared.device_id(), room, saved_cursor, saved_pending);
     loop {
+        // Re-resolve on every dial. Before RoomSession, run_session re-checked
+        // the people HashSet each attempt; baking the path once meant a cold
+        // start with an empty set dialed `{id}/{id}` forever while iOS used
+        // `people/{id}` — Mac and mobile never shared a CRDT room.
+        let is_people = shared.is_people(&room_chat);
+        let want = room::room_path(&project_id, &room_chat, is_people);
+        if session.room() != want {
+            session = RoomSession::new(
+                shared.device_id(),
+                want,
+                session.cursor(),
+                session.pending().to_vec(),
+            );
+        }
         let outcome = run_session(
             &shared,
             &project_id,
