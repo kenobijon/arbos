@@ -16,8 +16,10 @@ use crate::sync::credentials::config_dir;
 pub const SIDEBAR_WIDTH: f32 = 296.0;
 /// Kept for the settings sub-panels, which open just right of the sidebar.
 pub const RAIL_WIDTH: f32 = SIDEBAR_WIDTH;
-/// The slim conversation header (avatar + name left, icon buttons right); Grok Mac: 44 pt.
-pub const HEADER_HEIGHT: f32 = 44.0;
+/// The conversation header (avatar + name left, icon buttons right) — also the
+/// window-drag catchment at the top of the chat pane. Twice the former 44 pt
+/// so the title strip is easier to grab ([feedback app-01M5G7QDRZASSTRMK524NDMQ2R]).
+pub const HEADER_HEIGHT: f32 = 88.0;
 pub const TAB_BAR_HEIGHT: f32 = HEADER_HEIGHT;
 /// Composer: one pill with the "+" circle inside left and mic / send inside right.
 pub const COMPOSER_WIDTH: f32 = 820.0;
