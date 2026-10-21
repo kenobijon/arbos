@@ -1580,8 +1580,12 @@ impl Composer {
         row
     }
 
-    /// Paths from the "+" picker or a drop onto the chat box.
-    fn add_paths(&mut self, paths: impl IntoIterator<Item = PathBuf>, cx: &mut Context<Self>) {
+    /// Paths from the "+" picker or a drop onto the chat (pane or composer).
+    pub(crate) fn add_paths(
+        &mut self,
+        paths: impl IntoIterator<Item = PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
         for path in paths {
             if path.is_file() {
                 self.attachments.push(StagedAttachment::new(path));
@@ -2103,6 +2107,8 @@ impl Render for Composer {
         // Stop (memo) / send / stop (turn) / hang-up.
         trailing = trailing.child(primary_button);
         let field_radius = if staged { CARD_RADIUS } else { COMPOSER_RADIUS };
+        // Highlight when a file is dragged over the chat pane (`group("chat-drop")`
+        // on `shell::render_center`), not only when the pointer is over this field.
         let field_base = div()
             .id("composer-field")
             .flex_1()
@@ -2111,7 +2117,7 @@ impl Render for Composer {
             .bg(theme.field)
             .border_1()
             .border_color(border_color)
-            .drag_over::<ExternalPaths>(move |style, _, _, _| {
+            .group_drag_over::<ExternalPaths>("chat-drop", move |style| {
                 style.border_color(drop_border).bg(drop_fill)
             });
         let field = if staged {
@@ -2163,17 +2169,16 @@ impl Render for Composer {
                 .child(trailing)
         };
 
+        // Drop acceptance lives on the chat pane (`shell::render_center`) so a
+        // file hovered anywhere over the conversation — not only this field —
+        // stages into the composer. `drag_over` below still highlights the field.
         let mut column = div()
             .id("composer")
             .relative()
             .w_full()
             .flex()
             .flex_col()
-            .gap(px(8.0))
-            .can_drop(|dragged, _, _| dragged.is::<ExternalPaths>())
-            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
-                this.add_paths(paths.paths().iter().cloned(), cx);
-            }));
+            .gap(px(8.0));
 
         // Reply chip (iPhone parity): set by the hover reply icon on a message.
         if let Some(chat_id) = self.state.read(cx).active_chat_id() {

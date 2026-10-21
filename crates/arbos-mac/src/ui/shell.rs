@@ -7,8 +7,9 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
-    actions, div, prelude::*, px, Animation, AnimationExt, App, Context, Div, Entity, FocusHandle,
-    Focusable, FontWeight, Render, ScrollHandle, SharedString, Stateful, Window,
+    actions, div, prelude::*, px, Animation, AnimationExt, App, Context, Div, Entity,
+    ExternalPaths, FocusHandle, Focusable, FontWeight, Render, ScrollHandle, SharedString,
+    Stateful, Window,
 };
 
 use crate::app::SignInMode;
@@ -1630,7 +1631,7 @@ impl Shell {
 
     // ----- conversation pane ---------------------------------------------------
 
-    fn render_center(&self, sidebar_hidden: bool, cx: &mut Context<Self>) -> Div {
+    fn render_center(&self, sidebar_hidden: bool, cx: &mut Context<Self>) -> Stateful<Div> {
         let theme = Theme::of(cx).clone();
         let state = self.state.read(cx);
         let project = state.selected().cloned();
@@ -1675,7 +1676,9 @@ impl Shell {
             .max_w(px(COMPOSER_WIDTH.max(COLUMN_MAX_WIDTH + 2.0 * PLUS_BUTTON)))
             .child(self.composer.clone());
 
+        // Stateful so the pane can own the file-drop hitbox (anywhere over the chat).
         let mut column = div()
+            .id("chat-pane")
             .relative()
             .flex()
             .flex_col()
@@ -1866,7 +1869,17 @@ impl Shell {
                 .child(self.voice.clone())
                 .child(composer_row);
         }
+        // Accept Finder / file drops anywhere over the conversation (transcript,
+        // empty hero, or composer) — not only the input field. The composer
+        // field uses `group_drag_over("chat-drop")` for the accent highlight.
         column
+            .group("chat-drop")
+            .can_drop(|dragged, _, _| dragged.is::<ExternalPaths>())
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+                this.composer.update(cx, |c, cx| {
+                    c.add_paths(paths.paths().iter().cloned(), cx);
+                });
+            }))
     }
 
     fn render_details(&self, target: &DetailsTarget, cx: &mut Context<Self>) -> impl IntoElement {
