@@ -65,6 +65,8 @@ CLI:  feedback_poller.py [run] | status | testers | set-cursor <ISO-8601>
       | track <id> <issue> "<comment>" [--handle <login>] [--owner <label>] [--target ios|mac]   (a hand-filed, handed-off item;
         workers can do the same without root by commenting `track <id> bc-<owner>` on the issue)
       | leadtime [since-ISO] | memtree-cost [YYYY-MM-DD]   (audit numbers; memtree-cost asks GET /admin/usage/memory-tree, else relay.db as root)
+      | gate-tree <sha-or-branch> <fid>…   (gate a hand-prepared integration tree as one run and land it whole)
+      | gate-abort   (drop the active gate run without verdicts; every ready branch re-batches at its current head)
 """
 
 from __future__ import annotations
@@ -3351,6 +3353,25 @@ def main(argv: list[str]) -> int:
         loop.status()
         print()
         print_testers(loop.store)
+        return 0
+    if cmd == "gate-abort":
+        # Operator: drop the active gate run without verdicts (a member branch was repaired mid-run, the
+        # old head would only fail again); the next tick re-batches every ready branch at its current head.
+        cur = loop.store.cursor()
+        active = cur.get("rust_gate")
+        if not active:
+            print("no active gate run")
+            return 0
+        if active.get("mac_started") and active.get("mac") == "pending":
+            loop.rust_gate_mac("abort", active["id"])
+        cur.pop("rust_gate", None)
+        cur["rust_gate_plan"] = []
+        loop.store.save_cursor(cur)
+        if active.get("branch"):
+            loop.gh.delete_branch(active["branch"])
+        for fid in active.get("members") or {}:
+            loop.store.event(fid, "rust_gate_aborted", run=active["id"], by="operator")
+        print(f"gate {active['id']} aborted ({len(active.get('members') or {})} member(s) re-batch next tick)")
         return 0
     if cmd != "run":
         print(__doc__)
