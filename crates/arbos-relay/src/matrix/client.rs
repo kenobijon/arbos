@@ -355,6 +355,30 @@ impl Client {
         Ok(v["chunk"].as_array().cloned().unwrap_or_default())
     }
 
+    /// One event, as seen by `as_user` (who must be in the room).
+    pub async fn event(&self, room_id: &str, as_user: &str, event_id: &str) -> MxResult<Value> {
+        let path = format!(
+            "/_matrix/client/v3/rooms/{}/event/{}",
+            enc(room_id),
+            enc(event_id)
+        );
+        self.call(Method::GET, &path, Some(as_user), None, None)
+            .await
+    }
+
+    /// `POST /pushers/set` as the user (register or remove the relay's push gateway).
+    pub async fn set_pusher(&self, who: &str, body: &Value) -> MxResult<()> {
+        self.call(
+            Method::POST,
+            "/_matrix/client/v3/pushers/set",
+            Some(who),
+            None,
+            Some(body),
+        )
+        .await?;
+        Ok(())
+    }
+
     /// `m.read` receipt (private when `private` is set).
     pub async fn read_receipt(
         &self,
@@ -429,8 +453,14 @@ impl Client {
     /// Unread counts per joined room as the homeserver computes them (stage B shadow-compare):
     /// one initial `/sync` with an empty timeline, lazy-loaded members.
     pub async fn unread_counts(&self, who: &str) -> MxResult<Vec<(String, i64, i64)>> {
+        // One timeline event per room: with an empty timeline Synapse leaves the room out of
+        // an initial sync altogether, counts included.
         let filter = json!({
-            "room": { "timeline": { "limit": 0 }, "state": { "lazy_load_members": true, "types": [] }, "ephemeral": { "types": [] } },
+            "room": {
+                "timeline": { "limit": 1, "lazy_load_members": true },
+                "state": { "lazy_load_members": true, "types": ["m.room.create"] },
+                "ephemeral": { "types": [] }
+            },
             "presence": { "types": [] }, "account_data": { "types": [] }
         });
         let path = format!(

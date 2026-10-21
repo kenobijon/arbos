@@ -18,6 +18,7 @@ pub mod appservice;
 pub mod backfill;
 pub mod client;
 pub mod db;
+pub mod reads;
 pub mod shadow;
 pub mod worker;
 
@@ -266,10 +267,12 @@ pub enum Job {
     },
     /// The chat is gone: everyone leaves, the room is tombstoned in state.
     CloseRoom { chat_id: String },
+    /// Stage B: register (on) or remove (off) the relay push gateway on a user's devices.
+    Pushers { user_id: String, on: bool },
 }
 
 impl Job {
-    /// Jobs of one chat run in order; this is the queue key.
+    /// Jobs of one chat run in order; this is the queue key (a user key for per-user jobs).
     pub fn chat_key(&self) -> &str {
         match self {
             Job::SyncRoom { chat_id, .. }
@@ -277,6 +280,7 @@ impl Job {
             | Job::Read { chat_id, .. }
             | Job::Archive { chat_id, .. }
             | Job::CloseRoom { chat_id } => chat_id,
+            Job::Pushers { user_id, .. } => user_id,
         }
     }
 }
@@ -376,6 +380,17 @@ impl Matrix {
                 chat_id: chat_id.to_owned(),
                 user_id: user_id.to_owned(),
                 archived,
+            },
+        );
+    }
+
+    /// Stage B flip: the user's devices get (or lose) the relay as their Matrix push gateway.
+    pub fn pushers(&self, state: &AppState, user_id: &str, on: bool) {
+        self.enqueue(
+            state,
+            Job::Pushers {
+                user_id: user_id.to_owned(),
+                on,
             },
         );
     }

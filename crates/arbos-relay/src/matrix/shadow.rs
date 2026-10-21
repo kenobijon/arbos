@@ -182,7 +182,7 @@ pub async fn run(state: &AppState, only_chat: Option<&str>, with_unread: bool) -
                 rep.unread_checked += 1;
                 let r = relay.get(&chat.chat_id).copied().unwrap_or(0);
                 // Synapse may lag by one during a write (design §4 stage B table).
-                if !(r == notif || notif + 1 == r) {
+                if !(r == notif || notif + 1 == r && notif > 0) {
                     rep.unread_diffs.push(UnreadDiff {
                         user_id: u.id.clone(),
                         chat_id: chat.chat_id,
@@ -198,4 +198,74 @@ pub async fn run(state: &AppState, only_chat: Option<&str>, with_unread: bool) -
 
 pub fn to_json(rep: &Report) -> Value {
     serde_json::to_value(rep).unwrap_or(Value::Null)
+}
+
+/// Where nightly reports go: `<data>/matrix/shadow-<YYYY-MM-DD>.json`.
+fn report_dir(state: &AppState) -> std::path::PathBuf {
+    state.cfg.data_dir.join("matrix")
+}
+
+/// The newest stored nightly report, if any.
+pub fn last_report(state: &AppState) -> Option<Value> {
+    let mut files: Vec<_> = std::fs::read_dir(report_dir(state))
+        .ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("shadow-") && n.ends_with(".json"))
+        })
+        .collect();
+    files.sort();
+    let path = files.pop()?;
+    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+}
+
+/// Run the full compare (with unread counts) and keep the report on disk.
+pub async fn run_and_store(state: &AppState) -> Report {
+    let rep = run(state, None, true).await;
+    let dir = report_dir(state);
+    let _ = std::fs::create_dir_all(&dir);
+    let day = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let mut v = to_json(&rep);
+    v["at"] = Value::String(chrono::Utc::now().to_rfc3339());
+    if let Ok(bytes) = serde_json::to_vec_pretty(&v) {
+        let _ = std::fs::write(dir.join(format!("shadow-{day}.json")), bytes);
+    }
+    tracing::info!(
+        chats = rep.chats,
+        diverged = rep.diverged,
+        no_room = rep.no_room,
+        unread_diffs = rep.unread_diffs.len(),
+        "matrix shadow-compare"
+    );
+    rep
+}
+
+/// Nightly at 03:10 UTC while `ARBOS_MATRIX` is not off (the stage B gate reads these).
+pub fn spawn_nightly(state: AppState) {
+    if !state.matrix.cfg.mode.writes() {
+        return;
+    }
+    tokio::spawn(async move {
+        loop {
+            let now = chrono::Utc::now();
+            let next = {
+                let today = now.date_naive().and_hms_opt(3, 10, 0).expect("time");
+                let candidate = today.and_utc();
+                if candidate > now {
+                    candidate
+                } else {
+                    candidate + chrono::Duration::days(1)
+                }
+            };
+            let wait = (next - now).to_std().unwrap_or_default();
+            tokio::time::sleep(wait).await;
+            if state.matrix.cfg.disabled() {
+                continue;
+            }
+            run_and_store(&state).await;
+        }
+    });
 }

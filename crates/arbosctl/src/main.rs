@@ -460,6 +460,9 @@ enum MatrixCmd {
         /// Also compare per-user unread counts.
         #[arg(long)]
         unread: bool,
+        /// Print the newest nightly report instead of running one.
+        #[arg(long)]
+        last: bool,
     },
     /// Per-user read flip (`on` serves that user's reads from the homeserver; `off` rolls back).
     Reads { user: String, state: String },
@@ -983,8 +986,11 @@ async fn main() -> Result<()> {
                                 )
                                 .await?
                         }
-                        MatrixCmd::Shadow { chat, unread } => {
+                        MatrixCmd::Shadow { chat, unread, last } => {
                             let mut q = Vec::new();
+                            if last {
+                                q.push("last=1".to_owned());
+                            }
                             if let Some(c) = chat {
                                 q.push(format!("chat={c}"));
                             }

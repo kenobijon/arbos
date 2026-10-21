@@ -125,10 +125,10 @@ pub async fn ping(
     Json(json!({})).into_response()
 }
 
-/// `POST /_matrix/push/v1/notify` — the relay as push gateway. Stage A: accept and ignore
-/// (today's `chat_events` pushes keep flowing); stage B turns these into APNs alerts for users
-/// whose reads are flipped.
-pub async fn push_notify(State(_state): State<AppState>, body: axum::body::Bytes) -> Response {
+/// `POST /_matrix/push/v1/notify` — the relay as push gateway. Devices of users whose reads
+/// are flipped (stage B) get their APNs alert from here; everything else is accepted and
+/// ignored (today's `chat_events` pushes keep flowing).
+pub async fn push_notify(State(state): State<AppState>, body: axum::body::Bytes) -> Response {
     let v: Value = serde_json::from_slice(&body).unwrap_or_else(|_| json!({}));
     let devices = v["notification"]["devices"]
         .as_array()
@@ -137,9 +137,10 @@ pub async fn push_notify(State(_state): State<AppState>, body: axum::body::Bytes
     tracing::debug!(
         room = v["notification"]["room_id"].as_str().unwrap_or(""),
         devices,
-        "matrix push notify (ignored in stage A)"
+        "matrix push notify"
     );
-    Json(json!({ "rejected": [] })).into_response()
+    let rejected = super::reads::on_notify(&state, &v).await;
+    Json(json!({ "rejected": rejected })).into_response()
 }
 
 // ---- admin ----------------------------------------------------------------------------------------
@@ -222,8 +223,10 @@ pub async fn backfill(
     Json(json!(report)).into_response()
 }
 
-/// `GET /admin/matrix/shadow[?chat=<id>&unread=1]` — shadow-compare (stage B gate): per mirrored
-/// chat, message ids and members on both sides; with `unread=1` also per-user unread counts.
+/// `GET /admin/matrix/shadow[?chat=<id>&unread=1 | ?store=1 | ?last=1]` — shadow-compare (stage B
+/// gate): per mirrored chat, message ids and members on both sides; with `unread=1` also per-user
+/// unread counts. `store=1` runs the nightly shape and keeps the report; `last=1` returns the
+/// newest stored report.
 pub async fn shadow_compare(
     State(state): State<AppState>,
     principal: Principal,
@@ -234,6 +237,16 @@ pub async fn shadow_compare(
     }
     if !state.matrix.cfg.mode.writes() {
         return api_error(StatusCode::CONFLICT, "matrix_off", "ARBOS_MATRIX is off");
+    }
+    if q.get("last").is_some_and(|l| l == "1") {
+        return match shadow::last_report(&state) {
+            Some(v) => Json(v).into_response(),
+            None => api_error(StatusCode::NOT_FOUND, "not_found", "no nightly report yet"),
+        };
+    }
+    if q.get("store").is_some_and(|l| l == "1") {
+        let rep = shadow::run_and_store(&state).await;
+        return Json(shadow::to_json(&rep)).into_response();
     }
     let rep = shadow::run(
         &state,
@@ -275,7 +288,11 @@ pub async fn set_reads(
         return *r;
     }
     match state.db.set_matrix_reads(&user_id, b.on) {
-        Ok(true) => Json(json!({ "user_id": user_id, "matrix_reads": b.on })).into_response(),
+        Ok(true) => {
+            state.matrix.pushers(&state, &user_id, b.on);
+            Json(json!({ "user_id": user_id, "matrix_reads": b.on, "mode": state.matrix.cfg.mode.as_str() }))
+                .into_response()
+        }
         Ok(false) => api_error(StatusCode::NOT_FOUND, "not_found", "no such user"),
         Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
     }
