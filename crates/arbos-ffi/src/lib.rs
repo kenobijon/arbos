@@ -91,6 +91,8 @@ pub enum RoomAction {
         typing: Option<bool>,
         in_call: Option<String>,
         mine: bool,
+        /// Full inbound PRESENCE header JSON (Swift `notePresence` reads `user` / `at`).
+        header_json: String,
     },
     DroppedOversize {
         bytes: u64,
@@ -142,12 +144,14 @@ impl From<ClientAction> for RoomAction {
                 typing,
                 in_call,
                 mine,
+                header,
             } => Self::Presence {
                 device,
                 handle,
                 typing,
                 in_call,
                 mine,
+                header_json: serde_json::to_string(&header).unwrap_or_else(|_| "{}".into()),
             },
             ClientAction::DroppedOversize { bytes } => Self::DroppedOversize {
                 bytes: bytes as u64,
