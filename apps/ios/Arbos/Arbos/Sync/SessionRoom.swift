@@ -146,6 +146,10 @@ final class SessionRoom: RoomSync {
         urlSession = nil
     }
 
+    deinit {
+        urlSession?.invalidateAndCancel()
+    }
+
     func wake(reason: String) {
         session.wake(reason: reason)
         drain()
@@ -393,13 +397,16 @@ private final class RoomSocketOpenDelegate: NSObject, URLSessionWebSocketDelegat
         webSocketTask: URLSessionWebSocketTask,
         didOpenWithProtocol protocol: String?
     ) {
+        // Only the open for the current socket — an older cancelled task must
+        // not start the session for a newer one.
+        guard webSocketTask === socket?.task else { return }
         socket?.handleDidOpen()
     }
 }
 
 private final class URLSessionRoomSocket: RoomSocket {
     var onOpen: (() -> Void)?
-    private let task: URLSessionWebSocketTask
+    fileprivate let task: URLSessionWebSocketTask
 
     init(task: URLSessionWebSocketTask) {
         self.task = task

@@ -882,4 +882,62 @@ mod tests {
             1
         );
     }
+
+    #[test]
+    fn inbound_presence_passes_header_and_flags_mine() {
+        let mut s = RoomSession::new("dev:me", "proj/room", 0, vec![]);
+        s.on_open(1_000);
+        let _ = s.drain_actions();
+
+        let other = Frame::new(
+            FrameType::Presence,
+            json!({
+                "device": "dev:other",
+                "user": "u1",
+                "at": 42,
+                "handle": "h",
+            }),
+            Vec::new(),
+        )
+        .encode()
+        .to_vec();
+        s.on_frame(&other);
+        let actions = s.drain_actions();
+        let presence: Vec<_> = actions
+            .iter()
+            .filter_map(|a| match a {
+                RoomAction::Presence {
+                    mine,
+                    handle,
+                    header,
+                    ..
+                } => Some((*mine, handle.clone(), header.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(presence.len(), 1);
+        assert!(!presence[0].0);
+        assert_eq!(presence[0].1.as_deref(), Some("h"));
+        assert_eq!(
+            presence[0].2.get("user").and_then(Value::as_str),
+            Some("u1")
+        );
+        assert_eq!(presence[0].2.get("at").and_then(Value::as_i64), Some(42));
+
+        let mine_frame = Frame::new(
+            FrameType::Presence,
+            json!({ "device": "dev:me", "at": 1 }),
+            Vec::new(),
+        )
+        .encode()
+        .to_vec();
+        s.on_frame(&mine_frame);
+        let mine_actions = s.drain_actions();
+        assert!(
+            mine_actions
+                .iter()
+                .any(|a| matches!(a, RoomAction::Presence { mine: true, .. })),
+            "PRESENCE from self must set mine true"
+        );
+    }
 }
