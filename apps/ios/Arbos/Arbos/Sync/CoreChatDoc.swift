@@ -1,0 +1,155 @@
+// Chat doc on arbos-core via ArbosFFI.ChatDoc (crdt-sync step 7b-1).
+// Same surface as Sync/ChatDoc.swift for AppModel / SessionRoom; unused until 7b-2.
+
+import Foundation
+import ArbosFFI
+
+/// Loro chat replica backed by `ArbosFFI.ChatDoc` (shared core writers/readers).
+final class CoreChatDoc {
+    let key: Id
+    private let doc: ArbosFFI.ChatDoc
+    /// Retain UniFFI foreign listeners for the lifetime of this wrapper.
+    private var changeListener: DocChangeListener?
+    private var localUpdateListener: LocalUpdateListener?
+
+    init(key: Id) {
+        self.key = key
+        self.doc = ArbosFFI.ChatDoc.open()
+    }
+
+    var count: Int { Int(doc.messageCount()) }
+
+    /// Nothing imported or written yet (a fresh replica is not worth saving).
+    var isEmpty: Bool { doc.isEmpty() }
+
+    func commit() { doc.commit() }
+
+    func importUpdate(_ bytes: Data) throws {
+        try doc.apply(bytes: bytes)
+    }
+
+    /// Does the replica already contain this checkpoint frontier?
+    func contains(frontier: Data) -> Bool {
+        doc.containsFrontier(frontier: frontier)
+    }
+
+    /// Bytes for the on-device store.
+    func exportSnapshot() throws -> Data {
+        doc.snapshot()
+    }
+
+    // MARK: Reading
+
+    func readMessage(_ ix: Int) -> Message? {
+        guard ix >= 0, ix < count,
+              let raw = doc.readMessageJson(index: UInt64(ix)),
+              let data = raw.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data)
+        else { return nil }
+        return DocJSON.message(json, chatId: key)
+    }
+
+    func readAll() -> [Message] {
+        (0..<count).compactMap(readMessage)
+    }
+
+    func mapValue(_ name: String) -> [String: Any] {
+        let raw = doc.readMapJson(name: name)
+        guard let data = raw.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data),
+              let dict = json as? [String: Any]
+        else { return [:] }
+        return dict
+    }
+
+    // MARK: Writing
+
+    func insertUserMessage(
+        id: Id, text: String, deviceId: String, attachments: [Attachment] = [],
+        author: ChatDoc.Author? = nil, mentions: [String] = [], replyTo: String? = nil
+    ) throws {
+        let opts = UserMessageOptsRecord(
+            attachments: attachments.map {
+                UserAttachmentRecord(name: $0.name, mime: $0.mime, kind: $0.kind, blobRef: $0.blobRef)
+            },
+            mentions: mentions,
+            replyTo: replyTo,
+            sender: author?.sender,
+            senderHandle: author?.handle,
+            senderName: author?.name,
+            senderAvatar: author?.avatar
+        )
+        try doc.insertUserMessage(id: id, text: text, deviceId: deviceId, opts: opts)
+    }
+
+    /// Optional `callId` is passed to the FFI as `linkId` (core's `callId`).
+    func insertSystemLine(id: Id, text: String, deviceId: String, callId: String? = nil) throws {
+        try doc.insertSystemLine(id: id, text: text, deviceId: deviceId, linkId: callId)
+    }
+
+    func insertAssistantGreeting(
+        id: Id, text: String, deviceId: String, projectId: Id, agentName: String
+    ) throws {
+        try doc.insertAssistantGreeting(
+            id: id, text: text, deviceId: deviceId, projectId: projectId, agentName: agentName
+        )
+    }
+
+    func toggleReaction(messageId: Id, emoji: String, sender: String) throws {
+        try doc.toggleReaction(messageId: messageId, emoji: emoji, sender: sender)
+    }
+
+    /// Append a `commands` row (`send`, `stop`, `answer`, `retry`, `retitle`). Does not commit.
+    func pushCommand(_ kind: String, payload: [String: Any], device: String) throws {
+        let data = try JSONSerialization.data(withJSONObject: payload)
+        let json = String(data: data, encoding: .utf8) ?? "{}"
+        _ = try doc.addCommand(kind: kind, payloadJson: json, deviceId: device)
+    }
+
+    func setModelSettings(model: String, effort: Effort) throws {
+        try doc.setModelSettings(model: model, effort: effort.rawValue)
+    }
+
+    // MARK: Subscriptions
+
+    func onChange(_ handler: @escaping (Touched) -> Void) {
+        let bridge = CoreChatDocChangeListener(handler)
+        changeListener = bridge
+        doc.onChange(listener: bridge)
+    }
+
+    func onLocalUpdate(_ handler: @escaping (Data) -> Void) {
+        let bridge = CoreChatDocLocalUpdateListener(handler)
+        localUpdateListener = bridge
+        doc.onLocalUpdate(listener: bridge)
+    }
+}
+
+/// Maps `ArbosFFI.Touched` onto the app's `Touched`.
+private final class CoreChatDocChangeListener: DocChangeListener, @unchecked Sendable {
+    private let handler: (Touched) -> Void
+
+    init(_ handler: @escaping (Touched) -> Void) {
+        self.handler = handler
+    }
+
+    func onChange(touched: ArbosFFI.Touched) {
+        var out = Touched()
+        out.listChanged = touched.listChanged
+        out.messages = Set(touched.messages.map { Int($0) })
+        out.other = touched.other
+        handler(out)
+    }
+}
+
+private final class CoreChatDocLocalUpdateListener: LocalUpdateListener, @unchecked Sendable {
+    private let handler: (Data) -> Void
+
+    init(_ handler: @escaping (Data) -> Void) {
+        self.handler = handler
+    }
+
+    func onLocalUpdate(update: Data) {
+        handler(update)
+    }
+}
