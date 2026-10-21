@@ -194,6 +194,7 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
     let selected = state.selected_project.clone();
     let query = shell.search_input.read(cx).text().trim().to_lowercase();
     let machine = state.machine.shown_state();
+    let waitlist_position = state.machine.waitlist_position;
 
     let mut rows: Vec<(u64, RowView)> = Vec::new();
     for p in state.projects.iter() {
@@ -395,7 +396,7 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         .overflow_y_scroll();
     // D89: the host that runs everyone's computer is full; this account is in line. Chats and
     // people work meanwhile; agents start once the machine is ready.
-    if let Some(n) = state.machine.waitlist_position {
+    if let Some(n) = waitlist_position {
         list = list.child(
             div()
                 .id("sidebar-waitlist-card")
