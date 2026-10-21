@@ -254,10 +254,22 @@ jobs:
           export PATH="$HOME/.cargo/bin:$PATH"
           rustup show active-toolchain || rustup toolchain install
           rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      # GitHub-hosted runner: nothing survives the job, so the registry and target dir come from the
+      # Actions cache. Self-hosted (the EC2 Mac): the disk is persistent, so the build goes to a target
+      # dir outside the workspace and the cache action is skipped — saving the cache took 4.5 min of the
+      # 30-min tag→published lead time of the v0.6.93 hotfix (P0 #1208), restoring it took minutes more.
       - uses: Swatinem/rust-cache@v2
+        if: runner.environment != 'self-hosted'
         with:
           key: release-macos
           cache-on-failure: true
+      - name: Persistent target dir on the self-hosted runner
+        if: runner.environment == 'self-hosted'
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/arbos-release-target"
+          echo "CARGO_TARGET_DIR=$HOME/arbos-release-target" >> "$GITHUB_ENV"
+          echo "target dir: $HOME/arbos-release-target ($(du -sh "$HOME/arbos-release-target" 2>/dev/null | cut -f1) so far)"
       # The certificate goes into a throwaway keychain in $RUNNER_TEMP and is
       # removed by the last step whatever happens. No tracing in these steps.
       - name: Import the Developer ID certificate
