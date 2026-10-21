@@ -598,33 +598,7 @@ pub fn seed_state(cfg: &Config) -> Result<()> {
         std::fs::create_dir_all(&claude_dir)?;
         std::fs::copy(claude_seed, claude_dir.join("settings.json"))?;
     }
-    // models.json: the relay proxy as provider `arbos-relay` through the loopback stub (D2).
-    // The built-in `openrouter` provider pointed at the loopback stub keeps pi's OpenRouter behaviour
-    // (cache_control breakpoints for Anthropic models, usage accounting) while the key stays on the relay.
-    // `ARBOS_CONTEXT_WINDOW_TOKENS_OVERRIDE`: when set, forces every model stub's contextWindow (unset = 1_000_000).
-    let context_window = context_window_tokens();
-    let models = json!({
-        "providers": {
-            "openrouter": { "baseUrl": format!("{}/v1", cfg.proxy_base()), "apiKey": cfg.box_token },
-            "arbos-relay": {
-                "baseUrl": format!("{}/v1", cfg.proxy_base()),
-                "api": "openai-completions",
-                "apiKey": cfg.box_token,
-                "models": [
-                    { "id": cfg.talking_model, "name": format!("{} (relay)", cfg.talking_model), "reasoning": false, "input": ["text", "image"], "contextWindow": context_window, "maxTokens": 32000, "cost": { "input": 0.1, "output": 0.5, "cacheRead": 0.01, "cacheWrite": 0.125 } },
-                    { "id": cfg.subagent_model, "name": format!("{} (relay)", cfg.subagent_model), "reasoning": true, "input": ["text", "image"], "contextWindow": context_window, "maxTokens": 64000, "cost": { "input": 2, "output": 10, "cacheRead": 0.2, "cacheWrite": 2.5 } }
-                ]
-            }
-        }
-    });
-    std::fs::write(
-        cfg.pi_dir().join("models.json"),
-        serde_json::to_string_pretty(&models)?,
-    )?;
-    std::fs::write(
-        cfg.prime_dir().join("models.json"),
-        serde_json::to_string_pretty(&models)?,
-    )?;
+    write_models_json(cfg, &cfg.talking_model, &cfg.subagent_model)?;
     let settings = json!({
         "defaultProvider": cfg.pi_provider(), "defaultModel": cfg.talking_model, "defaultThinkingLevel": "off",
         "defaultTools": ["read", "bash", "edit", "write", "codemode"],
@@ -671,14 +645,61 @@ pub fn seed_state(cfg: &Config) -> Result<()> {
     Ok(())
 }
 
-/// Provider context-window size for model stubs. `ARBOS_CONTEXT_WINDOW_TOKENS_OVERRIDE` (unset = 1_000_000).
+/// The context window pi plans against (and compacts under). `ARBOS_CONTEXT_WINDOW_TOKENS_OVERRIDE`
+/// (unset = [`DEFAULT_CONTEXT_WINDOW_TOKENS`]).
 fn context_window_tokens() -> u64 {
     std::env::var("ARBOS_CONTEXT_WINDOW_TOKENS_OVERRIDE")
         .ok()
         .and_then(|s| s.parse().ok())
         .filter(|&n| n > 0)
-        .unwrap_or(1_000_000)
+        .unwrap_or(DEFAULT_CONTEXT_WINDOW_TOKENS)
 }
+
+/// models.json for pi (and Prime): the relay proxy as provider `arbos-relay` through the loopback
+/// stub (D2). The built-in `openrouter` provider pointed at the loopback stub keeps pi's OpenRouter
+/// behaviour (cache_control breakpoints for Anthropic models, usage accounting) while the key stays
+/// on the relay. Every model stub carries [`context_window_tokens`] as its window, and the live
+/// talking / subagent models of the built-in provider get the same window through `modelOverrides`
+/// — pi's own registry says 1M for them, so a chat's session never compacted: Lium's group session
+/// reached 242k tokens, every turn rewrote a $2.6–3 cache and the provider refused all of them
+/// (feedback lium-empty-reply-2026-10-21). Rewritten when the models change (`apply_models`); pi
+/// reads it at (re)spawn.
+pub fn write_models_json(cfg: &Config, talking: &str, subagent: &str) -> Result<()> {
+    let context_window = context_window_tokens();
+    let mut window_overrides = serde_json::Map::new();
+    for id in [talking, subagent] {
+        window_overrides.insert(id.to_owned(), json!({ "contextWindow": context_window }));
+    }
+    let mut models = json!({
+        "providers": {
+            "openrouter": { "baseUrl": format!("{}/v1", cfg.proxy_base()), "apiKey": cfg.box_token },
+            "arbos-relay": {
+                "baseUrl": format!("{}/v1", cfg.proxy_base()),
+                "api": "openai-completions",
+                "apiKey": cfg.box_token,
+                "models": [
+                    { "id": talking, "name": format!("{talking} (relay)"), "reasoning": false, "input": ["text", "image"], "contextWindow": context_window, "maxTokens": 32000, "cost": { "input": 0.1, "output": 0.5, "cacheRead": 0.01, "cacheWrite": 0.125 } },
+                    { "id": subagent, "name": format!("{subagent} (relay)"), "reasoning": true, "input": ["text", "image"], "contextWindow": context_window, "maxTokens": 64000, "cost": { "input": 2, "output": 10, "cacheRead": 0.2, "cacheWrite": 2.5 } }
+                ]
+            }
+        }
+    });
+    // Prime reads the same file but not pi's `modelOverrides` key: write its copy first.
+    std::fs::write(
+        cfg.prime_dir().join("models.json"),
+        serde_json::to_string_pretty(&models)?,
+    )?;
+    models["providers"]["openrouter"]["modelOverrides"] = Value::Object(window_overrides);
+    std::fs::write(
+        cfg.pi_dir().join("models.json"),
+        serde_json::to_string_pretty(&models)?,
+    )?;
+    Ok(())
+}
+
+/// Anthropic's standard window. With pi's 16k reserve a chat compacts at ~184k tokens, before the
+/// 1M-tier pricing and the refusals seen past 200k.
+pub const DEFAULT_CONTEXT_WINDOW_TOKENS: u64 = 200_000;
 
 /// Seed files are the image's: a file is copied when missing **or when its bytes differ** from the
 /// seed, so an image roll updates `arbos-pi-ext` (and every other seed file) in a workspace that
