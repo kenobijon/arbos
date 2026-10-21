@@ -3,6 +3,7 @@
 
 pub mod approval;
 pub mod auth;
+pub mod avatar;
 pub mod doc;
 pub mod ids;
 pub mod local;

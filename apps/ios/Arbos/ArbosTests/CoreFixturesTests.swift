@@ -29,10 +29,10 @@ final class CoreFixturesTests: XCTestCase {
         return rows
     }
 
-    /// loro-swift path: import the snapshot with the app's ChatDoc and compare shape.
-    func testLoroSwiftReadsCoreChatDocFixture() throws {
+    /// CoreChatDoc path: import the snapshot and compare shape.
+    func testCoreChatDocReadsFixture() throws {
         let snap = try fixtureData("chat_doc.bin")
-        let doc = Arbos.ChatDoc(key: "chat-fixture")
+        let doc = CoreChatDoc(key: "chat-fixture")
         try doc.importUpdate(snap)
         let messages = doc.readAll()
         let expected = try expectedRows()

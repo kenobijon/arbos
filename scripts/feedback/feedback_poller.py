@@ -62,9 +62,12 @@ CLI:  feedback_poller.py [run] | status | testers | set-cursor <ISO-8601>
       | inject <image|-> "<comment>" [ios|mac] [--handle <login>] [--origin "<text>"] [--email <tester email, grouping only>]
                [--note "<owner decision / scope>"] [--id <slug used as the feedback id>]
       | requeue <id>… [--allow "<who confirmed>"] | prioritize <id>… | confirm <id> [note] | handoff <id> [label] | deployed <id> [note]
+      | supersede <id> <by-id> [note]   (a shipped fix was reverted/regressed; <by-id> re-lands it and closes both issues when it ships)
       | track <id> <issue> "<comment>" [--handle <login>] [--owner <label>] [--target ios|mac]   (a hand-filed, handed-off item;
         workers can do the same without root by commenting `track <id> bc-<owner>` on the issue)
       | leadtime [since-ISO] | memtree-cost [YYYY-MM-DD]   (audit numbers; memtree-cost asks GET /admin/usage/memory-tree, else relay.db as root)
+      | gate-tree <sha-or-branch> <fid>…   (gate a hand-prepared integration tree as one run and land it whole)
+      | gate-abort   (drop the active gate run without verdicts; every ready branch re-batches at its current head)
 """
 
 from __future__ import annotations
@@ -579,15 +582,22 @@ class GitHub:
         return self.later_run("ios.yml", "push", sha, since_iso)
 
     def later_release(self, sha: str, since_iso: str) -> dict | None:
-        return self.later_run("release.yml", "workflow_run", sha, since_iso)
+        # A hand-tagged hotfix (`git tag vX.Y.Z` on a bump commit, P0 #1208 → v0.6.93) runs release.yml
+        # on the tag ref with event `push`; it ships the fix just like an auto-stable run on main does.
+        return self.later_run("release.yml", "workflow_run", sha, since_iso, tags_too=True)
 
-    def later_run(self, workflow: str, event: str, sha: str, since_iso: str) -> dict | None:
-        """The earliest successful run of `workflow` on main, started after `since_iso`, whose commit
-        contains `sha` (a run cancelled by a newer push still ships in that newer build)."""
-        q = urllib.parse.urlencode({"branch": "main", "status": "success", "created": f">={since_iso}", "per_page": 30})
-        runs = self.repo_api("GET", f"/actions/workflows/{workflow}/runs?{q}").get("workflow_runs", [])
+    def later_run(self, workflow: str, event: str, sha: str, since_iso: str, tags_too: bool = False) -> dict | None:
+        """The earliest successful run of `workflow` on main (or, with `tags_too`, on a vX.Y.Z tag), started
+        after `since_iso`, whose commit contains `sha` (a run cancelled by a newer push still ships in that
+        newer build)."""
+        q = {"status": "success", "created": f">={since_iso}", "per_page": 30}
+        if not tags_too:
+            q["branch"] = "main"
+        runs = self.repo_api("GET", f"/actions/workflows/{workflow}/runs?{urllib.parse.urlencode(q)}").get("workflow_runs", [])
         for r in sorted(runs, key=lambda r: r["run_started_at"]):
-            if r.get("event") != event:
+            on_main = r.get("head_branch") == "main" and r.get("event") == event
+            on_tag = tags_too and r.get("event") == "push" and re.fullmatch(r"v\d+\.\d+\.\d+", r.get("head_branch") or "")
+            if not (on_main or on_tag):
                 continue
             try:
                 cmp = self.repo_api("GET", f"/compare/{sha}...{r['head_sha']}")
@@ -1534,7 +1544,7 @@ class Loop:
         commit on main → `pushed`. Red → the diagnostics go back to the agent as a follow-up (new commit on
         the same branch), at most 2 retries. Rust-touching branches are never merged without the gate
         (2026-10-19: #1058 merged with header.rs not compiling and blocked every Mac release)."""
-        head = st["branch_head"]
+        head = self.refresh_branch_head(fid, st)
         if st.get("expects_rust") is None:
             st["expects_rust"] = bool(self.rust_crates(st.get("files") or []))
         if st.get("expects_rust") or st.get("expects_ios"):
@@ -1549,6 +1559,43 @@ class Loop:
                 # branches each compiled alone, their textual merge removed `showMembers`, main was red 25 min).
                 return
         self.merge_branch(fid, st)
+
+    def branch_files(self, fid: str, cmp: dict) -> list[str]:
+        """Files a branch changes against main; when the head is a merge of main the compare lists none,
+        so take them from the tagged commits themselves."""
+        files = [f["filename"] for f in cmp.get("files", [])]
+        if files:
+            return files
+        seen: list[str] = []
+        for c in cmp.get("commits", []):
+            if f"[feedback {fid}]" in c["commit"]["message"]:
+                for f in self.gh.commit(c["sha"]).get("files", []):
+                    if f["filename"] not in seen:
+                        seen.append(f["filename"])
+        return seen
+
+    def refresh_branch_head(self, fid: str, st: dict) -> str:
+        """`gating` gates the branch at its CURRENT head. A worker who pushes a repair, or the rest of the fix,
+        while the batch is still building must not end up with only the first commit gated and merged
+        (P0 #1215, 21:30: the fmt repair and the release.yml steps sat behind the first push, unseen)."""
+        recorded = st["branch_head"]
+        if not st.get("branch"):
+            return recorded
+        head = self.gh.branch_head(st["branch"])
+        if not head or head == recorded:
+            return recorded
+        cmp = self.gh.compare("main", head)
+        if cmp.get("status") not in ("ahead", "diverged"):
+            return recorded
+        files = self.branch_files(fid, cmp) or st.get("files") or []
+        st.update(branch_head=head, files=files,
+                  expects_ios=any(f.startswith(("apps/ios/", "crates/arbos-core/", "crates/arbos-client/", "crates/arbos-ffi/")) or f == ".github/workflows/ios.yml" for f in files),
+                  expects_rust=bool(self.rust_crates(files)),
+                  expects_ci=any(not f.startswith("apps/ios/") for f in files))
+        self.store.save_state(fid, st)
+        self.store.event(fid, "branch_moved", branch=st["branch"], previous=recorded, head=head, files=files)
+        log(f"[{fid}] {st['branch']} moved {recorded[:8]} → {head[:8]} while gating; the gate takes the new head")
+        return head
 
     def gate_followup(self, fid: str, st: dict, which: str, output: str) -> None:
         """A gate went red: send the diagnostics back to the agent (at most 2 retries), never merge."""
@@ -1670,6 +1717,14 @@ class Loop:
         if active and active.get("fid"):
             # A run from the one-at-a-time scheduler (before batch mode): nothing to resume, re-batch it.
             cur.pop("rust_gate", None); self.store.save_cursor(cur); active = None
+        for marker in self.cfg.state_dir.glob("gate-abort.*"):
+            if active and marker.name == f"gate-abort.{active['id']}":
+                # `gate-abort` arrived while a tick was in flight (that tick would have written its stale
+                # cursor back over the abort); the marker survives cursor saves, so the abort happens here.
+                self.gate_abort(active, cur, by="operator")
+                active = None
+            else:
+                marker.unlink(missing_ok=True)  # names a run that already settled
         if active and active.get("warm"):
             out = self.rust_gate_mac("status", active["id"])
             verdict = (out or "running\n").partition("\n")[0].strip()
@@ -1714,6 +1769,24 @@ class Loop:
             cur["rust_gate"] = {"id": f"warm-{main_head[:8]}", "members": {}, "started": iso(), "warm": True, "base": main_head}
             self.store.save_cursor(cur)
             log(f"Rust gate: warm-up release build of main {main_head[:8]} started on the Mac")
+
+    def gate_abort_marker(self, run_id: str) -> Path:
+        return self.cfg.state_dir / f"gate-abort.{run_id}"
+
+    def gate_abort(self, active: dict, cur: dict, by: str) -> None:
+        """Drop the active gate run without verdicts: Mac build aborted, integration branch deleted, bisect plan
+        cleared. Every ready branch re-batches at its current head on the next tick."""
+        if active.get("mac_started") and active.get("mac") == "pending":
+            self.rust_gate_mac("abort", active["id"])
+        cur.pop("rust_gate", None)
+        cur["rust_gate_plan"] = []
+        self.store.save_cursor(cur)
+        self.gate_abort_marker(active["id"]).unlink(missing_ok=True)
+        if active.get("branch"):
+            self.gh.delete_branch(active["branch"])
+        for fid in active.get("members") or {}:
+            self.store.event(fid, "rust_gate_aborted", run=active["id"], by=by)
+        log(f"Gate {active['id']}: aborted by {by} ({len(active.get('members') or {})} member(s) re-batch next tick)")
 
     def rust_gate_mac(self, *args: str) -> str | None:
         """ssh to the gate Mac; None when it is unreachable (the Linux half keeps going, the Mac half waits)."""
@@ -2379,9 +2452,14 @@ class Loop:
         with contextlib.suppress(HttpError):
             self.gh.close_issue(st["issue"], "completed", body)
             self.gh.set_labels(st["issue"], [], ["fixed-on-main", "in-progress", "landed-not-shipped"])
+        for extra in st.get("also_closes") or []:
+            # Issues this fix re-lands (`supersede <id> <by-id>`: their first fix was reverted or regressed).
+            with contextlib.suppress(HttpError):
+                self.gh.close_issue(extra, "completed", body + f" Re-landed by #{st['issue']}.")
+                self.gh.set_labels(extra, ["shipped"], ["fixed-on-main", "in-progress", "landed-not-shipped"])
         st["closed"] = {"reason": "completed", "at": iso(), "where": self.fixed_in(st)}
         self.store.save_state(fid, st)
-        self.store.event(fid, "closed", reason="completed", where=st["closed"]["where"])
+        self.store.event(fid, "closed", reason="completed", where=st["closed"]["where"], also=st.get("also_closes") or [])
 
     def close_not_planned(self, fid: str, st: dict, why: str) -> None:
         """Won't-fix / duplicate / no-change / superseded: closed with reason not_planned and one line of why."""
@@ -3102,6 +3180,39 @@ def main(argv: list[str]) -> int:
                     loop.gh.set_labels(st["issue"], [], ["needs-human", "fixed-on-main", "shipped", "shipped-unverified", "no-change"])
             print(f"{fid}: queued ({tier}, {st['tester']})")
         return 0
+    if cmd == "supersede":
+        # `supersede <id> <by-id> [note]`: a shipped fix was reverted or regressed and <by-id> re-lands it. The
+        # item becomes `superseded`, its issue is reopened (Jacob's rule: reopen on regression) and closes
+        # again, with the same "Fixed in …" line, when <by-id> ships.
+        if len(argv) < 4:
+            print('supersede <id> <by-id> [note]')
+            return 2
+        store = Store(cfg)
+        loop = Loop(cfg)
+        fid, by = argv[2], argv[3]
+        note = " ".join(argv[4:]) or "the first fix was reverted"
+        st, bst = store.state(fid), store.state(by)
+        if not st or not bst:
+            print(f"{fid if not st else by}: unknown")
+            return 2
+        st.update(status="superseded", superseded_by=by, superseded_at=iso(), superseded_note=note[:300])
+        st["reopened"] = {"at": iso(), "why": note[:300], "by": by}
+        store.save_state(fid, st)
+        store.event(fid, "superseded", by=by, note=note[:300])
+        if st.get("issue") and st["issue"] not in (bst.get("also_closes") or []):
+            bst["also_closes"] = (bst.get("also_closes") or []) + [st["issue"]]
+            store.save_state(by, bst)
+        if st.get("issue"):
+            text = (f"Reopened: {note.rstrip('.')}. Re-landed by #{bst.get('issue')} (`{by}`); this issue closes again "
+                    f"when that fix is in a build.")
+            with contextlib.suppress(HttpError):
+                if loop.gh.issue(st["issue"]).get("state") == "closed":
+                    loop.gh.reopen_issue(st["issue"], text)
+                else:
+                    loop.gh.comment(st["issue"], text)
+                loop.gh.set_labels(st["issue"], ["superseded"], ["shipped", "shipped-unverified", "fixed-on-main"])
+        print(f"{fid}: superseded by {by} (#{st.get('issue')} reopened, closes with #{bst.get('issue')})")
+        return 0
     if cmd == "confirm":
         # Device-level evidence arrived (tester / Jacob / a real-device run): shipped-unverified → shipped.
         store = Store(cfg)
@@ -3344,6 +3455,25 @@ def main(argv: list[str]) -> int:
         loop.status()
         print()
         print_testers(loop.store)
+        return 0
+    if cmd == "gate-abort":
+        # Operator: drop the active gate run without verdicts (a member branch was repaired mid-run, the
+        # old head would only fail again); the next tick re-batches every ready branch at its current head.
+        cur = loop.store.cursor()
+        active = cur.get("rust_gate")
+        if not active:
+            print("no active gate run")
+            return 0
+        with (cfg.state_dir / ".lock").open("w") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                # A tick is running with its own copy of the cursor and would write it back over the abort.
+                loop.gate_abort_marker(active["id"]).touch()
+                print(f"a tick is in flight; gate {active['id']} is aborted at the start of the next tick (marker written)")
+                return 0
+            loop.gate_abort(active, cur, by="operator")
+        print(f"gate {active['id']} aborted ({len(active.get('members') or {})} member(s) re-batch next tick)")
         return 0
     if cmd != "run":
         print(__doc__)

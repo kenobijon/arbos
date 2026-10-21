@@ -218,7 +218,7 @@ extension AppModel {
     }
 
     /// Sends in fixture mode append locally so the composer can be exercised,
-    /// then a scripted reply streams in word by word.
+    /// then a scripted reply lands as complete bubbles (ack → working → result).
     func fixtureAppend(chatId: Id, text: String, attachments: [Attachment], replyTo: Id? = nil) {
         var list = messages[chatId] ?? []
         // Finish the fixture's stuck "working" turn so the demo reads cleanly.
@@ -278,24 +278,12 @@ extension AppModel {
             work.parts = [.text(id: "\(workId)-t", text: "Got your style from 40 recent messages.")]
             replace(work)
         }
-        // 3. Result, streamed — clone stays short and conversational.
+        // 3. Result as one complete bubble — no token stream (feedback AFyd_3zYZ2uaRwPk9_7_rMs).
+        try? await Task.sleep(nanoseconds: clone ? 500_000_000 : 700_000_000)
         let resultText = clone
             ? "Got `subtensor/` on main. What do you want to do with it?"
             : "Done. Short replies from now on, and I'll keep anything that goes out on Discord to one or two casual lines in your voice."
-        var result = bubble("", done: false)
-        result.parts = [.status(id: "\(result.id)-s", code: .working, message: "Working")]
-        append(result)
-        try? await Task.sleep(nanoseconds: clone ? 500_000_000 : 700_000_000)
-        var text = ""
-        for w in resultText.split(separator: " ") {
-            text += (text.isEmpty ? "" : " ") + w
-            result.parts = [.text(id: "\(result.id)-t", text: text)]
-            replace(result)
-            try? await Task.sleep(nanoseconds: 60_000_000)
-        }
-        result.status = .done
-        result.completedAt = nowMs()
-        replace(result)
+        append(bubble(resultText))
     }
 
     private func user(_ id: Id, _ chat: Id, _ text: String, at: Int64) -> Message {
