@@ -1,5 +1,5 @@
-//! Box lifecycle: providers (Daytona, local process, local Docker), wake jobs,
-//! keep-alive, liveness (design §4.5 Flow 5, §4.6; crdt-sync §8).
+//! Box lifecycle: providers (Daytona, local process, local Docker, gVisor sandboxes on the relay
+//! host — D89, `fleet.rs`), wake jobs, keep-alive, liveness (design §4.5 Flow 5, §4.6; crdt-sync §8).
 
 use std::collections::BTreeMap;
 use std::process::Stdio;
@@ -23,6 +23,8 @@ pub enum Provider {
     Daytona,
     Process,
     Docker,
+    /// A gVisor (`runsc`) container on the relay host with a per-user `/work` image (D89).
+    Gvisor,
 }
 
 impl Provider {
@@ -31,6 +33,7 @@ impl Provider {
             "daytona" => Some(Provider::Daytona),
             "process" => Some(Provider::Process),
             "docker" => Some(Provider::Docker),
+            "gvisor" => Some(Provider::Gvisor),
             _ => None,
         }
     }
@@ -39,7 +42,23 @@ impl Provider {
             Provider::Daytona => "daytona",
             Provider::Process => "process",
             Provider::Docker => "docker",
+            Provider::Gvisor => "gvisor",
         }
+    }
+}
+
+/// Where a user without a box gets one: `ARBOS_DEFAULT_PROVIDER` when set (D89: `gvisor` on the
+/// arbos.life host), else Daytona when it is configured, else a local process.
+pub fn default_provider(state: &AppState) -> Provider {
+    match state
+        .cfg
+        .default_provider
+        .as_deref()
+        .and_then(Provider::parse)
+    {
+        Some(p) => p,
+        None if state.daytona.is_some() => Provider::Daytona,
+        None => Provider::Process,
     }
 }
 
@@ -212,6 +231,21 @@ pub async fn create_box(
             state.db.record_timing(
                 &timing_key(user_id),
                 "docker_create_ms",
+                t0.elapsed().as_millis() as i64,
+                None,
+            )?;
+        }
+        Provider::Gvisor => {
+            if let Err(e) =
+                crate::fleet::create_box(state, user_id, &mut sb, &box_token, &mcp_token).await
+            {
+                // A half-made sandbox must not count as a resident: the next attempt starts clean.
+                let _ = state.db.delete_box_row(user_id);
+                return Err(e);
+            }
+            state.db.record_timing(
+                &timing_key(user_id),
+                "gvisor_create_ms",
                 t0.elapsed().as_millis() as i64,
                 None,
             )?;
@@ -403,14 +437,21 @@ pub async fn start_box(state: &AppState, user_id: &str) -> Result<()> {
     let mut sb = match state.db.user_box(user_id)? {
         Some(sb) => sb,
         None => {
-            // A user with projects but no box yet (pre-D70 data): create it on first wake.
-            let provider = if state.daytona.is_some() {
-                Provider::Daytona
-            } else {
-                Provider::Process
-            };
+            // A user with projects but no box yet (pre-D70 data, or a fresh sign-in): create it on
+            // first wake. On a full host (D89) the user is waitlisted instead and this is not an
+            // error: the admission tick wakes them later.
+            let provider = default_provider(state);
             tracing::info!(%user_id, provider = provider.as_str(), "no box for this user yet; creating one");
-            ensure_user_box(state, user_id, provider).await?;
+            match ensure_user_box(state, user_id, provider).await {
+                Ok(_) => {}
+                Err(e) if e.to_string() == crate::fleet::WAITLISTED => {
+                    let _ = state.db.finish_wake_job(user_id);
+                    state
+                        .set_box_state(user_id, BoxState::Asleep, Some("waitlisted"))
+                        .await;
+                }
+                Err(e) => return Err(e),
+            }
             return Ok(());
         }
     };
@@ -482,6 +523,16 @@ pub async fn start_box(state: &AppState, user_id: &str) -> Result<()> {
             let (box_token, mcp_token) = tokens.ok_or_else(|| anyhow!("local tokens missing"))?;
             start_docker(state, user_id, &mut sb, &box_token, &mcp_token, false).await?;
         }
+        Provider::Gvisor => {
+            let t0 = Instant::now();
+            crate::fleet::start_box(state, user_id, &mut sb, tokens).await?;
+            state.db.record_timing(
+                &timing_key(user_id),
+                "gvisor_start_ms",
+                t0.elapsed().as_millis() as i64,
+                None,
+            )?;
+        }
     }
     Ok(())
 }
@@ -544,6 +595,11 @@ pub async fn stop_box(state: &AppState, user_id: &str, force: bool) -> Result<()
                 .args(["stop", "-t", "10", &name])
                 .output()
                 .await;
+        }
+        Provider::Gvisor => {
+            let name = sb.sandbox_id.clone().unwrap_or_default();
+            // One agentd stops every workspace's children; give it the full grace.
+            crate::fleet::stop_box(&name, 30).await?;
         }
     }
     sb.last_stopped_at = Some(now_ms());
@@ -669,6 +725,9 @@ pub async fn ensure_user_box(
     if let Some(sb) = state.db.user_box(user_id)? {
         return Ok(sb);
     }
+    if provider == Provider::Gvisor && !crate::fleet::try_admit(state, user_id).await? {
+        return Err(anyhow!(crate::fleet::WAITLISTED));
+    }
     let snapshot = state.db.user_snapshot(user_id)?;
     create_box(state, user_id, provider, snapshot.as_deref()).await
 }
@@ -692,6 +751,14 @@ pub async fn ensure_awake(state: &AppState, user_id: &str, reason: &str) {
     }
     if explicit_wake(reason) {
         let _ = state.db.set_box_held(user_id, false);
+    }
+    // Evicted under host pressure (D89): only the user's own activity brings it back; the
+    // always-on sweep leaves it down so the pressure does not come straight back.
+    if crate::fleet::is_evicted(state, user_id).await {
+        if reason == "always-on" {
+            return;
+        }
+        crate::fleet::clear_evicted(state, user_id).await;
     }
     if st == BoxState::Error {
         // Stale-box error: no more automatic retries; an explicit wake/start tries again once.
@@ -1045,6 +1112,31 @@ pub async fn copy_workspace_for_fork(
                 Err(e) => tracing::warn!(%user_id, error = %e, "fork copy"),
             }
         }
+        (Some(Provider::Gvisor), _, Some(name)) => {
+            let _ = hold_workspace(state, &sb, dest_project_id, true).await;
+            let _ = hold_workspace(state, &sb, source_project_id, true).await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let cmd = format!(
+                "if [ ! -d /work/{src} ]; then echo missing; exit 0; fi; \
+                 rm -rf /work/{dst} && cp -a /work/{src} /work/{dst} && \
+                 rm -rf /work/{dst}/.arbos/pi/sessions /work/{dst}/.arbos/prime/sessions /work/{dst}/.arbos/claude/sessions 2>/dev/null; \
+                 mkdir -p /work/{dst}/.arbos/pi/sessions; rm -f /work/{dst}/.arbos/.owner; echo ok",
+                src = source_project_id,
+                dst = dest_project_id
+            );
+            let result = crate::fleet::exec_in_box(name, &cmd, Duration::from_secs(600)).await;
+            let _ = hold_workspace(state, &sb, source_project_id, false).await;
+            let _ = hold_workspace(state, &sb, dest_project_id, false).await;
+            match result {
+                Ok(text) if text.contains("missing") => {
+                    tracing::info!(%user_id, source_project_id, "fork copy: source workspace empty")
+                }
+                Ok(_) => {
+                    tracing::info!(%user_id, source_project_id, dest_project_id, "fork copy done")
+                }
+                Err(e) => tracing::warn!(%user_id, error = %e, "fork copy"),
+            }
+        }
         (Some(Provider::Process), _, _) | (Some(Provider::Docker), _, _) => {
             let base = state.cfg.data_dir.join("boxes").join(user_id).join("work");
             let src = base.join(source_project_id);
@@ -1102,6 +1194,19 @@ pub async fn archive_workspace_dir(state: &AppState, user_id: &str, project_id: 
                 Err(e) => tracing::warn!(%user_id, project_id, error = %e, "workspace archive"),
             }
         }
+        (Some(Provider::Gvisor), _, Some(name)) => {
+            tokio::time::sleep(Duration::from_secs(20)).await;
+            let cmd = format!(
+                "mkdir -p /work/.archive && if [ -d /work/{p} ]; then mv /work/{p} /work/.archive/{p}; fi; echo ok",
+                p = project_id
+            );
+            match crate::fleet::exec_in_box(name, &cmd, Duration::from_secs(120)).await {
+                Ok(_) => {
+                    tracing::info!(%user_id, project_id, "workspace folder archived on the box")
+                }
+                Err(e) => tracing::warn!(%user_id, project_id, error = %e, "workspace archive"),
+            }
+        }
         (Some(Provider::Process), _, _) | (Some(Provider::Docker), _, _) => {
             let base = state.cfg.data_dir.join("boxes").join(user_id).join("work");
             let src = base.join(project_id);
@@ -1127,7 +1232,16 @@ pub async fn spawn_project_purge(state: AppState) {
                 state.db.projects_deleted_before(cutoff).unwrap_or_default()
             {
                 if let Ok(Some(sb)) = state.db.user_box(&user_id) {
-                    if let (Some(dt), Some(id)) = (&state.daytona, &sb.sandbox_id) {
+                    if sb.provider == "gvisor" {
+                        if let Some(name) = &sb.sandbox_id {
+                            let _ = crate::fleet::exec_in_box(
+                                name,
+                                &format!("rm -rf /work/.archive/{project_id}; echo ok"),
+                                Duration::from_secs(120),
+                            )
+                            .await;
+                        }
+                    } else if let (Some(dt), Some(id)) = (&state.daytona, &sb.sandbox_id) {
                         if sb.provider == "daytona" {
                             let _ = dt
                                 .toolbox_exec(
@@ -1184,6 +1298,10 @@ pub async fn spawn_always_on(state: AppState) {
                     // A stale-box error stays until the user asks again (see `explicit_wake`).
                     continue;
                 }
+                // Waitlisted (D89): no box until the admission tick frees a slot.
+                if state.db.is_waitlisted(&user_id).unwrap_or(false) {
+                    continue;
+                }
                 tracing::info!(%user_id, "always-on: waking");
                 ensure_awake(&state, &user_id, "always-on").await;
             }
@@ -1234,6 +1352,15 @@ pub async fn spawn_wake_runner(state: AppState) {
 
 /// Keep-alive from the box while a turn runs (design §4.6): forward as "update last activity".
 pub async fn keepalive(state: &AppState, user_id: &str, turn_running: bool) -> Result<()> {
+    {
+        // Eviction (D89) never takes a sandbox mid-turn.
+        let mut t = state.turn_running.lock().await;
+        if turn_running {
+            t.insert(user_id.to_owned(), now_ms());
+        } else {
+            t.remove(user_id);
+        }
+    }
     let sb = state
         .db
         .user_box(user_id)?

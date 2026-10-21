@@ -62,6 +62,7 @@ CLI:  feedback_poller.py [run] | status | testers | set-cursor <ISO-8601>
       | inject <image|-> "<comment>" [ios|mac] [--handle <login>] [--origin "<text>"] [--email <tester email, grouping only>]
                [--note "<owner decision / scope>"] [--id <slug used as the feedback id>]
       | requeue <id>… [--allow "<who confirmed>"] | prioritize <id>… | confirm <id> [note] | handoff <id> [label] | deployed <id> [note]
+      | supersede <id> <by-id> [note]   (a shipped fix was reverted/regressed; <by-id> re-lands it and closes both issues when it ships)
       | track <id> <issue> "<comment>" [--handle <login>] [--owner <label>] [--target ios|mac]   (a hand-filed, handed-off item;
         workers can do the same without root by commenting `track <id> bc-<owner>` on the issue)
       | leadtime [since-ISO] | memtree-cost [YYYY-MM-DD]   (audit numbers; memtree-cost asks GET /admin/usage/memory-tree, else relay.db as root)
@@ -104,6 +105,7 @@ ASSET_RELEASE_TAG = "feedback-screenshots"
 RELAY_DEPLOYED_SHA_FILE = "/etc/arbos/relay.deployed-sha"  # written by scripts/deploy/relay-server.sh
 INSTALL_SIGNAL_SINCE = "2026-10-19T22:00:00Z"  # relay records X-Arbos-Client versions since then (D85)
 DEPLOY_HOOK = "/usr/local/bin/arbos-deploy-hook"  # CD worker's hook: `<relay|agentd|voice> <sha>`, idempotent, debounced; called directly (no sudo)
+DEPLOY_QUEUE = os.environ.get("ARBOS_DEPLOY_QUEUE", "/var/lib/arbos-feedback/deploy-requests")  # the hook's queue: one file per kind
 USER_AGENT = "arbos-feedback-poller/1 (+https://github.com/unarbos/arbos)"
 
 TERMINAL = {"shipped", "failed", "ignored", "rejected", "duplicate", "no_change", "handed_off", "deferred"}
@@ -1716,6 +1718,14 @@ class Loop:
         if active and active.get("fid"):
             # A run from the one-at-a-time scheduler (before batch mode): nothing to resume, re-batch it.
             cur.pop("rust_gate", None); self.store.save_cursor(cur); active = None
+        for marker in self.cfg.state_dir.glob("gate-abort.*"):
+            if active and marker.name == f"gate-abort.{active['id']}":
+                # `gate-abort` arrived while a tick was in flight (that tick would have written its stale
+                # cursor back over the abort); the marker survives cursor saves, so the abort happens here.
+                self.gate_abort(active, cur, by="operator")
+                active = None
+            else:
+                marker.unlink(missing_ok=True)  # names a run that already settled
         if active and active.get("warm"):
             out = self.rust_gate_mac("status", active["id"])
             verdict = (out or "running\n").partition("\n")[0].strip()
@@ -1760,6 +1770,24 @@ class Loop:
             cur["rust_gate"] = {"id": f"warm-{main_head[:8]}", "members": {}, "started": iso(), "warm": True, "base": main_head}
             self.store.save_cursor(cur)
             log(f"Rust gate: warm-up release build of main {main_head[:8]} started on the Mac")
+
+    def gate_abort_marker(self, run_id: str) -> Path:
+        return self.cfg.state_dir / f"gate-abort.{run_id}"
+
+    def gate_abort(self, active: dict, cur: dict, by: str) -> None:
+        """Drop the active gate run without verdicts: Mac build aborted, integration branch deleted, bisect plan
+        cleared. Every ready branch re-batches at its current head on the next tick."""
+        if active.get("mac_started") and active.get("mac") == "pending":
+            self.rust_gate_mac("abort", active["id"])
+        cur.pop("rust_gate", None)
+        cur["rust_gate_plan"] = []
+        self.store.save_cursor(cur)
+        self.gate_abort_marker(active["id"]).unlink(missing_ok=True)
+        if active.get("branch"):
+            self.gh.delete_branch(active["branch"])
+        for fid in active.get("members") or {}:
+            self.store.event(fid, "rust_gate_aborted", run=active["id"], by=by)
+        log(f"Gate {active['id']}: aborted by {by} ({len(active.get('members') or {})} member(s) re-batch next tick)")
 
     def rust_gate_mac(self, *args: str) -> str | None:
         """ssh to the gate Mac; None when it is unreachable (the Linux half keeps going, the Mac half waits)."""
@@ -2425,9 +2453,14 @@ class Loop:
         with contextlib.suppress(HttpError):
             self.gh.close_issue(st["issue"], "completed", body)
             self.gh.set_labels(st["issue"], [], ["fixed-on-main", "in-progress", "landed-not-shipped"])
+        for extra in st.get("also_closes") or []:
+            # Issues this fix re-lands (`supersede <id> <by-id>`: their first fix was reverted or regressed).
+            with contextlib.suppress(HttpError):
+                self.gh.close_issue(extra, "completed", body + f" Re-landed by #{st['issue']}.")
+                self.gh.set_labels(extra, ["shipped"], ["fixed-on-main", "in-progress", "landed-not-shipped"])
         st["closed"] = {"reason": "completed", "at": iso(), "where": self.fixed_in(st)}
         self.store.save_state(fid, st)
-        self.store.event(fid, "closed", reason="completed", where=st["closed"]["where"])
+        self.store.event(fid, "closed", reason="completed", where=st["closed"]["where"], also=st.get("also_closes") or [])
 
     def close_not_planned(self, fid: str, st: dict, why: str) -> None:
         """Won't-fix / duplicate / no-change / superseded: closed with reason not_planned and one line of why."""
@@ -2498,12 +2531,30 @@ class Loop:
             return
         self.close_fixed(fid, st)
 
+    @staticmethod
+    def queued_deploy_sha(kind: str) -> str | None:
+        """The sha currently queued for `kind` by the CD hook (one file per kind), or None."""
+        try:
+            for line in Path(DEPLOY_QUEUE, kind).read_text().splitlines():
+                if line.startswith("sha="):
+                    return line[4:].strip() or None
+        except OSError:
+            return None
+        return None
+
     def request_deploys(self, fid: str, kinds: list[str], sha: str) -> None:
         """Ask the CD hook to deploy the relay / roll the image / redeploy voice for a landed fix. Only speeds the
         hook's own 1-min main watcher up; "live" is still judged from the reported shas (watch_deploys)."""
         if not os.path.exists(DEPLOY_HOOK) or not sha:
             return
         for kind in kinds:
+            # The queue holds one sha per kind and the last write wins. Never replace a queued request that already
+            # contains this fix with an older commit (22:01 Oct 21: the worker's "newest green" request b22f22b6 was
+            # overwritten by a branch commit from 21:22, resetting the debounce and pointing the deploy backwards).
+            queued = self.queued_deploy_sha(kind)
+            if queued and queued != sha and self.gh.contains(queued, sha):
+                log(f"[{fid}] deploy {kind}: queued {queued[:8]} already carries {sha[:8]}; not requested again")
+                continue
             try:
                 # Direct call: the unit runs with NoNewPrivileges, so no sudo; the hook queues the request under
                 # /var/lib/arbos-feedback/deploy-requests/ (inside the unit's ReadWritePaths) for the CD worker.
@@ -3148,6 +3199,39 @@ def main(argv: list[str]) -> int:
                     loop.gh.set_labels(st["issue"], [], ["needs-human", "fixed-on-main", "shipped", "shipped-unverified", "no-change"])
             print(f"{fid}: queued ({tier}, {st['tester']})")
         return 0
+    if cmd == "supersede":
+        # `supersede <id> <by-id> [note]`: a shipped fix was reverted or regressed and <by-id> re-lands it. The
+        # item becomes `superseded`, its issue is reopened (Jacob's rule: reopen on regression) and closes
+        # again, with the same "Fixed in …" line, when <by-id> ships.
+        if len(argv) < 4:
+            print('supersede <id> <by-id> [note]')
+            return 2
+        store = Store(cfg)
+        loop = Loop(cfg)
+        fid, by = argv[2], argv[3]
+        note = " ".join(argv[4:]) or "the first fix was reverted"
+        st, bst = store.state(fid), store.state(by)
+        if not st or not bst:
+            print(f"{fid if not st else by}: unknown")
+            return 2
+        st.update(status="superseded", superseded_by=by, superseded_at=iso(), superseded_note=note[:300])
+        st["reopened"] = {"at": iso(), "why": note[:300], "by": by}
+        store.save_state(fid, st)
+        store.event(fid, "superseded", by=by, note=note[:300])
+        if st.get("issue") and st["issue"] not in (bst.get("also_closes") or []):
+            bst["also_closes"] = (bst.get("also_closes") or []) + [st["issue"]]
+            store.save_state(by, bst)
+        if st.get("issue"):
+            text = (f"Reopened: {note.rstrip('.')}. Re-landed by #{bst.get('issue')} (`{by}`); this issue closes again "
+                    f"when that fix is in a build.")
+            with contextlib.suppress(HttpError):
+                if loop.gh.issue(st["issue"]).get("state") == "closed":
+                    loop.gh.reopen_issue(st["issue"], text)
+                else:
+                    loop.gh.comment(st["issue"], text)
+                loop.gh.set_labels(st["issue"], ["superseded"], ["shipped", "shipped-unverified", "fixed-on-main"])
+        print(f"{fid}: superseded by {by} (#{st.get('issue')} reopened, closes with #{bst.get('issue')})")
+        return 0
     if cmd == "confirm":
         # Device-level evidence arrived (tester / Jacob / a real-device run): shipped-unverified → shipped.
         store = Store(cfg)
@@ -3399,15 +3483,15 @@ def main(argv: list[str]) -> int:
         if not active:
             print("no active gate run")
             return 0
-        if active.get("mac_started") and active.get("mac") == "pending":
-            loop.rust_gate_mac("abort", active["id"])
-        cur.pop("rust_gate", None)
-        cur["rust_gate_plan"] = []
-        loop.store.save_cursor(cur)
-        if active.get("branch"):
-            loop.gh.delete_branch(active["branch"])
-        for fid in active.get("members") or {}:
-            loop.store.event(fid, "rust_gate_aborted", run=active["id"], by="operator")
+        with (cfg.state_dir / ".lock").open("w") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                # A tick is running with its own copy of the cursor and would write it back over the abort.
+                loop.gate_abort_marker(active["id"]).touch()
+                print(f"a tick is in flight; gate {active['id']} is aborted at the start of the next tick (marker written)")
+                return 0
+            loop.gate_abort(active, cur, by="operator")
         print(f"gate {active['id']} aborted ({len(active.get('members') or {})} member(s) re-batch next tick)")
         return 0
     if cmd != "run":

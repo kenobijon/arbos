@@ -156,6 +156,7 @@ pub async fn get_group(
     Path((id, chat_id)): Path<(String, String)>,
 ) -> ApiResult {
     let host = resolve_project_id(&state, &id)?;
+    state.matrix.touch_chat(&state, &chat_id, Some(&host));
     let chat = load_group(&state, &host, &chat_id)?;
     // A participant's box (D70: the box of a participant's user) may read the group it belongs to.
     let allowed = state.allows(&principal, &host)

@@ -847,6 +847,8 @@ mod tests {
             agentd_bin: "arbos-agentd".into(),
             local_box_image: String::new(),
             box_idle_grace_ms: 0,
+            default_provider: None,
+            fleet: crate::fleet::FleetCfg::default(),
             connectors_mock: mock,
             channels_mock: true,
             image_mock: false,
@@ -906,11 +908,15 @@ mod tests {
             presence_seen: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             activity: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             box_http_seen: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            turn_running: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            evicted: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            fleet_pressure: Arc::new(tokio::sync::Mutex::new(None)),
             voice: Arc::new(crate::voice::VoiceCfg::default()),
             voice_conns: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             voice_dispatched: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             voice_worker: Arc::new(tokio::sync::Mutex::new(None)),
             client_seen: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            matrix: crate::matrix::Matrix::new(crate::matrix::Config::off()),
         }
     }
 

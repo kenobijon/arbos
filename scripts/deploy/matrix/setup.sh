@@ -113,7 +113,7 @@ sn = re.escape(server).replace("\\", "\\\\")  # YAML double-quoted: \. stays a l
 def ns(entries):
     return "\n".join(f'    - exclusive: {"true" if ex else "false"}\n      regex: "{rx}"' for ex, rx in entries) or "    []"
 users = {
-    "users":   [(False, f"@gh_.*:{sn}"), (False, f"@u_.*:{sn}")],
+    "users":   [(False, f"@gh_.*:{sn}"), (False, f"@u_.*:{sn}"), (False, f"@test_.*:{sn}")],
     "agents":  [(True, f"@_a_.*:{sn}"), (True, f"@_x_.*:{sn}")],
     "bridges": [(True, f"@_b_.*:{sn}"), (False, f"@gh_.*:{sn}")],
 }[kind]

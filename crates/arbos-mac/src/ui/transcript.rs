@@ -22,7 +22,6 @@ use crate::ui::attachments;
 use crate::ui::avatars;
 use crate::ui::cards;
 use crate::ui::frost::edge_faded;
-use crate::ui::groups;
 use crate::ui::icons::icon;
 use crate::ui::markdown::{
     has_fenced_code, inline_spans, polish_assistant_prose, split_blocks, Block,
@@ -918,11 +917,17 @@ impl Transcript {
                 if let Some(person) = from {
                     // Someone else: left-aligned, their avatar and name above.
                     // A small coloured left-edge sliver marks a person message
-                    // so it reads apart from an agent bubble.
+                    // so it reads apart from an agent bubble: the dominant
+                    // colour of their picture, else their D79 disc colour.
                     // Must not early-return: the match arm still needs the
                     // COLUMN_MARGIN wrapper (same padding as agent bubbles).
-                    let image = self.state.read(cx).avatar(&person.avatar_url);
-                    let color = groups::sender_color(&person.handle, &theme);
+                    let (image, color) = {
+                        let state = self.state.read(cx);
+                        (
+                            state.avatar(&person.avatar_url),
+                            state.sender_accent(&person, &theme),
+                        )
+                    };
                     div()
                         .w_full()
                         .flex()
@@ -1045,10 +1050,10 @@ impl Transcript {
                 // One assistant bubble, drawn block by block: the first block
                 // rounds the top, the last the bottom, the rest run straight.
                 // People-chat agent bubbles get the same coloured left-edge
-                // sliver as person messages, from the agent's avatar colour.
+                // sliver as person messages, from the agent's disc colour.
                 let agent_accent = lane.as_deref().map(|seed| {
                     let (_, disc_seed, color_index, _) = self.agent_identity(seed, "Agent", cx);
-                    avatars::gradient(avatars::index_for(&disc_seed, color_index), &theme).0
+                    avatars::accent_fallback(&disc_seed, color_index, &theme)
                 });
                 let r = px(BUBBLE_RADIUS);
                 let bubble = self
@@ -2052,6 +2057,10 @@ pub fn build_rows(
                 let fill = total_blocks > 1;
                 let mut block_ix = 0usize;
                 let mut had_prose = false;
+                // Error parts wait until the prose is known: under a real answer they stay
+                // the chip with Retry; on an answer with no words they become the words.
+                let mut errors: Vec<(String, String, String)> = Vec::new();
+                let rows_before_parts = rows.len();
                 for (pix, part) in message.parts.iter().enumerate() {
                     match part {
                         Part::Text { id, .. } => {
@@ -2202,15 +2211,7 @@ pub fn build_rows(
                             id,
                             code,
                             message: text,
-                        } => rows.push(Row {
-                            version: hash_version(&(code, text), false),
-                            id: format!("{}#{}", message.id, id),
-                            message_id: message.id.clone(),
-                            kind: RowKind::Error {
-                                code: code.clone(),
-                                message: text.clone(),
-                            },
-                        }),
+                        } => errors.push((id.clone(), code.clone(), text.clone())),
                         // Everything the agent did, not said: Details drawer only.
                         Part::Status { .. }
                         | Part::Tool { .. }
@@ -2223,17 +2224,67 @@ pub fn build_rows(
                         | Part::Unknown => {}
                     }
                 }
-                // Stopped / failed turns leave one tiny glyph, no words.
+                // A finished reply that shows nothing — no prose, no card, no attachment —
+                // would leave only the sender header (Lium in the "Testing" group,
+                // 2026-10-21: six "answering @…" lines over nothing). Say so in the bubble,
+                // plainly, like the limit announcements: the error part's own line when the
+                // box wrote one, else a stock line.
+                let shows_nothing = rows.len() == rows_before_parts && !had_prose;
+                let finished = matches!(message.status, MessageStatus::Done | MessageStatus::Error);
+                // A row that only did work (tool calls, a hand-off) may legitimately end
+                // without words — its answer came as a progress bubble; only a row that holds
+                // nothing but empty text and status gets the stock line.
+                let only_empty = message.parts.iter().all(|p| {
+                    matches!(
+                        p,
+                        Part::Text { .. } | Part::Status { .. } | Part::Error { .. }
+                    )
+                });
+                let failed = !errors.is_empty() || matches!(message.status, MessageStatus::Error);
+                if shows_nothing && finished && !streaming && (failed || only_empty) {
+                    let line = errors
+                        .first()
+                        .map(|(_, _, text)| text.trim())
+                        .filter(|t| !t.is_empty())
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| {
+                            let name = message
+                                .sender_name
+                                .clone()
+                                .filter(|n| !n.trim().is_empty())
+                                .unwrap_or_else(|| "The agent".to_owned());
+                            format!("{name} didn't answer. Ask again.")
+                        });
+                    rows.push(Row {
+                        version: hash_version(&line, false),
+                        id: format!("{}#failed", message.id),
+                        message_id: message.id.clone(),
+                        kind: RowKind::Markdown {
+                            block: Block::Paragraph(line),
+                            live: false,
+                            first: true,
+                            last: true,
+                            fill: false,
+                            time: clock_label(message.created_at),
+                            lane: lane.clone(),
+                        },
+                    });
+                } else {
+                    for (id, code, text) in &errors {
+                        rows.push(Row {
+                            version: hash_version(&(code, text), false),
+                            id: format!("{}#{}", message.id, id),
+                            message_id: message.id.clone(),
+                            kind: RowKind::Error {
+                                code: code.clone(),
+                                message: text.clone(),
+                            },
+                        });
+                    }
+                }
+                // Stopped turns leave one tiny glyph, no words.
                 let glyph = match message.status {
                     MessageStatus::Cancelled => Some("■"),
-                    MessageStatus::Error
-                        if !message
-                            .parts
-                            .iter()
-                            .any(|p| matches!(p, Part::Error { .. })) =>
-                    {
-                        Some("✗")
-                    }
                     MessageStatus::Error
                     | MessageStatus::Done
                     | MessageStatus::Queued

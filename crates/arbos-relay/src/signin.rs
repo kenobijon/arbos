@@ -596,7 +596,10 @@ pub async fn refresh(State(state): State<AppState>, Json(b): Json<RefreshBody>) 
 pub async fn logout(State(state): State<AppState>, principal: Principal) -> Response {
     match principal {
         Principal::Device { id, .. } => match state.db.revoke_device_fully(&id) {
-            Ok(_) => StatusCode::NO_CONTENT.into_response(),
+            Ok(_) => {
+                crate::matrix::servers::revoke_device(&state, &id).await;
+                StatusCode::NO_CONTENT.into_response()
+            }
             Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
         },
         Principal::Box { .. } | Principal::Admin => {
@@ -647,7 +650,10 @@ pub async fn device_revoke(
         return api_error(StatusCode::FORBIDDEN, "forbidden", "not your device");
     }
     match state.db.revoke_device_fully(&target) {
-        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Ok(_) => {
+            crate::matrix::servers::revoke_device(&state, &target).await;
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
     }
 }
@@ -899,6 +905,19 @@ pub async fn me(State(state): State<AppState>, principal: Principal) -> Response
             .into_iter()
             .find(|d| d.get("id").and_then(Value::as_str) == Some(id.as_str()))
     });
+    // D89: a host that is full waitlists new machines; `signup` tells the apps so, and a
+    // waitlisted user sees their place in line instead of a machine.
+    let fleet = crate::fleet::fleet_enabled(&state);
+    let waitlist_position = if fleet {
+        state.db.waitlist_position(&user_id).ok().flatten()
+    } else {
+        None
+    };
+    let signup = if fleet && sb.is_none() && !crate::fleet::capacity(&state).await.has_room {
+        "waitlist"
+    } else {
+        "open"
+    };
     Json(json!({
         "user": user_json(&state, &user_id),
         "device": device_json,
@@ -906,7 +925,7 @@ pub async fn me(State(state): State<AppState>, principal: Principal) -> Response
         "limits": {
             "read_only": ks.on,
             "read_only_reason": ks.reason,
-            "signup": "open",
+            "signup": signup,
             "auth_mode": state.cfg.auth_mode.as_str(),
         },
         "machine": {
@@ -917,6 +936,9 @@ pub async fn me(State(state): State<AppState>, principal: Principal) -> Response
             "sandbox_id": sb.as_ref().and_then(|s| s.sandbox_id.clone()),
             "always_on": state.cfg.always_on,
             "held": state.db.box_held(&user_id).unwrap_or(false),
+            "waitlisted": waitlist_position.is_some(),
+            "waitlist_position": waitlist_position,
+            "evicted": crate::fleet::is_evicted(&state, &user_id).await,
         },
     }))
     .into_response()

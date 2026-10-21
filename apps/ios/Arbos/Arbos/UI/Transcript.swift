@@ -3,6 +3,7 @@
 // voice-memo cards, one "<Project> is working" line while a turn runs.
 // Prose only: tool calls, status noise, usage and JSON never render.
 
+import ArbosFFI
 import AVFoundation
 import QuickLook
 import SwiftUI
@@ -181,6 +182,10 @@ enum Transcript {
                     if t.count <= 80 { return t }
                     return String(t.prefix(80)) + "…"
                 }()
+                // Error parts wait until the prose is known: under a real answer they stay the
+                // chip with Retry; on an answer with no words they become the words.
+                var errors: [(id: Id, code: String, text: String)] = []
+                let rowsBeforeParts = chunk.count
                 for (pix, part) in message.parts.enumerated() {
                     switch part {
                     case .text(let id, let text):
@@ -224,14 +229,49 @@ enum Transcript {
                     case .attachment(let id, let a):
                         chunk.append(attachmentRow(id: "\(message.id)#\(id)", message: message, a: a, projectId: projectId, fromUser: false))
                     case .error(let id, let code, let text):
-                        chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant, kind: .error(code: code, message: text)))
+                        errors.append((id: id, code: code, text: text))
                     case .status, .tool, .subagentResult, .reasoning, .unknown:
                         break
                     }
                 }
-                if message.status == .error && !message.hasErrorPart {
-                    chunk.append(Row(id: "\(message.id)#failed", messageId: message.id, role: .assistant,
-                                     kind: .error(code: "turn_failed", message: "The agent could not finish this turn.")))
+                // A finished reply that shows nothing — no prose, no card, no attachment — used
+                // to vanish here (Mac: a bare "answering @…" header; Lium in the "Testing"
+                // group, 2026-10-21). Say so in the bubble, plainly, like the limit
+                // announcements: the error part's own line when the box wrote one, else a
+                // stock line. A row that only did work (tool calls) may end without words —
+                // its answer came as a progress bubble — so only an all-empty row gets the
+                // stock line.
+                let showsNothing = chunk.count == rowsBeforeParts
+                let finished = message.status == .done || message.status == .error
+                let onlyEmpty = message.parts.allSatisfy { part in
+                    switch part {
+                    case .text, .status, .error: return true
+                    case .tool, .attachment, .question, .subagentResult, .reasoning, .unknown: return false
+                    }
+                }
+                let failed = !errors.isEmpty || message.status == .error
+                if showsNothing, finished, !streaming, failed || onlyEmpty {
+                    let line: String = {
+                        if let first = errors.first?.text.trimmingCharacters(in: .whitespacesAndNewlines), !first.isEmpty {
+                            return first
+                        }
+                        let name = (message.senderName ?? "").trimmingCharacters(in: .whitespaces)
+                        return "\(name.isEmpty ? "The agent" : name) didn't answer. Ask again."
+                    }()
+                    let blocks: [Block] = [.paragraph(line)]
+                    if people, let h = message.senderHandle {
+                        chunk.append(Row(id: "\(message.id)#failed", messageId: message.id, role: .assistant,
+                                         kind: .member(blocks: blocks, live: false, handle: h,
+                                                       avatar: message.senderAvatar,
+                                                       replyHandle: replyHandle, replyPreview: replyPreview)))
+                    } else {
+                        chunk.append(Row(id: "\(message.id)#failed", messageId: message.id, role: .assistant,
+                                         kind: .assistant(blocks: blocks, live: false, caption: nil)))
+                    }
+                } else {
+                    for e in errors {
+                        chunk.append(Row(id: "\(message.id)#\(e.id)", messageId: message.id, role: .assistant, kind: .error(code: e.code, message: e.text)))
+                    }
                 }
             }
             guard !chunk.isEmpty else { continue }
@@ -604,6 +644,7 @@ enum Markdown {
 struct RowView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
+    @ObservedObject private var accents = SenderAccents.shared
     let row: Row
     let chatId: Id
     let width: CGFloat
@@ -718,10 +759,12 @@ struct RowView: View {
                     .padding(.horizontal, Theme.bubbleHPad)
                     .padding(.vertical, Theme.bubbleVPad)
                     .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
+                    .senderBar(personAccent(handle: handle, avatar: avatar))
                 }
                 .frame(maxWidth: maxBubble - 34, alignment: .leading)
                 Spacer(minLength: 0)
             }
+            .task(id: avatar) { accents.load(url: avatar) }
         case .member(let blocks, let live, let handle, let avatar, let replyHandle, let replyPreview):
             HStack(alignment: .bottom, spacing: 8) {
                 peopleAvatar(handle: handle, avatar: avatar)
@@ -741,10 +784,12 @@ struct RowView: View {
                     .padding(.horizontal, Theme.bubbleHPad)
                     .padding(.vertical, Theme.bubbleVPad)
                     .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
+                    .senderBar(memberAccent(handle: handle, avatar: avatar))
                 }
                 .frame(maxWidth: maxBubble - 34, alignment: .leading)
                 Spacer(minLength: 0)
             }
+            .task(id: avatar) { if memberProject(handle: handle) == nil { accents.load(url: avatar) } }
         case .assistant(let blocks, let live, let caption):
             HStack {
                 VStack(alignment: .leading, spacing: 8) {
@@ -872,18 +917,35 @@ struct RowView: View {
         }
     }
 
+    /// A people-chat member handle that is one of my agents.
+    private func memberProject(handle: String) -> Project? {
+        model.projects.first { mentionSlug($0.name).caseInsensitiveCompare(handle) == .orderedSame }
+    }
+
     /// Avatar for a people-chat agent: project tree when we know it, else sender slug / initials.
     @ViewBuilder
     private func peopleAvatar(handle: String, avatar: String?) -> some View {
-        if let project = model.projects.first(where: {
-            mentionSlug($0.name).caseInsensitiveCompare(handle) == .orderedSame
-        }) {
+        if let project = memberProject(handle: handle) {
             AgentAvatar(project: project, theme: theme, size: 26, still: true)
         } else if let avatar, avatar.contains("://") {
             PersonAvatar(url: avatar, handle: handle, size: 26, name: model.personName(handle: handle), id: model.personId(handle: handle))
         } else {
             PersonAvatar(url: nil, handle: handle, size: 26, name: model.personName(handle: handle), id: model.personId(handle: handle))
         }
+    }
+
+    /// The bar colour on a person's bubble: their picture's dominant colour,
+    /// else the D79 colour of the same disc `PersonAvatar` draws (`id ?? handle`).
+    private func personAccent(handle: String, avatar: String?) -> Color {
+        accents.color(url: avatar, seed: model.personId(handle: handle) ?? handle, dark: theme.isDark)
+    }
+
+    /// Mac parity: an agent's bubbles in a people chat carry its disc colour.
+    private func memberAccent(handle: String, avatar: String?) -> Color {
+        if let project = memberProject(handle: handle) {
+            return accents.color(url: nil, seed: project.id, override: project.effectiveAvatarColorIndex, dark: theme.isDark)
+        }
+        return personAccent(handle: handle, avatar: avatar)
     }
 
     /// Grok Bot's quote header at the top of a reply bubble: speech-bubble glyph, then the
@@ -1051,6 +1113,71 @@ struct BlockView: View {
             }
             .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.bg.opacity(0.6)))
         }
+    }
+}
+
+/// The 2 pt coloured sliver on the left edge of a sender's bubble (the Mac's
+/// `border_l_2` at 70 %), clipped to the bubble's corners.
+private extension View {
+    func senderBar(_ color: Color) -> some View {
+        overlay(alignment: .leading) {
+            Rectangle().fill(color.opacity(0.7)).frame(width: 2)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous))
+    }
+}
+
+/// Bubble-bar colours per sender, the same arithmetic as the Mac through
+/// ArbosFFI (`arbos_core::avatar`): a picture's dominant vibrant colour,
+/// extracted once per avatar URL per launch, else the midpoint of the D79
+/// disc gradient. A colourless picture (black-and-white, logo on white) gets
+/// no entry and falls back like no picture.
+final class SenderAccents: ObservableObject {
+    static let shared = SenderAccents()
+
+    @Published private(set) var byUrl: [String: AccentHex] = [:]
+    /// Touched from the main thread only (`load` runs from `.task`).
+    private var requested: Set<String> = []
+
+    /// The bar colour for the current appearance.
+    func color(url: String?, seed: String, override: Int? = nil, dark: Bool) -> Color {
+        let accent: AccentHex
+        if let url, let known = byUrl[url] {
+            accent = known
+        } else {
+            accent = avatarFallbackAccent(seed: seed, overrideIndex: override.map { UInt8(clamping: $0) })
+        }
+        return Color(uiColor: UIColor(hexString: dark ? accent.dark : accent.light) ?? .systemGray)
+    }
+
+    /// Fetch (through the shared URLCache, so usually no second download after
+    /// `AsyncImage`) and extract; repeated calls for one URL are free.
+    func load(url: String?) {
+        guard let url, url.contains("://"), let u = URL(string: url), !requested.contains(url) else { return }
+        requested.insert(url)
+        Task.detached(priority: .utility) { [weak self] in
+            guard let (data, _) = try? await URLSession.shared.data(from: u),
+                  let accent = Self.extract(data) else { return }
+            await MainActor.run { self?.byUrl[url] = accent }
+        }
+    }
+
+    /// 96 × 96 RGBA into the shared extractor (which box-averages to 48 × 48 itself).
+    private static func extract(_ data: Data) -> AccentHex? {
+        guard let cg = UIImage(data: data)?.cgImage else { return nil }
+        let side = 96
+        var pixels = [UInt8](repeating: 0, count: side * side * 4)
+        let info = CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue
+        let drawn = pixels.withUnsafeMutableBytes { buf -> Bool in
+            guard let ctx = CGContext(data: buf.baseAddress, width: side, height: side, bitsPerComponent: 8,
+                                      bytesPerRow: side * 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: info)
+            else { return false }
+            ctx.interpolationQuality = .high
+            ctx.draw(cg, in: CGRect(x: 0, y: 0, width: side, height: side))
+            return true
+        }
+        guard drawn else { return nil }
+        return avatarDominantAccent(rgba: Data(pixels), width: UInt32(side), height: UInt32(side))
     }
 }
 

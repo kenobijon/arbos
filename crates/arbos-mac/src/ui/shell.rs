@@ -37,9 +37,10 @@ use crate::ui::secrets::{SecretsEvent, SecretsPanel};
 use crate::ui::sidebar;
 use crate::ui::skills::{self, SkillsPanel};
 use crate::ui::theme::{
-    reapply_window_background, AppearancePref, Surface, Theme, COLUMN_MARGIN, COMPOSER_BOTTOM,
-    COMPOSER_MARGIN, COMPOSER_WIDTH, DRAWER_WIDTH, HEADER_HEIGHT, LINE_HEIGHT, PANEL_RADIUS,
-    PLUS_BUTTON, SIDEBAR_WIDTH, TAB_BAR_HEIGHT, TEXT_BODY, TEXT_SMALL, TEXT_TINY,
+    reapply_window_background, AppearancePref, GlassOpacity, Surface, Theme, COLUMN_MARGIN,
+    COMPOSER_BOTTOM, COMPOSER_MARGIN, COMPOSER_WIDTH, DRAWER_WIDTH, GLASS_OPACITY_MAX,
+    GLASS_OPACITY_MIN, HEADER_HEIGHT, LINE_HEIGHT, PANEL_RADIUS, PLUS_BUTTON, SIDEBAR_WIDTH,
+    TAB_BAR_HEIGHT, TEXT_BODY, TEXT_SMALL, TEXT_TINY,
 };
 use crate::ui::transcript::{Transcript, TranscriptEvent, COLUMN_MAX_WIDTH};
 use crate::ui::voice::Voice;
@@ -1316,6 +1317,32 @@ impl Shell {
         }
         cx.set_global(Theme::for_pref(pref, surface, cx));
         reapply_window_background(cx);
+        cx.notify();
+    }
+
+    /// Appearance → Opacity: set the glass shell tint from a track click / drag.
+    pub(crate) fn set_glass_opacity_at(
+        &mut self,
+        x: gpui::Pixels,
+        bounds: gpui::Bounds<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let width = f32::from(bounds.size.width).max(1.0);
+        let frac = ((f32::from(x) - f32::from(bounds.left())) / width).clamp(0.0, 1.0);
+        let raw = GLASS_OPACITY_MIN + frac * (GLASS_OPACITY_MAX - GLASS_OPACITY_MIN);
+        let value = (raw * 100.0).round() / 100.0;
+        self.set_glass_opacity(value, cx);
+    }
+
+    pub(crate) fn set_glass_opacity(&mut self, value: f32, cx: &mut Context<Self>) {
+        let value = GlassOpacity::clamp(value);
+        if (Theme::of(cx).glass_opacity - value).abs() < 0.005 {
+            return;
+        }
+        GlassOpacity::save(value);
+        let mut theme = Theme::of(cx).clone();
+        theme.glass_opacity = value;
+        cx.set_global(theme);
         cx.notify();
     }
 
