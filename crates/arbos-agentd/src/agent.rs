@@ -1520,9 +1520,10 @@ impl Agent {
         self.switch_session_to(chat_id, &path).await
     }
 
-    /// Replace the chat's model window: a fresh pi session file, switched to at once. Used after
-    /// a provider refusal, which is bound to the window's content, not to the user's message.
-    async fn rotate_chat_session(self: &Arc<Self>, chat_id: &str) -> Result<()> {
+    /// Replace the chat's model window: a fresh pi session file, switched to at once. Used when
+    /// the current window will not answer (provider refusal, or a turn that settled with no
+    /// `route` and no words) — both are bound to the window, not to the user's message.
+    async fn rotate_chat_session(self: &Arc<Self>, chat_id: &str, reason: &str) -> Result<()> {
         let previous = self
             .store
             .chat(chat_id)?
@@ -1531,10 +1532,10 @@ impl Agent {
         let path = self.new_session_file(chat_id)?;
         *self.current_chat.lock().await = None;
         self.switch_session_to(chat_id, &path).await?;
-        tracing::warn!(chat_id, previous = %previous, fresh = %path.display(), "fresh pi session after a model refusal");
+        tracing::warn!(chat_id, reason, previous = %previous, fresh = %path.display(), "fresh pi session after an empty answer");
         self.append_audit(
             "session_rotated",
-            json!({ "chat_id": chat_id, "reason": "model_refused", "previous": previous, "fresh": path.display().to_string() }),
+            json!({ "chat_id": chat_id, "reason": reason, "previous": previous, "fresh": path.display().to_string() }),
         );
         let _ = self.store.t3_append(
             chat_id,
@@ -1542,7 +1543,7 @@ impl Agent {
             Some(chat_id),
             "compaction",
             Some("system"),
-            "pi session replaced after a model refusal (history stays in the memory tree)",
+            &format!("pi session replaced after {reason} (history stays in the memory tree)"),
             None,
         );
         Ok(())
@@ -2605,20 +2606,27 @@ impl Agent {
         self.turn_running.store(true, Ordering::SeqCst);
         let keepalive = self.spawn_keepalive();
         let mut result = self.run_main_turn(chat_id, host, prompt_text).await;
-        // A refusal is the provider declining this model window, not this question: the same
-        // session answers the same way every time (Lium, 2026-10-21: six turns in a row, 208–242k
-        // tokens each, zero output). The chat history lives in the memory tree, so rebuild the
-        // window — a fresh pi session for this chat — and ask once more before failing visibly.
-        if result.is_ok() && self.refusal_wants_fresh_session().await {
-            match self.rotate_chat_session(chat_id).await {
-                Ok(()) => {
-                    if let Some(t) = self.turn.lock().await.as_mut() {
-                        t.model_error = None;
-                        t.session_rotated = true;
+        // An empty answer is bound to the model window, not the question: a provider refusal
+        // (Lium, 2026-10-21: six turns in a row, 208–242k tokens, zero output) or a settle with
+        // no `route` and no words (mr.agi, 2026-10-21: "turn without route; corrective
+        // continuation=false" — pi will not continue when the run ended on plain/empty text).
+        // The chat history lives in the memory tree, so rebuild the window and ask once more.
+        if result.is_ok() {
+            if let Some(reason) = self.empty_answer_retry_reason().await {
+                match self.rotate_chat_session(chat_id, reason).await {
+                    Ok(()) => {
+                        if let Some(t) = self.turn.lock().await.as_mut() {
+                            t.model_error = None;
+                            t.session_rotated = true;
+                            t.metrics.route_missing = false;
+                            t.route = None;
+                        }
+                        result = self.run_main_turn(chat_id, host, prompt_text).await;
                     }
-                    result = self.run_main_turn(chat_id, host, prompt_text).await;
+                    Err(e) => {
+                        tracing::warn!(chat_id, reason, error = %e, "fresh session after empty answer")
+                    }
                 }
-                Err(e) => tracing::warn!(chat_id, error = %e, "fresh session after refusal"),
             }
         }
         self.turn_running.store(false, Ordering::SeqCst);
@@ -2632,10 +2640,18 @@ impl Agent {
                 self.flush_staged_text(host, t).await;
             }
         }
-        let turn = self.turn.lock().await.take();
-        let Some(turn) = turn else {
+        let Some(mut turn) = self.turn.lock().await.take() else {
             return Err(anyhow!("turn state vanished mid-turn"));
         };
+        // Model answered in prose without calling `route` (corrective continuation was not
+        // allowed): keep the words and record the turn as reply, as the route-guard comment
+        // promises. An empty miss stays `none` so the clients show the stock ask-again line.
+        if turn.route.is_none()
+            && turn.metrics.route_missing
+            && !turn.streamed_text.trim().is_empty()
+        {
+            turn.route = Some(ValidRoute::Reply { reply: None });
+        }
         // After an ack or progress bubble the live row is a later one than the row this turn
         // opened with; everything below finalizes the row the turn ended on.
         let assistant_msg_id = turn.assistant_msg_id.clone();
@@ -3842,16 +3858,23 @@ impl Agent {
         t.model_error = Some(m);
     }
 
-    /// The turn ended on a provider refusal with nothing shown and has not been retried yet.
-    async fn refusal_wants_fresh_session(&self) -> bool {
+    /// Why this empty turn should get one fresh-session retry, or `None` when it should not.
+    /// A provider refusal with nothing shown, or a settle with no `route` and no words (the
+    /// extension's corrective continuation only runs when pi sets `canContinue` — empty/plain
+    /// text ends leave `corrective continuation=false` and would otherwise drop the turn).
+    async fn empty_answer_retry_reason(&self) -> Option<&'static str> {
         let tl = self.turn.lock().await;
-        let Some(t) = tl.as_ref() else {
-            return false;
-        };
-        !t.stopped
-            && !t.session_rotated
-            && t.streamed_text.trim().is_empty()
-            && t.model_error.as_ref().is_some_and(|m| m.refusal)
+        let t = tl.as_ref()?;
+        if t.stopped || t.session_rotated || !t.streamed_text.trim().is_empty() {
+            return None;
+        }
+        if t.model_error.as_ref().is_some_and(|m| m.refusal) {
+            return Some("model_refused");
+        }
+        if t.route.is_none() && t.metrics.route_missing && t.ack_text.trim().is_empty() {
+            return Some("turn_without_route");
+        }
+        None
     }
 
     /// Post a one- or two-sentence hard-limit notice into the live chat row (never silent).
