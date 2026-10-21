@@ -139,7 +139,11 @@ if [[ -n "$IMPORT_DATA" ]]; then
   rsync -a --delete "$IMPORT_DATA/" "$DATA_DIR/"
   echo "imported relay data from $IMPORT_DATA"
 fi
-chown -R arbos:arbos "$DATA_DIR"; chmod 0750 "$DATA_DIR"
+# Own the data dir — but never descend into the user sandboxes' /work images mounted under
+# $DATA_DIR/boxes/<user>/mnt (D89): their files belong to the sandbox's own users, and a
+# recursive chown there breaks every workspace at the next start. `-xdev` stays on this fs.
+find "$DATA_DIR" -xdev \( ! -user arbos -o ! -group arbos \) -exec chown arbos:arbos {} + 2>/dev/null || true
+chmod 0750 "$DATA_DIR"
 
 # ---- 3. env file (secrets) -------------------------------------------------------------------------
 say "env file"
