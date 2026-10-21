@@ -28,45 +28,58 @@ pub(super) fn page(
     cx: &mut Context<Shell>,
 ) -> Option<Stateful<Div>> {
     let theme = Theme::of(cx).clone();
-    let state = shell.state.read(cx);
-    let person: Person = state.person_by_handle(handle).unwrap_or_else(|| Person {
-        handle: handle.to_string(),
-        ..Default::default()
-    });
-    let me = state.me_handle() == person.handle;
-    let image = state.avatar(&person.avatar_url);
-    let tab = state.profile_tab;
+    // Own everything we need from state so link_list can request favicons after.
+    let (person, me, image, tab, links, any_chats, groups, group_pictures) = {
+        let state = shell.state.read(cx);
+        let person: Person = state.person_by_handle(handle).unwrap_or_else(|| Person {
+            handle: handle.to_string(),
+            ..Default::default()
+        });
+        let me = state.me_handle() == person.handle;
+        let image = state.avatar(&person.avatar_url);
+        let tab = state.profile_tab;
 
-    // Spaces we share: group chats and shared projects (the DM itself is not a group).
-    let shared: Vec<Project> = state
-        .projects
-        .iter()
-        .filter(|p| p.people.iter().any(|x| x.handle == person.handle))
-        .cloned()
-        .collect();
-    let groups: Vec<&Project> = shared
-        .iter()
-        .filter(|p| p.kind != crate::model::SpaceKind::Dm)
-        .collect();
+        // Spaces we share: group chats and shared projects (the DM itself is not a group).
+        let shared: Vec<Project> = state
+            .projects
+            .iter()
+            .filter(|p| p.people.iter().any(|x| x.handle == person.handle))
+            .cloned()
+            .collect();
+        let groups: Vec<Project> = shared
+            .iter()
+            .filter(|p| p.kind != crate::model::SpaceKind::Dm)
+            .cloned()
+            .collect();
 
-    // Links this person shared, across every chat we hold.
-    let all_chats: Vec<&crate::model::Chat> =
-        shared.iter().flat_map(|p| chats_of(state, &p.id)).collect();
-    let content = collect(state, &all_chats);
-    let any_chats = !all_chats.is_empty();
-    drop(all_chats);
-    let by = format!("@{}", person.handle);
-    let links: Vec<super::Link> = content.links.into_iter().filter(|l| l.by == by).collect();
-    let group_pictures: Vec<gpui::AnyElement> = groups
-        .iter()
-        .map(|p| {
-            if p.is_people() {
-                groups::picture(p, state, kit::AVATAR, &theme).into_any_element()
-            } else {
-                avatars::project(p, kit::AVATAR, &theme).into_any_element()
-            }
-        })
-        .collect();
+        // Links this person shared, across every chat we hold.
+        let all_chats: Vec<&crate::model::Chat> =
+            shared.iter().flat_map(|p| chats_of(state, &p.id)).collect();
+        let content = collect(state, &all_chats);
+        let any_chats = !all_chats.is_empty();
+        let by = format!("@{}", person.handle);
+        let links: Vec<super::Link> = content.links.into_iter().filter(|l| l.by == by).collect();
+        let group_pictures: Vec<gpui::AnyElement> = groups
+            .iter()
+            .map(|p| {
+                if p.is_people() {
+                    groups::picture(p, state, kit::AVATAR, &theme).into_any_element()
+                } else {
+                    avatars::project(p, kit::AVATAR, &theme).into_any_element()
+                }
+            })
+            .collect();
+        (
+            person,
+            me,
+            image,
+            tab,
+            links,
+            any_chats,
+            groups,
+            group_pictures,
+        )
+    };
 
     // ----- hero: picture and name read-only, @handle as the subtitle --------------
     let picture = people::avatar(image, &person, HERO_AVATAR, &theme).into_any_element();
@@ -91,7 +104,7 @@ pub(super) fn page(
     // ----- tabs -----------------------------------------------------------------
     let tabs = tab_bar(&TABS, tab, &theme, cx);
     let body_tab = match tab {
-        0 => link_list(&links, &theme, cx),
+        0 => link_list(&links, shell, &theme, cx),
         _ => {
             if groups.is_empty() {
                 empty("No groups in common yet", &theme)
