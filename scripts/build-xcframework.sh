@@ -56,7 +56,12 @@ test -f "$DEVICE_LIB"
 test -f "$SIM_ARM_LIB"
 test -f "$SIM_X86_LIB"
 
-UNIVERSAL_SIM_LIB="$ROOT/target/lib${LIB_NAME}-ios-sim-universal.a"
+# Name must stay lib${LIB_NAME}.a: xcodebuild -create-xcframework keeps the
+# basename inside the xcframework, and the iOS gate looks for that file.
+UNIVERSAL_SIM_DIR="$ROOT/target/arbos-ffi-ios-sim-universal"
+rm -rf "$UNIVERSAL_SIM_DIR"
+mkdir -p "$UNIVERSAL_SIM_DIR"
+UNIVERSAL_SIM_LIB="$UNIVERSAL_SIM_DIR/lib${LIB_NAME}.a"
 echo "==> lipo simulator (${SIM_TARGET} + ${SIM_X86_TARGET})"
 lipo -create "$SIM_ARM_LIB" "$SIM_X86_LIB" -output "$UNIVERSAL_SIM_LIB"
 SIM_LIB="$UNIVERSAL_SIM_LIB"

@@ -25,18 +25,20 @@ if [[ -x scripts/build-xcframework.sh ]]; then
     exit 1
   fi
   # Generic simulator destinations need both arm64 and x86_64 in the sim slice.
+  # Match any .a under a simulator library identifier (basename can vary).
   SIM_LIB=""
   while IFS= read -r f; do
     case "$f" in
       *simulator*|*ios-arm64_x86_64*|*ios-x86_64_arm64*) SIM_LIB=$f; break ;;
     esac
-  done < <(find "$PKG_XC" -name 'libarbos_ffi.a' 2>/dev/null)
+  done < <(find "$PKG_XC" -name '*.a' 2>/dev/null)
   if [[ -z "$SIM_LIB" || ! -f "$SIM_LIB" ]]; then
-    echo "== xcframework: FAILS (no simulator libarbos_ffi.a inside ${PKG_XC})"
+    echo "== xcframework: FAILS (no simulator .a inside ${PKG_XC})"
+    find "$PKG_XC" -type f 2>/dev/null | head -40
     exit 1
   fi
   arches=$(lipo -archs "$SIM_LIB" 2>/dev/null || true)
-  echo "== xcframework: simulator lib arches: ${arches}"
+  echo "== xcframework: simulator lib arches: ${arches} (${SIM_LIB#"$PKG_XC"/})"
   case " $arches " in
     *" x86_64 "*) ;;
     *) echo "== xcframework: FAILS (simulator library missing x86_64; got: ${arches})"; exit 1 ;;
