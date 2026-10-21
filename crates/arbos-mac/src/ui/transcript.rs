@@ -878,11 +878,16 @@ impl Transcript {
                     )
                 };
                 let quote_header = quote.map(|q| self.quote_header(&row.id, q, text_color));
-                let text = plain_text(
+                // Same inline link paint as agent bubbles (accent + underline,
+                // clickable): bare `http(s)://…` and `[text](url)`.
+                let text = styled_text(
                     &format!("{}.u", row.id),
                     &text,
                     text_color,
                     &theme,
+                    None,
+                    now,
+                    0,
                     &bubble_selectable,
                 );
                 let bubble = self
@@ -1134,7 +1139,18 @@ impl Transcript {
                 .pb(px(STAMP_PAD_BOTTOM))
                 .text_size(px(TEXT_SMALL))
                 .text_color(theme.text_muted)
-                .child(label)
+                // System / time lines can carry a tracking URL; paint and open
+                // it like a chat link.
+                .child(styled_text(
+                    &format!("{}.s", row.id),
+                    &label,
+                    theme.text_muted,
+                    &theme,
+                    None,
+                    now,
+                    0,
+                    &selectable,
+                ))
                 .into_any_element(),
             RowKind::Reactions {
                 reactions,
@@ -2286,27 +2302,6 @@ fn sans_font(theme: &Theme) -> gpui::Font {
         weight: FontWeight::NORMAL,
         style: gpui::FontStyle::Normal,
     }
-}
-
-/// Unstyled selectable text (a user bubble): one run in the body font.
-fn plain_text(
-    id: &str,
-    text: &str,
-    color: gpui::Hsla,
-    theme: &Theme,
-    selectable: &Selectable,
-) -> AnyElement {
-    let runs = vec![TextRun {
-        len: text.len(),
-        font: sans_font(theme),
-        color,
-        background_color: None,
-        underline: None,
-        strikethrough: None,
-    }];
-    selectable
-        .text(id.to_string(), text.to_string(), runs)
-        .into_any_element()
 }
 
 #[allow(clippy::too_many_arguments)]
