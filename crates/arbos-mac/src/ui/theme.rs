@@ -16,8 +16,10 @@ use crate::sync::credentials::config_dir;
 pub const SIDEBAR_WIDTH: f32 = 296.0;
 /// Kept for the settings sub-panels, which open just right of the sidebar.
 pub const RAIL_WIDTH: f32 = SIDEBAR_WIDTH;
-/// The slim conversation header (avatar + name left, icon buttons right); Grok Mac: 44 pt.
-pub const HEADER_HEIGHT: f32 = 44.0;
+/// The conversation header (avatar + name left, icon buttons right) — also the
+/// window-drag catchment at the top of the chat pane. Twice the former 44 pt
+/// so the title strip is easier to grab ([feedback app-01M5G7QDRZASSTRMK524NDMQ2R]).
+pub const HEADER_HEIGHT: f32 = 88.0;
 pub const TAB_BAR_HEIGHT: f32 = HEADER_HEIGHT;
 /// Composer: one pill with the "+" circle inside left and mic / send inside right.
 pub const COMPOSER_WIDTH: f32 = 820.0;
@@ -45,6 +47,12 @@ pub const DRAWER_WIDTH: f32 = 320.0;
 pub const NARROW_WINDOW: f32 = 1000.0;
 pub const GLASS_ALPHA: f32 = 0.80;
 pub const FROST_TINT_ALPHA: f32 = 0.50;
+/// Glass shell tint: how opaque the window wash is over the blur (Settings →
+/// Appearance → Opacity). Default matches [`GLASS_ALPHA`]; range keeps text
+/// readable at the low end and still looks like glass at the high end.
+pub const GLASS_OPACITY_MIN: f32 = 0.30;
+pub const GLASS_OPACITY_MAX: f32 = 1.00;
+const GLASS_OPACITY_FILE: &str = "glass_opacity";
 /// Type scale (iPhone 17/15/13 pt, scaled for a desktop viewing distance).
 pub const TEXT_BODY: f32 = 15.0;
 pub const TEXT_SMALL: f32 = 13.0;
@@ -91,6 +99,35 @@ impl Surface {
         let dir = config_dir();
         let _ = std::fs::create_dir_all(&dir);
         let _ = std::fs::write(dir.join(SURFACE_FILE), self.as_str());
+    }
+}
+
+/// The user's glass opacity (0.30–1.00). Saved as a float string in
+/// `<config>/glass_opacity` when moved in Settings; a missing file keeps the
+/// default ([`GLASS_ALPHA`]). Only applied while Surface is Glass.
+pub struct GlassOpacity;
+
+impl GlassOpacity {
+    pub fn clamp(v: f32) -> f32 {
+        v.clamp(GLASS_OPACITY_MIN, GLASS_OPACITY_MAX)
+    }
+
+    /// The saved choice, or [`GLASS_ALPHA`].
+    pub fn load() -> f32 {
+        std::fs::read_to_string(config_dir().join(GLASS_OPACITY_FILE))
+            .ok()
+            .and_then(|s| s.trim().parse::<f32>().ok())
+            .map(Self::clamp)
+            .unwrap_or(GLASS_ALPHA)
+    }
+
+    pub fn save(v: f32) {
+        let dir = config_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(
+            dir.join(GLASS_OPACITY_FILE),
+            format!("{:.2}", Self::clamp(v)),
+        );
     }
 }
 
@@ -194,6 +231,8 @@ pub struct Theme {
     pub appearance: Appearance,
     /// The user's choice behind `appearance` (System / Light / Dark).
     pub pref: AppearancePref,
+    /// Shell tint alpha while Glass is on ([`GlassOpacity`]; default [`GLASS_ALPHA`]).
+    pub glass_opacity: f32,
     pub bg: Hsla,
     /// The chat-list column (a shade lighter than the conversation, as on Grok Mac).
     pub sidebar: Hsla,
@@ -251,6 +290,7 @@ impl Theme {
             surface,
             appearance: Appearance::Dark,
             pref: AppearancePref::Dark,
+            glass_opacity: GLASS_ALPHA,
             bg: hex(0x141414),
             sidebar: hex(0x1a1a1a),
             surface_1: hex(0x1e1e1e),
@@ -283,6 +323,7 @@ impl Theme {
             surface,
             appearance: Appearance::Light,
             pref: AppearancePref::Light,
+            glass_opacity: GLASS_ALPHA,
             // Grok Mac light (ref 16/30): chat #FCFCFC, sidebar #F6F6F6,
             // selected row #EFEFEF, assistant bubble #F2F2F2.
             bg: hex(0xfcfcfc),
@@ -329,6 +370,7 @@ impl Theme {
         note_system_appearance(system);
         let mut theme = Self::with(pref.resolve(system), surface);
         theme.pref = pref;
+        theme.glass_opacity = GlassOpacity::load();
         theme
     }
 
@@ -372,7 +414,11 @@ impl Theme {
     /// The shell tint painted on the root (zeron-study §3.1 step 2).
     pub fn shell(&self) -> Hsla {
         let mut c = self.bg;
-        c.a = if self.is_glass() { GLASS_ALPHA } else { 1.0 };
+        c.a = if self.is_glass() {
+            GlassOpacity::clamp(self.glass_opacity)
+        } else {
+            1.0
+        };
         c
     }
 
