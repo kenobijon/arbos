@@ -566,43 +566,89 @@ pub(super) fn file_list(items: &[Found], glyph: &'static str, none: &str, theme:
     list
 }
 
-/// Links tab: favicon-less rows like Telegram's — a letter tile, the URL, who shared it.
-pub(super) fn link_list(items: &[Link], theme: &Theme, cx: &mut Context<Shell>) -> Div {
+/// Host for a link row (no scheme, path, or leading `www.`).
+fn link_host(url: &str) -> String {
+    url.trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .trim_start_matches("www.")
+        .to_string()
+}
+
+/// The site's own favicon — fetched through the avatar pipeline (ICO/PNG/JPEG).
+fn favicon_url(host: &str) -> Option<String> {
+    if host.is_empty()
+        || !host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':'))
+    {
+        return None;
+    }
+    Some(format!("https://{host}/favicon.ico"))
+}
+
+/// Links tab: the site's favicon when we have it, else a letter tile; URL; who shared it.
+pub(super) fn link_list(
+    items: &[Link],
+    shell: &Shell,
+    theme: &Theme,
+    cx: &mut Context<Shell>,
+) -> Div {
     if items.is_empty() {
         return empty("No links shared yet", theme);
     }
+    let wants: Vec<String> = items
+        .iter()
+        .filter_map(|l| favicon_url(&link_host(&l.url)))
+        .collect();
+    shell.state.update(cx, |s, _| {
+        for url in wants {
+            s.want_avatar(url);
+        }
+    });
+    let state = shell.state.read(cx);
     let mut list = card(theme);
     for (i, l) in items.iter().enumerate() {
-        let host = l
-            .url
-            .trim_start_matches("https://")
-            .trim_start_matches("http://")
-            .split('/')
-            .next()
-            .unwrap_or("")
-            .trim_start_matches("www.")
-            .to_string();
+        let host = link_host(&l.url);
         let letter = host
             .chars()
             .next()
             .map(|c| c.to_uppercase().to_string())
             .unwrap_or_else(|| "#".into());
+        let favicon = favicon_url(&host).and_then(|u| state.avatar(&u));
+        let leading = match favicon {
+            Some(img) => div()
+                .size(px(kit::AVATAR))
+                .rounded(px(10.0))
+                .overflow_hidden()
+                .bg(theme.surface_2)
+                .child(
+                    gpui::img(img)
+                        .size(px(kit::AVATAR))
+                        .rounded(px(10.0))
+                        .object_fit(gpui::ObjectFit::Cover),
+                )
+                .into_any_element(),
+            None => div()
+                .size(px(kit::AVATAR))
+                .rounded(px(10.0))
+                .bg(crate::ui::groups::sender_color(&host, theme))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(TEXT_BODY + 2.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme.text)
+                .child(letter)
+                .into_any_element(),
+        };
         let url = l.url.clone();
         list = list.child(
             list_row(
                 ElementId::Name(SharedString::from(format!("profile-link-{i}"))),
-                div()
-                    .size(px(kit::AVATAR))
-                    .rounded(px(10.0))
-                    .bg(crate::ui::groups::sender_color(&host, theme))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_size(px(TEXT_BODY + 2.0))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.text)
-                    .child(letter)
-                    .into_any_element(),
+                leading,
                 host,
                 format!("{} · {} · {}", l.by, l.chat, when_text(l.when)),
                 theme.text_muted,
