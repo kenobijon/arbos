@@ -5,13 +5,17 @@
 # schedule, and by `workflow_dispatch` with channel=auto. Prints the plan as key=value lines.
 #
 #   scripts/release/auto-stable.sh [--dry-run]      (env: GH_TOKEN or GITHUB_TOKEN, GITHUB_REPOSITORY,
-#                                                    ARBOS_RELEASE_DEBOUNCE_S=150, ARBOS_MAC_PATHS)
+#                                                    ARBOS_RELEASE_DEBOUNCE_S=150, ARBOS_MAC_PATHS,
+#                                                    ARBOS_HOTFIX_ONLY=1 + ARBOS_PUSHED_SHA: the push-to-main
+#                                                    trigger — do nothing unless the pushed commit is a hotfix)
 #
 # What it does:
 #   1. waits ARBOS_RELEASE_DEBOUNCE_S so a batch of merges that lands within a few minutes shares
-#      one release (a fix is never held longer than that);
+#      one release (a fix is never held longer than that) — not when a hotfix sits at the head of main;
 #   2. target = the newest commit on origin/main whose CI run is green (commits whose CI is still
-#      running are left for the next run; a red one is skipped);
+#      running are left for the next run; a red one is skipped) — except a hotfix: a revert, or a
+#      commit marked `hotfix:` / `[hotfix]`, is released as soon as it is on main, ahead of its CI
+#      (P0 #1208: waiting for CI cost the crash fix two releases);
 #   3. nothing to do when the paths the Mac app is built from did not change since the last
 #      stable tag, or when a stable tag already sits on the target;
 #   4. otherwise: version = next patch after the last stable tag (or Cargo.toml's version when
@@ -70,22 +74,52 @@ else:
 EOF
 }
 
-if (( DEBOUNCE > 0 )) && ! $DRY_RUN; then
-  say "debounce: waiting ${DEBOUNCE}s for sibling merges"
-  sleep "$DEBOUNCE"
-fi
+is_hotfix() {
+  # A revert, or a commit marked `hotfix`, on main's first-parent line: its own subject, or (a merge)
+  # the subjects of the commits it brings in. Case-insensitive; `[hotfix]` anywhere in the message.
+  git log --format='%s%n%b' "$1^1..$1" 2>/dev/null | grep -qiE '^(revert\b|hotfix\b)|\[hotfix\]' \
+    || git log -1 --format='%s%n%b' "$1" | grep -qiE '^(revert\b|hotfix\b)|\[hotfix\]'
+}
+
 git fetch -q --tags --force origin "+refs/heads/main:refs/remotes/origin/main"
+head_main="$(git rev-parse origin/main)"
+pushed="${ARBOS_PUSHED_SHA:-$head_main}"
+if [[ "${ARBOS_HOTFIX_ONLY:-0}" == 1 ]] && ! is_hotfix "$pushed"; then
+  emit_none "push ${pushed:0:8} to main is not a hotfix; it ships through the CI-green path"
+  exit 0
+fi
+if (( DEBOUNCE > 0 )) && ! $DRY_RUN; then
+  if is_hotfix "$head_main"; then
+    say "hotfix at the head of main: no debounce"
+  else
+    say "debounce: waiting ${DEBOUNCE}s for sibling merges"
+    sleep "$DEBOUNCE"
+    git fetch -q --tags --force origin "+refs/heads/main:refs/remotes/origin/main"
+  fi
+fi
 
 # 2. newest green commit on main — first-parent line only: a merged branch's own tip is reachable
 #    from main too, but lacks everything main had before the merge.
+#    Hotfix fast path (P0 #1208, 2026-10-21): a revert or a `hotfix`-marked commit whose CI is still
+#    running (or has not started) is released at once, ahead of the newest green commit — waiting for
+#    CI cost v0.6.91/v0.6.92 the crash fix. Everything else keeps the green-CI rule, and a hotfix whose
+#    CI already failed is skipped like any red commit. (If its CI goes red after the release, the
+#    feedback loop's "main is red" watcher raises it.)
 target=""
+hotfix=false
 pending_seen=false
 for sha in $(git rev-list --first-parent origin/main -n 25); do
   state="$(ci_state "$sha")"
   case "$state" in
     success) target="$sha"; break ;;
-    pending) pending_seen=true ;;
-    *) ;;
+    failed) ;;
+    *)
+      if is_hotfix "$sha"; then
+        target="$sha"; hotfix=true
+        say "hotfix ${sha:0:8} released ahead of its CI ($state)"
+        break
+      fi
+      pending_seen=true ;;
   esac
 done
 if [[ -z "$target" ]]; then
@@ -138,6 +172,7 @@ summary="$(git log --format=%s --no-merges "${last_tag:+$last_tag..}$target" -- 
   | awk '{ if (length($0) > 72) { s = substr($0, 1, 72); sub(/ [^ ]*$/, "", s); print s "…" } else print }' \
   | paste -sd ';' - | sed 's/;/; /g' || true)"
 [[ -n "$summary" ]] || summary="changes since ${last_tag:-the start}"
+if $hotfix; then summary="hotfix (released ahead of CI): $summary"; fi
 subject="release: $version — $summary"
 subject="${subject:0:480}"
 
