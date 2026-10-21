@@ -172,12 +172,21 @@ struct PaneRow: View {
     /// A control at the trailing edge (a Toggle, a ✕); drawn after the value.
     var trailing: AnyView? = nil
 
+    /// Mock b: names on people / agent / file rows are medium; mock g:
+    /// settings labels are regular.
+    private var titleWeight: Font.Weight {
+        switch leading {
+        case .avatar, .glyph: return .medium
+        case .none, .tile: return .regular
+        }
+    }
+
     var body: some View {
         HStack(spacing: PaneKit.gap) {
             leadingView
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
-                    .font(theme.font(Theme.body))
+                    .font(theme.font(Theme.body, weight: titleWeight))
                     .foregroundStyle(titleTint ?? theme.text)
                     .lineLimit(1)
                 if let subtitle, !subtitle.isEmpty {
@@ -281,23 +290,22 @@ struct PaneTabs: View {
     let tabs: [String]
     @Binding var selected: String
 
+    // Redesign mocks b/g (same kit as the Mac): bare labels, the current one
+    // on a capsule, centred — no track, no border.
     var body: some View {
-        HStack(spacing: 2) {
+        HStack(spacing: 4) {
             ForEach(tabs, id: \.self) { t in
                 Button { withAnimation(.snappy(duration: 0.2)) { selected = t } } label: {
                     Text(t)
-                        .font(theme.font(Theme.small, weight: selected == t ? .semibold : .medium))
+                        .font(theme.font(Theme.body, weight: selected == t ? .semibold : .regular))
                         .foregroundStyle(selected == t ? theme.text : theme.muted)
                         .padding(.horizontal, 16).frame(height: 32)
-                        .frame(maxWidth: .infinity)
-                        .background(Capsule().fill(selected == t ? theme.field : .clear))
+                        .background(Capsule().fill(selected == t ? theme.bubbleAssistant : .clear))
                 }
                 .buttonStyle(.plain)
             }
         }
-        .padding(3)
-        .background(Capsule().fill(theme.bubbleAssistant))
-        .overlay(Capsule().strokeBorder(theme.fieldBorder, lineWidth: 1))
+        .frame(maxWidth: .infinity)
     }
 }
 
