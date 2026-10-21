@@ -1716,6 +1716,11 @@ class Loop:
         if active and active.get("fid"):
             # A run from the one-at-a-time scheduler (before batch mode): nothing to resume, re-batch it.
             cur.pop("rust_gate", None); self.store.save_cursor(cur); active = None
+        if active and self.gate_abort_marker(active["id"]).exists():
+            # `gate-abort` arrived while a tick was in flight (that tick would have written its stale cursor
+            # back over the abort); the marker survives cursor saves, so the abort happens here.
+            self.gate_abort(active, cur, by="operator")
+            active = None
         if active and active.get("warm"):
             out = self.rust_gate_mac("status", active["id"])
             verdict = (out or "running\n").partition("\n")[0].strip()
@@ -1760,6 +1765,24 @@ class Loop:
             cur["rust_gate"] = {"id": f"warm-{main_head[:8]}", "members": {}, "started": iso(), "warm": True, "base": main_head}
             self.store.save_cursor(cur)
             log(f"Rust gate: warm-up release build of main {main_head[:8]} started on the Mac")
+
+    def gate_abort_marker(self, run_id: str) -> Path:
+        return self.cfg.state_dir / f"gate-abort.{run_id}"
+
+    def gate_abort(self, active: dict, cur: dict, by: str) -> None:
+        """Drop the active gate run without verdicts: Mac build aborted, integration branch deleted, bisect plan
+        cleared. Every ready branch re-batches at its current head on the next tick."""
+        if active.get("mac_started") and active.get("mac") == "pending":
+            self.rust_gate_mac("abort", active["id"])
+        cur.pop("rust_gate", None)
+        cur["rust_gate_plan"] = []
+        self.store.save_cursor(cur)
+        self.gate_abort_marker(active["id"]).unlink(missing_ok=True)
+        if active.get("branch"):
+            self.gh.delete_branch(active["branch"])
+        for fid in active.get("members") or {}:
+            self.store.event(fid, "rust_gate_aborted", run=active["id"], by=by)
+        log(f"Gate {active['id']}: aborted by {by} ({len(active.get('members') or {})} member(s) re-batch next tick)")
 
     def rust_gate_mac(self, *args: str) -> str | None:
         """ssh to the gate Mac; None when it is unreachable (the Linux half keeps going, the Mac half waits)."""
@@ -3399,15 +3422,15 @@ def main(argv: list[str]) -> int:
         if not active:
             print("no active gate run")
             return 0
-        if active.get("mac_started") and active.get("mac") == "pending":
-            loop.rust_gate_mac("abort", active["id"])
-        cur.pop("rust_gate", None)
-        cur["rust_gate_plan"] = []
-        loop.store.save_cursor(cur)
-        if active.get("branch"):
-            loop.gh.delete_branch(active["branch"])
-        for fid in active.get("members") or {}:
-            loop.store.event(fid, "rust_gate_aborted", run=active["id"], by="operator")
+        with (cfg.state_dir / ".lock").open("w") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                # A tick is running with its own copy of the cursor and would write it back over the abort.
+                loop.gate_abort_marker(active["id"]).touch()
+                print(f"a tick is in flight; gate {active['id']} is aborted at the start of the next tick (marker written)")
+                return 0
+            loop.gate_abort(active, cur, by="operator")
         print(f"gate {active['id']} aborted ({len(active.get('members') or {})} member(s) re-batch next tick)")
         return 0
     if cmd != "run":
