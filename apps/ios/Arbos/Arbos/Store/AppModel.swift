@@ -93,6 +93,22 @@ final class AppModel: ObservableObject {
     @Published var appearanceSetting: String = UserDefaults.standard.string(forKey: "appearance") ?? Appearance.system.rawValue {
         didSet { UserDefaults.standard.set(appearanceSetting, forKey: "appearance") }
     }
+    /// TestFlight switch: dial with SessionRoom (shared client core). Absent key → false.
+    @Published var sharedRoomSessionSetting: Bool = UserDefaults.standard.bool(forKey: "sharedRoomSession") {
+        didSet { UserDefaults.standard.set(sharedRoomSessionSetting, forKey: "sharedRoomSession") }
+    }
+    /// Frozen at init from the setting or `ARBOS_SHARED_ROOM_SESSION=1`. Rooms never switch type mid-run.
+    let sharedRoomSession: Bool
+    /// Sum of SessionRoom reconnect / state_timeout counters (About page test surface).
+    var sharedRoomStats: (reconnects: Int, timeouts: Int) {
+        var reconnects = 0
+        var timeouts = 0
+        for case let room as SessionRoom in rooms.values {
+            reconnects += room.reconnects
+            timeouts += room.stateTimeouts
+        }
+        return (reconnects, timeouts)
+    }
     /// Glass is the iPhone default (D10 amendment, 2026-10-17: Grok's header
     /// blurs the transcript under it). The key is only written when the user
     /// picks a surface in Settings, so an absent key means "never chose" → Glass,
@@ -399,6 +415,7 @@ final class AppModel: ObservableObject {
 
     init() {
         LaunchClock.mark("app-init")
+        sharedRoomSession = sharedRoomSessionSetting || DebugHooks.sharedRoomSession
         #if DEBUG
         if let scale = DebugHooks.textScale, TextScale.steps.contains(where: { abs($0 - CGFloat(scale)) < 0.001 }) {
             textScaleSetting = scale
@@ -1206,9 +1223,17 @@ final class AppModel: ObservableObject {
                 }
             }
         }
-        let room = Room(projectId: projectId, key: key, roomChat: roomChat, doc: doc, api: api,
+        let room: any RoomSync
+        if sharedRoomSession {
+            room = SessionRoom(projectId: projectId, key: key, roomChat: roomChat, doc: doc, api: api,
+                               cursor: restored?.cursor ?? 0, pending: restored?.pending ?? []) { [weak self] in
+                self?.deviceId ?? "ios:unpaired"
+            }
+        } else {
+            room = Room(projectId: projectId, key: key, roomChat: roomChat, doc: doc, api: api,
                         cursor: restored?.cursor ?? 0, pending: restored?.pending ?? []) { [weak self] in
-            self?.deviceId ?? "ios:unpaired"
+                self?.deviceId ?? "ios:unpaired"
+            }
         }
         room.onCursorMoved = { [weak self] in self?.markDirty(key) }
         room.onPendingChanged = { [weak self] batches in self?.store?.savePending(key: key, batches: batches) }

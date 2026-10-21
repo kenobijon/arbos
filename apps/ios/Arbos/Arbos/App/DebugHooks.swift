@@ -28,6 +28,8 @@ enum DebugHooks {
     static var autoFeedback: String? { value("ARBOS_AUTO_FEEDBACK") }
     /// Fixture machine reports `always_on` (D73 policy screens).
     static var alwaysOn: Bool { value("ARBOS_ALWAYS_ON") == "1" }
+    /// Use SessionRoom (shared client core) instead of Room for every dial.
+    static var sharedRoomSession: Bool { value("ARBOS_SHARED_ROOM_SESSION") == "1" }
     /// keyboard | settings | voice | threads | model | profile — opened on the chat screen.
     /// `onboarding` shows the D82 first-login screen frozen on `ARBOS_ONBOARDING_STAGE` (1|2|3|fail).
     static var show: String? { value("ARBOS_SHOW") }

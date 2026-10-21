@@ -36,6 +36,10 @@ final class SessionRoom: RoomSync {
     }
 
     private(set) var cursor: Int64 = 0
+    /// How many times the session asked us to reconnect (test surface).
+    private(set) var reconnects = 0
+    /// How many `state_timeout` session errors we saw (test surface).
+    private(set) var stateTimeouts = 0
     var onPendingChanged: (([(String, Data)]) -> Void)?
     var onCursorMoved: (() -> Void)?
 
@@ -261,6 +265,7 @@ final class SessionRoom: RoomSync {
         case .scheduleReconnect(let afterMs):
             applyScheduleReconnect(afterMs: afterMs)
         case .sessionError(let code, let message):
+            if code == "state_timeout" { stateTimeouts += 1 }
             NSLog("relay room \(roomChat): error \(code): \(message)")
         case .presence(_, _, _, _, let mine, let headerJson):
             guard !mine else { return }
@@ -304,6 +309,7 @@ final class SessionRoom: RoomSync {
     }
 
     private func applyScheduleReconnect(afterMs: UInt64) {
+        reconnects += 1
         onLink?(.reconnecting)
         checkpointTask?.cancel()
         checkpointTask = nil
