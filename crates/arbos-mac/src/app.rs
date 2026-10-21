@@ -233,6 +233,9 @@ pub struct ChatUi {
     pub reply_to: Option<Id>,
 }
 
+/// Rows per history page the shared Matrix client fetches (`arbos_matrix::client::HISTORY_PAGE`).
+const CHANNEL_PAGE: usize = 50;
+
 pub struct AppState {
     pub source_name: &'static str,
     pub pairing: Option<Pairing>,
@@ -431,6 +434,9 @@ pub struct AppState {
     pub matrix_connected: bool,
     /// D88: decoded rows per channel room id; the transcript reads them like `messages`.
     pub channel_rows: HashMap<String, Vec<Message>>,
+    /// D88: rooms that already got their second page of history (one extra page per session,
+    /// asked for when the first page came back full).
+    pub channel_paged: HashSet<String>,
     /// D88: the channel open in the centre (clears `selected_project` for the transcript).
     pub selected_channel: Option<ChannelSel>,
     /// D88: the server whose channel list the left pane slid into.
@@ -689,6 +695,7 @@ impl AppState {
             matrix_snapshot: Snapshot::default(),
             matrix_connected: false,
             channel_rows: HashMap::new(),
+            channel_paged: HashSet::new(),
             selected_channel: None,
             open_server: None,
             server_sheet: None,
@@ -1750,8 +1757,13 @@ impl AppState {
                 }
             }
             SyncEvent::ChannelSendFailed {
-                room_id, local_id, ..
-            } => self.on_channel_send_failed(room_id, local_id, cx),
+                room_id,
+                local_id,
+                error,
+            } => {
+                log::warn!("servers: send to {room_id} failed: {error}");
+                self.on_channel_send_failed(room_id, local_id, cx)
+            }
         }
     }
 
@@ -3369,7 +3381,15 @@ impl AppState {
         for url in urls {
             self.want_avatar(url);
         }
+        let count = decoded.len();
         self.channel_rows.insert(room_id.clone(), decoded);
+        // A full first page means there is more above: fetch one more page so the room opens
+        // with a comfortable scrollback (one extra page per session; the rest on demand later).
+        if count >= CHANNEL_PAGE && self.channel_paged.insert(room_id.clone()) {
+            self.command(ClientCommand::ChannelLoadOlder {
+                room_id: room_id.clone(),
+            });
+        }
         let active = self
             .selected_channel
             .as_ref()
