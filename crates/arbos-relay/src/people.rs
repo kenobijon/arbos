@@ -285,6 +285,15 @@ pub fn agent_slug(name: &str) -> String {
         .join("-")
 }
 
+/// Soft-deleted agents leave every list at once; do not linger as @mention ghosts that
+/// never wake (workspace already moved to `/work/.archive/`). Humans always pass.
+fn member_alive(state: &AppState, m: &Membership) -> bool {
+    match m.project_id() {
+        None => true,
+        Some(pid) => state.db.project(pid).ok().flatten().is_some(),
+    }
+}
+
 pub fn chat_json(state: &AppState, cm: &ChatWithMembers, me: &str, device_id: &str) -> Value {
     let (head_seq, last_row_at) = state
         .db
@@ -294,7 +303,13 @@ pub fn chat_json(state: &AppState, cm: &ChatWithMembers, me: &str, device_id: &s
         .db
         .read_mark(&cm.chat.id, device_id)
         .unwrap_or((0, false));
-    let members: Vec<Value> = cm.members.iter().map(|m| member_json(state, m)).collect();
+    // Drop soft-deleted agent memberships from the client roster (purge clears the rows later).
+    let live: Vec<&Membership> = cm
+        .members
+        .iter()
+        .filter(|m| member_alive(state, m))
+        .collect();
+    let members: Vec<Value> = live.iter().map(|m| member_json(state, m)).collect();
     let others: Vec<&Value> = members
         .iter()
         .filter(|m| {
@@ -319,8 +334,8 @@ pub fn chat_json(state: &AppState, cm: &ChatWithMembers, me: &str, device_id: &s
     let pending = others
         .iter()
         .any(|m| m["status"].as_str() == Some("invited"));
-    let has_agent = cm.members.iter().any(|m| m.project_id().is_some());
-    let mine = cm.members.iter().find(|m| m.user_id() == Some(me));
+    let has_agent = live.iter().any(|m| m.project_id().is_some());
+    let mine = live.iter().find(|m| m.user_id() == Some(me)).copied();
     let archived_at = state.db.chat_archived_at(me, &cm.chat.id).ok().flatten();
     json!({
         "id": cm.chat.id,
@@ -1238,6 +1253,46 @@ pub async fn agent_settings(
     match load_chat(&state, &id) {
         Ok(cm) => Json(chat_json(&state, &cm, &me, &device_of(&principal))).into_response(),
         Err(r) => *r,
+    }
+}
+
+/// Leave every people chat this agent is in: box stop (`people_agent_removed`) + human roster
+/// refresh. Used by `DELETE /chats/{id}/agents/{project}` and by project soft-delete so a
+/// deleted agent does not linger as an @mention ghost that never replies.
+pub fn detach_agent_from_people_chats(state: &AppState, project_id: &str, by_user: &str) {
+    let member = format!("agent:{project_id}");
+    let chats = state.db.chats_of_member(&member).unwrap_or_default();
+    let by_handle = handle_of(state, by_user);
+    for cm in chats {
+        match state.db.remove_member(&cm.chat.id, &member) {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(e) => {
+                tracing::warn!(
+                    chat = %cm.chat.id,
+                    project_id,
+                    error = %e,
+                    "detach deleted agent from people chat"
+                );
+                continue;
+            }
+        }
+        let _ = state.db.enqueue_push(
+            project_id,
+            "people_agent_removed",
+            &json!({ "chat_id": cm.chat.id }),
+        );
+        notify_members(
+            state,
+            &cm,
+            by_user,
+            "people_agent_removed",
+            json!({
+                "chat_id": cm.chat.id,
+                "project_id": project_id,
+                "by_handle": by_handle,
+            }),
+        );
     }
 }
 
@@ -2279,6 +2334,83 @@ mod agent_tests {
         )
         .await;
         assert_eq!(r.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn deleting_a_project_leaves_its_people_chats() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 21);
+        let (bob, _bob_dev) = person(&state, 22);
+        let chat = dm(&state, &alice, &bob);
+        let project = project_of(&state, &alice, "Lium");
+        state
+            .db
+            .add_member(
+                &chat,
+                &format!("agent:{project}"),
+                "agent",
+                &alice,
+                &json!({}),
+            )
+            .expect("agent member");
+
+        let cm = ChatWithMembers {
+            chat: state.db.people_chat(&chat).unwrap().unwrap(),
+            members: state.db.members_of(&chat).unwrap(),
+        };
+        let before = crate::people::chat_json(&state, &cm, &alice, "dev");
+        assert!(
+            before["members"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["member"] == format!("agent:{project}")),
+            "live agent is listed"
+        );
+
+        let r = crate::api::delete_project(State(state.clone()), alice_dev, Path(project.clone()))
+            .await
+            .expect("delete");
+        assert_eq!(r.status(), StatusCode::NO_CONTENT);
+        assert!(
+            state
+                .db
+                .membership(&chat, &format!("agent:{project}"))
+                .unwrap()
+                .is_none(),
+            "soft-delete removes the agent from the people chat"
+        );
+        let pushes = state.db.take_pushes(&project).unwrap();
+        assert!(
+            pushes.iter().any(|(_, k, _)| k == "people_agent_removed"),
+            "box is told to leave the room"
+        );
+
+        // A membership left behind by an older delete must not appear in chat_json either.
+        state
+            .db
+            .add_member(
+                &chat,
+                &format!("agent:{project}"),
+                "agent",
+                &alice,
+                &json!({}),
+            )
+            .expect("ghost row");
+        let cm = ChatWithMembers {
+            chat: state.db.people_chat(&chat).unwrap().unwrap(),
+            members: state.db.members_of(&chat).unwrap(),
+        };
+        let after = crate::people::chat_json(&state, &cm, &alice, "dev");
+        assert!(
+            after["members"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|m| m["member"] != format!("agent:{project}")),
+            "soft-deleted agent is hidden from the roster"
+        );
+        assert_eq!(after["lock_state"], "people_only");
     }
 
     #[tokio::test]

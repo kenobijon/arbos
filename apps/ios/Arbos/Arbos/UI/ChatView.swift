@@ -918,9 +918,10 @@ struct ChatView: View {
     /// Avatars + handles of everyone in a people chat; agents show their owner.
     /// Tap a chip to insert `@handle` into the composer and address the next send.
     /// Agent chips toggle so several can be selected together (that combination all replies).
+    /// Soft-deleted agents (no nested project) are hidden — they cannot reply.
     private func memberChips(_ people: PeopleChat) -> some View {
         // Skip me — you don't address yourself; keeps a 1:1 DM to one chip + Agent.
-        let others = people.members.filter { $0.id != model.user?.id }
+        let others = people.members.filter { $0.id != model.user?.id && (!$0.isAgent || $0.project != nil) }
         return ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
                 ForEach(others) { m in
@@ -1300,8 +1301,9 @@ struct ChatView: View {
     private var idleButtonGlyph: String { "phone.fill" }
 
     /// Members whose handle/slug starts with the typed `@` prefix; agents first.
+    /// Agents without a live `project` (soft-deleted) are omitted — they cannot reply.
     private func mentionList(_ people: PeopleChat, query: String) -> some View {
-        let agents = people.agents.filter { query.isEmpty || mentionSlug($0.project?.name ?? $0.handle).hasPrefix(query) }
+        let agents = people.agents.filter { $0.project != nil && (query.isEmpty || mentionSlug($0.project?.name ?? $0.handle).hasPrefix(query)) }
         let humans = people.humans.filter { $0.id != model.user?.id && (query.isEmpty || $0.handle.lowercased().hasPrefix(query)) }
         let items = agents + humans
         return Group {

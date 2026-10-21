@@ -412,9 +412,11 @@ struct NewGroupView: View {
     private var trimmed: String { query.trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "@")) }
 
     /// Own agents only (same as Members → Add agent); shared ones cannot be re-shared here.
+    /// Empty query hides archived agents; a search finds them again — archived agents still
+    /// exist and can join groups unless deleted (home archive is hide-only).
     private var agentCandidates: [Project] {
         let q = trimmed.lowercased()
-        let base = model.projects.filter { !$0.shared && !model.isArchived($0.id) }
+        let base = model.projects.filter { !$0.shared && (q.isEmpty ? !model.isArchived($0.id) : true) }
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         if q.isEmpty { return base }
         return base.filter { $0.name.lowercased().contains(q) || mentionSlug($0.name).contains(q) }
