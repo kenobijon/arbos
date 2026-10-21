@@ -1775,6 +1775,11 @@ class Loop:
     def rust_gate_poll(self, active: dict) -> bool:
         """Advance a running batch. True = still running (nothing more to do this tick)."""
         cur = self.store.cursor()
+        # `active` must be the dict inside this `cur`, or the half verdicts below are saved into a stale copy and
+        # every tick re-runs the halves (the iOS build re-ran each tick on 2026-10-21 21:0x).
+        if cur.get("rust_gate") and cur["rust_gate"].get("id") == active.get("id"):
+            cur["rust_gate"].update(active)
+            active = cur["rust_gate"]
         # Linux half: the CI run on the integration branch.
         if active["linux"] == "pending":
             runs = [r for r in self.gh.runs_for_sha(active["tree"]) if r.get("name") == "CI"]
