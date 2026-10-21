@@ -63,7 +63,7 @@ struct Timeline {
 }
 
 const HISTORY_PAGE: u32 = 50;
-const ROOM_RANGE_END: u32 = 299;
+const ROOM_RANGE_END: u32 = 1999;
 const POLL_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct MatrixClient {
