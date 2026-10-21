@@ -151,11 +151,33 @@ impl Isolation {
         };
         let home = state_dir.join("home");
         std::fs::create_dir_all(home.join(".cache"))?;
-        // Ownership: the whole folder once (marker), then only what agentd creates later.
+        // Ownership: the whole folder once (marker), then only what agentd creates later. The
+        // marker alone is not proof: a workspace that moved machines (D89 host sandboxes,
+        // move_box) or was written through a differently-mapped mount carries the same marker
+        // with foreign uids, and pi then fails with EACCES on its own session files. So the
+        // marker counts only while the state folder is really owned by this user's ids.
         let marker = state_dir.join(".owner");
-        let owned = std::fs::read_to_string(&marker)
+        let marker_ok = std::fs::read_to_string(&marker)
             .map(|s| s.trim() == user)
             .unwrap_or(false);
+        let ids_ok = {
+            use std::os::unix::fs::MetadataExt;
+            let sessions = state_dir.join("pi").join("sessions");
+            [state_dir, &sessions]
+                .iter()
+                .filter_map(|p| std::fs::metadata(p).ok())
+                .all(|m| m.uid() == uid && m.gid() == gid)
+        };
+        let owned = marker_ok && ids_ok;
+        if marker_ok && !ids_ok {
+            tracing::warn!(
+                project_id,
+                user,
+                uid,
+                gid,
+                "workspace files carry foreign ids; re-owning them"
+            );
+        }
         if !owned {
             let st = Command::new("chown")
                 .args([

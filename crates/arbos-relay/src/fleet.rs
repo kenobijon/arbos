@@ -634,7 +634,28 @@ pub async fn create_box(
     let _ = state
         .db
         .fleet_event("created", Some(user_id), &format!("{name} ({image})"));
+    uid_self_check(state, user_id, &name).await;
     Ok(())
+}
+
+/// A file the sandbox's root writes on `/work` must land as uid 0 on the image. Once (2026-10-21)
+/// a sandbox wrote everything as the relay's own host uid, which broke the per-project users at
+/// the next recreate; this check turns a repeat into a loud event instead of a silent one.
+async fn uid_self_check(state: &AppState, user_id: &str, name: &str) {
+    let probe =
+        "p=/work/.arbos-uidcheck; rm -f \"$p\"; : > \"$p\"; stat -c %u:%g \"$p\"; rm -f \"$p\"";
+    match exec_in_box(name, probe, Duration::from_secs(20)).await {
+        Ok(out) if out.trim() == "0:0" => {}
+        Ok(out) => {
+            tracing::error!(%user_id, name, got = %out.trim(), "sandbox uid mapping is wrong: root writes do not land as 0:0");
+            let _ = state.db.fleet_event(
+                "uid_mapping_wrong",
+                Some(user_id),
+                &format!("root wrote {} on /work", out.trim()),
+            );
+        }
+        Err(e) => tracing::debug!(%user_id, error = %e, "uid self-check skipped"),
+    }
 }
 
 /// Image roll for one sandbox: stop and remove the container, start a new one from `snapshot`
