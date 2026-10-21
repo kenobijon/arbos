@@ -1121,7 +1121,19 @@ impl AppState {
                         self.image_preview_pending = None;
                         self.image_preview = Some(image.clone());
                     }
+                    self.thumbnails_failed.remove(&key);
                     self.thumbnails.insert(key, image);
+                    if let Some(chat_id) = self.active_chat_id() {
+                        cx.emit(AppEvent::TranscriptChanged { chat_id });
+                    }
+                    cx.notify();
+                } else {
+                    // Bytes arrived but could not be decoded (unsupported format,
+                    // corrupt file, …): show "No preview", not Loading forever.
+                    if self.image_preview_pending.as_ref() == Some(&key) {
+                        self.image_preview_pending = None;
+                    }
+                    self.thumbnails_failed.insert(key);
                     if let Some(chat_id) = self.active_chat_id() {
                         cx.emit(AppEvent::TranscriptChanged { chat_id });
                     }
@@ -1521,7 +1533,18 @@ impl AppState {
                 cx.notify();
             }
             SyncEvent::MessageUpsert { chat_id, message } => {
-                let message = *message;
+                let mut message = *message;
+                // Optimistic send stores a decoded picture under `local:…`. Keep it on
+                // the row when the server frame arrives so the card does not flash
+                // "Loading preview…" / "No preview" after the user just added the image.
+                let prior = self
+                    .messages
+                    .get(&chat_id)
+                    .and_then(|list| list.iter().find(|m| m.id == message.id))
+                    .cloned();
+                if let Some(ref prior) = prior {
+                    self.carry_local_previews(prior, &mut message);
+                }
                 self.request_thumbnails_for(&chat_id, std::slice::from_ref(&message));
                 let list = self.messages.entry(chat_id.clone()).or_default();
                 let mut text_only = false;
@@ -4363,6 +4386,48 @@ impl AppState {
         self.request_thumbnails_for(chat_id, &messages);
     }
 
+    /// Reuse the optimistic `local:…` decode when a server frame replaces the
+    /// echo: copy it onto the real blob key, or keep the local key when the
+    /// upload left `blob_ref` empty so the card still shows a picture.
+    fn carry_local_previews(&mut self, old: &Message, new: &mut Message) {
+        let old_keys: Vec<Option<String>> = old
+            .parts
+            .iter()
+            .filter_map(|p| match p {
+                Part::Attachment { attachment, .. } => Some(attachment.blob_ref.clone()),
+                _ => None,
+            })
+            .collect();
+        let mut i = 0usize;
+        for part in &mut new.parts {
+            let Part::Attachment { attachment, .. } = part else {
+                continue;
+            };
+            let old_key = old_keys.get(i).cloned().flatten();
+            i += 1;
+            let Some(old_key) = old_key else {
+                continue;
+            };
+            if !old_key.starts_with("local:") {
+                continue;
+            }
+            let Some(image) = self.thumbnails.get(&old_key).cloned() else {
+                continue;
+            };
+            match attachment.blob_ref.clone() {
+                Some(new_key) if new_key != old_key => {
+                    self.thumbnails.entry(new_key.clone()).or_insert(image);
+                    self.thumbnails_requested.insert(new_key.clone());
+                    self.thumbnails_failed.remove(&new_key);
+                }
+                None => {
+                    attachment.blob_ref = Some(old_key);
+                }
+                Some(_) => {}
+            }
+        }
+    }
+
     fn request_thumbnails_for(&mut self, chat_id: &Id, messages: &[Message]) {
         let project_id = self
             .chats
@@ -5519,7 +5584,7 @@ fn mime_for_path(path: &std::path::Path) -> &'static str {
     }
 }
 
-/// PNG/JPEG → BGRA frame for GPUI (`RenderImage` is BGRA).
+/// PNG/JPEG/GIF/WebP/ICO → BGRA frame for GPUI (`RenderImage` is BGRA).
 pub fn decode_image(bytes: &[u8]) -> Option<RenderImage> {
     let img = image::load_from_memory(bytes).ok()?.into_rgba8();
     let (w, h) = img.dimensions();
