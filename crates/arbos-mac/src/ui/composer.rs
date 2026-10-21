@@ -2661,11 +2661,15 @@ mod enter_tests {
                 }));
                 let w2 = weak.clone();
                 input.on_mention_next = Some(Rc::new(move |cx| {
-                    w2.upgrade().map(|e| e.read(cx).text().contains('@')).unwrap_or(false)
+                    w2.upgrade()
+                        .map(|e| e.read(cx).text().contains('@'))
+                        .unwrap_or(false)
                 }));
                 let w3 = weak.clone();
                 input.on_mention_prev = Some(Rc::new(move |cx| {
-                    w3.upgrade().map(|e| e.read(cx).text().contains('@')).unwrap_or(false)
+                    w3.upgrade()
+                        .map(|e| e.read(cx).text().contains('@'))
+                        .unwrap_or(false)
                 }));
             });
         });
@@ -2682,7 +2686,10 @@ mod enter_tests {
         cx.dispatch_action(Send);
         cx.run_until_parked();
         assert_eq!(submitted.get(), 1, "Enter must submit the text once");
-        assert_eq!(cx.update(|_, cx| input.read(cx).text().to_string()), "hello from the enter test");
+        assert_eq!(
+            cx.update(|_, cx| input.read(cx).text().to_string()),
+            "hello from the enter test"
+        );
     }
 
     #[gpui::test]
@@ -2691,21 +2698,36 @@ mod enter_tests {
         cx.simulate_input("hi @sa");
         cx.dispatch_action(Send);
         cx.run_until_parked();
-        assert_eq!(submitted.get(), 0, "Enter on an open @mention accepts the row, it does not send");
+        assert_eq!(
+            submitted.get(),
+            0,
+            "Enter on an open @mention accepts the row, it does not send"
+        );
         let text = cx.update(|_, cx| input.read(cx).text().to_string());
-        assert!(text.starts_with("hi @sam"), "the mention was completed: {text:?}");
+        assert!(
+            text.starts_with("hi @sam"),
+            "the mention was completed: {text:?}"
+        );
     }
 
     #[gpui::test]
     fn mention_keys_without_a_mention_are_plain_editing(cx: &mut TestAppContext) {
         let (input, cx, submitted) = input_with_owner_callbacks(cx);
         cx.simulate_input("plain text");
-        let keys: [Box<dyn Action>; 4] = [Box::new(Up), Box::new(Down), Box::new(AcceptMention), Box::new(PrevMention)];
+        let keys: [Box<dyn Action>; 4] = [
+            Box::new(Up),
+            Box::new(Down),
+            Box::new(AcceptMention),
+            Box::new(PrevMention),
+        ];
         for action in keys {
             cx.update(|window, cx| window.dispatch_action(action, cx));
             cx.run_until_parked();
         }
         assert_eq!(submitted.get(), 0);
-        assert_eq!(cx.update(|_, cx| input.read(cx).text().to_string()), "plain text");
+        assert_eq!(
+            cx.update(|_, cx| input.read(cx).text().to_string()),
+            "plain text"
+        );
     }
 }
