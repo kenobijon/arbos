@@ -4679,8 +4679,12 @@ impl AppState {
     }
 
     pub fn routines_refresh(&mut self, cx: &mut Context<Self>) {
+        // Routines are per agent project. A people space or a selection the
+        // registry no longer has would 404 ("no such project") — skip quietly.
         if let Some(project_id) = self.selected_project.clone() {
-            self.command(ClientCommand::RoutinesRefresh { project_id });
+            if self.project(&project_id).is_some_and(|p| !p.is_people()) {
+                self.command(ClientCommand::RoutinesRefresh { project_id });
+            }
         }
         cx.notify();
     }
