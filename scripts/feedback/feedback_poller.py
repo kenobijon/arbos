@@ -1009,8 +1009,11 @@ class Loop:
             self.store.save_state(fid, st)
             self.store.event(fid, "ignored", reason="tester on the blocklist", tester=st["tester"])
             return
+        # Topic rules fold a tester's short report into a feature already being built. A long report is a spec or a
+        # work item of its own (Ken's "Shared client core, step 5b-2b" was folded into #929 by the word "persist").
+        short = len((info.get("comment") or "").strip()) <= 400
         for issue_no, pattern in self.cfg.topics:
-            if re.search(pattern, info.get("comment") or "", re.I):
+            if short and re.search(pattern, info.get("comment") or "", re.I):
                 st.update(status="duplicate", duplicate_of=f"issue#{issue_no}")
                 self.store.save_state(fid, st)
                 self.store.event(fid, "duplicate", of=f"issue#{issue_no}", tester=st["tester"], topic=pattern)
