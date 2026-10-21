@@ -231,7 +231,7 @@ Unknown type bytes: decode returns “skip” (`Ok(None)` / `nil`) so callers ig
 
 **Handshake (both apps):** dial → `HELLO` → wait for `STATE` → optional checkpoint fetch (§7.3) → `ROWS_REQ` → replay pending `PUSH`es → live `ROW` / `ACK` / `STATUS` / `PRESENCE`.
 
-`STATE` header fields: `headSeq`, `seqFloor`, `checkpointSeq`, `checkpointSize`, `rowCount`, `rowBytes`, `box` (BoxState). Payload = encoded checkpoint frontier (version vector bytes).
+`STATE` header fields: `headSeq`, `seqFloor`, `checkpointSeq`, `checkpointSize`, `rowCount`, `rowBytes`, `box` (BoxState). Payload = encoded checkpoint frontier (version vector bytes). Clients accept unknown `box` values and missing `STATE` fields, skipping only the box update so the handshake still continues.
 
 ### 7.2a Room session state machine (`arbos-client::room`)
 

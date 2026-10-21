@@ -10,11 +10,33 @@ use std::time::Duration;
 
 use arbos_core::ids::ulid;
 use arbos_core::wire::{
-    self, Ack, ErrorHeader, Frame, FrameType, Hello, PushHeader, RowHeader, RowsReq, State,
-    StatusHeader, WakeHeader, ROW_MAX,
+    self, Ack, ErrorHeader, Frame, FrameType, Hello, PushHeader, RowHeader, RowsReq, StatusHeader,
+    WakeHeader, ROW_MAX,
 };
 use arbos_core::PROTO_VERSION;
+use serde::Deserialize;
 use serde_json::{json, Value};
+
+/// Lenient `STATE` header for clients (crdt-sync §7). Relay still writes
+/// [`wire::State`]; unknown `box` values and missing fields must not stall
+/// the handshake — only the box update is skipped.
+#[derive(Debug, Deserialize)]
+struct StateHeader {
+    #[serde(rename = "checkpointSeq", default)]
+    checkpoint_seq: i64,
+    #[serde(rename = "box", default)]
+    box_state: Option<String>,
+}
+
+fn parse_box_state(value: &str) -> Option<wire::BoxState> {
+    match value {
+        "awake" => Some(wire::BoxState::Awake),
+        "waking" => Some(wire::BoxState::Waking),
+        "asleep" => Some(wire::BoxState::Asleep),
+        "error" => Some(wire::BoxState::Error),
+        _ => None,
+    }
+}
 
 /// Wait this long after `on_open` for a `STATE` frame before giving up.
 pub const HELLO_DEADLINE: Duration = Duration::from_secs(15);
@@ -237,14 +259,18 @@ impl RoomSession {
         if self.phase != Phase::WaitState {
             return;
         }
-        let Ok(state) = serde_json::from_value::<State>(frame.header) else {
+        let Ok(state) = serde_json::from_value::<StateHeader>(frame.header) else {
             return;
         };
-        self.push(RoomAction::BoxState {
-            state: state.box_state,
-            detail: None,
-            poll_machine: false,
-        });
+        if let Some(box_value) = state.box_state.as_deref() {
+            if let Some(box_state) = parse_box_state(box_value) {
+                self.push(RoomAction::BoxState {
+                    state: box_state,
+                    detail: None,
+                    poll_machine: false,
+                });
+            }
+        }
         let frontier = frame.payload.to_vec();
         self.checkpoint_seq = state.checkpoint_seq;
         if state.checkpoint_seq > 0 {
@@ -749,6 +775,77 @@ mod tests {
         assert_eq!(s.cursor(), 5);
         let cont = s.drain_actions();
         assert!(take_sends(&cont).iter().any(|f| f.ty == FrameType::RowsReq));
+    }
+
+    #[test]
+    fn state_with_unknown_box_still_finishes_handshake() {
+        let mut s = RoomSession::new("dev:me", "proj/chat", 0, Vec::new());
+        s.on_open(1_000);
+        let _ = s.drain_actions();
+        let frame = Frame::new(
+            FrameType::State,
+            json!({
+                "headSeq": 0,
+                "seqFloor": 0,
+                "checkpointSeq": 0,
+                "box": "hibernating",
+            }),
+            Vec::new(),
+        )
+        .encode()
+        .to_vec();
+        s.on_frame(&frame);
+        let actions = s.drain_actions();
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, RoomAction::BoxState { .. })),
+            "unknown box skips only the box update"
+        );
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, RoomAction::SessionError { .. })),
+            "unknown box must not error the session"
+        );
+        assert!(take_sends(&actions)
+            .iter()
+            .any(|f| f.ty == FrameType::RowsReq));
+        assert!(s.is_live());
+    }
+
+    #[test]
+    fn state_with_only_checkpoint_seq_fetches_checkpoint() {
+        let mut s = RoomSession::new("dev:me", "proj/chat", 0, Vec::new());
+        s.on_open(1_000);
+        let _ = s.drain_actions();
+        let frame = Frame::new(
+            FrameType::State,
+            json!({ "checkpointSeq": 5 }),
+            b"frontier".to_vec(),
+        )
+        .encode()
+        .to_vec();
+        s.on_frame(&frame);
+        let actions = s.drain_actions();
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, RoomAction::BoxState { .. })),
+            "missing box emits no BoxState"
+        );
+        let fetches: Vec<_> = actions
+            .iter()
+            .filter(|a| matches!(a, RoomAction::FetchCheckpoint { .. }))
+            .collect();
+        assert_eq!(fetches.len(), 1);
+        assert!(matches!(
+            &fetches[0],
+            RoomAction::FetchCheckpoint {
+                checkpoint_seq: 5,
+                ..
+            }
+        ));
     }
 
     fn lagging_frame() -> Vec<u8> {
