@@ -14,6 +14,7 @@ use gpui::{
 use crate::app::SignInMode;
 use crate::app::{AppState, DetailsTarget, ProfilePage};
 use crate::model::{now_ms, CallKind, Link, MachineState};
+use crate::ui::attachments;
 use crate::ui::avatars;
 use crate::ui::callview;
 use crate::ui::channels::{ChannelsEvent, ChannelsPanel};
@@ -1195,6 +1196,11 @@ impl Shell {
     /// Escape stops a recording memo (keeping its transcript), then closes
     /// whatever floats: menus, then sheets.
     fn escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
+        if self.state.read(cx).image_preview_open() {
+            self.state.update(cx, |s, cx| s.close_image_preview(cx));
+            Composer::focus(&self.composer, window, cx);
+            return;
+        }
         if self.voice.update(cx, |v, cx| v.escape(cx)) {
             Composer::focus(&self.composer, window, cx);
             return;
@@ -2594,6 +2600,8 @@ impl Render for Shell {
         let sidebar_hidden = state.rail_collapsed || state.window_is_narrow(width);
         let sidebar_overlay = sidebar_hidden && state.sidebar_overlay;
         let details = state.details_open.clone();
+        let image_preview = state.image_preview.clone();
+        let image_preview_pending = state.image_preview_open() && image_preview.is_none();
         let pairing = state.pairing.clone();
         let new_chat_open = state.new_chat_open;
         let people_space = state.selected().filter(|p| p.is_people()).cloned();
@@ -2788,6 +2796,13 @@ impl Render for Shell {
         }
         if self.feedback.read(cx).is_open() {
             root = root.child(self.feedback.clone());
+        }
+        if image_preview.is_some() || image_preview_pending {
+            root = root.child(attachments::preview_overlay(
+                image_preview,
+                self.state.clone(),
+                &theme,
+            ));
         }
         // Collapsed video call: the camera keeps showing in a draggable tile.
         let collapsed_video = self
