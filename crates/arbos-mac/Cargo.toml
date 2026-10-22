@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 arbos-core.workspace = true
 arbos-client.workspace = true
+arbos-matrix.workspace = true
 arbos-update.workspace = true
 rusqlite.workspace = true
 

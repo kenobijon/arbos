@@ -183,6 +183,7 @@ pub fn new_chat_sheet(
         .and_then(|id| s.projects.iter().find(|p| &p.id == id))
         .map(|p| p.name.clone());
     let creating = s.new_project_open;
+    let servers_available = s.servers_available;
     let my_agents: Vec<Project> = if group_mode {
         let q = typed.to_lowercase();
         s.my_projects()
@@ -392,6 +393,72 @@ pub fn new_chat_sheet(
             group = group
                 .child(div().h(px(0.5)).ml(px(66.0)).bg(theme.border))
                 .child(group_row);
+            // D88 rule 8: servers, when this relay runs them.
+            if servers_available {
+                let server_row = |id: &'static str,
+                                  glyph: &'static str,
+                                  title: &'static str,
+                                  line: &'static str,
+                                  sheet: crate::app::ServerSheet| {
+                    div()
+                        .id(id)
+                        .flex()
+                        .items_center()
+                        .gap(px(12.0))
+                        .px(px(14.0))
+                        .py(px(10.0))
+                        .cursor_pointer()
+                        .hover(|st| st.bg(theme.surface_2))
+                        .child(
+                            glass::circle(
+                                ElementId::Name(SharedString::from(format!("{id}-glyph"))),
+                                40.0,
+                                &theme,
+                            )
+                            .child(icon(glyph, 17.0, theme.text)),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .flex_1()
+                                .min_w_0()
+                                .child(
+                                    div()
+                                        .text_size(px(TEXT_BODY))
+                                        .text_color(theme.text)
+                                        .child(title),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(TEXT_SMALL))
+                                        .text_color(theme.text_muted)
+                                        .child(line),
+                                ),
+                        )
+                        .child(icon("chevron-right", 13.0, theme.text_faint))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.open_server_sheet(sheet.clone(), window, cx);
+                        }))
+                };
+                group = group
+                    .child(div().h(px(0.5)).ml(px(66.0)).bg(theme.border))
+                    .child(server_row(
+                        "new-server",
+                        "hash",
+                        "New server",
+                        "Channels for a crowd, with an invite link",
+                        crate::app::ServerSheet::NewServer,
+                    ))
+                    .child(div().h(px(0.5)).ml(px(66.0)).bg(theme.border))
+                    .child(server_row(
+                        "join-server",
+                        "link",
+                        "Join a server",
+                        "Paste an invite link",
+                        crate::app::ServerSheet::JoinServer,
+                    ));
+            }
             body = body.child(group);
         }
 

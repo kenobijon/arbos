@@ -884,6 +884,15 @@ pub async fn spawn_fleet_tasks(state: AppState) {
             }
         }
     });
+    let st2 = state.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(300));
+        let mut last_alert: HashMap<&'static str, i64> = HashMap::new();
+        loop {
+            tick.tick().await;
+            sample_fleet(&st2, &mut last_alert).await;
+        }
+    });
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(60));
         loop {
@@ -935,6 +944,96 @@ fn admin_only(principal: &Principal) -> Result<(), Box<Response>> {
             "admin token required",
         ))),
     }
+}
+
+/// "12.34%" → 12.34; "28.73MiB / 2GiB" → 28.73 (MiB).
+fn parse_pct(s: &str) -> f64 {
+    s.trim().trim_end_matches('%').parse().unwrap_or(0.0)
+}
+
+fn parse_mib(s: &str) -> f64 {
+    let first = s.split('/').next().unwrap_or("").trim();
+    let num: String = first
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    let v: f64 = num.parse().unwrap_or(0.0);
+    let unit = first[num.len()..].trim();
+    match unit {
+        "GiB" => v * 1024.0,
+        "KiB" => v / 1024.0,
+        "B" => v / 1024.0 / 1024.0,
+        "GB" => v * 1000.0 * 1000.0 * 1000.0 / 1024.0 / 1024.0,
+        "MB" => v * 1000.0 * 1000.0 / 1024.0 / 1024.0,
+        "kB" => v * 1000.0 / 1024.0 / 1024.0,
+        _ => v,
+    }
+}
+
+/// Every 5 min: one `fleet_samples` row per running sandbox plus host alerts (disk under the
+/// floor + 20 GB, available memory under the eviction floor + 32 GiB) as `fleet_events`, at most
+/// one alert per kind per hour. Samples older than 30 days are pruned.
+async fn sample_fleet(state: &AppState, last_alert: &mut HashMap<&'static str, i64>) {
+    let p = sample_pressure(state).await;
+    let stats = docker_stats().await;
+    let host = (p.mem_available_gb, p.load5, p.disk_free_gb);
+    for b in state.db.list_boxes().unwrap_or_default() {
+        if b.provider != "gvisor" {
+            continue;
+        }
+        let Some(name) = &b.sandbox_id else {
+            continue;
+        };
+        let Some(v) = stats.get(name) else {
+            continue;
+        };
+        let cpu = v
+            .get("CPUPerc")
+            .and_then(Value::as_str)
+            .map(parse_pct)
+            .unwrap_or(0.0);
+        let mem = v
+            .get("MemUsage")
+            .and_then(Value::as_str)
+            .map(parse_mib)
+            .unwrap_or(0.0);
+        let pids = v
+            .get("PIDs")
+            .and_then(Value::as_str)
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0);
+        let _ = state.db.fleet_sample(&b.user_id, cpu, mem, pids, host);
+    }
+    let cfg = &state.cfg.fleet;
+    let mut alerts: Vec<(&'static str, String)> = Vec::new();
+    if p.disk_free_gb < cfg.min_free_disk_gb + 20.0 {
+        alerts.push((
+            "disk_low",
+            format!(
+                "{:.0} GB free on the relay data volume (sign-ups pause at {:.0} GB)",
+                p.disk_free_gb, cfg.min_free_disk_gb
+            ),
+        ));
+    }
+    if p.mem_available_gb < cfg.evict_min_available_gb + 32.0 {
+        alerts.push((
+            "memory_low",
+            format!(
+                "{:.0} GiB available on the host (eviction starts at {:.0} GiB)",
+                p.mem_available_gb, cfg.evict_min_available_gb
+            ),
+        ));
+    }
+    let now = now_ms();
+    for (kind, detail) in alerts {
+        if last_alert.get(kind).is_some_and(|t| now - *t < 3_600_000) {
+            continue;
+        }
+        last_alert.insert(kind, now);
+        tracing::warn!(kind, %detail, "host fleet alert");
+        let _ = state.db.fleet_event(kind, None, &detail);
+    }
+    let _ = state.db.prune_fleet_samples(now - 30 * 24 * 3_600_000);
 }
 
 async fn docker_stats() -> HashMap<String, Value> {
@@ -1009,6 +1108,10 @@ pub async fn admin_fleet(State(state): State<AppState>, principal: Principal) ->
             "image": current_image(&state), "snapshot": current_snapshot(&state),
         },
         "sandboxes": sandboxes,
+        "samples": {
+            "last_24h": state.db.fleet_sample_summary(now_ms() - 24 * 3_600_000).ok(),
+            "last_7d": state.db.fleet_sample_summary(now_ms() - 7 * 24 * 3_600_000).ok(),
+        },
         "waitlist": state.db.waitlist().unwrap_or_default(),
         "events": state.db.fleet_events(50).unwrap_or_default(),
     }))
@@ -1209,6 +1312,32 @@ mod tests {
             "my-registry/agent:test",
             "an explicit image pins"
         );
+    }
+
+    #[test]
+    fn docker_stats_fields_parse() {
+        assert!((parse_pct("12.34%") - 12.34).abs() < 1e-9);
+        assert!((parse_mib("28.73MiB / 2GiB") - 28.73).abs() < 1e-9);
+        assert!((parse_mib("1.5GiB / 2GiB") - 1536.0).abs() < 1e-9);
+        assert!((parse_mib("512KiB / 2GiB") - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn samples_summarise() {
+        let state = test_state(AuthMode::Github);
+        for (i, mem) in [100.0, 200.0, 300.0, 400.0].iter().enumerate() {
+            state
+                .db
+                .fleet_sample("u", i as f64, *mem, 80 + i as i64, (400.0, 10.0, 200.0))
+                .unwrap();
+        }
+        let s = state.db.fleet_sample_summary(0).unwrap();
+        assert_eq!(s.samples, 4);
+        assert_eq!(s.sandboxes, 1);
+        assert!((s.mem_mib_avg - 250.0).abs() < 1e-9);
+        assert!((s.mem_mib_max - 400.0).abs() < 1e-9);
+        assert_eq!(s.pids_max, 83);
+        assert_eq!(state.db.prune_fleet_samples(now_ms() + 1).unwrap(), 4);
     }
 
     #[test]

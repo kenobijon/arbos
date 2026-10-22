@@ -297,6 +297,24 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         | ClientCommand::RenameGroup { .. }
         | ClientCommand::SetGroupImage { .. }
         | ClientCommand::CloseChat { .. } => {}
+        // D88 servers live on the relay only; the fixture has none.
+        ClientCommand::ServersRefresh
+        | ClientCommand::ServerCreate { .. }
+        | ClientCommand::ServerJoin { .. }
+        | ClientCommand::ServerFetch { .. }
+        | ClientCommand::ServerRename { .. }
+        | ClientCommand::ServerDelete { .. }
+        | ClientCommand::ServerLeave { .. }
+        | ClientCommand::ServerResetInvite { .. }
+        | ClientCommand::ServerSetRole { .. }
+        | ClientCommand::ServerRemoveMember { .. }
+        | ClientCommand::ChannelCreate { .. }
+        | ClientCommand::ChannelPatch { .. }
+        | ClientCommand::ChannelDelete { .. }
+        | ClientCommand::ChannelOpen { .. }
+        | ClientCommand::ChannelLoadOlder { .. }
+        | ClientCommand::ChannelSend { .. }
+        | ClientCommand::ChannelMarkRead { .. } => {}
         // The relay keeps archive state; the fixture does the same so a chat
         // brought back from the "+" dropdown stays back when the list is re-sent.
         ClientCommand::ArchiveChat { chat_id, archived } => {
