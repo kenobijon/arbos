@@ -204,7 +204,7 @@ pub fn new_chat_sheet(
                         ),
                 )
                 .child(icon("chevron-right", 13.0, theme.text_faint))
-                // D92: opens the Create agent sheet (`create_agent::sheet`) in place of this one.
+                // D93: opens the Create screen (`create_entity::sheet`) in place of this one.
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.state.update(cx, |s, cx| {
                         s.new_project_open = true;
@@ -246,14 +246,8 @@ pub fn new_chat_sheet(
                         ),
                 )
                 .child(icon("chevron-right", 13.0, theme.text_faint))
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.people_input.update(cx, |input, _| {
-                        input.set_placeholder("Add people or agents");
-                    });
-                    this.state.update(cx, |s, cx| s.open_new_group(cx));
-                    let handle = this.people_input.read(cx).focus_handle(cx);
-                    window.focus(&handle, cx);
-                }));
+                // D93: step 1 is the Create screen (picture + name); the picker below is step 2.
+                .on_click(cx.listener(|this, _, window, cx| this.open_create_group(window, cx)));
             // Inside the scrolling body the card must keep its height, or the
             // expanded form is squeezed and clipped once the list below is long.
             let mut group = glass::group(&theme)
@@ -461,9 +455,10 @@ pub fn new_chat_sheet(
         (None, false, Some(name)) => format!("Invite to {name}"),
         (None, false, None) => "New Message".to_string(),
     };
-    // Create needs a person (a group of one is a DM); Add takes agents alone too.
-    let can_create = !picked.is_empty() && !busy;
-    let can_add = (!picked.is_empty() || !picked_agents.is_empty()) && !busy;
+    // People, agents, or both — a group of your agents is a group (Jacob,
+    // 2026-10-22: Create greyed out with only agents picked read as broken).
+    let can_create = (!picked.is_empty() || !picked_agents.is_empty()) && !busy;
+    let can_add = can_create;
     let left = if add_to.is_some() {
         // No New Message sheet behind this one: Cancel closes it.
         glass::sheet_button("add-members-cancel", "Cancel", &theme)

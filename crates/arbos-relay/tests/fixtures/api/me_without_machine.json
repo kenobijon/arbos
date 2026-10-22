@@ -20,7 +20,8 @@
   "features": {
     "leaf_avatars": true,
     "leaf_lottie": true,
-    "vault_connect": false
+    "vault_connect": false,
+    "voice_mode": false
   },
   "limits": {
     "auth_mode": "github",

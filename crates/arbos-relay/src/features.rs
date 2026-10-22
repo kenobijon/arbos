@@ -6,6 +6,7 @@
 //! | `vault_connect` (#1265: the Connect 1Password flow) | `ARBOS_FEATURE_VAULT_CONNECT` (`vaults.rs`) | off |
 //! | `leaf_avatars` (D92: agents without a photo draw a leaf, not initials) | `ARBOS_FEATURE_LEAF_AVATARS` | on; `0` / `false` / `off` / `no` is the kill switch |
 //! | `leaf_lottie` (the leaves play their committed Lottie idle/gust instead of the native sway) | `ARBOS_FEATURE_LEAF_LOTTIE` | on; same kill switch |
+//! | `voice_mode` (spoken replies, voice picker, reply playback; 2026-10-22 Jacob: hidden until it works end to end) | `ARBOS_FEATURE_VOICE_MODE` | off; the relay also refuses `/proxy/v1/audio/speech` while off, so no client can spend on TTS |
 //!
 //! `GET /secrets` serves the same object (`vaults::features()` delegates here).
 
@@ -34,6 +35,12 @@ pub fn leaf_lottie() -> bool {
     env_flag("ARBOS_FEATURE_LEAF_LOTTIE", true)
 }
 
+/// Voice mode (spoken replies, voice picker, playback). Default off; `ARBOS_FEATURE_VOICE_MODE=1`
+/// brings it back without a client release.
+pub fn voice_mode() -> bool {
+    env_flag("ARBOS_FEATURE_VOICE_MODE", false)
+}
+
 /// The `features` object on `GET /me` and `GET /secrets`. Key names are a contract with the
 /// shipped apps (Mac v0.6.104 / TestFlight read `vault_connect`); only add, never rename.
 pub fn dto() -> MeFeaturesDto {
@@ -41,6 +48,7 @@ pub fn dto() -> MeFeaturesDto {
         vault_connect: Some(crate::vaults::vault_connect()),
         leaf_avatars: Some(leaf_avatars()),
         leaf_lottie: Some(leaf_lottie()),
+        voice_mode: Some(voice_mode()),
     }
 }
 
@@ -70,5 +78,17 @@ mod tests {
             assert_eq!(env_flag("ARBOS_FEATURE_TEST_FLAG", true), want, "{v}");
         }
         std::env::remove_var("ARBOS_FEATURE_TEST_FLAG");
+    }
+
+    /// Voice mode is off unless the relay is started with the flag; the object always carries
+    /// the key, so a client never has to guess. (The flag itself is not flipped here: other
+    /// tests snapshot `features()` concurrently.)
+    #[test]
+    fn voice_mode_is_off_by_default_and_always_sent() {
+        if std::env::var_os("ARBOS_FEATURE_VOICE_MODE").is_none() {
+            assert!(!voice_mode());
+            assert_eq!(features()["voice_mode"], serde_json::json!(false));
+        }
+        assert!(features().get("voice_mode").is_some());
     }
 }

@@ -73,6 +73,11 @@ arbos.life {
 		not path /apple-touch-icon.png
 	}
 	header @png Cache-Control "public, max-age=86400"
+	# Server invite links (D88): arbos.life/s/<code> is answered by the relay — a page that opens
+	# the installed app through arbos://join/<code> and falls back to the download.
+	handle /s/* {
+		reverse_proxy @RELAY_LISTEN@
+	}
 	header /favicon.ico Cache-Control "public, max-age=3600"
 	header /favicon.svg Cache-Control "public, max-age=3600"
 	header /apple-touch-icon.png Cache-Control "public, max-age=3600"
