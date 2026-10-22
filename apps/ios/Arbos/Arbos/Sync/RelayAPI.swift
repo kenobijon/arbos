@@ -640,6 +640,104 @@ final class RelayAPI {
         return chat
     }
 
+    // MARK: Servers (D88)
+
+    /// `GET /servers` → every server I belong to (channels, my role, invite for owner/admin).
+    func servers() async throws -> [Server] {
+        ((try await json("GET", "/servers")) as? [Any] ?? []).compactMap(Server.parse)
+    }
+
+    /// `GET /servers/{id}` → the server with its members.
+    func server(_ id: String) async throws -> Server {
+        guard let s = Server.parse(try await json("GET", "/servers/\(id)")) else { throw RelayError(status: 0, message: "Bad server") }
+        return s
+    }
+
+    /// `POST /servers {name}` → 201 the server (with `#general` and members).
+    func createServer(name: String) async throws -> Server {
+        let v = try await json("POST", "/servers", body: ["name": name.trimmingCharacters(in: .whitespacesAndNewlines)])
+        guard let s = Server.parse(v) else { throw RelayError(status: 0, message: "The relay returned no server") }
+        return s
+    }
+
+    /// `PATCH /servers/{id} {name?, image_key?}` (owner/admin).
+    func patchServer(_ id: String, name: String? = nil, imageKey: String? = nil) async throws {
+        var body: [String: Any] = [:]
+        if let name { body["name"] = name }
+        if let imageKey { body["image_key"] = imageKey }
+        guard !body.isEmpty else { return }
+        _ = try await request("PATCH", "/servers/\(id)", body: body)
+    }
+
+    /// `DELETE /servers/{id}` (owner).
+    func deleteServer(_ id: String) async throws {
+        _ = try await request("DELETE", "/servers/\(id)")
+    }
+
+    /// `POST /servers/{id}/channels {name, topic?, restricted?}` → 201 the channel.
+    func createChannel(serverId: String, name: String, topic: String? = nil, restricted: Bool = false) async throws -> ServerChannel {
+        var body: [String: Any] = ["name": name, "restricted": restricted]
+        if let topic, !topic.isEmpty { body["topic"] = topic }
+        let v = try await json("POST", "/servers/\(serverId)/channels", body: body)
+        guard let c = ServerChannel.parse(v) else { throw RelayError(status: 0, message: "The relay returned no channel") }
+        return c
+    }
+
+    /// `PATCH /servers/{id}/channels/{cid} {name?, topic?, restricted?}`.
+    func patchChannel(serverId: String, channelId: String, name: String? = nil, topic: String? = nil, restricted: Bool? = nil) async throws {
+        var body: [String: Any] = [:]
+        if let name { body["name"] = name }
+        if let topic { body["topic"] = topic }
+        if let restricted { body["restricted"] = restricted }
+        guard !body.isEmpty else { return }
+        _ = try await request("PATCH", "/servers/\(serverId)/channels/\(channelId)", body: body)
+    }
+
+    /// `DELETE /servers/{id}/channels/{cid}` (`#general` answers 409).
+    func deleteChannel(serverId: String, channelId: String) async throws {
+        _ = try await request("DELETE", "/servers/\(serverId)/channels/\(channelId)")
+    }
+
+    /// `POST /servers/{id}/invite/reset` (owner) → the new `{code, url}`.
+    func resetServerInvite(_ id: String) async throws -> ServerInvite {
+        guard let inv = ServerInvite.parse(try await json("POST", "/servers/\(id)/invite/reset", body: [String: Any]())) else {
+            throw RelayError(status: 0, message: "The relay returned no invite link")
+        }
+        return inv
+    }
+
+    /// `POST /servers/join {code}` (the code or the whole link) → the server.
+    func joinServer(code: String) async throws -> Server {
+        let v = try await json("POST", "/servers/join", body: ["code": code.trimmingCharacters(in: .whitespacesAndNewlines)])
+        guard let s = Server.parse(v) else { throw RelayError(status: 0, message: "The relay returned no server") }
+        return s
+    }
+
+    /// `PUT /servers/{id}/members/{uid} {role: admin|member}` (owner).
+    func setServerMemberRole(serverId: String, userId: String, role: String) async throws {
+        _ = try await request("PUT", "/servers/\(serverId)/members/\(userId)", body: ["role": role])
+    }
+
+    /// `DELETE /servers/{id}/members/{uid}[?ban=1]` (owner/admin).
+    func removeServerMember(serverId: String, userId: String, ban: Bool) async throws {
+        _ = try await request("DELETE", "/servers/\(serverId)/members/\(userId)\(ban ? "?ban=1" : "")")
+    }
+
+    /// `POST /servers/{id}/leave`.
+    func leaveServer(_ id: String) async throws {
+        _ = try await request("POST", "/servers/\(id)/leave", body: [String: Any]())
+    }
+
+    /// `GET /me/matrix` → this device's session for the shared Matrix client; nil when the
+    /// relay has no servers (503 `servers_off`) or predates the route (404).
+    func matrixSession() async throws -> MatrixCredentials? {
+        do {
+            return MatrixCredentials.parse(try await json("GET", "/me/matrix"))
+        } catch let e as RelayError where e.status == 503 || e.status == 404 || e.type == "servers_off" {
+            return nil
+        }
+    }
+
     func patchProject(_ projectId: Id, name: String?, color: String?, icon: String?, avatar: String? = nil, avatarColor: String? = nil, description: String? = nil) async throws {
         var body: [String: Any] = [:]
         if let description { body["description"] = String(description.prefix(500)) }
