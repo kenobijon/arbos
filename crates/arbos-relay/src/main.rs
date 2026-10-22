@@ -314,6 +314,8 @@ async fn main() -> anyhow::Result<()> {
         fleet_pressure: Arc::new(Mutex::new(None)),
         voice: Arc::new(voice::cfg_from_env(&data_dir_for_voice)),
         voice_conns: Arc::new(Mutex::new(HashMap::new())),
+        default_snapshot: Arc::new(std::sync::RwLock::new(String::new())),
+        started_at: std::time::Instant::now(),
         voice_dispatched: Arc::new(Mutex::new(HashMap::new())),
         voice_worker: Arc::new(Mutex::new(None)),
         client_seen: Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -404,6 +406,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/admin/calls", get(calls::admin_calls))
         .route("/admin/usage/{purpose}", get(admin::usage_by_purpose))
         .route("/admin/release", post(releases::admin_release))
+        .route("/admin/snapshot/default", post(admin::set_default_snapshot))
         // Chats on Matrix (D88): the relay is Synapse's appservice, push gateway and operator.
         .route(
             "/_matrix/app/v1/transactions/{txn}",

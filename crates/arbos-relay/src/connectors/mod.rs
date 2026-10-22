@@ -936,6 +936,8 @@ mod tests {
             fleet_pressure: Arc::new(tokio::sync::Mutex::new(None)),
             voice: Arc::new(crate::voice::VoiceCfg::default()),
             voice_conns: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            default_snapshot: Arc::new(std::sync::RwLock::new(String::new())),
+            started_at: std::time::Instant::now(),
             voice_dispatched: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             voice_worker: Arc::new(tokio::sync::Mutex::new(None)),
             client_seen: Arc::new(std::sync::Mutex::new(HashMap::new())),
