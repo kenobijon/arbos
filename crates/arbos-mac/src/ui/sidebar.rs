@@ -217,7 +217,7 @@ fn server_preview(state: &AppState, server: &ServerInfo) -> String {
         .filter(|c| c.server_id == server.id && c.last_ts > 0)
         .max_by_key(|c| c.last_ts);
     match newest {
-        Some(c) => format!("#{} · {}", c.name, channel_last_line(c)),
+        Some(c) => format!("{} · {}", c.name, channel_last_line(c)),
         None => state
             .space_row(server)
             .map(|s| s.last_text.clone())
@@ -855,7 +855,6 @@ fn server_channels(
     let page = crate::app::ProfilePage::Server {
         server_id: server.id.clone(),
     };
-    let page_open = state.profile.as_ref() == Some(&page);
     let selected_channel = state
         .selected_channel
         .as_ref()
@@ -894,8 +893,6 @@ fn server_channels(
                 .min_w_0()
                 .flex_1()
                 .cursor_pointer()
-                .rounded(px(8.0))
-                .when(page_open, |el| el.bg(theme.surface_2))
                 .child(server_picture(server, 26.0, theme))
                 .child(
                     div()
@@ -949,6 +946,8 @@ fn server_channels(
         let locked = ch.restricted || room.as_ref().is_some_and(|r| r.restricted);
         let server_id = server.id.clone();
         let channel_id = ch.id.clone();
+        let (menu_sid, menu_cid) = (server.id.clone(), ch.id.clone());
+        let (ctrl_sid, ctrl_cid) = (server.id.clone(), ch.id.clone());
         list = list.child(
             div()
                 .id(ElementId::Name(SharedString::from(format!(
@@ -1039,16 +1038,156 @@ fn server_channels(
                                 }),
                         ),
                 )
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.menu_open = false;
-                    this.state.update(cx, |s, cx| {
-                        s.select_channel(server_id.clone(), channel_id.clone(), cx)
-                    });
-                    Composer::focus(&this.composer, window, cx);
-                })),
+                .on_click(
+                    cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                        // Control-click opened the menu on mouse-down; the click stays swallowed.
+                        if is_control_click(event) {
+                            return;
+                        }
+                        this.menu_open = false;
+                        this.channel_menu = None;
+                        this.state.update(cx, |s, cx| {
+                            s.select_channel(server_id.clone(), channel_id.clone(), cx)
+                        });
+                        Composer::focus(&this.composer, window, cx);
+                    }),
+                )
+                // Right-click or control-click: the row's menu (Archive; Delete for admins),
+                // the sidebar row menu's pattern (#1257/#1258).
+                .on_mouse_down(
+                    gpui::MouseButton::Right,
+                    cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.open_channel_menu(
+                            menu_sid.clone(),
+                            menu_cid.clone(),
+                            event.position,
+                            cx,
+                        );
+                    }),
+                )
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                        if !event.modifiers.control {
+                            return;
+                        }
+                        cx.stop_propagation();
+                        this.open_channel_menu(
+                            ctrl_sid.clone(),
+                            ctrl_cid.clone(),
+                            event.position,
+                            cx,
+                        );
+                    }),
+                ),
         );
     }
     list
+}
+
+/// The right-click menu of a channel row (D88): **Archive** (or Unarchive) for every member —
+/// hides the channel from my list, the server's Channels tab brings it back — and, for owners
+/// and admins, a divider and **Delete** (never on `#general`), which first asks "Delete #name?".
+pub fn channel_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
+    let (server_id, channel_id, at) = shell.channel_menu.clone()?;
+    let theme = Theme::of(cx).clone();
+    let state = shell.state.read(cx);
+    let server = state.server(&server_id)?;
+    let channel = server.channel(&channel_id)?.clone();
+    let is_general = server.general().is_some_and(|g| g.id == channel.id);
+    let can_delete = server.can_admin() && !is_general;
+    let archived = channel.archived;
+
+    if shell.channel_delete_armed && can_delete {
+        let (sid, cid) = (server_id.clone(), channel_id.clone());
+        let body = div()
+            .flex()
+            .flex_col()
+            .gap(px(10.0))
+            .p(px(8.0))
+            .child(
+                div()
+                    .text_size(px(TEXT_SMALL))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.text)
+                    .child(format!("Delete #{}?", channel.name)),
+            )
+            .child(
+                div()
+                    .text_size(px(TEXT_TINY))
+                    .text_color(theme.text_muted)
+                    .child("Deletes the channel and its messages for everyone in the server."),
+            )
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap(px(6.0))
+                    .child(
+                        confirm_button("channel-menu-delete-cancel", "Cancel", false, &theme)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.channel_menu = None;
+                                this.channel_delete_armed = false;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        confirm_button("channel-menu-delete-go", "Delete", true, &theme).on_click(
+                            cx.listener(move |this, _, _, cx| {
+                                this.channel_menu = None;
+                                this.channel_delete_armed = false;
+                                let (sid, cid) = (sid.clone(), cid.clone());
+                                this.state
+                                    .update(cx, |s, cx| s.delete_channel(sid, cid, cx));
+                            }),
+                        ),
+                    ),
+            );
+        return Some(
+            div()
+                .absolute()
+                .left(at.x)
+                .top(at.y)
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(glass::frosted_menu(260.0, &theme, body)),
+        );
+    }
+
+    let (sid, cid) = (server_id.clone(), channel_id.clone());
+    let mut body = div().flex().flex_col().gap(px(1.0)).child(
+        glass::menu_row(
+            "channel-menu-archive",
+            if archived { "tray-up" } else { "archive" },
+            if archived { "Unarchive" } else { "Archive" },
+            false,
+            &theme,
+        )
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.channel_menu = None;
+            let (sid, cid) = (sid.clone(), cid.clone());
+            this.state
+                .update(cx, |s, cx| s.archive_channel(sid, cid, !archived, cx));
+        })),
+    );
+    if can_delete {
+        body = body.child(glass::menu_divider(&theme)).child(
+            glass::menu_row("channel-menu-delete", "trash", "Delete", true, &theme).on_click(
+                cx.listener(|this, _, _, cx| {
+                    this.channel_delete_armed = true;
+                    cx.notify();
+                }),
+            ),
+        );
+    }
+    Some(
+        div()
+            .absolute()
+            .left(at.x)
+            .top(at.y)
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(glass::frosted_menu(200.0, &theme, body)),
+    )
 }
 
 fn render_row(
@@ -1079,7 +1218,7 @@ fn render_row(
         .renaming_project
         .as_ref()
         .is_some_and(|p| p == &space.id);
-    if streaming || typing || avatar_state != avatars::AvatarState::Idle {
+    if typing || avatar_state != avatars::AvatarState::Idle {
         PulseClock::request(cx);
     }
     let phase = PulseClock::phase(cx, 900);
@@ -1314,13 +1453,18 @@ fn render_row(
                                 .text_color(theme.text_muted)
                                 .child(preview),
                         )
-                        .when(streaming || typing, |el| {
-                            el.child(div().size(px(7.0)).rounded_full().bg(Theme::with_alpha(
-                                if typing { theme.online } else { theme.warn },
-                                0.35 + 0.65 * phase,
-                            )))
+                        // No "agent is working" dot on rows (Jacob, 2026-10-22): the
+                        // working state lives in the header / activity line. A person
+                        // typing keeps its green pulse; unread keeps its accent dot.
+                        .when(typing, |el| {
+                            el.child(
+                                div()
+                                    .size(px(7.0))
+                                    .rounded_full()
+                                    .bg(Theme::with_alpha(theme.online, 0.35 + 0.65 * phase)),
+                            )
                         })
-                        .when(!streaming && !typing && unread, |el| {
+                        .when(!typing && unread, |el| {
                             el.child(div().size(px(8.0)).rounded_full().bg(theme.accent))
                         }),
                 ),

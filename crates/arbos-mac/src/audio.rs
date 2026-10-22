@@ -52,7 +52,18 @@ pub fn encode_wav(rate: u32, samples: &[i16]) -> Vec<u8> {
 
 /// Decode a WAV blob to mono 16-bit PCM (channels are averaged; floats and
 /// other bit depths are rescaled). `None` when the bytes are not a WAV.
+/// A streamed header (placeholder RIFF/`data` sizes, what OpenAI's TTS sends)
+/// is repaired first; hound rejects it as is.
 pub fn decode_wav(bytes: &[u8]) -> Option<Pcm> {
+    if arbos_core::wav::needs_repair(bytes) {
+        let mut fixed = bytes.to_vec();
+        arbos_core::wav::repair_sizes(&mut fixed);
+        return decode_wav_strict(&fixed);
+    }
+    decode_wav_strict(bytes)
+}
+
+fn decode_wav_strict(bytes: &[u8]) -> Option<Pcm> {
     let mut reader = hound::WavReader::new(Cursor::new(bytes)).ok()?;
     let spec = reader.spec();
     let channels = spec.channels.max(1) as usize;
@@ -146,4 +157,44 @@ pub fn tone_speech(text: &str) -> Vec<u8> {
         out.extend(std::iter::repeat_n(0i16, RATE as usize / 4));
     }
     encode_wav(RATE, &out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What `POST /audio/speech` (gpt-4o-mini-tts, `wav`) really returns: 24 kHz mono
+    /// 16-bit with RIFF and `data` sizes left at `0xFFFFFFFF`.
+    fn streamed_like_openai(samples: &[i16]) -> Vec<u8> {
+        let mut b = encode_wav(24_000, samples);
+        b[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+        b[40..44].copy_from_slice(&u32::MAX.to_le_bytes());
+        b
+    }
+
+    #[test]
+    fn hound_alone_rejects_the_streamed_header() {
+        let b = streamed_like_openai(&[0i16; 2400]);
+        assert!(hound::WavReader::new(Cursor::new(&b)).is_err());
+        assert!(decode_wav_strict(&b).is_none());
+    }
+
+    #[test]
+    fn decode_wav_accepts_the_streamed_header() {
+        let samples: Vec<i16> = (0..24_000).map(|i| ((i % 100) as i16 - 50) * 100).collect();
+        let b = streamed_like_openai(&samples);
+        let pcm = decode_wav(&b).expect("streamed WAV decodes");
+        assert_eq!(pcm.rate, 24_000);
+        assert_eq!(pcm.samples, samples);
+        assert!((pcm.duration_secs() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn decode_wav_roundtrips_a_well_formed_file() {
+        let samples: Vec<i16> = (0..1600).map(|i| (i * 7 % 3000) as i16).collect();
+        let pcm = decode_wav(&encode_wav(RATE, &samples)).expect("wav");
+        assert_eq!(pcm.rate, RATE);
+        assert_eq!(pcm.samples, samples);
+        assert!(decode_wav(b"not audio at all").is_none());
+    }
 }
