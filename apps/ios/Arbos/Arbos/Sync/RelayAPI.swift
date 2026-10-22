@@ -739,6 +739,15 @@ final class RelayAPI {
         return ((p?["avatar_color_index_effective"] as? NSNumber) ?? (p?["avatar_color_index"] as? NSNumber))?.intValue
     }
 
+    /// D92 `PATCH /projects/{id} {"avatar_leaf": 0–8|null, "avatar_leaf_color": 0–9|null}` (null = automatic).
+    func setProjectAvatarLeaf(_ projectId: Id, leaf: Int?, color: Int?) async throws {
+        let body: [String: Any] = [
+            "avatar_leaf": leaf.map { $0 as Any } ?? NSNull(),
+            "avatar_leaf_color": color.map { $0 as Any } ?? NSNull(),
+        ]
+        _ = try await json("PATCH", "/projects/\(projectId)", body: body)
+    }
+
     /// §11 `PATCH /projects/{id} {"vision_enabled": bool}` — may the agent sample the camera on calls.
     func setProjectVision(_ projectId: Id, enabled: Bool) async throws -> Bool? {
         let v = try await json("PATCH", "/projects/\(projectId)", body: ["vision_enabled": enabled])

@@ -980,7 +980,7 @@ pub async fn me(State(state): State<AppState>, principal: Principal) -> Response
             signup: signup.to_owned(),
             auth_mode: state.cfg.auth_mode.as_str().to_owned(),
         },
-        features: crate::vaults::features(),
+        features: crate::features::dto(),
         machine: MeMachineDto {
             exists: sb.is_some(),
             state: bs,

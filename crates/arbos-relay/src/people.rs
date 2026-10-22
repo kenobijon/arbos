@@ -244,6 +244,10 @@ pub(crate) fn member_dto(state: &AppState, m: &Membership) -> ChatMemberDto {
         avatar_color: None,
         avatar_color_index: None,
         avatar_color_index_effective: None,
+        avatar_leaf: None,
+        avatar_leaf_color: None,
+        avatar_leaf_effective: None,
+        avatar_leaf_color_effective: None,
         project: None,
         description: None,
         owner: None,
@@ -286,8 +290,13 @@ pub(crate) fn member_dto(state: &AppState, m: &Membership) -> ChatMemberDto {
             ));
             dto.avatar = Some(avatar.clone());
             dto.avatar_color = Some(avatar_color.clone());
+            let leaf = crate::avatar::effective_leaf(&p);
             dto.avatar_color_index = Some(p.avatar_color_index);
             dto.avatar_color_index_effective = Some(effective);
+            dto.avatar_leaf = Some(p.avatar_leaf);
+            dto.avatar_leaf_color = Some(p.avatar_leaf_color);
+            dto.avatar_leaf_effective = Some(i64::from(leaf.leaf));
+            dto.avatar_leaf_color_effective = Some(i64::from(leaf.color));
             dto.project = Some(ChatMemberProjectDto {
                 id: p.id.clone(),
                 name: p.name.clone(),
@@ -297,6 +306,10 @@ pub(crate) fn member_dto(state: &AppState, m: &Membership) -> ChatMemberDto {
                 avatar_color,
                 avatar_color_index: p.avatar_color_index,
                 avatar_color_index_effective: effective,
+                avatar_leaf: p.avatar_leaf,
+                avatar_leaf_color: p.avatar_leaf_color,
+                avatar_leaf_effective: Some(i64::from(leaf.leaf)),
+                avatar_leaf_color_effective: Some(i64::from(leaf.color)),
                 description: p.description.clone(),
                 model: p
                     .models
@@ -546,6 +559,11 @@ pub async fn users_search(
 /// `GET /avatar-colors` — the one 7-entry initials palette every client renders from (D79).
 pub async fn avatar_colors() -> Response {
     Json(crate::avatar::palette_json()).into_response()
+}
+
+/// `GET /avatar-leaves` — the D92 leaf shapes, colours and index rule (public, no auth).
+pub async fn avatar_leaves() -> Response {
+    Json(crate::avatar::leaves_json()).into_response()
 }
 
 /// `GET /users/{id}` — one person's card for a profile page: handle, name, avatar, status,
@@ -2828,6 +2846,8 @@ pub(crate) mod tests_support {
             description: String::new(),
             primary_chat_id: None,
             avatar_color_index: None,
+            avatar_leaf: None,
+            avatar_leaf_color: None,
         };
         state.db.insert_project(&project).expect("project");
         state

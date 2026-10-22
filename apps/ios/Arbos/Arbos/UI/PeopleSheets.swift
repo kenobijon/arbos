@@ -357,9 +357,17 @@ struct NewAgentView: View {
 
     var body: some View {
         VStack(spacing: 18) {
-            InitialsAvatar(initials: AvatarPalette.initials(name: clean.isEmpty ? "Agent" : clean, handle: nil), colorIndex: previewIndex, size: 92)
-                .padding(.top, 28)
-                .animation(.snappy, value: "\(clean)|\(pickedColorIndex ?? -1)")
+            // D92: a leaf preview (seeded by the typed name until the id exists); the leaf and
+            // colour are picked on the agent's page once it is created.
+            if LeafAvatarsFlag.shared.on {
+                LeafAvatar(pick: LeafArt.pick(seed: clean.isEmpty ? "new" : clean), size: 92)
+                    .padding(.top, 28)
+                    .animation(.snappy, value: clean)
+            } else {
+                InitialsAvatar(initials: AvatarPalette.initials(name: clean.isEmpty ? "Agent" : clean, handle: nil), colorIndex: previewIndex, size: 92)
+                    .padding(.top, 28)
+                    .animation(.snappy, value: "\(clean)|\(pickedColorIndex ?? -1)")
+            }
             Text(clean.isEmpty ? "Name your agent" : "@\(mentionSlug(clean))")
                 .font(theme.font(Theme.small)).foregroundStyle(theme.muted)
             TextField("", text: $name, prompt: Text("Agent name").foregroundStyle(theme.placeholder))
@@ -373,8 +381,10 @@ struct NewAgentView: View {
                 .background(RoundedRectangle(cornerRadius: 25, style: .continuous).fill(theme.field))
                 .overlay(RoundedRectangle(cornerRadius: 25, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
                 .padding(.horizontal, 24)
-            AvatarColorPicker(name: clean, id: clean.isEmpty ? "new" : clean, current: pickedColorIndex) { pickedColorIndex = $0 }
-                .padding(.horizontal, 24)
+            if !LeafAvatarsFlag.shared.on {
+                AvatarColorPicker(name: clean, id: clean.isEmpty ? "new" : clean, current: pickedColorIndex) { pickedColorIndex = $0 }
+                    .padding(.horizontal, 24)
+            }
             Button(action: create) {
                 Text("Create agent")
                     .font(theme.font(Theme.body, weight: .semibold)).foregroundStyle(theme.onPrimary)

@@ -6,8 +6,8 @@ use serde_json::{json, Value};
 
 use arbos_core::api::{
     AccountUserDto, CreditsDto, MachineImageDto, MachineSpecDto, MachineStatusDto,
-    MachineWorkspaceDto, MeDeviceDto, MeLimitsDto, MeMachineDto, MeResponseDto, UnreadChatDto,
-    UnreadDto, UserCardDto,
+    MachineWorkspaceDto, MeDeviceDto, MeFeaturesDto, MeLimitsDto, MeMachineDto, MeResponseDto,
+    UnreadChatDto, UnreadDto, UserCardDto,
 };
 use arbos_core::wire::BoxState;
 
@@ -96,6 +96,8 @@ fn insert_project(
         description: "A fixture agent".into(),
         primary_chat_id: Some(chat_id.into()),
         avatar_color_index,
+        avatar_leaf: None,
+        avatar_leaf_color: None,
     };
     state.db.insert_project(&p).unwrap();
     state
@@ -411,7 +413,10 @@ fn me_and_machine_unread_fixtures() {
             signup: "open".into(),
             auth_mode: "github".into(),
         },
-        features: json!({ "vault_connect": false }),
+        features: MeFeaturesDto {
+            vault_connect: Some(false),
+            leaf_avatars: Some(true),
+        },
         machine: MeMachineDto {
             exists: false,
             state: BoxState::Asleep,
@@ -507,6 +512,8 @@ async fn create_project_accepts_avatar_color_index() {
             avatar_color: None,
             description: None,
             avatar_color_index: Some(4),
+            avatar_leaf: None,
+            avatar_leaf_color: None,
             source_project_id: None,
         }),
     )

@@ -134,6 +134,32 @@ fn new_agent_preview(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         }
         Some(i) => format!("{}, chosen by you.", avatars::GRADIENTS[i as usize].name),
     };
+    // D92: a leaf preview (seeded by the typed name until the id exists); the
+    // leaf and colour are picked on the agent's page once it is created.
+    if avatars::leaf_avatars_on() {
+        return div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(px(8.0))
+            .px(px(14.0))
+            .pt(px(14.0))
+            .pb(px(4.0))
+            .child(avatars::leaf_element(avatars::leaf_pick(seed, None, None), 64.0))
+            .child(
+                div()
+                    .text_size(px(TEXT_SMALL))
+                    .text_color(theme.text_muted)
+                    .child(caption),
+            )
+            .child(
+                div()
+                    .text_size(px(TEXT_TINY))
+                    .text_color(theme.text_muted)
+                    .text_center()
+                    .child("Every agent gets its own leaf. Change the leaf and colour from its profile."),
+            );
+    }
     div()
         .flex()
         .flex_col()
@@ -829,13 +855,7 @@ fn new_group_body(
                     .when(!already, |el| {
                         el.cursor_pointer().hover(|st| st.bg(theme.surface_2))
                     })
-                    .child(avatars::element(
-                        &project.id,
-                        &project.name,
-                        project.avatar_color_index,
-                        40.0,
-                        theme,
-                    ))
+                    .child(avatars::project(project, 40.0, theme))
                     .child(
                         div()
                             .flex()

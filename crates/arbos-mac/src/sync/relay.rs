@@ -740,6 +740,8 @@ async fn refresh_me(shared: &Arc<Shared>) {
     *shared.me.lock().unwrap() = Some(u);
     let view = account_view_from_me(&dto);
     let _ = shared.events.send(SyncEvent::Account(Some(view)));
+    // D92 remote flag: leaf avatars for agents (absent on older relays = on).
+    crate::ui::avatars::set_leaf_avatars(dto.features.leaf_avatars.unwrap_or(true));
     let m = &dto.machine;
     // D89: provider and waitlist place ride along with `always_on`.
     let position = m
@@ -4556,6 +4558,39 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         if !err.to_string().contains("HTTP 404") {
                             shared
                                 .notice(format!("Avatar colour not saved: {}", people_error(&err)));
+                        }
+                    }
+                }
+            });
+        }
+        ClientCommand::SetAvatarLeaf {
+            project_id,
+            leaf,
+            color,
+        } => {
+            {
+                let mut projects = shared.projects.lock().unwrap();
+                if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
+                    p.avatar_leaf = leaf;
+                    p.avatar_leaf_color = color;
+                }
+                let snapshot = projects.clone();
+                drop(projects);
+                let _ = shared.events.send(SyncEvent::Projects(snapshot));
+            }
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let body = json!({ "avatar_leaf": leaf, "avatar_leaf_color": color });
+                match shared
+                    .patch_json(&format!("/projects/{project_id}"), body)
+                    .await
+                {
+                    Ok(_) => {}
+                    Err(err) => {
+                        // An older relay (no D92 columns) ignores unknown fields and answers
+                        // 200; a 404 means no such project. Anything else is worth a line.
+                        if !err.to_string().contains("HTTP 404") {
+                            shared.notice(format!("Leaf not saved: {}", people_error(&err)));
                         }
                     }
                 }

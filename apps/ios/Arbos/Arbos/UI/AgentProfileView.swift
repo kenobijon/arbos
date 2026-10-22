@@ -30,12 +30,22 @@ struct AgentEditSheet: View {
                         hero(project)
                         card {
                             VStack(alignment: .leading, spacing: 12) {
-                                Text("Avatar colour").font(theme.font(Theme.body, weight: .medium)).foregroundStyle(theme.text)
-                                AvatarColorPicker(name: project.name, id: project.id, current: project.effectiveAvatarColorIndex == project.avatarColorIndex ? project.avatarColorIndex : project.avatarColorIndex) { index in
-                                    guard !project.shared else { return }
-                                    model.pickAvatarColorIndex(projectId, index: index)
+                                if LeafAvatarsFlag.shared.on {
+                                    // D92: leaf + colour; the hero above is the live preview.
+                                    Text("Avatar").font(theme.font(Theme.body, weight: .medium)).foregroundStyle(theme.text)
+                                    LeafPicker(project: project) { leaf, color in
+                                        guard !project.shared else { return }
+                                        model.pickAvatarLeaf(projectId, leaf: leaf, color: color)
+                                    }
+                                    .disabled(project.shared)
+                                } else {
+                                    Text("Avatar colour").font(theme.font(Theme.body, weight: .medium)).foregroundStyle(theme.text)
+                                    AvatarColorPicker(name: project.name, id: project.id, current: project.effectiveAvatarColorIndex == project.avatarColorIndex ? project.avatarColorIndex : project.avatarColorIndex) { index in
+                                        guard !project.shared else { return }
+                                        model.pickAvatarColorIndex(projectId, index: index)
+                                    }
+                                    .disabled(project.shared)
                                 }
-                                .disabled(project.shared)
                             }
                             .padding(.horizontal, 14)
                             .padding(.vertical, 12)
@@ -130,7 +140,7 @@ struct AgentEditSheet: View {
 
     private func hero(_ project: Project) -> some View {
         VStack(spacing: 12) {
-            AgentAvatar(project: project, theme: theme, size: 116, dot: machineDotColor(model.machine.state, theme: theme), working: model.isStreaming(project: project.id))
+            AgentAvatar(project: project, theme: theme, size: 116, dot: machineDotColor(model.machine.state, theme: theme), working: model.isStreaming(project: project.id), idle: true)
                 .padding(.top, 18)
                 .id("\(project.effectiveAvatarColorIndex.map(String.init) ?? "auto")")
                 .animation(.snappy, value: project.color)
@@ -263,14 +273,14 @@ struct AgentProfileView: View {
                         PaneHeader(name: project.name, subtitle: statusLine(project)) {
                             if isMine {
                                 Button { showEdit = true } label: {
-                                    AgentAvatar(project: project, theme: theme, size: PaneHeader<EmptyView>.avatarSize, working: model.isStreaming(project: project.id))
+                                    AgentAvatar(project: project, theme: theme, size: PaneHeader<EmptyView>.avatarSize, working: model.isStreaming(project: project.id), idle: true)
                                         .paneCrayon()
                                         .contentShape(Rectangle())
                                 }
                                 .buttonStyle(.plain)
                                 .accessibilityLabel("Edit agent")
                             } else {
-                                AgentAvatar(project: project, theme: theme, size: PaneHeader<EmptyView>.avatarSize, working: model.isStreaming(project: project.id))
+                                AgentAvatar(project: project, theme: theme, size: PaneHeader<EmptyView>.avatarSize, working: model.isStreaming(project: project.id), idle: true)
                             }
                         }
                         .overlay(alignment: .bottom) {

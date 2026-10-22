@@ -149,6 +149,12 @@ pub struct CreateProjectBody {
     /// Telegram-style initials colour (D79): 0–6. Omitted = automatic from the id.
     #[serde(default)]
     pub avatar_color_index: Option<i64>,
+    /// Leaf avatar shape (D92): 0–8. Omitted = automatic from the id.
+    #[serde(default)]
+    pub avatar_leaf: Option<i64>,
+    /// Leaf avatar disc colour (D92): 0–9. Omitted = automatic from the id.
+    #[serde(default)]
+    pub avatar_leaf_color: Option<i64>,
     /// Fork: copy the source project's workspace folder (files + memory) into the new agent.
     /// Own projects only; chat UI history is not copied (the new pinned chat stays empty).
     #[serde(default)]
@@ -255,6 +261,7 @@ pub async fn create_project(
             ));
         }
     }
+    crate::avatar::check_leaf_pick(b.avatar_leaf, b.avatar_leaf_color)?;
     let project = Project {
         id,
         name: name.clone(),
@@ -273,6 +280,8 @@ pub async fn create_project(
         description: clean_description(b.description.as_deref().unwrap_or_default())?,
         primary_chat_id: None,
         avatar_color_index: b.avatar_color_index,
+        avatar_leaf: b.avatar_leaf,
+        avatar_leaf_color: b.avatar_leaf_color,
     };
     if state
         .db
@@ -499,6 +508,12 @@ pub struct PatchProjectBody {
     /// Telegram-style initials colour (D79): 0–6, or `null` to go back to the derived colour.
     #[serde(default, deserialize_with = "deserialize_double_option_i64")]
     pub avatar_color_index: Option<Option<i64>>,
+    /// Leaf avatar shape (D92): 0–8, or `null` to go back to the derived leaf.
+    #[serde(default, deserialize_with = "deserialize_double_option_i64")]
+    pub avatar_leaf: Option<Option<i64>>,
+    /// Leaf avatar disc colour (D92): 0–9, or `null` to go back to the derived colour.
+    #[serde(default, deserialize_with = "deserialize_double_option_i64")]
+    pub avatar_leaf_color: Option<Option<i64>>,
 }
 
 fn deserialize_double_option<'de, D>(d: D) -> Result<Option<Option<String>>, D::Error>
@@ -603,6 +618,7 @@ pub async fn patch_project(
             ));
         }
     }
+    crate::avatar::check_leaf_pick(b.avatar_leaf.flatten(), b.avatar_leaf_color.flatten())?;
     if let Some(voice) = &b.voice {
         let voice = voice.as_deref().map(str::trim).filter(|v| !v.is_empty());
         if let Some(v) = voice {
@@ -638,6 +654,8 @@ pub async fn patch_project(
             color_patch.as_ref().map(|a| a.as_deref()),
             description.as_deref(),
             b.avatar_color_index,
+            b.avatar_leaf,
+            b.avatar_leaf_color,
         )
         .map_err(internal)?;
     let p = state
@@ -769,6 +787,7 @@ pub(crate) async fn project_dto(state: &AppState, p: &Project) -> ProjectDto {
         .map(|u| u.usd)
         .unwrap_or(0.0);
     let voice_settings = state.db.voice_agent_settings(&p.id).ok();
+    let leaf = crate::avatar::effective_leaf(p);
     ProjectDto {
         id: p.id.clone(),
         name: p.name.clone(),
@@ -802,6 +821,10 @@ pub(crate) async fn project_dto(state: &AppState, p: &Project) -> ProjectDto {
             &p.id,
             p.avatar_color_index,
         )),
+        avatar_leaf: p.avatar_leaf,
+        avatar_leaf_color: p.avatar_leaf_color,
+        avatar_leaf_effective: Some(i64::from(leaf.leaf)),
+        avatar_leaf_color_effective: Some(i64::from(leaf.color)),
         primary_chat_id: primary_chat_id(state, p),
         owner: project_owner_dto(state, &p.user_id),
         model: p
@@ -1593,6 +1616,9 @@ fn workspace_json(state: &AppState, p: &Project) -> Result<Value, (StatusCode, S
         &p.id,
         p.avatar_color_index
     ));
+    let leaf = crate::avatar::effective_leaf(p);
+    project["avatar_leaf_effective"] = json!(leaf.leaf);
+    project["avatar_leaf_color_effective"] = json!(leaf.color);
     // Always true for the box: agentd 0.1.16 (85fd0b4e) read this as "may I open my Projects ⇄
     // tab" and otherwise spilled agent-hosted group traffic into the owner's primary chat. The
     // relay enforces the single-chat rule itself in `create_chat` (plain chats only), so the box

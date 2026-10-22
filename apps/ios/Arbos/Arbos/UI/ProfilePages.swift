@@ -734,7 +734,7 @@ struct GroupProfileView: View {
                     // member count, Members | Library, one leave row at the end.
                     PaneHeader(name: title, subtitle: "\(memberCount) member\(memberCount == 1 ? "" : "s")") {
                         if let project {
-                            AgentAvatar(project: project, theme: theme, size: 112)
+                            AgentAvatar(project: project, theme: theme, size: 112, idle: true)
                         } else {
                             Button { showEdit = true } label: {
                                 AvatarCluster(members: clusterMembers, size: 72, imageUrl: groupImageURL)

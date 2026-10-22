@@ -36,6 +36,9 @@ fn project_from_member(state: &crate::app::AppState, project_id: &str) -> Option
             color: a.color.clone(),
             avatar: a.avatar.clone(),
             avatar_color: a.avatar_color.clone(),
+            avatar_color_index: a.avatar_color_index,
+            avatar_leaf: a.avatar_leaf,
+            avatar_leaf_color: a.avatar_leaf_color,
             description: a.description.clone(),
             owner_person: a.owner.clone(),
             model: a.model.clone().unwrap_or_default(),
@@ -105,7 +108,7 @@ pub(super) fn page(
     let picture = div()
         .relative()
         .size(px(HERO_AVATAR))
-        .child(avatars::project(&project, HERO_AVATAR, &theme))
+        .child(avatars::project_hero(&project, HERO_AVATAR, &theme))
         .child(
             div()
                 .absolute()
@@ -232,30 +235,40 @@ pub(super) fn page(
         ));
     }
 
-    // ----- appearance (avatar click): Automatic + the seven gradients ----------
-    // Shown only while the picker is open so Avatar colour is not a permanent
-    // settings row. Owned agents open it by clicking the big avatar.
+    // ----- appearance (avatar click) -------------------------------------------
+    // D92: the leaf picker (nine leaves, ten colours; the hero above is the live
+    // preview). With the flag off: Automatic + the seven D79 gradients. Shown
+    // only while the picker is open so it is not a permanent settings row.
+    let leafy = avatars::leaf_avatars_on();
     let appearance = (mine && picker_open).then(|| {
-        card(&theme)
-            .child(
-                kit::row(
-                    "profile-appearance",
-                    Leading::None,
-                    "Avatar colour",
-                    None,
-                    Some("pick".into()),
-                    None,
-                    true,
-                    &theme,
-                )
-                .cursor_pointer()
-                .hover(|s| s.bg(theme.surface_2))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.state.update(cx, |s, cx| s.toggle_profile_picker(cx));
-                })),
+        let card = card(&theme).child(
+            kit::row(
+                "profile-appearance",
+                Leading::None,
+                if leafy { "Avatar" } else { "Avatar colour" },
+                None,
+                Some("pick".into()),
+                None,
+                true,
+                &theme,
             )
-            .child(colour_row(&project, &theme, cx).pt(px(14.0)))
-            .child(
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.surface_2))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.state.update(cx, |s, cx| s.toggle_profile_picker(cx));
+            })),
+        );
+        if leafy {
+            card.child(leaf_picker(&project, &theme, cx).pt(px(14.0))).child(
+                div()
+                    .px(px(kit::INSET))
+                    .pb(px(12.0))
+                    .text_size(px(TEXT_TINY))
+                    .text_color(theme.text_muted)
+                    .child("Automatic picks the leaf and colour from the agent's id, the same on every device; choose your own to make it yours."),
+            )
+        } else {
+            card.child(colour_row(&project, &theme, cx).pt(px(14.0))).child(
                 div()
                     .px(px(kit::INSET))
                     .pb(px(12.0))
@@ -263,6 +276,7 @@ pub(super) fn page(
                     .text_color(theme.text_muted)
                     .child("Automatic picks the colour from the agent's id, the same on every device; choose one to make it yours."),
             )
+        }
     });
 
     // ----- settings (#1258, Jacob option b) ----------------------------------
@@ -293,6 +307,152 @@ pub(super) fn page(
         &theme,
         cx,
     ))
+}
+
+/// D92 picker: the nine leaves on the agent's current disc colour, the ten
+/// colours as plain discs, and an Automatic reset. Each click saves at once
+/// (optimistic, then `PATCH /projects/{id}`), so the hero is the live preview.
+fn leaf_picker(project: &Project, theme: &Theme, cx: &mut Context<Shell>) -> Div {
+    let current = avatars::project_leaf(project);
+    let picked_leaf = project.avatar_leaf;
+    let picked_color = project.avatar_leaf_color;
+    let automatic = picked_leaf.is_none() && picked_color.is_none();
+    let ring = |selected: bool, size: f32, theme: &Theme| {
+        div()
+            .size(px(size))
+            .rounded_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .border_2()
+            .border_color(if selected {
+                theme.text
+            } else {
+                gpui::transparent_black()
+            })
+            .cursor_pointer()
+            .hover(|st| st.border_color(theme.border_strong))
+    };
+    let label = |text: &'static str, theme: &Theme| {
+        div()
+            .px(px(16.0))
+            .pb(px(6.0))
+            .text_size(px(TEXT_TINY))
+            .text_color(theme.text_muted)
+            .child(text)
+    };
+
+    let mut leaves = div()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap(px(8.0))
+        .px(px(16.0))
+        .pb(px(12.0));
+    for (i, l) in avatars::leaf::LEAVES.iter().enumerate() {
+        let index = i as u8;
+        let pid = project.id.clone();
+        let pick = avatars::LeafPick {
+            leaf: index,
+            color: current.color,
+        };
+        leaves = leaves.child(
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(px(3.0))
+                .child(
+                    ring(current.leaf == index, 50.0, theme)
+                        .id(ElementId::Name(SharedString::from(format!(
+                            "avatar-leaf-{index}"
+                        ))))
+                        .child(avatars::leaf_element(pick, 42.0))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            let p = pid.clone();
+                            this.state.update(cx, |st, cx| {
+                                st.set_avatar_leaf(p, Some(index), picked_color, cx)
+                            });
+                        })),
+                )
+                .child(
+                    div()
+                        .text_size(px(TEXT_TINY))
+                        .text_color(if current.leaf == index {
+                            theme.text
+                        } else {
+                            theme.text_muted
+                        })
+                        .child(l.name),
+                ),
+        );
+    }
+
+    let mut colours = div()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap(px(8.0))
+        .px(px(16.0))
+        .pb(px(10.0));
+    for index in 0..avatars::leaf::COLOR_COUNT {
+        let pid = project.id.clone();
+        colours = colours.child(
+            ring(current.color == index, 36.0, theme)
+                .id(ElementId::Name(SharedString::from(format!(
+                    "avatar-leaf-color-{index}"
+                ))))
+                .child(
+                    div()
+                        .size(px(28.0))
+                        .rounded_full()
+                        .bg(avatars::leaf_disc(index)),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let p = pid.clone();
+                    this.state.update(cx, |st, cx| {
+                        st.set_avatar_leaf(p, picked_leaf, Some(index), cx)
+                    });
+                })),
+        );
+    }
+
+    let pid = project.id.clone();
+    let reset = div()
+        .id("avatar-leaf-auto")
+        .mx(px(16.0))
+        .mb(px(12.0))
+        .px(px(10.0))
+        .py(px(5.0))
+        .rounded(px(8.0))
+        .text_size(px(TEXT_SMALL))
+        .text_color(if automatic {
+            theme.text_muted
+        } else {
+            theme.text
+        })
+        .bg(theme.surface_2)
+        .cursor_pointer()
+        .hover(|st| st.bg(theme.border))
+        .child(if automatic {
+            "Automatic"
+        } else {
+            "Back to automatic"
+        })
+        .on_click(cx.listener(move |this, _, _, cx| {
+            let p = pid.clone();
+            this.state
+                .update(cx, |st, cx| st.set_avatar_leaf(p, None, None, cx));
+        }));
+
+    div()
+        .flex()
+        .flex_col()
+        .child(label("Leaf", theme))
+        .child(leaves)
+        .child(label("Colour", theme))
+        .child(colours)
+        .child(div().flex().child(reset))
 }
 
 /// The owned agent's settings card: sharing (invite sheet, or the members

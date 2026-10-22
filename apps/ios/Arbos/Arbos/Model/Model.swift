@@ -270,6 +270,11 @@ struct Project: Identifiable, Equatable, Codable {
     var avatarColorIndex: Int? = nil
     var avatarColorIndexEffective: Int? = nil
     var effectiveAvatarColorIndex: Int? { AvatarPalette.clamp(avatarColorIndexEffective) ?? AvatarPalette.clamp(avatarColorIndex) }
+    /// D92: the owner's leaf picks (`avatar_leaf` 0–8, `avatar_leaf_color` 0–9); nil → derived
+    /// from the id by the shared rule (`LeafArt.pick`), the same pair the relay reports as
+    /// `avatar_leaf_effective` / `avatar_leaf_color_effective`.
+    var avatarLeaf: Int? = nil
+    var avatarLeafColor: Int? = nil
     /// Private standing instructions (owner only).
     var instructions: String = ""
     /// §9 public one-paragraph description (≤500), `PATCH {description}`.
@@ -320,6 +325,8 @@ extension Project {
         self.avatarColor = dto.avatar_color.isEmpty ? nil : dto.avatar_color
         self.avatarColorIndex = dto.avatar_color_index.map(Int.init)
         self.avatarColorIndexEffective = Int(dto.avatar_color_index_effective)
+        self.avatarLeaf = dto.avatar_leaf.map(Int.init)
+        self.avatarLeafColor = dto.avatar_leaf_color.map(Int.init)
         self.instructions = dto.instructions
         self.description = dto.description
         self.ownerName = dto.owner.name

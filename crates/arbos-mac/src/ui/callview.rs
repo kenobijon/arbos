@@ -195,6 +195,8 @@ pub fn screen(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> Di
         avatar: None,
         avatar_color: None,
         avatar_color_index: None,
+        avatar_leaf: None,
+        avatar_leaf_color: None,
         avatar_url: state
             .account
             .as_ref()

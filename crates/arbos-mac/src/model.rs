@@ -100,6 +100,12 @@ pub struct Project {
     /// D79: the owner's explicit pick (`avatar_color_index`), `None` = automatic.
     #[serde(default)]
     pub avatar_color_override: Option<u8>,
+    /// D92: the owner's leaf pick (`avatar_leaf`, 0–8), `None` = automatic.
+    #[serde(default)]
+    pub avatar_leaf: Option<u8>,
+    /// D92: the owner's leaf disc colour pick (`avatar_leaf_color`, 0–9), `None` = automatic.
+    #[serde(default)]
+    pub avatar_leaf_color: Option<u8>,
     /// A group's custom picture (`PATCH /chats/{id} {image_key}`), as a URL
     /// the avatar loader can fetch; `None` = the initials disc.
     #[serde(default)]
@@ -381,6 +387,11 @@ pub struct Sender {
     /// D79: the agent's avatar gradient in effect (0–6), when the relay sends it.
     #[serde(default)]
     pub avatar_color_index: Option<u8>,
+    /// D92: the agent's leaf avatar in effect (shape, disc colour), when the relay sends it.
+    #[serde(default)]
+    pub avatar_leaf: Option<u8>,
+    #[serde(default)]
+    pub avatar_leaf_color: Option<u8>,
     #[serde(default, deserialize_with = "null_to_empty")]
     pub avatar_url: String,
 }
@@ -403,6 +414,10 @@ struct SenderWire {
     avatar_color_index: Option<u8>,
     #[serde(default)]
     avatar_color_index_effective: Option<u8>,
+    #[serde(default)]
+    avatar_leaf_effective: Option<u8>,
+    #[serde(default)]
+    avatar_leaf_color_effective: Option<u8>,
     #[serde(default, deserialize_with = "null_to_empty")]
     avatar_url: String,
 }
@@ -420,6 +435,8 @@ impl From<SenderWire> for Sender {
                 w.avatar_color_index,
                 w.avatar_color_index_effective,
             ),
+            avatar_leaf: w.avatar_leaf_effective,
+            avatar_leaf_color: w.avatar_leaf_color_effective,
             avatar_url: w.avatar_url,
         }
     }
@@ -711,6 +728,11 @@ pub struct AgentMember {
     /// D79: the agent's avatar gradient in effect (0–6).
     #[serde(default)]
     pub avatar_color_index: Option<u8>,
+    /// D92: the agent's leaf avatar in effect (shape 0–8, disc colour 0–9).
+    #[serde(default)]
+    pub avatar_leaf: Option<u8>,
+    #[serde(default)]
+    pub avatar_leaf_color: Option<u8>,
     /// API §9: the agent's description and talking model.
     #[serde(default)]
     pub description: Option<String>,
@@ -748,6 +770,14 @@ struct AgentMemberWire {
     #[serde(default)]
     avatar_color_index_effective: Option<u8>,
     #[serde(default)]
+    avatar_leaf: Option<u8>,
+    #[serde(default)]
+    avatar_leaf_color: Option<u8>,
+    #[serde(default)]
+    avatar_leaf_effective: Option<u8>,
+    #[serde(default)]
+    avatar_leaf_color_effective: Option<u8>,
+    #[serde(default)]
     description: Option<String>,
     #[serde(default)]
     model: Option<String>,
@@ -772,6 +802,8 @@ impl From<AgentMemberWire> for AgentMember {
                 w.avatar_color_index,
                 w.avatar_color_index_effective,
             ),
+            avatar_leaf: w.avatar_leaf_effective.or(w.avatar_leaf),
+            avatar_leaf_color: w.avatar_leaf_color_effective.or(w.avatar_leaf_color),
             description: w.description,
             model: w.model,
             owner: w.owner,

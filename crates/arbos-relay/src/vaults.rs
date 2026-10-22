@@ -72,9 +72,15 @@ fn connect_enabled() -> bool {
     })
 }
 
-/// Remote feature flags the apps read (`GET /secrets` and `GET /me` → `features`).
+/// `features.vault_connect`: may users connect new vaults on this relay.
+pub(crate) fn vault_connect() -> bool {
+    provider_enabled() && connect_enabled()
+}
+
+/// Remote feature flags the apps read (`GET /secrets` and `GET /me` → `features`): the one
+/// object from `crate::features`, so every flag ships on both endpoints.
 pub(crate) fn features() -> Value {
-    json!({ "vault_connect": provider_enabled() && connect_enabled() })
+    crate::features::features()
 }
 
 fn cache_ttl() -> Duration {

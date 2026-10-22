@@ -18,6 +18,7 @@
     "revoked_at": null
   },
   "features": {
+    "leaf_avatars": true,
     "vault_connect": false
   },
   "limits": {
