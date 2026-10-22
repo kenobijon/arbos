@@ -691,7 +691,10 @@ pub async fn delete_chat(
             StatusCode::CONFLICT,
             "the pinned chat cannot be closed".into(),
         )),
-        Some(true) => Ok(StatusCode::NO_CONTENT.into_response()),
+        Some(true) => {
+            state.matrix.close_chat(&state, &chat);
+            Ok(StatusCode::NO_CONTENT.into_response())
+        }
     }
 }
 
