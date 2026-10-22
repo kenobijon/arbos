@@ -962,13 +962,18 @@ pub async fn audio_transcriptions(
 }
 
 /// `POST /proxy/v1/audio/speech`: `{ model, input, voice, response_format }` → audio bytes.
-/// Metered by input characters; `ARBOS_VOICE_MOCK=1` returns a 1 s sine WAV.
+/// Metered by input characters; `ARBOS_VOICE_MOCK=1` returns a 1 s sine WAV. Refused with
+/// 403 `feature_off` while `features.voice_mode` is off — the one place every client's TTS
+/// spend goes through, so an app that still shows the switch cannot spend either.
 pub async fn audio_speech(
     State(state): State<AppState>,
     principal: Principal,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    if !crate::features::voice_mode() {
+        return speech_feature_off();
+    }
     let project_id = audio_project(&state, &principal, &headers);
     if let Some(r) = audio_spend_cap(&state, &principal, &project_id) {
         return r;
@@ -1065,6 +1070,13 @@ pub async fn audio_speech(
             _ => "audio/mpeg".to_owned(),
         });
     let bytes = upstream.bytes().await.unwrap_or_default();
+    // gpt-4o-mini-tts streams its WAV with placeholder RIFF/data sizes (0xFFFFFFFF); the
+    // whole body is here now, so hand every client a header that strict decoders accept.
+    let bytes = if status.is_success() {
+        finish_wav_body(bytes.to_vec())
+    } else {
+        bytes.to_vec()
+    };
     if status.is_success() {
         let _ = state.db.record_usage(
             &project_id,
@@ -1095,6 +1107,27 @@ pub async fn audio_speech(
     }
     resp_headers.insert("x-arbos-proxied", HeaderValue::from_static("1"));
     (status, resp_headers, bytes).into_response()
+}
+
+/// The answer to a TTS request while voice mode is switched off on the relay.
+pub fn speech_feature_off() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        [("content-type", "application/json")],
+        json!({
+            "error": "feature_off",
+            "message": "Voice mode is off on this relay (features.voice_mode); spoken replies are not synthesised.",
+        })
+        .to_string(),
+    )
+        .into_response()
+}
+
+/// A buffered TTS body with real RIFF/`data` sizes: streamed WAV placeholders are rewritten,
+/// every other format (mp3, opus, …) passes through unchanged.
+pub fn finish_wav_body(mut bytes: Vec<u8>) -> Vec<u8> {
+    arbos_core::wav::repair_sizes(&mut bytes);
+    bytes
 }
 
 /// `GET /proxy/v1/models` passthrough (pi's model discovery).
@@ -1154,6 +1187,36 @@ mod tests {
         cfg.openai_route = OpenAiRoute::Direct;
         assert!(openai_goes_direct(&cfg, "openai/gpt-6-luna"));
         assert_eq!(model_leaf("openai/gpt-6-luna"), "gpt-6-luna");
+    }
+
+    /// The streamed header OpenAI returns for `gpt-4o-mini-tts` + `response_format: wav`
+    /// (both sizes `0xFFFFFFFF`) leaves the proxy with real sizes; mp3 bytes pass untouched.
+    #[test]
+    fn speech_wav_body_gets_real_sizes() {
+        let mut streamed = sine_wav(0.5, 440.0);
+        streamed[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+        streamed[40..44].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(arbos_core::wav::needs_repair(&streamed));
+        let fixed = finish_wav_body(streamed.clone());
+        assert_eq!(fixed.len(), streamed.len());
+        assert!(!arbos_core::wav::needs_repair(&fixed));
+        assert_eq!(fixed, sine_wav(0.5, 440.0));
+
+        let mp3 = b"ID3\x04\x00\x00\x00\x00\x00\x00\xff\xfb\x90\x00".to_vec();
+        assert_eq!(finish_wav_body(mp3.clone()), mp3);
+    }
+
+    /// Voice mode off → TTS is refused before any upstream call or metering (no spend).
+    #[test]
+    fn speech_is_refused_while_voice_mode_is_off() {
+        let r = speech_feature_off();
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            r.headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok()),
+            Some("application/json")
+        );
     }
 
     #[test]

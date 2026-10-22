@@ -1,14 +1,15 @@
-//! An agent's page on the shared pane kit: the D79 avatar (crayon = the
-//! colour picker for owned agents), name, what it is doing, @slug, and the
-//! info card (for my own agent — Model / Reasoning / Voice rows that open a
-//! choice list on click). No quick-action row (panels-unify, 2026-10-21):
-//! call and search live in the chat, mute in the sidebar row's menu. Matches
-//! the Grok bot page otherwise: no about, camera vision, secrets, or Media /
-//! Files / Links tabs. Owner and machine stay off this page.
+//! An agent's page on the shared profile pane (D93): one [`ProfilePane`]
+//! spec — hero (leaf / photo with the owner's crayon, editable name,
+//! "working" or "Agent · run by @owner"), the tabs **Profile** (name, handle,
+//! description) | **Settings** (model, reasoning) | **Library** (images, files,
+//! links from the agent's chats), and a Delete agent footer for the owner.
+//! The same three tabs as the iPhone's agent page. Voice, Share project and
+//! Add to this chat left the pane on 2026-10-22 (Jacob: simple, consistent,
+//! powerful); the avatar picker opens from the hero while the pane is up.
 
-use gpui::{div, prelude::*, px, Context, Div, ElementId, Focusable, SharedString, Stateful};
+use gpui::{div, prelude::*, px, Context, Div, ElementId, SharedString, Stateful};
 
-use crate::app::AgentPick;
+use crate::app::{AgentPick, ProfilePage};
 use crate::model::{Id, MachineState, Project};
 use crate::ui::avatars::{self, AvatarState};
 use crate::ui::glass;
@@ -19,7 +20,14 @@ use crate::ui::sidebar::machine_dot;
 use crate::ui::theme::{Theme, TEXT_SMALL, TEXT_TINY};
 
 use super::kit::{self, Leading};
-use super::{card, editable_name, editable_picture, hero, pushed_frame, HeroClick, HERO_AVATAR};
+use super::pane::{self, Hero, Picture, ProfilePane, Section};
+use super::{
+    card, chats_of, collect, editable_name, editable_picture, file_list, link_list, HeroClick,
+    HERO_AVATAR,
+};
+
+/// The agent pane's tabs — the same three on the iPhone (`AgentProfileView`).
+const TABS: [&str; 3] = ["Profile", "Settings", "Library"];
 
 /// An agent that is only known as a member of a people chat (someone else's
 /// project) is shown from that member entry.
@@ -61,7 +69,6 @@ pub(super) fn page(
     };
     let avatar_state = state.avatar_state(&project.id);
     let streaming = state.project_is_streaming(&project.id);
-    let voice_text = crate::ui::voicepicker::current_label(&project, &state.voices);
     let machine_state: MachineState = match &project.machine_info {
         Some(m) if !mine => match m.state.as_str() {
             "awake" => MachineState::Awake,
@@ -96,7 +103,14 @@ pub(super) fn page(
     let picker_open = state.profile_picker_open;
     let pick = state.agent_pick;
     let renaming = state.profile_editing_name && mine;
+    let tab = state.profile_tab;
+    let editing_description = state.profile_editing_description && mine;
     let pid: Id = project.id.clone();
+    // Library tab: what the agent's chats hold (read while `state` is borrowed).
+    let content = (tab == 2).then(|| {
+        let chats: Vec<&crate::model::Chat> = chats_of(state, &project.id);
+        collect(state, &chats)
+    });
 
     if avatar_state != AvatarState::Idle {
         PulseClock::request(cx);
@@ -151,96 +165,38 @@ pub(super) fn page(
         &theme,
     )
     .into_any_element();
-    let hero = hero(avatar, name_el, &status, status_color, &theme).child(
-        div()
-            .text_size(px(TEXT_SMALL))
-            .text_color(theme.text_faint)
-            .child(format!("@{}", Project::mention_slug(&project.name))),
-    );
-
-    // ----- info card -------------------------------------------------------------
-    // Grok-bot parity: model / reasoning / voice only. About, camera vision,
-    // secrets, and Media / Files / Links stay off this page. Avatar colour
-    // opens from a click on the big avatar, not as a settings row.
-    let mut info = card(&theme);
-    if mine {
-        // The agent's own settings: Model (searchable), Reasoning and Voice
-        // open a choice list on click; a pick applies and folds the list.
-        let model_open = pick == Some(AgentPick::Model);
-        let reasoning_open = pick == Some(AgentPick::Reasoning);
-        let voice_open = pick == Some(AgentPick::Voice);
-        info = info
-            .child(hoverpick::row(
-                "Model",
-                model_text,
-                AgentPick::Model,
-                model_open,
-                model_open.then(|| hoverpick::model_panel(shell, &project, cx)),
-                &theme,
-                cx,
-            ))
-            .child(hoverpick::row(
-                "Reasoning",
-                project.effort.label(),
-                AgentPick::Reasoning,
-                reasoning_open,
-                reasoning_open.then(|| hoverpick::reasoning_panel(&project, cx)),
-                &theme,
-                cx,
-            ))
-            .child(hoverpick::row(
-                "Voice",
-                voice_text,
-                AgentPick::Voice,
-                voice_open,
-                voice_open.then(|| hoverpick::voice_panel(shell, &project, cx)),
-                &theme,
-                cx,
-            ));
-        // Rows are the card's children 0 / 1 / 2; when one has just opened,
-        // scroll the sheet so its list is in view.
-        if let Some(open) = pick {
-            let open_ix = match open {
-                AgentPick::Model => 0,
-                AgentPick::Reasoning => 1,
-                AgentPick::Voice => 2,
-            };
-            let reveal = cx.listener(
-                move |this, bounds: &Vec<gpui::Bounds<gpui::Pixels>>, window, cx| {
-                    this.reveal_agent_pick(bounds.get(open_ix), window, cx);
-                },
-            );
-            info =
-                info.on_children_prepainted(move |bounds, window, cx| reveal(&bounds, window, cx));
-        }
-    } else {
-        info = info.child(kit::value_row(
-            "agent-model-row",
-            "Model",
-            model_text,
-            &theme,
-        ));
-    }
-    // Someone else's agent: who runs it (the "owned by" the transcript no longer carries).
-    if let Some(owner) = project
+    // ----- hero (D93): picture, name, one subtitle ---------------------------------
+    // "working" while a turn runs, else who runs the agent; the machine state
+    // sits on the disc's dot. The @slug lives on the Profile tab (Handle).
+    let owner_handle = project
         .owner_handle
         .as_deref()
-        .filter(|o| !mine && !o.trim().is_empty())
-    {
-        info = info.child(kit::value_row(
-            "agent-owner-row",
-            "Owned by",
-            format!("@{}", owner.trim_start_matches('@')),
-            &theme,
-        ));
-    }
+        .map(|o| o.trim_start_matches('@').to_owned())
+        .filter(|o| !o.is_empty());
+    let subtitle: SharedString = if streaming {
+        "working".into()
+    } else if mine {
+        "Agent · run by you".into()
+    } else if let Some(o) = &owner_handle {
+        format!("Agent · run by @{o}").into()
+    } else {
+        format!("Agent · {status}").into()
+    };
+    let hero = Hero {
+        picture: Picture::Element(avatar),
+        name: name_el,
+        badge: None,
+        subtitle: Some(subtitle),
+        subtitle_color: status_color,
+    };
 
     // ----- appearance (avatar click) -------------------------------------------
     // D92: the leaf picker (nine leaves, ten colours; the hero above is the live
     // preview). With the flag off: Automatic + the seven D79 gradients. Shown
-    // only while the picker is open so it is not a permanent settings row.
+    // only while the picker is open, on whichever tab is up, so it is not a
+    // permanent settings row.
     let leafy = avatars::leaf_avatars_on();
-    let appearance = (mine && picker_open).then(|| {
+    let appearance: Option<Section> = (mine && picker_open).then(|| {
         let card = card(&theme).child(
             kit::row(
                 "profile-appearance",
@@ -258,7 +214,7 @@ pub(super) fn page(
                 this.state.update(cx, |s, cx| s.toggle_profile_picker(cx));
             })),
         );
-        if leafy {
+        let card = if leafy {
             card.child(leaf_picker(&project, &theme, cx).pt(px(14.0))).child(
                 div()
                     .px(px(kit::INSET))
@@ -276,35 +232,250 @@ pub(super) fn page(
                     .text_color(theme.text_muted)
                     .child("Automatic picks the colour from the agent's id, the same on every device; choose one to make it yours."),
             )
-        }
+        };
+        // Custom: the picker is a swatch grid, not rows (noted on #1330).
+        Section::Custom(card.into_any_element())
     });
 
-    // ----- settings (#1258, Jacob option b) ----------------------------------
-    // What the sidebar row's menu used to carry, now rows on the pane for my
-    // own agents: Share project… / Members, Add to this chat…, Voice mode.
-    let settings = mine.then(|| settings_card(shell, &project, &theme, cx));
+    let description = project.description.clone().unwrap_or_default();
+    let slug = format!("@{}", Project::mention_slug(&project.name));
+    let mut body: Vec<Section> = Vec::new();
+    body.extend(appearance);
 
-    let body = div()
-        .flex()
-        .flex_col()
-        .pb(px(16.0))
-        .child(hero)
-        .child(info)
-        .children(appearance)
-        .children(settings);
-    // No "Edit" — click the avatar to change its colour; double-click the
-    // name to rename. "Done" only while renaming.
-    let done = (mine && renaming).then(|| {
+    match tab {
+        0 => {
+            // ----- Profile: who the agent is ------------------------------------------
+            let mut rows: Vec<gpui::AnyElement> = Vec::new();
+            let name_row = kit::value_row("agent-name-row", "Name", project.name.clone(), &theme);
+            rows.push(if mine {
+                let p = pid.clone();
+                name_row
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.surface_2))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.start_edit_agent(p.clone(), false, window, cx);
+                    }))
+                    .into_any_element()
+            } else {
+                name_row.into_any_element()
+            });
+            rows.push(
+                kit::value_row("agent-handle-row", "Handle", slug, &theme).into_any_element(),
+            );
+            if editing_description {
+                rows.push(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.0))
+                        .px(px(kit::INSET))
+                        .py(px(10.0))
+                        .child(
+                            div()
+                                .text_size(px(TEXT_SMALL))
+                                .text_color(theme.text_muted)
+                                .child("Description"),
+                        )
+                        .child(
+                            div()
+                                .min_h(px(60.0))
+                                .px(px(8.0))
+                                .py(px(6.0))
+                                .rounded(px(8.0))
+                                .bg(theme.field)
+                                .border_1()
+                                .border_color(theme.field_border)
+                                .child(shell.description_input.clone()),
+                        )
+                        .into_any_element(),
+                );
+            } else {
+                let shown = if description.trim().is_empty() {
+                    if mine {
+                        "Add a description".to_string()
+                    } else {
+                        "—".to_string()
+                    }
+                } else {
+                    description.clone()
+                };
+                let row = kit::row(
+                    "agent-description-row",
+                    Leading::None,
+                    "Description",
+                    Some(shown.into()),
+                    None,
+                    None,
+                    mine,
+                    &theme,
+                );
+                rows.push(if mine {
+                    let p = pid.clone();
+                    row.cursor_pointer()
+                        .hover(|s| s.bg(theme.surface_2))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.start_edit_agent(p.clone(), true, window, cx);
+                        }))
+                        .into_any_element()
+                } else {
+                    row.into_any_element()
+                });
+            }
+            body.push(Section::Card(rows));
+            body.push(Section::Footnote(
+                if mine {
+                    "The name, handle, picture and description are what people and their agents see, here and on the iPhone."
+                } else {
+                    "Someone else's agent: what it shares with you shows in your chats."
+                }
+                .into(),
+            ));
+        }
+        2 => {
+            // ----- Library: everything the agent's chats hold ----------------------------
+            let content = content.expect("collected for the Library tab");
+            if content.media.is_empty() && content.files.is_empty() && content.links.is_empty() {
+                body.push(Section::Empty("Nothing shared here yet".into()));
+            } else {
+                if !content.media.is_empty() {
+                    body.push(Section::Title(
+                        format!("Images · {}", content.media.len()).into(),
+                    ));
+                    body.push(Section::Grid(content.media));
+                }
+                if !content.files.is_empty() {
+                    body.push(Section::Title(
+                        format!("Files · {}", content.files.len()).into(),
+                    ));
+                    // Custom: the kit's file list is a list of its own rows (noted on #1330).
+                    body.push(Section::Custom(
+                        file_list(&content.files, "doc", "", &theme).into_any_element(),
+                    ));
+                }
+                if !content.links.is_empty() {
+                    body.push(Section::Title(
+                        format!("Links · {}", content.links.len()).into(),
+                    ));
+                    body.push(Section::Custom(
+                        link_list(&content.links, shell, &theme, cx).into_any_element(),
+                    ));
+                }
+            }
+        }
+        _ => {
+            // ----- Settings: how the agent runs — Model · Reasoning ---------------------
+            // (Voice, Share project and Add to this chat left the pane on
+            // 2026-10-22 — Jacob: simple, consistent, powerful.)
+            if mine {
+                let model_open = pick == Some(AgentPick::Model);
+                let reasoning_open = pick == Some(AgentPick::Reasoning);
+                let mut info = card(&theme)
+                    .child(hoverpick::row(
+                        "Model",
+                        model_text,
+                        AgentPick::Model,
+                        model_open,
+                        model_open.then(|| hoverpick::model_panel(shell, &project, cx)),
+                        &theme,
+                        cx,
+                    ))
+                    .child(hoverpick::row(
+                        "Reasoning",
+                        project.effort.label(),
+                        AgentPick::Reasoning,
+                        reasoning_open,
+                        reasoning_open.then(|| hoverpick::reasoning_panel(&project, cx)),
+                        &theme,
+                        cx,
+                    ));
+                // Rows are the card's children 0 / 1; when one has just opened,
+                // scroll the sheet so its list is in view. Custom: the card needs
+                // the prepaint hook (noted on #1330).
+                if let Some(open_ix) = pick.and_then(|open| match open {
+                    AgentPick::Model => Some(0),
+                    AgentPick::Reasoning => Some(1),
+                    AgentPick::Voice => None,
+                }) {
+                    let reveal = cx.listener(
+                        move |this, bounds: &Vec<gpui::Bounds<gpui::Pixels>>, window, cx| {
+                            this.reveal_agent_pick(bounds.get(open_ix), window, cx);
+                        },
+                    );
+                    info = info.on_children_prepainted(move |bounds, window, cx| {
+                        reveal(&bounds, window, cx)
+                    });
+                }
+                body.push(Section::Custom(info.into_any_element()));
+            } else {
+                body.push(Section::Card(vec![kit::value_row(
+                    "agent-model-row",
+                    "Model",
+                    model_text,
+                    &theme,
+                )
+                .into_any_element()]));
+            }
+        }
+    }
+
+    // ----- footer: Delete agent (owner) ------------------------------------------
+    // The one danger action, in its own card; the first click swaps the row
+    // for "Delete “Name”?" with Cancel / Delete (the sidebar's rule).
+    let footer: Vec<Section> = if mine {
+        let delete_id = pid.clone();
+        let row: gpui::AnyElement = if shell.agent_delete_armed {
+            kit::confirm_row(
+                &format!("Delete “{}”?", project.name),
+                "Delete",
+                kit::confirm_button("agent-delete-cancel", "Cancel", false, &theme).on_click(
+                    cx.listener(|this, _, _, cx| {
+                        this.agent_delete_armed = false;
+                        cx.notify();
+                    }),
+                ),
+                kit::confirm_button("agent-delete-go", "Delete", true, &theme).on_click(
+                    cx.listener(move |this, _, window, cx| {
+                        this.agent_delete_armed = false;
+                        let id = delete_id.clone();
+                        this.state.update(cx, |s, cx| s.delete_project(id, cx));
+                        this.close_profile(window, cx);
+                    }),
+                ),
+                &theme,
+            )
+            .into_any_element()
+        } else {
+            kit::danger_row("agent-delete", "Delete agent", &theme)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.agent_delete_armed = true;
+                    cx.notify();
+                }))
+                .into_any_element()
+        };
+        vec![Section::Card(vec![row])]
+    } else {
+        Vec::new()
+    };
+
+    // No "Edit" — click the avatar to change its colour; click the name or
+    // the Description row to edit. "Done" only while editing.
+    let done = (mine && (renaming || editing_description)).then(|| {
         glass::sheet_button("profile-done", "Done", &theme)
             .on_click(cx.listener(|this, _, window, cx| this.finish_edit_agent(window, cx)))
     });
-    Some(pushed_frame(
-        &project.name,
-        body,
-        done,
-        Some(&shell.profile_scroll),
+    Some(pane::render(
+        ProfilePane {
+            page: ProfilePage::Agent {
+                project_id: project.id.clone(),
+            },
+            hero,
+            tabs: &TABS,
+            selected: tab,
+            body,
+            footer,
+            done,
+        },
         shell,
-        &theme,
         cx,
     ))
 }
@@ -453,87 +624,6 @@ fn leaf_picker(project: &Project, theme: &Theme, cx: &mut Context<Shell>) -> Div
         .child(label("Colour", theme))
         .child(colours)
         .child(div().flex().child(reset))
-}
-
-/// The owned agent's settings card: sharing (invite sheet, or the members
-/// list once it is shared), the agent-to-agent group picker when there is
-/// another agent to add, and the global spoken-replies switch.
-fn settings_card(shell: &Shell, project: &Project, theme: &Theme, cx: &mut Context<Shell>) -> Div {
-    let state = shell.state.read(cx);
-    let voice_mode = state.voice_mode;
-    let multi_chat = state.multi_chat;
-    let other_agents = state
-        .projects
-        .iter()
-        .filter(|p| !p.is_people() && p.id != project.id)
-        .count();
-    let guests = project.guests().count();
-    let has_guests = guests > 0;
-
-    let share_id = project.id.clone();
-    let mut card = card(theme).child(
-        kit::nav_row(
-            "agent-share",
-            "person-plus",
-            if has_guests {
-                "Members"
-            } else {
-                "Share project…"
-            },
-            has_guests.then(|| format!("{}", guests + 1)),
-            theme,
-        )
-        .on_click(cx.listener(move |this, _, window, cx| {
-            let id = share_id.clone();
-            if has_guests {
-                this.state.update(cx, |s, cx| s.select_project(id, cx));
-                this.members_open = true;
-                cx.notify();
-            } else {
-                this.people_input.update(cx, |i, cx| i.clear(cx));
-                this.state.update(cx, |s, cx| {
-                    s.select_project(id.clone(), cx);
-                    s.open_invite(id, cx);
-                });
-                let handle = this.people_input.read(cx).focus_handle(cx);
-                window.focus(&handle, cx);
-            }
-        })),
-    );
-    if multi_chat && other_agents > 0 {
-        let group_id = project.id.clone();
-        card = card.child(
-            kit::nav_row(
-                "agent-add-to-chat",
-                "people",
-                "Add to this chat…",
-                None,
-                theme,
-            )
-            .on_click(cx.listener(move |this, _, _, cx| {
-                let id = group_id.clone();
-                this.state.update(cx, |s, cx| s.select_project(id, cx));
-                this.set_group_picker(true, cx);
-            })),
-        );
-    }
-    card.child(
-        kit::row(
-            "agent-voice-mode",
-            Leading::Tile("mic"),
-            "Voice mode",
-            Some("Spoken replies, every agent".into()),
-            None,
-            Some(glass::switch(voice_mode, theme).into_any_element()),
-            false,
-            theme,
-        )
-        .cursor_pointer()
-        .hover(|s| s.bg(theme.surface_2))
-        .on_click(cx.listener(|this, _, _, cx| {
-            this.voice.update(cx, |v, cx| v.toggle_voice_mode(cx));
-        })),
-    )
 }
 
 fn colour_row(project: &Project, theme: &Theme, cx: &mut Context<Shell>) -> Div {

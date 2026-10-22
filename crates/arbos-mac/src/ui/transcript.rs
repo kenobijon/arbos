@@ -68,6 +68,10 @@ const SENDER_LANE: f32 = SENDER_DISC + SENDER_DISC_GAP;
 /// Messages for Mac fades a row's hover-only affordances (time, react glyph)
 /// in and out rather than snapping them.
 const HOVER_FADE_MS: f32 = 150.0;
+/// The fade band under the floating header: Grok Mac's content is invisible at
+/// the window edge and fully opaque about 50 pt down (Jacob's reference,
+/// `ref-grok-header.png`, 2 px/pt: faint at 13–20 pt, half at 30–40, full at 52).
+pub const HEADER_FADE_BAND: f32 = crate::ui::theme::HEADER_HEIGHT + 6.0;
 /// How long the hover copy glyph stays a checkmark after a successful copy.
 const COPY_FEEDBACK_MS: u64 = 2_000;
 
@@ -303,6 +307,8 @@ pub enum RowKind {
     Speaker {
         /// The speech is already cached (instant replay) vs. will be synthesised.
         cached: bool,
+        /// The last attempt to speak this reply failed; the row is a retry.
+        failed: bool,
     },
     /// Empty height at the end of the list so the last bubble sits clear of
     /// the composer when pinned; scrolls away so mid-thread bubbles can reach
@@ -313,7 +319,11 @@ pub enum RowKind {
 /// Which replies get a speaker row (F11).
 #[derive(Clone, Copy)]
 pub struct SpeechRows<'a> {
+    /// Relay flag `features.voice_mode`; off = no speaker rows at all.
+    pub enabled: bool,
     pub spoken: &'a HashSet<Id>,
+    /// Replies whose speech failed (reason): their speaker row offers a retry.
+    pub failed: &'a HashMap<Id, String>,
     pub voice_mode: bool,
 }
 
@@ -542,7 +552,9 @@ impl Transcript {
 
         let show_details = state.show_details;
         let speech = SpeechRows {
+            enabled: state.voice_mode_available(),
             spoken: &state.spoken,
+            failed: &state.speech_failed,
             voice_mode: state.voice_mode,
         };
         let me_id = state.me_id();
@@ -1689,22 +1701,24 @@ impl Transcript {
                     })
                     .into_any_element()
             }
-            RowKind::Speaker { cached } => {
+            RowKind::Speaker { cached, failed } => {
                 let state = self.state.clone();
                 let message_id = row.message_id.clone();
+                // The failure lives under the reply it belongs to, as a retry.
+                let label = speaker_label(cached, failed);
                 div()
                     .id(SharedString::from(row.id.clone()))
                     .flex()
                     .items_center()
                     .gap(px(6.0))
-                    .w(px(96.0))
+                    .w(px(if failed { 220.0 } else { 96.0 }))
                     .pb(px(ROW_GAP_HALF))
                     .text_size(px(11.0))
                     .text_color(theme.text_faint)
                     .cursor_pointer()
                     .hover(|s| s.text_color(theme.text_muted))
                     .child(div().text_size(px(12.0)).child("▶"))
-                    .child(if cached { "Replay" } else { "Speak" })
+                    .child(label)
                     .on_click(move |_, _, cx| {
                         state.update(cx, |s, cx| s.replay_speech(message_id.clone(), cx));
                     })
@@ -1774,12 +1788,13 @@ impl Render for Transcript {
             .track_focus(&focus)
             .on_action(cx.listener(Self::copy_selection))
             .on_scroll_wheel(cx.listener(|this, event, _, cx| this.on_wheel(event, cx)))
-            // No top fade: the header is opaque and the list starts under it on
-            // the pane's own background, so bubbles never fade or slide behind
-            // the pill (Jacob, Oct 21; [feedback mac-collapsed-toggle-inline]).
+            // Grok's header band (Jacob, Oct 22 12:49 CR, superseding the opaque
+            // band): the list runs up under the floating pill and fades out
+            // over `HEADER_FADE_BAND` — Grok's text is gone at the window edge
+            // and fully readable ~50 pt down ([feedback mac-header-fade-grok]).
             .child(edge_faded(
-                24.0,
-                false,
+                HEADER_FADE_BAND,
+                true,
                 false,
                 list(self.list.clone(), cx.processor(Self::render_row)).size_full(),
             ))
@@ -1841,6 +1856,18 @@ fn hash_version<T: Hash>(value: &T, live: bool) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     value.hash(&mut h);
     (h.finish() << 1) | (live as u64)
+}
+
+/// Text of the speaker row under a reply (F11). A failure is said under the
+/// reply it belongs to and reads as a retry; it never becomes a global line.
+pub fn speaker_label(cached: bool, failed: bool) -> &'static str {
+    if failed {
+        "Could not play — try again"
+    } else if cached {
+        "Replay"
+    } else {
+        "Speak"
+    }
 }
 
 fn block_text_len(block: &Block) -> usize {
@@ -2448,19 +2475,21 @@ pub fn build_rows(
                 if !streaming {
                     push_reactions(&mut rows, message, false);
                 }
-                // Speaker (F11): every reply whose speech is cached, plus the
-                // newest finished reply while voice mode is on.
+                // Speaker (F11): every reply whose speech is cached or failed,
+                // plus the newest finished reply while voice mode is on.
                 let cached = speech.spoken.contains(&message.id);
-                if !streaming
+                let failed = speech.failed.contains_key(&message.id);
+                if speech.enabled
+                    && !streaming
                     && message.role == Role::Assistant
                     && had_prose
-                    && (cached || (speech.voice_mode && last_reply == Some(mix)))
+                    && (cached || failed || (speech.voice_mode && last_reply == Some(mix)))
                 {
                     rows.push(Row {
-                        version: hash_version(&cached, false),
+                        version: hash_version(&(cached, failed), false),
                         id: format!("{}#speaker", message.id),
                         message_id: message.id.clone(),
-                        kind: RowKind::Speaker { cached },
+                        kind: RowKind::Speaker { cached, failed },
                     });
                 }
                 if show_details && !streaming && message.role == Role::Assistant && had_prose {

@@ -2,6 +2,7 @@
 // New group, your agents, every Arbos user), the New group / Add members
 // picker (chips, search, checkmarks) and project members (invite by handle).
 
+import ArbosFFI
 import SwiftUI
 
 /// "+" on home — Telegram's "New Message" sheet in Grok's dark skin: rises
@@ -20,8 +21,17 @@ struct NewChatSheet: View {
     @State private var searching = false
     @State private var opening = false
     @State private var loadingDirectory = false
-    /// `ARBOS_SHOW=newagent` lands on the New agent page (screenshot rig).
-    @State private var showNewAgent = DebugHooks.show == "newagent"
+    /// `ARBOS_SHOW=newagent|newgroup|newserver` lands on that Create screen, `newgroup2` on the
+    /// member picker (screenshot rig).
+    @State private var showCreate: CreateKind? = {
+        switch DebugHooks.show {
+        case "newagent": return .agent
+        case "newgroup": return .group
+        case "newserver": return .server
+        default: return nil
+        }
+    }()
+    @State private var showGroupPicker = DebugHooks.show == "newgroup2"
     @FocusState private var focused: Bool
 
     private var trimmed: String {
@@ -80,19 +90,19 @@ struct NewChatSheet: View {
 
                     if trimmed.isEmpty {
                         card {
-                            NavigationLink { NewAgentView(onDone: { dismiss() }) } label: {
+                            NavigationLink { CreateEntityView(kind: .agent, onDone: { dismiss() }) } label: {
                                 actionRow(icon: "sparkles", title: "New agent", subtitle: "Its own workspace on your machine")
                             }
                             .buttonStyle(.plain)
                             rowDivider
-                            NavigationLink { NewGroupView(onDone: { dismiss() }) } label: {
+                            NavigationLink { CreateEntityView(kind: .group, onDone: { dismiss() }) } label: {
                                 actionRow(icon: "person.2.fill", title: "New group", subtitle: "People and agents in one chat")
                             }
                             .buttonStyle(.plain)
                             if model.serversAvailable {
                                 // D88 rule 8: a server of your own, or one you were invited to.
                                 rowDivider
-                                NavigationLink { NewServerView(onDone: { dismiss() }) } label: {
+                                NavigationLink { CreateEntityView(kind: .server, onDone: { dismiss() }) } label: {
                                     actionRow(icon: "number", title: "New server", subtitle: "Channels for a group of people")
                                 }
                                 .buttonStyle(.plain)
@@ -157,7 +167,12 @@ struct NewChatSheet: View {
             .background(theme.bg)
             .navigationTitle("New Message")
             .navigationBarTitleDisplayMode(.inline)
-            .navigationDestination(isPresented: $showNewAgent) { NewAgentView(onDone: { dismiss() }) }
+            .navigationDestination(isPresented: Binding(get: { showCreate != nil }, set: { if !$0 { showCreate = nil } })) {
+                CreateEntityView(kind: showCreate ?? .agent, onDone: { dismiss() })
+            }
+            .navigationDestination(isPresented: $showGroupPicker) {
+                NewGroupView(onDone: { dismiss() }, draft: GroupDraft(title: "Launch week", leaf: LeafArt.pick(seed: "rig")))
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) { Button("Cancel") { dismiss() }.foregroundStyle(theme.text) }
             }
@@ -334,7 +349,7 @@ struct ServerPickRow: View {
 
     var body: some View {
         HStack(spacing: 14) {
-            InitialsAvatar(name: server.name, handle: nil, id: server.id, override: server.avatarColorIndex, size: 44)
+            ServerAvatar(server: server, size: 44)
             VStack(alignment: .leading, spacing: 2) {
                 Text(server.name).font(theme.font(Theme.body, weight: .medium)).foregroundStyle(theme.text).lineLimit(1)
                 Text(server.isMember
@@ -420,79 +435,262 @@ struct PersonRow: View {
 /// New agent: a name and an avatar colour, then `POST /projects`. The relay
 /// sets up its workspace. The preview is the Telegram-style initials circle
 /// (D79): Automatic until a swatch is picked.
-struct NewAgentView: View {
+/// What the Create screen creates (D93: one style, parameterised by entity).
+enum CreateKind {
+    case agent, group, server
+
+    var title: String {
+        switch self {
+        case .agent: return "Create New Agent"
+        case .group: return "Create New Group"
+        case .server: return "Create New Server"
+        }
+    }
+
+    var placeholder: String {
+        switch self {
+        case .agent: return "Name your agent"
+        case .group: return "Name your group"
+        case .server: return "Name your server"
+        }
+    }
+
+    /// The footer action: groups continue to the member picker.
+    var action: String {
+        switch self {
+        case .agent, .server: return "Create"
+        case .group: return "Next"
+        }
+    }
+
+    var explainer: String? {
+        switch self {
+        case .server: return "A server has channels and an invite link. You start as its owner, in #general."
+        case .agent, .group: return nil
+        }
+    }
+}
+
+/// The one Create screen (D93) for a new agent, group or server — Grok Bot's "Create New Bot"
+/// layout: title + close ×, the swaying preview of the chosen leaf, a centred name field, the nine
+/// leaves in a 5 / 4 grid, the ten colours in two rows of five, Cancel + the action pinned above the
+/// home indicator. Grok's sizes in points (measured on the 2x reference) inside the shipped
+/// bottom-sheet frame; the 44 pt footer pills are the one deliberate deviation (touch minimum).
+/// Agents create here; a group goes on to the member picker (`NewGroupView`) as step two with the
+/// name + leaf as its draft; a server keeps its one-line explainer under the field. Pushed from New
+/// Message with its own header; × and Cancel close the whole sheet.
+struct CreateEntityView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
+    let kind: CreateKind
     /// Closes the whole sheet (a pushed view's own dismiss only pops).
     let onDone: () -> Void
-    @State private var name = ""
-    /// Explicit swatch pick; nil = Automatic (the relay derives the colour from the new id).
-    @State private var pickedColorIndex: Int? = nil
+    @State private var name = DebugHooks.newAgentName ?? ""
+    @State private var pickedLeaf: Int? = nil
+    @State private var pickedColor: Int? = nil
+    @State private var creating = false
+    @State private var errorText: String?
+    @State private var next = false
     @FocusState private var focused: Bool
 
     private var clean: String { name.trimmingCharacters(in: .whitespaces) }
-    /// Before the project exists there is no id: preview the name's hash.
-    private var previewIndex: Int { pickedColorIndex ?? AvatarPalette.index(for: clean.isEmpty ? "new" : clean) }
+    /// A stable default for this sheet (seeded by how many of that entity exist) so successive new
+    /// ones start on different leaves without the preview jumping while typing; clicks override it.
+    private var pick: LeafPick {
+        let n: Int
+        switch kind {
+        case .agent: n = model.projects.filter { !$0.shared }.count
+        case .group: n = model.peopleChats.filter(\.isGroup).count
+        case .server: n = model.servers.count
+        }
+        return LeafArt.pick(seed: "new-\(kind)-\(n)", leaf: pickedLeaf, color: pickedColor)
+    }
+    private var canGo: Bool { !clean.isEmpty && !creating }
+
+    // Grok's palette, approved as is.
+    private let sheetBg = Color(red: 0x1F / 255, green: 0x1F / 255, blue: 0x1F / 255)
+    private let line = Color(red: 0x35 / 255, green: 0x35 / 255, blue: 0x35 / 255)
+    private let ring = Color(red: 0x50 / 255, green: 0x50 / 255, blue: 0x50 / 255)
+    private let placeholder = Color(red: 0x93 / 255, green: 0x93 / 255, blue: 0x93 / 255)
+    private let cancelBg = Color(red: 0x27 / 255, green: 0x27 / 255, blue: 0x27 / 255)
+    private let createBg = Color(red: 0x3B / 255, green: 0x3B / 255, blue: 0x3B / 255)
+    private let createText = Color(red: 0x73 / 255, green: 0x73 / 255, blue: 0x73 / 255)
 
     var body: some View {
-        VStack(spacing: 18) {
-            // D92: a leaf preview (seeded by the typed name until the id exists); the leaf and
-            // colour are picked on the agent's page once it is created.
-            if LeafAvatarsFlag.shared.on {
-                LeafAvatar(pick: LeafArt.pick(seed: clean.isEmpty ? "new" : clean), size: 92)
-                    .padding(.top, 28)
-                    .animation(.snappy, value: clean)
-            } else {
-                InitialsAvatar(initials: AvatarPalette.initials(name: clean.isEmpty ? "Agent" : clean, handle: nil), colorIndex: previewIndex, size: 92)
-                    .padding(.top, 28)
-                    .animation(.snappy, value: "\(clean)|\(pickedColorIndex ?? -1)")
+        VStack(spacing: 0) {
+            header
+            // The middle scrolls when the keyboard is up (the footer stays above the keyboard,
+            // so the action is always reachable); at rest it is Grok's fixed layout.
+            ScrollView(showsIndicators: false) {
+                ZStack(alignment: .top) {
+                    LeafAvatar(pick: pick, size: 114, idle: true)
+                        .padding(.top, 62 - 54.5)
+                        .animation(.snappy, value: "\(pick.leaf)-\(pick.color)")
+                    // Grok's vertical rhythm from the sheet top (header 54.5): field 183…218, leaf
+                    // row centres 264 / 320 (40 pt rings → 244…340), swatch row centres 386 / 426
+                    // (32 pt rings → 370…442). The server explainer (two lines) adds 40 under the field.
+                    VStack(spacing: 0) {
+                        field.padding(.top, 183 - 54.5)
+                        if let explainer = kind.explainer {
+                            Text(explainer)
+                                .font(.system(size: 13))
+                                .foregroundStyle(placeholder)
+                                .multilineTextAlignment(.center)
+                                .lineSpacing(3)
+                                .padding(.horizontal, 16.5)
+                                .padding(.top, 8)
+                                .frame(height: 40, alignment: .top)
+                        }
+                        if let errorText {
+                            Text(errorText)
+                                .font(.system(size: 13)).foregroundStyle(theme.danger)
+                                .multilineTextAlignment(.center).padding(.horizontal, 24).padding(.top, 8)
+                        }
+                        leafGrid.padding(.top, 244 - 218)
+                        colourGrid.padding(.top, 370 - 340)
+                    }
+                }
+                .padding(.bottom, 24)
             }
-            Text(clean.isEmpty ? "Name your agent" : "@\(mentionSlug(clean))")
-                .font(theme.font(Theme.small)).foregroundStyle(theme.muted)
-            TextField("", text: $name, prompt: Text("Agent name").foregroundStyle(theme.placeholder))
-                .font(theme.font(Theme.body)).foregroundStyle(theme.text)
-                .multilineTextAlignment(.center)
-                .autocorrectionDisabled()
-                .focused($focused)
-                .submitLabel(.done)
-                .onSubmit(create)
-                .padding(.horizontal, 16).frame(height: 50)
-                .background(RoundedRectangle(cornerRadius: 25, style: .continuous).fill(theme.field))
-                .overlay(RoundedRectangle(cornerRadius: 25, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
-                .padding(.horizontal, 24)
-            if !LeafAvatarsFlag.shared.on {
-                AvatarColorPicker(name: clean, id: clean.isEmpty ? "new" : clean, current: pickedColorIndex) { pickedColorIndex = $0 }
-                    .padding(.horizontal, 24)
-            }
-            Button(action: create) {
-                Text("Create agent")
-                    .font(theme.font(Theme.body, weight: .semibold)).foregroundStyle(theme.onPrimary)
-                    .frame(maxWidth: .infinity).frame(height: 50)
-                    .background(Capsule().fill(theme.primary))
-            }
-            .buttonStyle(.plain)
-            .disabled(clean.isEmpty)
-            .opacity(clean.isEmpty ? 0.45 : 1)
-            .padding(.horizontal, 24)
-            Text("A new agent with its own workspace on your machine. You can rename it and pick its model from its profile.")
-                .font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
-                .multilineTextAlignment(.center).padding(.horizontal, 36)
-                .fixedSize(horizontal: false, vertical: true)
-            Spacer()
+            .scrollDismissesKeyboard(.interactively)
+            footer
         }
-        .background(theme.bg)
-        .navigationTitle("New agent")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbarBackground(theme.bg, for: .navigationBar)
-        .toolbarBackground(.visible, for: .navigationBar)
-        .onAppear { focused = true }
+        .background(sheetBg.ignoresSafeArea())
+        .toolbar(.hidden, for: .navigationBar)
+        .navigationDestination(isPresented: $next) {
+            NewGroupView(onDone: onDone, draft: GroupDraft(title: clean, leaf: pick))
+        }
+        // The rig shoots the sheet without the keyboard (`ARBOS_SHOW=new…`); users get the caret.
+        .onAppear { if !(DebugHooks.show ?? "").hasPrefix("new") { focused = true } }
     }
 
-    private func create() {
-        guard !clean.isEmpty else { return }
-        model.createProject(name: clean, avatarColorIndex: pickedColorIndex)
-        onDone()
+    private var header: some View {
+        HStack {
+            Text(kind.title)
+                .font(.system(size: 14.2, weight: .semibold))
+                .foregroundStyle(Color(white: 0xF5 / 255))
+                .padding(.leading, 17.5)
+            Spacer()
+            Button(action: onDone) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Color(white: 0xD2 / 255))
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(.trailing, 5.5)
+            .accessibilityLabel("Close")
+        }
+        .frame(height: 54.5)
+        .overlay(alignment: .bottom) { Rectangle().fill(line).frame(height: 1) }
     }
+
+    private var field: some View {
+        TextField("", text: $name, prompt: Text(kind.placeholder).foregroundStyle(placeholder))
+            .font(.system(size: 15.5))
+            .foregroundStyle(Color(white: 0xF5 / 255))
+            .multilineTextAlignment(.center)
+            .autocorrectionDisabled()
+            .focused($focused)
+            .submitLabel(kind == .group ? .next : .done)
+            .onSubmit(go)
+            .padding(.horizontal, 12)
+            .frame(height: 35)
+            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(line, lineWidth: 1))
+            .padding(.horizontal, 16.5)
+    }
+
+    /// Nine leaves, 5 / 4, on a 56 pt pitch: 33 pt discs on the chosen colour, a 40 pt ring on the pick.
+    private var leafGrid: some View {
+        VStack(spacing: 56 - 40) {
+            ForEach([Array(0..<5), Array(5..<9)], id: \.self) { row in
+                HStack(spacing: 56 - 40) {
+                    ForEach(row, id: \.self) { i in
+                        Button { pickedLeaf = i } label: {
+                            LeafAvatar(pick: LeafPick(leaf: UInt8(i), color: pick.color), size: 33)
+                                .frame(width: 40, height: 40)
+                                .overlay(Circle().strokeBorder(Int(pick.leaf) == i ? ring : .clear, lineWidth: 1))
+                                .contentShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(LeafArt.names[i] + (Int(pick.leaf) == i ? ", selected" : ""))
+                    }
+                }
+            }
+        }
+    }
+
+    /// Ten colours in two rows of five on a 40 pt pitch: 24 pt discs, a 32 pt ring on the pick.
+    private var colourGrid: some View {
+        VStack(spacing: 40 - 32) {
+            ForEach([Array(0..<5), Array(5..<10)], id: \.self) { row in
+                HStack(spacing: 40 - 32) {
+                    ForEach(row, id: \.self) { i in
+                        Button { pickedColor = i } label: {
+                            Circle().fill(LeafArt.colors[i]).frame(width: 24, height: 24)
+                                .frame(width: 32, height: 32)
+                                .overlay(Circle().strokeBorder(Int(pick.color) == i ? ring : .clear, lineWidth: 1))
+                                .contentShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(LeafArt.colorNames[i] + (Int(pick.color) == i ? ", selected" : ""))
+                    }
+                }
+            }
+        }
+    }
+
+    private var footer: some View {
+        HStack(spacing: 10) {
+            Spacer()
+            Button(action: onDone) {
+                Text("Cancel").font(.system(size: 15, weight: .semibold)).foregroundStyle(Color(white: 0xF5 / 255))
+                    .frame(width: 84, height: 44).background(Capsule().fill(cancelBg))
+            }
+            .buttonStyle(.plain)
+            Button(action: go) {
+                Text(creating ? "Creating…" : kind.action).font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(canGo ? theme.onPrimary : createText)
+                    .frame(width: 92, height: 44).background(Capsule().fill(canGo ? theme.primary : createBg))
+            }
+            .buttonStyle(.plain)
+            .disabled(!canGo)
+        }
+        .padding(.trailing, 16)
+        .padding(.top, 25)
+        .padding(.bottom, 35)
+        .overlay(alignment: .top) { Rectangle().fill(line).frame(height: 1) }
+    }
+
+    private func go() {
+        guard canGo else { return }
+        switch kind {
+        case .agent:
+            model.createProject(name: clean, leaf: pick)
+            onDone()
+        case .group:
+            next = true
+        case .server:
+            creating = true
+            errorText = nil
+            Task {
+                if await model.createServer(name: clean, leaf: pick) {
+                    onDone()
+                } else {
+                    errorText = model.notice?.text ?? "Could not create the server."
+                    model.notice = nil
+                }
+                creating = false
+            }
+        }
+    }
+}
+
+/// What the Create group screen hands to the member picker (step 2).
+struct GroupDraft: Equatable {
+    var title: String
+    var leaf: LeafPick
 }
 
 /// New group: pick people (and your own agents), then create. With `addTo`
@@ -504,6 +702,8 @@ struct NewGroupView: View {
     let onDone: () -> Void
     /// People-chat id to add to; nil creates a new group.
     var addTo: String? = nil
+    /// D93 step 1's name + leaf picture (nil when opened as Add members).
+    var draft: GroupDraft? = nil
     @State private var query = ""
     @State private var remote: [Person] = []
     @State private var picked: [Person] = []
@@ -537,7 +737,9 @@ struct NewGroupView: View {
     private var adding: Bool { addTo != nil }
     private var title: String { addToChat.map { "Add members to \($0.title)" } ?? (adding ? "Add members" : "New group") }
     /// Create needs a person (a group of one is a DM); Add takes agents alone too.
-    private var canSubmit: Bool { adding ? !(picked.isEmpty && pickedAgents.isEmpty) : !picked.isEmpty }
+    /// People, agents, or both — a group of your agents is a group (Create
+    /// greyed out with only agents picked read as broken, 2026-10-22).
+    private var canSubmit: Bool { !(picked.isEmpty && pickedAgents.isEmpty) }
 
     private func isIn(_ p: Person) -> Bool { addToChat?.hasPerson(p, meId: model.user?.id) ?? false }
     private func isIn(_ p: Project) -> Bool { addToChat?.hasAgent(p.id) ?? false }
@@ -715,12 +917,12 @@ struct NewGroupView: View {
     }
 
     private func create() {
-        guard !picked.isEmpty, !creating else { return }
+        guard canSubmit, !creating else { return }
         creating = true
         errorText = nil
         let agentIds = pickedAgents.map(\.id)
         Task {
-            if await model.createGroup(handles: picked.map(\.handle), agentIds: agentIds) {
+            if await model.createGroup(handles: picked.map(\.handle), agentIds: agentIds, title: draft?.title, leaf: draft?.leaf) {
                 onDone()
             } else {
                 // Copy onto this screen: RootView's alert is behind the sheet.

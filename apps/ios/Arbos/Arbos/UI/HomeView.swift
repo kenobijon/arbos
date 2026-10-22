@@ -3,6 +3,7 @@
 // preview) — nothing between the bar and the list. One machine: its state is
 // the small dot on the account circle; the machine details live in Settings.
 
+import ArbosFFI
 import SwiftUI
 
 struct HomeView: View {
@@ -1089,9 +1090,10 @@ struct AgentRow: View {
         // semibold over a 15 pt grey preview, time right, 10 pt unread dot at the far
         // right of the preview line, 80 pt row pitch.
         HStack(spacing: 15) {
-            // Grok carries the bot's activity on the avatar (12 pt green disc, bottom-right)
-            // and keeps the right edge for the unread dot.
-            AgentAvatar(project: project, theme: theme, size: Theme.rowAvatar, dot: streaming ? theme.online : nil, working: streaming)
+            // No "agent is working" indicator on rows (Jacob, 2026-10-22): the working
+            // state lives in the chat header / activity line. The right edge keeps the
+            // unread dot.
+            AgentAvatar(project: project, theme: theme, size: Theme.rowAvatar)
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline) {
                     Text(project.name)
@@ -1177,6 +1179,9 @@ struct PeopleRow: View {
                 if chat.isGroup {
                     if let groupImageURL {
                         AvatarCluster(members: [], size: Theme.rowAvatar, imageUrl: groupImageURL)
+                    } else if let leaf = chat.leafPick, LeafAvatarsFlag.shared.on {
+                        // D92 amendment: the leaf picked on the Create screen.
+                        LeafAvatar(pick: leaf, size: Theme.rowAvatar)
                     } else {
                         ZStack {
                             Circle().fill(theme.card).frame(width: Theme.rowAvatar, height: Theme.rowAvatar)

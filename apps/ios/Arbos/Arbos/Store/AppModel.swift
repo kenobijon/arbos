@@ -833,6 +833,8 @@ final class AppModel: ObservableObject {
             saveAccountCache()
             // D92 remote flag `features.leaf_avatars` (absent on an older relay = on).
             LeafAvatarsFlag.shared.set(features?.leaf_avatars ?? true)
+            // Voice mode kill switch (absent on an older relay = off).
+            VoiceModeFlag.shared.set(features?.voice_mode ?? false)
             let position = summary.waitlisted ? Int(summary.waitlist_position ?? 1) : nil
             if position != waitlistPosition { waitlistPosition = position }
             meAlwaysOn = summary.always_on
@@ -1738,22 +1740,25 @@ final class AppModel: ObservableObject {
     /// rest (`POST /chats/{id}/members` turns a DM into a group on the third person).
     /// Optional `agentIds` are added afterwards (`POST /chats/{id}/agents`) so the
     /// group can start with people and your agents in one step.
-    func createGroup(handles: [String], agentIds: [Id] = []) async -> Bool {
+    /// People, agents, or both — never nobody. Agents ride in the create body
+    /// (`agent_ids`); whatever the relay did not add (an older relay) is added
+    /// one by one afterwards.
+    func createGroup(handles: [String], agentIds: [Id] = [], title: String? = nil, leaf: LeafPick? = nil) async -> Bool {
         let cleaned = handles
             .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "@ ")) }
             .filter { !$0.isEmpty }
-        guard !cleaned.isEmpty else {
-            notice = Notice(text: "Add at least one other person")
+        guard !cleaned.isEmpty || !agentIds.isEmpty else {
+            notice = Notice(text: "Pick at least one person or agent")
             return false
         }
         do {
             var chat: PeopleChat
             do {
-                chat = try await api.createGroup(handles: cleaned)
-            } catch let e as RelayError where e.status == 404 || e.status == 405 || e.status == 501 {
+                chat = try await api.createGroup(handles: cleaned, agentIds: agentIds, title: title, leaf: leaf)
+            } catch let e as RelayError where !cleaned.isEmpty && (e.status == 404 || e.status == 405 || e.status == 501) {
                 chat = try await createGroupViaDm(handles: cleaned)
             }
-            for pid in agentIds {
+            for pid in agentIds where !chat.hasAgent(pid) {
                 do {
                     chat = try await api.addAgent(chatId: chat.id, projectId: pid)
                 } catch {
@@ -1804,9 +1809,10 @@ final class AppModel: ObservableObject {
 
     @Published private(set) var voiceCatalog: VoiceCatalog?
 
-    /// `GET /voices` once per launch (the relay caches it for an hour anyway).
+    /// `GET /voices` once per launch (the relay caches it for an hour anyway). Nothing is
+    /// fetched while voice mode is switched off on the relay (no picker to feed).
     func loadVoices() async {
-        guard voiceCatalog == nil, !isFixture else { return }
+        guard voiceCatalog == nil, !isFixture, VoiceModeFlag.shared.on else { return }
         voiceCatalog = try? await api.voices()
     }
 
@@ -3380,10 +3386,10 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func createProject(name: String, avatarColorIndex: Int? = nil) {
+    func createProject(name: String, avatarColorIndex: Int? = nil, leaf: LeafPick? = nil) {
         Task {
             do {
-                try await api.createProject(name: name, avatarColorIndex: avatarColorIndex)
+                try await api.createProject(name: name, avatarColorIndex: avatarColorIndex, leaf: leaf)
                 await refreshRegistry()
             } catch {
                 notice = Notice(text: "New project failed: \(error.localizedDescription)")
@@ -3408,6 +3414,7 @@ final class AppModel: ObservableObject {
                 // relay to copy the source agent's project folder and memory.
                 try await api.createProject(
                     name: name,
+                    leaf: LeafArt.pick(project),
                     color: project.color,
                     description: project.description,
                     instructions: project.instructions,

@@ -42,6 +42,12 @@ pub enum SyncEvent {
     },
     /// Who is signed in (`/auth/token` or `/me`); `None` after sign-out.
     Account(Option<AccountView>),
+    /// Remote feature flags from `GET /me` → `features` (one object, one place on the relay).
+    Features {
+        /// `features.voice_mode`: spoken replies, voice picker, reply playback. Absent on an
+        /// older relay = off (Jacob, 2026-10-22: hidden everywhere until it works end to end).
+        voice_mode: bool,
+    },
     /// `GET /users/search` results for the new-chat sheet (D72).
     PeopleSearch {
         query: String,
@@ -65,6 +71,11 @@ pub enum SyncEvent {
     },
     /// Error from a people-chat action (search, DM, members), shown inline.
     PeopleError(String),
+    /// `CreatePeopleGroup` succeeded: the new group's id, sent after the
+    /// registry refresh that lists it. The sheet closes and the group opens.
+    PeopleGroupCreated {
+        chat_id: Id,
+    },
     /// Calls v1: `POST …/calls` or `/join` answered with a call (and my token).
     /// `created` = 201: this device started it and writes the system line;
     /// `reachable` (201 only) says per callee whether anyone can pick up.
@@ -313,11 +324,15 @@ pub enum ClientCommand {
     StartDm {
         handle: String,
     },
-    /// `POST /chats {kind: group, members}`; then optional `POST /chats/{id}/agents`.
-    /// The chat lands in the next `Projects` event.
+    /// `POST /chats {kind: group, members, agent_ids}` — people, agents, or
+    /// both. The chat lands in the next `Projects` event, then
+    /// `PeopleGroupCreated` names it.
     CreatePeopleGroup {
         handles: Vec<String>,
         agent_ids: Vec<Id>,
+        /// D93 Create screen: the group's name and leaf picture, when it came through it.
+        title: Option<String>,
+        leaf: Option<crate::ui::avatars::LeafPick>,
     },
     /// Presence `typing` for a people chat.
     SetTyping {
@@ -464,19 +479,6 @@ pub enum ClientCommand {
         chat_id: Id,
         title: String,
     },
-    /// F6: a group chat hosted by `project_id` with the other `participants`; `chat_id` is the
-    /// client's placeholder until `ChatCreated` brings the relay's.
-    GroupCreate {
-        project_id: Id,
-        chat_id: Id,
-        participants: Vec<Id>,
-        title: Option<String>,
-    },
-    GroupAddParticipant {
-        project_id: Id,
-        chat_id: Id,
-        participant: Id,
-    },
     /// Archive (hide from the tab strip) or unarchive a chat for me on every
     /// device (§9c `PUT /chats/{id}/settings {archived}`); the relay keeps it
     /// open, history stays in context, memory and search.
@@ -532,6 +534,8 @@ pub enum ClientCommand {
         name: String,
         /// D79: the owner's swatch pick at creation; `None` = automatic (the id's colour).
         avatar_color_index: Option<u8>,
+        /// D92: the leaf + colour the Create sheet previewed (forks copy the source's); `None` = automatic.
+        leaf: Option<crate::ui::avatars::LeafPick>,
         /// Fork: copy this agent's workspace (files + memory) into the new one.
         source_project_id: Option<Id>,
         /// Optional profile blurb for the new agent (forks copy the source's).
@@ -774,6 +778,8 @@ pub enum ClientCommand {
     /// D88: `POST /servers {name}`; answered by `ServerOpened`.
     ServerCreate {
         name: String,
+        /// D93 Create screen: the server's leaf picture.
+        leaf: Option<crate::ui::avatars::LeafPick>,
     },
     /// D88: `POST /servers/join {code}` with a code or a full invite link; `ServerOpened`.
     ServerJoin {
