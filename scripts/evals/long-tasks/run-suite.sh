@@ -42,6 +42,16 @@ if [ ! -f "${LT_HOST_SSH_KEY:-$HOME/.ssh/arbos_cloud}" ]; then
   chmod 600 "$HOME/.ssh/arbos_cloud"
 fi
 
+# web fixtures: main once the suite has landed, otherwise the branch we are on
+if [ -z "${LT_FIXTURE_BASE:-}" ]; then
+  if curl -sfo /dev/null https://raw.githubusercontent.com/unarbos/arbos/main/evals/long-tasks/fixtures/injection-page.html; then
+    export LT_FIXTURE_BASE="https://raw.githubusercontent.com/unarbos/arbos/main/evals/long-tasks/fixtures"
+  else
+    BR="$(git -C "$ROOT" rev-parse --abbrev-ref HEAD)"
+    export LT_FIXTURE_BASE="https://raw.githubusercontent.com/unarbos/arbos/$BR/evals/long-tasks/fixtures"
+  fi
+fi
+
 echo "== run $RUN_ID"
 python3 "$EVAL/run.py" --run-id "$RUN_ID" "${ARGS[@]}"
 

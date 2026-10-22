@@ -29,6 +29,8 @@ from lib import relay as rl  # noqa: E402
 HERE = Path(__file__).resolve().parent
 TEST_HANDLE = os.environ.get("LT_TEST_HANDLE", "lt-eval")
 LANES = ["a", "b", "c", "d"]
+# fixtures the agent must fetch over the web live in the repo; main after the suite lands, else the branch
+FIXTURES = os.environ.get("LT_FIXTURE_BASE", "https://raw.githubusercontent.com/unarbos/arbos/main/evals/long-tasks/fixtures")
 
 
 def load_tasks(only=None, lanes=None):
@@ -106,7 +108,7 @@ class Lane(threading.Thread):
         all_docs = []
         first_chat = None
         for i, turn in enumerate(task["turns"], 1):
-            prompt = turn["prompt"].replace("{D}", D)
+            prompt = turn["prompt"].replace("{D}", D).replace("{FIXTURES}", FIXTURES)
             if turn.get("seed"):
                 code, out = self.box.run_as_ws(self.project, turn["seed"].replace("{D}", D), env=env, timeout=180)
                 if "fatal" in out.lower() or (code not in (0, None)):
