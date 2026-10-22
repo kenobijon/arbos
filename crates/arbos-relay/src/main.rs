@@ -432,6 +432,7 @@ async fn main() -> anyhow::Result<()> {
             get(matrix::servers::list).post(matrix::servers::create),
         )
         .route("/servers/join", post(matrix::servers::join))
+        .route("/servers/search", get(matrix::servers::search))
         .route(
             "/servers/{id}",
             get(matrix::servers::get)

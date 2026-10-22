@@ -83,13 +83,15 @@ struct Server: Identifiable, Equatable {
     var ownerUserId: String
     var spaceRoomId: String?
     var createdAt: Int64
-    /// owner | admin | member
+    /// owner | admin | member (empty on open-server search hits before join)
     var myRole: String
     var memberCount: Int
     var channels: [ServerChannel]
     var generalChannelId: String?
     /// D79 `avatar_color_index_effective` (nil → derived from `id`).
     var avatarColorIndex: Int?
+    /// Anyone on Arbos can search and join without an invite link.
+    var isOpen: Bool
     /// Only for owner/admin.
     var invite: ServerInvite?
     /// Only from `GET /servers/{id}` / `POST /servers`.
@@ -97,6 +99,8 @@ struct Server: Identifiable, Equatable {
 
     var isOwner: Bool { myRole == "owner" }
     var isAdmin: Bool { myRole == "owner" || myRole == "admin" }
+    /// Already in this server (search hits for open servers you are not in have an empty role).
+    var isMember: Bool { !myRole.isEmpty }
 
     /// Where opening the server lands (rule 3).
     var general: ServerChannel? {
@@ -119,6 +123,7 @@ struct Server: Identifiable, Equatable {
             channels: channels,
             generalChannelId: (d["general_channel_id"] as? String).flatMap { $0.isEmpty ? nil : $0 },
             avatarColorIndex: (d["avatar_color_index_effective"] as? NSNumber)?.intValue,
+            isOpen: (d["open"] as? Bool) ?? (d["open"] as? NSNumber)?.boolValue ?? false,
             invite: ServerInvite.parse(d["invite"]),
             members: ((d["members"] as? [Any]) ?? []).compactMap(ServerMember.parse)
         )

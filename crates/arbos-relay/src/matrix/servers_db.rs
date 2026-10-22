@@ -13,7 +13,8 @@ use crate::db::Db;
 pub const SERVERS_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS servers (
   id TEXT PRIMARY KEY, name TEXT NOT NULL, owner_user_id TEXT NOT NULL, image_key TEXT,
-  invite_code TEXT NOT NULL UNIQUE, space_room_id TEXT, created_at INTEGER NOT NULL, deleted_at INTEGER
+  invite_code TEXT NOT NULL UNIQUE, space_room_id TEXT, created_at INTEGER NOT NULL, deleted_at INTEGER,
+  is_open INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS server_members (
   server_id TEXT NOT NULL, user_id TEXT NOT NULL, role TEXT NOT NULL, added_by TEXT NOT NULL,
@@ -29,7 +30,15 @@ CREATE TABLE IF NOT EXISTS channels (
 CREATE INDEX IF NOT EXISTS channels_server ON channels(server_id, position);
 "#;
 
-pub fn migrate_servers(_c: &Connection) {}
+pub fn migrate_servers(c: &Connection) {
+    let _ = c.execute(
+        "ALTER TABLE servers ADD COLUMN is_open INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = c.execute_batch(
+        "CREATE INDEX IF NOT EXISTS servers_open_name ON servers(is_open, name) WHERE deleted_at IS NULL;",
+    );
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Server {
@@ -40,6 +49,8 @@ pub struct Server {
     pub invite_code: String,
     pub space_room_id: Option<String>,
     pub created_at: i64,
+    /// Anyone on Arbos can find and join without an invite link.
+    pub is_open: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -80,11 +91,12 @@ fn server_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Server> {
         invite_code: r.get(4)?,
         space_room_id: r.get(5)?,
         created_at: r.get(6)?,
+        is_open: r.get::<_, i64>(7)? != 0,
     })
 }
 
 const SERVER_COLS: &str =
-    "id, name, owner_user_id, image_key, invite_code, space_room_id, created_at";
+    "id, name, owner_user_id, image_key, invite_code, space_room_id, created_at, is_open";
 
 fn channel_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Channel> {
     Ok(Channel {
@@ -115,9 +127,18 @@ impl Db {
     pub fn insert_server(&self, s: &Server) -> Result<()> {
         self.with(|c| {
             c.execute(
-                "INSERT INTO servers(id, name, owner_user_id, image_key, invite_code, space_room_id, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![s.id, s.name, s.owner_user_id, s.image_key, s.invite_code, s.space_room_id, s.created_at],
+                "INSERT INTO servers(id, name, owner_user_id, image_key, invite_code, space_room_id, created_at, is_open)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    s.id,
+                    s.name,
+                    s.owner_user_id,
+                    s.image_key,
+                    s.invite_code,
+                    s.space_room_id,
+                    s.created_at,
+                    if s.is_open { 1 } else { 0 }
+                ],
             )?;
             c.execute(
                 "INSERT INTO server_members(server_id, user_id, role, added_by, joined_at) VALUES (?1, ?2, 'owner', ?2, ?3)",
@@ -160,13 +181,39 @@ impl Db {
             let rows = st.query_map(params![user_id], |r| {
                 let s = server_from_row(r)?;
                 let m = ServerMember {
-                    server_id: r.get(7)?,
-                    user_id: r.get(8)?,
-                    role: r.get(9)?,
-                    joined_at: r.get(10)?,
-                    banned_at: r.get(11)?,
+                    server_id: r.get(8)?,
+                    user_id: r.get(9)?,
+                    role: r.get(10)?,
+                    joined_at: r.get(11)?,
+                    banned_at: r.get(12)?,
                 };
                 Ok((s, m))
+            })?;
+            rows.collect()
+        })
+    }
+
+    /// Open servers whose name contains `q` (case-insensitive), newest first.
+    pub fn search_open_servers(&self, q: &str, limit: i64) -> Result<Vec<(Server, i64)>> {
+        let needle = q.trim().to_lowercase();
+        if needle.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.with(|c| {
+            let mut st = c.prepare(&format!(
+                "SELECT {SERVER_COLS},
+                        (SELECT COUNT(*) FROM server_members m
+                         WHERE m.server_id = s.id AND m.left_at IS NULL AND m.banned_at IS NULL)
+                 FROM servers s
+                 WHERE s.is_open = 1 AND s.deleted_at IS NULL
+                   AND lower(s.name) LIKE '%' || ?1 || '%'
+                 ORDER BY s.created_at DESC
+                 LIMIT ?2"
+            ))?;
+            let rows = st.query_map(params![needle, limit], |r| {
+                let s = server_from_row(r)?;
+                let count: i64 = r.get(8)?;
+                Ok((s, count))
             })?;
             rows.collect()
         })
@@ -177,6 +224,7 @@ impl Db {
         id: &str,
         name: Option<&str>,
         image_key: Option<Option<&str>>,
+        is_open: Option<bool>,
     ) -> Result<bool> {
         self.with(|c| {
             let mut n = 0;
@@ -190,6 +238,12 @@ impl Db {
                 n += c.execute(
                     "UPDATE servers SET image_key = ?2 WHERE id = ?1",
                     params![id, image],
+                )?;
+            }
+            if let Some(open) = is_open {
+                n += c.execute(
+                    "UPDATE servers SET is_open = ?2 WHERE id = ?1",
+                    params![id, if open { 1 } else { 0 }],
                 )?;
             }
             Ok(n > 0)
@@ -418,6 +472,7 @@ mod tests {
             invite_code: "abc".into(),
             space_room_id: None,
             created_at: 1,
+            is_open: false,
         };
         d.insert_server(&s).unwrap();
         assert_eq!(d.server("S1").unwrap().unwrap().name, "Launch Crew");
@@ -453,6 +508,11 @@ mod tests {
         assert_eq!(d.channels_of_server("S1").unwrap().len(), 1);
         d.set_server_invite("S1", "xyz").unwrap();
         assert!(d.server_by_invite("abc").unwrap().is_none());
+        assert!(d.update_server("S1", None, None, Some(true)).unwrap());
+        assert!(d.server("S1").unwrap().unwrap().is_open);
+        let hits = d.search_open_servers("crew", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].0.id, "S1");
         assert!(d.delete_server("S1").unwrap());
         assert!(d.server("S1").unwrap().is_none());
     }

@@ -970,8 +970,11 @@ struct ServerProfileView: View {
                         } else {
                             membersList(server)
                         }
-                        if isAdmin, let invite = server.invite {
-                            inviteCard(invite)
+                        if isAdmin {
+                            openCard(server)
+                            if let invite = server.invite {
+                                inviteCard(invite)
+                            }
                         }
                         actions(server)
                     } else {
@@ -1256,7 +1259,28 @@ struct ServerProfileView: View {
         .buttonStyle(.borderless)
     }
 
-    // MARK: Invite link (rule 6)
+    // MARK: Open + invite (rule 6)
+
+    private func openCard(_ server: Server) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            PaneCard(header: "Discovery", footer: "When open, anyone on Arbos can find this server by name and join without an invite link.") {
+                PaneRow(
+                    title: "Open server",
+                    subtitle: "Searchable · no invite needed",
+                    trailing: AnyView(
+                        Toggle("", isOn: Binding(
+                            get: { server.isOpen },
+                            set: { on in Task { await model.setServerOpen(serverId, open: on) } }
+                        ))
+                        .labelsHidden()
+                        .tint(theme.online)
+                        .accessibilityLabel("Open server")
+                    )
+                )
+            }
+        }
+        .padding(.horizontal, PaneKit.inset)
+    }
 
     private func inviteCard(_ invite: ServerInvite) -> some View {
         VStack(alignment: .leading, spacing: 8) {

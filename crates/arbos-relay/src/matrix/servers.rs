@@ -7,7 +7,8 @@
 //! `GET /servers` · `POST /servers {name}` · `GET /servers/{id}` · `PATCH /servers/{id}` ·
 //! `DELETE /servers/{id}` · `POST /servers/{id}/channels {name, restricted?}` ·
 //! `PATCH|DELETE /servers/{id}/channels/{cid}` · `POST /servers/{id}/invite/reset` ·
-//! `POST /servers/join {code}` · `GET /s/{code}` (landing, no token) ·
+//! `GET /servers/search?q=` (open servers by name) · `POST /servers/join {code|server_id}` ·
+//! `GET /s/{code}` (landing, no token) ·
 //! `PUT /servers/{id}/members/{uid} {role}` · `DELETE /servers/{id}/members/{uid}[?ban=1]` ·
 //! `POST /servers/{id}/leave` · `GET /me/matrix` (token for the SDK) ·
 //! `/_matrix/client/{*rest}` (proxy to Synapse; the Matrix token authenticates there).
@@ -151,6 +152,7 @@ fn server_json(state: &AppState, s: &Server, me: &ServerMember, detail: bool) ->
         "owner_user_id": s.owner_user_id,
         "space_room_id": s.space_room_id,
         "created_at": s.created_at,
+        "open": s.is_open,
         "my_role": me.role,
         "member_count": members.len(),
         "channels": channels.iter().map(channel_json).collect::<Vec<_>>(),
@@ -284,6 +286,7 @@ pub async fn create(
         invite_code: invite_code(),
         space_room_id: None,
         created_at: now,
+        is_open: false,
     };
     if let Err(e) = state.db.insert_server(&server) {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
@@ -341,9 +344,12 @@ pub struct PatchBody {
     /// Blob key under `servers:{id}`; JSON `null` clears, absent leaves it.
     #[serde(default)]
     pub image_key: Option<Value>,
+    /// `true` = anyone on Arbos can search and join without an invite link.
+    #[serde(default)]
+    pub open: Option<bool>,
 }
 
-/// `PATCH /servers/{id} {name?, image_key?}` — owner/admins.
+/// `PATCH /servers/{id} {name?, image_key?, open?}` — owner/admins.
 pub async fn patch(
     State(state): State<AppState>,
     principal: Principal,
@@ -400,11 +406,12 @@ pub async fn patch(
             StoredImage::NotAnImage(why) => return not_an_image(&why),
         }
     }
-    if let Err(e) =
-        state
-            .db
-            .update_server(&id, name.as_deref(), image.as_ref().map(|o| o.as_deref()))
-    {
+    if let Err(e) = state.db.update_server(
+        &id,
+        name.as_deref(),
+        image.as_ref().map(|o| o.as_deref()),
+        b.open,
+    ) {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
     }
     state.matrix.touch_server(&state, &id);
@@ -698,10 +705,16 @@ pub async fn invite_reset(
 
 #[derive(Deserialize)]
 pub struct JoinBody {
-    pub code: String,
+    /// Invite link or its code (invite-only and open servers).
+    #[serde(default)]
+    pub code: Option<String>,
+    /// Open server id — join without an invite when `open` is true.
+    #[serde(default)]
+    pub server_id: Option<String>,
 }
 
-/// `POST /servers/join {code}` — join by invite link (members; banned people cannot).
+/// `POST /servers/join {code}` or `{server_id}` — invite link, or an open server by id
+/// (banned people cannot).
 pub async fn join(
     State(state): State<AppState>,
     principal: Principal,
@@ -711,20 +724,55 @@ pub async fn join(
         Ok(u) => u,
         Err(r) => return *r,
     };
-    let code = b
-        .code
-        .trim()
-        .rsplit('/')
-        .next()
-        .unwrap_or_default()
-        .to_owned();
-    let Some(s) = state.db.server_by_invite(&code).ok().flatten() else {
-        return api_error(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            "that invite link is not valid",
-        );
+    let s = if let Some(id) = b
+        .server_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let Some(s) = state.db.server(id).ok().flatten() else {
+            return api_error(StatusCode::NOT_FOUND, "not_found", "no such server");
+        };
+        if !s.is_open {
+            return api_error(
+                StatusCode::FORBIDDEN,
+                "invite_required",
+                "this server needs an invite link",
+            );
+        }
+        s
+    } else {
+        let code = b
+            .code
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .rsplit('/')
+            .next()
+            .unwrap_or_default()
+            .to_owned();
+        if code.is_empty() {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+                "paste an invite link or pick an open server",
+            );
+        }
+        let Some(s) = state.db.server_by_invite(&code).ok().flatten() else {
+            return api_error(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "that invite link is not valid",
+            );
+        };
+        s
     };
+    // Already a member: return the server (search → open, or re-tapping Join).
+    if let Ok(Some(m)) = state.db.server_member(&s.id, &me) {
+        if m.banned_at.is_none() {
+            return Json(server_json(&state, &s, &m, true)).into_response();
+        }
+    }
     match state.db.add_server_member(&s.id, &me, &me) {
         Ok(true) => {}
         Ok(false) => {
@@ -754,6 +802,63 @@ pub async fn join(
         Ok((s, m)) => Json(server_json(&state, &s, &m, true)).into_response(),
         Err(r) => *r,
     }
+}
+
+#[derive(Deserialize)]
+pub struct SearchQuery {
+    #[serde(default)]
+    pub q: String,
+}
+
+const OPEN_SEARCH_LIMIT: i64 = 20;
+
+/// Slim open-server hit for New Message search (not a member yet — no invite, no channels).
+fn open_hit_json(s: &Server, member_count: i64) -> Value {
+    json!({
+        "id": s.id,
+        "name": s.name,
+        "image_key": s.image_key,
+        "open": true,
+        "member_count": member_count,
+        "avatar_color_index_effective": crate::avatar::effective_color_index(&s.id, None),
+        "my_role": "",
+        "channels": [],
+    })
+}
+
+/// `GET /servers/search?q=` — open servers by name so anyone can join without an invite.
+pub async fn search(
+    State(state): State<AppState>,
+    principal: Principal,
+    Query(q): Query<SearchQuery>,
+) -> Response {
+    let me = match user_of(&principal) {
+        Ok(u) => u,
+        Err(r) => return *r,
+    };
+    if let Err(r) = matrix_required(&state) {
+        return *r;
+    }
+    let needle = q.q.trim();
+    if needle.chars().count() < 2 {
+        return Json(Value::Array(Vec::new())).into_response();
+    }
+    let mine: std::collections::HashSet<String> = state
+        .db
+        .servers_of_user(&me)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(s, _)| s.id)
+        .collect();
+    let hits: Vec<Value> = state
+        .db
+        .search_open_servers(needle, OPEN_SEARCH_LIMIT)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(s, _)| !mine.contains(&s.id))
+        .map(|(s, n)| open_hit_json(&s, n))
+        .collect();
+    Json(hits).into_response()
 }
 
 /// `GET /s/{code}` — what an invite link opens: JSON for the apps, a page for browsers.
@@ -1142,6 +1247,7 @@ mod picture_tests {
             Json(PatchBody {
                 name: None,
                 image_key: Some(key),
+                open: None,
             }),
         )
         .await
@@ -1160,6 +1266,7 @@ mod picture_tests {
             invite_code: "crew1234".into(),
             space_room_id: None,
             created_at: now_ms(),
+            is_open: false,
         };
         state.db.insert_server(&server).unwrap();
         let picture = |state: &AppState| state.db.server(&server.id).unwrap().unwrap().image_key;

@@ -238,6 +238,30 @@ extension AppModel {
         }
     }
 
+    /// Join an open server by id (no invite link).
+    func joinOpenServer(_ id: Id) async -> Bool {
+        do {
+            let s = try await relay.joinOpenServer(id: id)
+            upsert(server: s)
+            open(server: s)
+            await startMatrixIfNeeded()
+            return true
+        } catch {
+            let type = (error as? RelayError)?.type
+            notice = Notice(text: type == "banned" ? "You can't join this server."
+                            : type == "invite_required" ? "This server needs an invite link."
+                            : type == "not_found" || (error as? RelayError)?.status == 404 ? "That server is not available."
+                            : "Could not join the server: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    /// `GET /servers/search?q=` — open servers matching the name (ones you are not in).
+    func searchOpenServers(_ q: String) async -> [Server] {
+        guard credentials != nil, !isFixture, serversAvailable else { return [] }
+        return (try? await relay.searchOpenServers(q)) ?? []
+    }
+
     func renameServer(_ id: Id, name: String) async -> Bool {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
@@ -248,6 +272,20 @@ extension AppModel {
             return true
         } catch {
             notice = Notice(text: "Could not rename the server: \(error.localizedDescription)")
+            await refreshServers()
+            return false
+        }
+    }
+
+    /// Owner/admin: open = anyone can search and join without an invite link.
+    func setServerOpen(_ id: Id, open: Bool) async -> Bool {
+        if let i = servers.firstIndex(where: { $0.id == id }) { servers[i].isOpen = open }
+        do {
+            try await relay.patchServer(id, open: open)
+            await refreshServer(id)
+            return true
+        } catch {
+            notice = Notice(text: "Could not update the server: \(error.localizedDescription)")
             await refreshServers()
             return false
         }

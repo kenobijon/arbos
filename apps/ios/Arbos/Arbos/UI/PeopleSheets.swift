@@ -6,15 +6,17 @@ import SwiftUI
 
 /// "+" on home — Telegram's "New Message" sheet in Grok's dark skin: rises
 /// from the bottom, search on top, then New agent / New group, then your
-/// agents, then every other Arbos user. Typing filters agents and the
-/// directory and also asks `GET /users/search`, so a GitHub handle not on
-/// Arbos yet can be invited.
+/// agents, then every other Arbos user. Typing filters agents, servers and the
+/// directory and also asks `GET /users/search` and `GET /servers/search`, so a
+/// GitHub handle not on Arbos yet can be invited and an open server can be joined
+/// without an invite link.
 struct NewChatSheet: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
     @State private var query = ""
     @State private var remote: [Person] = []
+    @State private var remoteServers: [Server] = []
     @State private var searching = false
     @State private var opening = false
     @State private var loadingDirectory = false
@@ -35,6 +37,21 @@ struct NewChatSheet: View {
             $0.name.lowercased().contains(q) || mentionSlug($0.name).contains(q)
         }
         return filtered.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    /// Servers I am in that match the query, then open servers from search I am not in.
+    private var servers: [Server] {
+        let q = trimmed.lowercased()
+        guard !q.isEmpty, model.serversAvailable else { return [] }
+        let mine = model.servers.filter { $0.name.lowercased().contains(q) }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        var seen = Set(mine.map(\.id))
+        var out = mine
+        for s in remoteServers where !seen.contains(s.id) {
+            seen.insert(s.id)
+            out.append(s)
+        }
+        return out
     }
 
     /// Directory hits first (alphabetical), then remote hits not already listed.
@@ -81,7 +98,7 @@ struct NewChatSheet: View {
                                 .buttonStyle(.plain)
                                 rowDivider
                                 NavigationLink { JoinServerView(onDone: { dismiss() }) } label: {
-                                    actionRow(icon: "link", title: "Join a server", subtitle: "Paste an invite link")
+                                    actionRow(icon: "link", title: "Join a server", subtitle: "Invite link or open server")
                                 }
                                 .buttonStyle(.plain)
                             }
@@ -103,9 +120,22 @@ struct NewChatSheet: View {
                         .padding(.bottom, 22)
                     }
 
+                    if !servers.isEmpty {
+                        sectionHeader("Servers")
+                        card {
+                            ForEach(Array(servers.enumerated()), id: \.element.id) { i, s in
+                                Button { openServer(s) } label: { ServerPickRow(server: s) }
+                                    .buttonStyle(.plain)
+                                if i < servers.count - 1 { rowDivider }
+                            }
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.bottom, 22)
+                    }
+
                     // Keep the people block when the directory is empty (invite copy),
                     // but skip a redundant "no match" under Agents when a search hit only agents.
-                    if !people.isEmpty || agents.isEmpty || trimmed.isEmpty {
+                    if !people.isEmpty || (agents.isEmpty && servers.isEmpty) || trimmed.isEmpty {
                         sectionHeader(trimmed.isEmpty ? "Arbos users" : "People")
                         if people.isEmpty {
                             peopleEmpty
@@ -153,7 +183,7 @@ struct NewChatSheet: View {
     private var searchField: some View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass").font(.system(size: SheetSearchField.iconSize, weight: .medium)).foregroundStyle(theme.muted)
-            TextField("", text: $query, prompt: Text("Search people or agents").foregroundStyle(theme.placeholder))
+            TextField("", text: $query, prompt: Text("Search people, agents or servers").foregroundStyle(theme.placeholder))
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
                 .font(theme.font(Theme.body))
@@ -162,13 +192,14 @@ struct NewChatSheet: View {
                 .submitLabel(.go)
                 .onSubmit {
                     if let first = agents.first { openAgent(first) }
+                    else if let first = servers.first { openServer(first) }
                     else if let first = people.first { open(first) }
                     else if !trimmed.isEmpty { openHandle(trimmed) }
                 }
             if searching {
                 ProgressView().controlSize(.small).tint(theme.muted)
             } else if !query.isEmpty {
-                Button { query = ""; remote = [] } label: {
+                Button { query = ""; remote = []; remoteServers = [] } label: {
                     Image(systemName: "xmark.circle.fill").foregroundStyle(theme.muted)
                 }
                 .buttonStyle(.plain)
@@ -248,12 +279,15 @@ struct NewChatSheet: View {
 
     private func search() {
         let q = trimmed
-        guard q.count >= 2 else { remote = []; searching = false; return }
+        guard q.count >= 2 else { remote = []; remoteServers = []; searching = false; return }
         searching = true
         Task {
             try? await Task.sleep(nanoseconds: 250_000_000)
             guard q == trimmed else { return }
-            remote = await model.searchPeople(q)
+            async let peopleHits = model.searchPeople(q)
+            async let serverHits = model.searchOpenServers(q)
+            remote = await peopleHits
+            remoteServers = await serverHits
             if q == trimmed { searching = false }
         }
     }
@@ -268,6 +302,21 @@ struct NewChatSheet: View {
         opening = false
     }
 
+    private func openServer(_ s: Server) {
+        guard !opening else { return }
+        opening = true
+        if s.isMember {
+            model.open(server: s)
+            dismiss()
+            opening = false
+            return
+        }
+        Task {
+            if await model.joinOpenServer(s.id) { dismiss() }
+            opening = false
+        }
+    }
+
     private func openHandle(_ handle: String) {
         guard !opening else { return }
         opening = true
@@ -275,6 +324,36 @@ struct NewChatSheet: View {
             if await model.openDM(handle: handle) != nil { dismiss() }
             opening = false
         }
+    }
+}
+
+/// One server in the New Message search list: disc, name, member count or "Open".
+struct ServerPickRow: View {
+    @Environment(\.theme) private var theme
+    let server: Server
+
+    var body: some View {
+        HStack(spacing: 14) {
+            InitialsAvatar(name: server.name, handle: nil, id: server.id, override: server.avatarColorIndex, size: 44)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(server.name).font(theme.font(Theme.body, weight: .medium)).foregroundStyle(theme.text).lineLimit(1)
+                Text(server.isMember
+                     ? "\(server.memberCount) member\(server.memberCount == 1 ? "" : "s")"
+                     : "Open · tap to join")
+                    .font(theme.font(Theme.tiny)).foregroundStyle(theme.muted).lineLimit(1)
+            }
+            Spacer()
+            if !server.isMember {
+                Text("Join")
+                    .font(theme.font(11, weight: .medium))
+                    .foregroundStyle(theme.online)
+                    .padding(.horizontal, 9).padding(.vertical, 4)
+                    .background(Capsule().fill(theme.field))
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 9)
+        .contentShape(Rectangle())
     }
 }
 
