@@ -1,8 +1,9 @@
 //! An agent's page on the shared profile pane (D93): one [`ProfilePane`]
 //! spec — hero (leaf / photo with the owner's crayon, editable name,
 //! "working" or "Agent · run by @owner"), the tabs **Profile** (name, handle,
-//! description) | **Settings** (model, reasoning), and a Delete agent footer
-//! for the owner. The same two tabs as the iPhone's agent page. Voice, Share
+//! description) | **Settings** (model, reasoning) | **Library** (images,
+//! files, links from the agent's chats), and a Delete agent footer for the
+//! owner. The same three tabs as the iPhone's agent page. Voice, Share
 //! project and Add to this chat left the pane on 2026-10-22 (Jacob: simple,
 //! consistent, powerful); the avatar picker opens from the hero while the
 //! pane is up.
@@ -21,12 +22,15 @@ use crate::ui::theme::{Theme, TEXT_SMALL, TEXT_TINY};
 
 use super::kit::{self, Leading};
 use super::pane::{self, Hero, Picture, ProfilePane, Section};
-use super::{editable_name, editable_picture, HeroClick, HERO_AVATAR};
+use super::{
+    chats_of, collect, editable_name, editable_picture, file_list, link_list, HeroClick,
+    HERO_AVATAR,
+};
 
-/// The agent pane's tabs — the same two on the iPhone (`AgentProfileView`).
-/// Jacob (2026-10-22): Profile and Settings only; what the agent's chats hold
-/// is reached from the group and person panes' Library / Links as before.
-const TABS: [&str; 2] = ["Profile", "Settings"];
+/// The agent pane's tabs — the same three on the iPhone (`AgentProfileView`).
+/// Jacob (2026-10-22 22:32 UTC): Library stays; every pane shares the
+/// structure (hero, pill, options), not a tab count.
+pub(super) const TABS: [&str; 3] = ["Profile", "Settings", "Library"];
 
 /// An agent that is only known as a member of a people chat (someone else's
 /// project) is shown from that member entry.
@@ -105,6 +109,11 @@ pub(super) fn page(
     let tab = state.profile_tab;
     let editing_description = state.profile_editing_description && mine;
     let pid: Id = project.id.clone();
+    // Library tab: what the agent's chats hold (read while `state` is borrowed).
+    let content = (tab == 2).then(|| {
+        let chats: Vec<&crate::model::Chat> = chats_of(state, &project.id);
+        collect(state, &chats)
+    });
 
     if avatar_state != AvatarState::Idle {
         PulseClock::request(cx);
@@ -319,6 +328,37 @@ pub(super) fn page(
                 }
                 .into(),
             ));
+        }
+        2 => {
+            // ----- Library: everything the agent's chats hold ----------------------------
+            let content = content.expect("collected for the Library tab");
+            if content.media.is_empty() && content.files.is_empty() && content.links.is_empty() {
+                body.push(Section::Empty("Nothing shared here yet".into()));
+            } else {
+                if !content.media.is_empty() {
+                    body.push(Section::Title(
+                        format!("Images · {}", content.media.len()).into(),
+                    ));
+                    body.push(Section::Grid(content.media));
+                }
+                if !content.files.is_empty() {
+                    body.push(Section::Title(
+                        format!("Files · {}", content.files.len()).into(),
+                    ));
+                    // Custom: the kit's file list is a list of its own rows (noted on #1330).
+                    body.push(Section::Custom(
+                        file_list(&content.files, "doc", "", &theme).into_any_element(),
+                    ));
+                }
+                if !content.links.is_empty() {
+                    body.push(Section::Title(
+                        format!("Links · {}", content.links.len()).into(),
+                    ));
+                    body.push(Section::Custom(
+                        link_list(&content.links, shell, &theme, cx).into_any_element(),
+                    ));
+                }
+            }
         }
         _ => {
             // ----- Settings: how the agent runs — Model · Reasoning ---------------------

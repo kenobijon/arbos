@@ -19,7 +19,7 @@ use super::{
     chats_of, collect, editable_name, editable_picture, kit, link_list, list_row, HERO_AVATAR,
 };
 
-const TABS: [&str; 2] = ["Links", "Groups"];
+pub(super) const TABS: [&str; 2] = ["Links", "Groups"];
 
 pub(super) fn page(
     handle: &str,
