@@ -3380,10 +3380,10 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func createProject(name: String, avatarColorIndex: Int? = nil) {
+    func createProject(name: String, avatarColorIndex: Int? = nil, leaf: LeafPick? = nil) {
         Task {
             do {
-                try await api.createProject(name: name, avatarColorIndex: avatarColorIndex)
+                try await api.createProject(name: name, avatarColorIndex: avatarColorIndex, leaf: leaf)
                 await refreshRegistry()
             } catch {
                 notice = Notice(text: "New project failed: \(error.localizedDescription)")
@@ -3408,6 +3408,7 @@ final class AppModel: ObservableObject {
                 // relay to copy the source agent's project folder and memory.
                 try await api.createProject(
                     name: name,
+                    leaf: LeafArt.pick(project),
                     color: project.color,
                     description: project.description,
                     instructions: project.instructions,

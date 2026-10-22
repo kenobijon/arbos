@@ -1333,6 +1333,7 @@ impl AppState {
                         self.command(ClientCommand::CreateProject {
                             name: "Home".into(),
                             avatar_color_index: None,
+                            leaf: None,
                             source_project_id: None,
                             description: None,
                             color: None,
@@ -5362,6 +5363,7 @@ impl AppState {
         &mut self,
         name: String,
         avatar_color_index: Option<u8>,
+        leaf: Option<crate::ui::avatars::LeafPick>,
         cx: &mut Context<Self>,
     ) {
         self.new_project_open = false;
@@ -5369,6 +5371,7 @@ impl AppState {
         self.command(ClientCommand::CreateProject {
             name,
             avatar_color_index,
+            leaf,
             source_project_id: None,
             description: None,
             color: None,
@@ -5395,10 +5398,13 @@ impl AppState {
             &src.id,
             src.avatar_color_override.or(src.avatar_color_index),
         ));
+        // D92: the fork keeps the source's leaf and colour too.
+        let leaf = Some(crate::ui::avatars::project_leaf(src));
         self.awaiting_new_project = true;
         self.command(ClientCommand::CreateProject {
             name,
             avatar_color_index,
+            leaf,
             source_project_id: Some(project_id),
             description,
             color,

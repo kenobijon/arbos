@@ -257,6 +257,7 @@ final class RelayAPI {
     func createProject(
         name: String,
         avatarColorIndex: Int? = nil,
+        leaf: LeafPick? = nil,
         color: String? = nil,
         description: String? = nil,
         instructions: String? = nil,
@@ -264,6 +265,8 @@ final class RelayAPI {
     ) async throws {
         var body: [String: Any] = ["name": name]
         if let avatarColorIndex { body["avatar_color_index"] = avatarColorIndex }
+        // D92: the Create sheet's leaf + colour (forks copy the source's).
+        if let leaf { body["avatar_leaf"] = Int(leaf.leaf); body["avatar_leaf_color"] = Int(leaf.color) }
         if let color { body["color"] = color }
         if let description, !description.isEmpty { body["description"] = String(description.prefix(500)) }
         if let instructions, !instructions.isEmpty { body["instructions"] = instructions }
