@@ -4,7 +4,7 @@
 //! else: no last-seen line, no call / mute / search / more, no username
 //! field, no Send Message, no Add members (adding people starts in groups).
 
-use gpui::{div, prelude::*, px, Context, Div, ElementId, SharedString, Stateful};
+use gpui::{prelude::*, Context, Div, ElementId, SharedString, Stateful};
 
 use crate::app::ProfilePage;
 use crate::model::{Person, Project};
@@ -14,9 +14,9 @@ use crate::ui::people;
 use crate::ui::shell::Shell;
 use crate::ui::theme::Theme;
 
+use super::pane::{self, Hero, Picture, ProfilePane, Section};
 use super::{
-    card, chats_of, collect, editable_name, editable_picture, empty, hero, kit, link_list,
-    list_row, pushed_frame, tab_bar, HERO_AVATAR,
+    chats_of, collect, editable_name, editable_picture, kit, link_list, list_row, HERO_AVATAR,
 };
 
 const TABS: [&str; 2] = ["Links", "Groups"];
@@ -83,32 +83,34 @@ pub(super) fn page(
         &theme,
     )
     .into_any_element();
-    let hero = hero(
-        avatar,
+    let hero = Hero {
+        picture: Picture::Element(avatar),
         name,
-        &format!("@{}", person.handle),
-        theme.text_muted,
-        &theme,
-    );
+        badge: None,
+        subtitle: Some(format!("@{}", person.handle).into()),
+        subtitle_color: theme.text_muted,
+    };
 
-    // ----- tabs -----------------------------------------------------------------
-    let tabs = tab_bar(&TABS, tab, &theme, cx);
-    let body_tab = match tab {
-        0 => link_list(&links, shell, &theme, cx),
+    // ----- tabs: Links | Groups (the same set on the iPhone) ------------------------
+    let body: Vec<Section> = match tab {
+        0 => vec![Section::Custom(
+            link_list(&links, shell, &theme, cx).into_any_element(),
+        )],
         _ => {
             if groups.is_empty() {
-                empty("No groups in common yet", &theme)
+                vec![Section::Empty("No groups in common yet".into())]
             } else {
-                let mut list = card(&theme);
-                for (p, leading) in groups.iter().zip(group_pictures) {
-                    let n = p.people.len() + 1;
-                    let sub = if p.is_people() {
-                        format!("{n} members · you are both in it")
-                    } else {
-                        format!("shared project · {n} people")
-                    };
-                    let pid = p.id.clone();
-                    list = list.child(
+                let rows = groups
+                    .iter()
+                    .zip(group_pictures)
+                    .map(|(p, leading)| {
+                        let n = p.people.len() + 1;
+                        let sub = if p.is_people() {
+                            format!("{n} members · you are both in it")
+                        } else {
+                            format!("shared project · {n} people")
+                        };
+                        let pid = p.id.clone();
                         list_row(
                             ElementId::Name(SharedString::from(format!("profile-group-{}", p.id))),
                             leading,
@@ -126,43 +128,47 @@ pub(super) fn page(
                                 s.select_project(pid.clone(), cx);
                                 s.open_profile(ProfilePage::Group { space_id: pid }, cx);
                             });
-                        })),
-                    );
-                }
-                list
+                        }))
+                        .into_any_element()
+                    })
+                    .collect();
+                vec![Section::Card(rows)]
             }
         }
     };
 
     // ----- the one action: Block user --------------------------------------------
     let h_block = person.handle.clone();
-    let block = (!me).then(|| {
-        kit::card(&theme).child(
-            kit::danger_row("profile-block", "Block user", &theme).on_click(cx.listener(
-                move |this, _, window, cx| {
-                    let h = h_block.clone();
-                    this.state.update(cx, |s, cx| s.block_user(h, cx));
-                    this.close_profile(window, cx);
-                },
-            )),
+    let footer = if me {
+        Vec::new()
+    } else {
+        vec![Section::Card(vec![kit::danger_row(
+            "profile-block",
+            "Block user",
+            &theme,
         )
-    });
+        .on_click(cx.listener(move |this, _, window, cx| {
+            let h = h_block.clone();
+            this.state.update(cx, |s, cx| s.block_user(h, cx));
+            this.close_profile(window, cx);
+        }))
+        .into_any_element()])]
+    };
 
-    let body = div()
-        .flex()
-        .flex_col()
-        .pb(px(16.0))
-        .child(hero)
-        .child(tabs)
-        .child(body_tab)
-        .children(block);
-    Some(pushed_frame(
-        &person.display_name(),
-        body,
-        None,
-        Some(&shell.profile_scroll),
+    Some(pane::render(
+        ProfilePane {
+            page: ProfilePage::User {
+                handle: handle.to_string(),
+                space_id: _space_id.map(str::to_string),
+            },
+            hero,
+            tabs: &TABS,
+            selected: tab,
+            body,
+            footer,
+            done: None,
+        },
         shell,
-        &theme,
         cx,
     ))
 }

@@ -342,7 +342,7 @@ pub fn render_channel(
         server_id: server.id.clone(),
         channel_id: channel.id.clone(),
     };
-    let pane_open = state.profile.as_ref() == Some(&page);
+    let pane_open = crate::ui::profiles::pane::is_open(state, &page);
     let overlay = state.sidebar_overlay;
     let locked = channel.restricted;
 

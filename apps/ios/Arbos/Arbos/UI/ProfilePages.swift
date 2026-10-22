@@ -99,6 +99,8 @@ enum PaneKit {
     static let gap: CGFloat = 14
     static let tile: CGFloat = 30
     static let avatar: CGFloat = 36
+    /// The hero picture (a free constant: a static on the generic PaneHeader cannot be named without its type parameter).
+    static let heroAvatar: CGFloat = 112
     static let radius: CGFloat = 16
     /// Where a row's hairline starts for a given leading element.
     static func separatorInset(_ leading: PaneLeading) -> CGFloat {
@@ -324,20 +326,28 @@ struct PaneTabs: View {
 
 /// The hero: 112 pt picture, name, subtitle (@handle, member count, …).
 struct PaneHeader<Avatar: View>: View {
-    static var avatarSize: CGFloat { 112 }
+    /// Kept for callers that spell the type (`PaneHeader<EmptyView>.avatarSize`); new code uses `PaneKit.heroAvatar`.
+    static var avatarSize: CGFloat { PaneKit.heroAvatar }
     @Environment(\.theme) private var theme
     let name: String
     let subtitle: String
+    /// SF Symbol after the name ("lock.fill" on a private channel).
+    var badge: String? = nil
     @ViewBuilder var avatar: () -> Avatar
 
     var body: some View {
         VStack(spacing: 10) {
-            avatar().frame(width: Self.avatarSize, height: Self.avatarSize)
-            Text(name)
-                .font(theme.font(28, weight: .semibold))
-                .foregroundStyle(theme.text)
-                .lineLimit(1)
-                .padding(.horizontal, 24)
+            avatar().frame(width: PaneKit.heroAvatar, height: PaneKit.heroAvatar)
+            HStack(spacing: 6) {
+                Text(name)
+                    .font(theme.font(28, weight: .semibold))
+                    .foregroundStyle(theme.text)
+                    .lineLimit(1)
+                if let badge {
+                    Image(systemName: badge).font(theme.font(15, weight: .semibold)).foregroundStyle(theme.muted)
+                }
+            }
+            .padding(.horizontal, 24)
             Text(subtitle)
                 .font(theme.font(Theme.small))
                 .foregroundStyle(theme.muted)
@@ -575,24 +585,22 @@ struct UserProfileView: View {
             ScrollView {
                 VStack(spacing: 18) {
                     Color.clear.frame(height: 80)
-                    // The shared read-only layout (2026-10-20, topbar-unify f/g):
-                    // picture, name, @handle; no last-seen, no action row, no
-                    // username field, no Open chat / Add members.
-                    PaneHeader(name: person.displayName, subtitle: "@\(person.handle)") {
-                        PersonAvatar(url: person.avatarUrl, handle: person.handle, size: 112, name: person.name, id: person.id, colorIndex: person.avatarColorIndex)
-                    }
-                    ProfileTabs(tabs: ["Links", "Groups"], selected: $tab)
-                    if tab == "Links" {
-                        ChatItemsList(items: items, kind: .link, empty: dm == nil ? "No chat with \(person.displayName) yet." : "No links shared yet.")
-                    } else {
-                        groupsList
-                    }
-                    if !isMe {
-                        // The one action.
-                        ProfileCard {
-                            ProfileLinkRow(title: "Block user", destructive: true) { confirmBlock = true }
-                        }
-                    }
+                    // The shared pane (D93): picture, name, @handle; Links | Groups
+                    // (the Mac's set); one Block user row. No last-seen, no action
+                    // row, no username field, no Open chat / Add members.
+                    ProfilePane(
+                        hero: PaneHero(
+                            picture: .image(AnyView(PersonAvatar(url: person.avatarUrl, handle: person.handle, size: PaneKit.heroAvatar, name: person.name, id: person.id, colorIndex: person.avatarColorIndex))),
+                            name: person.displayName,
+                            subtitle: "@\(person.handle)"
+                        ),
+                        tabs: ["Links", "Groups"],
+                        selected: $tab,
+                        body: tab == "Links"
+                            ? [.custom(AnyView(ChatItemsList(items: items, kind: .link, empty: dm == nil ? "No chat with \(person.displayName) yet." : "No links shared yet.")))]
+                            : groupsSections,
+                        footer: isMe ? [] : [.card([AnyView(ProfileLinkRow(title: "Block user", destructive: true) { confirmBlock = true })])]
+                    )
                     Color.clear.frame(height: 40)
                 }
             }
@@ -621,33 +629,33 @@ struct UserProfileView: View {
         }
     }
 
-    private var groupsList: some View {
+    private var groupsSections: [PaneSection] {
         let groups = sharedGroups
-        return Group {
-            if groups.isEmpty && sharedProjects.isEmpty {
-                Text("No groups in common yet.").font(theme.font(Theme.small)).foregroundStyle(theme.muted).padding(.top, 36)
-            } else {
-                ProfileCard(separatorInset: PaneKit.separatorInset(.glyph(""))) {
-                    ForEach(groups) { g in
-                        Button { dismiss(); model.open(peopleChat: g) } label: {
-                            PaneRow(leading: .glyph("person.2.fill"), title: g.title, subtitle: "\(g.humans.count) members", chevron: true)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                    ForEach(sharedProjects) { p in
-                        Button { dismiss(); model.open(project: p) } label: {
-                            PaneRow(
-                                leading: .avatar(AnyView(AgentAvatar(project: p, theme: theme, size: PaneKit.avatar, still: true))),
-                                title: p.name,
-                                subtitle: "shared project · @\(p.ownerHandle ?? model.user?.login ?? "")",
-                                chevron: true
-                            )
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-            }
+        if groups.isEmpty && sharedProjects.isEmpty {
+            return [.empty("No groups in common yet.")]
         }
+        var rows: [AnyView] = groups.map { g in
+            AnyView(
+                Button { dismiss(); model.open(peopleChat: g) } label: {
+                    PaneRow(leading: .glyph("person.2.fill"), title: g.title, subtitle: "\(g.humans.count) members", chevron: true)
+                }
+                .buttonStyle(.plain)
+            )
+        }
+        rows += sharedProjects.map { p in
+            AnyView(
+                Button { dismiss(); model.open(project: p) } label: {
+                    PaneRow(
+                        leading: .avatar(AnyView(AgentAvatar(project: p, theme: theme, size: PaneKit.avatar, still: true))),
+                        title: p.name,
+                        subtitle: "shared project · @\(p.ownerHandle ?? model.user?.login ?? "")",
+                        chevron: true
+                    )
+                }
+                .buttonStyle(.plain)
+            )
+        }
+        return [.card(rows, separatorInset: PaneKit.separatorInset(.glyph("")))]
     }
 
 }
@@ -1541,6 +1549,127 @@ struct GroupEditSheet: View {
             UIImage(cgImage: cg, scale: image.scale, orientation: image.imageOrientation)
                 .draw(in: CGRect(origin: .zero, size: CGSize(width: side, height: side)))
         }
+    }
+}
+
+// MARK: - Shared profile pane (D93) — one component for every entity
+// (docs/group-chat-redesign.md § "Shared profile pane"; the Mac twin is profiles::pane).
+
+/// The hero: picture (image or glyph tile), name, optional badge, subtitle.
+struct PaneHero {
+    enum Picture {
+        case image(AnyView)
+        /// A glyph tile ("number" for channels, "archivebox"…).
+        case glyph(String)
+    }
+    let picture: Picture
+    let name: String
+    /// SF Symbol after the name ("lock.fill" on a private channel).
+    var badge: String? = nil
+    let subtitle: String
+}
+
+/// One block of a tab's content, top to bottom.
+enum PaneSection {
+    /// Small caps title over a card ("Images · 4", "Archived").
+    case title(String)
+    /// Rows; the card draws separators between them only.
+    case card([AnyView], separatorInset: CGFloat = PaneKit.inset)
+    /// Media thumbnails, three square tiles per row.
+    case grid([ChatItem])
+    /// Centred muted line for an empty tab.
+    case empty(String)
+    case footnote(String)
+    /// Escape hatch — say why on the component's issue.
+    case custom(AnyView)
+}
+
+struct ProfilePane: View {
+    @Environment(\.theme) private var theme
+    let hero: PaneHero
+    /// Same labels and order as the Mac page; zero or one tab shows no pill.
+    let tabs: [String]
+    @Binding var selected: String
+    /// The selected tab's content.
+    let sections: [PaneSection]
+    /// Pinned after the body: Block user, Leave group, Sign out…
+    var footer: [PaneSection] = []
+
+    init(hero: PaneHero, tabs: [String], selected: Binding<String>, body: [PaneSection], footer: [PaneSection] = []) {
+        self.hero = hero
+        self.tabs = tabs
+        self._selected = selected
+        self.sections = body
+        self.footer = footer
+    }
+
+    var body: some View {
+        VStack(spacing: 18) {
+            PaneHeader(name: hero.name, subtitle: hero.subtitle, badge: hero.badge) {
+                switch hero.picture {
+                case .image(let v): v
+                case .glyph(let glyph):
+                    RoundedRectangle(cornerRadius: PaneKit.heroAvatar * 0.28, style: .continuous)
+                        .fill(theme.field)
+                        .frame(width: PaneKit.heroAvatar, height: PaneKit.heroAvatar)
+                        .overlay(Image(systemName: glyph).font(.system(size: PaneKit.heroAvatar * 0.42, weight: .medium)).foregroundStyle(theme.text))
+                }
+            }
+            if tabs.count > 1 {
+                ProfileTabs(tabs: tabs, selected: $selected)
+            }
+            ForEach(Array(sections.enumerated()), id: \.offset) { _, s in section(s) }
+            if !footer.isEmpty {
+                Color.clear.frame(height: 1)
+                ForEach(Array(footer.enumerated()), id: \.offset) { _, s in section(s) }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func section(_ s: PaneSection) -> some View {
+        switch s {
+        case .title(let t):
+            PaneSectionTitle(t)
+        case .card(let rows, let inset):
+            ProfileCard(separatorInset: inset) {
+                ForEach(Array(rows.enumerated()), id: \.offset) { _, r in r }
+            }
+        case .grid(let items):
+            ChatItemsList(items: items, kind: .media, empty: "No photos or videos yet.")
+        case .empty(let t):
+            Text(t).font(theme.font(Theme.small)).foregroundStyle(theme.muted)
+                .frame(maxWidth: .infinity).padding(.top, 36).padding(.horizontal, 32).multilineTextAlignment(.center)
+        case .footnote(let t):
+            Text(t).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
+                .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, PaneKit.inset + 16)
+        case .custom(let v):
+            v
+        }
+    }
+}
+
+/// Title + optional subtitle with a switch; the row flips through `isOn`.
+struct PaneToggleRow: View {
+    @Environment(\.theme) private var theme
+    let title: String
+    var subtitle: String? = nil
+    @Binding var isOn: Bool
+    var body: some View {
+        PaneRow(leading: .none, title: title, subtitle: subtitle, trailing: AnyView(
+            Toggle("", isOn: $isOn).labelsHidden().tint(theme.text)
+        ))
+    }
+}
+
+/// A paragraph inside a card (a channel topic, an agent's description).
+struct PaneTextRow: View {
+    @Environment(\.theme) private var theme
+    let text: String
+    var body: some View {
+        Text(text).font(theme.font(Theme.body)).foregroundStyle(theme.text)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, PaneKit.inset).padding(.vertical, 12)
     }
 }
 
