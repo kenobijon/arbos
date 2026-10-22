@@ -183,7 +183,7 @@ extension RelayAPI {
     }
 
     /// `GET /me` → user, credits, machine summary.
-    func me() async throws -> (AuthUser, Credits?, MeMachineDto, MeFeaturesDto) {
+    func me() async throws -> (AuthUser, Credits?, MeMachineDto, MeFeaturesDto?) {
         let v = try await json("GET", AuthEndpoints.me)
         guard JSONSerialization.isValidJSONObject(v),
               let data = try? JSONSerialization.data(withJSONObject: v) else {

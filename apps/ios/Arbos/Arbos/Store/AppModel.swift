@@ -833,7 +833,7 @@ final class AppModel: ObservableObject {
             credits = cr
             saveAccountCache()
             // D92 remote flag `features.leaf_avatars` (absent on an older relay = on).
-            LeafAvatarsFlag.shared.set(features.leaf_avatars ?? true)
+            LeafAvatarsFlag.shared.set(features?.leaf_avatars ?? true)
             let position = summary.waitlisted ? Int(summary.waitlist_position ?? 1) : nil
             if position != waitlistPosition { waitlistPosition = position }
             meAlwaysOn = summary.always_on
