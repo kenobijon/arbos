@@ -18,6 +18,25 @@ repo=$HOME/arbos-rust-gate
 mkdir -p "$runs"
 cmd=${1:-}; shift || true
 
+disk_floor_check() {
+  # A release build of arbos-mac needs several GiB of scratch; below ~2 GiB free it fails half-way and
+  # takes the shared runner down with it (2026-10-22 01:55: 3.8 GiB free, four concurrent release builds).
+  # Under MIN_FREE_GB the run is refused as an infrastructure error (the poller retries next tick), the
+  # loop journal gets an ALERT line, and the sweep runs if it can.
+  local free
+  free=$(df -g /System/Volumes/Data 2>/dev/null | awk 'NR==2 {print $4}')
+  [ -n "$free" ] || return 0
+  if [ "$free" -lt "${MIN_FREE_GB:-6}" ]; then
+    echo "== disk: ${free} GiB free on the Mac (< ${MIN_FREE_GB:-6}); refusing to start the release build"
+    msg="ALERT $(date -u +%FT%TZ) EC2 Mac has ${free} GiB free (< ${MIN_FREE_GB:-6}); the Rust gate refused a release build — prune target dirs (arbos-mac-clean.sh --if-low runs every 30 min)"
+    mkdir -p /Users/Shared/arbos-run 2>/dev/null; printf '%s\n' "$msg" >> /Users/Shared/arbos-run/loop-journal.log 2>/dev/null
+    logger -t arbos-rust-gate "$msg" 2>/dev/null
+    sudo -n /bin/bash /usr/local/bin/arbos-mac-clean.sh --if-low >/dev/null 2>&1 || true
+    return 1
+  fi
+  return 0
+}
+
 webrtc_scratch_check() {
   # webrtc-sys (livekit) downloads libwebrtc into a directory the `scratch` crate bakes in at ITS compile time.
   # When the gate's target dir moved (in-tree ~/arbos-rust-gate/target → ~/arbos-rust-gate-target) the cached
@@ -107,6 +126,7 @@ case "$cmd" in
       fi
     fi
     if [ "$status" -eq 0 ] && [ "$mac" = "1" ]; then
+      disk_floor_check || finish 2
       webrtc_scratch_check
       echo "== cargo build --release --locked -p arbos-mac"
       if cargo build --release --locked -p arbos-mac; then echo "== release build: passes"; else echo "== release build: FAILS"; status=1; fi

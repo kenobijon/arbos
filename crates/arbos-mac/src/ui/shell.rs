@@ -217,8 +217,13 @@ pub struct Shell {
     /// Group pane › Members: the row whose ✕ was clicked (`user:<id>` or
     /// `agent:<project>`); it shows "Remove … ?" with Cancel / Remove.
     pub(crate) member_remove_armed: Option<String>,
-    /// Right-click menu on a chat tab or archived chat: the chat and click point.
-    pub(crate) chat_menu: Option<(crate::model::Id, gpui::Point<gpui::Pixels>)>,
+    /// Right-click menu on a session row of the header's tab dropdown: the
+    /// chat whose row carries it (#1256: anchored to the row, the dropdown
+    /// stays open with the row highlighted).
+    pub(crate) chat_menu: Option<crate::model::Id>,
+    /// The session menu's Delete was clicked once: it shows `Delete "title"?`
+    /// with Cancel / Delete instead of the action list.
+    pub(crate) chat_delete_armed: bool,
     /// People chats (D72): the @search field, the header pickers.
     pub people_input: Entity<ComposerInput>,
     /// Agent profile page: inline description editor.
@@ -322,7 +327,16 @@ impl Shell {
             })
             .detach();
         }
-        cx.observe(&state, |_, _, cx| cx.notify()).detach();
+        cx.observe(&state, |this, state, cx| {
+            // The Add members picker (from a group pane or the rig hook) searches
+            // agents too; Cancel / Add put "Search people" back.
+            if state.read(cx).add_members_target.is_some() {
+                this.people_input
+                    .update(cx, |input, _| input.set_placeholder("Add people or agents"));
+            }
+            cx.notify();
+        })
+        .detach();
         Self::follow_system_appearance(window);
         cx.observe(&voice, |_, _, cx| cx.notify()).detach();
         cx.observe(&composer, |_, _, cx| cx.notify()).detach();
@@ -600,6 +614,7 @@ impl Shell {
             row_delete_armed: false,
             member_remove_armed: None,
             chat_menu: None,
+            chat_delete_armed: false,
             react_menu: None,
             group_picker_open: false,
             renaming_tab: None,
@@ -1238,19 +1253,29 @@ impl Shell {
     }
 
     /// A member row in a group's pane (or an owner on an agent's): push the
-    /// person's page over the open one, which keeps its tab and scroll.
+    /// person's page over the open one, which keeps its tab and body scroll.
     pub(crate) fn push_profile(&mut self, page: ProfilePage, cx: &mut Context<Self>) {
         let scroll = -f32::from(self.profile_scroll.offset().y);
         self.member_remove_armed = None;
-        self.state
-            .update(cx, |s, cx| s.push_profile(page, scroll, cx));
+        self.state.update(cx, |s, cx| {
+            let depth = s.profile_stack.len();
+            s.push_profile(page, cx);
+            // The page just covered is the new top frame; only the shell knows
+            // how far its body was scrolled.
+            if s.profile_stack.len() > depth {
+                if let Some(frame) = s.profile_stack.last_mut() {
+                    frame.scroll = scroll;
+                }
+            }
+        });
     }
 
-    /// The pane's `‹`: back to the page underneath, its tab and scroll as left.
-    pub(crate) fn pop_profile(&mut self, cx: &mut Context<Self>) {
+    /// The pane's `‹`: back to the page underneath, its tab and scroll as left
+    /// (closes the pane when nothing is underneath).
+    pub(crate) fn back_profile(&mut self, cx: &mut Context<Self>) {
         self.member_remove_armed = None;
         let (scroll, epoch) = self.state.update(cx, |s, cx| {
-            let scroll = s.pop_profile(cx);
+            let scroll = s.back_profile(cx);
             (scroll, s.profile_opened)
         });
         if let Some(scroll) = scroll {
@@ -1453,6 +1478,14 @@ impl Shell {
         if self.close_agent_pick(Some(window), cx) {
             return;
         }
+        // A session row's context menu closes alone; the dropdown under it
+        // stays (standard menu behaviour).
+        if self.chat_menu.is_some() {
+            self.chat_menu = None;
+            self.chat_delete_armed = false;
+            cx.notify();
+            return;
+        }
         let floating = self.menu_open
             || self.members_open
             || self.add_agent_open
@@ -1504,19 +1537,22 @@ impl Shell {
         }
     }
 
-    pub(crate) fn set_theme(
-        &mut self,
-        pref: AppearancePref,
-        surface: Surface,
-        cx: &mut Context<Self>,
-    ) {
-        let current = Theme::of(cx);
-        if current.pref != pref {
-            pref.save();
-        }
-        if current.surface != surface {
-            surface.save();
-        }
+    /// Settings → Appearance → Theme. The pick is always written, even when it
+    /// equals the unsaved default, so it survives a later default change (D90).
+    pub(crate) fn pick_appearance(&mut self, pref: AppearancePref, cx: &mut Context<Self>) {
+        pref.save();
+        let surface = Theme::of(cx).surface;
+        self.set_theme(pref, surface, cx);
+    }
+
+    /// Settings → Appearance → Surface. Same persistence rule as the theme.
+    pub(crate) fn pick_surface(&mut self, surface: Surface, cx: &mut Context<Self>) {
+        surface.save();
+        let pref = Theme::of(cx).pref;
+        self.set_theme(pref, surface, cx);
+    }
+
+    fn set_theme(&mut self, pref: AppearancePref, surface: Surface, cx: &mut Context<Self>) {
         cx.set_global(Theme::for_pref(pref, surface, cx));
         reapply_window_background(cx);
         cx.notify();
@@ -1569,6 +1605,19 @@ impl Shell {
             .detach();
     }
 
+    /// Right-click / control-click on a session row of the tab dropdown
+    /// (#1256): its menu opens anchored to that row; the dropdown stays open
+    /// and the row stays highlighted until the menu closes.
+    pub(crate) fn open_chat_menu(&mut self, chat_id: crate::model::Id, cx: &mut Context<Self>) {
+        self.menu_open = false;
+        self.row_menu = None;
+        self.row_delete_armed = false;
+        self.tab_menu_open = true;
+        self.chat_menu = Some(chat_id);
+        self.chat_delete_armed = false;
+        cx.notify();
+    }
+
     /// Everything that floats closes on a click elsewhere.
     pub(crate) fn close_popovers(&mut self, cx: &mut Context<Self>) {
         self.close_agent_pick(None, cx);
@@ -1589,6 +1638,7 @@ impl Shell {
             self.row_menu = None;
             self.row_delete_armed = false;
             self.chat_menu = None;
+            self.chat_delete_armed = false;
             self.react_menu = None;
             cx.notify();
         }
@@ -3024,7 +3074,7 @@ impl Render for Shell {
         };
         if let Some(page) = profile {
             // A page that just filled the pane starts at the top; a popped
-            // one already carries its restored offset (see `pop_profile`).
+            // one already carries its restored offset (see `back_profile`).
             if self.profile_scroll_epoch != opened {
                 self.profile_scroll_epoch = opened;
                 self.profile_scroll.set_offset(gpui::Point::default());
@@ -3037,9 +3087,6 @@ impl Render for Shell {
             }
         }
         if let Some(menu) = sidebar::row_menu(self, cx) {
-            root = root.child(menu);
-        }
-        if let Some(menu) = sidebar::chat_menu(self, cx) {
             root = root.child(menu);
         }
         if let Some(menu) = self.react_menu(cx) {

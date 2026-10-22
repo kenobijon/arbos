@@ -51,30 +51,41 @@ pub fn pane(page: &ProfilePage, shell: &Shell, cx: &mut Context<Shell>) -> Optio
 
 /// The right pane: an X at the top right (plus the page's `right` control),
 /// then the scrolling body. It sits beside the chat as a flex sibling, so it
-/// never covers it. The body tracks the shell's `profile_scroll`, so a page
-/// pushed over another (a member from a group) leaves the one underneath its
-/// scroll and gets a `‹` at the top left that pops back to it. Clicks inside
-/// stay inside (pickers, menus, fields).
+/// never covers it; `scroll` tracks the body's scroll when a page needs to
+/// move it. Clicks inside stay inside (pickers, menus, fields).
 pub(super) fn frame(
     body: Div,
     right: Option<Stateful<Div>>,
+    scroll: Option<&ScrollHandle>,
+    theme: &Theme,
+    cx: &mut Context<Shell>,
+) -> Stateful<Div> {
+    pane_frame(SHEET_WIDTH, None, body, right, scroll, theme, cx)
+}
+
+/// A page pushed from another (a sender tapped in a group): the header leads with `‹`
+/// back to the page underneath and `title`.
+pub(super) fn pushed_frame(
+    title: &str,
+    body: Div,
+    right: Option<Stateful<Div>>,
+    scroll: Option<&ScrollHandle>,
     shell: &Shell,
     theme: &Theme,
     cx: &mut Context<Shell>,
 ) -> Stateful<Div> {
-    let pushed = !shell.state.read(cx).profile_stack.is_empty();
-    let back = pushed.then(|| {
-        let chevron = glass::circle("profile-back", 30.0, theme)
-            .child(icon("chevron-left", 14.0, theme.text))
-            .on_click(cx.listener(|this, _, _, cx| this.pop_profile(cx)));
-        ("", chevron)
-    });
+    if shell.state.read(cx).profile_stack.is_empty() {
+        return pane_frame(SHEET_WIDTH, None, body, right, scroll, theme, cx);
+    }
+    let back = glass::circle("profile-back", 30.0, theme)
+        .child(icon("chevron-left", 14.0, theme.text))
+        .on_click(cx.listener(|this, _, _, cx| this.back_profile(cx)));
     pane_frame(
         SHEET_WIDTH,
-        back,
+        Some((title, back)),
         body,
         right,
-        Some(&shell.profile_scroll),
+        scroll,
         theme,
         cx,
     )

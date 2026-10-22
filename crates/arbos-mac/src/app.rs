@@ -15,8 +15,8 @@ use tokio::sync::mpsc;
 use crate::auth;
 use crate::calls::{self, CallCmd, CallEvent};
 use crate::model::{
-    call_ended_line, reachable_line, AccountView, Call, CallEnded, CallKind, CallMissed, Person,
-    Reachable, Sender, Voice,
+    add_members_plan, call_ended_line, reachable_line, AccountView, Call, CallEnded, CallKind,
+    CallMissed, Person, Reachable, Sender, Voice,
 };
 use crate::model::{
     new_id, now_ms, AttachmentKind, BoxState, ChannelSel, ChannelsView, Chat, ChatKind,
@@ -278,6 +278,9 @@ pub struct AppState {
     awaiting_group: Option<Vec<String>>,
     /// The sheet invites into this project instead of starting a DM (step 3).
     pub invite_target: Option<Id>,
+    /// The group picker adds to this people group instead of creating one
+    /// (the group pane's "Add members").
+    pub add_members_target: Option<Id>,
     /// Avatar reply reaction window per project (ms): plays once after a turn.
     pub avatar_reply_until: HashMap<Id, u64>,
     /// Avatar picker open for this project.
@@ -366,8 +369,9 @@ pub struct AppState {
     /// Telegram-style profile sheet (user / group / agent) and its tab.
     pub profile: Option<ProfilePage>,
     pub profile_tab: usize,
-    /// The pages under `profile`, outermost first: a member opened from a
-    /// group's pane sits over that group, and `‹` pops back to it.
+    /// Pages under the open one, outermost first (a sender's profile pushed
+    /// from a group, a member from its pane): `‹` pops back to the page with
+    /// its tab and scroll.
     pub profile_stack: Vec<ProfileFrame>,
     /// Bumped whenever a different page fills the pane, so the shell starts
     /// its body at the top (a popped page keeps its saved scroll instead).
@@ -623,6 +627,7 @@ impl AppState {
             awaiting_dm: None,
             awaiting_group: None,
             invite_target: None,
+            add_members_target: None,
             avatar_reply_until: HashMap::new(),
             avatar_picker: None,
             profile_from_name: false,
@@ -1394,7 +1399,7 @@ impl AppState {
                     }
                     // select_project() keeps the tab within the visible chats.
                     self.select_project(project_id.clone(), cx);
-                    // Rig: `ARBOS_OPEN_PROFILE=agent[:model|reasoning|voice]|group[:library|:member]|user|me`
+                    // Rig: `ARBOS_OPEN_PROFILE=agent[:model|reasoning|voice]|group[:library|:add-members|:member]|user|me`
                     // opens the right pane for the restored chat (selecting it
                     // closed whatever the shell opened at launch), and
                     // `ARBOS_OPEN_SETTINGS=…` re-opens my pane on its Settings tab.
@@ -1414,10 +1419,12 @@ impl AppState {
                             );
                             if rest == ":library" {
                                 self.set_profile_tab(1, cx);
-                            }
-                            // `:member` lands on the first other member, pushed
-                            // over the group as a click on its row would.
-                            if rest == ":member" {
+                            } else if rest == ":add-members" {
+                                // The pane's Add members sheet over the Members tab.
+                                self.open_add_members(project_id, cx);
+                            } else if rest == ":member" {
+                                // `:member` lands on the first other member, pushed
+                                // over the group as a click on its row would.
                                 let me = self.me_handle();
                                 if let Some(handle) = self
                                     .projects
@@ -1431,7 +1438,6 @@ impl AppState {
                                             handle,
                                             space_id: Some(project_id),
                                         },
-                                        0.0,
                                         cx,
                                     );
                                 }
@@ -3944,10 +3950,12 @@ impl AppState {
         self.show_profile(page, cx);
     }
 
-    /// Push `page` over the open pane — a member from a group's list, the
-    /// owner from an agent — keeping the page underneath with its tab and
-    /// `scroll` so `‹` brings it back as it was. Nothing open: plain open.
-    pub fn push_profile(&mut self, page: ProfilePage, scroll: f32, cx: &mut Context<Self>) {
+    /// Open `page` on top of the current one (a sender tapped inside a group,
+    /// a member from a group's pane, an agent's owner): the page underneath
+    /// is kept with its tab so `‹` brings it back as it was. Callers that
+    /// know the body's scroll set it on the pushed frame (`Shell::push_profile`).
+    /// Same page again is a no-op; nothing open is a plain open.
+    pub fn push_profile(&mut self, page: ProfilePage, cx: &mut Context<Self>) {
         let Some(under) = self.profile.clone() else {
             self.open_profile(page, cx);
             return;
@@ -3959,19 +3967,25 @@ impl AppState {
         self.profile_stack.push(ProfileFrame {
             page: under,
             tab,
-            scroll,
+            scroll: 0.0,
         });
         self.show_profile(page, cx);
     }
 
-    /// `‹` on a pushed page: the page underneath comes back on its tab; the
-    /// saved scroll is returned for the shell to restore (`None` = the pane
-    /// has nothing under the open page).
-    pub fn pop_profile(&mut self, cx: &mut Context<Self>) -> Option<f32> {
-        let frame = self.profile_stack.pop()?;
-        self.show_profile(frame.page, cx);
-        self.profile_tab = frame.tab;
-        Some(frame.scroll)
+    /// `‹` in the pane header: back to the page underneath on its tab, returning
+    /// the body scroll it had for the shell to restore; closes when none.
+    pub fn back_profile(&mut self, cx: &mut Context<Self>) -> Option<f32> {
+        match self.profile_stack.pop() {
+            Some(frame) => {
+                self.show_profile(frame.page, cx);
+                self.profile_tab = frame.tab;
+                Some(frame.scroll)
+            }
+            None => {
+                self.close_profile(cx);
+                None
+            }
+        }
     }
 
     fn show_profile(&mut self, page: ProfilePage, cx: &mut Context<Self>) {
@@ -4128,10 +4142,10 @@ impl AppState {
     /// Closes the sheet; `true` when one was open. An edit in progress on the
     /// agent page (name, description) is dropped with it.
     pub fn close_profile(&mut self, cx: &mut Context<Self>) -> bool {
+        self.profile_stack.clear();
         self.avatar_picker = None;
         self.profile_from_name = false;
         self.agent_pick = None;
-        self.profile_stack.clear();
         let was = self.profile.take().is_some();
         if was {
             self.profile_editing_name = false;
@@ -4831,6 +4845,7 @@ impl AppState {
         self.new_group_picked.clear();
         self.new_group_agents.clear();
         self.invite_target = None;
+        self.add_members_target = None;
         self.people_query.clear();
         self.people_results.clear();
         self.people_error = None;
@@ -4852,7 +4867,67 @@ impl AppState {
         self.awaiting_dm = None;
         self.awaiting_group = None;
         self.invite_target = None;
+        self.add_members_target = None;
         cx.notify();
+    }
+
+    /// Group pane → "Add members": the New group picker, titled for this
+    /// group, whose Add puts the picks into it (not into a new group).
+    pub fn open_add_members(&mut self, chat_id: Id, cx: &mut Context<Self>) {
+        if !self.project(&chat_id).is_some_and(|p| p.is_people()) {
+            return;
+        }
+        self.open_new_chat(cx);
+        self.new_group_open = true;
+        self.add_members_target = Some(chat_id);
+        cx.notify();
+    }
+
+    /// The group the picker adds to, when it was opened from a group pane.
+    pub fn add_members_group(&self) -> Option<&Project> {
+        self.add_members_target
+            .as_deref()
+            .and_then(|id| self.project(id))
+    }
+
+    /// "Add" in the Add members picker: one relay call per new person
+    /// (`POST /chats/{id}/members`) and per new agent (`POST /chats/{id}/agents`),
+    /// all on the group the picker was opened for. People already in the group
+    /// are skipped (the rows were disabled anyway). The pane shows them at once;
+    /// the relay's next list confirms. Returns whether the calls were sent (the
+    /// sheet closes then; an empty pick keeps it open with a line why).
+    pub fn add_members_to_group(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(space) = self.add_members_group().cloned() else {
+            return false;
+        };
+        let me_handle = self.me_handle();
+        let plan = add_members_plan(
+            &space,
+            &me_handle,
+            &self.new_group_picked,
+            &self.new_group_agents,
+        );
+        if plan.handles.is_empty() && plan.agent_ids.is_empty() {
+            self.people_error = Some("Pick someone who is not in the group yet".into());
+            cx.notify();
+            return false;
+        }
+        let picked: Vec<Person> = self
+            .new_group_picked
+            .iter()
+            .filter(|p| plan.handles.contains(&p.handle))
+            .cloned()
+            .collect();
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == plan.chat_id) {
+            p.people.extend(picked);
+        }
+        self.command(ClientCommand::AddMembers {
+            chat_id: plan.chat_id,
+            handles: plan.handles,
+            agent_ids: plan.agent_ids,
+        });
+        cx.notify();
+        true
     }
 
     /// New Message → New group: multi-select people and optional agents.
@@ -4879,6 +4954,14 @@ impl AppState {
     }
 
     pub fn toggle_group_person(&mut self, person: Person, cx: &mut Context<Self>) {
+        // Add members: someone already in the group is shown as added, not pickable.
+        let me_handle = self.me_handle();
+        if self
+            .add_members_group()
+            .is_some_and(|g| g.has_person(&me_handle, &person))
+        {
+            return;
+        }
         if let Some(i) = self
             .new_group_picked
             .iter()
@@ -4893,6 +4976,12 @@ impl AppState {
     }
 
     pub fn toggle_group_agent(&mut self, project_id: Id, cx: &mut Context<Self>) {
+        if self
+            .add_members_group()
+            .is_some_and(|g| g.has_agent(&project_id))
+        {
+            return;
+        }
         if let Some(i) = self
             .new_group_agents
             .iter()
@@ -5190,6 +5279,47 @@ impl AppState {
             color,
         });
         self.push_notice("Forking…");
+        cx.notify();
+    }
+
+    /// Session fork (#1257): a new chat of the **same** agent carrying this
+    /// chat's transcript — never a new project (that is `duplicate_project`,
+    /// reached only from the sidebar's agent row). The copy shows at once
+    /// under a local id and opens; `ChatCreated` swaps the relay's id in and
+    /// the box fills the room with the real history and the model's context.
+    pub fn fork_chat(&mut self, chat_id: Id, cx: &mut Context<Self>) {
+        if !self.multi_chat {
+            return;
+        }
+        let Some(project) = self.project_of_chat(&chat_id).cloned() else {
+            return;
+        };
+        let Some(source) = self
+            .tabs(&project.id)
+            .iter()
+            .find(|c| c.id == chat_id)
+            .cloned()
+        else {
+            return;
+        };
+        let Some(chat) = forked_chat(&source, &project, new_id()) else {
+            return;
+        };
+        let local_id = chat.id.clone();
+        let title = chat.title.clone();
+        let messages = self.messages_of(&chat_id).to_vec();
+        self.chats.entry(project.id.clone()).or_default().push(chat);
+        self.messages.insert(local_id.clone(), messages);
+        self.chat_ui.insert(local_id.clone(), ChatUi::default());
+        self.active_tab.insert(project.id.clone(), local_id.clone());
+        self.last_chats.insert(project.id.clone(), local_id.clone());
+        self.command(ClientCommand::ForkChat {
+            project_id: project.id,
+            source_chat_id: chat_id,
+            chat_id: local_id.clone(),
+            title,
+        });
+        self.command(ClientCommand::OpenChat { chat_id: local_id });
         cx.notify();
     }
 
@@ -6605,5 +6735,108 @@ fn device_name() -> String {
         format!("{host} (Mac)")
     } else {
         host.to_string()
+    }
+}
+
+/// The local row of a session fork (#1257): the same project, a plain chat
+/// titled `<title> (fork)`, nothing pinned or shared. `None` when `source`
+/// cannot be forked (groups, system tabs, chats of shared or people spaces).
+pub(crate) fn forked_chat(source: &Chat, project: &Project, id: Id) -> Option<Chat> {
+    if project.shared || project.is_people() {
+        return None;
+    }
+    if source.is_group() || source.is_system || source.kind != ChatKind::Chat {
+        return None;
+    }
+    if source.project_id != project.id {
+        return None;
+    }
+    Some(Chat {
+        id,
+        project_id: project.id.clone(),
+        title: fork_title(&crate::ui::header::tab_title(source, project)),
+        is_pinned: false,
+        is_system: false,
+        kind: ChatKind::Chat,
+        participants: Vec::new(),
+        unread: false,
+        last_message_at: now_ms(),
+        archived_at: None,
+    })
+}
+
+/// `"unicorns"` → `"unicorns (fork)"`; a fork of a fork stays `"… (fork)"`.
+/// Mirrors the relay's default so the row the Mac shows first is the one the
+/// relay returns.
+pub(crate) fn fork_title(source: &str) -> String {
+    let base = source.trim();
+    if base.is_empty() {
+        return "New chat (fork)".into();
+    }
+    if base.ends_with("(fork)") {
+        return base.to_owned();
+    }
+    format!("{base} (fork)")
+}
+
+#[cfg(test)]
+mod fork_tests {
+    //! #1257: a session fork stays inside its agent. It never becomes a project.
+    use super::*;
+
+    fn agent(id: &str, name: &str) -> Project {
+        Project {
+            id: id.into(),
+            name: name.into(),
+            ..Default::default()
+        }
+    }
+
+    fn chat(id: &str, project: &str, title: &str, pinned: bool) -> Chat {
+        Chat {
+            id: id.into(),
+            project_id: project.into(),
+            title: title.into(),
+            is_pinned: pinned,
+            is_system: false,
+            kind: ChatKind::Chat,
+            participants: Vec::new(),
+            unread: false,
+            last_message_at: 0,
+            archived_at: None,
+        }
+    }
+
+    #[test]
+    fn fork_is_a_sibling_chat_not_a_project() {
+        let bob = agent("p-bob", "Bob");
+        let unicorns = chat("c-unicorns", "p-bob", "unicorns", false);
+        let fork = forked_chat(&unicorns, &bob, "c-local".into()).expect("forkable");
+        assert_eq!(fork.project_id, bob.id, "same agent");
+        assert_eq!(fork.title, "unicorns (fork)");
+        assert_eq!(fork.kind, ChatKind::Chat);
+        assert!(!fork.is_pinned);
+        assert_eq!(fork_title(&fork.title), "unicorns (fork)");
+        // The pinned "Main" chat forks under its display name, not the agent's.
+        let main = chat("c-main", "p-bob", "Bob", true);
+        let fork = forked_chat(&main, &bob, "c-local-2".into()).expect("forkable");
+        assert_eq!(fork.title, "Main (fork)");
+    }
+
+    #[test]
+    fn groups_system_tabs_and_shared_spaces_do_not_fork() {
+        let bob = agent("p-bob", "Bob");
+        let mut group = chat("c-g", "p-bob", "Group · Mira", false);
+        group.kind = ChatKind::Group;
+        assert!(forked_chat(&group, &bob, "x".into()).is_none());
+        let mut system = chat("c-s", "p-bob", "Projects ⇄", false);
+        system.is_system = true;
+        assert!(forked_chat(&system, &bob, "x".into()).is_none());
+        let mut shared = agent("p-shared", "Team");
+        shared.shared = true;
+        let c = chat("c-t", "p-shared", "Plan", false);
+        assert!(forked_chat(&c, &shared, "x".into()).is_none());
+        let other = chat("c-o", "p-other", "Elsewhere", false);
+        assert!(forked_chat(&other, &bob, "x".into()).is_none());
     }
 }

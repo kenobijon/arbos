@@ -98,6 +98,7 @@ fn insert_project(
             doc_epoch: 1,
             kind: "chat".into(),
             participants: Vec::new(),
+            forked_from: None,
         })
         .unwrap();
     p
@@ -138,6 +139,7 @@ fn chat_json_matches_fixture() {
         doc_epoch: 1,
         kind: "chat".into(),
         participants: Vec::new(),
+        forked_from: None,
     };
     assert_dto("chat_json.json", chat_dto(&chat));
 }
@@ -155,6 +157,7 @@ async fn chat_json_for_matches_fixture() {
         doc_epoch: 1,
         kind: "chat".into(),
         participants: Vec::new(),
+        forked_from: None,
     };
     assert_dto(
         "chat_json_for.json",
@@ -310,6 +313,7 @@ async fn group_json_matches_fixture() {
         doc_epoch: 1,
         kind: "group".into(),
         participants: vec![p.id.clone(), other.id.clone()],
+        forked_from: None,
     };
     state.db.insert_chat(&group).unwrap();
     assert_dto(

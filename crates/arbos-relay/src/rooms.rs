@@ -623,6 +623,7 @@ mod ordering_tests {
                     doc_epoch: 1,
                     kind: "chat".into(),
                     participants: Vec::new(),
+                    forked_from: None,
                 })
                 .unwrap();
             let url = |tok: &str| format!("ws://{addr}/room/{project}/{chat}?token={tok}");

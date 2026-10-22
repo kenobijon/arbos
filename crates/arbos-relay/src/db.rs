@@ -239,6 +239,10 @@ pub struct Chat {
     /// Group chats only: participant project ids, the host project first.
     #[serde(default)]
     pub participants: Vec<String>,
+    /// Session fork (#1257): the chat of the same project this one was forked from. The box
+    /// seeds the new room from that chat's transcript and model context on first sight.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_from: Option<String>,
 }
 
 fn default_chat_kind() -> String {
@@ -528,6 +532,7 @@ impl Db {
             "ALTER TABLE chats ADD COLUMN participants TEXT NOT NULL DEFAULT '[]'",
             [],
         );
+        let _ = c.execute("ALTER TABLE chats ADD COLUMN forked_from TEXT", []);
         c.execute_batch(
             "CREATE TABLE IF NOT EXISTS group_traffic (
                id INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT NOT NULL, chat_id TEXT NOT NULL,
@@ -1081,15 +1086,15 @@ impl Db {
     pub fn insert_chat(&self, ch: &Chat) -> Result<()> {
         self.with(|c| {
             c.execute(
-                "INSERT INTO chats(id, project_id, title, is_pinned, position, created_at, doc_epoch, kind, participants) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
-                params![ch.id, ch.project_id, ch.title, ch.is_pinned as i64, ch.position, ch.created_at, ch.doc_epoch, ch.kind, serde_json::to_string(&ch.participants).unwrap_or_else(|_| "[]".into())],
+                "INSERT INTO chats(id, project_id, title, is_pinned, position, created_at, doc_epoch, kind, participants, forked_from) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                params![ch.id, ch.project_id, ch.title, ch.is_pinned as i64, ch.position, ch.created_at, ch.doc_epoch, ch.kind, serde_json::to_string(&ch.participants).unwrap_or_else(|_| "[]".into()), ch.forked_from],
             )
             .map(|_| ())
         })
     }
 
     const CHAT_COLS: &'static str =
-        "id, project_id, title, is_pinned, position, created_at, doc_epoch, kind, participants";
+        "id, project_id, title, is_pinned, position, created_at, doc_epoch, kind, participants, forked_from";
 
     fn row_to_chat(r: &rusqlite::Row<'_>) -> rusqlite::Result<Chat> {
         Ok(Chat {
@@ -1102,6 +1107,7 @@ impl Db {
             doc_epoch: r.get(6)?,
             kind: r.get(7)?,
             participants: serde_json::from_str(&r.get::<_, String>(8)?).unwrap_or_default(),
+            forked_from: r.get(9)?,
         })
     }
 

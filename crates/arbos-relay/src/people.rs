@@ -2824,6 +2824,7 @@ pub(crate) mod tests_support {
                 doc_epoch: 1,
                 kind: "chat".into(),
                 participants: Vec::new(),
+                forked_from: None,
             })
             .expect("pinned chat");
         project.id

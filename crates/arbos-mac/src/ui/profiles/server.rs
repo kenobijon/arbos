@@ -132,7 +132,7 @@ pub(super) fn page(
         .child(hero)
         .child(tabs)
         .child(body_tab);
-    Some(frame(body, None, shell, &theme, cx))
+    Some(frame(body, None, Some(&shell.profile_scroll), &theme, cx))
 }
 
 /// Channels: "Add channel" for admins, then one row per channel — `#name`, a lock word when

@@ -13,6 +13,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context as _, Result};
 use arbos_client::room::{self, RoomAction, RoomSession};
+use arbos_core::api::{
+    CreateChatResponseDto, GetProjectResponseDto, GroupDto, PeopleChatDto, ProjectDto,
+    ProjectMembersDto,
+};
 use arbos_core::doc::{UserAttachment, UserMessageOpts};
 use arbos_core::wire::{BoxState as WireBox, PROJECT_DOC_CHAT_ID};
 use arbos_matrix::{Listener as MatrixListener, MatrixClient, MessageRow, Session, Snapshot};
@@ -29,15 +33,18 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use super::credentials::{self, DeviceCredentials};
 use super::diagnostics;
 use super::doc::ChatDoc;
+use super::dto::{
+    chat_from_create, chat_from_dto, chat_from_group_dto, people_space_from, project_from_dto,
+};
 use super::store::{self, Store};
 use super::{ClientCommand, SyncEvent, SyncSource};
 use crate::model::{
-    new_id, now_ms, AccountView, AgentMember, Attachment, AttachmentKind, BoxState, Call,
-    CallEnded, CallLeft, CallMissed, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelsView,
-    Chat, ChatKind, Connector, ConnectorProvider, ConnectorsView, Effort, Id, Link, LocalDevice,
-    LocalView, Machine, MachineState, Message, Part, Person, Project, ProjectDocView,
-    ProjectSecrets, Reachable, ReplyPolicy, Role, Routine, RoutineRun, Secret, SecretActivity,
-    SecretRequest, SecretsView, Sender, ServerInfo, Skill, SpaceKind, ThreadInfo, Voice,
+    new_id, now_ms, AccountView, Attachment, AttachmentKind, BoxState, Call, CallEnded, CallLeft,
+    CallMissed, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelsView, Chat, Connector,
+    ConnectorProvider, ConnectorsView, Effort, Id, Link, LocalDevice, LocalView, Machine,
+    MachineState, Message, Part, Person, Project, ProjectDocView, ProjectSecrets, Reachable, Role,
+    Routine, RoutineRun, Secret, SecretActivity, SecretRequest, SecretsView, Sender, ServerInfo,
+    Skill, ThreadInfo, Voice,
 };
 use crate::update;
 
@@ -1158,268 +1165,12 @@ fn start_store_flusher(shared: &Arc<Shared>) {
 // Registry (HTTP)
 // ---------------------------------------------------------------------------
 
-fn effort_from(v: &Value) -> Effort {
-    match v.as_str().unwrap_or("") {
-        "high" | "xhigh" | "max" => Effort::High,
-        "medium" => Effort::Medium,
-        _ => Effort::Low,
-    }
-}
-
 fn effort_to(e: Effort) -> &'static str {
     match e {
         Effort::Low => "low",
         Effort::Medium => "medium",
         Effort::High => "high",
     }
-}
-
-fn box_state_from(state: &str, box_state: &str) -> BoxState {
-    match state {
-        "awake" => BoxState::Awake,
-        "waking" => BoxState::Waking,
-        "hibernated_light" => BoxState::HibernatedLight,
-        "hibernated_deep" => BoxState::HibernatedDeep,
-        "stopped_by_user" => BoxState::StoppedByUser,
-        "error" => BoxState::Error,
-        _ => match box_state {
-            "awake" => BoxState::Awake,
-            "waking" => BoxState::Waking,
-            "error" => BoxState::Error,
-            _ => BoxState::HibernatedLight,
-        },
-    }
-}
-
-/// `GET /chats` item → a rail space (kind dm/group) and its one chat.
-fn people_space_from(shared: &Shared, v: &Value) -> Option<(Project, Chat)> {
-    let id = v.get("id")?.as_str()?.to_string();
-    let me = shared.me_id();
-    let mut people: Vec<Person> = Vec::new();
-    let mut agents: Vec<AgentMember> = Vec::new();
-    // My own member row says whether I own the chat (`DELETE /chats/{id}` is
-    // owner-only; a member leaves instead).
-    let mut i_own = false;
-    for m in v
-        .get("members")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default()
-    {
-        let member = m.get("member").and_then(Value::as_str).unwrap_or("");
-        if let Some(uid) = member.strip_prefix("user:") {
-            if uid == me {
-                i_own = m.get("role").and_then(Value::as_str).unwrap_or("owner") == "owner";
-                continue;
-            }
-            people.push(Person {
-                id: uid.to_string(),
-                handle: m
-                    .get("handle")
-                    .and_then(Value::as_str)
-                    .unwrap_or(uid)
-                    .to_string(),
-                name: m.get("name").and_then(Value::as_str).map(str::to_string),
-                avatar_url: m
-                    .get("avatar_url")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string(),
-                status: m
-                    .get("status")
-                    .and_then(Value::as_str)
-                    .unwrap_or("member")
-                    .to_string(),
-                role: m
-                    .get("role")
-                    .and_then(Value::as_str)
-                    .unwrap_or("owner")
-                    .to_string(),
-                last_seen_at: m.get("last_seen_at").and_then(Value::as_i64),
-                online: m.get("online").and_then(Value::as_bool).unwrap_or(false),
-                avatar_color_index: m
-                    .get("avatar_color_index_effective")
-                    .or_else(|| m.get("avatar_color_index"))
-                    .and_then(Value::as_u64)
-                    .map(|i| (i % 7) as u8),
-            });
-        } else if let Some(pid) = member.strip_prefix("agent:") {
-            let project = m.get("project").cloned().unwrap_or(Value::Null);
-            let name = project
-                .get("name")
-                .and_then(Value::as_str)
-                .unwrap_or("Agent")
-                .to_string();
-            agents.push(AgentMember {
-                project_id: pid.to_string(),
-                handle: m
-                    .get("handle")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-                    .unwrap_or_else(|| Project::mention_slug(&name)),
-                icon: project
-                    .get("icon")
-                    .and_then(Value::as_str)
-                    .unwrap_or("Ω")
-                    .to_string(),
-                color: project
-                    .get("color")
-                    .and_then(Value::as_str)
-                    .unwrap_or("#8b7cf6")
-                    .to_string(),
-                name,
-                owner_id: m
-                    .get("owner")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string(),
-                owner_handle: m
-                    .get("owner_handle")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string(),
-                description: m
-                    .get("description")
-                    .or_else(|| project.get("description"))
-                    .and_then(Value::as_str)
-                    .filter(|d| !d.is_empty())
-                    .map(str::to_string),
-                model: project
-                    .get("model")
-                    .and_then(Value::as_str)
-                    .filter(|d| !d.is_empty())
-                    .map(str::to_string),
-                owner: project
-                    .get("owner")
-                    .filter(|o| o.is_object())
-                    .and_then(|o| serde_json::from_value::<Person>(o.clone()).ok()),
-                reply_policy: match m.pointer("/settings/reply_policy").and_then(Value::as_str) {
-                    Some("every_message") => ReplyPolicy::EveryMessage,
-                    _ => ReplyPolicy::Mention,
-                },
-                avatar: project
-                    .get("avatar")
-                    .and_then(Value::as_str)
-                    .filter(|a| !a.is_empty())
-                    .map(str::to_string),
-                avatar_color: project
-                    .get("avatar_color")
-                    .or_else(|| m.get("avatar_color"))
-                    .and_then(Value::as_str)
-                    .filter(|a| !a.is_empty())
-                    .map(str::to_string),
-                avatar_color_index: project
-                    .get("avatar_color_index_effective")
-                    .or_else(|| project.get("avatar_color_index"))
-                    .or_else(|| m.get("avatar_color_index_effective"))
-                    .or_else(|| m.get("avatar_color_index"))
-                    .and_then(Value::as_u64)
-                    .map(|i| (i % 7) as u8),
-            });
-        }
-    }
-    let people_owner: Option<String> = people
-        .iter()
-        .find(|p| p.role == "owner")
-        .map(|p| p.handle.clone());
-    let kind = match v.get("kind").and_then(Value::as_str) {
-        Some("group") => SpaceKind::Group,
-        _ => SpaceKind::Dm,
-    };
-    let title = v
-        .get("title")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .or_else(|| people.first().map(|p| p.handle.clone()))
-        .unwrap_or_else(|| "chat".into());
-    let pending = v.get("pending").and_then(Value::as_bool).unwrap_or(false)
-        || people.iter().all(|p| p.status == "invited");
-    let unread = v.get("unread").and_then(Value::as_bool).unwrap_or(false);
-    let last = v
-        .get("last_activity_at")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    let icon = people
-        .first()
-        .map(|p| p.initial())
-        .unwrap_or_else(|| "@".into());
-    let space = Project {
-        id: id.clone(),
-        name: title.clone(),
-        icon,
-        color: "#8b7cf6".into(),
-        state: BoxState::Awake,
-        state_detail: None,
-        wake_progress: None,
-        model: String::new(),
-        effort: Effort::Low,
-        spend_today_usd: 0.0,
-        spend_cap_usd: 0.0,
-        kind,
-        people,
-        agents,
-        pending,
-        shared: false,
-        // People chats: my handle when I own it, else the first owner's.
-        owner_handle: if i_own {
-            Some(shared.me_handle())
-        } else {
-            people_owner.clone()
-        },
-        avatar: None,
-        avatar_color: None,
-        description: None,
-        owner_person: None,
-        machine_info: None,
-        muted: v
-            .pointer("/me/muted")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        primary_chat: None,
-        voice: None,
-        vision_enabled: true,
-        avatar_color_index: None,
-        avatar_color_override: None,
-        // A custom group picture: the blob URL with the device token in the
-        // query (the avatar loader sends no header), as the iPhone builds it.
-        image_url: v
-            .get("image_key")
-            .and_then(Value::as_str)
-            .filter(|k| !k.is_empty())
-            .map(|k| {
-                format!(
-                    "{}/blob/people:{}/{}?token={}",
-                    shared.http_url,
-                    id,
-                    k,
-                    shared.token()
-                )
-            }),
-    };
-    let previous_unread = shared
-        .chats
-        .lock()
-        .unwrap()
-        .iter()
-        .find(|c| c.id == id)
-        .map(|c| c.unread);
-    let chat = Chat {
-        id: id.clone(),
-        project_id: id,
-        title,
-        is_pinned: true,
-        is_system: false,
-        kind: ChatKind::Chat,
-        participants: Vec::new(),
-        unread: previous_unread.unwrap_or(unread),
-        last_message_at: last,
-        archived_at: v
-            .get("archived_at")
-            .and_then(Value::as_i64)
-            .filter(|t| *t > 0)
-            .map(|t| t as u64),
-    };
-    Some((space, chat))
 }
 
 /// `GET /me/pushes`: people_* kinds that change the chat list refresh it.
@@ -2149,41 +1900,6 @@ fn people_error(err: &anyhow::Error) -> String {
     .unwrap_or(text)
 }
 
-fn parse_chat(v: &Value) -> Option<Chat> {
-    Some(Chat {
-        id: v.get("id")?.as_str()?.to_string(),
-        project_id: v.get("project_id")?.as_str()?.to_string(),
-        title: v
-            .get("title")
-            .and_then(Value::as_str)
-            .unwrap_or("New chat")
-            .to_string(),
-        is_pinned: v.get("is_pinned").and_then(Value::as_bool).unwrap_or(false),
-        is_system: v.get("is_system").and_then(Value::as_bool).unwrap_or(false),
-        kind: v
-            .get("kind")
-            .cloned()
-            .and_then(|k| serde_json::from_value(k).ok())
-            .unwrap_or_default(),
-        participants: v
-            .get("participants")
-            .and_then(Value::as_array)
-            .map(|a| {
-                a.iter()
-                    .filter_map(|x| x.as_str().map(str::to_owned))
-                    .collect()
-            })
-            .unwrap_or_default(),
-        unread: false,
-        last_message_at: v.get("created_at").and_then(Value::as_i64).unwrap_or(0) as u64,
-        archived_at: v
-            .get("archived_at")
-            .and_then(Value::as_i64)
-            .filter(|t| *t > 0)
-            .map(|t| t as u64),
-    })
-}
-
 /// `GET /projects` then `GET /projects/{id}` for chats, models and spend.
 async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
     shared.ensure_me().await;
@@ -2191,29 +1907,35 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
     let items = list.as_array().cloned().unwrap_or_default();
     let mut projects: Vec<Project> = Vec::new();
     let mut all_chats: Vec<Chat> = Vec::new();
+    let me_id = shared.me_id();
     for item in items {
-        let Some(id) = item.get("id").and_then(Value::as_str) else {
-            continue;
+        let list_dto: ProjectDto = match serde_json::from_value(item) {
+            Ok(d) => d,
+            Err(err) => {
+                log::warn!(target: "arbos_mac::relay", "ProjectDto: bad list item: {err}");
+                continue;
+            }
         };
-        let detail = shared.get_json(&format!("/projects/{id}")).await?;
+        let id = list_dto.id.clone();
+        let detail_val = shared.get_json(&format!("/projects/{id}")).await?;
+        let detail: GetProjectResponseDto = match serde_json::from_value(detail_val) {
+            Ok(d) => d,
+            Err(err) => {
+                log::warn!(target: "arbos_mac::relay", "GetProjectResponseDto {id}: {err}");
+                continue;
+            }
+        };
         // Who else is in this project (D72 step 3); older relays answer 404.
-        let members = shared
-            .get_json(&format!("/projects/{id}/members"))
-            .await
-            .ok()
-            .and_then(|v| v.get("members").cloned())
-            .unwrap_or(Value::Null);
-        let p = detail.get("project").cloned().unwrap_or(item.clone());
-        let models = p.get("models").cloned().unwrap_or(Value::Null);
-        let talking = models.get("talking_model").cloned().unwrap_or(Value::Null);
-        let state = box_state_from(
-            p.get("state").and_then(Value::as_str).unwrap_or(""),
-            detail
-                .get("box")
-                .or(item.get("box"))
-                .and_then(Value::as_str)
-                .unwrap_or(""),
-        );
+        let members = match shared.get_json(&format!("/projects/{id}/members")).await {
+            Ok(v) => match serde_json::from_value::<ProjectMembersDto>(v) {
+                Ok(m) => Some(m),
+                Err(err) => {
+                    log::warn!(target: "arbos_mac::relay", "ProjectMembersDto {id}: {err}");
+                    None
+                }
+            },
+            Err(_) => None,
+        };
         let previous = shared
             .projects
             .lock()
@@ -2221,159 +1943,40 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
             .iter()
             .find(|x| x.id == id)
             .cloned();
-        projects.push(Project {
-            id: id.to_string(),
-            name: p
-                .get("name")
-                .and_then(Value::as_str)
-                .unwrap_or("Project")
-                .to_string(),
-            icon: p
-                .get("icon")
-                .and_then(Value::as_str)
-                .unwrap_or("Ω")
-                .to_string(),
-            color: "#8b7cf6".into(),
-            state,
-            state_detail: previous.as_ref().and_then(|x| x.state_detail.clone()),
-            wake_progress: None,
-            model: talking
-                .get("id")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .or_else(|| previous.as_ref().map(|x| x.model.clone()))
-                .unwrap_or_else(|| "anthropic/claude-haiku-5.5".into()),
-            effort: effort_from(talking.get("effort").unwrap_or(&Value::Null)),
-            spend_today_usd: detail
-                .get("spend_today")
-                .and_then(Value::as_f64)
-                .unwrap_or(0.0),
-            spend_cap_usd: p
-                .get("spend_cap_daily")
-                .and_then(Value::as_f64)
-                .unwrap_or(25.0),
-            kind: SpaceKind::Project,
-            agents: Vec::new(),
-            pending: false,
-            people: members
-                .as_array()
-                .or_else(|| item.get("members").and_then(Value::as_array))
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|m| {
-                            let id = m.get("user_id").and_then(Value::as_str)?;
-                            Some(Person {
-                                id: id.to_string(),
-                                handle: m
-                                    .get("handle")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or(id)
-                                    .to_string(),
-                                name: m.get("name").and_then(Value::as_str).map(str::to_string),
-                                avatar_url: m
-                                    .get("avatar_url")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or("")
-                                    .to_string(),
-                                status: "member".into(),
-                                last_seen_at: m.get("last_seen_at").and_then(Value::as_i64),
-                                online: m.get("online").and_then(Value::as_bool).unwrap_or(false),
-                                avatar_color_index: m
-                                    .get("avatar_color_index_effective")
-                                    .or_else(|| m.get("avatar_color_index"))
-                                    .and_then(Value::as_u64)
-                                    .map(|i| (i % 7) as u8),
-                                role: m
-                                    .get("role")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or("member")
-                                    .to_string(),
-                            })
-                        })
-                        .filter(|p| p.id != shared.me_id())
-                        .collect()
-                })
-                .unwrap_or_default(),
-            shared: item.get("shared").and_then(Value::as_bool).unwrap_or(false),
-            owner_handle: item
-                .get("owner_handle")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            avatar: p
-                .get("avatar")
-                .or_else(|| item.get("avatar"))
-                .and_then(Value::as_str)
-                .filter(|a| !a.is_empty())
-                .map(str::to_string)
-                .or_else(|| previous.as_ref().and_then(|x| x.avatar.clone())),
-            avatar_color: p
-                .get("avatar_color")
-                .or_else(|| item.get("avatar_color"))
-                .and_then(Value::as_str)
-                .filter(|a| !a.is_empty())
-                .map(str::to_string)
-                .or_else(|| previous.as_ref().and_then(|x| x.avatar_color.clone())),
-            description: p
-                .get("description")
-                .or_else(|| item.get("description"))
-                .and_then(Value::as_str)
-                .filter(|d| !d.is_empty())
-                .map(str::to_string),
-            owner_person: p
-                .get("owner")
-                .or_else(|| item.get("owner"))
-                .filter(|o| o.is_object())
-                .and_then(|o| serde_json::from_value::<Person>(o.clone()).ok()),
-            machine_info: p
-                .get("machine")
-                .or_else(|| item.get("machine"))
-                .filter(|m| m.is_object())
-                .and_then(|m| {
-                    serde_json::from_value::<crate::model::ProjectMachine>(m.clone()).ok()
-                }),
-            muted: previous.as_ref().is_some_and(|x| x.muted),
-            // §9b: the relay names the agent's one chat (stored, never flips).
-            primary_chat: [&p, &detail, &item]
-                .iter()
-                .find_map(|v| {
-                    v.get("primary_chat_id")
-                        .or_else(|| v.get("primary_chat"))
-                        .and_then(Value::as_str)
-                        .filter(|c| !c.is_empty())
-                })
-                .map(str::to_string),
-            voice: p
-                .get("voice")
-                .or_else(|| item.get("voice"))
-                .and_then(Value::as_str)
-                .filter(|v| !v.is_empty())
-                .map(str::to_string),
-            vision_enabled: [&p, &item]
-                .iter()
-                .find_map(|v| v.get("vision_enabled").and_then(Value::as_bool))
-                .unwrap_or(true),
-            // D79: the relay's effective index when it sends one, else the
-            // owner's pick, else derived from the id (the same rule everywhere).
-            avatar_color_index: [&p, &item]
-                .iter()
-                .find_map(|v| {
-                    v.get("avatar_color_index_effective")
-                        .or_else(|| v.get("avatar_color_index"))
-                        .and_then(Value::as_u64)
-                })
-                .map(|i| (i % 7) as u8)
-                .or_else(|| Some(crate::ui::avatars::color_index(id))),
-            avatar_color_override: [&p, &item]
-                .iter()
-                .find_map(|v| v.get("avatar_color_index").and_then(Value::as_u64))
-                .map(|i| (i % 7) as u8),
-            image_url: None,
-        });
-        let chats: Vec<Chat> = detail
-            .get("chats")
-            .and_then(Value::as_array)
-            .map(|a| a.iter().filter_map(parse_chat).collect())
-            .unwrap_or_default();
+        let mut project = project_from_dto(&detail, members.as_ref());
+        // list_projects extras (shared / owner_handle) live on the list row.
+        if let Some(shared_flag) = list_dto.shared {
+            project.shared = shared_flag;
+        }
+        if project.owner_handle.is_none() {
+            project.owner_handle = list_dto
+                .owner_handle
+                .clone()
+                .flatten()
+                .filter(|h| !h.is_empty());
+        }
+        project.people.retain(|p| p.id != me_id);
+        if let Some(prev) = &previous {
+            project.state_detail = prev.state_detail.clone();
+            project.muted = prev.muted;
+            if project.model.is_empty() {
+                project.model = prev.model.clone();
+            }
+            if project.avatar.is_none() {
+                project.avatar = prev.avatar.clone();
+            }
+            if project.avatar_color.is_none() {
+                project.avatar_color = prev.avatar_color.clone();
+            }
+        }
+        if project.model.is_empty() {
+            project.model = "anthropic/claude-haiku-5.5".into();
+        }
+        if project.avatar_color_index.is_none() {
+            project.avatar_color_index = Some(crate::ui::avatars::color_index(&id));
+        }
+        let chats: Vec<Chat> = detail.chats.iter().map(chat_from_dto).collect();
+        projects.push(project);
         all_chats.extend(chats);
     }
 
@@ -2408,10 +2011,27 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
     match people_list {
         Ok(list) => {
             let mut ids = shared.people.lock().unwrap();
+            let me_handle = shared.me_handle();
+            let token = shared.token();
             for item in list.as_array().cloned().unwrap_or_default() {
-                let Some((space, chat)) = people_space_from(shared, &item) else {
-                    continue;
+                let dto: PeopleChatDto = match serde_json::from_value(item) {
+                    Ok(d) => d,
+                    Err(err) => {
+                        log::warn!(target: "arbos_mac::relay", "PeopleChatDto: {err}");
+                        continue;
+                    }
                 };
+                let (space, mut chat) =
+                    people_space_from(&dto, &me_id, &me_handle, &shared.http_url, &token);
+                if let Some(prev) = shared
+                    .chats
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|c| c.id == chat.id)
+                {
+                    chat.unread = prev.unread;
+                }
                 ids.insert(space.id.clone());
                 projects.push(space);
                 all_chats.push(chat);
@@ -2521,29 +2141,15 @@ async fn migrate_local_archive(shared: &Arc<Shared>, all_chats: &mut [Chat]) {
 /// `archived_at` when the relay echoes the chat; `Ok(None)` when it does not.
 async fn set_archived(
     shared: &Arc<Shared>,
-    project_id: &str,
+    _project_id: &str,
     chat_id: &str,
     archived: bool,
 ) -> Result<Option<u64>> {
     let body = json!({ "archived": archived });
-    let v = match shared
-        .put_json(&format!("/chats/{chat_id}/settings"), body.clone())
-        .await
-    {
-        Ok(v) => v,
-        // Older relays route project chats under the project.
-        Err(err) if err.to_string().contains("HTTP 404") && !shared.is_people(chat_id) => {
-            shared
-                .put_json(
-                    &format!("/projects/{project_id}/chats/{chat_id}/settings"),
-                    body,
-                )
-                .await?
-        }
-        Err(err) => return Err(err),
-    };
+    let v = shared
+        .put_json(&format!("/chats/{chat_id}/settings"), body)
+        .await?;
     Ok(v.get("archived_at")
-        .or_else(|| v.pointer("/chat/archived_at"))
         .and_then(Value::as_i64)
         .filter(|t| *t > 0)
         .map(|t| t as u64))
@@ -4161,11 +3767,16 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .await
                 {
                     Ok(v) => {
-                        let chat_id = v
-                            .get("id")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .to_string();
+                        let chat_id = match serde_json::from_value::<PeopleChatDto>(v) {
+                            Ok(dto) => dto.id,
+                            Err(err) => {
+                                log::warn!(
+                                    target: "arbos_mac::relay",
+                                    "CreatePeopleGroup PeopleChatDto: {err}"
+                                );
+                                String::new()
+                            }
+                        };
                         for project_id in agent_ids {
                             if chat_id.is_empty() {
                                 break;
@@ -4241,6 +3852,47 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         .send(SyncEvent::PeopleError(people_error(&err)));
                 }
                 let _ = refresh_registry(&shared).await;
+            });
+        }
+        ClientCommand::AddMembers {
+            chat_id,
+            handles,
+            agent_ids,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                // Every add is tried; the first failure is reported once the
+                // rest are done, and the list is refreshed either way so the
+                // pane shows exactly who made it in.
+                let mut failed: Option<String> = None;
+                for handle in handles {
+                    if let Err(err) = shared
+                        .post_json(
+                            &format!("/chats/{chat_id}/members"),
+                            json!({ "handle": handle }),
+                        )
+                        .await
+                    {
+                        failed.get_or_insert(format!("@{handle}: {}", people_error(&err)));
+                    }
+                }
+                for project_id in agent_ids {
+                    if let Err(err) = shared
+                        .post_json(
+                            &format!("/chats/{chat_id}/agents"),
+                            json!({ "project_id": project_id }),
+                        )
+                        .await
+                    {
+                        failed.get_or_insert(format!("agent: {}", people_error(&err)));
+                    }
+                }
+                if let Err(err) = refresh_registry(&shared).await {
+                    shared.diagnostic("refresh", format!("{err:#}"));
+                }
+                if let Some(why) = failed {
+                    shared.notice(format!("Could not add {why}"));
+                }
             });
         }
         ClientCommand::RemoveMember { chat_id, user_id } => {
@@ -4694,7 +4346,14 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     Ok(v) => {
                         // The relay returns the chat: re-read it so the new
                         // picture URL reaches every row at once.
-                        if let Some((space, _)) = people_space_from(&shared, &v) {
+                        if let Ok(dto) = serde_json::from_value::<PeopleChatDto>(v) {
+                            let (space, _) = people_space_from(
+                                &dto,
+                                &shared.me_id(),
+                                &shared.me_handle(),
+                                &shared.http_url,
+                                &shared.token(),
+                            );
                             let mut projects = shared.projects.lock().unwrap();
                             if let Some(p) = projects.iter_mut().find(|p| p.id == chat_id) {
                                 p.image_url = space.image_url;
@@ -4758,9 +4417,16 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .await
                 {
                     Ok(v) => {
-                        let Some(chat) = v.get("chat").and_then(parse_chat) else {
-                            shared.notice("Relay returned no chat");
-                            return;
+                        let chat = match serde_json::from_value::<CreateChatResponseDto>(v) {
+                            Ok(dto) => chat_from_create(&dto),
+                            Err(err) => {
+                                log::warn!(
+                                    target: "arbos_mac::relay",
+                                    "CreateChatResponseDto: {err}"
+                                );
+                                shared.notice("Relay returned no chat");
+                                return;
+                            }
                         };
                         shared.chats.lock().unwrap().push(chat.clone());
                         ensure_room(&shared, &project_id, &chat.id, &chat.id);
@@ -4771,6 +4437,45 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         });
                     }
                     Err(err) => shared.notice(format!("New chat failed: {err:#}")),
+                }
+            });
+        }
+        ClientCommand::ForkChat {
+            project_id,
+            source_chat_id,
+            chat_id: local_id,
+            title,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                match shared
+                    .post_json(
+                        &format!("/projects/{project_id}/chats"),
+                        json!({ "title": title, "fork_from": source_chat_id }),
+                    )
+                    .await
+                {
+                    Ok(v) => {
+                        let chat = match serde_json::from_value::<CreateChatResponseDto>(v) {
+                            Ok(dto) => chat_from_create(&dto),
+                            Err(err) => {
+                                log::warn!(
+                                    target: "arbos_mac::relay",
+                                    "CreateChatResponseDto (fork): {err}"
+                                );
+                                shared.notice("Relay returned no chat");
+                                return;
+                            }
+                        };
+                        shared.chats.lock().unwrap().push(chat.clone());
+                        ensure_room(&shared, &project_id, &chat.id, &chat.id);
+                        let _ = shared.events.send(SyncEvent::ChatCreated {
+                            project_id: project_id.clone(),
+                            local_id,
+                            chat,
+                        });
+                    }
+                    Err(err) => shared.notice(format!("Fork failed: {err:#}")),
                 }
             });
         }
@@ -4790,9 +4495,13 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .await
                 {
                     Ok(v) => {
-                        let Some(chat) = parse_chat(&v) else {
-                            shared.notice("Relay returned no group");
-                            return;
+                        let chat = match serde_json::from_value::<GroupDto>(v) {
+                            Ok(dto) => chat_from_group_dto(&dto),
+                            Err(err) => {
+                                log::warn!(target: "arbos_mac::relay", "GroupDto: {err}");
+                                shared.notice("Relay returned no group");
+                                return;
+                            }
                         };
                         shared.chats.lock().unwrap().push(chat.clone());
                         ensure_room(&shared, &project_id, &chat.id, &chat.id);
@@ -4821,7 +4530,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .await
                 {
                     Ok(v) => {
-                        if let Some(chat) = parse_chat(&v) {
+                        if let Ok(dto) = serde_json::from_value::<GroupDto>(v) {
+                            let chat = chat_from_group_dto(&dto);
                             let mut chats = shared.chats.lock().unwrap();
                             match chats.iter_mut().find(|c| c.id == chat.id) {
                                 Some(slot) => {
@@ -6170,11 +5880,15 @@ async fn refresh_secrets(shared: &Arc<Shared>) {
         .iter()
         .filter_map(|p| p.as_str().map(str::to_string))
         .collect();
+    let vault_connect = overview["features"]["vault_connect"]
+        .as_bool()
+        .unwrap_or(false);
     let _ = shared.events.send(SyncEvent::Secrets(SecretsView {
         paused: overview["paused"].as_bool().unwrap_or(false),
         secrets,
         vaults,
         providers,
+        vault_connect,
         requests,
         activity,
         loaded: true,
