@@ -279,7 +279,7 @@ pub fn agent(
 
 /// The agent's profile hero (D92: swaying leaf; D79 disc when the flag is off).
 pub fn project_hero(p: &Project, size: f32, theme: &Theme) -> Div {
-    if leaf_avatars_on() {
+    if leaf_avatars_on() && !p.is_people() {
         leaf_hero(project_leaf(p), size, hover_key(&p.id, size))
     } else {
         element(&p.id, &p.name, p.avatar_color_index, size, theme)
@@ -397,7 +397,11 @@ pub fn element(seed: &str, name: &str, index: Option<u8>, size: f32, theme: &The
 }
 
 /// An agent (project): its id seeds the leaf and colour, the owner's picks override.
+/// A people space (DM / group) rides the same type and keeps its D79 initials.
 pub fn project(p: &Project, size: f32, theme: &Theme) -> Div {
+    if p.is_people() {
+        return element(&p.id, &p.name, p.avatar_color_index, size, theme);
+    }
     agent(
         &p.id,
         &p.name,
