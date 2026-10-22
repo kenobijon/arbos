@@ -752,6 +752,12 @@ async fn refresh_me(shared: &Arc<Shared>) {
         daily_cap_usd: credits.get("daily_cap_usd").and_then(Value::as_f64),
     };
     let _ = shared.events.send(SyncEvent::Account(Some(view)));
+    // D91 remote flag: leaf avatars for agents (absent on older relays = on).
+    crate::ui::avatars::set_leaf_avatars(
+        v.pointer("/features/leaf_avatars")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+    );
     if let Some(m) = v.get("machine").and_then(Value::as_object) {
         // D89: provider and waitlist place ride along with `always_on`.
         let waitlisted = m
@@ -1315,6 +1321,14 @@ fn people_space_from(shared: &Shared, v: &Value) -> Option<(Project, Chat)> {
                     .or_else(|| m.get("avatar_color_index"))
                     .and_then(Value::as_u64)
                     .map(|i| (i % 7) as u8),
+                avatar_leaf: [&project, &m]
+                    .iter()
+                    .find_map(|v| v.get("avatar_leaf_effective").and_then(Value::as_u64))
+                    .map(|i| i as u8),
+                avatar_leaf_color: [&project, &m]
+                    .iter()
+                    .find_map(|v| v.get("avatar_leaf_color_effective").and_then(Value::as_u64))
+                    .map(|i| i as u8),
             });
         }
     }
@@ -1380,6 +1394,8 @@ fn people_space_from(shared: &Shared, v: &Value) -> Option<(Project, Chat)> {
         vision_enabled: true,
         avatar_color_index: None,
         avatar_color_override: None,
+        avatar_leaf: None,
+        avatar_leaf_color: None,
         // A custom group picture: the blob URL with the device token in the
         // query (the avatar loader sends no header), as the iPhone builds it.
         image_url: v
@@ -2367,6 +2383,16 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
                 .iter()
                 .find_map(|v| v.get("avatar_color_index").and_then(Value::as_u64))
                 .map(|i| (i % 7) as u8),
+            // D91: the owner's leaf picks; the pair in effect is derived by the
+            // shared rule (`arbos_core::avatar::leaf::pick_for`), as on the relay.
+            avatar_leaf: [&p, &item]
+                .iter()
+                .find_map(|v| v.get("avatar_leaf").and_then(Value::as_u64))
+                .map(|i| i as u8),
+            avatar_leaf_color: [&p, &item]
+                .iter()
+                .find_map(|v| v.get("avatar_leaf_color").and_then(Value::as_u64))
+                .map(|i| i as u8),
             image_url: None,
         });
         let chats: Vec<Chat> = detail
@@ -4902,6 +4928,39 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         if !err.to_string().contains("HTTP 404") {
                             shared
                                 .notice(format!("Avatar colour not saved: {}", people_error(&err)));
+                        }
+                    }
+                }
+            });
+        }
+        ClientCommand::SetAvatarLeaf {
+            project_id,
+            leaf,
+            color,
+        } => {
+            {
+                let mut projects = shared.projects.lock().unwrap();
+                if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
+                    p.avatar_leaf = leaf;
+                    p.avatar_leaf_color = color;
+                }
+                let snapshot = projects.clone();
+                drop(projects);
+                let _ = shared.events.send(SyncEvent::Projects(snapshot));
+            }
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let body = json!({ "avatar_leaf": leaf, "avatar_leaf_color": color });
+                match shared
+                    .patch_json(&format!("/projects/{project_id}"), body)
+                    .await
+                {
+                    Ok(_) => {}
+                    Err(err) => {
+                        // An older relay (no D91 columns) ignores unknown fields and answers
+                        // 200; a 404 means no such project. Anything else is worth a line.
+                        if !err.to_string().contains("HTTP 404") {
+                            shared.notice(format!("Leaf not saved: {}", people_error(&err)));
                         }
                     }
                 }

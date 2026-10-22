@@ -787,6 +787,20 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             }
             emit_projects(shared);
         }
+        ClientCommand::SetAvatarLeaf {
+            project_id,
+            leaf,
+            color,
+        } => {
+            {
+                let mut projects = shared.projects.lock().unwrap();
+                if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
+                    p.avatar_leaf = leaf;
+                    p.avatar_leaf_color = color;
+                }
+            }
+            emit_projects(shared);
+        }
         ClientCommand::SetMyAvatar { .. } => {
             let url = "fixture://avatar/me-picture".to_string();
             emit_avatar(shared, &url);
@@ -924,6 +938,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 avatar_color_index: avatar_color_index
                     .map(|i| crate::ui::avatars::index_for(&id, Some(i))),
                 avatar_color_override: avatar_color_index,
+                avatar_leaf: None,
+                avatar_leaf_color: None,
                 image_url: None,
             });
             let chat_id = new_id();
@@ -3496,6 +3512,8 @@ fn seed_projects() -> Vec<Project> {
             vision_enabled: true,
             avatar_color_index: None,
             avatar_color_override: None,
+            avatar_leaf: None,
+            avatar_leaf_color: None,
             image_url: None,
         },
         Project {
@@ -3527,6 +3545,8 @@ fn seed_projects() -> Vec<Project> {
             vision_enabled: true,
             avatar_color_index: None,
             avatar_color_override: None,
+            avatar_leaf: None,
+            avatar_leaf_color: None,
             image_url: None,
         },
         Project {
@@ -3558,6 +3578,8 @@ fn seed_projects() -> Vec<Project> {
             vision_enabled: true,
             avatar_color_index: None,
             avatar_color_override: None,
+            avatar_leaf: None,
+            avatar_leaf_color: None,
             image_url: None,
         },
     ]
@@ -4549,6 +4571,8 @@ fn people_space(id: &str, other: Person, agents: Vec<AgentMember>) -> Project {
         vision_enabled: true,
         avatar_color_index: None,
         avatar_color_override: None,
+        avatar_leaf: None,
+        avatar_leaf_color: None,
         image_url: None,
     }
 }
@@ -4572,6 +4596,8 @@ fn launch_week() -> Project {
         avatar: None,
         avatar_color: None,
         avatar_color_index: None,
+        avatar_leaf: None,
+        avatar_leaf_color: None,
         description: None,
         model: None,
         owner: None,
@@ -4620,6 +4646,8 @@ fn seed_people_projects() -> Vec<Project> {
             vision_enabled: true,
             avatar_color_index: None,
             avatar_color_override: None,
+            avatar_leaf: None,
+            avatar_leaf_color: None,
             image_url: None,
         },
     ]
@@ -5078,6 +5106,8 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                                 avatar: p.avatar.clone(),
                                 avatar_color: p.avatar_color.clone(),
                                 avatar_color_index: p.avatar_color_index,
+                                avatar_leaf: p.avatar_leaf,
+                                avatar_leaf_color: p.avatar_leaf_color,
                                 description: None,
                                 model: None,
                                 owner: None,
@@ -5136,6 +5166,8 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                         avatar: p.avatar.clone(),
                         avatar_color: p.avatar_color.clone(),
                         avatar_color_index: p.avatar_color_index,
+                        avatar_leaf: p.avatar_leaf,
+                        avatar_leaf_color: p.avatar_leaf_color,
                         description: None,
                         model: None,
                         owner: None,
@@ -5250,6 +5282,8 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                                 avatar: p.avatar.clone(),
                                 avatar_color: p.avatar_color.clone(),
                                 avatar_color_index: p.avatar_color_index,
+                                avatar_leaf: p.avatar_leaf,
+                                avatar_leaf_color: p.avatar_leaf_color,
                                 description: None,
                                 model: None,
                                 owner: None,
@@ -5517,6 +5551,8 @@ fn sender_of(p: &Person) -> Sender {
         avatar: None,
         avatar_color: None,
         avatar_color_index: None,
+        avatar_leaf: None,
+        avatar_leaf_color: None,
         avatar_url: p.avatar_url.clone(),
     }
 }

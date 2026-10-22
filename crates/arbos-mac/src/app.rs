@@ -3881,6 +3881,26 @@ impl AppState {
         cx.notify();
     }
 
+    /// D91: the owner's leaf and disc-colour picks (`None` = automatic). Optimistic, then PATCH.
+    pub fn set_avatar_leaf(
+        &mut self,
+        project_id: Id,
+        leaf: Option<u8>,
+        color: Option<u8>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == project_id) {
+            p.avatar_leaf = leaf;
+            p.avatar_leaf_color = color;
+        }
+        self.command(ClientCommand::SetAvatarLeaf {
+            project_id,
+            leaf,
+            color,
+        });
+        cx.notify();
+    }
+
     /// The agent's profile page (which holds the tree + colour picker).
     /// A second click on the same agent folds the pane away.
     pub fn toggle_avatar_picker(&mut self, project_id: Id, cx: &mut Context<Self>) {
@@ -5986,6 +6006,8 @@ impl AppState {
             avatar: None,
             avatar_color: None,
             avatar_color_index: None,
+            avatar_leaf: None,
+            avatar_leaf_color: None,
             avatar_url: account.map(|a| a.avatar_url).unwrap_or_default(),
         }
     }

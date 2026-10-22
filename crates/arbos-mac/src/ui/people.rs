@@ -791,13 +791,7 @@ fn new_group_body(
                     })
                     .cursor_pointer()
                     .hover(|st| st.bg(theme.surface_2))
-                    .child(avatars::element(
-                        &project.id,
-                        &project.name,
-                        project.avatar_color_index,
-                        40.0,
-                        theme,
-                    ))
+                    .child(avatars::project(project, 40.0, theme))
                     .child(
                         div()
                             .flex()

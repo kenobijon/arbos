@@ -572,6 +572,13 @@ pub enum ClientCommand {
         project_id: Id,
         index: Option<u8>,
     },
+    /// Leaf picker (D91): `PATCH /projects/{id} {avatar_leaf: 0–8|null, avatar_leaf_color: 0–9|null}`;
+    /// `None` = automatic (derived from the project id).
+    SetAvatarLeaf {
+        project_id: Id,
+        leaf: Option<u8>,
+        color: Option<u8>,
+    },
     FetchBlob {
         project_id: Id,
         key: String,

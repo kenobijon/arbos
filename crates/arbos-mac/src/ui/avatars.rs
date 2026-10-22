@@ -5,10 +5,17 @@
 //! (GitHub avatar) always wins over initials — see [`crate::ui::people::avatar`].
 //! The brand mark is the only image left in the app; no character art.
 
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
-use gpui::{div, linear_color_stop, linear_gradient, prelude::*, px, Div, FontWeight, Hsla};
+use gpui::{
+    div, linear_color_stop, linear_gradient, point, prelude::*, px, radians, svg, Animation,
+    AnimationExt, AnyElement, Div, ElementId, FontWeight, Hsla, SharedString, Svg, Transformation,
+};
 
 use crate::model::{AgentMember, Person, Project, Sender};
 use crate::ui::theme::{Appearance, Theme};
@@ -22,10 +29,280 @@ pub enum AvatarState {
     Reply,
 }
 
+pub use arbos_core::avatar::leaf::{self, LeafPick};
 /// The palette, the index rule and the sender accent live in `arbos-core`
 /// (`avatar.rs`) so the iPhone draws the same colours through arbos-ffi.
 pub use arbos_core::avatar::{color_index, index_for, GRADIENTS, INITIALS_SCALE};
 use arbos_core::avatar::{Accent, Rgb};
+
+// ----- D91 leaf avatars ---------------------------------------------------------
+
+/// Remote flag `features.leaf_avatars` from `GET /me` (default on; the relay's
+/// `ARBOS_FEATURE_LEAF_AVATARS=0` is the kill switch). Process-wide so every
+/// avatar call site reads it without threading state through the views.
+static LEAF_AVATARS: AtomicBool = AtomicBool::new(true);
+
+pub fn set_leaf_avatars(on: bool) {
+    LEAF_AVATARS.store(on, Ordering::Relaxed);
+}
+
+pub fn leaf_avatars_on() -> bool {
+    LEAF_AVATARS.load(Ordering::Relaxed)
+}
+
+/// The leaf and disc colour an agent shows: the owner's picks, else the id's cell.
+pub fn leaf_pick(seed: &str, leaf_override: Option<u8>, color_override: Option<u8>) -> LeafPick {
+    leaf::pick_for(seed, leaf_override, color_override)
+}
+
+/// The cream leaf ink.
+pub fn leaf_ink() -> Hsla {
+    let Rgb(r, g, b) = leaf::LEAF_INK;
+    rgb([r, g, b])
+}
+
+/// Disc colour `index` of the autumn palette.
+pub fn leaf_disc(index: u8) -> Hsla {
+    let Rgb(r, g, b) = leaf::COLORS[(index % leaf::COLOR_COUNT) as usize].rgb;
+    rgb([r, g, b])
+}
+
+/// Asset path of leaf shape `index` (served by `icons::Assets`).
+pub fn leaf_asset(index: u8) -> SharedString {
+    SharedString::from(format!(
+        "leaves/{}.svg",
+        leaf::LEAVES[(index % leaf::LEAF_COUNT) as usize].slug
+    ))
+}
+
+/// The SVG bytes behind a `leaves/<slug>.svg` asset path, for the asset source.
+pub fn leaf_asset_bytes(path: &str) -> Option<&'static [u8]> {
+    let slug = path.strip_prefix("leaves/")?.strip_suffix(".svg")?;
+    leaf::LEAVES
+        .iter()
+        .find(|l| l.slug == slug)
+        .map(|l| l.svg.as_bytes())
+}
+
+/// The leaf glyph alone (cream, `LEAF_SCALE` of `size`), optionally swayed:
+/// `angle` in radians about the stem, i.e. the bottom centre of the glyph.
+pub fn leaf_glyph(pick: LeafPick, size: f32, angle: f32) -> Svg {
+    let side = size * leaf::LEAF_SCALE;
+    svg()
+        .path(leaf_asset(pick.leaf))
+        .size(px(side))
+        .flex_shrink_0()
+        .text_color(leaf_ink())
+        .with_transformation(sway(pick.leaf, side, angle))
+}
+
+/// Reduce Motion (macOS Accessibility), read once: no sway, no ruffle.
+fn reduce_motion() -> bool {
+    static REDUCE: OnceLock<bool> = OnceLock::new();
+    *REDUCE.get_or_init(crate::ui::motion::system_reduce_motion)
+}
+
+/// Hover state per leaf disc (`key` = who + where): hovered now, and a tick
+/// that advances on every hover start so the one-shot ruffle replays.
+fn hover_state(key: u64) -> (bool, u64) {
+    static HOVER: OnceLock<Mutex<HashMap<u64, (bool, u64)>>> = OnceLock::new();
+    HOVER
+        .get_or_init(Default::default)
+        .lock()
+        .ok()
+        .and_then(|m| m.get(&key).copied())
+        .unwrap_or((false, 0))
+}
+
+fn set_hover_state(key: u64, hovered: bool) {
+    static HOVER: OnceLock<Mutex<HashMap<u64, (bool, u64)>>> = OnceLock::new();
+    if let Ok(mut m) = HOVER.get_or_init(Default::default).lock() {
+        let e = m.entry(key).or_insert((false, 0));
+        if hovered && !e.0 {
+            e.1 += 1;
+        }
+        e.0 = hovered;
+    }
+}
+
+fn hover_key(seed: &str, size: f32) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    seed.hash(&mut h);
+    size.to_bits().hash(&mut h);
+    h.finish()
+}
+
+/// A rotation by `angle` radians about the leaf's stem pivot (from the
+/// manifest) for a glyph of `side` points. GPUI rotates about the glyph
+/// centre, so the pivot is restored with a translation of `p − R·p`.
+fn sway(leaf_index: u8, side: f32, angle: f32) -> Transformation {
+    let (pvx, pvy) = leaf::LEAVES[(leaf_index % leaf::LEAF_COUNT) as usize].pivot;
+    let (x, y) = ((pvx - 50.0) / 100.0 * side, (pvy - 50.0) / 100.0 * side);
+    let (sin, cos) = angle.sin_cos();
+    Transformation::rotate(radians(angle)).with_translation(point(
+        px(x - (x * cos - y * sin)),
+        px(y - (x * sin + y * cos)),
+    ))
+}
+
+fn disc(pick: LeafPick, size: f32) -> Div {
+    div()
+        .size(px(size))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .bg(leaf_disc(pick.color))
+}
+
+/// The leaf avatar disc at `size` points: a cream leaf on its autumn colour. Still.
+pub fn leaf_element(pick: LeafPick, size: f32) -> Div {
+    disc(pick, size).child(leaf_glyph(pick, size, 0.0))
+}
+
+/// One-shot hover gust (the Lottie's spring: ≈9° peak, settled in 1 s).
+fn ruffle_glyph(pick: LeafPick, size: f32, tick: u64) -> AnyElement {
+    let side = size * leaf::LEAF_SCALE;
+    leaf_glyph(pick, size, 0.0)
+        .with_animation(
+            ElementId::NamedInteger(
+                SharedString::from(format!("leaf-gust-{}-{}", pick.leaf, pick.color)),
+                tick,
+            ),
+            Animation::new(Duration::from_secs_f32(leaf::GUST_SECS)),
+            move |el, t| {
+                el.with_transformation(sway(pick.leaf, side, leaf::gust_angle(t * leaf::GUST_SECS)))
+            },
+        )
+        .into_any_element()
+}
+
+/// Idle sway: a few degrees about the stem, the leaf's own loop length
+/// (manifest `idle_frames`), forever. Profile hero only.
+fn sway_glyph(pick: LeafPick, size: f32) -> AnyElement {
+    let side = size * leaf::LEAF_SCALE;
+    let period = leaf::LEAVES[(pick.leaf % leaf::LEAF_COUNT) as usize].idle_secs;
+    leaf_glyph(pick, size, 0.0)
+        .with_animation(
+            ElementId::Name(SharedString::from(format!(
+                "leaf-sway-{}-{}",
+                pick.leaf, pick.color
+            ))),
+            Animation::new(Duration::from_secs_f32(period)).repeat(),
+            move |el, t| {
+                el.with_transformation(sway(
+                    pick.leaf,
+                    side,
+                    leaf::idle_angle(pick.leaf, t * period),
+                ))
+            },
+        )
+        .into_any_element()
+}
+
+/// The leaf disc with the Mac hover ruffle (lists, chips, header): still until
+/// the pointer enters, one wobble, still again. Nothing moves under Reduce
+/// Motion or below 20 pt, where a wobble is noise.
+pub fn leaf_hover(pick: LeafPick, size: f32, key: u64) -> Div {
+    if reduce_motion() || size < 20.0 {
+        return leaf_element(pick, size);
+    }
+    let (hovered, tick) = hover_state(key);
+    let glyph = if hovered {
+        ruffle_glyph(pick, size, tick)
+    } else {
+        leaf_glyph(pick, size, 0.0).into_any_element()
+    };
+    disc(pick, size).child(
+        div()
+            .id(ElementId::NamedInteger("leaf-hover".into(), key))
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .on_hover(move |is_hovered, window, _| {
+                set_hover_state(key, *is_hovered);
+                window.refresh();
+            })
+            .child(glyph),
+    )
+}
+
+/// The profile hero: idle sway, and the ruffle when the pointer is over it.
+/// Still under Reduce Motion.
+pub fn leaf_hero(pick: LeafPick, size: f32, key: u64) -> Div {
+    if reduce_motion() {
+        return leaf_element(pick, size);
+    }
+    let (hovered, tick) = hover_state(key);
+    let glyph = if hovered {
+        ruffle_glyph(pick, size, tick)
+    } else {
+        sway_glyph(pick, size)
+    };
+    disc(pick, size).child(
+        div()
+            .id(ElementId::NamedInteger("leaf-hero".into(), key))
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .on_hover(move |is_hovered, window, _| {
+                set_hover_state(key, *is_hovered);
+                window.refresh();
+            })
+            .child(glyph),
+    )
+}
+
+/// An agent's avatar: the leaf (D91) while the flag is on, else the D79 disc.
+pub fn agent(
+    seed: &str,
+    name: &str,
+    color_index: Option<u8>,
+    leaf_override: Option<u8>,
+    leaf_color_override: Option<u8>,
+    size: f32,
+    theme: &Theme,
+) -> Div {
+    if leaf_avatars_on() {
+        leaf_hover(
+            leaf_pick(seed, leaf_override, leaf_color_override),
+            size,
+            hover_key(seed, size),
+        )
+    } else {
+        element(seed, name, color_index, size, theme)
+    }
+}
+
+/// The agent's profile hero (D91: swaying leaf; D79 disc when the flag is off).
+pub fn project_hero(p: &Project, size: f32, theme: &Theme) -> Div {
+    if leaf_avatars_on() {
+        leaf_hero(project_leaf(p), size, hover_key(&p.id, size))
+    } else {
+        element(&p.id, &p.name, p.avatar_color_index, size, theme)
+    }
+}
+
+/// The bubble-bar accent of an agent: its leaf disc colour (D91), else D79.
+pub fn agent_accent(
+    seed: &str,
+    color_index: Option<u8>,
+    leaf_override: Option<u8>,
+    leaf_color_override: Option<u8>,
+    theme: &Theme,
+) -> Hsla {
+    if leaf_avatars_on() {
+        accent_color(
+            leaf::accent(leaf_pick(seed, leaf_override, leaf_color_override)),
+            theme,
+        )
+    } else {
+        accent_fallback(seed, color_index, theme)
+    }
+}
 
 fn rgb(c: [u8; 3]) -> Hsla {
     gpui::Rgba {
@@ -119,19 +396,52 @@ pub fn element(seed: &str, name: &str, index: Option<u8>, size: f32, theme: &The
         .child(text)
 }
 
-/// An agent (project): its id seeds the colour, the owner's pick overrides.
+/// An agent (project): its id seeds the leaf and colour, the owner's picks override.
 pub fn project(p: &Project, size: f32, theme: &Theme) -> Div {
-    element(&p.id, &p.name, p.avatar_color_index, size, theme)
+    agent(
+        &p.id,
+        &p.name,
+        p.avatar_color_index,
+        p.avatar_leaf,
+        p.avatar_leaf_color,
+        size,
+        theme,
+    )
+}
+
+/// The agent's leaf pick (D91) for callers that animate it.
+pub fn project_leaf(p: &Project) -> LeafPick {
+    leaf_pick(&p.id, p.avatar_leaf, p.avatar_leaf_color)
 }
 
 /// An agent shared into a people chat.
 pub fn agent_member(a: &AgentMember, size: f32, theme: &Theme) -> Div {
-    element(&a.project_id, &a.name, a.avatar_color_index, size, theme)
+    agent(
+        &a.project_id,
+        &a.name,
+        a.avatar_color_index,
+        a.avatar_leaf,
+        a.avatar_leaf_color,
+        size,
+        theme,
+    )
 }
 
 /// Who started a call / sits in it (users and agents).
 pub fn sender(s: &Sender, size: f32, theme: &Theme) -> Div {
-    element(&s.id, &s.display_name(), s.avatar_color_index, size, theme)
+    if s.kind == "agent" {
+        agent(
+            &s.id,
+            &s.display_name(),
+            s.avatar_color_index,
+            s.avatar_leaf,
+            s.avatar_leaf_color,
+            size,
+            theme,
+        )
+    } else {
+        element(&s.id, &s.display_name(), s.avatar_color_index, size, theme)
+    }
 }
 
 /// A person without a photo.

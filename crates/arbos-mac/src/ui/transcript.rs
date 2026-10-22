@@ -838,6 +838,23 @@ impl Transcript {
         name: &str,
         cx: &Context<Self>,
     ) -> (String, String, Option<u8>, Option<Id>) {
+        let (name, seed, color, _, pid) = self.agent_identity_full(seed, name, cx);
+        (name, seed, color, pid)
+    }
+
+    /// `agent_identity` plus the D91 leaf picks (owner's leaf, owner's colour).
+    fn agent_identity_full(
+        &self,
+        seed: &str,
+        name: &str,
+        cx: &Context<Self>,
+    ) -> (
+        String,
+        String,
+        Option<u8>,
+        (Option<u8>, Option<u8>),
+        Option<Id>,
+    ) {
         let state = self.state.read(cx);
         let agent_pid = seed
             .strip_prefix("agent:")
@@ -847,29 +864,47 @@ impl Transcript {
             state
                 .selected()
                 .and_then(|space| space.agents.iter().find(|a| a.project_id == pid))
-                .map(|a| (a.name.clone(), a.avatar_color_index))
+                .map(|a| {
+                    (
+                        a.name.clone(),
+                        a.avatar_color_index,
+                        (a.avatar_leaf, a.avatar_leaf_color),
+                    )
+                })
                 .or_else(|| {
-                    state
-                        .projects
-                        .iter()
-                        .find(|p| p.id == pid)
-                        .map(|p| (p.name.clone(), p.avatar_color_index))
+                    state.projects.iter().find(|p| p.id == pid).map(|p| {
+                        (
+                            p.name.clone(),
+                            p.avatar_color_index,
+                            (p.avatar_leaf, p.avatar_leaf_color),
+                        )
+                    })
                 })
         });
         let resolved_name = match &member {
-            Some((n, _)) if name == "Agent" || name == "Project" => n.clone(),
+            Some((n, _, _)) if name == "Agent" || name == "Project" => n.clone(),
             _ => name.to_string(),
         };
-        let color_index = member.as_ref().and_then(|(_, c)| *c);
+        let color_index = member.as_ref().and_then(|(_, c, _)| *c);
+        let leaf = member.as_ref().map(|(_, _, l)| *l).unwrap_or((None, None));
         let disc_seed = agent_pid.clone().unwrap_or_else(|| seed.to_string());
-        (resolved_name, disc_seed, color_index, agent_pid)
+        (resolved_name, disc_seed, color_index, leaf, agent_pid)
     }
 
     /// The 24 pt disc for an agent's message in a people chat.
     fn agent_disc(&self, seed: &str, cx: &Context<Self>) -> Div {
         let theme = Theme::of(cx).clone();
-        let (name, disc_seed, color_index, _) = self.agent_identity(seed, "Agent", cx);
-        avatars::element(&disc_seed, &name, color_index, SENDER_DISC, &theme)
+        let (name, disc_seed, color_index, (leaf, leaf_color), _) =
+            self.agent_identity_full(seed, "Agent", cx);
+        avatars::agent(
+            &disc_seed,
+            &name,
+            color_index,
+            leaf,
+            leaf_color,
+            SENDER_DISC,
+            &theme,
+        )
     }
 
     /// One assistant bubble block (the Markdown row and the no-answer line share it).
@@ -905,8 +940,9 @@ impl Transcript {
         // People-chat agent bubbles get the same coloured left-edge
         // sliver as person messages, from the agent's disc colour.
         let agent_accent = lane.as_deref().map(|seed| {
-            let (_, disc_seed, color_index, _) = self.agent_identity(seed, "Agent", cx);
-            avatars::accent_fallback(&disc_seed, color_index, theme)
+            let (_, disc_seed, color_index, (leaf, leaf_color), _) =
+                self.agent_identity_full(seed, "Agent", cx);
+            avatars::agent_accent(&disc_seed, color_index, leaf, leaf_color, theme)
         });
         let r = px(BUBBLE_RADIUS);
         let bubble = self
