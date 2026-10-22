@@ -29,7 +29,7 @@ use arbos_core::api::{
 use arbos_core::ids::{now_ms, ulid};
 
 use super::client::Client;
-use super::servers_db::{Channel, Server, ServerMember};
+use super::servers_db::{Channel, Server, ServerInvite, ServerMember};
 use crate::auth::Principal;
 use crate::blobs::{no_such_image, not_an_image, stored_image, StoredImage};
 use crate::signin::api_error;
@@ -75,6 +75,27 @@ fn matrix_required(state: &AppState) -> Result<(), Box<Response>> {
 fn invite_code() -> String {
     ulid().to_ascii_lowercase().chars().rev().take(10).collect()
 }
+
+/// Invite links live on the site (`arbos.life/s/<code>` deep-links into the app and falls back
+/// to a page) when `ARBOS_SITE_URL` is set; the relay's own `/s/<code>` otherwise.
+fn invite_url(state: &AppState, code: &str) -> String {
+    let base = std::env::var("ARBOS_SITE_URL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| state.cfg.public_url.clone());
+    format!("{}/s/{}", base.trim_end_matches('/'), code)
+}
+
+fn invite_json(state: &AppState, i: &ServerInvite) -> Value {
+    json!({
+        "id": i.id, "code": i.code, "url": invite_url(state, &i.code), "created_by": i.created_by,
+        "created_at": i.created_at, "expires_at": i.expires_at, "uses_left": i.uses_left,
+        "usable": i.usable(now_ms()),
+    })
+}
+
+/// Seven days: the only expiry the apps offer (Jacob: "optional 7-day expiry").
+const INVITE_EXPIRY_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
 /// Channel names are Discord-like: lowercase, digits and dashes, no leading `#`.
 fn channel_slug(name: &str) -> Option<String> {
@@ -171,11 +192,20 @@ fn server_json(state: &AppState, s: &Server, me: &ServerMember, detail: bool) ->
         "general_channel_id": channels.iter().find(|c| c.name == "general").or(channels.first()).map(|c| c.id.clone()),
         "avatar_color_index_effective": crate::avatar::effective_color_index(&s.id, None),
     });
-    if me.can_admin() {
+    // Invite links are the owner's fallback (Jacob 2026-10-22: demoted; Add members by name is
+    // the main way in). Admins no longer see them.
+    if s.owner_user_id == me.user_id {
         v["invite"] = json!({
             "code": s.invite_code,
-            "url": format!("{}/s/{}", state.cfg.public_url.trim_end_matches('/'), s.invite_code),
+            "url": invite_url(state, &s.invite_code),
         });
+        v["invites"] = json!(state
+            .db
+            .invites_of_server(&s.id)
+            .unwrap_or_default()
+            .iter()
+            .map(|i| invite_json(state, i))
+            .collect::<Vec<_>>());
     }
     if detail {
         v["members"] = json!(members
@@ -755,12 +785,208 @@ pub async fn invite_reset(
             "only the owner resets the invite link",
         );
     }
-    let code = invite_code();
-    if let Err(e) = state.db.set_server_invite(&id, &code) {
+    let _ = state.db.revoke_all_invites(&id);
+    let inv = ServerInvite {
+        id: ulid(),
+        server_id: id.clone(),
+        code: invite_code(),
+        created_by: me.clone(),
+        created_at: now_ms(),
+        expires_at: None,
+        uses_left: None,
+        revoked_at: None,
+    };
+    if let Err(e) = state
+        .db
+        .insert_server_invite(&inv)
+        .and_then(|_| state.db.set_server_invite(&id, &inv.code))
+    {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
     }
-    Json(json!({ "code": code, "url": format!("{}/s/{}", state.cfg.public_url.trim_end_matches('/'), code) }))
-        .into_response()
+    Json(json!({ "code": inv.code, "url": invite_url(&state, &inv.code) })).into_response()
+}
+
+#[derive(Deserialize, Default)]
+pub struct InviteBody {
+    /// Expire after seven days.
+    #[serde(default)]
+    pub expires: bool,
+    /// Number of joins the link allows; absent = unlimited.
+    #[serde(default)]
+    pub max_uses: Option<i64>,
+}
+
+/// `GET /servers/{id}/invites` — the owner's links (live ones; expired / used-up still listed).
+pub async fn invites_list(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+) -> Response {
+    let me = match user_of(&principal) {
+        Ok(u) => u,
+        Err(r) => return *r,
+    };
+    let (s, _) = match load(&state, &me, &id) {
+        Ok(v) => v,
+        Err(r) => return *r,
+    };
+    if s.owner_user_id != me {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "owner_only",
+            "only the owner sees invite links",
+        );
+    }
+    let list: Vec<Value> = state
+        .db
+        .invites_of_server(&id)
+        .unwrap_or_default()
+        .iter()
+        .map(|i| invite_json(&state, i))
+        .collect();
+    Json(json!({ "invites": list })).into_response()
+}
+
+/// `POST /servers/{id}/invites {expires?, max_uses?}` — the owner mints another link.
+pub async fn invites_create(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+    body: Option<Json<InviteBody>>,
+) -> Response {
+    let me = match user_of(&principal) {
+        Ok(u) => u,
+        Err(r) => return *r,
+    };
+    let (s, _) = match load(&state, &me, &id) {
+        Ok(v) => v,
+        Err(r) => return *r,
+    };
+    if s.owner_user_id != me {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "owner_only",
+            "only the owner makes invite links",
+        );
+    }
+    let b = body.map(|b| b.0).unwrap_or_default();
+    let max_uses = b.max_uses.filter(|n| *n > 0).map(|n| n.min(1000));
+    let inv = ServerInvite {
+        id: ulid(),
+        server_id: id.clone(),
+        code: invite_code(),
+        created_by: me.clone(),
+        created_at: now_ms(),
+        expires_at: b.expires.then(|| now_ms() + INVITE_EXPIRY_MS),
+        uses_left: max_uses,
+        revoked_at: None,
+    };
+    if let Err(e) = state.db.insert_server_invite(&inv) {
+        return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
+    }
+    if inv.expires_at.is_none() && inv.uses_left.is_none() {
+        // Older clients read one code off the server: the newest unlimited one.
+        let _ = state.db.set_server_invite(&id, &inv.code);
+    }
+    (StatusCode::CREATED, Json(invite_json(&state, &inv))).into_response()
+}
+
+/// `DELETE /servers/{id}/invites/{iid}` — the owner revokes a link; it stops working at once.
+pub async fn invites_revoke(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path((id, iid)): Path<(String, String)>,
+) -> Response {
+    let me = match user_of(&principal) {
+        Ok(u) => u,
+        Err(r) => return *r,
+    };
+    let (s, _) = match load(&state, &me, &id) {
+        Ok(v) => v,
+        Err(r) => return *r,
+    };
+    if s.owner_user_id != me {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "owner_only",
+            "only the owner revokes invite links",
+        );
+    }
+    match state.db.revoke_server_invite(&id, &iid) {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => api_error(StatusCode::NOT_FOUND, "not_found", "no such invite"),
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct AddMemberBody {
+    pub user_id: String,
+}
+
+/// `POST /servers/{id}/members {user_id}` — owner/admin adds someone on Arbos by name (the
+/// main way in since 2026-10-22; the picker is the groups' Add members). Banned people need
+/// an unban (remove the ban) first.
+pub async fn member_add(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+    Json(b): Json<AddMemberBody>,
+) -> Response {
+    let me = match user_of(&principal) {
+        Ok(u) => u,
+        Err(r) => return *r,
+    };
+    let (s, m) = match load(&state, &me, &id) {
+        Ok(v) => v,
+        Err(r) => return *r,
+    };
+    if let Err(r) = admin_required(&m) {
+        return *r;
+    }
+    let user_id = b.user_id.trim().to_owned();
+    if state.db.user(&user_id).ok().flatten().is_none() {
+        return api_error(StatusCode::NOT_FOUND, "not_found", "no such person");
+    }
+    if let Ok(Some(existing)) = state.db.server_member(&s.id, &user_id) {
+        if existing.banned_at.is_none() {
+            return Json(server_json(&state, &s, &m, true)).into_response();
+        }
+    }
+    match state.db.add_server_member(&s.id, &user_id, &me) {
+        Ok(true) => {}
+        Ok(false) => {
+            return api_error(
+                StatusCode::CONFLICT,
+                "banned",
+                "they were banned from this server",
+            )
+        }
+        Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+    }
+    state.matrix.touch_server(&state, &s.id);
+    for ch in state.db.channels_of_server(&s.id).unwrap_or_default() {
+        state.matrix.touch_channel(&state, &ch.id);
+    }
+    let joined = PushEventDto::ServerMemberJoined(ServerMemberJoinedPayloadDto {
+        server_id: s.id.clone(),
+        user_id: user_id.clone(),
+        handle: handle_of(&state, &user_id),
+    });
+    notify_server_members(&state, &s.id, &me, &joined);
+    // The newcomer's own devices learn about the server right away.
+    let _ = state.db.push_user_event(
+        &user_id,
+        &PushEventDto::ServerUpdated(ServerUpdatedPayloadDto {
+            server_id: s.id.clone(),
+            channel_id: None,
+            deleted: None,
+            user_id: Some(user_id.clone()),
+            role: Some("member".into()),
+        }),
+        None,
+    );
+    Json(server_json(&state, &s, &m, true)).into_response()
 }
 
 #[derive(Deserialize)]
@@ -784,6 +1010,7 @@ pub async fn join(
         Ok(u) => u,
         Err(r) => return *r,
     };
+    let mut used_invite: Option<ServerInvite> = None;
     let s = if let Some(id) = b
         .server_id
         .as_deref()
@@ -818,19 +1045,38 @@ pub async fn join(
                 "paste an invite link or pick an open server",
             );
         }
-        let Some(s) = state.db.server_by_invite(&code).ok().flatten() else {
+        let Some(inv) = state
+            .db
+            .invite_by_code(&code)
+            .ok()
+            .flatten()
+            .filter(|i| i.usable(now_ms()))
+        else {
             return api_error(
                 StatusCode::NOT_FOUND,
                 "not_found",
-                "that invite link is not valid",
+                "that invite link is not valid any more",
             );
         };
+        let Some(s) = state.db.server(&inv.server_id).ok().flatten() else {
+            return api_error(StatusCode::NOT_FOUND, "not_found", "no such server");
+        };
+        used_invite = Some(inv);
         s
     };
     // Already a member: return the server (search → open, or re-tapping Join).
     if let Ok(Some(m)) = state.db.server_member(&s.id, &me) {
         if m.banned_at.is_none() {
             return Json(server_json(&state, &s, &m, true)).into_response();
+        }
+    }
+    if let Some(inv) = &used_invite {
+        if inv.uses_left.is_some() && !state.db.consume_invite_use(&inv.id).unwrap_or(false) {
+            return api_error(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "that invite link has been used up",
+            );
         }
     }
     match state.db.add_server_member(&s.id, &me, &me) {
@@ -922,44 +1168,78 @@ pub async fn search(
 }
 
 /// `GET /s/{code}` — what an invite link opens: JSON for the apps, a page for browsers.
+/// `GET /s/{code}` — the invite link. JSON for the apps (server name, member count, whether
+/// the link still works); for a browser an HTML page that first tries the installed app
+/// (`arbos://join/<code>`) and otherwise explains how to join, with the download.
 pub async fn landing(
     State(state): State<AppState>,
     Path(code): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    let s = state.db.server_by_invite(&code).ok().flatten();
     let wants_html = headers
         .get(header::ACCEPT)
         .and_then(|a| a.to_str().ok())
         .is_some_and(|a| a.contains("text/html"));
-    let Some(s) = s else {
+    let inv = state.db.invite_by_code(&code).ok().flatten();
+    let s = inv
+        .as_ref()
+        .and_then(|i| state.db.server(&i.server_id).ok().flatten());
+    let (Some(inv), Some(s)) = (inv, s) else {
         return if wants_html {
-            page("<p>This invite link is no longer valid.</p>")
+            page("<p>This invite link is not valid.</p>")
         } else {
             api_error(StatusCode::NOT_FOUND, "not_found", "no such invite")
         };
     };
+    let usable = inv.usable(now_ms());
     let members = state.db.server_members(&s.id).map(|m| m.len()).unwrap_or(0);
+    let download = format!(
+        "{}/download/mac",
+        state.cfg.public_url.trim_end_matches('/')
+    );
     if !wants_html {
         return Json(json!({
-            "code": code, "server": { "id": s.id, "name": s.name, "member_count": members, "image_key": s.image_key },
+            "code": code, "usable": usable, "expires_at": inv.expires_at, "uses_left": inv.uses_left,
+            "server": { "id": s.id, "name": s.name, "member_count": members, "image_key": s.image_key },
             "owner_handle": handle_of(&state, &s.owner_user_id),
-            "download_url": format!("{}/download/mac", state.cfg.public_url.trim_end_matches('/')),
+            "download_url": download,
         }))
         .into_response();
     }
-    page(&format!(
-        "<p>You are invited to the server <strong>{}</strong> on Arbos ({members} members).</p>\
-         <p>Open Arbos, tap <strong>+</strong>, choose <strong>Join a server</strong> and paste this link — or download Arbos first.</p>\
-         <p><a class=\"btn\" href=\"{}/download/mac\">Download for Mac</a></p>",
-        html_escape(&s.name),
-        state.cfg.public_url.trim_end_matches('/')
-    ))
+    if !usable {
+        let why = if inv.revoked_at.is_some() {
+            "was revoked by the server's owner"
+        } else if inv.uses_left == Some(0) {
+            "has been used up"
+        } else {
+            "has expired"
+        };
+        return page(&format!(
+            "<p>This invite to <strong>{}</strong> {why}. Ask someone in the server to add you, or for a new link.</p>",
+            html_escape(&s.name)
+        ));
+    }
+    let safe_code = html_escape(&code);
+    // The site's CSP allows no inline script: a meta refresh hands the link to the installed
+    // app (the browser asks "Open in Arbos?"); the button does the same on a tap.
+    page_with_head(
+        &format!("<meta http-equiv=\"refresh\" content=\"0;url=arbos://join/{safe_code}\">"),
+        &format!(
+            "<p>You are invited to the server <strong>{name}</strong> on Arbos ({members} members).</p>\
+             <p><a class=\"btn\" href=\"arbos://join/{safe_code}\">Open in Arbos</a></p>\
+             <p>No Arbos yet? <a href=\"{download}\">Download for Mac</a>, then open this link again.</p>",
+            name = html_escape(&s.name),
+        ),
+    )
 }
 
 fn page(body: &str) -> Response {
+    page_with_head("", body)
+}
+
+fn page_with_head(head: &str, body: &str) -> Response {
     let html = format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Arbos server invite</title>\
+        "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Arbos server invite</title>{head}\
          <style>body{{font:16px/1.5 -apple-system,system-ui,sans-serif;background:#0b0b0d;color:#e8e8ea;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}}\
          main{{max-width:28rem;padding:2rem}}h1{{font-size:1.4rem;margin:0 0 1rem}}.btn{{display:inline-block;background:#e8e8ea;color:#0b0b0d;padding:.6rem 1rem;border-radius:.6rem;text-decoration:none;font-weight:600}}</style></head>\
          <body><main><h1>Arbos</h1>{body}</main></body></html>"
