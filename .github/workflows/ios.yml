@@ -26,7 +26,7 @@ name: iOS
 
 on:
   push:
-    branches: [main, arbos-v2, "cursor/**"]
+    branches: [main, arbos-v2, "feedback/**"]
     paths:
       - "apps/ios/**"
       - ".github/workflows/ios.yml"
