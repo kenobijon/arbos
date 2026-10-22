@@ -598,6 +598,119 @@ public struct CreditsDto: Codable {
 	}
 }
 
+/// Target block on a secret request.
+public struct SecretRequestTargetDto: Codable {
+	public let kind: String
+	public let id: String?
+	public let ref: String
+
+	public init(kind: String, id: String?, ref: String) {
+		self.kind = kind
+		self.id = id
+		self.ref = ref
+	}
+}
+
+/// Pending / decided request card (`request_json`).
+public struct SecretRequestDto: Codable {
+	public let id: String
+	public let project_id: String
+	public let project_name: String?
+	public let chat_id: String
+	public let target: SecretRequestTargetDto
+	public let name: String
+	public let purpose: String
+	public let use: String
+	public let host: String?
+	public let status: String
+	public let decided_by: String?
+	public let created_at: Int64
+	public let decided_at: Int64?
+	public let expires_at: Int64
+
+	public init(id: String, project_id: String, project_name: String?, chat_id: String, target: SecretRequestTargetDto, name: String, purpose: String, use: String, host: String?, status: String, decided_by: String?, created_at: Int64, decided_at: Int64?, expires_at: Int64) {
+		self.id = id
+		self.project_id = project_id
+		self.project_name = project_name
+		self.chat_id = chat_id
+		self.target = target
+		self.name = name
+		self.purpose = purpose
+		self.use = use
+		self.host = host
+		self.status = status
+		self.decided_by = decided_by
+		self.created_at = created_at
+		self.decided_at = decided_at
+		self.expires_at = expires_at
+	}
+}
+
+/// Access scope on a secret or vault access row.
+public struct SecretAccessScopeDto: Codable {
+	public let kind: String
+	public let chat_id: String?
+
+	public init(kind: String, chat_id: String?) {
+		self.kind = kind
+		self.chat_id = chat_id
+	}
+}
+
+/// One pinned host on a vault access (`item_hosts[]`).
+public struct VaultItemHostDto: Codable {
+	public let ref: String
+	public let host: String
+
+	public init(ref: String, host: String) {
+		self.ref = ref
+		self.host = host
+	}
+}
+
+/// Access row (`access_json`): secret accesses omit `item_hosts`; vault accesses include it.
+public struct SecretAccessDto: Codable {
+	public let project_id: String
+	public let name: String
+	public let access_id: String
+	public let enabled: Bool
+	public let note: String
+	public let hosts: [String]
+	public let scope: SecretAccessScopeDto
+	public let created_from: String
+	public let created_at: Int64
+	public let last_used_at: Int64?
+	public let disabled_at: Int64?
+	/// Vault accesses only (omitted on secret accesses).
+	public let item_hosts: [VaultItemHostDto]?
+
+	public init(project_id: String, name: String, access_id: String, enabled: Bool, note: String, hosts: [String], scope: SecretAccessScopeDto, created_from: String, created_at: Int64, last_used_at: Int64?, disabled_at: Int64?, item_hosts: [VaultItemHostDto]?) {
+		self.project_id = project_id
+		self.name = name
+		self.access_id = access_id
+		self.enabled = enabled
+		self.note = note
+		self.hosts = hosts
+		self.scope = scope
+		self.created_from = created_from
+		self.created_at = created_at
+		self.last_used_at = last_used_at
+		self.disabled_at = disabled_at
+		self.item_hosts = item_hosts
+	}
+}
+
+/// `POST /secrets/requests/{id}/decide` → `{ request, access }` (`access` may be JSON null).
+public struct DecideSecretResponseDto: Codable {
+	public let request: SecretRequestDto
+	public let access: SecretAccessDto?
+
+	public init(request: SecretRequestDto, access: SecretAccessDto?) {
+		self.request = request
+		self.access = access
+	}
+}
+
 /// `POST /routines/{rid}/fire` reply.
 public struct FireRoutineResponseDto: Codable {
 	public let run_id: String
@@ -1017,6 +1130,144 @@ public struct ProjectMembersDto: Codable {
 	}
 }
 
+/// Reduced secret nested on `GET /projects/{id}/secrets` items.
+public struct ProjectSecretSummaryDto: Codable {
+	public let id: String
+	public let name: String
+	public let env: String
+	public let kind: String
+	public let note: String
+	public let hosts: [String]
+	public let last_used_at: Int64?
+	public let vault_name: String
+	public let inject_env: Bool
+
+	public init(id: String, name: String, env: String, kind: String, note: String, hosts: [String], last_used_at: Int64?, vault_name: String, inject_env: Bool) {
+		self.id = id
+		self.name = name
+		self.env = env
+		self.kind = kind
+		self.note = note
+		self.hosts = hosts
+		self.last_used_at = last_used_at
+		self.vault_name = vault_name
+		self.inject_env = inject_env
+	}
+}
+
+/// Reduced vault nested on a project-secrets vault row.
+public struct ProjectVaultSummaryDto: Codable {
+	public let id: String
+	public let provider: String
+	public let name: String
+	public let items_count: Int64
+	public let status: String
+
+	public init(id: String, provider: String, name: String, items_count: Int64, status: String) {
+		self.id = id
+		self.provider = provider
+		self.name = name
+		self.items_count = items_count
+		self.status = status
+	}
+}
+
+/// One row of `GET /projects/{id}/secrets` → `items[]`.
+public struct ProjectSecretItemDto: Codable {
+	public let project_id: String
+	public let name: String
+	public let access_id: String
+	public let enabled: Bool
+	public let note: String
+	public let hosts: [String]
+	public let scope: SecretAccessScopeDto
+	public let created_from: String
+	public let created_at: Int64
+	public let last_used_at: Int64?
+	public let disabled_at: Int64?
+	/// Vault rows only.
+	public let item_hosts: [VaultItemHostDto]?
+	/// Vault rows only (`"vault"`); secret rows omit the key.
+	public let target_kind: String?
+	public let secret: ProjectSecretSummaryDto?
+	public let vault: ProjectVaultSummaryDto?
+
+	public init(project_id: String, name: String, access_id: String, enabled: Bool, note: String, hosts: [String], scope: SecretAccessScopeDto, created_from: String, created_at: Int64, last_used_at: Int64?, disabled_at: Int64?, item_hosts: [VaultItemHostDto]?, target_kind: String?, secret: ProjectSecretSummaryDto?, vault: ProjectVaultSummaryDto?) {
+		self.project_id = project_id
+		self.name = name
+		self.access_id = access_id
+		self.enabled = enabled
+		self.note = note
+		self.hosts = hosts
+		self.scope = scope
+		self.created_from = created_from
+		self.created_at = created_at
+		self.last_used_at = last_used_at
+		self.disabled_at = disabled_at
+		self.item_hosts = item_hosts
+		self.target_kind = target_kind
+		self.secret = secret
+		self.vault = vault
+	}
+}
+
+/// One audit row (`activity[]`). `detail` stays free-form (`#[typeshare(skip)]`).
+public struct SecretActivityDto: Codable {
+	public let id: Int64
+	public let user_id: String
+	public let at: Int64
+	public let action: String
+	public let target_kind: String
+	public let target_id: String
+	public let target_name: String
+	/// Overlay of `target_name` for the UI.
+	public let name: String
+	public let project_id: String?
+	public let project_name: String?
+	public let chat_id: String?
+	public let request_id: String?
+	public let access_id: String?
+	public let use_kind: String?
+	public let host: String?
+	public let by: String
+
+	public init(id: Int64, user_id: String, at: Int64, action: String, target_kind: String, target_id: String, target_name: String, name: String, project_id: String?, project_name: String?, chat_id: String?, request_id: String?, access_id: String?, use_kind: String?, host: String?, by: String) {
+		self.id = id
+		self.user_id = user_id
+		self.at = at
+		self.action = action
+		self.target_kind = target_kind
+		self.target_id = target_id
+		self.target_name = target_name
+		self.name = name
+		self.project_id = project_id
+		self.project_name = project_name
+		self.chat_id = chat_id
+		self.request_id = request_id
+		self.access_id = access_id
+		self.use_kind = use_kind
+		self.host = host
+		self.by = by
+	}
+}
+
+/// `GET /projects/{id}/secrets` body.
+public struct ProjectSecretsDto: Codable {
+	public let paused: Bool
+	public let owner: Bool
+	public let items: [ProjectSecretItemDto]
+	public let requests: [SecretRequestDto]
+	public let activity: [SecretActivityDto]
+
+	public init(paused: Bool, owner: Bool, items: [ProjectSecretItemDto], requests: [SecretRequestDto], activity: [SecretActivityDto]) {
+		self.paused = paused
+		self.owner = owner
+		self.items = items
+		self.requests = requests
+		self.activity = activity
+	}
+}
+
 /// Routine as clients see it (`routine_json`): `db::Routine` plus optional `fire_url`.
 /// 
 /// `trigger` stays free-form JSON (`#[typeshare(skip)]`).
@@ -1065,6 +1316,208 @@ public struct RoutineRunDto: Codable {
 		self.status = status
 		self.message_id = message_id
 		self.note = note
+	}
+}
+
+/// `{ access }` after access PUT.
+public struct SecretAccessEnvelopeDto: Codable {
+	public let access: SecretAccessDto
+
+	public init(access: SecretAccessDto) {
+		self.access = access
+	}
+}
+
+/// `GET /secrets/activity` page.
+public struct SecretActivityPageDto: Codable {
+	public let items: [SecretActivityDto]
+	public let next_before: Int64?
+
+	public init(items: [SecretActivityDto], next_before: Int64?) {
+		self.items = items
+		self.next_before = next_before
+	}
+}
+
+/// Director card on `secret.directors[]`.
+public struct SecretDirectorDto: Codable {
+	public let user_id: String
+	public let handle: String
+	public let name: String?
+	public let avatar_url: String?
+	public let note: String
+	public let created_at: Int64
+
+	public init(user_id: String, handle: String, name: String?, avatar_url: String?, note: String, created_at: Int64) {
+		self.user_id = user_id
+		self.handle = handle
+		self.name = name
+		self.avatar_url = avatar_url
+		self.note = note
+		self.created_at = created_at
+	}
+}
+
+/// Secret as clients see it (`secret_json`). Never carries a secret value.
+public struct SecretDto: Codable {
+	public let id: String
+	public let name: String
+	public let env: String
+	public let kind: String
+	public let note: String
+	public let hosts: [String]
+	public let ask_every_time: Bool
+	public let inject_env: Bool
+	public let expires_at: Int64?
+	public let version: Int64
+	public let created_at: Int64
+	public let updated_at: Int64
+	public let last_used_at: Int64?
+	/// Login kind only: username metadata (not a secret). Otherwise JSON null.
+	public let username: String?
+	public let vault_name: String
+	public let ref: String
+	public let agents: [SecretAccessDto]
+	public let directors: [SecretDirectorDto]
+
+	public init(id: String, name: String, env: String, kind: String, note: String, hosts: [String], ask_every_time: Bool, inject_env: Bool, expires_at: Int64?, version: Int64, created_at: Int64, updated_at: Int64, last_used_at: Int64?, username: String?, vault_name: String, ref: String, agents: [SecretAccessDto], directors: [SecretDirectorDto]) {
+		self.id = id
+		self.name = name
+		self.env = env
+		self.kind = kind
+		self.note = note
+		self.hosts = hosts
+		self.ask_every_time = ask_every_time
+		self.inject_env = inject_env
+		self.expires_at = expires_at
+		self.version = version
+		self.created_at = created_at
+		self.updated_at = updated_at
+		self.last_used_at = last_used_at
+		self.username = username
+		self.vault_name = vault_name
+		self.ref = ref
+		self.agents = agents
+		self.directors = directors
+	}
+}
+
+/// `GET /secrets/{id}` → `{ secret, activity }`.
+public struct SecretDetailDto: Codable {
+	public let secret: SecretDto
+	public let activity: [SecretActivityDto]
+
+	public init(secret: SecretDto, activity: [SecretActivityDto]) {
+		self.secret = secret
+		self.activity = activity
+	}
+}
+
+/// `{ secret }` create / patch / value / directors / revoke / scrub replies.
+public struct SecretEnvelopeDto: Codable {
+	public let secret: SecretDto
+
+	public init(secret: SecretDto) {
+		self.secret = secret
+	}
+}
+
+/// `GET /secrets/requests` → `{ items }`.
+public struct SecretRequestsDto: Codable {
+	public let items: [SecretRequestDto]
+
+	public init(items: [SecretRequestDto]) {
+		self.items = items
+	}
+}
+
+/// Rate-limit block on a connected vault.
+public struct VaultLimitsDto: Codable {
+	public let reads_per_hour: Int64
+	public let reads_used_hour: Int64
+	public let reads_per_day: Int64
+	public let reads_used_day: Int64
+	public let cache_ttl_secs: Int64
+
+	public init(reads_per_hour: Int64, reads_used_hour: Int64, reads_per_day: Int64, reads_used_day: Int64, cache_ttl_secs: Int64) {
+		self.reads_per_hour = reads_per_hour
+		self.reads_used_hour = reads_used_hour
+		self.reads_per_day = reads_per_day
+		self.reads_used_day = reads_used_day
+		self.cache_ttl_secs = cache_ttl_secs
+	}
+}
+
+/// Connected vault (`vault_json`). `external_vaults` and `items` stay free-form.
+public struct VaultDto: Codable {
+	public let id: String
+	public let provider: String
+	public let name: String
+	public let items_count: Int64
+	public let items_refreshed_at: Int64?
+	public let token_expires_at: Int64?
+	public let limits: VaultLimitsDto
+	public let status: String
+	public let last_error: String?
+	public let last_refreshed_at: Int64?
+	public let created_at: Int64
+	public let agents: [SecretAccessDto]
+	public let env_items: Int64
+
+	public init(id: String, provider: String, name: String, items_count: Int64, items_refreshed_at: Int64?, token_expires_at: Int64?, limits: VaultLimitsDto, status: String, last_error: String?, last_refreshed_at: Int64?, created_at: Int64, agents: [SecretAccessDto], env_items: Int64) {
+		self.id = id
+		self.provider = provider
+		self.name = name
+		self.items_count = items_count
+		self.items_refreshed_at = items_refreshed_at
+		self.token_expires_at = token_expires_at
+		self.limits = limits
+		self.status = status
+		self.last_error = last_error
+		self.last_refreshed_at = last_refreshed_at
+		self.created_at = created_at
+		self.agents = agents
+		self.env_items = env_items
+	}
+}
+
+/// `GET /secrets` body.
+public struct SecretsOverviewDto: Codable {
+	public let paused: Bool
+	public let paused_at: Int64?
+	public let paused_by: String?
+	public let vaults: [VaultDto]
+	public let providers: [String]
+	public let features: MeFeaturesDto
+	public let secrets: [SecretDto]
+	public let requests_pending: Int64
+	public let requests: [SecretRequestDto]
+	public let activity: [SecretActivityDto]
+
+	public init(paused: Bool, paused_at: Int64?, paused_by: String?, vaults: [VaultDto], providers: [String], features: MeFeaturesDto, secrets: [SecretDto], requests_pending: Int64, requests: [SecretRequestDto], activity: [SecretActivityDto]) {
+		self.paused = paused
+		self.paused_at = paused_at
+		self.paused_by = paused_by
+		self.vaults = vaults
+		self.providers = providers
+		self.features = features
+		self.secrets = secrets
+		self.requests_pending = requests_pending
+		self.requests = requests
+		self.activity = activity
+	}
+}
+
+/// Kill-switch reply (`set_paused` / `PUT /me/secrets/settings`).
+public struct SecretsPausedDto: Codable {
+	public let paused: Bool
+	public let paused_at: Int64?
+	public let paused_by: String?
+
+	public init(paused: Bool, paused_at: Int64?, paused_by: String?) {
+		self.paused = paused
+		self.paused_at = paused_at
+		self.paused_by = paused_by
 	}
 }
 
@@ -1148,6 +1601,35 @@ public struct UsersPageDto: Codable {
 		self.total = total
 		self.offset = offset
 		self.next_offset = next_offset
+	}
+}
+
+/// `GET /vaults/{id}` → `{ vault, items, activity }`. `items` is free-form.
+public struct VaultDetailDto: Codable {
+	public let vault: VaultDto
+	public let activity: [SecretActivityDto]
+
+	public init(vault: VaultDto, activity: [SecretActivityDto]) {
+		self.vault = vault
+		self.activity = activity
+	}
+}
+
+/// `{ vault }` connect reply.
+public struct VaultEnvelopeDto: Codable {
+	public let vault: VaultDto
+
+	public init(vault: VaultDto) {
+		self.vault = vault
+	}
+}
+
+/// `{ vault, items }` after env toggle. `items` is free-form.
+public struct VaultItemsEnvelopeDto: Codable {
+	public let vault: VaultDto
+
+	public init(vault: VaultDto) {
+		self.vault = vault
 	}
 }
 

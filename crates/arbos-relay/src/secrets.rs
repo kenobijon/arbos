@@ -18,13 +18,20 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use arbos_core::api::{
+    DecideSecretResponseDto, ProjectSecretItemDto, ProjectSecretSummaryDto, ProjectSecretsDto,
+    SecretAccessDto, SecretAccessEnvelopeDto, SecretAccessScopeDto, SecretActivityDto,
+    SecretActivityPageDto, SecretDetailDto, SecretDirectorDto, SecretDto, SecretEnvelopeDto,
+    SecretRequestDto, SecretRequestTargetDto, SecretRequestsDto, SecretsOverviewDto,
+    SecretsPausedDto,
+};
 use arbos_core::ids::{now_ms, ulid};
 
 use crate::auth::Principal;
 use crate::connectors::crypto::Dek;
 use crate::db_secrets::{
-    Access, AuditEntry, AuditQuery, Secret, SecretDirector, SecretRequest, SecretVersion,
-    REQUEST_PENDING_MS,
+    Access, AuditEntry, AuditQuery, Secret, SecretAudit, SecretDirector, SecretRequest,
+    SecretVersion, SecretsSettings, REQUEST_PENDING_MS,
 };
 use crate::signin::api_error;
 use crate::state::AppState;
@@ -344,9 +351,13 @@ fn push_user(state: &AppState, user_id: &str, kind: &str, payload: Value) {
     let _ = state.db.push_user(user_id, kind, &payload, None);
 }
 
-// ---- JSON shapes ------------------------------------------------------------------------------
+// ---- JSON shapes (Dto builders; wire JSON unchanged) ------------------------------------------
 
-fn access_json(state: &AppState, a: &Access) -> Value {
+fn to_json<T: serde::Serialize>(v: T) -> Value {
+    serde_json::to_value(v).expect("secrets dto")
+}
+
+pub(crate) fn access_dto(state: &AppState, a: &Access) -> SecretAccessDto {
     let name = state
         .db
         .project(&a.project_id)
@@ -354,17 +365,32 @@ fn access_json(state: &AppState, a: &Access) -> Value {
         .flatten()
         .map(|p| p.name)
         .unwrap_or_else(|| a.project_id.clone());
-    json!({
-        "project_id": a.project_id, "name": name, "access_id": a.id, "enabled": a.enabled,
-        "note": a.note, "hosts": a.hosts,
-        "scope": { "kind": a.scope_kind, "chat_id": a.scope_chat_id },
-        "created_from": a.created_from, "created_at": a.created_at,
-        "last_used_at": a.last_used_at, "disabled_at": a.disabled_at,
-    })
+    SecretAccessDto {
+        project_id: a.project_id.clone(),
+        name,
+        access_id: a.id.clone(),
+        enabled: a.enabled,
+        note: a.note.clone(),
+        hosts: a.hosts.clone(),
+        scope: SecretAccessScopeDto {
+            kind: a.scope_kind.clone(),
+            chat_id: a.scope_chat_id.clone(),
+        },
+        created_from: a.created_from.clone(),
+        created_at: a.created_at,
+        last_used_at: a.last_used_at,
+        disabled_at: a.disabled_at,
+        item_hosts: None,
+    }
+}
+
+#[allow(dead_code)] // Value form; HTTP handlers return DTOs, fixtures still use this.
+fn access_json(state: &AppState, a: &Access) -> Value {
+    to_json(access_dto(state, a))
 }
 
 /// One director row for Settings / the box: id, handle, name, and the usage note the agent sees.
-pub(crate) fn director_json(state: &AppState, d: &SecretDirector) -> Value {
+pub(crate) fn director_dto(state: &AppState, d: &SecretDirector) -> SecretDirectorDto {
     let card = state.db.user_card(&d.user_id).ok().flatten();
     let handle = card
         .as_ref()
@@ -375,30 +401,34 @@ pub(crate) fn director_json(state: &AppState, d: &SecretDirector) -> Value {
         .and_then(|c| c.name.clone())
         .filter(|n| !n.is_empty());
     let avatar_url = card.as_ref().and_then(|c| c.avatar_url.clone());
-    json!({
-        "user_id": d.user_id,
-        "handle": handle,
-        "name": name,
-        "avatar_url": avatar_url,
-        "note": d.note,
-        "created_at": d.created_at,
-    })
+    SecretDirectorDto {
+        user_id: d.user_id.clone(),
+        handle,
+        name,
+        avatar_url,
+        note: d.note.clone(),
+        created_at: d.created_at,
+    }
 }
 
-pub(crate) fn secret_json(state: &AppState, s: &Secret) -> Value {
-    let agents: Vec<Value> = state
+pub(crate) fn director_json(state: &AppState, d: &SecretDirector) -> Value {
+    to_json(director_dto(state, d))
+}
+
+pub(crate) fn secret_dto(state: &AppState, s: &Secret) -> SecretDto {
+    let agents: Vec<SecretAccessDto> = state
         .db
         .accesses_of_target("secret", &s.id)
         .unwrap_or_default()
         .iter()
-        .map(|a| access_json(state, a))
+        .map(|a| access_dto(state, a))
         .collect();
-    let directors: Vec<Value> = state
+    let directors: Vec<SecretDirectorDto> = state
         .db
         .secret_directors(&s.id)
         .unwrap_or_default()
         .iter()
-        .map(|d| director_json(state, d))
+        .map(|d| director_dto(state, d))
         .collect();
     let username = if s.kind == "login" {
         user_dek(state, &s.user_id)
@@ -408,34 +438,102 @@ pub(crate) fn secret_json(state: &AppState, s: &Secret) -> Value {
     } else {
         None
     };
-    json!({
-        "id": s.id, "name": s.name, "env": s.env, "kind": s.kind, "note": s.note, "hosts": s.hosts,
-        "ask_every_time": s.ask_every_time, "inject_env": s.inject_env, "expires_at": s.expires_at, "version": s.current_version,
-        "created_at": s.created_at, "updated_at": s.updated_at, "last_used_at": s.last_used_at,
-        "username": username, "vault_name": ARBOS_VAULT_NAME,
-        "ref": placeholder(&s.env, if s.kind == "login" { "password" } else { "value" }),
-        "agents": agents,
-        "directors": directors,
-    })
+    SecretDto {
+        id: s.id.clone(),
+        name: s.name.clone(),
+        env: s.env.clone(),
+        kind: s.kind.clone(),
+        note: s.note.clone(),
+        hosts: s.hosts.clone(),
+        ask_every_time: s.ask_every_time,
+        inject_env: s.inject_env,
+        expires_at: s.expires_at,
+        version: s.current_version,
+        created_at: s.created_at,
+        updated_at: s.updated_at,
+        last_used_at: s.last_used_at,
+        username,
+        vault_name: ARBOS_VAULT_NAME.to_owned(),
+        secret_ref: placeholder(
+            &s.env,
+            if s.kind == "login" {
+                "password"
+            } else {
+                "value"
+            },
+        ),
+        agents,
+        directors,
+    }
 }
 
-pub(crate) fn request_json(state: &AppState, r: &SecretRequest) -> Value {
+#[allow(dead_code)] // Value form; HTTP handlers return DTOs, fixtures still use this.
+pub(crate) fn secret_json(state: &AppState, s: &Secret) -> Value {
+    to_json(secret_dto(state, s))
+}
+
+fn secret_envelope(state: &AppState, s: &Secret) -> SecretEnvelopeDto {
+    SecretEnvelopeDto {
+        secret: secret_dto(state, s),
+    }
+}
+
+pub(crate) fn request_dto(state: &AppState, r: &SecretRequest) -> SecretRequestDto {
     let project_name = state
         .db
         .project(&r.project_id)
         .ok()
         .flatten()
         .map(|p| p.name);
-    json!({
-        "id": r.id, "project_id": r.project_id, "project_name": project_name, "chat_id": r.chat_id,
-        "target": { "kind": r.target_kind, "id": r.target_id, "ref": r.target_ref },
-        "name": r.target_ref, "purpose": r.purpose, "use": r.use_kind, "host": r.host,
-        "status": r.status, "decided_by": r.decided_by, "created_at": r.created_at,
-        "decided_at": r.decided_at, "expires_at": r.expires_at,
-    })
+    SecretRequestDto {
+        id: r.id.clone(),
+        project_id: r.project_id.clone(),
+        project_name,
+        chat_id: r.chat_id.clone(),
+        target: SecretRequestTargetDto {
+            kind: r.target_kind.clone(),
+            id: r.target_id.clone(),
+            target_ref: r.target_ref.clone(),
+        },
+        name: r.target_ref.clone(),
+        purpose: r.purpose.clone(),
+        use_kind: r.use_kind.clone(),
+        host: r.host.clone(),
+        status: r.status.clone(),
+        decided_by: r.decided_by.clone(),
+        created_at: r.created_at,
+        decided_at: r.decided_at,
+        expires_at: r.expires_at,
+    }
 }
 
-pub(crate) fn activity(state: &AppState, user_id: &str, q: AuditQuery) -> Vec<Value> {
+pub(crate) fn request_json(state: &AppState, r: &SecretRequest) -> Value {
+    to_json(request_dto(state, r))
+}
+
+pub(crate) fn activity_dto(a: &SecretAudit, project_name: Option<String>) -> SecretActivityDto {
+    SecretActivityDto {
+        id: a.id,
+        user_id: a.user_id.clone(),
+        at: a.at,
+        action: a.action.clone(),
+        target_kind: a.target_kind.clone(),
+        target_id: a.target_id.clone(),
+        target_name: a.target_name.clone(),
+        name: a.target_name.clone(),
+        project_id: a.project_id.clone(),
+        project_name,
+        chat_id: a.chat_id.clone(),
+        request_id: a.request_id.clone(),
+        access_id: a.access_id.clone(),
+        use_kind: a.use_kind.clone(),
+        host: a.host.clone(),
+        by: a.by.clone(),
+        detail: a.detail.clone(),
+    }
+}
+
+pub(crate) fn activity(state: &AppState, user_id: &str, q: AuditQuery) -> Vec<SecretActivityDto> {
     state
         .db
         .list_audit(user_id, &q)
@@ -447,12 +545,52 @@ pub(crate) fn activity(state: &AppState, user_id: &str, q: AuditQuery) -> Vec<Va
                 .as_deref()
                 .and_then(|p| state.db.project(p).ok().flatten())
                 .map(|p| p.name);
-            let mut v = serde_json::to_value(a).unwrap_or(Value::Null);
-            v["project_name"] = json!(project_name);
-            v["name"] = json!(a.target_name);
-            v
+            activity_dto(a, project_name)
         })
         .collect()
+}
+
+fn project_secret_summary(s: &Secret) -> ProjectSecretSummaryDto {
+    ProjectSecretSummaryDto {
+        id: s.id.clone(),
+        name: s.name.clone(),
+        env: s.env.clone(),
+        kind: s.kind.clone(),
+        note: s.note.clone(),
+        hosts: s.hosts.clone(),
+        last_used_at: s.last_used_at,
+        vault_name: ARBOS_VAULT_NAME.to_owned(),
+        inject_env: s.inject_env,
+    }
+}
+
+fn project_secret_item(state: &AppState, a: &Access, s: &Secret) -> ProjectSecretItemDto {
+    let access = access_dto(state, a);
+    ProjectSecretItemDto {
+        project_id: access.project_id,
+        name: access.name,
+        access_id: access.access_id,
+        enabled: access.enabled,
+        note: access.note,
+        hosts: access.hosts,
+        scope: access.scope,
+        created_from: access.created_from,
+        created_at: access.created_at,
+        last_used_at: access.last_used_at,
+        disabled_at: access.disabled_at,
+        item_hosts: None,
+        target_kind: None,
+        secret: Some(project_secret_summary(s)),
+        vault: None,
+    }
+}
+
+pub(crate) fn paused_dto(settings: &SecretsSettings) -> SecretsPausedDto {
+    SecretsPausedDto {
+        paused: settings.paused,
+        paused_at: settings.paused_at,
+        paused_by: settings.paused_by.clone(),
+    }
 }
 
 // ---- the one rule: Access on, host allowed, not paused ---------------------------------------
@@ -800,22 +938,22 @@ fn after_access_change(state: &AppState, s: &Secret, a: &Access) {
 pub async fn list(State(state): State<AppState>, principal: Principal) -> ApiResult {
     let user_id = device_user(&principal)?;
     let settings = state.db.secrets_settings(&user_id).map_err(internal)?;
-    let secrets: Vec<Value> = state
+    let secrets: Vec<SecretDto> = state
         .db
         .list_secrets(&user_id)
         .map_err(internal)?
         .iter()
-        .map(|s| secret_json(&state, s))
+        .map(|s| secret_dto(&state, s))
         .collect();
-    let pending_items: Vec<Value> = state
+    let pending_items: Vec<SecretRequestDto> = state
         .db
         .list_secret_requests(&user_id, None, 50)
         .unwrap_or_default()
         .iter()
         .filter(|r| r.status == "pending")
-        .map(|r| request_json(&state, r))
+        .map(|r| request_dto(&state, r))
         .collect();
-    let pending = pending_items.len();
+    let pending = pending_items.len() as i64;
     let recent = activity(
         &state,
         &user_id,
@@ -825,13 +963,21 @@ pub async fn list(State(state): State<AppState>, principal: Principal) -> ApiRes
             ..Default::default()
         },
     );
-    Ok(Json(json!({
-        "paused": settings.paused, "paused_at": settings.paused_at, "paused_by": settings.paused_by,
-        "vaults": crate::vaults::list_json(&state, &user_id),
-        "providers": crate::vaults::providers(&state),
-        "features": crate::vaults::features(),
-        "secrets": secrets, "requests_pending": pending, "requests": pending_items, "activity": recent,
-    }))
+    Ok(Json(SecretsOverviewDto {
+        paused: settings.paused,
+        paused_at: settings.paused_at,
+        paused_by: settings.paused_by,
+        vaults: crate::vaults::list_dto(&state, &user_id),
+        providers: crate::vaults::providers(&state)
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        features: crate::features::dto(),
+        secrets,
+        requests_pending: pending,
+        requests: pending_items,
+        activity: recent,
+    })
     .into_response())
 }
 
@@ -976,11 +1122,7 @@ pub async fn create(
             after_access_change(&state, &s, &a);
         }
     }
-    Ok((
-        StatusCode::CREATED,
-        Json(json!({ "secret": secret_json(&state, &s) })),
-    )
-        .into_response())
+    Ok((StatusCode::CREATED, Json(secret_envelope(&state, &s))).into_response())
 }
 
 /// Create or update the access row for `(secret, project)`; audits on/off. `Ok(None)` when the
@@ -1078,7 +1220,11 @@ pub async fn get(
             ..Default::default()
         },
     );
-    Ok(Json(json!({ "secret": secret_json(&state, &s), "activity": act })).into_response())
+    Ok(Json(SecretDetailDto {
+        secret: secret_dto(&state, &s),
+        activity: act,
+    })
+    .into_response())
 }
 
 #[derive(Deserialize, Default)]
@@ -1189,7 +1335,7 @@ pub async fn patch(
             after_access_change(&state, &s, &a);
         }
     }
-    Ok(Json(json!({ "secret": secret_json(&state, &s) })).into_response())
+    Ok(Json(secret_envelope(&state, &s)).into_response())
 }
 
 /// `PUT /secrets/{id}/value` `{ value | text | fields }` → `{ secret }`: version n+1; version n
@@ -1247,7 +1393,7 @@ pub async fn replace_value(
         );
     }
     spawn_remount(state.clone(), user_id.clone());
-    Ok(Json(json!({ "secret": secret_json(&state, &s) })).into_response())
+    Ok(Json(secret_envelope(&state, &s)).into_response())
 }
 
 /// `DELETE /secrets/{id}` → 204. Ciphertext, versions and accesses go; audit stays.
@@ -1345,7 +1491,10 @@ pub async fn put_access(
         state.db.upsert_access(&a).map_err(internal)?;
     }
     after_access_change(&state, &s, &a);
-    Ok(Json(json!({ "access": access_json(&state, &a) })).into_response())
+    Ok(Json(SecretAccessEnvelopeDto {
+        access: access_dto(&state, &a),
+    })
+    .into_response())
 }
 
 /// `DELETE /secrets/{id}/access/{project_id}` → 204: off, and gone from the lists.
@@ -1454,7 +1603,7 @@ pub async fn put_director(
             ..entry("director_on", &s, &format!("user:{user_id}"))
         },
     );
-    Ok(Json(json!({ "secret": secret_json(&state, &s) })).into_response())
+    Ok(Json(secret_envelope(&state, &s)).into_response())
 }
 
 /// `POST /secrets/{id}/directors` → `{ secret }` with body `{ handle, note? }` for the people picker.
@@ -1523,7 +1672,7 @@ pub async fn post_director(
             ..entry("director_on", &s, &format!("user:{user_id}"))
         },
     );
-    Ok(Json(json!({ "secret": secret_json(&state, &s) })).into_response())
+    Ok(Json(secret_envelope(&state, &s)).into_response())
 }
 
 /// `DELETE /secrets/{id}/directors/{director_user_id}` → `{ secret }`.
@@ -1552,7 +1701,7 @@ pub async fn delete_director(
             },
         );
     }
-    Ok(Json(json!({ "secret": secret_json(&state, &s) })).into_response())
+    Ok(Json(secret_envelope(&state, &s)).into_response())
 }
 
 /// `POST /secrets/{id}/revoke-all` → `{ secret }` (every access off).
@@ -1585,7 +1734,7 @@ pub async fn revoke_all(
         );
         after_access_change(&state, &s, &a);
     }
-    Ok(Json(json!({ "secret": secret_json(&state, &s) })).into_response())
+    Ok(Json(secret_envelope(&state, &s)).into_response())
 }
 
 /// How long a box may fetch scrub values after the owner taps Scrub from context.
@@ -1625,7 +1774,7 @@ pub async fn scrub(
             json!({ "secret_id": s.id, "env": s.env, "ref": placeholder(&s.env, "value") }),
         );
     }
-    Ok(Json(json!({ "secret": secret_json(&state, &s) })).into_response())
+    Ok(Json(secret_envelope(&state, &s)).into_response())
 }
 
 /// `GET /projects/{id}/secrets` → `{ paused, items, requests, activity }` for the agent profile.
@@ -1652,22 +1801,18 @@ pub async fn project_secrets(
     for a in state.db.accesses_of_project(&p.id).map_err(internal)? {
         if a.target_kind == "secret" {
             if let Some(s) = state.db.secret(&owner, &a.target_id).map_err(internal)? {
-                let mut v = access_json(&state, &a);
-                v["secret"] = json!({ "id": s.id, "name": s.name, "env": s.env, "kind": s.kind, "note": s.note,
-                    "hosts": s.hosts, "last_used_at": s.last_used_at, "vault_name": ARBOS_VAULT_NAME,
-                    "inject_env": s.inject_env });
-                items.push(v);
+                items.push(project_secret_item(&state, &a, &s));
             }
-        } else if let Some(v) = crate::vaults::access_item_json(&state, &owner, &a) {
+        } else if let Some(v) = crate::vaults::access_item_dto(&state, &owner, &a) {
             items.push(v);
         }
     }
-    let requests: Vec<Value> = state
+    let requests: Vec<SecretRequestDto> = state
         .db
         .list_secret_requests(&owner, Some(&p.id), 50)
         .map_err(internal)?
         .iter()
-        .map(|r| request_json(&state, r))
+        .map(|r| request_dto(&state, r))
         .collect();
     let act = activity(
         &state,
@@ -1679,8 +1824,14 @@ pub async fn project_secrets(
             ..Default::default()
         },
     );
-    Ok(Json(json!({ "paused": settings.paused, "owner": owner == user_id, "items": items, "requests": requests, "activity": act }))
-        .into_response())
+    Ok(Json(ProjectSecretsDto {
+        paused: settings.paused,
+        owner: owner == user_id,
+        items,
+        requests,
+        activity: act,
+    })
+    .into_response())
 }
 
 // ---- device: kill switch, activity, requests ---------------------------------------------------
@@ -1692,7 +1843,12 @@ pub struct PauseBody {
 
 /// Flip the kill switch for a user: relay refuses at once; boxes hear within 5 s; Daytona
 /// mounts within 15 s.
-pub(crate) async fn set_paused(state: &AppState, user_id: &str, paused: bool, by: &str) -> Value {
+pub(crate) async fn set_paused(
+    state: &AppState,
+    user_id: &str,
+    paused: bool,
+    by: &str,
+) -> SecretsPausedDto {
     let before = state.db.secrets_settings(user_id).unwrap_or_default();
     let settings = state
         .db
@@ -1723,7 +1879,7 @@ pub(crate) async fn set_paused(state: &AppState, user_id: &str, paused: bool, by
         json!({ "paused": paused }),
     );
     remount_daytona(state, user_id).await;
-    json!({ "paused": settings.paused, "paused_at": settings.paused_at, "paused_by": settings.paused_by })
+    paused_dto(&settings)
 }
 
 /// `PUT /me/secrets/settings` `{ paused }`.
@@ -1770,26 +1926,24 @@ pub async fn list_activity(
         },
     );
     let next_before = if items.len() as i64 == limit {
-        items
-            .last()
-            .and_then(|a| a.get("at").and_then(Value::as_i64))
+        items.last().map(|a| a.at)
     } else {
         None
     };
-    Ok(Json(json!({ "items": items, "next_before": next_before })).into_response())
+    Ok(Json(SecretActivityPageDto { items, next_before }).into_response())
 }
 
 /// `GET /secrets/requests` → `{ items }` (pending first).
 pub async fn list_requests(State(state): State<AppState>, principal: Principal) -> ApiResult {
     let user_id = device_user(&principal)?;
-    let items: Vec<Value> = state
+    let items: Vec<SecretRequestDto> = state
         .db
         .list_secret_requests(&user_id, None, 100)
         .map_err(internal)?
         .iter()
-        .map(|r| request_json(&state, r))
+        .map(|r| request_dto(&state, r))
         .collect();
-    Ok(Json(json!({ "items": items })).into_response())
+    Ok(Json(SecretRequestsDto { items }).into_response())
 }
 
 #[derive(Deserialize)]
@@ -1908,8 +2062,11 @@ pub async fn decide_request(
 ) -> ApiResult {
     let user_id = device_user(&principal)?;
     let (rq, access) = decide(&state, &user_id, &id, &b.decision, &format!("card:{id}")).await?;
-    Ok(Json(json!({ "request": request_json(&state, &rq), "access": access.map(|a| access_json(&state, &a)) }))
-        .into_response())
+    Ok(Json(DecideSecretResponseDto {
+        request: request_dto(&state, &rq),
+        access: access.map(|a| access_dto(&state, &a)),
+    })
+    .into_response())
 }
 
 // ---- box ---------------------------------------------------------------------------------------
@@ -2615,7 +2772,7 @@ pub async fn admin_pause(
     let mut out = Vec::new();
     for u in users {
         let v = set_paused(&state, &u, b.paused, "admin").await;
-        out.push(json!({ "user_id": u, "paused": v["paused"] }));
+        out.push(json!({ "user_id": u, "paused": v.paused }));
     }
     Ok(Json(json!({ "users": out })).into_response())
 }
@@ -2833,6 +2990,413 @@ async fn sweep_once(state: &AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::{Chat, Project};
+    use crate::db_secrets::Vault;
+    use crate::people::tests_support::person;
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+    use arbos_core::api::{
+        DecideSecretResponseDto, ProjectSecretsDto, SecretAccessEnvelopeDto, SecretsOverviewDto,
+    };
+
+    const FIXED_AT: i64 = 1_700_000_000_000;
+
+    fn fixtures_dir() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/api")
+    }
+
+    fn load_fixture(name: &str) -> Value {
+        let path = fixtures_dir().join(name);
+        let raw =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        serde_json::from_str(&raw).expect("fixture json")
+    }
+
+    fn assert_builder(name: &str, got: Value) {
+        let path = fixtures_dir().join(name);
+        if !path.exists() || std::env::var_os("UPDATE_API_FIXTURES").is_some() {
+            let pretty = serde_json::to_string_pretty(&got).expect("pretty");
+            std::fs::write(&path, format!("{pretty}\n")).expect("write fixture");
+        }
+        let want = load_fixture(name);
+        assert_eq!(got, want, "fixture {name}");
+    }
+
+    fn insert_project(state: &AppState, owner: &str, id: &str, name: &str) {
+        state
+            .db
+            .insert_project(&Project {
+                id: id.into(),
+                name: name.into(),
+                icon: "R".into(),
+                instructions: String::new(),
+                models: json!({}),
+                state: "hibernated_light".into(),
+                created_at: FIXED_AT,
+                last_active_at: FIXED_AT,
+                spend_cap_daily: 25.0,
+                color: "#000".into(),
+                user_id: owner.to_owned(),
+                workspace_state: "stopped".into(),
+                avatar: None,
+                avatar_color: None,
+                description: String::new(),
+                primary_chat_id: None,
+                avatar_color_index: None,
+                avatar_leaf: None,
+                avatar_leaf_color: None,
+            })
+            .unwrap();
+        state
+            .db
+            .insert_chat(&Chat {
+                id: format!("chat_{id}"),
+                project_id: id.into(),
+                title: name.into(),
+                is_pinned: true,
+                position: 0,
+                created_at: FIXED_AT,
+                doc_epoch: 1,
+                kind: "chat".into(),
+                participants: Vec::new(),
+                forked_from: None,
+            })
+            .unwrap();
+    }
+
+    fn insert_key_secret(
+        state: &AppState,
+        user_id: &str,
+        id: &str,
+        name: &str,
+        env: &str,
+    ) -> Secret {
+        let dek = user_dek(state, user_id).unwrap();
+        let fields = json!({ "value": "fixture-not-a-real-key" });
+        let s = Secret {
+            id: id.into(),
+            user_id: user_id.into(),
+            name: name.into(),
+            env: env.into(),
+            kind: "key".into(),
+            note: "Fixture key for agent egress tests.".into(),
+            hosts: vec!["api.fixture.example".into()],
+            ask_every_time: false,
+            expires_at: None,
+            current_version: 1,
+            created_at: FIXED_AT,
+            updated_at: FIXED_AT,
+            last_used_at: Some(FIXED_AT + 1_000),
+            daytona_secrets: json!({}),
+            inject_env: false,
+        };
+        let v1 = SecretVersion {
+            secret_id: s.id.clone(),
+            version: 1,
+            fields_enc: encrypt_fields(&dek, &s.id, 1, &fields).unwrap(),
+            created_at: FIXED_AT,
+            retire_at: None,
+        };
+        state.db.insert_secret(&s, &v1).unwrap();
+        s
+    }
+
+    fn insert_login_secret(state: &AppState, user_id: &str) -> Secret {
+        let dek = user_dek(state, user_id).unwrap();
+        let fields = json!({
+            "username": "fixture.login",
+            "password": "fixture-not-a-real-password",
+            "url": "https://login.fixture.example"
+        });
+        let s = Secret {
+            id: "sec_login_fixture".into(),
+            user_id: user_id.into(),
+            name: "Fixture Login".into(),
+            env: "FIXTURE_LOGIN".into(),
+            kind: "login".into(),
+            note: "Login metadata only; password stays encrypted.".into(),
+            hosts: vec!["login.fixture.example".into()],
+            ask_every_time: false,
+            expires_at: None,
+            current_version: 1,
+            created_at: FIXED_AT,
+            updated_at: FIXED_AT,
+            last_used_at: None,
+            daytona_secrets: json!({}),
+            inject_env: false,
+        };
+        let v1 = SecretVersion {
+            secret_id: s.id.clone(),
+            version: 1,
+            fields_enc: encrypt_fields(&dek, &s.id, 1, &fields).unwrap(),
+            created_at: FIXED_AT,
+            retire_at: None,
+        };
+        state.db.insert_secret(&s, &v1).unwrap();
+        s
+    }
+
+    #[test]
+    fn secrets_wire_fixtures() {
+        let state = test_state(AuthMode::Github);
+        let (owner, _) = person(&state, 501);
+        let (director_id, _) = person(&state, 502);
+        insert_project(&state, &owner, "proj_secrets_fixture", "Research");
+        let secret = insert_key_secret(
+            &state,
+            &owner,
+            "sec_fixture",
+            "Fixture Stripe",
+            "FIXTURE_STRIPE_KEY",
+        );
+        let login = insert_login_secret(&state, &owner);
+        state
+            .db
+            .upsert_access(&Access {
+                id: "acc_secret_fixture".into(),
+                user_id: owner.clone(),
+                project_id: "proj_secrets_fixture".into(),
+                target_kind: "secret".into(),
+                target_id: secret.id.clone(),
+                note: "May charge test fixtures only.".into(),
+                hosts: vec!["api.fixture.example".into()],
+                scope_kind: "all".into(),
+                scope_chat_id: None,
+                enabled: true,
+                created_from: "settings".into(),
+                created_at: FIXED_AT,
+                disabled_at: None,
+                last_used_at: Some(FIXED_AT + 2_000),
+            })
+            .unwrap();
+        state
+            .db
+            .upsert_secret_director(&SecretDirector {
+                secret_id: secret.id.clone(),
+                user_id: director_id.clone(),
+                note: "Only fixture spend.".into(),
+                created_at: FIXED_AT,
+            })
+            .unwrap();
+
+        let request = SecretRequest {
+            id: "req_secret_fixture".into(),
+            user_id: owner.clone(),
+            project_id: "proj_secrets_fixture".into(),
+            chat_id: "chat_proj_secrets_fixture".into(),
+            target_kind: "secret".into(),
+            target_id: Some(secret.id.clone()),
+            target_ref: secret.env.clone(),
+            purpose: "Call the fixture API once.".into(),
+            use_kind: "header".into(),
+            host: Some("api.fixture.example".into()),
+            status: "pending".into(),
+            decided_by: None,
+            created_at: FIXED_AT,
+            decided_at: None,
+            expires_at: FIXED_AT + REQUEST_PENDING_MS,
+        };
+        state.db.insert_secret_request(&request).unwrap();
+
+        let vault = Vault {
+            id: "vault_fixture".into(),
+            user_id: owner.clone(),
+            provider: "onepassword".into(),
+            name: "Fixture 1Password".into(),
+            token_enc: None,
+            external_vaults: json!([{ "id": "ev_fixture", "name": "Fixture Vault" }]),
+            items: json!([{
+                "ref": "op://Fixture/Login/password",
+                "id": "item_fixture",
+                "title": "Fixture Login Item",
+                "category": "Login",
+                "fields": ["username", "password"],
+                "urls": ["https://login.fixture.example"]
+            }]),
+            items_count: 1,
+            items_refreshed_at: Some(FIXED_AT),
+            token_expires_at: Some(FIXED_AT + 86_400_000),
+            status: "ok".into(),
+            last_error: None,
+            last_refreshed_at: Some(FIXED_AT),
+            created_at: FIXED_AT,
+            disconnected_at: None,
+        };
+        state.db.upsert_vault(&vault).unwrap();
+        state
+            .db
+            .upsert_access(&Access {
+                id: "acc_vault_fixture".into(),
+                user_id: owner.clone(),
+                project_id: "proj_secrets_fixture".into(),
+                target_kind: "vault".into(),
+                target_id: vault.id.clone(),
+                note: "Everything in the fixture vault.".into(),
+                hosts: vec![],
+                scope_kind: "all".into(),
+                scope_chat_id: None,
+                enabled: true,
+                created_from: "settings".into(),
+                created_at: FIXED_AT,
+                disabled_at: None,
+                last_used_at: None,
+            })
+            .unwrap();
+
+        let reason = SecretAudit {
+            id: 1,
+            user_id: owner.clone(),
+            at: FIXED_AT,
+            action: "refused".into(),
+            target_kind: "secret".into(),
+            target_id: secret.id.clone(),
+            target_name: secret.env.clone(),
+            project_id: Some("proj_secrets_fixture".into()),
+            chat_id: Some("chat_proj_secrets_fixture".into()),
+            request_id: None,
+            access_id: Some("acc_secret_fixture".into()),
+            use_kind: Some("header".into()),
+            host: Some("evil.fixture.example".into()),
+            by: "agent:proj_secrets_fixture".into(),
+            detail: json!({ "reason": "host_not_allowed" }),
+        };
+        let decision = SecretAudit {
+            id: 2,
+            user_id: owner.clone(),
+            at: FIXED_AT + 60_000,
+            action: "decided".into(),
+            target_kind: "secret".into(),
+            target_id: secret.id.clone(),
+            target_name: secret.env.clone(),
+            project_id: Some("proj_secrets_fixture".into()),
+            chat_id: Some("chat_proj_secrets_fixture".into()),
+            request_id: Some(request.id.clone()),
+            access_id: None,
+            use_kind: Some("header".into()),
+            host: Some("api.fixture.example".into()),
+            by: format!("card:{}", request.id),
+            detail: json!({ "decision": "allowed_always" }),
+        };
+
+        assert_builder("secret_json.json", secret_json(&state, &secret));
+        assert_builder("secret_login_json.json", secret_json(&state, &login));
+        assert_builder("secret_request_json.json", request_json(&state, &request));
+        assert_builder(
+            "secret_activity_reason.json",
+            to_json(activity_dto(&reason, Some("Research".into()))),
+        );
+        assert_builder(
+            "secret_activity_decision.json",
+            to_json(activity_dto(&decision, Some("Research".into()))),
+        );
+        assert_builder(
+            "secret_access_json.json",
+            access_json(
+                &state,
+                &state
+                    .db
+                    .access("proj_secrets_fixture", "secret", &secret.id)
+                    .unwrap()
+                    .unwrap(),
+            ),
+        );
+        assert_builder("vault_json.json", crate::vaults::vault_json(&state, &vault));
+
+        let overview = SecretsOverviewDto {
+            paused: false,
+            paused_at: None,
+            paused_by: None,
+            vaults: vec![crate::vaults::vault_dto(&state, &vault)],
+            providers: crate::vaults::providers(&state)
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            features: crate::features::dto(),
+            secrets: vec![secret_dto(&state, &secret), secret_dto(&state, &login)],
+            requests_pending: 1,
+            requests: vec![request_dto(&state, &request)],
+            activity: vec![
+                activity_dto(&reason, Some("Research".into())),
+                activity_dto(&decision, Some("Research".into())),
+            ],
+        };
+        assert_builder("secrets_overview.json", to_json(overview));
+
+        let mut items = vec![project_secret_item(
+            &state,
+            &state
+                .db
+                .access("proj_secrets_fixture", "secret", &secret.id)
+                .unwrap()
+                .unwrap(),
+            &secret,
+        )];
+        items.push(
+            crate::vaults::access_item_dto(
+                &state,
+                &owner,
+                &state
+                    .db
+                    .access("proj_secrets_fixture", "vault", &vault.id)
+                    .unwrap()
+                    .unwrap(),
+            )
+            .unwrap(),
+        );
+        assert_builder(
+            "project_secrets_json.json",
+            to_json(ProjectSecretsDto {
+                paused: false,
+                owner: true,
+                items,
+                requests: vec![request_dto(&state, &request)],
+                activity: vec![
+                    activity_dto(&reason, Some("Research".into())),
+                    activity_dto(&decision, Some("Research".into())),
+                ],
+            }),
+        );
+
+        let decided = SecretRequest {
+            status: "allowed_always".into(),
+            decided_by: Some(format!("card:{}", request.id)),
+            decided_at: Some(FIXED_AT + 60_000),
+            ..request.clone()
+        };
+        assert_builder(
+            "decide_secret_response.json",
+            to_json(DecideSecretResponseDto {
+                request: request_dto(&state, &decided),
+                access: Some(access_dto(
+                    &state,
+                    &state
+                        .db
+                        .access("proj_secrets_fixture", "secret", &secret.id)
+                        .unwrap()
+                        .unwrap(),
+                )),
+            }),
+        );
+        assert_builder(
+            "secrets_paused.json",
+            to_json(paused_dto(&SecretsSettings {
+                paused: true,
+                paused_at: Some(FIXED_AT),
+                paused_by: Some("user".into()),
+            })),
+        );
+        let _ = SecretAccessEnvelopeDto {
+            access: access_dto(
+                &state,
+                &state
+                    .db
+                    .access("proj_secrets_fixture", "secret", &secret.id)
+                    .unwrap()
+                    .unwrap(),
+            ),
+        };
+        let _ = director_id;
+    }
 
     #[test]
     fn env_vars_follow_the_placeholder_names() {

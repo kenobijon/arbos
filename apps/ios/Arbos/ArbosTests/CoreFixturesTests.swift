@@ -341,4 +341,69 @@ final class CoreFixturesTests: XCTestCase {
         XCTAssertEqual(listed.plan.count, 2)
         XCTAssertEqual(listed.progressLog.count, 1)
     }
+
+    // MARK: Secrets / vaults (step 6b-2c-2)
+
+    func testSecretsParseFixtures() throws {
+        let secret = try XCTUnwrap(SecretItem.parse(try apiFixtureJSON("secret_json.json")))
+        XCTAssertEqual(secret.id, "sec_fixture")
+        XCTAssertEqual(secret.env, "FIXTURE_STRIPE_KEY")
+        XCTAssertEqual(secret.agents.count, 1)
+        XCTAssertEqual(secret.agents[0].name, "Research")
+        XCTAssertEqual(secret.directors.count, 1)
+        XCTAssertEqual(secret.directors[0].handle, "user502")
+
+        let login = try XCTUnwrap(SecretItem.parse(try apiFixtureJSON("secret_login_json.json")))
+        XCTAssertEqual(login.kind, "login")
+        XCTAssertEqual(login.username, "fixture.login")
+
+        let request = try XCTUnwrap(SecretRequestItem.parse(try apiFixtureJSON("secret_request_json.json")))
+        XCTAssertEqual(request.id, "req_secret_fixture")
+        XCTAssertEqual(request.name, "FIXTURE_STRIPE_KEY")
+        XCTAssertTrue(request.isPending)
+
+        let reason = try XCTUnwrap(SecretActivity.parse(try apiFixtureJSON("secret_activity_reason.json")))
+        XCTAssertEqual(reason.action, "refused")
+        XCTAssertEqual(reason.reason, "host_not_allowed")
+        XCTAssertEqual(reason.targetKind, "secret")
+
+        let decision = try XCTUnwrap(SecretActivity.parse(try apiFixtureJSON("secret_activity_decision.json")))
+        XCTAssertEqual(decision.decision, "allowed_always")
+
+        let vault = try XCTUnwrap(ConnectedVault.parse(try apiFixtureJSON("vault_json.json")))
+        XCTAssertEqual(vault.id, "vault_fixture")
+        XCTAssertEqual(vault.providerLabel, "1Password")
+        XCTAssertEqual(vault.itemsCount, 1)
+        XCTAssertEqual(vault.agents.count, 1)
+
+        let overview = try XCTUnwrap(SecretsOverview.parse(try apiFixtureJSON("secrets_overview.json")))
+        XCTAssertEqual(overview.secrets.count, 2)
+        XCTAssertEqual(overview.vaults.count, 1)
+        XCTAssertEqual(overview.requestsPending, 1)
+        XCTAssertEqual(overview.activity.count, 2)
+        XCTAssertEqual(overview.activity[0].reason, "host_not_allowed")
+        XCTAssertEqual(overview.activity[1].decision, "allowed_always")
+
+        let project = try XCTUnwrap(ProjectSecrets.parse(try apiFixtureJSON("project_secrets_json.json")))
+        XCTAssertTrue(project.owner)
+        XCTAssertEqual(project.items.count, 2)
+        XCTAssertEqual(project.items[0].targetKind, "secret")
+        XCTAssertEqual(project.items[0].secret?.env, "FIXTURE_STRIPE_KEY")
+        XCTAssertEqual(project.items[1].targetKind, "vault")
+        XCTAssertEqual(project.items[1].vault?.name, "Fixture 1Password")
+
+        let access = try XCTUnwrap(SecretAgentAccess.parse(try apiFixtureJSON("secret_access_json.json")))
+        XCTAssertEqual(access.id, "acc_secret_fixture")
+        XCTAssertEqual(access.projectId, "proj_secrets_fixture")
+
+        let pausedData = try apiFixtureData("secrets_paused.json")
+        let paused = try JSONDecoder().decode(SecretsPausedDto.self, from: pausedData)
+        XCTAssertTrue(paused.paused)
+        XCTAssertEqual(paused.paused_by, "user")
+
+        let decideData = try apiFixtureData("decide_secret_response.json")
+        let decide = try JSONDecoder().decode(DecideSecretResponseDto.self, from: decideData)
+        XCTAssertEqual(decide.request.status, "allowed_always")
+        XCTAssertEqual(decide.access?.access_id, "acc_secret_fixture")
+    }
 }

@@ -7,16 +7,20 @@
 use arbos_core::api::{
     AccountUserDto, CallDto, CallReachabilityDto, ChatDto, ChatMemberDto, CreateChatResponseDto,
     GetProjectResponseDto, GroupDto, MachineStatusDto, MeResponseDto, PeopleChatDto,
-    ProjectMemberDto, ProjectMembersDto, ProjectOwnerDto, RoutineDto, RoutineRunDto, SenderDto,
-    UserCardDto,
+    ProjectMemberDto, ProjectMembersDto, ProjectOwnerDto, ProjectSecretItemDto,
+    ProjectSecretSummaryDto, ProjectSecretsDto, ProjectVaultSummaryDto, RoutineDto, RoutineRunDto,
+    SecretAccessDto, SecretActivityDto, SecretDirectorDto, SecretDto, SecretRequestDto,
+    SecretsOverviewDto, SenderDto, UserCardDto, VaultDto,
 };
 use arbos_core::wire::BoxState as WireBox;
 use serde_json::Value;
 
 use crate::model::{
-    AccountView, AgentMember, BoxState, Call, CallKind, Chat, ChatKind, Effort, Machine,
-    MachineState, Person, Project, ProjectMachine, Reachable, ReachableDevice, ReplyPolicy,
-    Routine, RoutineRun, RoutineRunStatus, RoutineTrigger, Sender, SpaceKind,
+    AccountView, AgentMember, BoxState, Call, CallKind, Chat, ChatKind, ConnectedVault, Effort,
+    Machine, MachineState, Person, Project, ProjectMachine, ProjectSecretAccess, ProjectSecrets,
+    Reachable, ReachableDevice, ReplyPolicy, Routine, RoutineRun, RoutineRunStatus, RoutineTrigger,
+    Secret, SecretActivity, SecretAgent, SecretDirector, SecretRequest, SecretScope, SecretsView,
+    Sender, SpaceKind,
 };
 use crate::sync::credentials::AccountUser;
 
@@ -186,6 +190,193 @@ impl From<&CallReachabilityDto> for Reachable {
                     last_seen_at: d.last_seen_at.filter(|t| *t > 0).map(|t| t as u64),
                 })
                 .collect(),
+        }
+    }
+}
+
+impl From<&SecretAccessDto> for SecretAgent {
+    fn from(a: &SecretAccessDto) -> Self {
+        SecretAgent {
+            project_id: a.project_id.clone(),
+            name: a.name.clone(),
+            access_id: a.access_id.clone(),
+            enabled: a.enabled,
+            note: a.note.clone(),
+            hosts: a.hosts.clone(),
+            scope: SecretScope {
+                kind: a.scope.kind.clone(),
+                chat_id: a.scope.chat_id.clone(),
+            },
+            last_used_at: a.last_used_at,
+            disabled_at: a.disabled_at,
+        }
+    }
+}
+
+impl From<&SecretDirectorDto> for SecretDirector {
+    fn from(d: &SecretDirectorDto) -> Self {
+        SecretDirector {
+            user_id: d.user_id.clone(),
+            handle: d.handle.clone(),
+            name: d.name.clone(),
+            avatar_url: d.avatar_url.clone(),
+            note: d.note.clone(),
+            created_at: d.created_at,
+        }
+    }
+}
+
+impl From<&SecretDto> for Secret {
+    fn from(d: &SecretDto) -> Self {
+        Secret {
+            id: d.id.clone(),
+            name: d.name.clone(),
+            env: d.env.clone(),
+            kind: d.kind.clone(),
+            note: d.note.clone(),
+            hosts: d.hosts.clone(),
+            ask_every_time: d.ask_every_time,
+            inject_env: d.inject_env,
+            expires_at: d.expires_at,
+            version: d.version,
+            created_at: d.created_at,
+            last_used_at: d.last_used_at,
+            username: d.username.clone(),
+            vault_name: d.vault_name.clone(),
+            agents: d.agents.iter().map(SecretAgent::from).collect(),
+            directors: d.directors.iter().map(SecretDirector::from).collect(),
+        }
+    }
+}
+
+impl From<&SecretRequestDto> for SecretRequest {
+    fn from(r: &SecretRequestDto) -> Self {
+        SecretRequest {
+            id: r.id.clone(),
+            project_id: r.project_id.clone(),
+            project_name: r.project_name.clone(),
+            chat_id: r.chat_id.clone(),
+            name: r.name.clone(),
+            purpose: r.purpose.clone(),
+            use_kind: r.use_kind.clone(),
+            host: r.host.clone(),
+            status: r.status.clone(),
+            created_at: r.created_at,
+            decided_at: r.decided_at,
+        }
+    }
+}
+
+impl From<&SecretActivityDto> for SecretActivity {
+    fn from(a: &SecretActivityDto) -> Self {
+        SecretActivity {
+            id: a.id,
+            at: a.at,
+            action: a.action.clone(),
+            name: a.name.clone(),
+            target_kind: a.target_kind.clone(),
+            project_id: a.project_id.clone(),
+            project_name: a.project_name.clone(),
+            host: a.host.clone(),
+            by: a.by.clone(),
+            detail: a.detail.clone(),
+        }
+    }
+}
+
+impl From<&VaultDto> for ConnectedVault {
+    fn from(v: &VaultDto) -> Self {
+        ConnectedVault {
+            id: v.id.clone(),
+            provider: v.provider.clone(),
+            name: v.name.clone(),
+            items_count: v.items_count,
+            token_expires_at: v.token_expires_at,
+            status: v.status.clone(),
+            agents: v.agents.iter().map(SecretAgent::from).collect(),
+            limits: serde_json::to_value(&v.limits).unwrap_or(Value::Null),
+            items: v.items.as_array().cloned().unwrap_or_default(),
+            env_items: v.env_items,
+        }
+    }
+}
+
+fn secret_from_summary(s: &ProjectSecretSummaryDto) -> Secret {
+    Secret {
+        id: s.id.clone(),
+        name: s.name.clone(),
+        env: s.env.clone(),
+        kind: s.kind.clone(),
+        note: s.note.clone(),
+        hosts: s.hosts.clone(),
+        ask_every_time: false,
+        inject_env: s.inject_env,
+        expires_at: None,
+        version: 1,
+        created_at: 0,
+        last_used_at: s.last_used_at,
+        username: None,
+        vault_name: s.vault_name.clone(),
+        agents: Vec::new(),
+        directors: Vec::new(),
+    }
+}
+
+fn vault_from_summary(v: &ProjectVaultSummaryDto) -> ConnectedVault {
+    ConnectedVault {
+        id: v.id.clone(),
+        provider: v.provider.clone(),
+        name: v.name.clone(),
+        items_count: v.items_count,
+        token_expires_at: None,
+        status: v.status.clone(),
+        agents: Vec::new(),
+        limits: Value::Null,
+        items: Vec::new(),
+        env_items: 0,
+    }
+}
+
+impl From<&ProjectSecretItemDto> for ProjectSecretAccess {
+    fn from(i: &ProjectSecretItemDto) -> Self {
+        ProjectSecretAccess {
+            access_id: i.access_id.clone(),
+            enabled: i.enabled,
+            note: i.note.clone(),
+            hosts: i.hosts.clone(),
+            last_used_at: i.last_used_at,
+            disabled_at: i.disabled_at,
+            secret: i.secret.as_ref().map(secret_from_summary),
+            vault: i.vault.as_ref().map(vault_from_summary),
+        }
+    }
+}
+
+/// `GET /secrets` (+ requests list) → Settings secrets view.
+pub fn secrets_view_from_dto(
+    overview: &SecretsOverviewDto,
+    requests: &[SecretRequestDto],
+) -> SecretsView {
+    SecretsView {
+        paused: overview.paused,
+        secrets: overview.secrets.iter().map(Secret::from).collect(),
+        vaults: overview.vaults.iter().map(ConnectedVault::from).collect(),
+        providers: overview.providers.clone(),
+        vault_connect: overview.features.vault_connect.unwrap_or(false),
+        requests: requests.iter().map(SecretRequest::from).collect(),
+        activity: overview.activity.iter().map(SecretActivity::from).collect(),
+        loaded: true,
+    }
+}
+
+impl From<&ProjectSecretsDto> for ProjectSecrets {
+    fn from(p: &ProjectSecretsDto) -> Self {
+        ProjectSecrets {
+            paused: p.paused,
+            owner: p.owner,
+            items: p.items.iter().map(ProjectSecretAccess::from).collect(),
+            requests: p.requests.iter().map(SecretRequest::from).collect(),
+            activity: p.activity.iter().map(SecretActivity::from).collect(),
         }
     }
 }
@@ -809,5 +1000,75 @@ mod tests {
         assert_eq!(run.routine_id, "routine_schedule_fixture");
         assert_eq!(run.status, RoutineRunStatus::Done);
         assert_eq!(run.message_id.as_deref(), Some("msg_fixture"));
+    }
+
+    #[test]
+    fn secrets_fixtures_into_model() {
+        use arbos_core::api::{
+            DecideSecretResponseDto, ProjectSecretsDto, SecretActivityDto, SecretDto,
+            SecretRequestDto, SecretsOverviewDto, SecretsPausedDto, VaultDto,
+        };
+
+        let secret: SecretDto = load_json("secret_json.json");
+        let s = Secret::from(&secret);
+        assert_eq!(s.id, "sec_fixture");
+        assert_eq!(s.env, "FIXTURE_STRIPE_KEY");
+        assert_eq!(s.agents.len(), 1);
+        assert_eq!(s.directors.len(), 1);
+        assert_eq!(s.directors[0].handle, "user502");
+
+        let login: SecretDto = load_json("secret_login_json.json");
+        let s = Secret::from(&login);
+        assert_eq!(s.kind, "login");
+        assert_eq!(s.username.as_deref(), Some("fixture.login"));
+
+        let request: SecretRequestDto = load_json("secret_request_json.json");
+        let r = SecretRequest::from(&request);
+        assert_eq!(r.id, "req_secret_fixture");
+        assert!(r.is_pending());
+
+        let reason: SecretActivityDto = load_json("secret_activity_reason.json");
+        let a = SecretActivity::from(&reason);
+        assert_eq!(a.action, "refused");
+        assert_eq!(a.target_kind, "secret");
+        assert_eq!(a.detail["reason"], "host_not_allowed");
+
+        let vault: VaultDto = load_json("vault_json.json");
+        let v = ConnectedVault::from(&vault);
+        assert_eq!(v.id, "vault_fixture");
+        assert_eq!(v.items_count, 1);
+        assert_eq!(v.agents.len(), 1);
+        assert_eq!(v.items.len(), 1);
+
+        let overview: SecretsOverviewDto = load_json("secrets_overview.json");
+        let view = secrets_view_from_dto(&overview, &overview.requests);
+        assert_eq!(view.secrets.len(), 2);
+        assert_eq!(view.vaults.len(), 1);
+        assert_eq!(view.activity.len(), 2);
+        assert!(!view.vault_connect);
+
+        let project: ProjectSecretsDto = load_json("project_secrets_json.json");
+        let p = ProjectSecrets::from(&project);
+        assert!(p.owner);
+        assert_eq!(p.items.len(), 2);
+        assert_eq!(
+            p.items[0].secret.as_ref().map(|s| s.env.as_str()),
+            Some("FIXTURE_STRIPE_KEY")
+        );
+        assert_eq!(
+            p.items[1].vault.as_ref().map(|v| v.name.as_str()),
+            Some("Fixture 1Password")
+        );
+
+        let paused: SecretsPausedDto = load_json("secrets_paused.json");
+        assert!(paused.paused);
+        assert_eq!(paused.paused_by.as_deref(), Some("user"));
+
+        let decide: DecideSecretResponseDto = load_json("decide_secret_response.json");
+        assert_eq!(decide.request.status, "allowed_always");
+        assert_eq!(
+            decide.access.as_ref().map(|a| a.access_id.as_str()),
+            Some("acc_secret_fixture")
+        );
     }
 }

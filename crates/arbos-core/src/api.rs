@@ -1,5 +1,5 @@
 //! Shared HTTP response shapes for projects, chats, people, me, machine,
-//! unread, calls, goals, and routines (crdt-sync).
+//! unread, calls, goals, routines, secrets, and vaults (crdt-sync).
 //!
 //! No I/O. The relay builds these and serializes them; clients will decode the
 //! same JSON. Regenerate Swift with `./scripts/gen-swift-types.sh`.
@@ -911,4 +911,368 @@ pub struct RoutineRunDto {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FireRoutineResponseDto {
     pub run_id: String,
+}
+
+// ---- Secrets / vaults (step 6b-2c-2) -----------------------------------------------------------
+//
+// Free-form on the wire (`#[typeshare(skip)]` + `Value`): activity `detail`, vault `items`,
+// vault `external_vaults`. Fixed-key objects the relay builds are real structs.
+
+/// Access scope on a secret or vault access row.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SecretAccessScopeDto {
+    pub kind: String,
+    pub chat_id: Option<String>,
+}
+
+/// One pinned host on a vault access (`item_hosts[]`).
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VaultItemHostDto {
+    #[serde(rename = "ref")]
+    pub item_ref: String,
+    pub host: String,
+}
+
+/// Access row (`access_json`): secret accesses omit `item_hosts`; vault accesses include it.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SecretAccessDto {
+    pub project_id: String,
+    pub name: String,
+    pub access_id: String,
+    pub enabled: bool,
+    pub note: String,
+    pub hosts: Vec<String>,
+    pub scope: SecretAccessScopeDto,
+    pub created_from: String,
+    #[typeshare(serialized_as = "I54")]
+    pub created_at: i64,
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub last_used_at: Option<i64>,
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub disabled_at: Option<i64>,
+    /// Vault accesses only (omitted on secret accesses).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_hosts: Option<Vec<VaultItemHostDto>>,
+}
+
+/// Director card on `secret.directors[]`.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SecretDirectorDto {
+    pub user_id: String,
+    pub handle: String,
+    pub name: Option<String>,
+    pub avatar_url: Option<String>,
+    pub note: String,
+    #[typeshare(serialized_as = "I54")]
+    pub created_at: i64,
+}
+
+/// Secret as clients see it (`secret_json`). Never carries a secret value.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SecretDto {
+    pub id: String,
+    pub name: String,
+    pub env: String,
+    pub kind: String,
+    pub note: String,
+    pub hosts: Vec<String>,
+    pub ask_every_time: bool,
+    pub inject_env: bool,
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub expires_at: Option<i64>,
+    #[typeshare(serialized_as = "I54")]
+    pub version: i64,
+    #[typeshare(serialized_as = "I54")]
+    pub created_at: i64,
+    #[typeshare(serialized_as = "I54")]
+    pub updated_at: i64,
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub last_used_at: Option<i64>,
+    /// Login kind only: username metadata (not a secret). Otherwise JSON null.
+    pub username: Option<String>,
+    pub vault_name: String,
+    #[serde(rename = "ref")]
+    pub secret_ref: String,
+    pub agents: Vec<SecretAccessDto>,
+    pub directors: Vec<SecretDirectorDto>,
+}
+
+/// Target block on a secret request.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SecretRequestTargetDto {
+    pub kind: String,
+    pub id: Option<String>,
+    #[serde(rename = "ref")]
+    pub target_ref: String,
+}
+
+/// Pending / decided request card (`request_json`).
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SecretRequestDto {
+    pub id: String,
+    pub project_id: String,
+    pub project_name: Option<String>,
+    pub chat_id: String,
+    pub target: SecretRequestTargetDto,
+    pub name: String,
+    pub purpose: String,
+    #[serde(rename = "use")]
+    pub use_kind: String,
+    pub host: Option<String>,
+    pub status: String,
+    pub decided_by: Option<String>,
+    #[typeshare(serialized_as = "I54")]
+    pub created_at: i64,
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub decided_at: Option<i64>,
+    #[typeshare(serialized_as = "I54")]
+    pub expires_at: i64,
+}
+
+/// One audit row (`activity[]`). `detail` stays free-form (`#[typeshare(skip)]`).
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SecretActivityDto {
+    #[typeshare(serialized_as = "I54")]
+    pub id: i64,
+    pub user_id: String,
+    #[typeshare(serialized_as = "I54")]
+    pub at: i64,
+    pub action: String,
+    pub target_kind: String,
+    pub target_id: String,
+    pub target_name: String,
+    /// Overlay of `target_name` for the UI.
+    pub name: String,
+    pub project_id: Option<String>,
+    pub project_name: Option<String>,
+    pub chat_id: Option<String>,
+    pub request_id: Option<String>,
+    pub access_id: Option<String>,
+    pub use_kind: Option<String>,
+    pub host: Option<String>,
+    pub by: String,
+    #[typeshare(skip)]
+    pub detail: Value,
+}
+
+/// Rate-limit block on a connected vault.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VaultLimitsDto {
+    #[typeshare(serialized_as = "I54")]
+    pub reads_per_hour: i64,
+    #[typeshare(serialized_as = "I54")]
+    pub reads_used_hour: i64,
+    #[typeshare(serialized_as = "I54")]
+    pub reads_per_day: i64,
+    #[typeshare(serialized_as = "I54")]
+    pub reads_used_day: i64,
+    #[typeshare(serialized_as = "I54")]
+    pub cache_ttl_secs: i64,
+}
+
+/// Connected vault (`vault_json`). `external_vaults` and `items` stay free-form.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VaultDto {
+    pub id: String,
+    pub provider: String,
+    pub name: String,
+    #[typeshare(skip)]
+    pub external_vaults: Value,
+    #[typeshare(serialized_as = "I54")]
+    pub items_count: i64,
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub items_refreshed_at: Option<i64>,
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub token_expires_at: Option<i64>,
+    pub limits: VaultLimitsDto,
+    pub status: String,
+    pub last_error: Option<String>,
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub last_refreshed_at: Option<i64>,
+    #[typeshare(serialized_as = "I54")]
+    pub created_at: i64,
+    pub agents: Vec<SecretAccessDto>,
+    #[typeshare(skip)]
+    pub items: Value,
+    #[typeshare(serialized_as = "I54")]
+    pub env_items: i64,
+}
+
+/// Reduced secret nested on `GET /projects/{id}/secrets` items.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProjectSecretSummaryDto {
+    pub id: String,
+    pub name: String,
+    pub env: String,
+    pub kind: String,
+    pub note: String,
+    pub hosts: Vec<String>,
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub last_used_at: Option<i64>,
+    pub vault_name: String,
+    pub inject_env: bool,
+}
+
+/// Reduced vault nested on a project-secrets vault row.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProjectVaultSummaryDto {
+    pub id: String,
+    pub provider: String,
+    pub name: String,
+    #[typeshare(serialized_as = "I54")]
+    pub items_count: i64,
+    pub status: String,
+}
+
+/// One row of `GET /projects/{id}/secrets` → `items[]`.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProjectSecretItemDto {
+    pub project_id: String,
+    pub name: String,
+    pub access_id: String,
+    pub enabled: bool,
+    pub note: String,
+    pub hosts: Vec<String>,
+    pub scope: SecretAccessScopeDto,
+    pub created_from: String,
+    #[typeshare(serialized_as = "I54")]
+    pub created_at: i64,
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub last_used_at: Option<i64>,
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub disabled_at: Option<i64>,
+    /// Vault rows only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_hosts: Option<Vec<VaultItemHostDto>>,
+    /// Vault rows only (`"vault"`); secret rows omit the key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret: Option<ProjectSecretSummaryDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault: Option<ProjectVaultSummaryDto>,
+}
+
+/// `GET /secrets` body.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SecretsOverviewDto {
+    pub paused: bool,
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub paused_at: Option<i64>,
+    pub paused_by: Option<String>,
+    pub vaults: Vec<VaultDto>,
+    pub providers: Vec<String>,
+    pub features: MeFeaturesDto,
+    pub secrets: Vec<SecretDto>,
+    #[typeshare(serialized_as = "I54")]
+    pub requests_pending: i64,
+    pub requests: Vec<SecretRequestDto>,
+    pub activity: Vec<SecretActivityDto>,
+}
+
+/// `GET /projects/{id}/secrets` body.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProjectSecretsDto {
+    pub paused: bool,
+    pub owner: bool,
+    pub items: Vec<ProjectSecretItemDto>,
+    pub requests: Vec<SecretRequestDto>,
+    pub activity: Vec<SecretActivityDto>,
+}
+
+/// `{ secret }` create / patch / value / directors / revoke / scrub replies.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SecretEnvelopeDto {
+    pub secret: SecretDto,
+}
+
+/// `GET /secrets/{id}` → `{ secret, activity }`.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SecretDetailDto {
+    pub secret: SecretDto,
+    pub activity: Vec<SecretActivityDto>,
+}
+
+/// `{ access }` after access PUT.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SecretAccessEnvelopeDto {
+    pub access: SecretAccessDto,
+}
+
+/// Kill-switch reply (`set_paused` / `PUT /me/secrets/settings`).
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SecretsPausedDto {
+    pub paused: bool,
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub paused_at: Option<i64>,
+    pub paused_by: Option<String>,
+}
+
+/// `GET /secrets/activity` page.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SecretActivityPageDto {
+    pub items: Vec<SecretActivityDto>,
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub next_before: Option<i64>,
+}
+
+/// `GET /secrets/requests` → `{ items }`.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SecretRequestsDto {
+    pub items: Vec<SecretRequestDto>,
+}
+
+/// `POST /secrets/requests/{id}/decide` → `{ request, access }` (`access` may be JSON null).
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DecideSecretResponseDto {
+    pub request: SecretRequestDto,
+    pub access: Option<SecretAccessDto>,
+}
+
+/// `{ vault }` connect reply.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VaultEnvelopeDto {
+    pub vault: VaultDto,
+}
+
+/// `GET /vaults/{id}` → `{ vault, items, activity }`. `items` is free-form.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VaultDetailDto {
+    pub vault: VaultDto,
+    #[typeshare(skip)]
+    pub items: Value,
+    pub activity: Vec<SecretActivityDto>,
+}
+
+/// `{ vault, items }` after env toggle. `items` is free-form.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VaultItemsEnvelopeDto {
+    pub vault: VaultDto,
+    #[typeshare(skip)]
+    pub items: Value,
 }

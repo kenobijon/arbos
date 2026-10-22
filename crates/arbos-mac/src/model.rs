@@ -1786,6 +1786,22 @@ pub struct SecretAgent {
     pub disabled_at: Option<i64>,
 }
 
+/// A person the owner authorized to direct agents to use this secret (`secret.directors[]`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SecretDirector {
+    pub user_id: Id,
+    #[serde(default)]
+    pub handle: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub avatar_url: Option<String>,
+    #[serde(default)]
+    pub note: String,
+    #[serde(default)]
+    pub created_at: i64,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SecretScope {
     #[serde(default)]
@@ -1830,6 +1846,8 @@ pub struct Secret {
     pub vault_name: String,
     #[serde(default)]
     pub agents: Vec<SecretAgent>,
+    #[serde(default)]
+    pub directors: Vec<SecretDirector>,
 }
 
 impl Secret {
@@ -1903,6 +1921,8 @@ pub struct SecretActivity {
     pub action: String,
     #[serde(default)]
     pub name: String,
+    #[serde(default)]
+    pub target_kind: String,
     #[serde(default)]
     pub project_id: Option<Id>,
     #[serde(default)]
