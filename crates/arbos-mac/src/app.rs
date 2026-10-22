@@ -1348,7 +1348,9 @@ impl AppState {
                     }
                 }
                 self.projects = projects;
-                if self.selected_project.is_none() {
+                // Nothing in the centre yet: pick an agent. A channel open in the centre
+                // (D88) has no selected project on purpose and stays.
+                if self.selected_project.is_none() && self.selected_channel.is_none() {
                     let pick = self
                         .projects
                         .iter()
@@ -1390,8 +1392,11 @@ impl AppState {
                 // Cold launch: open the agent's primary chat (same conversation
                 // the iPhone shows — D78) so history matches across devices.
                 // Multi-chat tabs stay available; last_chats only resumes a tab
-                // within a session after the user picks one.
-                if self.projects.iter().any(|p| p.id == project_id) {
+                // within a session after the user picks one. A channel already
+                // opened (D88) is not replaced.
+                if self.selected_channel.is_none()
+                    && self.projects.iter().any(|p| p.id == project_id)
+                {
                     let open = self
                         .primary_chat(&project_id)
                         .map(|c| c.id.clone())

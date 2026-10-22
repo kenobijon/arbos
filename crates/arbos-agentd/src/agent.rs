@@ -872,7 +872,7 @@ fn context_tokens(usage: &Value) -> i64 {
 /// What the rolling summary must keep when agentd compacts a chat (D91). Anything it drops is
 /// still one memory walk away, but facts the user stated and the thread of the current task
 /// should not need a lookup.
-const SOFT_COMPACTION_INSTRUCTIONS: &str = "Keep, exactly as written, every fact the user stated about themselves or their preferences, every decision and rule agreed, every number, date, name, file path, URL, identifier and command that was used or produced, and every open question or task with its current state. State the current goal and what the next step was going to be. Older detail you leave out is still retrievable with context_search / context_open, so prefer precision over coverage.";
+const SOFT_COMPACTION_INSTRUCTIONS: &str = "Keep, exactly as written, every fact the user stated about themselves or their preferences, every decision and rule agreed, every number, date, name, file path, URL, identifier and command that was used or produced, and every open question or task with its current state. State the current goal and what the next step was going to be. Older detail you leave out is still retrievable with context_search / context_open, so prefer precision over coverage, and keep the whole summary under about 1,500 words.";
 
 /// A memory walk running beside the turn's setup. Dropped without `block` (stop, preempt, an
 /// error before the prompt) it is aborted, so no Jev request is spent on a turn that never ran.
@@ -2527,6 +2527,19 @@ impl Agent {
             return;
         }
         if self.current_chat.lock().await.as_deref() != Some(chat_id) {
+            return;
+        }
+        let turns_since = self
+            .store
+            .user_turns_since_compaction(chat_id)
+            .unwrap_or(i64::MAX);
+        if turns_since < crate::workspace::MIN_TURNS_BETWEEN_COMPACTIONS {
+            tracing::debug!(
+                chat_id,
+                tokens,
+                turns_since,
+                "soft compaction deferred: compacted recently"
+            );
             return;
         }
         let Ok(pi) = self.pi().await else {
