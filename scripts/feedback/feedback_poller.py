@@ -1758,7 +1758,9 @@ class Loop:
         members: dict[str, str] = {}
         while plan and not members:
             half = plan.pop(0)
-            members = {fid: head for fid, head in half.items() if any(f == fid and st["branch_head"] == head for f, st in ready)}
+            # Match by item, gate at its CURRENT head: a pinned (gate-next) or bisected item whose owner pushed a
+            # repair / merged main meanwhile keeps its place in the queue instead of dropping to the back.
+            members = {f: st["branch_head"] for f, st in ready if f in half}
         if not members:
             members = {fid: st["branch_head"] for fid, st in ready}
         cur["rust_gate_plan"] = plan
