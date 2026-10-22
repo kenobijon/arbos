@@ -2771,6 +2771,30 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Delete a message for everyone via the shared chat doc. No push notification.
+    func deleteMessage(chatId: Id, messageId: Id) {
+        guard !messageId.isEmpty else { return }
+        #if DEBUG
+        if isFixture {
+            guard var list = messages[chatId] else { return }
+            list.removeAll { $0.id == messageId }
+            messages[chatId] = list
+            clearUnacked(chatId: chatId, messageId: messageId)
+            Haptics.pick()
+            return
+        }
+        #endif
+        guard let doc = docs[chatId] else { return }
+        do {
+            try doc.deleteMessage(messageId: messageId)
+            doc.commit()
+            clearUnacked(chatId: chatId, messageId: messageId)
+            Haptics.pick()
+        } catch {
+            notice = Notice(text: "Could not delete the message: \(error.localizedDescription)")
+        }
+    }
+
     /// Paint any room doc that already has rows but no published transcript yet
     /// (checkpoint landed, catch-up still in flight). Home search reads
     /// `messages`, so this must run when the search field becomes active.

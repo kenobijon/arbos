@@ -821,6 +821,11 @@ struct ChatView: View {
                                     }
                                 }
                                 Button { UIPasteboard.general.string = m_text(row) } label: { Label("Copy", systemImage: "doc.on.doc") }
+                                if canReact(to: row) {
+                                    Button(role: .destructive) {
+                                        model.deleteMessage(chatId: chatId, messageId: row.messageId)
+                                    } label: { Label("Delete", systemImage: "trash") }
+                                }
                             }
                     }
                     if model.isStreaming(chatId) || model.hasOpenSubagent(chatId) || model.isAwaitingReply(chatId) {

@@ -734,6 +734,29 @@ impl ChatDoc {
         Ok(())
     }
 
+    /// Client write: remove one message from the shared `messages` list (delete for
+    /// everyone). Does not commit. No-op when the id is missing. Peers see the
+    /// same list delete through normal room sync; callers must not announce.
+    pub fn delete_message(&self, msg_id: &str) -> CoreResult<()> {
+        if msg_id.is_empty() {
+            return Ok(());
+        }
+        let msgs = self.messages_list();
+        for i in 0..msgs.len() {
+            let Some(ValueOrContainer::Container(Container::Map(m))) = msgs.get(i) else {
+                continue;
+            };
+            let Some(ValueOrContainer::Value(LoroValue::String(s))) = m.get("id") else {
+                continue;
+            };
+            if s.as_str() == msg_id {
+                loro_err(msgs.delete(i, 1))?;
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+
     /// Client write: append a `commands` row. Does not commit. Returns the command id.
     /// Object payloads become a nested `LoroMap` (arrays → `LoroList`).
     pub fn push_command(&self, kind: &str, payload: Value, device_id: &str) -> String {
@@ -2026,6 +2049,33 @@ mod tests {
         doc.set_reaction("legacy", "👍", "user:x", false).unwrap();
         let row = &doc.to_json()["messages"][0];
         assert!(row.get("reactions").is_none());
+    }
+
+    #[test]
+    fn delete_message_removes_row_and_syncs() {
+        let a = ChatDoc::new(None, false);
+        let mut b = ChatDoc::new(None, false);
+        a.transact(|d| {
+            d.append_user_message("keep", "stay", "dev:a", &UserMessageOpts::default())
+                .unwrap();
+            d.append_user_message("gone", "bye", "dev:a", &UserMessageOpts::default())
+                .unwrap();
+        });
+        b.import(&a.snapshot()).unwrap();
+        assert_eq!(a.messages_list().len(), 2);
+        assert_eq!(b.messages_list().len(), 2);
+
+        let base = a.oplog_vv();
+        a.transact(|d| d.delete_message("gone").unwrap());
+        assert_eq!(a.messages_list().len(), 1);
+        assert_eq!(a.messages()[0].id, "keep");
+        assert!(a.message("gone").is_none());
+        a.delete_message("gone").unwrap(); // idempotent
+        a.delete_message("").unwrap();
+
+        b.import(&a.export_updates_since(&base)).unwrap();
+        assert_eq!(b.messages_list().len(), 1);
+        assert_eq!(b.messages()[0].id, "keep");
     }
 
     #[test]

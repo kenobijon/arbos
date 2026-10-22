@@ -668,6 +668,14 @@ impl ChatDoc {
             .map_err(write_err)
     }
 
+    /// Remove one message from the shared list (delete for everyone). Does not
+    /// commit. Callers must not announce — peers learn via room sync only.
+    pub fn delete_message(&self, message_id: String) -> Result<(), FfiError> {
+        self.lock_doc()
+            .delete_message(&message_id)
+            .map_err(write_err)
+    }
+
     /// Append a `commands` row. Does not commit. Returns the new command id.
     /// `payload_json` must be a JSON object.
     pub fn add_command(
@@ -917,6 +925,33 @@ mod tests {
         assert_eq!(parts[0]["attachment"]["ref"], "blob:1");
         assert_eq!(parts[1]["kind"], "text");
         assert_eq!(parts[1]["text"], "hello");
+    }
+
+    #[test]
+    fn delete_message_drops_row() {
+        let doc = ChatDoc::open();
+        doc.insert_user_message(
+            "keep".into(),
+            "stay".into(),
+            "dev".into(),
+            UserMessageOptsRecord::default(),
+        )
+        .unwrap();
+        doc.insert_user_message(
+            "gone".into(),
+            "bye".into(),
+            "dev".into(),
+            UserMessageOptsRecord::default(),
+        )
+        .unwrap();
+        doc.delete_message("gone".into()).unwrap();
+        doc.commit();
+        assert_eq!(doc.message_count(), 1);
+        let row: Value = serde_json::from_str(&doc.read_message_json(0).unwrap()).unwrap();
+        assert_eq!(row["id"], "keep");
+        doc.delete_message("gone".into()).unwrap();
+        doc.commit();
+        assert_eq!(doc.message_count(), 1);
     }
 
     #[test]

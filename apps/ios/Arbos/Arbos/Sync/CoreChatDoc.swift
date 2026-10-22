@@ -118,6 +118,11 @@ final class CoreChatDoc {
         try doc.toggleReaction(messageId: messageId, emoji: emoji, sender: sender)
     }
 
+    /// Remove a message for everyone. Does not commit. Do not announce.
+    func deleteMessage(messageId: Id) throws {
+        try doc.deleteMessage(messageId: messageId)
+    }
+
     /// Append a `commands` row (`send`, `stop`, `answer`, `retry`, `retitle`). Does not commit.
     func pushCommand(_ kind: String, payload: [String: Any], device: String) throws {
         let data = try JSONSerialization.data(withJSONObject: payload)
