@@ -8,6 +8,8 @@ enum DebugHooks {
     static var openChat: Id? { value("ARBOS_OPEN_CHAT") }
     /// D88: `<name or id>[:list|:home|:page|:page-settings|:#channel]` — land in a server (screenshot rig).
     static var openServer: String? { value("ARBOS_OPEN_SERVER") }
+    /// With `ARBOS_OPEN_SERVER=…:panel`: the server page's tab to land on (Channels | Members | Settings).
+    static var panelTab: String? { value("ARBOS_PANEL_TAB") }
     static var autoSend: String? { value("ARBOS_AUTO_SEND") }
     static var pairCode: String? { value("ARBOS_PAIR_CODE") }
     static var fixture: Bool { value("ARBOS_FIXTURE") == "1" }
