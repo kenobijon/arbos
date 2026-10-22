@@ -4456,9 +4456,16 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .await
                 {
                     Ok(v) => {
-                        let Some(chat) = v.get("chat").and_then(parse_chat) else {
-                            shared.notice("Relay returned no chat");
-                            return;
+                        let chat = match serde_json::from_value::<CreateChatResponseDto>(v) {
+                            Ok(dto) => chat_from_create(&dto),
+                            Err(err) => {
+                                log::warn!(
+                                    target: "arbos_mac::relay",
+                                    "CreateChatResponseDto (fork): {err}"
+                                );
+                                shared.notice("Relay returned no chat");
+                                return;
+                            }
                         };
                         shared.chats.lock().unwrap().push(chat.clone());
                         ensure_room(&shared, &project_id, &chat.id, &chat.id);
