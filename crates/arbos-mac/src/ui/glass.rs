@@ -6,8 +6,8 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui::{
-    div, prelude::*, px, Div, ElementId, FontWeight, InteractiveElement, MouseButton, SharedString,
-    Stateful, WindowControlArea,
+    div, prelude::*, px, Div, ElementId, FontWeight, InteractiveElement, MouseButton,
+    MouseDownEvent, MouseMoveEvent, Pixels, Point, SharedString, Stateful, WindowControlArea,
 };
 
 use crate::ui::frost::{frosted, MENU_BLUR, PANEL_BLUR};
@@ -21,32 +21,42 @@ use crate::ui::theme::{Theme, PANEL_RADIUS, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
 /// should pull) with this; a left-drag calls [`gpui::Window::start_window_move`].
 /// Interactive children should `cx.stop_propagation()` on mouse-down so a
 /// click on a button does not start a move.
+/// How far the pointer travels (pt) after a press before the window moves.
+/// A press that stays put is a click for whatever is under it (a bubble in
+/// the transcript's top fade), so the drag catchment can overlap content.
+pub const WINDOW_DRAG_SLOP: f32 = 4.0;
+
 pub trait WindowDrag: InteractiveElement + Sized {
     fn window_drag(self) -> Self {
-        let pending = Rc::new(Cell::new(false));
+        // The press position while a move is pending; None otherwise.
+        let pending: Rc<Cell<Option<Point<Pixels>>>> = Rc::new(Cell::new(None));
         self.window_control_area(WindowControlArea::Drag)
             .on_mouse_down(MouseButton::Left, {
                 let pending = pending.clone();
-                move |_, _, _| pending.set(true)
+                move |event: &MouseDownEvent, _, _| pending.set(Some(event.position))
             })
             .on_mouse_up(MouseButton::Left, {
                 let pending = pending.clone();
-                move |_, _, _| pending.set(false)
+                move |_, _, _| pending.set(None)
             })
             .on_mouse_up_out(MouseButton::Left, {
                 let pending = pending.clone();
-                move |_, _, _| pending.set(false)
+                move |_, _, _| pending.set(None)
             })
             .on_mouse_down_out({
                 let pending = pending.clone();
-                move |_, _, _| pending.set(false)
+                move |_, _, _| pending.set(None)
             })
             .on_mouse_move({
                 let pending = pending.clone();
-                move |_, window, _| {
-                    if pending.get() {
-                        pending.set(false);
-                        window.start_window_move();
+                move |event: &MouseMoveEvent, window, _| {
+                    if let Some(start) = pending.get() {
+                        let dx: f32 = (event.position.x - start.x).into();
+                        let dy: f32 = (event.position.y - start.y).into();
+                        if dx * dx + dy * dy >= WINDOW_DRAG_SLOP * WINDOW_DRAG_SLOP {
+                            pending.set(None);
+                            window.start_window_move();
+                        }
                     }
                 }
             })

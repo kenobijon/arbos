@@ -21,15 +21,18 @@ use crate::ui::groups;
 use crate::ui::icons::icon;
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
-use crate::ui::shell::Shell;
+use crate::ui::shell::{Shell, TRAFFIC_LIGHTS_INSET};
 use crate::ui::theme::{
     Theme, AVATAR_ROW, HEADER_HEIGHT, PANEL_RADIUS, SIDEBAR_WIDTH, TEXT_BODY, TEXT_SMALL, TEXT_TINY,
 };
 
-/// The drag strip beside the traffic lights (+, search, collapse on the right):
-/// Grok Mac's 44 pt top band, the same height as the chat header, with the
-/// controls centred on the traffic lights' line (22 pt)
-/// ([feedback mac-header-height-grok]).
+/// The drag strip beside the traffic lights: Grok Mac's 44 pt top band, the
+/// same height as the chat header ([feedback mac-header-height-grok]). The
+/// collapse control sits right of the lights — at the header toggle's exact
+/// spot, so folding the pane never moves it — and + / search keep the right
+/// end. Controls are centred on the lights' line: macOS draws them at 20.75 pt
+/// in this window, so the 44 band is centred 1 pt high (Grok: 21.75 / 21.75)
+/// ([feedback mac-collapsed-toggle-inline]).
 fn top_strip() -> f32 {
     if cfg!(target_os = "macos") {
         HEADER_HEIGHT
@@ -423,12 +426,14 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         .flex_shrink_0()
         .flex()
         .items_center()
-        .justify_end()
         .gap(px(2.0))
-        .px(px(12.0))
+        .pl(px(TRAFFIC_LIGHTS_INSET + 12.0))
+        .pr(px(12.0))
+        .pb(px(2.0))
+        .child(collapse)
+        .child(div().flex_1())
         .when(show_plus, |el| el.child(plus))
         .child(search_toggle)
-        .child(collapse)
         .window_drag();
     let search = div()
         .id("sidebar-search")

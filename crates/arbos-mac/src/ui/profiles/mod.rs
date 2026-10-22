@@ -106,13 +106,19 @@ pub(crate) fn pane_frame(
     let close = glass::circle("profile-close", 30.0, theme)
         .child(icon("xmark", 13.0, theme.text))
         .on_click(cx.listener(|this, _, window, cx| this.close_profile(window, cx)));
+    // An opaque bar the body scrolls under; once scrolled it shows its lower
+    // edge, so content passing beneath reads as behind a bar, not clipped by
+    // nothing (Jacob, Oct 21; [feedback mac-collapsed-toggle-inline]).
+    let scrolled = scroll.is_some_and(|h| f32::from(h.offset().y) < -0.5);
     let mut header = div()
         .h(px(crate::ui::theme::HEADER_HEIGHT))
         .flex_shrink_0()
         .flex()
         .items_center()
         .gap(px(6.0))
-        .px(px(10.0));
+        .px(px(10.0))
+        .bg(theme.card())
+        .when(scrolled, |el| el.border_b_1().border_color(theme.border));
     if let Some((title, back)) = back {
         header = header.child(back).child(
             div()
@@ -144,7 +150,10 @@ pub(crate) fn pane_frame(
                 .flex_1()
                 .min_h_0()
                 .overflow_y_scroll()
-                .when_some(scroll, |el, h| el.track_scroll(h)),
+                .when_some(scroll, |el, h| el.track_scroll(h))
+                // A wheel tick re-renders the pane so the bar's edge follows the
+                // scroll position (the handle alone does not notify).
+                .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify())),
         )
         .on_mouse_down(
             gpui::MouseButton::Left,

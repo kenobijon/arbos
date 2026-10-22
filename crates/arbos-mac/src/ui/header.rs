@@ -243,26 +243,22 @@ pub fn render(
 
     // ----- the bar: equal side slots keep the pill centred ---------------------
     let button = |id: &'static str, glyph: &str, on: bool, theme: &Theme| {
+        // The same 28 pt tile as the sidebar strip's collapse control, at the
+        // same spot (72 + 12 pt), so folding the pane swaps one for the other
+        // without a visible move ([feedback mac-collapsed-toggle-inline]).
+        let _ = on;
         div()
             .id(id)
-            .size(px(CONTROL))
+            .size(px(28.0))
             .flex_shrink_0()
-            .rounded(px(8.0))
+            .rounded(px(7.0))
             .flex()
             .items_center()
             .justify_center()
             .cursor_pointer()
-            .bg(if on {
-                theme.surface_2
-            } else {
-                gpui::transparent_black()
-            })
+            .bg(theme.surface_2)
             .hover(|s| s.bg(theme.surface_2))
-            .child(icon(
-                glyph,
-                17.0,
-                if on { theme.text } else { theme.text_muted },
-            ))
+            .child(icon(glyph, 17.0, theme.text))
             // The bar is a window-drag region; a control is not part of it.
             .on_mouse_down(
                 gpui::MouseButton::Left,
@@ -297,6 +293,9 @@ pub fn render(
         .gap(px(10.0))
         .pl(px(12.0))
         .pr(px(10.0))
+        // Centred on the traffic lights' line (20.75 pt in this window), like
+        // the sidebar strip ([feedback mac-collapsed-toggle-inline]).
+        .pb(px(2.0))
         // No hard hairline under the pill — the transcript's top edge fade
         // (iPhone Settings glass fade) softens the join instead.
         .window_drag()
@@ -314,6 +313,11 @@ pub fn render(
                 .min_w_0()
                 .flex()
                 .justify_center()
+                // Grok's pill sits 7 pt under the window edge (Jacob's
+                // reference, 2 px/pt: 14 px); ours sat at 4–5. The 6 pt top
+                // margin inside the 42 pt content box lands the 34 pt pill at
+                // 7–41 while the toggle stays on the lights' line.
+                .mt(px(6.0))
                 .child(pill.flex_shrink_0().max_w(px(460.0))),
         )
         .child(div().w(side).flex_shrink_0())
