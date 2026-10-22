@@ -329,6 +329,14 @@ Clients reconnect forever with exponential backoff (0.25 s → 16 s, reset after
 
 Auth: `Authorization: Bearer <device_token>` unless noted. Apps column: **Mac** = `arbos-mac` `relay.rs`; **iOS** = `RelayAPI.swift` (and related). Box-only routes are omitted unless a client also calls them.
 
+### Relay responses
+
+- Every relay response a client reads is a `Dto` in `crates/arbos-core/src/api.rs`. The relay serializes it. The Mac decodes it with serde (`sync/dto.rs` maps it onto model types), and iOS decodes it with `JSONDecoder`.
+- After you change a `Dto`, run `./scripts/gen-swift-types.sh` to regenerate `packages/ArbosFFI/Sources/ArbosFFI/RelayTypes.swift`.
+- The fixtures in `crates/arbos-relay/tests/fixtures/api` come from the relay's real handlers and builders (`api_fixture_capture.rs`). Both clients decode them in tests: `sync/dto.rs` on the Mac and `CoreFixturesTests.swift` on iOS.
+- Change a `Dto` only by addition, so older app builds keep decoding. A new field is optional. Never rename a field or change its type. Keep `null` and an absent key distinct where the relay already does.
+- Free-form JSON stays untyped on purpose: Matrix, error bodies, request bodies, connector `config`, action `args`, and goal plan and log.
+
 ### 9.1 Pairing and session
 
 | Method | Path | Body / response | Apps |
