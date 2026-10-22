@@ -174,6 +174,10 @@ FLEET_KEYS=(ARBOS_DEFAULT_PROVIDER ARBOS_LOCAL_BOX_IMAGE ARBOS_HOST_MAX_BOXES AR
   ARBOS_BOX_CPUS ARBOS_BOX_MEM_GB ARBOS_BOX_WORK_GB ARBOS_BOX_PIDS ARBOS_BOX_NETWORK ARBOS_BOX_DNS ARBOS_BOX_RUNTIME)
 MATRIX_KEYS=(ARBOS_MATRIX ARBOS_MATRIX_HS_URL ARBOS_MATRIX_SERVER_NAME ARBOS_MATRIX_AS_TOKEN_USERS ARBOS_MATRIX_HS_TOKEN_USERS
   ARBOS_MATRIX_AS_TOKEN_AGENTS ARBOS_MATRIX_HS_TOKEN_AGENTS ARBOS_MATRIX_AS_TOKEN_BRIDGES ARBOS_MATRIX_HS_TOKEN_BRIDGES)
+# Remote feature flags the apps read from the relay (no client release to flip): operator switches,
+# kept from the env file, never read from the vault. Unset = the relay's default (off).
+#   ARBOS_FEATURE_VAULT_CONNECT=1  shows "Connect a vault…" (1Password, D83 Phase 2) in the apps again.
+FEATURE_KEYS=(ARBOS_FEATURE_VAULT_CONNECT)
 if command -v op >/dev/null 2>&1 && [[ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]]; then
   for k in "${MATRIX_KEYS[@]:1}"; do
     [[ -n "${!k:-}" ]] || printf -v "$k" '%s' "$(opread "op://Arbos/Arbos Matrix/$k")"
@@ -182,7 +186,7 @@ fi
 # keep values already in the env file when nothing new was supplied
 if [[ -f "$ENV_FILE" ]]; then
   keep() { local k=$1; [[ -n "${!k:-}" ]] || printf -v "$k" '%s' "$(sed -n "s/^$k=//p" "$ENV_FILE" | head -1)"; }
-  for k in OPENROUTER_API_KEY OPENAI_API_KEY DAYTONA_API_KEY ARBOS_RELAY_ADMIN_TOKEN ARBOS_RELAY_KEY ARBOS_JWT_KEY ARBOS_GITHUB_CLIENT_ID ARBOS_GITHUB_CLIENT_SECRET ARBOS_DAYTONA_SNAPSHOT LIVEKIT_URL LIVEKIT_API_KEY LIVEKIT_API_SECRET "${MATRIX_KEYS[@]}" "${FLEET_KEYS[@]}"; do keep "$k"; done
+  for k in OPENROUTER_API_KEY OPENAI_API_KEY DAYTONA_API_KEY ARBOS_RELAY_ADMIN_TOKEN ARBOS_RELAY_KEY ARBOS_JWT_KEY ARBOS_GITHUB_CLIENT_ID ARBOS_GITHUB_CLIENT_SECRET ARBOS_DAYTONA_SNAPSHOT LIVEKIT_URL LIVEKIT_API_KEY LIVEKIT_API_SECRET "${MATRIX_KEYS[@]}" "${FLEET_KEYS[@]}" "${FEATURE_KEYS[@]}"; do keep "$k"; done
 fi
 [[ -n "${DAYTONA_API_KEY:-}" ]] || echo "WARNING: DAYTONA_API_KEY is empty — new projects will get process boxes"
 [[ -n "${OPENROUTER_API_KEY:-}${OPENAI_API_KEY:-}" ]] || echo "WARNING: no model provider key"
@@ -224,6 +228,10 @@ for k in "${FLEET_KEYS[@]}"; do
 done
 # Matrix (D88): only the keys that have a value; ARBOS_MATRIX unset means off.
 for k in "${MATRIX_KEYS[@]}"; do
+  [[ -z "${!k:-}" ]] || printf '%s=%s\n' "$k" "${!k}" >> "$ENV_FILE"
+done
+# Remote feature flags: only the keys that have a value; unset means the relay default.
+for k in "${FEATURE_KEYS[@]}"; do
   [[ -z "${!k:-}" ]] || printf '%s=%s\n' "$k" "${!k}" >> "$ENV_FILE"
 done
 chmod 0600 "$ENV_FILE"; chown root:root "$ENV_FILE"

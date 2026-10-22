@@ -801,7 +801,7 @@ fn after_access_change(state: &AppState, s: &Secret, a: &Access) {
 
 // ---- device: list, create, read, update, value, delete -----------------------------------------
 
-/// `GET /secrets` → `{ paused, vaults, secrets, requests_pending, requests, activity, providers }`.
+/// `GET /secrets` → `{ paused, vaults, secrets, requests_pending, requests, activity, providers, features }`.
 /// `requests` are the pending cards, so the Secrets root can show "Waiting for you" from one call.
 pub async fn list(State(state): State<AppState>, principal: Principal) -> ApiResult {
     let user_id = device_user(&principal)?;
@@ -835,6 +835,7 @@ pub async fn list(State(state): State<AppState>, principal: Principal) -> ApiRes
         "paused": settings.paused, "paused_at": settings.paused_at, "paused_by": settings.paused_by,
         "vaults": crate::vaults::list_json(&state, &user_id),
         "providers": crate::vaults::providers(&state),
+        "features": crate::vaults::features(),
         "secrets": secrets, "requests_pending": pending, "requests": pending_items, "activity": recent,
     }))
     .into_response())

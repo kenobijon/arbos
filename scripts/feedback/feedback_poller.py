@@ -69,7 +69,7 @@ CLI:  feedback_poller.py [run] | status | testers | set-cursor <ISO-8601>
       | gate-tree <sha-or-branch> <fid>…   (gate a hand-prepared integration tree as one run and land it whole)
       | gate-abort   (drop the active gate run without verdicts; every ready branch re-batches at its current head)
       | gate-next <fid>… [--then <fid>…] [--abort]   (pin: these items gate next and alone; while a pinned item is with its owner nothing else merges)
-      | gate-unpin <fid>…
+      | gate-unpin <fid>…   | unfail <fid>…   (a failed item whose fix is on main goes back to pushed)
 """
 
 from __future__ import annotations
@@ -580,6 +580,19 @@ class GitHub:
                 if len(lines) >= limit:
                     return lines
         return lines
+
+    def pending_run_containing(self, workflow: str, sha: str, since_iso: str) -> dict | None:
+        """A queued / in-progress run of `workflow` on main (started after `since_iso`) whose commit contains `sha`:
+        the build that will carry the fix is still in GitHub's runner queue, so waiting is right."""
+        for status in ("queued", "in_progress"):
+            q = urllib.parse.urlencode({"branch": "main", "status": status, "created": f">={since_iso}", "per_page": 20})
+            for r in self.repo_api("GET", f"/actions/workflows/{workflow}/runs?{q}").get("workflow_runs", []):
+                try:
+                    if self.compare(sha, r["head_sha"]).get("status") in ("ahead", "identical"):
+                        return r
+                except HttpError:
+                    continue
+        return None
 
     def later_ios_build(self, sha: str, since_iso: str) -> dict | None:
         return self.later_run("ios.yml", "push", sha, since_iso)
@@ -2345,6 +2358,16 @@ class Loop:
         if st.get("expects_ci") and not st.get("release_done") and ci and ci["status"] == "completed" and ci["conclusion"] == "success" \
                 and (rel is None or (rel["status"] == "completed" and rel["conclusion"] in ("cancelled", "skipped"))):
             later = self.gh.later_release(sha, since)
+            if not later:
+                # Auto-stable builds the bump on top of a target newer than the CI run that triggered it (the debounce
+                # lets main move), so the run's head_sha may not contain the fix although the published tag does
+                # (#1241: merged 01:19, run head 76222502 from 01:13, tag v0.6.103 at 02:29). The release itself is
+                # the evidence: the newest published stable tag that carries the commit.
+                tag_rel = next((r for r in self.gh.releases() if not r.get("draft") and re.fullmatch(r"v\d+\.\d+\.\d+", r.get("tag_name") or "")
+                                and (r.get("published_at") or "") >= since and self.gh.contains(r["tag_name"], sha)), None)
+                if tag_rel:
+                    later = {"head_sha": tag_rel["tag_name"], "html_url": tag_rel["html_url"], "status": "completed",
+                             "conclusion": "success", "updated_at": tag_rel["published_at"]}
             log(f"[{fid}] no Release for the commit; superseding edge release run: {later['head_sha'][:8] if later else 'none yet'}")
             if later:
                 rel = later
@@ -2418,6 +2441,20 @@ class Loop:
             self.ship(fid, st)
             return
         if waited > self.cfg.ship_timeout_min:
+            # The budget is for builds that never happen, not for GitHub's macos runner queue: when the iOS /
+            # Release run that will carry the fix is queued or running, keep waiting (02:55 Oct 22: #1252's iOS run
+            # sat 96 min in the queue and the item was failed although its code was on main and in v0.6.104).
+            pending = None
+            if st.get("expects_ios") and not st.get("ios_done"):
+                pending = self.gh.pending_run_containing("ios.yml", sha, since)
+            if pending is None and st.get("expects_ci") and not st.get("release_done"):
+                pending = self.gh.pending_run_containing("release.yml", sha, since) or self.gh.pending_run_containing("ci.yml", sha, since)
+            if pending:
+                if st.get("ship_wait_noted") != pending["html_url"]:
+                    st["ship_wait_noted"] = pending["html_url"]
+                    log(f"[{fid}] ship budget passed but the carrying run is still {pending['status']}: {pending['html_url']}; waiting")
+                self.store.save_state(fid, st)
+                return
             if st.get("expects_ios") and st.get("ios_done") and not st.get("testflight_ready_at") and self.adopt_later_testflight(fid, st, sha, since):
                 if mac_ok:
                     self.ship(fid, st)
@@ -2461,8 +2498,12 @@ class Loop:
         shared = any(f.startswith(("crates/arbos-core/", "crates/arbos-client/", "crates/arbos-ffi/")) for f in files)
         mac_files = shared or any(f.startswith("crates/arbos-mac/") or f.startswith("crates/arbos-update/") for f in files)
         ios_files = shared or any(f.startswith("apps/ios/") for f in files)
-        if st.get("testflight_build") or (ios_files and st.get("status") == "shipped"):
-            parts.append(f"TestFlight {st.get('testflight_build') or 'build'}")
+        if st.get("testflight_build"):
+            parts.append(f"TestFlight {st['testflight_build']}")
+        elif ios_files and st.get("status") == "shipped":
+            # The upload ran but Apple's build number was not resolved (#1224 closed as "TestFlight build"): name
+            # the run so the reader can find the build; the audit fills in the number.
+            parts.append(f"TestFlight (the build from {st.get('ios_run') or 'the iOS run on main'})")
         if mac_files or (st.get("edge_release") or "").startswith("edge-"):
             tag = None
             if commit:
@@ -3560,6 +3601,26 @@ def main(argv: list[str]) -> int:
             for fid in b:
                 loop.store.event(fid, "gate_next", by="operator", members=list(b))
         print("next gate batches: " + " → ".join(", ".join(b) for b in batches) + ("" if "--abort" in argv or not active else f" (after the active run {active['id']} settles)"))
+        return 0
+    if cmd == "unfail":
+        # `unfail <id>… [note]`: a `failed` item whose fix IS on main goes back to `pushed` (the ship checks resume);
+        # the needs-human label and the failure note are withdrawn on the issue.
+        ids = [a for a in argv[2:] if not a.startswith("--")]
+        for fid in ids:
+            st = loop.store.state(fid)
+            if not st or st.get("status") != "failed" or not st.get("commit"):
+                print(f"{fid}: not a failed item with a commit")
+                continue
+            why = st.pop("error", "")
+            st.pop("failed_at", None)
+            st["status"] = "pushed"
+            loop.store.save_state(fid, st)
+            loop.store.event(fid, "unfailed", by="operator", was=why[:200])
+            if st.get("issue"):
+                with contextlib.suppress(HttpError):
+                    loop.gh.comment(st["issue"], f"Not a failure after all: the fix `{st['commit'][:8]}` is on `main`; the build that carries it was still in the runner queue ({why.rstrip('.')}). Back to tracking the builds.")
+                    loop.gh.set_labels(st["issue"], [], ["needs-human"])
+            print(f"{fid}: back to pushed")
         return 0
     if cmd == "gate-unpin":
         # `gate-unpin <fid>…`: drop the owner-priority pin (the pool runs again if the item is with its owner).

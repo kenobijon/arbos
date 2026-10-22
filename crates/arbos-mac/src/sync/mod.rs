@@ -10,6 +10,7 @@
 pub mod credentials;
 pub mod diagnostics;
 pub mod doc;
+pub mod dto;
 pub mod fixture;
 pub mod relay;
 pub mod store;
@@ -333,6 +334,13 @@ pub enum ClientCommand {
         chat_id: Id,
         project_id: Id,
     },
+    /// Group pane "Add members": `POST /chats/{id}/members {handle}` per person,
+    /// `POST /chats/{id}/agents {project_id}` per agent, all on this group.
+    AddMembers {
+        chat_id: Id,
+        handles: Vec<String>,
+        agent_ids: Vec<Id>,
+    },
     /// `DELETE /chats/{id}/members/{user_id}` (chat owner).
     RemoveMember {
         chat_id: Id,
@@ -446,6 +454,15 @@ pub enum ClientCommand {
     NewChat {
         project_id: Id,
         chat_id: Id,
+    },
+    /// Session fork (#1257): a new chat of the same project seeded from
+    /// `source_chat_id` (`POST /projects/{id}/chats` with `fork_from`); `chat_id`
+    /// is the client's placeholder until `ChatCreated` brings the relay's.
+    ForkChat {
+        project_id: Id,
+        source_chat_id: Id,
+        chat_id: Id,
+        title: String,
     },
     /// F6: a group chat hosted by `project_id` with the other `participants`; `chat_id` is the
     /// client's placeholder until `ChatCreated` brings the relay's.

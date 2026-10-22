@@ -17,7 +17,6 @@ struct HomeView: View {
     /// relay has not answered for a few seconds (#929).
     @State private var offlineHint = false
     /// Own-agent Share sheet from the home long-press menu.
-    @State private var shareProject: Project? = nil
     /// Own-agent delete confirmation from the home long-press / swipe menu.
     @State private var deleteProject: Project? = nil
     /// People chat delete confirmation from the home long-press / swipe menu.
@@ -120,35 +119,17 @@ struct HomeView: View {
                                 }
                                 .buttonStyle(.borderless)
                                 .contextMenu {
-                                    // Long-press (Telegram / Grok): Pin, Fork, Archive,
-                                    // Share, Profile, Delete. People rows keep a smaller menu.
-                                    Button {
-                                        withAnimation {
-                                            if pinned { model.unpinHome(projectId: project.id) }
-                                            else { model.pinHome(projectId: project.id) }
-                                        }
-                                    } label: {
-                                        Label(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin")
-                                    }
+                                    // Long-press on an agent (Jacob, #1258): Fork (a new
+                                    // agent) and Delete only — the Mac sidebar menu's Mute,
+                                    // Fork, Delete without Mute, which the iPhone has no
+                                    // per-agent form of. Pin and Archive stay on the swipes,
+                                    // Profile is the chat header, Share is the chat's
+                                    // members sheet.
                                     if !project.shared {
                                         Button { model.duplicateProject(project) } label: {
                                             Label("Fork", systemImage: "arrow.triangle.branch")
                                         }
-                                    }
-                                    Button {
-                                        withAnimation { model.archive(project.id) }
-                                    } label: {
-                                        Label("Archive", systemImage: "archivebox")
-                                    }
-                                    if !project.shared {
-                                        Button { shareProject = project } label: {
-                                            Label("Share", systemImage: "person.2")
-                                        }
-                                    }
-                                    Button { model.showProfile(.agent(projectId: project.id)) } label: {
-                                        Label("Profile", systemImage: "person.crop.circle")
-                                    }
-                                    if !project.shared {
+                                        Divider()
                                         Button(role: .destructive) { deleteProject = project } label: {
                                             Label("Delete", systemImage: "trash")
                                         }
@@ -328,9 +309,6 @@ struct HomeView: View {
             }
             .sheet(isPresented: $showNewChat) {
                 NewChatSheet().environmentObject(model).environment(\.theme, theme)
-            }
-            .sheet(item: $shareProject) { project in
-                ProjectMembersSheet(project: project).environmentObject(model).environment(\.theme, theme)
             }
             .confirmationDialog(
                 "Delete \(deleteProject?.name ?? "this agent")?",

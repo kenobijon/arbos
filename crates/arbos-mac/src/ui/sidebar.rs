@@ -14,7 +14,7 @@ use gpui::{
 use crate::app::AppState;
 use crate::model::{Id, MachineState, Message, Project, Role, ServerInfo};
 use crate::ui::avatars;
-use crate::ui::composer::{Composer, Picker};
+use crate::ui::composer::Composer;
 use crate::ui::frost::edge_faded;
 use crate::ui::glass::{self, WindowDrag};
 use crate::ui::groups;
@@ -1322,10 +1322,10 @@ fn render_row(
         )
 }
 
-/// The right-click menu of a sidebar row (Grok Mac, ref 48): profile, mute,
-/// new chat, fork, delete — anchored at the click. For an agent it also
-/// carries what the header's "…" menu used to hold and nothing else offers
-/// yet: model, effort, share / members, "add to this chat", voice mode.
+/// The right-click menu of a sidebar row, anchored at the click. An agent
+/// row (Jacob, #1258): Mute, Fork, a divider, Delete — nothing else; its
+/// settings live on the agent pane. A people row: Profile, Mute, Delete; a
+/// group row: Delete group.
 pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
     let (space_id, at) = shell.row_menu.clone()?;
     let theme = Theme::of(cx).clone();
@@ -1336,9 +1336,6 @@ pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
     let can_fork = !is_people && !space.shared;
     let can_delete = is_people || !space.shared;
     let person = space.person().cloned();
-    let voice_mode = state.voice_mode;
-    let multi_chat = state.multi_chat;
-    let projects_count = state.projects.iter().filter(|p| !p.is_people()).count();
 
     let profile_id = space.id.clone();
     let profile_page = if is_people {
@@ -1361,7 +1358,6 @@ pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
         }
     };
     let mute_id = space.id.clone();
-    let chat_id = space.id.clone();
     let fork_id = space.id.clone();
     let delete_id = space.id.clone();
     let delete_people = is_people;
@@ -1474,27 +1470,24 @@ pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
                 .child(glass::frosted_menu(200.0, &theme, body)),
         );
     }
-    body = body.child(
-        glass::menu_row(
-            "row-menu-profile",
-            "person",
-            if is_people {
-                "Profile"
-            } else {
-                "Agent profile"
-            },
-            false,
-            &theme,
-        )
-        .on_click(cx.listener(move |this, _, _, cx| {
-            this.row_menu = None;
-            let (page, id) = (profile_page.clone(), profile_id.clone());
-            this.state.update(cx, |s, cx| {
-                s.select_project(id, cx);
-                s.open_profile(page, cx);
-            });
-        })),
-    );
+    // Jacob (#1258): an agent row's menu is Mute, Fork, a divider, Delete —
+    // nothing else. The profile is the header pill, New chat is the pill's
+    // "+", Model / Reasoning / Share / Add to this chat / Voice mode are rows
+    // on the agent pane. A people row keeps Profile.
+    if is_people {
+        body = body.child(
+            glass::menu_row("row-menu-profile", "person", "Profile", false, &theme).on_click(
+                cx.listener(move |this, _, _, cx| {
+                    this.row_menu = None;
+                    let (page, id) = (profile_page.clone(), profile_id.clone());
+                    this.state.update(cx, |s, cx| {
+                        s.select_project(id, cx);
+                        s.open_profile(page, cx);
+                    });
+                }),
+            ),
+        );
+    }
     body = body.child(
         glass::menu_row(
             "row-menu-mute",
@@ -1509,38 +1502,6 @@ pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
             this.state.update(cx, |s, cx| s.toggle_mute(id, cx));
         })),
     );
-    if !is_people {
-        body = body.child(glass::menu_divider(&theme)).child(
-            glass::menu_row(
-                "row-menu-new-chat",
-                "square-pencil",
-                "New chat",
-                false,
-                &theme,
-            )
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.row_menu = None;
-                let id = chat_id.clone();
-                this.state.update(cx, |s, cx| {
-                    s.select_project(id, cx);
-                    s.new_tab(cx);
-                });
-                Composer::focus(&this.composer, window, cx);
-            })),
-        );
-        body = agent_rows(
-            body,
-            &space,
-            voice_mode,
-            multi_chat,
-            projects_count,
-            &theme,
-            cx,
-        );
-    }
-    if can_fork || can_delete {
-        body = body.child(glass::menu_divider(&theme));
-    }
     if can_fork {
         body = body.child(
             glass::menu_row("row-menu-fork", "branch", "Fork", false, &theme).on_click(
@@ -1553,6 +1514,7 @@ pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
         );
     }
     if can_delete {
+        body = body.child(glass::menu_divider(&theme));
         body = body.child(
             glass::menu_row("row-menu-delete", "trash", "Delete", true, &theme).on_click(
                 cx.listener(|this, _, _, cx| {
@@ -1611,148 +1573,20 @@ pub(crate) fn confirm_button(
         .child(label)
 }
 
-/// The agent-only rows of `row_menu`: the former header "…" entries with no
-/// other home yet. Model and effort open the composer's pickers (the profile
-/// page is getting its own); share / members and "add a project" start the
-/// same flows the header did; voice mode is the global spoken-replies switch.
-fn agent_rows(
-    mut body: Div,
-    space: &Project,
-    voice_mode: bool,
-    multi_chat: bool,
-    projects_count: usize,
-    theme: &Theme,
-    cx: &mut Context<Shell>,
-) -> Div {
-    if !space.is_guest() {
-        let model_id = space.id.clone();
-        let effort_id = space.id.clone();
-        body = body
-            .child(glass::menu_divider(theme))
-            .child(
-                glass::menu_row(
-                    "row-menu-model",
-                    "cpu",
-                    format!("Model · {}", space.model),
-                    false,
-                    theme,
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.row_menu = None;
-                    let id = model_id.clone();
-                    this.state.update(cx, |s, cx| s.select_project(id, cx));
-                    this.composer.update(cx, |c, cx| {
-                        c.open_picker = Some(Picker::Model);
-                        cx.notify();
-                    });
-                })),
-            )
-            .child(
-                glass::menu_row(
-                    "row-menu-effort",
-                    "waveform",
-                    format!("Effort · {}", space.effort.label()),
-                    false,
-                    theme,
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.row_menu = None;
-                    let id = effort_id.clone();
-                    this.state.update(cx, |s, cx| s.select_project(id, cx));
-                    this.composer.update(cx, |c, cx| {
-                        c.open_picker = Some(Picker::Effort);
-                        cx.notify();
-                    });
-                })),
-            );
-        // Shared already: the members list; else the invite sheet.
-        let has_guests = space.guests().next().is_some();
-        let share_id = space.id.clone();
-        body = body.child(glass::menu_divider(theme)).child(
-            glass::menu_row(
-                "row-menu-share",
-                "person-plus",
-                if has_guests {
-                    "Members"
-                } else {
-                    "Share project…"
-                },
-                false,
-                theme,
-            )
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.row_menu = None;
-                let id = share_id.clone();
-                if has_guests {
-                    this.state.update(cx, |s, cx| s.select_project(id, cx));
-                    this.members_open = true;
-                    cx.notify();
-                } else {
-                    this.people_input.update(cx, |i, cx| i.clear(cx));
-                    this.state.update(cx, |s, cx| {
-                        s.select_project(id.clone(), cx);
-                        s.open_invite(id, cx);
-                    });
-                    let handle = this.people_input.read(cx).focus_handle(cx);
-                    window.focus(&handle, cx);
-                }
-            })),
-        );
-        if multi_chat && projects_count > 1 {
-            let group_id = space.id.clone();
-            body = body.child(
-                glass::menu_row(
-                    "row-menu-group",
-                    "people",
-                    "Add to this chat…",
-                    false,
-                    theme,
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.row_menu = None;
-                    let id = group_id.clone();
-                    this.state.update(cx, |s, cx| s.select_project(id, cx));
-                    this.set_group_picker(true, cx);
-                })),
-            );
-        }
-    } else {
-        let members_id = space.id.clone();
-        body = body.child(glass::menu_divider(theme)).child(
-            glass::menu_row("row-menu-members", "people", "Members", false, theme).on_click(
-                cx.listener(move |this, _, _, cx| {
-                    this.row_menu = None;
-                    let id = members_id.clone();
-                    this.state.update(cx, |s, cx| s.select_project(id, cx));
-                    this.members_open = true;
-                    cx.notify();
-                }),
-            ),
-        );
-    }
-    body.child(glass::menu_divider(theme)).child(
-        glass::menu_row(
-            "row-menu-voice-mode",
-            "mic",
-            if voice_mode {
-                "Voice mode · on"
-            } else {
-                "Voice mode · off"
-            },
-            false,
-            theme,
-        )
-        .on_click(cx.listener(|this, _, _, cx| {
-            this.row_menu = None;
-            this.voice.update(cx, |v, cx| v.toggle_voice_mode(cx));
-        })),
-    )
-}
+/// Width of the session row's context menu (`chat_menu`).
+pub(crate) const CHAT_MENU_WIDTH: f32 = 180.0;
 
-/// Right-click / control-click menu on a chat tab or an archived chat row:
-/// Fork (the agent) and Delete (archive, or permanently close when already archived).
-pub fn chat_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
-    let (chat_id, at) = shell.chat_menu.clone()?;
+/// Right-click / control-click menu of a session row in the header's tab
+/// dropdown (#1256): Rename, Fork and Delete (archive, or permanently close
+/// when already archived). The caller anchors it to the row; the dropdown
+/// stays open behind it with the row highlighted. Delete first swaps the
+/// menu for `Delete "title"?` with Cancel / Delete, so the session being
+/// removed is always named.
+pub fn chat_menu(
+    shell: &Shell,
+    chat_id: &str,
+    cx: &mut Context<Shell>,
+) -> Option<gpui::AnyElement> {
     let theme = Theme::of(cx).clone();
     let state = shell.state.read(cx);
     let chat = state
@@ -1763,17 +1597,78 @@ pub fn chat_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
         .clone();
     let project = state.project(&chat.project_id)?.clone();
     let archived = state.archived_chats.contains(&chat.id);
-    let can_fork = !project.shared && !project.is_people();
+    // Session fork (#1257): this chat again, inside the same agent. The
+    // agent-level fork lives on the sidebar's agent row only.
+    let can_fork =
+        state.multi_chat && crate::app::forked_chat(&chat, &project, String::new()).is_some();
     let can_delete = !chat.is_pinned;
-    let fork_id = project.id.clone();
+    let fork_id = chat.id.clone();
     let delete_id = chat.id.clone();
     let delete_archived = archived;
+    let title = crate::ui::header::tab_title(&chat, &project);
+
+    if shell.chat_delete_armed && can_delete {
+        let note = if archived {
+            "Removes this chat from Previous chats for good."
+        } else {
+            "Closes this chat. It moves to Previous chats."
+        };
+        let body = div()
+            .flex()
+            .flex_col()
+            .gap(px(10.0))
+            .p(px(8.0))
+            .child(
+                div()
+                    .text_size(px(TEXT_SMALL))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.text)
+                    .child(format!("Delete “{title}”?")),
+            )
+            .child(
+                div()
+                    .text_size(px(TEXT_TINY))
+                    .text_color(theme.text_muted)
+                    .child(note),
+            )
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap(px(6.0))
+                    .child(
+                        confirm_button("chat-menu-delete-cancel", "Cancel", false, &theme)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.chat_menu = None;
+                                this.chat_delete_armed = false;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        confirm_button("chat-menu-delete-go", "Delete", true, &theme).on_click(
+                            cx.listener(move |this, _, _, cx| {
+                                this.chat_menu = None;
+                                this.chat_delete_armed = false;
+                                let id = delete_id.clone();
+                                this.state.update(cx, |s, cx| {
+                                    if delete_archived {
+                                        s.delete_chat_tab(id, cx);
+                                    } else {
+                                        s.close_tab(id, cx);
+                                    }
+                                });
+                            }),
+                        ),
+                    ),
+            );
+        return Some(glass::frosted_menu(240.0, &theme, body).into_any_element());
+    }
 
     let mut body = div().flex().flex_col().gap(px(1.0));
     if !archived && !project.is_people() {
         // Rename: the inline field in the tab dropdown (also double-click there).
         let rename_id = chat.id.clone();
-        let rename_label = crate::ui::header::tab_title(&chat, &project);
+        let rename_label = title.clone();
         body = body.child(
             glass::menu_row("chat-menu-rename", "square-pencil", "Rename", false, &theme).on_click(
                 cx.listener(move |this, _, window, cx| {
@@ -1787,29 +1682,25 @@ pub fn chat_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
     if can_fork {
         body = body.child(
             glass::menu_row("chat-menu-fork", "branch", "Fork", false, &theme).on_click(
-                cx.listener(move |this, _, _, cx| {
+                cx.listener(move |this, _, window, cx| {
                     this.chat_menu = None;
                     this.tab_menu_open = false;
                     let id = fork_id.clone();
-                    this.state.update(cx, |s, cx| s.duplicate_project(id, cx));
+                    this.state.update(cx, |s, cx| s.fork_chat(id, cx));
+                    Composer::focus(&this.composer, window, cx);
                 }),
             ),
         );
     }
     if can_delete {
+        if can_fork || !archived {
+            body = body.child(glass::menu_divider(&theme));
+        }
         body = body.child(
             glass::menu_row("chat-menu-delete", "trash", "Delete", true, &theme).on_click(
-                cx.listener(move |this, _, _, cx| {
-                    this.chat_menu = None;
-                    this.tab_menu_open = false;
-                    let id = delete_id.clone();
-                    this.state.update(cx, |s, cx| {
-                        if delete_archived {
-                            s.delete_chat_tab(id, cx);
-                        } else {
-                            s.close_tab(id, cx);
-                        }
-                    });
+                cx.listener(|this, _, _, cx| {
+                    this.chat_delete_armed = true;
+                    cx.notify();
                 }),
             ),
         );
@@ -1817,12 +1708,5 @@ pub fn chat_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
     if !can_fork && !can_delete {
         return None;
     }
-    Some(
-        div()
-            .absolute()
-            .left(at.x)
-            .top(at.y)
-            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(glass::frosted_menu(180.0, &theme, body)),
-    )
+    Some(glass::frosted_menu(CHAT_MENU_WIDTH, &theme, body).into_any_element())
 }

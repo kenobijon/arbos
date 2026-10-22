@@ -61,12 +61,14 @@ struct Quote: Equatable, Hashable {
 
 enum RowKind: Equatable {
     case user(text: String, pending: Bool, quote: Quote?)
-    /// Another person's message in a people chat: left bubble with handle + avatar.
-    case other(text: String, handle: String, avatar: String?, quote: Quote?)
+    /// Another person's message in a people chat: left bubble with avatar; the name above
+    /// only when the sender changed (`named`, Grok Bot's group style).
+    case other(text: String, handle: String, avatar: String?, named: Bool, quote: Quote?)
     case assistant(blocks: [Block], live: Bool, caption: String?)
-    /// Shared agent in a people chat: same shape as `.other` (avatar + handle + bubble),
-    /// with an optional reply chip for the message it answers.
-    case member(blocks: [Block], live: Bool, handle: String, avatar: String?, replyHandle: String?, replyPreview: String?)
+    /// Shared agent in a people chat: same shape as `.other` (avatar + bubble, name on sender
+    /// change). No "answering @x · owned by @y" meta — ownership lives in the profile pane
+    /// (Jacob, 2026-10-22). `agentId` opens that pane from the avatar / name.
+    case member(blocks: [Block], live: Bool, handle: String, avatar: String?, named: Bool, agentId: String?)
     /// Centred muted line: hand-offs ("Messaged ◉ Affine"), stops, dates.
     case system(icon: String?, text: String, avatarProject: Id?)
     /// Grok Bot question card: bold question, × top-right, lettered answer rows.
@@ -102,6 +104,9 @@ enum Transcript {
     static func rows(_ messages: [Message], projectId: Id, subagentNames: [String: String] = [:], me: String? = nil, people: Bool = false, joins: [Join] = [], agentNames: [String: String] = [:]) -> [Row] {
         var rows: [Row] = []
         var lastAt: Int64 = 0
+        // Who spoke last: a name sits above a bubble only when the sender changed or a date
+        // line broke the run (Grok Bot's group style).
+        var prevSender: String? = nil
         var pendingJoins = joins.filter { $0.at > 0 && !$0.handle.isEmpty }.sorted { $0.at < $1.at }
 
         /// Emit join lines whose time is at or before `before` (or all remaining when `before` is nil).
@@ -130,6 +135,8 @@ enum Transcript {
             // a lone "Today 5:45 PM" in a blank chat.
             var chunk: [Row] = []
             let streaming = message.isStreaming
+            let dateBreak = message.createdAt > 0 && (lastAt == 0 || message.createdAt - lastAt > 3_600_000)
+            let named = dateBreak || prevSender != message.sender
             switch message.role {
             case .user:
                 var hasImage = false
@@ -150,7 +157,7 @@ enum Transcript {
                                          kind: .user(text: text, pending: message.pending, quote: quote)))
                     } else {
                         chunk.append(Row(id: "\(message.id)#other", messageId: message.id, role: .project,
-                                         kind: .other(text: text, handle: message.senderHandle ?? "someone", avatar: message.senderAvatar, quote: quote)))
+                                         kind: .other(text: text, handle: message.senderHandle ?? "someone", avatar: message.senderAvatar, named: named, quote: quote)))
                     }
                 }
             case .system:
@@ -174,16 +181,7 @@ enum Transcript {
                 }
                 let lastTextPart = message.parts.lastIndex { $0.textValue != nil }
                 let firstTextPart = message.parts.firstIndex { $0.textValue != nil }
-                let parent = message.inReplyTo.flatMap { id in messages.first { $0.id == id } }
-                let replyHandle = message.askedByHandle ?? parent?.senderHandle
-                let replyPreview: String? = {
-                    guard let parent else { return nil }
-                    let t = Self.stripAskedPrefix(parent.plainText)
-                        .trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard !t.isEmpty else { return nil }
-                    if t.count <= 80 { return t }
-                    return String(t.prefix(80)) + "…"
-                }()
+                let agentId: String? = message.sender.hasPrefix("agent:") ? String(message.sender.dropFirst(6)) : nil
                 // Error parts wait until the prose is known: under a real answer they stay the
                 // chip with Retry; on an answer with no words they become the words.
                 var errors: [(id: Id, code: String, text: String)] = []
@@ -199,12 +197,10 @@ enum Transcript {
                         if blocks.isEmpty { continue }
                         let live = streaming && pix == lastTextPart
                         if people, let h = message.senderHandle {
-                            let showReply = pix == firstTextPart
                             chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
                                              kind: .member(blocks: blocks, live: live, handle: h,
-                                                           avatar: message.senderAvatar,
-                                                           replyHandle: showReply ? replyHandle : nil,
-                                                           replyPreview: showReply ? replyPreview : nil)))
+                                                           avatar: message.senderAvatar, named: named && pix == firstTextPart,
+                                                           agentId: agentId)))
                         } else {
                             chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
                                              kind: .assistant(blocks: blocks, live: live, caption: nil)))
@@ -267,8 +263,7 @@ enum Transcript {
                     if people, let h = message.senderHandle {
                         chunk.append(Row(id: "\(message.id)#failed", messageId: message.id, role: .assistant,
                                          kind: .member(blocks: blocks, live: false, handle: h,
-                                                       avatar: message.senderAvatar,
-                                                       replyHandle: replyHandle, replyPreview: replyPreview)))
+                                                       avatar: message.senderAvatar, named: named, agentId: agentId)))
                     } else {
                         chunk.append(Row(id: "\(message.id)#failed", messageId: message.id, role: .assistant,
                                          kind: .assistant(blocks: blocks, live: false, caption: nil)))
@@ -292,12 +287,13 @@ enum Transcript {
             // Joins that happened before this message land first (Grok: "@bob joined").
             if message.createdAt > 0 { flushJoins(before: message.createdAt) }
             // Date separators when the gap is over an hour (Grok: "Today 8:00 AM").
-            if message.createdAt > 0 && (lastAt == 0 || message.createdAt - lastAt > 3_600_000) {
+            if dateBreak {
                 rows.append(Row(id: "\(message.id)#date", messageId: message.id, role: .system,
                                 kind: .system(icon: nil, text: dateLabel(message.createdAt), avatarProject: nil)))
             }
             if message.createdAt > 0 { lastAt = message.createdAt }
             rows.append(contentsOf: chunk)
+            prevSender = message.sender
         }
         // Agent added after the latest message (the usual "I just added Bob" case).
         flushJoins(before: nil)
@@ -739,7 +735,7 @@ struct RowView: View {
                 .frame(maxWidth: maxBubble, alignment: .trailing)
                 .opacity(pending ? 0.6 : 1)
             }
-        case .other(let text, let handle, let avatar, let quote):
+        case .other(let text, let handle, let avatar, let named, let quote):
             HStack(alignment: .bottom, spacing: 8) {
                 Button { model.openPersonProfile(handle: handle, avatarUrl: avatar, chatId: chatId) } label: {
                     PersonAvatar(url: avatar, handle: handle, size: 26, name: model.personName(handle: handle), id: model.personId(handle: handle))
@@ -747,10 +743,15 @@ struct RowView: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("@\(handle), profile")
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("@\(handle)")
-                        .font(theme.font(Theme.tiny, weight: .medium))
-                        .foregroundStyle(theme.muted)
-                        .padding(.leading, 4)
+                    if named {
+                        Button { model.openPersonProfile(handle: handle, avatarUrl: avatar, chatId: chatId) } label: {
+                            Text(model.personName(handle: handle) ?? "@\(handle)")
+                                .font(theme.font(Theme.tiny, weight: .medium))
+                                .foregroundStyle(theme.muted)
+                                .padding(.leading, 4)
+                        }
+                        .buttonStyle(.plain)
+                    }
                     VStack(alignment: .leading, spacing: 6) {
                         if let quote {
                             quoteHeader(quote, color: theme.text)
@@ -770,18 +771,26 @@ struct RowView: View {
                 Spacer(minLength: 0)
             }
             .task(id: avatar) { accents.load(url: avatar) }
-        case .member(let blocks, let live, let handle, let avatar, let replyHandle, let replyPreview):
+        case .member(let blocks, let live, let handle, let avatar, let named, let agentId):
+            let openMember = {
+                if let agentId { model.showProfile(.agent(projectId: agentId)) }
+                else { model.openPersonProfile(handle: handle, avatarUrl: avatar, chatId: chatId) }
+            }
             HStack(alignment: .bottom, spacing: 8) {
-                peopleAvatar(handle: handle, avatar: avatar)
+                Button(action: openMember) { peopleAvatar(handle: handle, avatar: avatar) }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("@\(handle), profile")
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("@\(handle)")
-                        .font(theme.font(Theme.tiny, weight: .medium))
-                        .foregroundStyle(theme.muted)
-                        .padding(.leading, 4)
-                    VStack(alignment: .leading, spacing: 8) {
-                        if let replyHandle {
-                            replyChip(handle: replyHandle, preview: replyPreview)
+                    if named {
+                        Button(action: openMember) {
+                            Text(memberProject(handle: handle)?.name ?? agentId.flatMap { model.foreignAgent($0)?.name } ?? "@\(handle)")
+                                .font(theme.font(Theme.tiny, weight: .medium))
+                                .foregroundStyle(theme.muted)
+                                .padding(.leading, 4)
                         }
+                        .buttonStyle(.plain)
+                    }
+                    VStack(alignment: .leading, spacing: 8) {
                         ForEach(Array(blocks.enumerated()), id: \.offset) { i, block in
                             BlockView(block: block, live: live && i == blocks.count - 1)
                         }
@@ -972,31 +981,6 @@ struct RowView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Replying to: \(quote.text)")
-    }
-
-    /// Compact reply reference above the prose (iMessage-style), not inline "@user asked:".
-    /// Accent bar is an overlay so a bare Shape cannot stretch the chip (and the bubble) vertically.
-    private func replyChip(handle: String, preview: String?) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("@\(handle)")
-                    .font(theme.font(Theme.tiny, weight: .semibold))
-                    .foregroundStyle(theme.muted)
-                if let preview, !preview.isEmpty {
-                    Text(preview)
-                        .font(theme.font(Theme.tiny))
-                        .foregroundStyle(theme.muted)
-                        .lineLimit(2)
-                }
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(.leading, 10)
-        .overlay(alignment: .leading) {
-            RoundedRectangle(cornerRadius: 1, style: .continuous)
-                .fill(theme.muted.opacity(0.55))
-                .frame(width: 2)
-        }
     }
 
     /// "Messaged \u{FFFC}Affine" / "6 messages with \u{FFFC}A, \u{FFFC}B and \u{FFFC}C":

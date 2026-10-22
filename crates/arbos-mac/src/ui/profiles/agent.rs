@@ -6,7 +6,7 @@
 //! the Grok bot page otherwise: no about, camera vision, secrets, or Media /
 //! Files / Links tabs. Owner and machine stay off this page.
 
-use gpui::{div, prelude::*, px, Context, Div, ElementId, SharedString, Stateful};
+use gpui::{div, prelude::*, px, Context, Div, ElementId, Focusable, SharedString, Stateful};
 
 use crate::app::AgentPick;
 use crate::model::{Id, MachineState, Project};
@@ -19,7 +19,7 @@ use crate::ui::sidebar::machine_dot;
 use crate::ui::theme::{Theme, TEXT_SMALL, TEXT_TINY};
 
 use super::kit::{self, Leading};
-use super::{card, editable_name, editable_picture, frame, hero, HeroClick, HERO_AVATAR};
+use super::{card, editable_name, editable_picture, hero, pushed_frame, HeroClick, HERO_AVATAR};
 
 /// An agent that is only known as a member of a people chat (someone else's
 /// project) is shown from that member entry.
@@ -218,6 +218,19 @@ pub(super) fn page(
             &theme,
         ));
     }
+    // Someone else's agent: who runs it (the "owned by" the transcript no longer carries).
+    if let Some(owner) = project
+        .owner_handle
+        .as_deref()
+        .filter(|o| !mine && !o.trim().is_empty())
+    {
+        info = info.child(kit::value_row(
+            "agent-owner-row",
+            "Owned by",
+            format!("@{}", owner.trim_start_matches('@')),
+            &theme,
+        ));
+    }
 
     // ----- appearance (avatar click): Automatic + the seven gradients ----------
     // Shown only while the picker is open so Avatar colour is not a permanent
@@ -252,20 +265,115 @@ pub(super) fn page(
             )
     });
 
+    // ----- settings (#1258, Jacob option b) ----------------------------------
+    // What the sidebar row's menu used to carry, now rows on the pane for my
+    // own agents: Share project… / Members, Add to this chat…, Voice mode.
+    let settings = mine.then(|| settings_card(shell, &project, &theme, cx));
+
     let body = div()
         .flex()
         .flex_col()
         .pb(px(16.0))
         .child(hero)
         .child(info)
-        .children(appearance);
+        .children(appearance)
+        .children(settings);
     // No "Edit" — click the avatar to change its colour; double-click the
     // name to rename. "Done" only while renaming.
     let done = (mine && renaming).then(|| {
         glass::sheet_button("profile-done", "Done", &theme)
             .on_click(cx.listener(|this, _, window, cx| this.finish_edit_agent(window, cx)))
     });
-    Some(frame(body, done, Some(&shell.profile_scroll), &theme, cx))
+    Some(pushed_frame(
+        &project.name,
+        body,
+        done,
+        Some(&shell.profile_scroll),
+        shell,
+        &theme,
+        cx,
+    ))
+}
+
+/// The owned agent's settings card: sharing (invite sheet, or the members
+/// list once it is shared), the agent-to-agent group picker when there is
+/// another agent to add, and the global spoken-replies switch.
+fn settings_card(shell: &Shell, project: &Project, theme: &Theme, cx: &mut Context<Shell>) -> Div {
+    let state = shell.state.read(cx);
+    let voice_mode = state.voice_mode;
+    let multi_chat = state.multi_chat;
+    let other_agents = state
+        .projects
+        .iter()
+        .filter(|p| !p.is_people() && p.id != project.id)
+        .count();
+    let guests = project.guests().count();
+    let has_guests = guests > 0;
+
+    let share_id = project.id.clone();
+    let mut card = card(theme).child(
+        kit::nav_row(
+            "agent-share",
+            "person-plus",
+            if has_guests {
+                "Members"
+            } else {
+                "Share project…"
+            },
+            has_guests.then(|| format!("{}", guests + 1)),
+            theme,
+        )
+        .on_click(cx.listener(move |this, _, window, cx| {
+            let id = share_id.clone();
+            if has_guests {
+                this.state.update(cx, |s, cx| s.select_project(id, cx));
+                this.members_open = true;
+                cx.notify();
+            } else {
+                this.people_input.update(cx, |i, cx| i.clear(cx));
+                this.state.update(cx, |s, cx| {
+                    s.select_project(id.clone(), cx);
+                    s.open_invite(id, cx);
+                });
+                let handle = this.people_input.read(cx).focus_handle(cx);
+                window.focus(&handle, cx);
+            }
+        })),
+    );
+    if multi_chat && other_agents > 0 {
+        let group_id = project.id.clone();
+        card = card.child(
+            kit::nav_row(
+                "agent-add-to-chat",
+                "people",
+                "Add to this chat…",
+                None,
+                theme,
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let id = group_id.clone();
+                this.state.update(cx, |s, cx| s.select_project(id, cx));
+                this.set_group_picker(true, cx);
+            })),
+        );
+    }
+    card.child(
+        kit::row(
+            "agent-voice-mode",
+            Leading::Tile("mic"),
+            "Voice mode",
+            Some("Spoken replies, every agent".into()),
+            None,
+            Some(glass::switch(voice_mode, theme).into_any_element()),
+            false,
+            theme,
+        )
+        .cursor_pointer()
+        .hover(|s| s.bg(theme.surface_2))
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.voice.update(cx, |v, cx| v.toggle_voice_mode(cx));
+        })),
+    )
 }
 
 fn colour_row(project: &Project, theme: &Theme, cx: &mut Context<Shell>) -> Div {

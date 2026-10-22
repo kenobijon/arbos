@@ -361,8 +361,7 @@ impl Shell {
                         .map(|(pref, id)| {
                             glass::segment(id, pref.label(), theme.pref == pref, &theme).on_click(
                                 cx.listener(move |this, _, _, cx| {
-                                    let s = Theme::of(cx).surface;
-                                    this.set_theme(pref, s, cx);
+                                    this.pick_appearance(pref, cx);
                                 }),
                             )
                         }),
@@ -382,8 +381,7 @@ impl Shell {
                                 &theme,
                             )
                             .on_click(cx.listener(|this, _, _, cx| {
-                                let a = Theme::of(cx).pref;
-                                this.set_theme(a, Surface::Matte, cx);
+                                this.pick_surface(Surface::Matte, cx);
                             })),
                         )
                         .child(
@@ -394,8 +392,7 @@ impl Shell {
                                 &theme,
                             )
                             .on_click(cx.listener(|this, _, _, cx| {
-                                let a = Theme::of(cx).pref;
-                                this.set_theme(a, Surface::Glass, cx);
+                                this.pick_surface(Surface::Glass, cx);
                             })),
                         ),
                     &theme,

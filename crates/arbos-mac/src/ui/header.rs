@@ -592,6 +592,9 @@ fn tab_segment(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Optio
 /// (archived) chats, a separator and New tab ⌘T.
 fn tab_dropdown(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> impl IntoElement {
     let theme = Theme::of(cx).clone();
+    // The session menu (#1256) hangs off its row; built here, placed by the
+    // row it belongs to.
+    let mut anchored_menu = anchored_chat_menu(shell, cx);
     let state = shell.state.read(cx);
     let multi_chat = state.multi_chat;
     let active = state.active_tab.get(&space.id).cloned();
@@ -621,12 +624,14 @@ fn tab_dropdown(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> impl
         let rename_id = chat.id.clone();
         let rename_label = title.clone();
         let key = chat.id.clone();
+        let menu_here = anchored_menu.as_ref().is_some_and(|(id, _)| id == &chat.id);
         let mut row = div()
             .id(ElementId::Name(SharedString::from(format!(
                 "tab-menu-{}",
                 chat.id
             ))))
             .group(SharedString::from(format!("tab-row-{key}")))
+            .relative()
             .flex()
             .items_center()
             .gap(px(10.0))
@@ -636,13 +641,16 @@ fn tab_dropdown(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> impl
             .rounded(px(9.0))
             .text_size(px(TEXT_SMALL))
             .text_color(theme.text)
-            .bg(if is_active {
+            .bg(if is_active || menu_here {
                 theme.surface_2
             } else {
                 gpui::transparent_black()
             })
             .cursor_pointer()
             .hover(|s| s.bg(theme.surface_2))
+            .when(menu_here, |el| {
+                el.children(anchored_menu.take().map(|(_, menu)| menu))
+            })
             .child(
                 div()
                     .w(px(14.0))
@@ -721,15 +729,13 @@ fn tab_dropdown(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> impl
             row = row.child(div().size(px(18.0)).flex_shrink_0());
         }
         row = row
-            // Right-click / control-click: the chat menu (Rename, Fork, Delete).
+            // Right-click / control-click: the session menu (Rename, Fork,
+            // Delete), anchored to this row; the dropdown stays open.
             .on_mouse_down(
                 gpui::MouseButton::Right,
-                cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
-                    this.tab_menu_open = false;
-                    this.row_menu = None;
-                    this.chat_menu = Some((menu_chat_id.clone(), event.position));
-                    cx.notify();
+                    this.open_chat_menu(menu_chat_id.clone(), cx);
                 }),
             )
             .on_mouse_down(
@@ -737,10 +743,7 @@ fn tab_dropdown(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> impl
                 cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
                     cx.stop_propagation();
                     if event.modifiers.control {
-                        this.tab_menu_open = false;
-                        this.row_menu = None;
-                        this.chat_menu = Some((ctrl_chat_id.clone(), event.position));
-                        cx.notify();
+                        this.open_chat_menu(ctrl_chat_id.clone(), cx);
                         return;
                     }
                     if event.click_count >= 2 && this.renaming_tab.as_ref() != Some(&rename_id) {
@@ -758,6 +761,7 @@ fn tab_dropdown(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> impl
                     }
                     this.tab_menu_open = false;
                     this.chat_menu = None;
+                    this.chat_delete_armed = false;
                     this.state.update(cx, |s, cx| s.select_tab(id.clone(), cx));
                     Composer::focus(&this.composer, window, cx);
                 }),
@@ -782,12 +786,15 @@ fn tab_dropdown(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> impl
         for chat in previous {
             let id = chat.id.clone();
             let menu_chat_id = chat.id.clone();
+            let ctrl_chat_id = chat.id.clone();
+            let menu_here = anchored_menu.as_ref().is_some_and(|(id, _)| id == &chat.id);
             list = list.child(
                 div()
                     .id(ElementId::Name(SharedString::from(format!(
                         "tab-menu-previous-{}",
                         chat.id
                     ))))
+                    .relative()
                     .flex()
                     .items_center()
                     .gap(px(10.0))
@@ -798,15 +805,25 @@ fn tab_dropdown(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> impl
                     .text_size(px(TEXT_SMALL))
                     .text_color(theme.text_muted)
                     .cursor_pointer()
+                    .when(menu_here, |el| {
+                        el.bg(theme.surface_2)
+                            .children(anchored_menu.take().map(|(_, menu)| menu))
+                    })
                     .hover(|s| s.bg(theme.surface_2))
                     .on_mouse_down(
                         gpui::MouseButton::Right,
+                        cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.open_chat_menu(menu_chat_id.clone(), cx);
+                        }),
+                    )
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
                         cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
                             cx.stop_propagation();
-                            this.tab_menu_open = false;
-                            this.row_menu = None;
-                            this.chat_menu = Some((menu_chat_id.clone(), event.position));
-                            cx.notify();
+                            if event.modifiers.control {
+                                this.open_chat_menu(ctrl_chat_id.clone(), cx);
+                            }
                         }),
                     )
                     .child(
@@ -823,12 +840,19 @@ fn tab_dropdown(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> impl
                             .text_color(theme.text_faint)
                             .child(crate::ui::sidebar::time_label(chat.last_message_at)),
                     )
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.tab_menu_open = false;
-                        let id = id.clone();
-                        this.state.update(cx, |s, cx| s.unarchive_chat(id, cx));
-                        Composer::focus(&this.composer, window, cx);
-                    })),
+                    .on_click(
+                        cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                            if event.modifiers().control {
+                                return;
+                            }
+                            this.tab_menu_open = false;
+                            this.chat_menu = None;
+                            this.chat_delete_armed = false;
+                            let id = id.clone();
+                            this.state.update(cx, |s, cx| s.unarchive_chat(id, cx));
+                            Composer::focus(&this.composer, window, cx);
+                        }),
+                    ),
             );
         }
         body = body.child(list);
@@ -849,7 +873,39 @@ fn tab_dropdown(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> impl
                 })),
         );
     }
-    glass::frosted_menu(280.0, &theme, body)
+    glass::frosted_menu(TAB_DROPDOWN_WIDTH, &theme, body)
+}
+
+/// The tab dropdown's card width and inner padding (`glass::menu_card`).
+const TAB_DROPDOWN_WIDTH: f32 = 280.0;
+const TAB_DROPDOWN_PAD: f32 = 6.0;
+
+/// The open session menu (#1256) as an element its row appends: an absolute
+/// wrapper at the row's right edge (taffy places it relative to the row), an
+/// anchored child that keeps it inside the window, deferred above the
+/// dropdown (priority 2 > the dropdown's 1) so it paints over the list and
+/// the chat. Returns the chat it belongs to, so the loops know which row.
+fn anchored_chat_menu(
+    shell: &Shell,
+    cx: &mut Context<Shell>,
+) -> Option<(crate::model::Id, AnyElement)> {
+    let chat_id = shell.chat_menu.clone()?;
+    let menu = sidebar::chat_menu(shell, &chat_id, cx)?;
+    let el = div()
+        .absolute()
+        .left(px(TAB_DROPDOWN_WIDTH - 2.0 * TAB_DROPDOWN_PAD - 6.0))
+        .top(px(-4.0))
+        .child(
+            deferred(
+                anchored()
+                    .position_mode(gpui::AnchoredPositionMode::Local)
+                    .snap_to_window_with_margin(Edges::all(px(8.0)))
+                    .child(glass::popover(menu)),
+            )
+            .with_priority(2),
+        )
+        .into_any_element();
+    Some((chat_id, el))
 }
 
 /// Nothing under the header any more (2026-10-20): agents of a DM or group
