@@ -584,7 +584,7 @@ fn new_group_body(
     busy: bool,
     error: Option<String>,
     add_to: Option<&crate::app::AddTarget>,
-    me_handle: &str,
+    _me_handle: &str,
     state: &Entity<AppState>,
     cx: &mut Context<Shell>,
 ) -> Stateful<Div> {
