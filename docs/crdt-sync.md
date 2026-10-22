@@ -115,11 +115,25 @@ commands:  List<Map { id, kind, payload, issuedBy, issuedAt, status }>
 
 **Reactions shape.** Writers store flat keys under `reactions` (`"👍|user:ken" → true`) so concurrent first reacts on the **same** emoji merge as map-key inserts. An empty `reactions` map is created with the message (`append_user_message`, `append_system_line`, `append_greeting`, `append_done_message`, `start_assistant_message`, `append_user_answer`, `append_system_note`) so peers do not race on creating that container. `set_reaction(..., on=false)` is a no-op when the `reactions` map is missing. UI / serde still see `emoji → { sender → true }` after `project_reactions` (also folds legacy nested emoji-bucket maps).
 
-**Pre-0.6.64 rows.** Message rows written before 0.6.64 have **no** `reactions` map. The first concurrent react on such a row can still lose one side’s container, because `set_reaction(..., on=true)` creates the map when it is missing — the same Loro create race as nested buckets.
+**Loro container create race.** When two peers concurrently `insert_container` under the **same** key, one container wins and the **losing container’s contents are dropped**. Do not rely on “usually survive” for nested bucket creates; the flat reaction keys avoid that race for same-emoji first-react on rows that already have an empty `reactions` map.
+
+**Legacy shapes readers accept.** Core (and the Swift client via `CoreChatDoc`) still read docs written by older builds. The committed snapshot `crates/arbos-core/fixtures/chat_doc_legacy.bin` (expected: `chat_doc_legacy_expected.json`) pins each shape so a later reader change cannot silently drop them:
+
+| Shape | Fixture row id |
+| --- | --- |
+| Old Swift-client user row (`chatId`, `pending`, `waitingUser: false`, empty `hiddenParts`, `replyTo`, `mentions`, nested `attachment`) | `msg-ios-user` |
+| Pre-0.6.64 row with **no** `reactions` map | `msg-no-reactions` |
+| `turn` as a plain string | `msg-turn-string` |
+| `turn` as a `{ "kind": … }` object | `msg-turn-object` |
+| Flat attachment part (no nested `attachment` wrapper) | `msg-flat-attach` |
+| Text part whose `text` is a plain string (not `LoroText`) | `msg-plain-text` |
+| Agent `status` (`waiting_user`) next to an open `question` part | `msg-status-question` |
+
+Nested emoji-bucket reactions (also pre-flat-key) are pinned on `msg-legacy-react` in `chat_doc.bin`. Mac placeholder rows (`chatId` / `pending` / `hiddenParts` on every message) are pinned in `mac_placeholder_rows.bin`.
+
+**Pre-0.6.64 rows.** Message rows written before 0.6.64 have **no** `reactions` map (see `msg-no-reactions` above). The first concurrent react on such a row can still lose one side’s container, because `set_reaction(..., on=true)` creates the map when it is missing — the same Loro create race as nested buckets.
 
 **Rollout (flat keys).** Builds before 0.6.64 do not understand flat `"emoji|sender"` keys. An older Mac drops the whole row: `Message.reactions` in `crates/arbos-mac/src/model.rs` is a strict nested map and `read_message` ends in `.ok()`. Older Swift client builds simply do not show those reactions.
-
-**Loro container create race.** When two peers concurrently `insert_container` under the **same** key, one container wins and the **losing container’s contents are dropped**. Do not rely on “usually survive” for nested bucket creates; the flat reaction keys avoid that race for same-emoji first-react on rows that already have an empty `reactions` map.
 
 **`callId` on system lines.** Core and Mac write optional `callId` (never `call_id`) on system lines. The Swift client ignores `callId` and renders the text only. The Mac fixture constructor still seeds `meta` for offline demos; relay-mode Mac does not write `meta` locally.
 

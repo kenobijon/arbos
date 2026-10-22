@@ -78,6 +78,27 @@ fn connect_enabled() -> bool {
 }
 
 /// `features.vault_connect`: may users connect new vaults on this relay.
+/// Push when a vault `op://` secret is requested (always carries `vault_id`).
+pub(crate) fn secret_request_push(
+    request_id: impl Into<String>,
+    project_id: impl Into<String>,
+    project_name: impl Into<String>,
+    name: impl Into<String>,
+    host: Option<String>,
+    use_kind: impl Into<String>,
+    vault_id: impl Into<String>,
+) -> PushEventDto {
+    PushEventDto::SecretRequest(SecretRequestPushPayloadDto {
+        request_id: request_id.into(),
+        project_id: project_id.into(),
+        project_name: project_name.into(),
+        name: name.into(),
+        host,
+        use_kind: use_kind.into(),
+        vault_id: Some(vault_id.into()),
+    })
+}
+
 pub(crate) fn vault_connect() -> bool {
     provider_enabled() && connect_enabled()
 }
@@ -1669,15 +1690,15 @@ pub(crate) async fn box_request(
         .unwrap_or_default();
     let _ = state.db.push_user_event(
         user_id,
-        &PushEventDto::SecretRequest(SecretRequestPushPayloadDto {
-            request_id: rq.id.clone(),
-            project_id: project_id.to_owned(),
-            project_name: agent,
-            name: short_ref(reference),
-            host: host.clone(),
-            use_kind: use_kind.to_owned(),
-            vault_id: Some(v.id.clone()),
-        }),
+        &secret_request_push(
+            rq.id.clone(),
+            project_id.to_owned(),
+            agent,
+            short_ref(reference),
+            host.clone(),
+            use_kind.to_owned(),
+            v.id.clone(),
+        ),
         None,
     );
     Ok((

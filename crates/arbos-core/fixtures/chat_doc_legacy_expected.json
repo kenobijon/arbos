@@ -1,0 +1,65 @@
+[
+  {
+    "answersQuestionId": null,
+    "greeting": null,
+    "hiddenCount": 0,
+    "id": "msg-ios-user",
+    "reactions": {},
+    "role": "user",
+    "text": "hello from ios"
+  },
+  {
+    "answersQuestionId": null,
+    "greeting": null,
+    "hiddenCount": 0,
+    "id": "msg-no-reactions",
+    "reactions": {},
+    "role": "user",
+    "text": "no reactions map"
+  },
+  {
+    "answersQuestionId": null,
+    "greeting": null,
+    "hiddenCount": 0,
+    "id": "msg-turn-string",
+    "reactions": {},
+    "role": "assistant",
+    "text": "turn was a string"
+  },
+  {
+    "answersQuestionId": null,
+    "greeting": null,
+    "hiddenCount": 0,
+    "id": "msg-turn-object",
+    "reactions": {},
+    "role": "assistant",
+    "text": "turn was an object"
+  },
+  {
+    "answersQuestionId": null,
+    "greeting": null,
+    "hiddenCount": 0,
+    "id": "msg-flat-attach",
+    "reactions": {},
+    "role": "user",
+    "text": "with flat attachment"
+  },
+  {
+    "answersQuestionId": null,
+    "greeting": null,
+    "hiddenCount": 0,
+    "id": "msg-plain-text",
+    "reactions": {},
+    "role": "assistant",
+    "text": "plain string text body"
+  },
+  {
+    "answersQuestionId": null,
+    "greeting": null,
+    "hiddenCount": 0,
+    "id": "msg-status-question",
+    "reactions": {},
+    "role": "assistant",
+    "text": ""
+  }
+]

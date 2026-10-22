@@ -2,9 +2,9 @@
 
 use std::path::PathBuf;
 
-use arbos_core::doc::{message_text, ChatDoc};
+use arbos_core::doc::{message_text, project_reactions, ChatDoc};
 use arbos_core::wire::{Ack, Frame, FrameType, Hello, PushHeader, RowHeader, State};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures")
@@ -59,6 +59,90 @@ fn fixtures_chat_doc_and_frames() {
     assert_eq!(expected[5]["reactions"]["🎉"]["user:legacy"], true);
 
     assert_frames();
+}
+
+/// Older shapes readers still accept (step 9b-1): Swift-client placeholders, no reactions
+/// map, turn string/object, flat attachment, plain-string text, status+question.
+#[test]
+fn fixtures_chat_doc_legacy_still_read() {
+    let mut doc = ChatDoc::new(Some(97), false);
+    doc.import(&load("chat_doc_legacy.bin")).unwrap();
+
+    let expected: Vec<Value> =
+        serde_json::from_slice(&load("chat_doc_legacy_expected.json")).unwrap();
+    let messages = doc.projected_rows();
+    assert_eq!(messages.len(), expected.len());
+    assert_eq!(expected.len(), 7);
+
+    for (i, exp) in expected.iter().enumerate() {
+        let json = &messages[i];
+        assert_eq!(json["id"], exp["id"], "row {i} id");
+        assert_eq!(json["role"], exp["role"], "row {i} role");
+        assert_eq!(message_text(json), exp["text"], "row {i} text");
+        let hidden_count = json
+            .get("hiddenParts")
+            .and_then(|h| h.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0);
+        assert_eq!(hidden_count, exp["hiddenCount"], "row {i} hiddenCount");
+        let got_reactions = json.get("reactions").cloned().unwrap_or(json!({}));
+        assert_eq!(got_reactions, exp["reactions"], "row {i} reactions");
+    }
+
+    assert_eq!(expected[0]["id"], "msg-ios-user");
+    assert_eq!(expected[0]["text"], "hello from ios");
+    let ios = &messages[0];
+    assert_eq!(ios["replyTo"], "m0");
+    assert_eq!(ios["mentions"][0], "agent:p1");
+    assert_eq!(ios["parts"][0]["attachment"]["name"], "pic.png");
+
+    assert_eq!(expected[1]["id"], "msg-no-reactions");
+    assert!(messages[1].get("reactions").is_none());
+
+    assert_eq!(messages[2]["turn"], "reply");
+    assert_eq!(messages[3]["turn"]["kind"], "reply");
+    assert_eq!(messages[4]["parts"][0]["name"], "flat.png");
+    assert!(messages[4]["parts"][0].get("attachment").is_none());
+    assert_eq!(expected[5]["text"], "plain string text body");
+    assert_eq!(messages[6]["parts"][0]["kind"], "question");
+    assert_eq!(messages[6]["parts"][1]["code"], "waiting_user");
+
+    // set_reaction on a pre-0.6.64 row (no map) creates the map; toggle off clears it.
+    doc.set_reaction("msg-no-reactions", "👍", "user:x", true)
+        .unwrap();
+    let mut row = doc.to_json()["messages"][1].clone();
+    project_reactions(&mut row);
+    assert_eq!(row["reactions"]["👍"]["user:x"], true);
+    doc.set_reaction("msg-no-reactions", "👍", "user:x", false)
+        .unwrap();
+    let mut row = doc.to_json()["messages"][1].clone();
+    project_reactions(&mut row);
+    let empty = row
+        .get("reactions")
+        .and_then(|r| r.as_object())
+        .map(|o| o.is_empty())
+        .unwrap_or(true);
+    assert!(empty, "toggle off clears the reaction");
+
+    // Nested emoji-bucket toggle (legacy reaction shape already in chat_doc.bin).
+    let mut nested = ChatDoc::new(Some(96), false);
+    nested.import(&load("chat_doc.bin")).unwrap();
+    let mut before = nested.to_json()["messages"][5].clone();
+    project_reactions(&mut before);
+    assert_eq!(before["reactions"]["🎉"]["user:legacy"], true);
+    nested
+        .set_reaction("msg-legacy-react", "🎉", "user:legacy", false)
+        .unwrap();
+    let mut after = nested.to_json()["messages"][5].clone();
+    project_reactions(&mut after);
+    let cleared = after
+        .get("reactions")
+        .and_then(|r| r.as_object())
+        .and_then(|o| o.get("🎉"))
+        .and_then(|b| b.as_object())
+        .map(|b| b.is_empty())
+        .unwrap_or(true);
+    assert!(cleared, "legacy nested reaction toggle clears the sender");
 }
 
 /// Rows written by the Mac fixture's old `insert_message` (full serde `Message`, with

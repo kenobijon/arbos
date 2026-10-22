@@ -36,13 +36,43 @@ final class CoreFixturesTests: XCTestCase {
         try JSONSerialization.jsonObject(with: apiFixtureData(name))
     }
 
-    private func expectedRows() throws -> [[String: Any]] {
-        let data = try fixtureData("chat_doc_expected.json")
+    private func expectedRows(_ name: String = "chat_doc_expected.json") throws -> [[String: Any]] {
+        let data = try fixtureData(name)
         let json = try JSONSerialization.jsonObject(with: data)
         guard let rows = json as? [[String: Any]] else {
             XCTFail("expected array"); return []
         }
         return rows
+    }
+
+    private func assertCoreChatDocRows(_ messages: [Message], expected: [[String: Any]], file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertEqual(messages.count, expected.count, file: file, line: line)
+        for (i, exp) in expected.enumerated() {
+            let msg = messages[i]
+            XCTAssertEqual(msg.id, exp["id"] as? String, "row \(i) id", file: file, line: line)
+            XCTAssertEqual(msg.role.rawValue, exp["role"] as? String, "row \(i) role", file: file, line: line)
+            XCTAssertEqual(msg.plainText, exp["text"] as? String ?? "", "row \(i) text", file: file, line: line)
+            XCTAssertEqual(msg.hiddenCount, exp["hiddenCount"] as? Int ?? 0, "row \(i) hiddenCount", file: file, line: line)
+            if let greeting = exp["greeting"] as? Bool {
+                XCTAssertEqual(msg.greeting, greeting, "row \(i) greeting", file: file, line: line)
+            }
+            if let qid = exp["answersQuestionId"] as? String {
+                // answersQuestionId is not a Message field; presence is enough via id/text.
+                XCTAssertFalse(qid.isEmpty, file: file, line: line)
+            }
+            if let reactions = exp["reactions"] as? [String: Any], !reactions.isEmpty {
+                XCTAssertFalse(msg.reactions.isEmpty, "row \(i) reactions", file: file, line: line)
+                for (emoji, people) in reactions {
+                    guard let people = people as? [String: Any] else { continue }
+                    let got = msg.reactions.first { $0.emoji == emoji }
+                    XCTAssertNotNil(got, "row \(i) missing emoji \(emoji)", file: file, line: line)
+                    for (sender, flag) in people {
+                        guard (flag as? Bool) == true else { continue }
+                        XCTAssertTrue(got?.senders.contains(sender) == true, "row \(i) \(emoji)/\(sender)", file: file, line: line)
+                    }
+                }
+            }
+        }
     }
 
     /// CoreChatDoc path: import the snapshot and compare shape.
@@ -52,35 +82,26 @@ final class CoreFixturesTests: XCTestCase {
         try doc.importUpdate(snap)
         let messages = doc.readAll()
         let expected = try expectedRows()
-        XCTAssertEqual(messages.count, expected.count)
-
-        for (i, exp) in expected.enumerated() {
-            let msg = messages[i]
-            XCTAssertEqual(msg.id, exp["id"] as? String, "row \(i) id")
-            XCTAssertEqual(msg.role.rawValue, exp["role"] as? String, "row \(i) role")
-            XCTAssertEqual(msg.plainText, exp["text"] as? String ?? "", "row \(i) text")
-            XCTAssertEqual(msg.hiddenCount, exp["hiddenCount"] as? Int ?? 0, "row \(i) hiddenCount")
-            if let greeting = exp["greeting"] as? Bool {
-                XCTAssertEqual(msg.greeting, greeting, "row \(i) greeting")
-            }
-            if let qid = exp["answersQuestionId"] as? String {
-                // answersQuestionId is not a Message field; presence is enough via id/text.
-                XCTAssertFalse(qid.isEmpty)
-            }
-            if let reactions = exp["reactions"] as? [String: Any], !reactions.isEmpty {
-                XCTAssertFalse(msg.reactions.isEmpty, "row \(i) reactions")
-                for (emoji, people) in reactions {
-                    guard let people = people as? [String: Any] else { continue }
-                    let got = msg.reactions.first { $0.emoji == emoji }
-                    XCTAssertNotNil(got, "row \(i) missing emoji \(emoji)")
-                    for (sender, flag) in people {
-                        guard (flag as? Bool) == true else { continue }
-                        XCTAssertTrue(got?.senders.contains(sender) == true, "row \(i) \(emoji)/\(sender)")
-                    }
-                }
-            }
-        }
+        assertCoreChatDocRows(messages, expected: expected)
         XCTAssertEqual(messages[1].hiddenCount, 1, "assistant fixture must expose one hidden tool part")
+    }
+
+    /// Older shapes (Swift placeholders, turn string/object, flat attachment, plain text,
+    /// status+question, no reactions map) still decode through CoreChatDoc.
+    func testCoreChatDocReadsLegacyFixture() throws {
+        let snap = try fixtureData("chat_doc_legacy.bin")
+        let doc = CoreChatDoc(key: "chat-legacy")
+        try doc.importUpdate(snap)
+        let messages = doc.readAll()
+        let expected = try expectedRows("chat_doc_legacy_expected.json")
+        assertCoreChatDocRows(messages, expected: expected)
+        XCTAssertEqual(messages.count, 7)
+        XCTAssertEqual(messages[0].id, "msg-ios-user")
+        XCTAssertEqual(messages[0].plainText, "hello from ios")
+        XCTAssertEqual(messages[0].replyTo, "m0")
+        XCTAssertEqual(messages[5].plainText, "plain string text body")
+        XCTAssertTrue(messages[6].parts.contains { if case .question(_, _) = $0 { return true }; return false })
+        XCTAssertTrue(messages[6].parts.contains { if case .status(_, let code, _) = $0 { return code == .askUser }; return false })
     }
 
     /// arbos-ffi path: same snapshot through UniFFI ChatDoc.readRowsJson.

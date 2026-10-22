@@ -352,6 +352,26 @@ fn push_user(state: &AppState, user_id: &str, event: PushEventDto) {
     let _ = state.db.push_user_event(user_id, &event, None);
 }
 
+/// Push when a project secret is requested (no `vault_id`; the secrets.rs form).
+pub(crate) fn secret_request_push(
+    request_id: impl Into<String>,
+    project_id: impl Into<String>,
+    project_name: impl Into<String>,
+    name: impl Into<String>,
+    host: Option<String>,
+    use_kind: impl Into<String>,
+) -> PushEventDto {
+    PushEventDto::SecretRequest(SecretRequestPushPayloadDto {
+        request_id: request_id.into(),
+        project_id: project_id.into(),
+        project_name: project_name.into(),
+        name: name.into(),
+        host,
+        use_kind: use_kind.into(),
+        vault_id: None,
+    })
+}
+
 // ---- JSON shapes (Dto builders; wire JSON unchanged) ------------------------------------------
 
 fn to_json<T: serde::Serialize>(v: T) -> Value {
@@ -2464,15 +2484,14 @@ pub async fn box_request(
     push_user(
         &state,
         &user_id,
-        PushEventDto::SecretRequest(SecretRequestPushPayloadDto {
-            request_id: rq.id.clone(),
-            project_id: project_id.clone(),
-            project_name: agent,
-            name: s.env.clone(),
-            host: host.clone(),
-            use_kind: use_kind.clone(),
-            vault_id: None,
-        }),
+        secret_request_push(
+            rq.id.clone(),
+            project_id.clone(),
+            agent,
+            s.env.clone(),
+            host.clone(),
+            use_kind.clone(),
+        ),
     );
     Ok((
         StatusCode::CREATED,
