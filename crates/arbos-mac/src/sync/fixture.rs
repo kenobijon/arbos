@@ -22,8 +22,8 @@ use tokio::sync::mpsc;
 use tokio::time::sleep;
 
 use crate::model::{
-    AgentMember, Call, CallEnded, CallKind, Machine, MachineState, Person, ProjectDocView,
-    ReplyPolicy, Sender, SpaceKind, ThreadInfo, Voice,
+    AgentMember, Call, CallEnded, CallKind, LinkState, Machine, MachineState, Person,
+    ProjectDocView, ReplyPolicy, Sender, SpaceKind, ThreadInfo, Voice,
 };
 
 use super::doc::ChatDoc;
@@ -203,6 +203,7 @@ impl SyncSource for FixtureSource {
             emit_secrets(&shared);
             emit_open_request(&shared);
             let _ = events.send(SyncEvent::Link(Link::Live));
+            emit_link_hook(&shared);
 
             loop {
                 tokio::select! {
@@ -219,6 +220,47 @@ impl SyncSource for FixtureSource {
             Ok(())
         })
     }
+}
+
+/// `ARBOS_LINK=offline|relay-down|reconnecting|syncing|restart-soon` puts every fixture room
+/// in that link state (the header's connection pill, [feedback
+/// connection-pill]); `ARBOS_LINK_CLEARS_MS=<ms>` sets them back to live after
+/// that long, so a rig can shoot the pill and then its clearing.
+fn emit_link_hook(shared: &Arc<Shared>) {
+    let Ok(spec) = std::env::var("ARBOS_LINK") else {
+        return;
+    };
+    let state = match spec.trim() {
+        "offline" => LinkState::Offline,
+        "relay-down" => LinkState::RelayDown,
+        "reconnecting" => LinkState::Reconnecting,
+        "syncing" => LinkState::Syncing,
+        "restart-soon" => LinkState::RestartSoon,
+        _ => return,
+    };
+    let keys: Vec<String> = shared.docs.lock().unwrap().keys().cloned().collect();
+    for key in &keys {
+        let _ = shared.events.send(SyncEvent::RoomLink {
+            key: key.clone(),
+            state,
+        });
+    }
+    let Some(clear_after) = std::env::var("ARBOS_LINK_CLEARS_MS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+    else {
+        return;
+    };
+    let events = shared.events.clone();
+    tokio::spawn(async move {
+        sleep(Duration::from_millis(clear_after)).await;
+        for key in keys {
+            let _ = events.send(SyncEvent::RoomLink {
+                key,
+                state: LinkState::Live,
+            });
+        }
+    });
 }
 
 /// `ARBOS_FIXTURE_OPEN=<project name or id>[/<chat id>]` opens that chat at

@@ -473,6 +473,7 @@ extension AppModel {
         matrixListener = nil
         matrixSnapshot = ArbosFFI.MatrixSnapshot(spaces: [], channels: [])
         matrixConnected = true
+        matrixDisconnectedSince = nil
         for id in channelRows.keys { caughtUp.remove(id) }
         channelRows = [:]
         channelAtStart = []
@@ -489,6 +490,12 @@ extension AppModel {
     }
 
     func applyMatrixConnection(connected: Bool, error: String?) {
+        if connected {
+            matrixDisconnectedSince = nil
+        } else if matrixConnected || matrixDisconnectedSince == nil {
+            matrixDisconnectedSince = Date()
+            scheduleLinkPillRepaint()
+        }
         matrixConnected = connected
         if let error, !connected {
             matrixLog.notice("matrix link down: \(error, privacy: .public)")

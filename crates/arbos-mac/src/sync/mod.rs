@@ -28,9 +28,9 @@ use crate::model::{
     Voice,
 };
 use crate::model::{
-    BoxState, ChannelsView, Chat, ConnectorsView, Effort, Id, Link, LocalView, Machine, Message,
-    NewSecret, Project, ProjectDocView, ProjectSecrets, Routine, RoutineRun, RoutineTrigger,
-    SecretsView, Skill,
+    BoxState, ChannelsView, Chat, ConnectorsView, Effort, Id, Link, LinkState, LocalView, Machine,
+    Message, NewSecret, Project, ProjectDocView, ProjectSecrets, Routine, RoutineRun,
+    RoutineTrigger, SecretsView, Skill,
 };
 
 /// Something the source learned; the UI applies it to its mirror.
@@ -214,8 +214,17 @@ pub enum SyncEvent {
     AttachmentSaved {
         path: PathBuf,
     },
-    /// Relay link state (S14).
+    /// Relay link state (S14), app-wide and coarse.
     Link(Link),
+    /// One room's socket state, keyed like `docs` (chat id, or the project id
+    /// for the project doc): what the chat header's status pill shows.
+    RoomLink {
+        key: Id,
+        state: LinkState,
+    },
+    /// What the relay's HTTP side says about reachability (the registry poll):
+    /// `Offline` / `RelayDown` while it fails, `Live` as soon as a call succeeds.
+    RelayLink(LinkState),
     /// Short user-facing notice (errors from HTTP calls, etc.).
     Notice(String),
     /// Settings → Connectors: catalog + connected accounts (F1).

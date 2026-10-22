@@ -15,7 +15,7 @@ use gpui::{
 use crate::app::SignInMode;
 use crate::app::{AppState, DetailsTarget, ProfilePage, ServerSheet};
 use crate::image_picker;
-use crate::model::{now_ms, CallKind, Link, MachineState};
+use crate::model::{now_ms, CallKind, LinkState, MachineState};
 use crate::ui::attachments;
 use crate::ui::avatars;
 use crate::ui::callview;
@@ -1823,10 +1823,80 @@ impl Shell {
 
     // ----- banners (S11–S14) ------------------------------------------
 
+    /// The connection pill under the header's name pill ([feedback
+    /// connection-pill], Jacob Oct 22): one small centred capsule — a status
+    /// dot and two words — for whatever is wrong with this chat's link
+    /// (offline > relay down > reconnecting > syncing), nothing when it is
+    /// fine. It replaced the full-width "Reconnecting…" strip and the
+    /// composer's "messages queue locally" line. Laid out as an overlay so
+    /// the header's 44 pt drag strip and its hit-tests (#1323) are untouched
+    /// and the list keeps running under the fade band.
+    fn render_link_pill(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let theme = Theme::of(cx).clone();
+        let state = self.state.read(cx);
+        let chat_id = state.active_chat_id();
+        let link = state.link_pill(chat_id.as_deref())?;
+        let label = link.label()?;
+        let dot = match link {
+            LinkState::Offline => theme.text_faint,
+            LinkState::RelayDown => theme.danger,
+            LinkState::Reconnecting | LinkState::RestartSoon => theme.warn,
+            LinkState::Syncing => theme.accent,
+            LinkState::Live => return None,
+        };
+        let pulsing = matches!(
+            link,
+            LinkState::Reconnecting | LinkState::Syncing | LinkState::RestartSoon
+        );
+        if pulsing {
+            PulseClock::request(cx);
+        }
+        let phase = if pulsing {
+            PulseClock::phase(cx, 1400)
+        } else {
+            1.0
+        };
+        Some(
+            div()
+                .absolute()
+                // Directly under the 34 pt name pill (7–41 pt in the bar).
+                .top(px(HEADER_HEIGHT + 3.0))
+                .left_0()
+                .right_0()
+                .flex()
+                .justify_center()
+                // A plain div (no id): nothing to hit, so the drag catchment
+                // and the list under it behave as if it were not there.
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .h(px(22.0))
+                        .pl(px(9.0))
+                        .pr(px(11.0))
+                        .rounded_full()
+                        .bg(theme.bubble_assistant)
+                        .child(
+                            div()
+                                .size(px(6.0))
+                                .rounded_full()
+                                .bg(Theme::with_alpha(dot, 0.55 + 0.45 * phase)),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(TEXT_TINY))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.text_muted)
+                                .child(label),
+                        ),
+                ),
+        )
+    }
+
     fn render_banner(&self, cx: &mut Context<Self>) -> Option<Div> {
         let theme = Theme::of(cx).clone();
         let state = self.state.read(cx);
-        let link = state.link;
         let machine = state.machine.clone();
         state.selected()?;
 
@@ -1842,14 +1912,6 @@ impl Shell {
                 .text_size(px(12.0))
                 .text_color(fg)
         };
-
-        if link == Link::Reconnecting {
-            return Some(
-                banner(theme.surface_1, theme.text_muted)
-                    .child(cards_spinner(&theme, cx))
-                    .child("Reconnecting… the transcript stays readable from your local replica."),
-            );
-        }
 
         match machine.shown_state() {
             MachineState::Waking => {
@@ -2081,6 +2143,7 @@ impl Shell {
             return column
                 .child(body)
                 .child(bottom)
+                .children(self.render_link_pill(cx))
                 .group("chat-drop")
                 .can_drop(|dragged, _, _| dragged.is::<ExternalPaths>())
                 .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
@@ -2320,6 +2383,7 @@ impl Shell {
                     .children(header_bar.take()),
             );
         }
+        column = column.children(self.render_link_pill(cx));
         // Accept Finder / file drops anywhere over the conversation (transcript,
         // empty hero, or composer) — not only the input field. The composer
         // field uses `group_drag_over("chat-drop")` for the accent highlight.
