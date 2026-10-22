@@ -235,7 +235,9 @@ pub async fn fire(
         .db
         .enqueue_push(&rt.project_id, "routine_run", &payload)?;
     tracing::info!(routine = %rt.id, run = %run.id, project = %rt.project_id, cause, "routine fired");
-    boxes::ensure_awake(state, &rt.project_id, "routine").await;
+    // The box belongs to the project's owner (D32), not to the project: waking by project id
+    // created phantom boxes for "users" that do not exist (lane-c / lane-d, 2026-10-22).
+    boxes::ensure_awake_project(state, &rt.project_id, "routine").await;
     Ok(run)
 }
 
