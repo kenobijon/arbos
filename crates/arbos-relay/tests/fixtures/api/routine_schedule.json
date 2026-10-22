@@ -1,0 +1,16 @@
+{
+  "chat_id": "chat_primary",
+  "created_at": 1700000000000,
+  "enabled": true,
+  "id": "routine_schedule_fixture",
+  "last_run_at": 1699913600000,
+  "name": "Weekday check-in",
+  "next_run_at": 1700086400000,
+  "project_id": "proj_fixture",
+  "prompt": "Review open goals.",
+  "trigger": {
+    "expr": "0 9 * * 1-5",
+    "kind": "cron",
+    "tz": "UTC"
+  }
+}

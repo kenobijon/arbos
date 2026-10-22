@@ -17,6 +17,7 @@ use croner::Cron;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use arbos_core::api::{FireRoutineResponseDto, RoutineDto, RoutineRunDto};
 use arbos_core::ids::{now_ms, ulid};
 use arbos_core::wire::BoxState;
 
@@ -333,20 +334,47 @@ pub async fn spawn_scheduler(state: AppState) {
 
 // ---- endpoints --------------------------------------------------------------------------------
 
-fn routine_json(state: &AppState, rt: &Routine) -> Value {
-    let mut v = serde_json::to_value(rt).unwrap_or_default();
-    if let Some(secret) = rt
+pub(crate) fn routine_dto(state: &AppState, rt: &Routine) -> RoutineDto {
+    let fire_url = rt
         .trigger
         .get("secret")
         .and_then(Value::as_str)
         .filter(|_| rt.trigger.get("kind").and_then(Value::as_str) == Some("webhook"))
-    {
-        v["fire_url"] = json!(format!(
-            "{}/routines/{}/fire?secret={secret}",
-            state.cfg.public_url, rt.id
-        ));
+        .map(|secret| {
+            format!(
+                "{}/routines/{}/fire?secret={secret}",
+                state.cfg.public_url, rt.id
+            )
+        });
+    RoutineDto {
+        id: rt.id.clone(),
+        project_id: rt.project_id.clone(),
+        chat_id: rt.chat_id.clone(),
+        name: rt.name.clone(),
+        prompt: rt.prompt.clone(),
+        trigger: rt.trigger.clone(),
+        enabled: rt.enabled,
+        created_at: rt.created_at,
+        last_run_at: rt.last_run_at,
+        next_run_at: rt.next_run_at,
+        fire_url,
     }
-    v
+}
+
+fn routine_json(state: &AppState, rt: &Routine) -> Value {
+    serde_json::to_value(routine_dto(state, rt)).expect("RoutineDto")
+}
+
+pub(crate) fn routine_run_dto(run: &RoutineRun) -> RoutineRunDto {
+    RoutineRunDto {
+        id: run.id.clone(),
+        routine_id: run.routine_id.clone(),
+        started_at: run.started_at,
+        finished_at: run.finished_at,
+        status: run.status.clone(),
+        message_id: run.message_id.clone(),
+        note: run.note.clone(),
+    }
 }
 
 fn authorize(
@@ -382,12 +410,12 @@ pub async fn list(
     Path(id): Path<String>,
 ) -> ApiResult {
     let project_id = authorize(&state, &principal, &id)?;
-    let out: Vec<Value> = state
+    let out: Vec<RoutineDto> = state
         .db
         .list_routines(&project_id)
         .map_err(internal)?
         .iter()
-        .map(|r| routine_json(&state, r))
+        .map(|r| routine_dto(&state, r))
         .collect();
     Ok(Json(out).into_response())
 }
@@ -536,7 +564,7 @@ pub async fn run_now(
         .db
         .mark_routine_fired(&rt.id, now_ms(), rt.next_run_at);
     let run = fire(&state, &rt, "manual", None).await.map_err(internal)?;
-    Ok((StatusCode::ACCEPTED, Json(run)).into_response())
+    Ok((StatusCode::ACCEPTED, Json(routine_run_dto(&run))).into_response())
 }
 
 #[derive(Deserialize)]
@@ -554,7 +582,14 @@ pub async fn runs(
     let project_id = authorize(&state, &principal, &id)?;
     load_routine(&state, &project_id, &rid)?;
     let limit = q.limit.unwrap_or(RUN_HISTORY_LIMIT).clamp(1, 200);
-    Ok(Json(state.db.routine_runs(&rid, limit).map_err(internal)?).into_response())
+    let runs: Vec<RoutineRunDto> = state
+        .db
+        .routine_runs(&rid, limit)
+        .map_err(internal)?
+        .iter()
+        .map(routine_run_dto)
+        .collect();
+    Ok(Json(runs).into_response())
 }
 
 #[derive(Deserialize)]
@@ -599,7 +634,7 @@ pub async fn report_run(
         .routine_run(&run_id)
         .map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "no such run".to_owned()))?;
-    Ok(Json(run).into_response())
+    Ok(Json(routine_run_dto(&run)).into_response())
 }
 
 #[derive(Deserialize)]
@@ -642,7 +677,11 @@ pub async fn webhook_fire(
     let run = fire(&state, &rt, "webhook", context)
         .await
         .map_err(internal)?;
-    Ok((StatusCode::ACCEPTED, Json(json!({ "run_id": run.id }))).into_response())
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(FireRoutineResponseDto { run_id: run.id }),
+    )
+        .into_response())
 }
 
 #[cfg(test)]
@@ -740,5 +779,86 @@ mod tests {
         assert!(Trigger::parse(&json!({ "kind": "event", "event": "box_awake" })).is_ok());
         let hook = Trigger::parse(&json!({ "kind": "webhook" })).unwrap();
         assert!(matches!(hook, Trigger::Webhook { ref secret } if !secret.is_empty()));
+    }
+
+    const FIXED_AT: i64 = 1_700_000_000_000;
+    /// Obviously fake; never a real webhook secret.
+    const FAKE_WEBHOOK_SECRET: &str = "fixture-webhook-secret-not-real";
+
+    fn fixtures_dir() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/api")
+    }
+
+    fn load_fixture(name: &str) -> Value {
+        let path = fixtures_dir().join(name);
+        let raw =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        serde_json::from_str(&raw).expect("fixture json")
+    }
+
+    fn assert_builder(name: &str, got: Value) {
+        let path = fixtures_dir().join(name);
+        if !path.exists() || std::env::var_os("UPDATE_API_FIXTURES").is_some() {
+            let pretty = serde_json::to_string_pretty(&got).expect("pretty");
+            std::fs::write(&path, format!("{pretty}\n")).expect("write fixture");
+        }
+        let want = load_fixture(name);
+        assert_eq!(got, want, "fixture {name}");
+    }
+
+    #[test]
+    fn routine_wire_fixtures() {
+        use crate::state::test_support::test_state;
+        use crate::state::AuthMode;
+
+        let state = test_state(AuthMode::Github);
+        let schedule = Routine {
+            id: "routine_schedule_fixture".into(),
+            project_id: "proj_fixture".into(),
+            chat_id: "chat_primary".into(),
+            name: "Weekday check-in".into(),
+            prompt: "Review open goals.".into(),
+            trigger: json!({
+                "kind": "cron",
+                "expr": "0 9 * * 1-5",
+                "tz": "UTC"
+            }),
+            enabled: true,
+            created_at: FIXED_AT,
+            last_run_at: Some(FIXED_AT - 86_400_000),
+            next_run_at: Some(FIXED_AT + 86_400_000),
+        };
+        assert_builder("routine_schedule.json", routine_json(&state, &schedule));
+
+        let webhook = Routine {
+            id: "routine_webhook_fixture".into(),
+            project_id: "proj_fixture".into(),
+            chat_id: "chat_primary".into(),
+            name: "Deploy hook".into(),
+            prompt: "A deploy finished; summarize.".into(),
+            trigger: json!({
+                "kind": "webhook",
+                "secret": FAKE_WEBHOOK_SECRET
+            }),
+            enabled: true,
+            created_at: FIXED_AT,
+            last_run_at: None,
+            next_run_at: None,
+        };
+        assert_builder("routine_webhook.json", routine_json(&state, &webhook));
+
+        let run = RoutineRun {
+            id: "run_fixture".into(),
+            routine_id: schedule.id.clone(),
+            started_at: FIXED_AT,
+            finished_at: Some(FIXED_AT + 5_000),
+            status: "done".into(),
+            message_id: Some("msg_fixture".into()),
+            note: None,
+        };
+        assert_builder(
+            "routine_run.json",
+            serde_json::to_value(routine_run_dto(&run)).expect("RoutineRunDto"),
+        );
     }
 }

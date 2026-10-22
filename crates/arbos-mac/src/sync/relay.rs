@@ -17,7 +17,7 @@ use arbos_core::api::{
     CallDto, CallEndedPayloadDto, CallEnvelopeDto, CallMissedPayloadDto, CallStartedPayloadDto,
     CreateChatResponseDto, GetProjectResponseDto, GroupDto, LeaveCallResponseDto, MachineStateDto,
     MachineStatusDto, MeResponseDto, MeUserResponseDto, PeopleChatDto, ProjectMembersDto,
-    StartCallResponseDto, UserCardDto, UsersPageDto,
+    RoutineDto, RoutineRunDto, StartCallResponseDto, UserCardDto, UsersPageDto,
 };
 use arbos_core::doc::{UserAttachment, UserMessageOpts};
 use arbos_core::wire::{BoxState as WireBox, PROJECT_DOC_CHAT_ID};
@@ -39,7 +39,7 @@ use super::diagnostics;
 use super::doc::ChatDoc;
 use super::dto::{
     account_view_from_me, apply_machine_status, chat_from_create, chat_from_dto,
-    chat_from_group_dto, people_space_from, project_from_dto,
+    chat_from_group_dto, people_space_from, project_from_dto, routine_from_dto,
 };
 use super::store::{self, Store};
 use super::{ClientCommand, SyncEvent, SyncSource};
@@ -5775,7 +5775,11 @@ async fn refresh_routines(shared: &Arc<Shared>, project_id: &str) {
         .await
     {
         Ok(v) => {
-            let routines: Vec<Routine> = serde_json::from_value(v).unwrap_or_default();
+            let routines: Vec<Routine> = serde_json::from_value::<Vec<RoutineDto>>(v)
+                .unwrap_or_default()
+                .iter()
+                .filter_map(routine_from_dto)
+                .collect();
             let _ = shared.events.send(SyncEvent::Routines {
                 project_id: project_id.to_string(),
                 routines,
@@ -5798,7 +5802,11 @@ async fn refresh_routine_runs(shared: &Arc<Shared>, project_id: &str, routine_id
         .await
     {
         Ok(v) => {
-            let runs: Vec<RoutineRun> = serde_json::from_value(v).unwrap_or_default();
+            let runs: Vec<RoutineRun> = serde_json::from_value::<Vec<RoutineRunDto>>(v)
+                .unwrap_or_default()
+                .iter()
+                .map(RoutineRun::from)
+                .collect();
             let _ = shared.events.send(SyncEvent::RoutineRuns {
                 routine_id: routine_id.to_string(),
                 runs,

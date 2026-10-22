@@ -1038,30 +1038,36 @@ struct GoalItem: Identifiable, Equatable {
         }
     }
 
+    /// Typed fields from `GoalDto`; `plan` / `progress_log` / linked ids from the raw dict
+    /// (those stay free-form and are `#[typeshare(skip)]` on the Dto).
+    init(dto: GoalDto, raw: [String: Any] = [:]) {
+        self.id = dto.id
+        self.projectId = dto.project_id
+        self.projectName = dto.project_name
+        self.chatId = dto.chat_id
+        self.title = dto.title
+        self.outcome = dto.outcome
+        self.plan = ((raw["plan"] as? [Any]) ?? []).compactMap(GoalStep.parse)
+        self.status = dto.status
+        self.progressLog = ((raw["progress_log"] as? [Any]) ?? []).compactMap(GoalLogEntry.parse)
+        self.nextStep = dto.next_step
+        self.checkInCron = dto.check_in_cron
+        self.checkInTz = dto.check_in_tz
+        self.routineId = dto.routine_id
+        self.autonomy = dto.autonomy
+        self.linkedChatIds = (raw["linked_chat_ids"] as? [Any])?.compactMap { $0 as? String } ?? []
+        self.linkedSubagentIds = (raw["linked_subagent_ids"] as? [Any])?.compactMap { $0 as? String } ?? []
+        self.waitingQuestion = dto.waiting_question
+        self.createdAt = dto.created_at
+        self.updatedAt = dto.updated_at
+        self.lastMovedAt = dto.last_moved_at
+    }
+
     static func parse(_ v: Any?) -> GoalItem? {
-        guard let m = v as? [String: Any], let id = DocJSON.str(m["id"]) else { return nil }
-        return GoalItem(
-            id: id,
-            projectId: DocJSON.str(m["project_id"]) ?? "",
-            projectName: DocJSON.str(m["project_name"]),
-            chatId: DocJSON.str(m["chat_id"]),
-            title: DocJSON.str(m["title"]) ?? id,
-            outcome: DocJSON.str(m["outcome"]) ?? "",
-            plan: ((m["plan"] as? [Any]) ?? []).compactMap(GoalStep.parse),
-            status: DocJSON.str(m["status"]) ?? "active",
-            progressLog: ((m["progress_log"] as? [Any]) ?? []).compactMap(GoalLogEntry.parse),
-            nextStep: DocJSON.str(m["next_step"]) ?? "",
-            checkInCron: DocJSON.str(m["check_in_cron"]),
-            checkInTz: DocJSON.str(m["check_in_tz"]) ?? "UTC",
-            routineId: DocJSON.str(m["routine_id"]),
-            autonomy: DocJSON.str(m["autonomy"]) ?? "ask",
-            linkedChatIds: (m["linked_chat_ids"] as? [Any])?.compactMap { $0 as? String } ?? [],
-            linkedSubagentIds: (m["linked_subagent_ids"] as? [Any])?.compactMap { $0 as? String } ?? [],
-            waitingQuestion: DocJSON.str(m["waiting_question"]),
-            createdAt: DocJSON.int(m["created_at"]) ?? 0,
-            updatedAt: DocJSON.int(m["updated_at"]) ?? 0,
-            lastMovedAt: DocJSON.int(m["last_moved_at"])
-        )
+        guard let v, JSONSerialization.isValidJSONObject(v),
+              let data = try? JSONSerialization.data(withJSONObject: v),
+              let dto = try? JSONDecoder().decode(GoalDto.self, from: data) else { return nil }
+        return GoalItem(dto: dto, raw: v as? [String: Any] ?? [:])
     }
 }
 

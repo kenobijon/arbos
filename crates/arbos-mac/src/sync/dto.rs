@@ -7,15 +7,16 @@
 use arbos_core::api::{
     AccountUserDto, CallDto, CallReachabilityDto, ChatDto, ChatMemberDto, CreateChatResponseDto,
     GetProjectResponseDto, GroupDto, MachineStatusDto, MeResponseDto, PeopleChatDto,
-    ProjectMemberDto, ProjectMembersDto, ProjectOwnerDto, SenderDto, UserCardDto,
+    ProjectMemberDto, ProjectMembersDto, ProjectOwnerDto, RoutineDto, RoutineRunDto, SenderDto,
+    UserCardDto,
 };
 use arbos_core::wire::BoxState as WireBox;
 use serde_json::Value;
 
 use crate::model::{
     AccountView, AgentMember, BoxState, Call, CallKind, Chat, ChatKind, Effort, Machine,
-    MachineState, Person, Project, ProjectMachine, Reachable, ReachableDevice, ReplyPolicy, Sender,
-    SpaceKind,
+    MachineState, Person, Project, ProjectMachine, Reachable, ReachableDevice, ReplyPolicy,
+    Routine, RoutineRun, RoutineRunStatus, RoutineTrigger, Sender, SpaceKind,
 };
 use crate::sync::credentials::AccountUser;
 
@@ -185,6 +186,40 @@ impl From<&CallReachabilityDto> for Reachable {
                     last_seen_at: d.last_seen_at.filter(|t| *t > 0).map(|t| t as u64),
                 })
                 .collect(),
+        }
+    }
+}
+
+/// `RoutineDto` → model; `trigger` stays free-form on the wire and becomes [`RoutineTrigger`].
+pub fn routine_from_dto(d: &RoutineDto) -> Option<Routine> {
+    let trigger: RoutineTrigger = serde_json::from_value(d.trigger.clone()).ok()?;
+    Some(Routine {
+        id: d.id.clone(),
+        project_id: d.project_id.clone(),
+        chat_id: d.chat_id.clone(),
+        name: d.name.clone(),
+        prompt: d.prompt.clone(),
+        trigger,
+        enabled: d.enabled,
+        created_at: d.created_at,
+        last_run_at: d.last_run_at,
+        next_run_at: d.next_run_at,
+        fire_url: d.fire_url.clone(),
+    })
+}
+
+impl From<&RoutineRunDto> for RoutineRun {
+    fn from(r: &RoutineRunDto) -> Self {
+        let status = serde_json::from_value(Value::String(r.status.clone()))
+            .unwrap_or(RoutineRunStatus::Other);
+        RoutineRun {
+            id: r.id.clone(),
+            routine_id: r.routine_id.clone(),
+            started_at: r.started_at,
+            finished_at: r.finished_at,
+            status,
+            message_id: r.message_id.clone(),
+            note: r.note.clone(),
         }
     }
 }
@@ -740,5 +775,39 @@ mod tests {
         let s = Sender::from(&started.sender);
         assert_eq!(s.id, "gh_201");
         assert_eq!(s.handle, "user201");
+    }
+
+    #[test]
+    fn routine_fixtures_into_model() {
+        let schedule: RoutineDto = load_json("routine_schedule.json");
+        let rt = routine_from_dto(&schedule).expect("schedule routine");
+        assert_eq!(rt.id, "routine_schedule_fixture");
+        assert_eq!(rt.name, "Weekday check-in");
+        assert!(matches!(
+            rt.trigger,
+            RoutineTrigger::Cron { ref expr, ref tz }
+                if expr == "0 9 * * 1-5" && tz == "UTC"
+        ));
+        assert!(rt.fire_url.is_none());
+
+        let webhook: RoutineDto = load_json("routine_webhook.json");
+        let rt = routine_from_dto(&webhook).expect("webhook routine");
+        assert_eq!(rt.id, "routine_webhook_fixture");
+        assert!(matches!(
+            rt.trigger,
+            RoutineTrigger::Webhook { ref secret }
+                if secret == "fixture-webhook-secret-not-real"
+        ));
+        assert!(rt
+            .fire_url
+            .as_deref()
+            .is_some_and(|u| u.contains("fixture-webhook-secret-not-real")));
+
+        let run: RoutineRunDto = load_json("routine_run.json");
+        let run = RoutineRun::from(&run);
+        assert_eq!(run.id, "run_fixture");
+        assert_eq!(run.routine_id, "routine_schedule_fixture");
+        assert_eq!(run.status, RoutineRunStatus::Done);
+        assert_eq!(run.message_id.as_deref(), Some("msg_fixture"));
     }
 }

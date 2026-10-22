@@ -1,0 +1,40 @@
+{
+  "autonomy": "suggest",
+  "chat_id": "chat_primary",
+  "check_in_cron": "0 9 * * 1-5",
+  "check_in_tz": "UTC",
+  "created_at": 1700000000000,
+  "id": "goal_fixture",
+  "last_moved_at": 1700000060000,
+  "linked_chat_ids": [
+    "chat_primary"
+  ],
+  "linked_subagent_ids": [],
+  "next_step": "Regenerate RelayTypes.swift",
+  "outcome": "Clients decode GoalDto",
+  "plan": [
+    {
+      "id": "step_1",
+      "status": "done",
+      "title": "Add GoalDto"
+    },
+    {
+      "id": "step_2",
+      "status": "doing",
+      "title": "Wire the relay"
+    }
+  ],
+  "progress_log": [
+    {
+      "at": 1700000000000,
+      "text": "Started the shared client core step."
+    }
+  ],
+  "project_id": "proj_fixture",
+  "project_name": "Fixture",
+  "routine_id": "routine_goal_checkin",
+  "status": "active",
+  "title": "Ship the DTO step",
+  "updated_at": 1700000060000,
+  "waiting_question": null
+}
