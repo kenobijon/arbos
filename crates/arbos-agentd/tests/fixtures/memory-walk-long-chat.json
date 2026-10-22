@@ -1,0 +1,72 @@
+{
+  "note": "Long single-chat recall set for D90 (tree.rs tests). One long chat whose early turns hold facts, followed by many turns on other work, then a recent fact. After a session compaction only the recent tail is still in the model's window; the walk must bring the early facts back when asked in that same chat, and must not pack what the window still holds. `t` is minutes before 'now'; gaps over 30 minutes split episodes.",
+  "chats": [
+    {
+      "id": "chat-launch",
+      "title": "Launch prep",
+      "leaves": [
+        { "t": 9000, "kind": "user", "role": "user", "text": "Let's plan the launch. First some context: my daughter's name is Mira and I am off on Wednesday afternoons for her swim class, so no meetings then." },
+        { "t": 8999, "kind": "assistant", "role": "assistant", "text": "Noted: Mira's swim class keeps Wednesday afternoons free of meetings." },
+        { "t": 8997, "kind": "user", "role": "user", "text": "The Stripe key lives in the env var STRIPE_LIVE_2026 on the relay host. Never print it." },
+        { "t": 8996, "kind": "assistant", "role": "assistant", "text": "Understood. STRIPE_LIVE_2026 holds the Stripe key; I will reference the variable, never its value." },
+        { "t": 8994, "kind": "user", "role": "user", "text": "Launch budget is $4,200 total, and our deploy window is Tuesdays 10:00 to 12:00 UTC." },
+        { "t": 8993, "kind": "assistant", "role": "assistant", "text": "Budget $4,200; deploys on Tuesdays between 10:00 and 12:00 UTC." },
+        { "t": 8991, "kind": "user", "role": "user", "text": "Also, the crash from yesterday: the bug was in parser.rs line 212, an off-by-one in the header loop. It is fixed on main." },
+        { "t": 8990, "kind": "assistant", "role": "assistant", "text": "Recorded: parser.rs line 212, off-by-one in the header loop, fixed on main." },
+        { "t": 8900, "kind": "user", "role": "user", "text": "Now the landing page copy. Draft a headline for the hero section." },
+        { "t": 8899, "kind": "assistant", "role": "assistant", "text": "Headline: \"Your agent, always on.\" Subline: \"Arbos runs your work while you sleep and reports back in plain words.\"" },
+        { "t": 8897, "kind": "user", "role": "user", "text": "Shorter subline please, and no sleep metaphor." },
+        { "t": 8896, "kind": "assistant", "role": "assistant", "text": "Subline: \"Arbos does the work and reports back in plain words.\"" },
+        { "t": 8894, "kind": "user", "role": "user", "text": "Good. Three bullet points for the features section." },
+        { "t": 8893, "kind": "assistant", "role": "assistant", "text": "1. Runs in its own sandbox. 2. Remembers every chat. 3. Talks like a colleague, not a console." },
+        { "t": 8891, "kind": "user", "role": "user", "text": "Swap bullet two for something about tools." },
+        { "t": 8890, "kind": "assistant", "role": "assistant", "text": "2. Uses the browser, the shell and your files on its own." },
+        { "t": 8800, "kind": "user", "role": "user", "text": "Design review notes: the chat header is too tall on Mac, the sidebar icons are mixed weights, the composer border is one pixel off." },
+        { "t": 8799, "kind": "assistant", "role": "assistant", "text": "Three items filed: header height, icon weights, composer border." },
+        { "t": 8797, "kind": "user", "role": "user", "text": "Add a fourth: the unread dot should be the accent colour." },
+        { "t": 8796, "kind": "assistant", "role": "assistant", "text": "Added: unread dot in the accent colour." },
+        { "t": 8794, "kind": "user", "role": "user", "text": "Which of the four is quickest?" },
+        { "t": 8793, "kind": "assistant", "role": "assistant", "text": "The composer border: one constant in the stylesheet." },
+        { "t": 8700, "kind": "user", "role": "user", "text": "Let's talk pricing tiers. Free, Pro, Team. Pro at $20 a month." },
+        { "t": 8699, "kind": "assistant", "role": "assistant", "text": "Free: one agent. Pro $20: five agents, priority models. Team: per seat, shared agents." },
+        { "t": 8697, "kind": "user", "role": "user", "text": "Team at $15 a seat with a five-seat minimum." },
+        { "t": 8696, "kind": "assistant", "role": "assistant", "text": "Team: $15 per seat, minimum five seats ($75 a month floor)." },
+        { "t": 8694, "kind": "user", "role": "user", "text": "Write the FAQ answer for 'can I cancel any time?'" },
+        { "t": 8693, "kind": "assistant", "role": "assistant", "text": "Yes. Cancel from Settings at any time; access continues to the end of the paid period." },
+        { "t": 8600, "kind": "user", "role": "user", "text": "Onboarding flow: sign in with GitHub, pick a name for the agent, say hello. Anything missing?" },
+        { "t": 8599, "kind": "assistant", "role": "assistant", "text": "A one-line explanation of what the sandbox is, before the first message." },
+        { "t": 8597, "kind": "user", "role": "user", "text": "Draft that line." },
+        { "t": 8596, "kind": "assistant", "role": "assistant", "text": "\"Your agent gets its own computer. Everything it does happens there, not on yours.\"" },
+        { "t": 8594, "kind": "user", "role": "user", "text": "Perfect." },
+        { "t": 8593, "kind": "assistant", "role": "assistant", "text": "Added to the onboarding copy." },
+        { "t": 8500, "kind": "user", "role": "user", "text": "Status page: which checks should it show?" },
+        { "t": 8499, "kind": "assistant", "role": "assistant", "text": "Relay health, model proxy latency, sandbox host capacity, and the last deploy time." },
+        { "t": 8497, "kind": "user", "role": "user", "text": "Add TestFlight build number." },
+        { "t": 8496, "kind": "assistant", "role": "assistant", "text": "Added: current TestFlight build." },
+        { "t": 60, "kind": "user", "role": "user", "text": "New item: the nightly CSV import job. Let's name it ledger-sync and run it at 03:00 UTC." },
+        { "t": 59, "kind": "assistant", "role": "assistant", "text": "The CSV import job is ledger-sync, scheduled 03:00 UTC." },
+        { "t": 57, "kind": "user", "role": "user", "text": "It should skip rows with an empty amount column." },
+        { "t": 56, "kind": "assistant", "role": "assistant", "text": "ledger-sync will skip rows whose amount column is empty." },
+        { "t": 54, "kind": "user", "role": "user", "text": "And log the count of skipped rows." },
+        { "t": 53, "kind": "assistant", "role": "assistant", "text": "It will log how many rows it skipped on each run." }
+      ]
+    },
+    {
+      "id": "chat-side",
+      "title": "Side notes",
+      "leaves": [
+        { "t": 5000, "kind": "user", "role": "user", "text": "Reminder: the office wifi password changes on the first of each month." },
+        { "t": 4999, "kind": "assistant", "role": "assistant", "text": "Noted: wifi password rotates on the 1st." }
+      ]
+    }
+  ],
+  "cases": [
+    { "id": "daughter", "from": "chat-launch", "query": "What's my daughter's name?", "gold": ["Mira"] },
+    { "id": "stripe", "from": "chat-launch", "query": "Which env var holds the Stripe key?", "gold": ["STRIPE_LIVE_2026"] },
+    { "id": "budget", "from": "chat-launch", "query": "What is the launch budget?", "gold": ["$4,200"] },
+    { "id": "window", "from": "chat-launch", "query": "When is our deploy window?", "gold": ["Tuesdays 10:00 to 12:00 UTC"] },
+    { "id": "parser", "from": "chat-launch", "query": "Where was the parser bug?", "gold": ["parser.rs line 212"] },
+    { "id": "pricing", "from": "chat-launch", "query": "How much is the Team tier per seat?", "gold": ["$15 per seat"] },
+    { "id": "csv-recent", "from": "chat-launch", "query": "What did we name the CSV import job?", "gold": [], "still_in_window": ["ledger-sync"] }
+  ]
+}

@@ -853,6 +853,27 @@ const RESEARCH_SECTION: &str = "## Unknown services, APIs and tools\n\nWhen the 
 /// (observed: `tools.arbos_submit_feedback` TypeErrors). Off: the prompt is unchanged byte for byte.
 pub const CODE_MODE_SECTION: &str = "## Code mode\n\n`codemode` runs a JavaScript program that calls your tools as async functions; only what the program prints or returns reaches you. Use one program instead of a chain of separate calls whenever the next step does not depend on your reading the previous result: read several files at once (`Promise.all`), run a search and the reads it points to, run the tests and keep only the failures, call several `arbos` tools together. Filter in code and return only what you need (counts, matching lines, the first rows, a short summary), never the raw output. Direct `read`/`bash`/`edit`/`write` calls remain right for a single step, and for an edit you must see first.\n\nNames inside a program: `tools.read({path})`, `tools.bash({command})` (resolves to `{output, exit_code}`), `tools.edit({path, edits: [{oldText, newText}]})`, `tools.write({path, content})`; every `arbos` project tool is `tools.mcp__arbos__<name>(args)`, for example `tools.mcp__arbos__web_search({query})`, `tools.mcp__arbos__web_fetch({url})`, `tools.mcp__arbos__context_search({query})`, `tools.mcp__arbos__history_search({query})`, `tools.mcp__arbos__secrets_list({})`, `tools.mcp__arbos__egress({url, method, headers, body})`, `tools.mcp__arbos__deliver_file({path, title})`, `tools.mcp__arbos__routines_create({...})`, `tools.mcp__arbos__remember({name, value})`, `tools.mcp__arbos__recall({name})`, `tools.mcp__arbos__submit_feedback({description})`. `await describeTool(\"mcp__arbos__<name>\")` shows a tool's arguments; `await searchTools(\"...\")` finds the rest. Never call `route`, `ask_user` or `send_message` from a program: those are direct calls only, and a program that tries is refused. A program has exactly your permissions: the deny-list, approval cards, secret placeholders and spending rules apply to every call it makes, and a refused call rejects with the reason. A program stops after 15 minutes; when one does, say so in one sentence and continue in smaller steps.\n";
 
+/// Context size of one model call as pi counts it: `totalTokens`, else input + output + cache
+/// read + cache write.
+fn context_tokens(usage: &Value) -> i64 {
+    let total = usage
+        .get("totalTokens")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    if total > 0 {
+        return total;
+    }
+    ["input", "output", "cacheRead", "cacheWrite"]
+        .iter()
+        .map(|k| usage.get(*k).and_then(Value::as_i64).unwrap_or(0))
+        .sum()
+}
+
+/// What the rolling summary must keep when agentd compacts a chat (D90). Anything it drops is
+/// still one memory walk away, but facts the user stated and the thread of the current task
+/// should not need a lookup.
+const SOFT_COMPACTION_INSTRUCTIONS: &str = "Keep, exactly as written, every fact the user stated about themselves or their preferences, every decision and rule agreed, every number, date, name, file path, URL, identifier and command that was used or produced, and every open question or task with its current state. State the current goal and what the next step was going to be. Older detail you leave out is still retrievable with context_search / context_open, so prefer precision over coverage.";
+
 /// A memory walk running beside the turn's setup. Dropped without `block` (stop, preempt, an
 /// error before the prompt) it is aborted, so no Jev request is spent on a turn that never ran.
 pub struct PendingMemory(Option<tokio::task::JoinHandle<Option<String>>>);
@@ -2489,6 +2510,64 @@ impl Agent {
             .await
     }
 
+    /// Soft compaction (D90). `usage` is the last model call's usage, so its context size is the
+    /// window the next turn would start from. Above `compact_at_tokens()` (64k by default) pi is
+    /// asked to compact: `keepRecentTokens` of recent turns stay verbatim, the rest becomes one
+    /// summary, and the walk gets the compacted-away leaves of this chat as candidates. pi's own
+    /// compaction at the 128k hard ceiling is unchanged and covers a single turn that balloons.
+    async fn maybe_soft_compact(&self, chat_id: &str, usage: Option<&Value>) {
+        let threshold = crate::workspace::compact_at_tokens();
+        if threshold == 0 {
+            return;
+        }
+        let tokens = usage.map(context_tokens).unwrap_or(0);
+        if tokens < threshold as i64 {
+            return;
+        }
+        if self.current_chat.lock().await.as_deref() != Some(chat_id) {
+            return;
+        }
+        let Ok(pi) = self.pi().await else {
+            return;
+        };
+        let t0 = Instant::now();
+        let r = pi
+            .call_timeout(
+                RpcCommand::Compact {
+                    id: pi.next_id("c"),
+                    custom_instructions: Some(SOFT_COMPACTION_INSTRUCTIONS.to_owned()),
+                },
+                Duration::from_secs(240),
+            )
+            .await;
+        match r {
+            Ok(resp) if resp.success => {
+                let n = self.store.bump_session_compactions(chat_id).unwrap_or(0);
+                let _ = self.store.t3_append(
+                    chat_id,
+                    None,
+                    Some(chat_id),
+                    "compaction",
+                    Some("system"),
+                    &format!(
+                        "pi session compacted at {tokens} tokens (soft threshold {threshold})"
+                    ),
+                    None,
+                );
+                let cut = self
+                    .tree
+                    .note_session_cut(chat_id, crate::workspace::KEEP_RECENT_TOKENS as usize);
+                tracing::info!(chat_id, tokens, threshold, compactions = n, cut = ?cut, ms = t0.elapsed().as_millis() as i64, "soft compaction");
+            }
+            Ok(resp) => {
+                tracing::warn!(chat_id, tokens, error = %resp.error.unwrap_or_default(), "soft compaction refused");
+            }
+            Err(e) => {
+                tracing::warn!(chat_id, tokens, error = %e, "soft compaction failed");
+            }
+        }
+    }
+
     /// Start the reply's memory walk beside the rest of the turn's setup (attachments, preludes,
     /// the assistant row, the pi session switch); `drive_turn` joins it right before the prompt
     /// goes to pi. The block still rides in front of the user message — in the user turn, never
@@ -2852,6 +2931,10 @@ impl Agent {
             .post_timing("main_turn_total_ms", total_ms, Some(turn_kind))
             .await;
         tracing::info!(chat_id, route = route_name, turn = turn_kind, ttft_ms = ?turn.metrics.ttft_ms, route_ms = ?turn.metrics.route_ms, total_ms, tool_calls = turn.metrics.tool_calls, nested_calls = turn.metrics.nested_calls, model_calls = turn.metrics.model_calls, "turn done");
+        // D90: the reply is out; if the window grew past the soft threshold, compact it now
+        // (still under the turn lock, so the next prompt meets a small window).
+        self.maybe_soft_compact(chat_id, turn.metrics.usage.as_ref())
+            .await;
         Ok(TurnOutcome {
             assistant_msg_id,
             route_name,
@@ -3461,9 +3544,12 @@ impl Agent {
                     Some(chat_id),
                     "compaction",
                     Some("system"),
-                    "pi session compacted",
+                    "pi session compacted (pi threshold or overflow)",
                     None,
                 );
+                let _ = self
+                    .tree
+                    .note_session_cut(chat_id, crate::workspace::KEEP_RECENT_TOKENS as usize);
             }
             Event::Other
             | Event::AgentStart
@@ -5055,6 +5141,24 @@ fn classify_hard_limit(err: &str) -> Option<(&'static str, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// D90: the window size pi would start the next turn from, as pi counts it.
+    #[test]
+    fn context_tokens_follow_pi() {
+        assert_eq!(
+            context_tokens(
+                &json!({ "input": 1000, "output": 200, "cacheRead": 60000, "cacheWrite": 3000 })
+            ),
+            64200
+        );
+        assert_eq!(
+            context_tokens(
+                &json!({ "totalTokens": 70000, "input": 1, "output": 1, "cacheRead": 1, "cacheWrite": 1 })
+            ),
+            70000
+        );
+        assert_eq!(context_tokens(&json!({})), 0);
+    }
 
     /// D86: per-turn totals sum every model call; the doc keeps the last call's usage and gains the
     /// totals and the three call counts.

@@ -602,7 +602,7 @@ pub fn seed_state(cfg: &Config) -> Result<()> {
     let settings = json!({
         "defaultProvider": cfg.pi_provider(), "defaultModel": cfg.talking_model, "defaultThinkingLevel": "off",
         "defaultTools": ["read", "bash", "edit", "write", "codemode"],
-        "compaction": { "enabled": true, "reserveTokens": 16384, "keepRecentTokens": 20000 },
+        "compaction": { "enabled": true, "reserveTokens": 16384, "keepRecentTokens": KEEP_RECENT_TOKENS },
         "hideThinkingBlock": true
     });
     std::fs::write(
@@ -647,7 +647,7 @@ pub fn seed_state(cfg: &Config) -> Result<()> {
 
 /// The context window pi plans against (and compacts under). `ARBOS_CONTEXT_WINDOW_TOKENS_OVERRIDE`
 /// (unset = [`DEFAULT_CONTEXT_WINDOW_TOKENS`]).
-fn context_window_tokens() -> u64 {
+pub fn context_window_tokens() -> u64 {
     std::env::var("ARBOS_CONTEXT_WINDOW_TOKENS_OVERRIDE")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -697,9 +697,32 @@ pub fn write_models_json(cfg: &Config, talking: &str, subagent: &str) -> Result<
     Ok(())
 }
 
-/// Anthropic's standard window. With pi's 16k reserve a chat compacts at ~184k tokens, before the
-/// 1M-tier pricing and the refusals seen past 200k.
-pub const DEFAULT_CONTEXT_WINDOW_TOKENS: u64 = 200_000;
+/// The hard ceiling of a chat's model window (D90). pi plans against it and compacts on its own
+/// at `window − reserve` (≈ 112k), and a provider overflow at this size is answered with a
+/// compact-and-retry — so the window never passes it. Was 200k (#1229, Anthropic's standard
+/// window); 128k halves the worst-case cache write and keeps every call under the 5× Haiku tier.
+/// The usual working window is far smaller: agentd compacts at [`DEFAULT_COMPACT_AT_TOKENS`].
+pub const DEFAULT_CONTEXT_WINDOW_TOKENS: u64 = 128_000;
+
+/// Soft compaction (D90): after a turn that leaves the chat's session above this many tokens,
+/// agentd asks pi to compact — `keepRecentTokens` (20k) of recent turns stay verbatim and the rest
+/// becomes one rolling summary, so the window settles at ≈ 20–30k. Older detail is not lost: it
+/// stays in the memory tree and the walk brings it back when a question needs it.
+/// `ARBOS_CONTEXT_COMPACT_AT_TOKENS` overrides; `0` leaves compaction to pi's hard threshold only.
+pub const DEFAULT_COMPACT_AT_TOKENS: u64 = 64_000;
+
+/// Tokens pi keeps verbatim when it compacts (`compaction.keepRecentTokens` in its settings).
+pub const KEEP_RECENT_TOKENS: u64 = 20_000;
+
+pub fn compact_at_tokens() -> u64 {
+    match std::env::var("ARBOS_CONTEXT_COMPACT_AT_TOKENS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+    {
+        Some(n) => n,
+        None => DEFAULT_COMPACT_AT_TOKENS,
+    }
+}
 
 /// Seed files are the image's: a file is copied when missing **or when its bytes differ** from the
 /// seed, so an image roll updates `arbos-pi-ext` (and every other seed file) in a workspace that
@@ -736,6 +759,17 @@ fn seed_file_differs(seed: &std::path::Path, target: &std::path::Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// D90: the soft threshold reads its override and defaults to the design's 64k.
+    #[test]
+    fn compact_at_tokens_default_and_override() {
+        std::env::remove_var("ARBOS_CONTEXT_COMPACT_AT_TOKENS");
+        assert_eq!(super::compact_at_tokens(), super::DEFAULT_COMPACT_AT_TOKENS);
+        std::env::set_var("ARBOS_CONTEXT_COMPACT_AT_TOKENS", "0");
+        assert_eq!(super::compact_at_tokens(), 0);
+        std::env::set_var("ARBOS_CONTEXT_COMPACT_AT_TOKENS", "90000");
+        assert_eq!(super::compact_at_tokens(), 90_000);
+        std::env::remove_var("ARBOS_CONTEXT_COMPACT_AT_TOKENS");
+    }
     use super::*;
 
     /// An image roll must reach existing workspaces: a seed file whose bytes changed is copied

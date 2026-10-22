@@ -274,6 +274,32 @@ enum Via {
     Thread(String),
 }
 
+/// What one walk may see: the asking chat, the allowed threads (restricted scopes), and — after
+/// a session compaction — the asking chat's own leaves older than `own_cut` (D90: those left the
+/// model's window and live on only in the tree).
+struct Scope<'a> {
+    chat_id: &'a str,
+    allowed: Option<HashSet<String>>,
+    own_cut: Option<String>,
+}
+
+impl Scope<'_> {
+    fn thread_ok(&self, thread_id: &str) -> bool {
+        self.allowed
+            .as_ref()
+            .map(|a| a.contains(thread_id))
+            .unwrap_or(true)
+    }
+
+    /// A leaf of the asking chat is a candidate only when it was compacted away.
+    fn leaf_ok(&self, thread_id: &str, leaf_id: &str) -> bool {
+        if thread_id != self.chat_id {
+            return self.thread_ok(thread_id);
+        }
+        self.own_cut.as_deref().is_some_and(|cut| leaf_id < cut)
+    }
+}
+
 /// Episode-level candidates of a set of threads.
 #[derive(Debug, Default)]
 struct Gathered {
@@ -1636,13 +1662,21 @@ impl Tree {
 
     /// Episodes of `threads`: ready ones as cards to score, the rest as leaves to scan directly
     /// (`direct` = leaf id, thread node id).
-    fn gather_episodes(&self, threads: &[&Node]) -> Gathered {
+    fn gather_episodes(&self, threads: &[&Node], scope: &Scope<'_>) -> Gathered {
         let mut g = Gathered::default();
         for t in threads {
+            let tid = t.thread_id.as_deref().unwrap_or("");
             for c in &t.children {
-                if let Some(ep) = self.node(c) {
+                if let Some(mut ep) = self.node(c) {
                     if ep.level != "episode" {
                         continue;
+                    }
+                    if tid == scope.chat_id {
+                        // the asking chat: only what the session no longer holds
+                        ep.children.retain(|l| scope.leaf_ok(tid, l));
+                        if ep.children.is_empty() {
+                            continue;
+                        }
                     }
                     if ep.status == "ready" && !ep.heading.is_empty() {
                         g.ep_cards.push((ep.id.clone(), self.card_json(&ep)));
@@ -1657,28 +1691,60 @@ impl Tree {
         g
     }
 
-    /// Keyword hits (bm25) outside the current chat and inside the allowed scope.
-    fn bm25_hits(
-        &self,
-        words: &[String],
-        chat_id: &str,
-        allowed: &Option<HashSet<String>>,
-    ) -> Vec<String> {
+    /// Keyword hits (bm25) inside the scope: other allowed threads, plus the asking chat's own
+    /// compacted-away leaves.
+    fn bm25_hits(&self, words: &[String], scope: &Scope<'_>) -> Vec<String> {
         let mut out = Vec::new();
         if let Ok(hits) = self.store.t3_search_any(words, BM25_EXTRA) {
             for (r, _, _) in hits {
-                if r.kind == "route" || r.thread_id == chat_id {
+                if r.kind == "route" || !scope.leaf_ok(&r.thread_id, &r.id) {
                     continue;
-                }
-                if let Some(a) = allowed {
-                    if !a.contains(&r.thread_id) {
-                        continue;
-                    }
                 }
                 out.push(r.id);
             }
         }
         out
+    }
+
+    /// After a session compaction (D90): the chat's leaves older than the kept tail left the
+    /// model's window. Record the oldest kept leaf; everything before it becomes a walk
+    /// candidate for questions asked in that chat. The tail is estimated at half of pi's
+    /// `keepRecentTokens` (T3 holds tool outputs clipped, so its token counts run low): the cut
+    /// errs towards offering a few leaves the window still has — Jev drops what is not needed —
+    /// never towards hiding one that is gone.
+    pub fn note_session_cut(&self, chat_id: &str, keep_recent_tokens: usize) -> Option<String> {
+        let rows = self.t3_rows(
+            "WHERE thread_id = ?1 AND kind <> 'route' ORDER BY id DESC LIMIT 2000",
+            &[&chat_id],
+        );
+        let budget = keep_recent_tokens / 2;
+        let mut acc = 0usize;
+        let mut cut: Option<String> = None;
+        for r in &rows {
+            acc += est_tokens(&r.text);
+            cut = Some(r.id.clone());
+            if acc >= budget {
+                break;
+            }
+        }
+        let key = format!("session_cut:{chat_id}");
+        match (&cut, acc >= budget) {
+            (Some(id), true) => {
+                self.state_set(&key, id);
+                cut
+            }
+            _ => {
+                // the whole chat fits in the kept tail: nothing was summarised away
+                let _ = self
+                    .store
+                    .with(|c| c.execute("DELETE FROM tree_state WHERE key = ?1", params![key]));
+                None
+            }
+        }
+    }
+
+    fn session_cut(&self, chat_id: &str) -> Option<String> {
+        self.state_get(&format!("session_cut:{chat_id}"))
     }
 
     /// Threads to expand, best first. A thread with keyword evidence is kept above the threshold
@@ -1823,7 +1889,11 @@ impl Tree {
         let t0 = Instant::now();
         let asked_at = now_ms();
         let mut pack = Pack::default();
-        let allowed = self.allowed_threads(chat_id, restricted);
+        let scope = Scope {
+            chat_id,
+            allowed: self.allowed_threads(chat_id, restricted),
+            own_cut: self.session_cut(chat_id),
+        };
         let words = content_words(query_text);
         let query = json!({ "text": query_text, "asked_at": fmt_ts(asked_at), "asked_in": if restricted { "a group or people chat" } else { "a chat with the project owner" }, "asked_by": asker });
         let ctx = cache_ctx(&words, asked_at, asker, restricted);
@@ -1831,17 +1901,16 @@ impl Tree {
         let mut cache_hits = 0i64;
         let fast = opts.fast;
         let compact = opts.compact;
-        // level 1 candidates: every other visible thread, split (fast) into those with keyword
-        // evidence for the question and those without
+        // level 1 candidates: every other visible thread — and the asking chat itself once a
+        // compaction has moved part of it out of the model's window — split (fast) into those
+        // with keyword evidence for the question and those without
         let mut evidence: Vec<Node> = self
             .nodes_where("level = 'thread' ORDER BY t1 DESC LIMIT 400", &[])
             .into_iter()
-            .filter(|n| {
-                n.thread_id.as_deref() != Some(chat_id)
-                    && allowed
-                        .as_ref()
-                        .map(|a| n.thread_id.as_ref().is_some_and(|t| a.contains(t)))
-                        .unwrap_or(true)
+            .filter(|n| match n.thread_id.as_deref() {
+                Some(t) if t == chat_id => scope.own_cut.is_some(),
+                Some(t) => scope.thread_ok(t),
+                None => false,
             })
             .collect();
         let mut ride: Vec<Node> = Vec::new();
@@ -1860,8 +1929,12 @@ impl Tree {
                 }
             }
         }
-        if restricted {
-            // the group's own thread is the subtree root; keep its episodes (not the recent ones)
+        if restricted
+            && !evidence
+                .iter()
+                .any(|n| n.thread_id.as_deref() == Some(chat_id))
+        {
+            // the group's own thread is the subtree root; keep its episodes
             if let Some(n) = self.node(&format!("thread:{chat_id}")) {
                 evidence.push(n);
             }
@@ -1893,8 +1966,8 @@ impl Tree {
         let mut leaf_kind: HashMap<String, Kind> = HashMap::new();
         if fast && evidence.len() <= FLAT_MAX_THREADS {
             let all: Vec<&Node> = evidence.iter().collect();
-            let g = self.gather_episodes(&all);
-            let h = self.bm25_hits(&words, chat_id, &allowed);
+            let g = self.gather_episodes(&all, &scope);
+            let h = self.bm25_hits(&words, &scope);
             let mut ids: Vec<String> = Vec::new();
             for ep in g.ep_nodes.values() {
                 for l in &ep.children {
@@ -1977,14 +2050,14 @@ impl Tree {
                     .filter(|t| ride.iter().any(|r| r.id == t.id))
                     .collect();
                 if !late.is_empty() {
-                    let gl = self.gather_episodes(&late);
+                    let gl = self.gather_episodes(&late, &scope);
                     g2.ep_cards.extend(gl.ep_cards);
                     g2.ep_nodes.extend(gl.ep_nodes);
                     g2.direct.extend(gl.direct);
                 }
                 g2
             }
-            None => self.gather_episodes(&keep_threads),
+            None => self.gather_episodes(&keep_threads, &scope),
         };
         // round 2: episode cards not scored yet (none when round 1 covered them)
         self.score_round(
@@ -2015,7 +2088,7 @@ impl Tree {
         }
         let hits = match hits.take() {
             Some(h) => h,
-            None => self.bm25_hits(&words, chat_id, &allowed),
+            None => self.bm25_hits(&words, &scope),
         };
         leaf_ids.extend(hits.iter().cloned());
         let mut seen = HashSet::new();
@@ -2629,7 +2702,12 @@ mod tests {
                 ));
             }
         }
-        for sub in fixture["subagents"].as_array().unwrap() {
+        for sub in fixture["subagents"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+        {
             let id = sub["id"].as_str().unwrap();
             store
                 .insert_subagent(
@@ -2654,8 +2732,9 @@ mod tests {
         rows.sort_by_key(|r| r.0);
         store
             .with(|c| {
-                for (at, thread, sub, kind, role, text) in &rows {
-                    let id = ulid();
+                for (i, (at, thread, sub, kind, role, text)) in rows.iter().enumerate() {
+                    // ids sort like the clock, as they do when rows arrive one turn at a time
+                    let id = ulid::Ulid::from_parts(*at as u64, i as u128).to_string();
                     c.execute(
                         "INSERT INTO t3(id, thread_id, subagent_id, session_id, kind, role, at, text, source, size) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,NULL,?9)",
                         params![id, thread, sub, thread, kind, role, at, text, text.len() as i64],
@@ -2793,6 +2872,154 @@ mod tests {
         );
         assert_eq!(calls_fast_again, 0);
         eprintln!("jev requests over the set: D77 walk {calls_slow}, fast walk {calls_fast}, fast walk again {calls_fast_again}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Build a tree over a fixture with the mock relay; returns the tree and its temp dir.
+    async fn build_fixture_tree(path_json: &str) -> (Tree, std::path::PathBuf, Value) {
+        let port = spawn_mock_relay().await;
+        let dir = std::env::temp_dir().join(format!("arbos-walk-{}", ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("agentd.db")).unwrap();
+        let fixture: Value = serde_json::from_str(path_json).unwrap();
+        load_fixture(&store, &fixture, now_ms());
+        let llm = Llm::with_endpoints(
+            &format!("http://127.0.0.1:{port}/v1"),
+            &format!("http://127.0.0.1:{port}/decisions"),
+            "test-token",
+        );
+        let tree = Tree::with_ids("p-test", "Bob", "mock-card-model", store, Arc::new(llm));
+        for _ in 0..10 {
+            let st = tree.build_pass().await.unwrap();
+            if st["cards"].as_i64().unwrap_or(0) == 0 && st["leaves"].as_i64().unwrap_or(0) == 0 {
+                break;
+            }
+        }
+        (tree, dir, fixture)
+    }
+
+    fn leaf_id_containing(tree: &Tree, needle: &str) -> String {
+        tree.t3_rows(
+            "WHERE text LIKE ?1 ORDER BY id LIMIT 1",
+            &[&format!("%{needle}%")],
+        )
+        .into_iter()
+        .next()
+        .map(|r| r.id)
+        .unwrap_or_else(|| panic!("no leaf containing {needle:?}"))
+    }
+
+    /// D90: after a session compaction the asking chat's own early turns are walk candidates;
+    /// what the window still holds is not. Both walk shapes agree, and the gold facts come back.
+    #[tokio::test]
+    async fn long_chat_recall_after_compaction() {
+        let (tree, dir, fixture) =
+            build_fixture_tree(include_str!("../tests/fixtures/memory-walk-long-chat.json")).await;
+        let slow = WalkOptions {
+            compact: true,
+            fast: false,
+        };
+        let fast = WalkOptions {
+            compact: true,
+            fast: true,
+        };
+        let chat = "chat-launch";
+        assert!(
+            tree.nodes_where(
+                "level = 'episode' AND status = 'ready' AND thread_id = 'chat-launch'",
+                &[]
+            )
+            .len()
+                >= 4,
+            "the long chat split into carded episodes"
+        );
+
+        // Before any compaction the chat's own turns are the model's and are not walked.
+        let before = tree
+            .walk_inner(
+                "mock-jev",
+                chat,
+                false,
+                "What's my daughter's name?",
+                "the project owner",
+                "",
+                fast,
+            )
+            .await;
+        assert!(
+            !before.text.contains("Mira"),
+            "uncompacted chat: own turns are not packed\n{}",
+            before.text
+        );
+
+        // A whole chat that fits in the kept tail records no cut.
+        assert_eq!(tree.note_session_cut(chat, 1_000_000), None);
+        assert_eq!(tree.session_cut(chat), None);
+
+        // Compaction keeps the recent tail (the ledger-sync turns); everything older left the window.
+        let cut = tree.note_session_cut(chat, 300).expect("a cut");
+        assert_eq!(tree.session_cut(chat).as_deref(), Some(cut.as_str()));
+        let pricing = leaf_id_containing(&tree, "$15 per seat");
+        let ledger = leaf_id_containing(&tree, "ledger-sync");
+        assert!(pricing < cut, "pricing turn is older than the cut");
+        assert!(ledger >= cut, "ledger-sync turn is still in the window");
+
+        let (mut calls_slow, mut calls_fast) = (0i64, 0i64);
+        for case in fixture["cases"].as_array().unwrap() {
+            let id = case["id"].as_str().unwrap();
+            let q = case["query"].as_str().unwrap();
+            let a = tree
+                .walk_inner("mock-jev", chat, false, q, "the project owner", "", slow)
+                .await;
+            let b = tree
+                .walk_inner("mock-jev", chat, false, q, "the project owner", "", fast)
+                .await;
+            calls_slow += a.jev_calls;
+            calls_fast += b.jev_calls;
+            eprintln!(
+                "{id:>10}: D77 {} leaves / {} requests · fast {} leaves / {} requests ({}, flat={})",
+                a.leaf_ids.len(), a.jev_calls, b.leaf_ids.len(), b.jev_calls, b.prefilter, b.flat
+            );
+            assert_eq!(
+                id_set(&a),
+                id_set(&b),
+                "{id}: both walk shapes pack the same leaves"
+            );
+            for gold in case["gold"].as_array().unwrap() {
+                let g = gold.as_str().unwrap();
+                assert!(a.text.contains(g), "{id}: D77 walk packs {g:?}\n{}", a.text);
+                assert!(
+                    b.text.contains(g),
+                    "{id}: fast walk packs {g:?}\n{}",
+                    b.text
+                );
+            }
+            for held in case["still_in_window"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+            {
+                let h = held.as_str().unwrap();
+                assert!(
+                    !b.text.contains(h),
+                    "{id}: {h:?} is still in the window and must not be packed\n{}",
+                    b.text
+                );
+            }
+            // nothing newer than the cut from the asking chat
+            for l in &b.leaf_ids {
+                let row = tree.store.t3_get(l).unwrap().unwrap();
+                assert!(
+                    row.thread_id != chat || l.as_str() < cut.as_str(),
+                    "{id}: leaf {l} is still in the window"
+                );
+            }
+        }
+        assert!(
+            calls_fast <= calls_slow,
+            "fast walk needs no more requests: {calls_fast} vs {calls_slow}"
+        );
+        eprintln!("long chat: D77 walk {calls_slow} requests, fast walk {calls_fast}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
