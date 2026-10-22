@@ -120,7 +120,9 @@ class Lane(threading.Thread):
                     self.say(f"{tid}: fixture upload failed: {msg}")
             if turn.get("pre_wait_s"):
                 time.sleep(turn["pre_wait_s"])
-            if chat_id is None or turn.get("new_chat"):
+            if turn.get("chat") == "first" and first_chat:
+                chat_id = first_chat  # back to the task's first chat after a new_chat turn
+            elif chat_id is None or turn.get("new_chat"):
                 chat_id = rl.chat_open(self.project, f"{tid} {tag}" + (f" t{i}" if turn.get("new_chat") else ""))
                 if first_chat is None:
                     first_chat = chat_id
