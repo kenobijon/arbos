@@ -48,9 +48,11 @@ pub const PANEL_RADIUS: f32 = 14.0;
 pub const DRAWER_WIDTH: f32 = 320.0;
 pub const NARROW_WINDOW: f32 = 1000.0;
 pub const GLASS_ALPHA: f32 = 0.80;
-/// Light + Glass tints the blur with pure white; a touch more opaque than the
-/// dark wash so the chat reads as a white surface, not grey over the desktop.
-pub const GLASS_ALPHA_LIGHT: f32 = 0.86;
+/// Light + Glass tints the blur with pure white at the same default wash as
+/// dark; the chat column adds [`CHAT_WASH_ALPHA_LIGHT`] of white on top so the
+/// conversation stays a white surface while the sidebar and pane show the glass.
+pub const GLASS_ALPHA_LIGHT: f32 = 0.80;
+pub const CHAT_WASH_ALPHA_LIGHT: f32 = 0.85;
 pub const FROST_TINT_ALPHA: f32 = 0.50;
 pub const FROST_TINT_ALPHA_LIGHT: f32 = 0.72;
 /// Glass shell tint: how opaque the window wash is over the blur (Settings →
@@ -351,9 +353,11 @@ impl Theme {
             // #F2F2F2, white field with a hairline. The flanks step away
             // from the chat more than Grok's #F6F6F6 so the three panes read
             // at a glance (Jacob, 2026-10-21): sidebar #F1F1F1 | chat #FCFCFC
-            // | pane #F5F5F5 with white cards. Greys meet WCAG AA on every
-            // surface they sit on: muted 5.3:1 on white / 4.7:1 on a bubble,
-            // faint 4.6:1 on white, accent 4.8:1 on white (#1084FE was 3.7:1).
+            // | pane #F5F5F5 with white cards; the assistant bubble sits two
+            // steps under Grok's so it still reads on the white glass chat.
+            // Greys meet WCAG AA on every surface they sit on: muted 5.3:1 on
+            // white / 4.7:1 on a bubble, faint 4.6:1 on white, accent 4.8:1 on
+            // white (#1084FE was 3.7:1).
             bg: hex(0xfcfcfc),
             sidebar: hex(0xf1f1f1),
             pane: hex(0xf5f5f5),
@@ -368,7 +372,7 @@ impl Theme {
             accent: hex(0x0a6fe0),
             accent_soft: hex_a(0x0a6fe0, 0.14),
             bubble: hex(0x111111),
-            bubble_assistant: hex(0xf2f2f2),
+            bubble_assistant: hex(0xededed),
             field: grey(1.0),
             field_border: hex(0xdedede),
             primary: hex(0x111111),
@@ -477,6 +481,21 @@ impl Theme {
             1.0
         };
         c
+    }
+
+    /// The chat column over light glass: an extra white wash so the
+    /// conversation is a white surface and bubbles stay legible while the
+    /// sidebar and pane beside it show the blur (Finder's model: translucent
+    /// chrome, opaque content). Transparent everywhere else — the column
+    /// inherits the shell.
+    pub fn chat_wash(&self) -> Hsla {
+        if self.is_glass() && self.is_light() {
+            let mut c = grey(1.0);
+            c.a = CHAT_WASH_ALPHA_LIGHT;
+            c
+        } else {
+            gpui::transparent_black()
+        }
     }
 
     /// The right pane (three-pane rule): its own tone, so it reads apart from

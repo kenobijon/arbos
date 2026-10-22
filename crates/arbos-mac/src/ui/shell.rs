@@ -1903,7 +1903,8 @@ impl Shell {
             .flex_col()
             .flex_1()
             .min_w_0()
-            .h_full();
+            .h_full()
+            .bg(theme.chat_wash());
 
         if let Some((server, ch, can_post)) = channel {
             column = column.child(
