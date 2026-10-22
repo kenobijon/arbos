@@ -112,12 +112,24 @@ fn handle_of(state: &AppState, user_id: &str) -> String {
         .unwrap_or_else(|| user_id.to_owned())
 }
 
-fn channel_json(ch: &Channel) -> Value {
+/// `archived` is per user (the caller's): the channel is hidden from their list, restorable
+/// from the server's Channels tab; on the homeserver it is the `m.lowpriority` tag.
+fn channel_json(ch: &Channel, archived: bool) -> Value {
     json!({
         "id": ch.id, "server_id": ch.server_id, "name": ch.name, "topic": ch.topic,
         "restricted": ch.restricted, "position": ch.position, "room_id": ch.room_id,
-        "created_at": ch.created_at,
+        "created_at": ch.created_at, "archived": archived,
     })
+}
+
+fn channel_json_for(state: &AppState, ch: &Channel, user_id: &str) -> Value {
+    let archived = state
+        .db
+        .chat_archived_at(user_id, &ch.id)
+        .ok()
+        .flatten()
+        .is_some();
+    channel_json(ch, archived)
 }
 
 fn member_json(state: &AppState, m: &ServerMember) -> Value {
@@ -155,7 +167,7 @@ fn server_json(state: &AppState, s: &Server, me: &ServerMember, detail: bool) ->
         "open": s.is_open,
         "my_role": me.role,
         "member_count": members.len(),
-        "channels": channels.iter().map(channel_json).collect::<Vec<_>>(),
+        "channels": channels.iter().map(|c| channel_json_for(state, c, &me.user_id)).collect::<Vec<_>>(),
         "general_channel_id": channels.iter().find(|c| c.name == "general").or(channels.first()).map(|c| c.id.clone()),
         "avatar_color_index_effective": crate::avatar::effective_color_index(&s.id, None),
     });
@@ -554,7 +566,7 @@ pub async fn channel_create(
             role: None,
         }),
     );
-    (StatusCode::CREATED, Json(channel_json(&ch))).into_response()
+    (StatusCode::CREATED, Json(channel_json(&ch, false))).into_response()
 }
 
 /// `PATCH /servers/{id}/channels/{cid} {name?, topic?, restricted?}` — owner/admins.
@@ -616,9 +628,57 @@ pub async fn channel_patch(
         }),
     );
     match state.db.channel(&ch.id) {
-        Ok(Some(c)) => Json(channel_json(&c)).into_response(),
+        Ok(Some(c)) => Json(channel_json_for(&state, &c, &me)).into_response(),
         _ => api_error(StatusCode::NOT_FOUND, "not_found", "no such channel"),
     }
+}
+
+#[derive(Deserialize)]
+pub struct ArchiveBody {
+    pub archived: bool,
+}
+
+/// `POST /servers/{id}/channels/{cid}/archive {archived}` — any member: hide the channel from
+/// my list (or bring it back). Per user; mirrored as the room's `m.lowpriority` tag so every
+/// device of mine agrees. The caller's other devices get a `server_updated` push.
+pub async fn channel_archive(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path((id, cid)): Path<(String, String)>,
+    Json(b): Json<ArchiveBody>,
+) -> Response {
+    let me = match user_of(&principal) {
+        Ok(u) => u,
+        Err(r) => return *r,
+    };
+    if let Err(r) = load(&state, &me, &id) {
+        return *r;
+    }
+    let Some(ch) = state
+        .db
+        .channel(&cid)
+        .ok()
+        .flatten()
+        .filter(|c| c.server_id == id)
+    else {
+        return api_error(StatusCode::NOT_FOUND, "not_found", "no such channel");
+    };
+    if let Err(e) = state.db.set_chat_archived(&me, &ch.id, b.archived) {
+        return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
+    }
+    state.matrix.archive(&state, &ch.id, &me, b.archived);
+    let _ = state.db.push_user_event(
+        &me,
+        &PushEventDto::ServerUpdated(ServerUpdatedPayloadDto {
+            server_id: id.clone(),
+            channel_id: Some(ch.id.clone()),
+            deleted: None,
+            user_id: None,
+            role: None,
+        }),
+        None,
+    );
+    Json(channel_json(&ch, b.archived)).into_response()
 }
 
 /// `DELETE /servers/{id}/channels/{cid}` — owner/admins; `#general` cannot be deleted.

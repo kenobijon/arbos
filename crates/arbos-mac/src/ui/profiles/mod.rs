@@ -9,9 +9,11 @@
 //! presence from the room frames.
 
 mod agent;
+mod channel;
 mod group;
 pub(crate) mod kit;
 mod me;
+pub(crate) mod pane;
 mod server;
 mod user;
 
@@ -44,6 +46,10 @@ pub fn pane(page: &ProfilePage, shell: &Shell, cx: &mut Context<Shell>) -> Optio
         ProfilePage::Agent { project_id } => agent::page(project_id, shell, cx),
         ProfilePage::Me => Some(me::page(shell, cx)),
         ProfilePage::Server { server_id } => server::page(server_id, shell, cx),
+        ProfilePage::Channel {
+            server_id,
+            channel_id,
+        } => channel::page(server_id, channel_id, shell, cx),
     }
 }
 
@@ -362,7 +368,7 @@ pub(super) fn list_row(
 // ----- content from the chat docs ----------------------------------------------
 
 /// One attachment found in a chat, with where it came from.
-pub(super) struct Found {
+pub(crate) struct Found {
     pub attachment: Attachment,
     /// Who shared it ("Mira", "@sam", "You", the agent's name).
     pub by: String,

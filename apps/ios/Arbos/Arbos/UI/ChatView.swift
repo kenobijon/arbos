@@ -73,10 +73,10 @@ struct ChatView: View {
     }
 
     /// Header tap: DM → the other person; group / shared project → the group page; own agent → its page;
-    /// server channel → the server's details (rule 5).
+    /// server channel → the channel's page (#1317; the server's page is the channel list's header).
     private func openHeaderProfile() {
         if let channel {
-            model.showProfile(.server(serverId: channel.serverId))
+            model.showProfile(.channel(channelId: channel.id))
         } else if let people {
             if !people.isGroup, let other = counterpart {
                 model.showProfile(.user(ProfilePerson(other)))
@@ -148,7 +148,7 @@ struct ChatView: View {
         model.isStreaming(chatId) || model.hasOpenSubagent(chatId) || model.isAwaitingReply(chatId)
     }
     private var name: String {
-        if let channel { return "# \(channel.name)" }
+        if let channel { return channel.name }
         if let people { return counterpart.map { "@\($0.handle)" } ?? people.title }
         if let chat, chat.isGroup, !chat.title.isEmpty { return chat.title }
         if let chat, chat.isSystem { return "\(project?.name ?? "Arbos") · Projects" }
@@ -582,20 +582,26 @@ struct ChatView: View {
             GlassPill {
                 HStack(spacing: 6) {
                     if let channel {
-                        // Rule 3: the unified pill — the server's disc + "# general".
+                        // Rule 3: the unified pill — the server's disc, the `#` glyph and the
+                        // name (never "#name": the glyph shows it, #1317).
                         HStack(spacing: 8) {
                             if let s = channelServer {
                                 InitialsAvatar(name: s.name, handle: nil, id: s.id, override: s.avatarColorIndex, size: Theme.avatar)
                             }
-                            Text("# \(channel.name)")
-                                .font(.system(size: Theme.body, weight: .semibold))
-                                .foregroundStyle(theme.text)
-                                .lineLimit(1)
+                            HStack(spacing: 5) {
+                                Text("#")
+                                    .font(.system(size: Theme.body, weight: .semibold))
+                                    .foregroundStyle(theme.muted)
+                                Text(channel.name)
+                                    .font(.system(size: Theme.body, weight: .semibold))
+                                    .foregroundStyle(theme.text)
+                                    .lineLimit(1)
+                            }
                         }
                         .contentShape(Rectangle())
                         .onTapGesture { openHeaderProfile() }
                         .accessibilityAddTraits(.isButton)
-                        .accessibilityHint("Opens the server details")
+                        .accessibilityHint("Opens the channel details")
                     } else if let people {
                         // One pill for every chat (2026-10-20): avatar + name,
                         // no member cluster, counts or agent lines.

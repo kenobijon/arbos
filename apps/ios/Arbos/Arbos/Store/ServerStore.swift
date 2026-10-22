@@ -108,7 +108,7 @@ extension AppModel {
         return ts > 0 ? ts : server.createdAt
     }
 
-    /// The space row carries "#general · text"; fall back to the newest channel row.
+    /// The space row carries "general · text"; fall back to the newest channel row.
     func serverPreview(_ server: Server) -> String {
         if let space = matrixSpaceRow(server.id), !space.lastText.isEmpty {
             return HomeView.plain(space.lastText.split(separator: "\n").first.map(String.init) ?? "")
@@ -116,7 +116,7 @@ extension AppModel {
         let rows = server.channels.compactMap { matrixChannelRow($0) }.filter { !$0.lastText.isEmpty }
         guard let newest = rows.max(by: { $0.lastTs < $1.lastTs }) else { return "No messages yet" }
         let line = newest.lastText.split(separator: "\n").first.map(String.init) ?? ""
-        return "#\(newest.name) · " + HomeView.plain(line)
+        return "\(newest.name) · " + HomeView.plain(line)
     }
 
     private static func previewWho(_ senderName: String, me: AuthUser?) -> String? {
@@ -362,6 +362,24 @@ extension AppModel {
             try await relay.patchChannel(serverId: channel.serverId, channelId: channel.id, restricted: restricted)
         } catch {
             notice = Notice(text: "Could not change who posts: \(error.localizedDescription)")
+        }
+        await refreshServers()
+    }
+
+    /// Row menu → Archive / Unarchive: hide a channel from my list or bring it back. An archived
+    /// channel that is open gives way to the channel list.
+    func archiveChannel(_ channel: ServerChannel, _ archived: Bool) async {
+        if let si = servers.firstIndex(where: { $0.id == channel.serverId }),
+           let ci = servers[si].channels.firstIndex(where: { $0.id == channel.id }) {
+            servers[si].channels[ci].archived = archived
+        }
+        if archived, case .chat(let id, _)? = path.last, id == channel.id {
+            path = [.server(serverId: channel.serverId)]
+        }
+        do {
+            try await relay.archiveChannel(serverId: channel.serverId, channelId: channel.id, archived: archived)
+        } catch {
+            notice = Notice(text: "Could not \(archived ? "archive" : "unarchive") the channel: \(error.localizedDescription)")
         }
         await refreshServers()
     }

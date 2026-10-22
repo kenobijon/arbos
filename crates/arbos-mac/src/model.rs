@@ -2518,6 +2518,9 @@ pub struct ServerChannel {
     pub room_id: Option<String>,
     #[serde(default)]
     pub created_at: i64,
+    /// Hidden from my channel list (per user; the server's Channels tab brings it back).
+    #[serde(default)]
+    pub archived: bool,
 }
 
 /// Invite link of a server; the relay only sends it to owners and admins.
@@ -2586,7 +2589,16 @@ impl ServerInfo {
 
     /// Channels in registry order (`position`, then name).
     pub fn ordered_channels(&self) -> Vec<&ServerChannel> {
-        let mut out: Vec<&ServerChannel> = self.channels.iter().collect();
+        self.sorted_channels(|c| !c.archived)
+    }
+
+    /// The channels I archived, in list order.
+    pub fn archived_channels(&self) -> Vec<&ServerChannel> {
+        self.sorted_channels(|c| c.archived)
+    }
+
+    fn sorted_channels(&self, keep: impl Fn(&ServerChannel) -> bool) -> Vec<&ServerChannel> {
+        let mut out: Vec<&ServerChannel> = self.channels.iter().filter(|c| keep(c)).collect();
         out.sort_by(|a, b| {
             a.position
                 .cmp(&b.position)
