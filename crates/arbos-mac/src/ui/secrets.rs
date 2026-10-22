@@ -372,7 +372,7 @@ impl SecretsPanel {
     // ---- building blocks -----------------------------------------------------------------------
 
     fn group(theme: &Theme) -> Div {
-        glass::group(theme).bg(theme.bubble_assistant)
+        glass::group(theme).bg(theme.pane_card)
     }
 
     fn section(label: &str, group: Div, note: Option<String>, theme: &Theme) -> Div {

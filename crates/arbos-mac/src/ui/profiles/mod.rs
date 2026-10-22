@@ -143,7 +143,7 @@ pub(crate) fn pane_frame(
         .flex_col()
         .border_l_1()
         .border_color(theme.border)
-        .bg(theme.card())
+        .bg(theme.pane())
         .child(header)
         .child(
             body.id("profile-body")
