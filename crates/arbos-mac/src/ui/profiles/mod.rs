@@ -55,20 +55,6 @@ pub fn pane(page: &ProfilePage, shell: &Shell, cx: &mut Context<Shell>) -> Optio
 
 // ----- scaffold ----------------------------------------------------------------
 
-/// The right pane: an X at the top right (plus the page's `right` control),
-/// then the scrolling body. It sits beside the chat as a flex sibling, so it
-/// never covers it; `scroll` tracks the body's scroll when a page needs to
-/// move it. Clicks inside stay inside (pickers, menus, fields).
-pub(super) fn frame(
-    body: Div,
-    right: Option<Stateful<Div>>,
-    scroll: Option<&ScrollHandle>,
-    theme: &Theme,
-    cx: &mut Context<Shell>,
-) -> Stateful<Div> {
-    pane_frame(SHEET_WIDTH, None, None, body, right, scroll, theme, cx)
-}
-
 /// A page pushed from another (a sender tapped in a group): the header leads with `‹`
 /// back to the page underneath and `title`.
 #[allow(clippy::too_many_arguments)]
