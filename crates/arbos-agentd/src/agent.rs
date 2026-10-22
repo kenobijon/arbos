@@ -2736,7 +2736,16 @@ impl Agent {
             .as_ref()
             .filter(|_| err_text.is_none() && !turn.stopped && turn.streamed_text.trim().is_empty())
             .cloned();
-        if model_failed.is_some() {
+        // Still empty after any fresh-session retry: route missing (possibly recorded as a
+        // synthetic reply), no prose, no ack (mr.agi group + DM drops). Mark error so the
+        // client shows a line instead of a bare header.
+        let silent_no_route = model_failed.is_none()
+            && err_text.is_none()
+            && !turn.stopped
+            && turn.metrics.route_missing
+            && turn.streamed_text.trim().is_empty()
+            && turn.ack_text.trim().is_empty();
+        if model_failed.is_some() || silent_no_route {
             final_status = MessageStatus::Error;
         }
         let (talking_model, _) = self.live_models().await;
@@ -2754,6 +2763,19 @@ impl Agent {
                     "model_error_detail",
                     &m.detail,
                     &json!({ "refusal": m.refusal, "sessionRotated": turn.session_rotated }),
+                );
+            }
+            if silent_no_route {
+                h.doc.add_error_part(
+                    &assistant_msg_id,
+                    "route_missing",
+                    "I couldn't answer that. Ask me again in a moment.",
+                );
+                h.doc.add_hidden_part(
+                    &assistant_msg_id,
+                    "route_missing_detail",
+                    "turn ended without a route call",
+                    &json!({ "sessionRotated": turn.session_rotated, "routeMissing": turn.metrics.route_missing }),
                 );
             }
             if turn.activity.is_some() {
@@ -2788,6 +2810,23 @@ impl Agent {
                     "refusal": m.refusal,
                     "session_rotated": turn.session_rotated,
                     "detail": m.detail.chars().take(400).collect::<String>(),
+                }),
+            );
+        }
+        if silent_no_route {
+            tracing::warn!(
+                chat_id,
+                session_rotated = turn.session_rotated,
+                route_missing = turn.metrics.route_missing,
+                "turn ended without route; error line shown in chat"
+            );
+            self.append_audit(
+                "turn_without_route",
+                json!({
+                    "chat_id": chat_id,
+                    "message_id": assistant_msg_id,
+                    "session_rotated": turn.session_rotated,
+                    "route_missing": turn.metrics.route_missing,
                 }),
             );
         }
