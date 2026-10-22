@@ -141,6 +141,27 @@ extension AppModel {
         path = [.server(serverId: channel.serverId), .chat(chatId: channel.id, projectId: channelSlot)]
     }
 
+    /// Rig: `ARBOS_OPEN_SERVER=<name or id>[:list|:#channel]` — the server on `#general`, its
+    /// channel list, or one channel, once the registry lists it and a first login has ended
+    /// (that one lands on its own chat). Debug builds only, like every `DebugHooks` value.
+    func applyOpenServerHook() {
+        guard !openServerHookDone, firstLogin == nil, let spec = DebugHooks.openServer else { return }
+        let parts = spec.split(separator: ":", maxSplits: 1).map(String.init)
+        guard let key = parts.first,
+              let server = servers.first(where: { $0.id == key || $0.name.lowercased() == key.lowercased() })
+        else { return }
+        openServerHookDone = true
+        switch parts.dropFirst().first {
+        case "list"?:
+            path = [.server(serverId: server.id)]
+        case let name?:
+            let wanted = name.hasPrefix("#") ? String(name.dropFirst()) : name
+            if let c = server.channels.first(where: { $0.name == wanted }) { open(channel: c) } else { open(server: server) }
+        case nil:
+            open(server: server)
+        }
+    }
+
     // MARK: Relay (control plane)
 
     /// `GET /servers`; refetched on the 15 s loop and on every `server_*` push.
@@ -154,6 +175,7 @@ extension AppModel {
             }
             servers = list
             serversAvailable = true
+            applyOpenServerHook()
         } catch let e as RelayError where e.status == 404 || e.status == 405 || e.status == 503 {
             // Relays without servers: nothing server-related.
             servers = []

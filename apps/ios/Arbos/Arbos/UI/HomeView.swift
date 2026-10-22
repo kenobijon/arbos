@@ -405,22 +405,6 @@ struct HomeView: View {
                 model.open(peopleChat: c)
             }
         }
-        .onChange(of: model.servers.count) { _, _ in
-            // Rig: `ARBOS_OPEN_SERVER=<name or id>[:list|:#channel]` — the server on `#general`,
-            // its channel list, or one channel, once the registry lists it.
-            guard let spec = DebugHooks.openServer, model.path.isEmpty else { return }
-            let parts = spec.split(separator: ":", maxSplits: 1).map(String.init)
-            guard let key = parts.first,
-                  let server = model.servers.first(where: { $0.id == key || $0.name.lowercased() == key.lowercased() })
-            else { return }
-            switch parts.dropFirst().first {
-            case "list": model.path = [.server(serverId: server.id)]
-            case let name?:
-                let wanted = name.hasPrefix("#") ? String(name.dropFirst()) : name
-                if let c = server.channels.first(where: { $0.name == wanted }) { model.open(channel: c) } else { model.open(server: server) }
-            case nil: model.open(server: server)
-            }
-        }
         .onChange(of: query) { _, _ in
             // Rooms may finish a checkpoint while the field is focused — paint
             // any still-unpublished transcripts so message search can see them.
