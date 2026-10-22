@@ -2130,17 +2130,34 @@ impl Shell {
         let shake_offset = shake
             .map(|dt| ((dt as f32 / SHAKE_MS as f32) * std::f32::consts::PI * 4.0).sin() * 3.0)
             .unwrap_or(0.0);
-        column = column.child(
-            div()
-                .relative()
-                .left(px(shake_offset))
-                // Without the sidebar the traffic lights sit over this header:
-                // clear them (14 pt in, three 12 pt lights, 8 pt gaps).
-                .when(sidebar_hidden, |el| el.pl(px(TRAFFIC_LIGHTS_INSET)))
-                .child(header::render(self, &space, sidebar_hidden, cx)),
-        );
+        // The header. With a transcript it floats over the list top like Grok's
+        // (the list runs under it and fades out through the band, see below),
+        // so it is appended last as an absolute overlay; everything else in the
+        // column is laid out from the top as before.
+        let header_bar = div()
+            .relative()
+            .left(px(shake_offset))
+            // Without the sidebar the traffic lights sit over this header:
+            // clear them (14 pt in, three 12 pt lights, 8 pt gaps).
+            .when(sidebar_hidden, |el| el.pl(px(TRAFFIC_LIGHTS_INSET)))
+            .child(header::render(self, &space, sidebar_hidden, cx));
+        let floating_header = dropped;
+        let mut flow_under_header = !floating_header;
+        let mut header_bar = Some(header_bar);
+        if !floating_header {
+            column = column.child(header_bar.take().expect("header built once"));
+        }
+        // Flow children between the header and the list start under the bar.
+        let mut pad_first = |el: Div| -> Div {
+            if !flow_under_header {
+                flow_under_header = true;
+                el.pt(px(HEADER_HEIGHT))
+            } else {
+                el
+            }
+        };
         if let Some(chips) = header::chips(self, &space, cx) {
-            column = column.child(chips);
+            column = column.child(pad_first(div()).child(chips));
         }
         // Calls v1: my call (bar, or the full screen below), or a live call to join.
         let my_call = self.state.read(cx).my_call.clone();
@@ -2150,7 +2167,7 @@ impl Shell {
             .map(|c| c.expanded && c.call.space_id() == space.id)
             .unwrap_or(false);
         if let Some(active) = my_call.as_ref().filter(|_| !screen_open) {
-            column = column.child(callview::bar(self, active, cx));
+            column = column.child(pad_first(div()).child(callview::bar(self, active, cx)));
         } else if let Some(call) = call_here.filter(|c| {
             c.is_live()
                 && my_call
@@ -2158,10 +2175,10 @@ impl Shell {
                     .map(|m| m.call.call_id != c.call_id)
                     .unwrap_or(true)
         }) {
-            column = column.child(callview::join_bar(&call, cx));
+            column = column.child(pad_first(div()).child(callview::join_bar(&call, cx)));
         }
         if let Some(banner) = self.render_banner(cx) {
-            column = column.child(banner);
+            column = column.child(pad_first(div()).child(banner));
         }
         if screen_open {
             if let Some(active) = my_call.as_ref() {
@@ -2234,11 +2251,12 @@ impl Shell {
             // Transcript above, composer pinned at the bottom. On the first
             // send the composer slides down from the centre over 220 ms using
             // a relative `top` inset (GPUI has no transform).
-            // The window-drag catchment reaches 24 pt past the 44 pt header,
-            // over the transcript's top fade (Jacob: the band alone was too
-            // small to grab). The strip arms a move only after the pointer
-            // travels `WINDOW_DRAG_SLOP`, so a click there still lands on the
-            // faded bubble beneath ([feedback mac-collapsed-toggle-inline]).
+            // Grok's header treatment (Jacob, Oct 22 12:49 CR, superseding the
+            // opaque band): the list runs up under the floating pill and fades
+            // out through the top band (`Transcript` fades `HEADER_FADE_BAND`).
+            // The window-drag catchment is the 44 pt header plus 24 pt below
+            // it; the strip arms a move only after `WINDOW_DRAG_SLOP`, so a
+            // click there still lands on the faded bubble beneath.
             let body = div()
                 .flex_1()
                 .min_h_0()
@@ -2247,7 +2265,11 @@ impl Shell {
                 .child(
                     div()
                         .absolute()
-                        .top_0()
+                        .top(px(if flow_under_header {
+                            0.0
+                        } else {
+                            HEADER_HEIGHT
+                        }))
                         .left_0()
                         .right_0()
                         .h(px(HEADER_DRAG_OVERHANG))
@@ -2286,6 +2308,17 @@ impl Shell {
                 .child(body)
                 .child(self.voice.clone())
                 .child(composer_row);
+            // Last, so it paints over the list: the floating header (its own
+            // hitboxes — pill, toggle, drag band — stay on top as well).
+            column = column.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .right_0()
+                    .h(px(HEADER_HEIGHT))
+                    .children(header_bar.take()),
+            );
         }
         // Accept Finder / file drops anywhere over the conversation (transcript,
         // empty hero, or composer) — not only the input field. The composer

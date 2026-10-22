@@ -68,6 +68,10 @@ const SENDER_LANE: f32 = SENDER_DISC + SENDER_DISC_GAP;
 /// Messages for Mac fades a row's hover-only affordances (time, react glyph)
 /// in and out rather than snapping them.
 const HOVER_FADE_MS: f32 = 150.0;
+/// The fade band under the floating header: Grok Mac's content is invisible at
+/// the window edge and fully opaque about 50 pt down (Jacob's reference,
+/// `ref-grok-header.png`, 2 px/pt: faint at 13–20 pt, half at 30–40, full at 52).
+pub const HEADER_FADE_BAND: f32 = crate::ui::theme::HEADER_HEIGHT + 6.0;
 /// How long the hover copy glyph stays a checkmark after a successful copy.
 const COPY_FEEDBACK_MS: u64 = 2_000;
 
@@ -1781,12 +1785,13 @@ impl Render for Transcript {
             .track_focus(&focus)
             .on_action(cx.listener(Self::copy_selection))
             .on_scroll_wheel(cx.listener(|this, event, _, cx| this.on_wheel(event, cx)))
-            // No top fade: the header is opaque and the list starts under it on
-            // the pane's own background, so bubbles never fade or slide behind
-            // the pill (Jacob, Oct 21; [feedback mac-collapsed-toggle-inline]).
+            // Grok's header band (Jacob, Oct 22 12:49 CR, superseding the opaque
+            // band): the list runs up under the floating pill and fades out
+            // over `HEADER_FADE_BAND` — Grok's text is gone at the window edge
+            // and fully readable ~50 pt down ([feedback mac-header-fade-grok]).
             .child(edge_faded(
-                24.0,
-                false,
+                HEADER_FADE_BAND,
+                true,
                 false,
                 list(self.list.clone(), cx.processor(Self::render_row)).size_full(),
             ))
