@@ -68,7 +68,8 @@ CLI:  feedback_poller.py [run] | status | testers | set-cursor <ISO-8601>
       | leadtime [since-ISO] | memtree-cost [YYYY-MM-DD]   (audit numbers; memtree-cost asks GET /admin/usage/memory-tree, else relay.db as root)
       | gate-tree <sha-or-branch> <fid>…   (gate a hand-prepared integration tree as one run and land it whole)
       | gate-abort   (drop the active gate run without verdicts; every ready branch re-batches at its current head)
-      | gate-next <fid>… [--then <fid>…] [--abort]   (the next gate batch is exactly these items, then the --then batch; --abort drops the active run first)
+      | gate-next <fid>… [--then <fid>…] [--abort]   (pin: these items gate next and alone; while a pinned item is with its owner nothing else merges)
+      | gate-unpin <fid>…
 """
 
 from __future__ import annotations
@@ -1686,6 +1687,16 @@ class Loop:
             raise RuntimeError(f"Rust gate ssh failed ({r.returncode}): {(r.stdout or '') + (r.stderr or '')}"[-1500:])
         return r.stdout or ""
 
+    def pinned_waiting(self) -> list[str]:
+        """Pinned (gate-next) items that are neither gating nor merged: back with their owner after a conflict or a
+        red gate. While one exists the scheduler starts no other batch."""
+        out = []
+        for fid in self.store.items():
+            st = self.store.state(fid)
+            if st.get("gate_pinned") and st.get("status") in ("handed_off", "running"):
+                out.append(fid)
+        return out
+
     def rust_gate_ready(self) -> list[tuple[str, dict]]:
         """Gating items that need a Rust verdict for their current head, oldest first."""
         out = []
@@ -1781,6 +1792,11 @@ class Loop:
         # pool AND ahead of bisect / conflict-retry plan halves — the pin survives a conflict → owner-merges-main
         # → re-push cycle (00:58 Oct 22: #1241 was merged third behind a retry half and hit a sibling conflict).
         members: dict[str, str] = {fid: st["branch_head"] for fid, st in ready if st.get("gate_pinned")}
+        if not members and self.pinned_waiting():
+            # A pinned item is back with its owner (conflict / red gate). Nothing else merges meanwhile: every merge
+            # moves main and hands the owner a fresh conflict (01:08 Oct 22, #1241's third). `gate-unpin` lifts it.
+            log(f"Gate: holding the pool for the pinned item(s) {', '.join(self.pinned_waiting())} (owner is repairing)")
+            return
         while plan and not members:
             half = plan.pop(0)
             # Match by item, gate at its CURRENT head: a bisected item whose owner pushed a repair meanwhile keeps
@@ -3544,6 +3560,18 @@ def main(argv: list[str]) -> int:
             for fid in b:
                 loop.store.event(fid, "gate_next", by="operator", members=list(b))
         print("next gate batches: " + " → ".join(", ".join(b) for b in batches) + ("" if "--abort" in argv or not active else f" (after the active run {active['id']} settles)"))
+        return 0
+    if cmd == "gate-unpin":
+        # `gate-unpin <fid>…`: drop the owner-priority pin (the pool runs again if the item is with its owner).
+        for fid in argv[2:]:
+            st = loop.store.state(fid)
+            if not st:
+                print(f"{fid}: unknown")
+                continue
+            st.pop("gate_pinned", None)
+            loop.store.save_state(fid, st)
+            loop.store.event(fid, "gate_unpinned", by="operator")
+            print(f"{fid}: unpinned")
         return 0
     if cmd == "gate-abort":
         # Operator: drop the active gate run without verdicts (a member branch was repaired mid-run, the
