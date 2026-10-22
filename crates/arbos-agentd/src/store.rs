@@ -447,6 +447,18 @@ impl Store {
         })
     }
 
+    /// User turns of `chat_id` since its last `compaction` row (every turn when there is none).
+    pub fn user_turns_since_compaction(&self, chat_id: &str) -> Result<i64> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT COUNT(*) FROM t3 WHERE thread_id = ?1 AND kind = 'user'
+                   AND id > COALESCE((SELECT MAX(id) FROM t3 WHERE thread_id = ?1 AND kind = 'compaction'), '')",
+                params![chat_id],
+                |r| r.get(0),
+            )
+        })
+    }
+
     pub fn bump_session_compactions(&self, id: &str) -> Result<i64> {
         self.with(|c| {
             c.execute(
@@ -1253,6 +1265,33 @@ fn fts_query(q: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// D91: the soft-compaction gate counts user turns after the last compaction row.
+    #[test]
+    fn user_turns_since_compaction_counts_after_the_last_row() {
+        let dir = std::env::temp_dir().join(format!("arbos-store-{}", ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("agentd.db")).unwrap();
+        // rows land milliseconds apart in real use; ULIDs minted in the same millisecond do not
+        // sort by insertion order, so give the clock a tick between rows
+        let append = |thread: &str, kind: &str, text: &str| {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            store
+                .t3_append(thread, None, None, kind, Some(kind), text, None)
+                .unwrap();
+        };
+        for _ in 0..3 {
+            append("c1", "user", "hi");
+            append("c1", "assistant", "hello");
+        }
+        assert_eq!(store.user_turns_since_compaction("c1").unwrap(), 3);
+        append("c1", "compaction", "compacted");
+        assert_eq!(store.user_turns_since_compaction("c1").unwrap(), 0);
+        append("c1", "user", "again");
+        append("c2", "user", "other chat");
+        assert_eq!(store.user_turns_since_compaction("c1").unwrap(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// D19 redaction is applied before anything lands in T3.
     #[test]
