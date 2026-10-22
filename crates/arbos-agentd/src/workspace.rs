@@ -756,7 +756,7 @@ pub fn seed_state(cfg: &Config) -> Result<()> {
     let settings = json!({
         "defaultProvider": cfg.pi_provider(), "defaultModel": cfg.talking_model, "defaultThinkingLevel": "off",
         "defaultTools": ["read", "bash", "edit", "write", "codemode"],
-        "compaction": { "enabled": true, "reserveTokens": 16384, "keepRecentTokens": KEEP_RECENT_TOKENS },
+        "compaction": { "enabled": true, "reserveTokens": COMPACTION_RESERVE_TOKENS, "keepRecentTokens": KEEP_RECENT_TOKENS },
         "hideThinkingBlock": true
     });
     std::fs::write(
@@ -867,6 +867,18 @@ pub const DEFAULT_COMPACT_AT_TOKENS: u64 = 64_000;
 
 /// Tokens pi keeps verbatim when it compacts (`compaction.keepRecentTokens` in its settings).
 pub const KEEP_RECENT_TOKENS: u64 = 20_000;
+
+/// pi's `compaction.reserveTokens`: it caps the rolling summary at 0.8× this (6.5k) and sets
+/// pi's own compaction threshold at `window − reserve` (120k, under the 128k ceiling). The
+/// default 16k let the summary run to 13k, which with the 20k kept tail and one big turn put the
+/// window back over the soft threshold right after a compaction.
+pub const COMPACTION_RESERVE_TOKENS: u64 = 8_192;
+
+/// A soft compaction is not repeated before this many user turns have passed since the last
+/// compaction of the chat: a turn large enough to land the window back above the threshold on
+/// its own (an 8k paste, a big retrieved block) must not rewrite the cache on every turn. The
+/// 128k ceiling still catches a chat that keeps growing meanwhile.
+pub const MIN_TURNS_BETWEEN_COMPACTIONS: i64 = 4;
 
 pub fn compact_at_tokens() -> u64 {
     match std::env::var("ARBOS_CONTEXT_COMPACT_AT_TOKENS")
