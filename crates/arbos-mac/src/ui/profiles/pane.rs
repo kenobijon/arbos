@@ -49,7 +49,6 @@ pub enum Picture {
     /// A photo, initials disc or leaf — `editable_picture(..)` when owned.
     Element(AnyElement),
     /// A glyph tile: "#" for channels, "archive"… (the channel page, bc-55453a88).
-    #[allow(dead_code)]
     Glyph(&'static str),
 }
 
@@ -104,6 +103,14 @@ fn title_of(page: &ProfilePage, state: &AppState) -> String {
             .iter()
             .find(|s| &s.id == server_id)
             .map(|s| s.name.clone())
+            .unwrap_or_default(),
+        ProfilePage::Channel {
+            server_id,
+            channel_id,
+        } => state
+            .server(server_id)
+            .and_then(|s| s.channel(channel_id))
+            .map(|c| c.name.clone())
             .unwrap_or_default(),
     }
 }

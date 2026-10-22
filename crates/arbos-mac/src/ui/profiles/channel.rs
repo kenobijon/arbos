@@ -1,17 +1,19 @@
-//! A channel's pane (D88, #1317): what the `# general` header pill opens. Minimal until the
-//! channel profile (Profile | Settings) is approved: the `#` disc, the name, the topic, who
-//! can post, how many members the server has, and a row that opens the server's pane.
+//! A channel's pane (D88, #1317) on the shared profile pane (D93): what the `# general` header
+//! pill opens. Minimal until the approved channel profile (Profile | Settings) lands: the `#`
+//! glyph tile, the name with a lock badge when admins-only, the topic, who posts, the server's
+//! member count, and a row that pushes the server's pane.
 
-use gpui::{div, prelude::*, px, Context, Div, FontWeight, Stateful};
+use gpui::{div, prelude::*, px, AnyElement, Context, Div, Stateful};
 
 use crate::app::ProfilePage;
-use crate::ui::icons::icon;
 use crate::ui::profiles::kit;
 use crate::ui::shell::Shell;
 use crate::ui::sidebar::server_picture;
-use crate::ui::theme::{Theme, TEXT_BODY, TEXT_SMALL};
+use crate::ui::theme::{Theme, TEXT_BODY};
 
-use super::{card, frame, hero, HERO_AVATAR};
+use super::pane::{self, Hero, Picture, ProfilePane, Section};
+
+const TABS: [&str; 0] = [];
 
 pub(super) fn page(
     server_id: &str,
@@ -26,89 +28,82 @@ pub(super) fn page(
     let restricted =
         channel.restricted || state.channel_row(&channel).is_some_and(|r| r.restricted);
 
-    let disc = div()
-        .size(px(HERO_AVATAR))
-        .rounded(px(HERO_AVATAR * 0.3))
-        .bg(theme.surface_2)
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(icon("hash", HERO_AVATAR * 0.5, theme.text_muted))
-        .into_any_element();
-    let name = div()
-        .flex()
-        .items_center()
-        .gap(px(6.0))
-        .child(
-            div()
-                .text_size(px(TEXT_BODY + 6.0))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme.text)
-                .child(channel.name.clone()),
-        )
-        .when(restricted, |el| {
-            el.child(icon("lock", 13.0, theme.text_faint))
-        })
-        .into_any_element();
     let count = server.member_count.max(server.members.len() as u64);
-    let subtitle = format!(
-        "{count} member{} · {}",
-        if count == 1 { "" } else { "s" },
-        server.name
-    );
-    let hero = hero(disc, name, &subtitle, theme.text_muted, &theme);
+    let hero = Hero {
+        picture: Picture::Glyph("hash"),
+        name: pane::name(channel.name.clone(), &theme),
+        badge: restricted.then_some("lock"),
+        subtitle: Some(
+            format!(
+                "{count} member{} · {}",
+                if count == 1 { "" } else { "s" },
+                server.name
+            )
+            .into(),
+        ),
+        subtitle_color: theme.text_muted,
+    };
 
-    let mut about = card(&theme);
+    let mut about: Vec<AnyElement> = Vec::new();
     if !channel.topic.trim().is_empty() {
-        about = about.child(
+        about.push(
             div()
                 .px(px(kit::INSET))
-                .py(px(10.0))
-                .text_size(px(TEXT_SMALL))
+                .py(px(12.0))
+                .text_size(px(TEXT_BODY))
                 .text_color(theme.text)
-                .child(channel.topic.clone()),
+                .child(channel.topic.clone())
+                .into_any_element(),
         );
     }
-    about = about.child(kit::value_row(
-        "channel-privacy",
-        "Posting",
-        if restricted {
-            "Admins only"
-        } else {
-            "Everyone"
-        },
-        &theme,
-    ));
+    about.push(
+        kit::value_row(
+            "channel-privacy",
+            "Posting",
+            if restricted {
+                "Admins only"
+            } else {
+                "Everyone"
+            },
+            &theme,
+        )
+        .into_any_element(),
+    );
 
     let page = ProfilePage::Server {
         server_id: server.id.clone(),
     };
-    let server_row = card(&theme).child(
-        kit::row(
-            "channel-server",
-            kit::Leading::Avatar(server_picture(&server, kit::AVATAR, &theme).into_any_element()),
-            server.name.clone(),
-            Some("Server".into()),
-            None,
-            None,
-            true,
-            &theme,
-        )
-        .cursor_pointer()
-        .hover(|s| s.bg(theme.surface_2))
-        .on_click(cx.listener(move |this, _, _, cx| {
-            let page = page.clone();
-            this.state.update(cx, |s, cx| s.push_profile(page, cx));
-        })),
-    );
+    let server_row = kit::row(
+        "channel-server",
+        kit::Leading::Avatar(server_picture(&server, kit::AVATAR, &theme).into_any_element()),
+        server.name.clone(),
+        Some("Server".into()),
+        None,
+        None,
+        true,
+        &theme,
+    )
+    .cursor_pointer()
+    .hover(|s| s.bg(theme.surface_2))
+    .on_click(cx.listener(move |this, _, _, cx| {
+        this.push_profile(page.clone(), cx);
+    }))
+    .into_any_element();
 
-    let body = div()
-        .flex()
-        .flex_col()
-        .gap(px(14.0))
-        .pb(px(16.0))
-        .child(hero)
-        .child(about)
-        .child(server_row);
-    Some(frame(body, None, Some(&shell.profile_scroll), &theme, cx))
+    Some(pane::render(
+        ProfilePane {
+            page: ProfilePage::Channel {
+                server_id: server.id.clone(),
+                channel_id: channel.id.clone(),
+            },
+            hero,
+            tabs: &TABS,
+            selected: 0,
+            body: vec![Section::Card(about), Section::Card(vec![server_row])],
+            footer: Vec::new(),
+            done: None,
+        },
+        shell,
+        cx,
+    ))
 }

@@ -1,5 +1,6 @@
-//! A server's pane (D88 rules 5 and 6): the group pane's skeleton — big disc, name, a tab
-//! pill — with **Channels**, **Members** and **Settings**. Owners and admins rename the server,
+//! A server's pane (D88 rules 5 and 6) on the shared profile pane (D93): one `ProfilePane` spec
+//! — editable picture and name, `N members · N channels`, **Channels** | **Members** |
+//! **Settings**, Leave / Delete server pinned in the footer. Owners and admins rename the server,
 //! add / rename / delete channels and flip "Admins only post", change roles and remove or ban
 //! members, and see the invite link (the owner resets it). Members read everything and can
 //! leave. Nothing here says "Matrix".
@@ -7,7 +8,8 @@
 use std::sync::Arc;
 
 use gpui::{
-    div, prelude::*, px, Context, Div, ElementId, FontWeight, RenderImage, SharedString, Stateful,
+    div, prelude::*, px, AnyElement, Context, Div, ElementId, FontWeight, RenderImage,
+    SharedString, Stateful,
 };
 
 use crate::app::{ProfilePage, ServerSheet};
@@ -19,10 +21,8 @@ use crate::ui::shell::Shell;
 use crate::ui::sidebar::server_picture;
 use crate::ui::theme::{Theme, TEXT_BODY, TEXT_SMALL};
 
-use super::{
-    card, editable_name, editable_picture, empty, frame, hero, kit, list_row, tab_bar, HeroClick,
-    HERO_AVATAR,
-};
+use super::pane::{self, Hero, Picture, ProfilePane, Section};
+use super::{editable_name, editable_picture, kit, list_row, HeroClick, HERO_AVATAR};
 
 const TABS: [&str; 3] = ["Channels", "Members", "Settings"];
 
@@ -99,12 +99,22 @@ pub(super) fn page(
     } else {
         members.len()
     };
-    let subtitle = format!("{count} member{}", if count == 1 { "" } else { "s" });
-    let hero = hero(avatar, name, &subtitle, theme.text_muted, &theme);
+    let channels_n = server.channels.iter().filter(|c| !c.archived).count();
+    let subtitle = format!(
+        "{count} member{} · {channels_n} channel{}",
+        if count == 1 { "" } else { "s" },
+        if channels_n == 1 { "" } else { "s" }
+    );
+    let hero = Hero {
+        picture: Picture::Element(avatar),
+        name,
+        badge: None,
+        subtitle: Some(subtitle.into()),
+        subtitle_color: theme.text_muted,
+    };
 
-    // ----- tabs -----------------------------------------------------------------
-    let tabs = tab_bar(&TABS, tab, &theme, cx);
-    let body_tab = match tab {
+    // ----- tabs: Channels | Members | Settings (the same set on the iPhone) ------
+    let body = match tab {
         0 => channels_tab(
             &server,
             selected_channel.as_deref(),
@@ -122,17 +132,25 @@ pub(super) fn page(
             &theme,
             cx,
         ),
-        _ => settings_tab(&server, is_owner, can_admin, leave_armed, &theme, cx),
+        _ => settings_tab(&server, is_owner, can_admin, &theme, cx),
     };
+    let footer = leave_footer(&server, is_owner, leave_armed, &theme, cx);
 
-    let body = div()
-        .flex()
-        .flex_col()
-        .pb(px(16.0))
-        .child(hero)
-        .child(tabs)
-        .child(body_tab);
-    Some(frame(body, None, Some(&shell.profile_scroll), &theme, cx))
+    Some(pane::render(
+        ProfilePane {
+            page: ProfilePage::Server {
+                server_id: server.id.clone(),
+            },
+            hero,
+            tabs: &TABS,
+            selected: tab,
+            body,
+            footer,
+            done: None,
+        },
+        shell,
+        cx,
+    ))
 }
 
 /// Channels: "Add channel" for admins, then one row per channel — `#name`, a lock word when
@@ -145,7 +163,7 @@ fn channels_tab(
     shell: &Shell,
     theme: &Theme,
     cx: &mut Context<Shell>,
-) -> Div {
+) -> Vec<Section> {
     let can_admin = server.can_admin();
     let mut add = None;
     if can_admin {
@@ -176,20 +194,20 @@ fn channels_tab(
     }
     let channels: Vec<ServerChannel> = server.ordered_channels().into_iter().cloned().collect();
     if channels.is_empty() && server.archived_channels().is_empty() {
-        return div()
-            .flex()
-            .flex_col()
-            .children(add.map(|row| card(theme).child(row)))
-            .child(empty("No channels yet", theme));
+        let mut out = Vec::new();
+        if let Some(row) = add {
+            out.push(Section::Card(vec![row.into_any_element()]));
+        }
+        out.push(Section::Empty("No channels yet".into()));
+        return out;
     }
     let general_id = server.general().map(|c| c.id.clone());
-    let has_live = !channels.is_empty();
-    let mut list = card(theme);
+    let mut list: Vec<AnyElement> = Vec::new();
     for ch in channels {
         let key = ch.id.clone();
         let is_selected = selected == Some(ch.id.as_str());
         if renaming == Some(ch.id.as_str()) {
-            list = list.child(
+            list.push(
                 div()
                     .flex()
                     .items_center()
@@ -197,8 +215,6 @@ fn channels_tab(
                     .min_h(px(kit::ROW_MIN_H))
                     .px(px(kit::INSET))
                     .py(px(6.0))
-                    .border_b_1()
-                    .border_color(theme.border)
                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(
                         div()
@@ -225,7 +241,8 @@ fn channels_tab(
                             .border_color(theme.primary)
                             .text_size(px(TEXT_BODY))
                             .child(shell.server_input.clone()),
-                    ),
+                    )
+                    .into_any_element(),
             );
             continue;
         }
@@ -287,7 +304,7 @@ fn channels_tab(
         let (sid, cid) = (server.id.clone(), ch.id.clone());
         let rename_name = ch.name.clone();
         let rename_id = ch.id.clone();
-        list = list.child(
+        list.push(
             kit::row(
                 ElementId::Name(SharedString::from(format!("profile-channel-{key}"))),
                 kit::Leading::Glyph("hash"),
@@ -302,8 +319,8 @@ fn channels_tab(
             .when(is_selected, |el| el.bg(theme.surface_2))
             .cursor_pointer()
             .hover(|s| s.bg(theme.surface_2))
-            .on_click(cx.listener(
-                move |this, event: &gpui::ClickEvent, window, cx| {
+            .on_click(
+                cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
                     if can_admin && event.click_count() >= 2 {
                         this.start_rename_channel(
                             rename_id.clone(),
@@ -318,15 +335,28 @@ fn channels_tab(
                         s.open_server = Some(sid.clone());
                         s.select_channel(sid, cid, cx);
                     });
-                },
-            )),
+                }),
+            )
+            .into_any_element(),
         );
     }
     // Channels I archived (row menu → Archive): listed under the live ones; the row's
     // "Unarchive" brings one back to my list.
     let archived: Vec<ServerChannel> = server.archived_channels().into_iter().cloned().collect();
-    let archived_section = (!archived.is_empty()).then(|| {
-        let mut rows = card(theme);
+    let mut out: Vec<Section> = Vec::new();
+    if let Some(row) = add {
+        out.push(Section::Card(vec![row.into_any_element()]));
+    }
+    if !list.is_empty() {
+        out.push(Section::Card(list));
+    }
+    if can_admin {
+        out.push(Section::Footnote(
+            "Double-click a channel to rename it. The switch makes it admins-only.".into(),
+        ));
+    }
+    if !archived.is_empty() {
+        let mut rows: Vec<AnyElement> = Vec::new();
         for ch in archived {
             let (sid, cid) = (server.id.clone(), ch.id.clone());
             let restore = div()
@@ -352,35 +382,24 @@ fn channels_tab(
                         .update(cx, |s, cx| s.archive_channel(sid, cid, false, cx));
                 }))
                 .into_any_element();
-            rows = rows.child(kit::row(
-                ElementId::Name(SharedString::from(format!("channel-archived-{}", ch.id))),
-                kit::Leading::Glyph("archive"),
-                ch.name.clone(),
-                ch.restricted.then(|| "Admins only post".into()),
-                None,
-                Some(restore),
-                false,
-                theme,
-            ));
+            rows.push(
+                kit::row(
+                    ElementId::Name(SharedString::from(format!("channel-archived-{}", ch.id))),
+                    kit::Leading::Glyph("archive"),
+                    ch.name.clone(),
+                    ch.restricted.then(|| "Admins only post".into()),
+                    None,
+                    Some(restore),
+                    false,
+                    theme,
+                )
+                .into_any_element(),
+            );
         }
-        div()
-            .flex()
-            .flex_col()
-            .child(kit::section_title("Archived", theme))
-            .child(rows)
-    });
-    div()
-        .flex()
-        .flex_col()
-        .children(add.map(|row| card(theme).child(row)))
-        .when(has_live, |el| el.child(list))
-        .when(can_admin, |el| {
-            el.child(kit::footnote(
-                "Double-click a channel to rename it. The switch makes it admins-only.",
-                theme,
-            ))
-        })
-        .children(archived_section)
+        out.push(Section::Title("Archived".into()));
+        out.push(Section::Card(rows));
+    }
+    out
 }
 
 /// Members: owner first. The owner flips admin ↔ member with the crown and removes or bans
@@ -393,18 +412,18 @@ fn members_tab(
     armed: Option<&str>,
     theme: &Theme,
     cx: &mut Context<Shell>,
-) -> Div {
+) -> Vec<Section> {
     if members.is_empty() {
-        return empty("Loading members…", theme);
+        return vec![Section::Empty("Loading members…".into())];
     }
     let is_owner = server.is_owner();
     let can_admin = server.can_admin();
-    let mut list = card(theme);
+    let mut list: Vec<AnyElement> = Vec::new();
     for (i, m) in members.iter().enumerate() {
         let is_me = m.id == me_id;
         let key = m.id.clone();
         if armed == Some(key.as_str()) {
-            list = list.child(remove_confirm(server, m, theme, cx));
+            list.push(remove_confirm(server, m, theme, cx).into_any_element());
             continue;
         }
         let title = if is_me {
@@ -490,7 +509,7 @@ fn members_tab(
             controls.into_any_element()
         });
         let handle = m.handle.clone();
-        list = list.child(
+        list.push(
             list_row(
                 ElementId::Name(SharedString::from(format!("profile-member-{key}"))),
                 people::avatar(images[i].clone(), m, kit::AVATAR, theme).into_any_element(),
@@ -512,10 +531,11 @@ fn members_tab(
                     },
                     cx,
                 );
-            })),
+            }))
+            .into_any_element(),
         );
     }
-    div().flex().flex_col().child(list)
+    vec![Section::Card(list)]
 }
 
 /// "Remove @x from Server?" in the row's place: Cancel keeps, Remove removes, Ban keeps them out.
@@ -528,8 +548,6 @@ fn remove_confirm(server: &ServerInfo, m: &Person, theme: &Theme, cx: &mut Conte
         .gap(px(8.0))
         .px(px(kit::INSET))
         .py(px(10.0))
-        .border_b_1()
-        .border_color(theme.border)
         .child(
             div()
                 .text_size(px(TEXT_SMALL))
@@ -573,19 +591,18 @@ fn remove_confirm(server: &ServerInfo, m: &Person, theme: &Theme, cx: &mut Conte
         )
 }
 
-/// Settings: the invite link (owner/admin; Copy, and Reset for the owner), then Leave server
-/// — or Delete server for the owner. Members see only the leave card.
+/// Settings (D93 order: relations): the invite link for owner/admin — Copy, and Reset for the
+/// owner. Members have nothing to set yet; Leave / Delete server sit in the footer.
 fn settings_tab(
     server: &ServerInfo,
     is_owner: bool,
     can_admin: bool,
-    leave_armed: bool,
     theme: &Theme,
     cx: &mut Context<Shell>,
-) -> Div {
-    let mut body = div().flex().flex_col();
+) -> Vec<Section> {
+    let mut body: Vec<Section> = Vec::new();
     if can_admin {
-        let mut invite = card(theme);
+        let mut invite: Vec<AnyElement> = Vec::new();
         match &server.invite {
             Some(link) => {
                 let url = link.url.clone();
@@ -600,19 +617,22 @@ fn settings_tab(
                             cx.notify();
                         });
                     }));
-                invite = invite.child(kit::row(
-                    "server-invite",
-                    kit::Leading::Tile("link"),
-                    "Invite link",
-                    Some(SharedString::from(link.url.clone())),
-                    None,
-                    Some(copy.into_any_element()),
-                    false,
-                    theme,
-                ));
+                invite.push(
+                    kit::row(
+                        "server-invite",
+                        kit::Leading::Tile("link"),
+                        "Invite link",
+                        Some(SharedString::from(link.url.clone())),
+                        None,
+                        Some(copy.into_any_element()),
+                        false,
+                        theme,
+                    )
+                    .into_any_element(),
+                );
                 if is_owner {
                     let sid = server.id.clone();
-                    invite = invite.child(
+                    invite.push(
                         kit::row(
                             "server-invite-reset",
                             kit::Leading::None,
@@ -628,33 +648,50 @@ fn settings_tab(
                         .on_click(cx.listener(move |this, _, _, cx| {
                             let sid = sid.clone();
                             this.state.update(cx, |s, cx| s.reset_invite(sid, cx));
-                        })),
+                        }))
+                        .into_any_element(),
                     );
                 }
             }
             None => {
-                invite = invite.child(kit::row(
-                    "server-invite",
-                    kit::Leading::Tile("link"),
-                    "Invite link",
-                    Some(SharedString::from("Loading…")),
-                    None,
-                    None,
-                    false,
-                    theme,
-                ));
+                invite.push(
+                    kit::row(
+                        "server-invite",
+                        kit::Leading::Tile("link"),
+                        "Invite link",
+                        Some(SharedString::from("Loading…")),
+                        None,
+                        None,
+                        false,
+                        theme,
+                    )
+                    .into_any_element(),
+                );
             }
         }
-        body = body.child(invite).child(kit::footnote(
+        body.push(Section::Card(invite));
+        body.push(Section::Footnote(
             if is_owner {
                 "Anyone with the link joins as a member. Resetting it makes the old link stop working."
             } else {
                 "Anyone with the link joins as a member."
-            },
-            theme,
+            }
+            .into(),
         ));
+    } else {
+        body.push(Section::Empty("Nothing to set up here yet.".into()));
     }
+    body
+}
 
+/// The footer on every tab: Leave server — or Delete server for the owner — asking first.
+fn leave_footer(
+    server: &ServerInfo,
+    is_owner: bool,
+    leave_armed: bool,
+    theme: &Theme,
+    cx: &mut Context<Shell>,
+) -> Vec<Section> {
     let (label, question, note) = if is_owner {
         (
             "Delete server",
@@ -669,66 +706,63 @@ fn settings_tab(
         )
     };
     let sid = server.id.clone();
-    let leave = if leave_armed {
-        card(theme).child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(8.0))
-                .px(px(kit::INSET))
-                .py(px(10.0))
-                .child(
-                    div()
-                        .text_size(px(TEXT_SMALL))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.text)
-                        .child(question),
-                )
-                .child(
-                    div()
-                        .text_size(px(TEXT_SMALL))
-                        .text_color(theme.text_muted)
-                        .child(note),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .justify_end()
-                        .gap(px(6.0))
-                        .child(
-                            kit::confirm_button("server-leave-cancel", "Cancel", false, theme)
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.server_leave_armed = false;
-                                    cx.notify();
-                                })),
+    let leave: AnyElement = if leave_armed {
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .px(px(kit::INSET))
+            .py(px(10.0))
+            .child(
+                div()
+                    .text_size(px(TEXT_SMALL))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.text)
+                    .child(question),
+            )
+            .child(
+                div()
+                    .text_size(px(TEXT_SMALL))
+                    .text_color(theme.text_muted)
+                    .child(note),
+            )
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap(px(6.0))
+                    .child(
+                        kit::confirm_button("server-leave-cancel", "Cancel", false, theme)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.server_leave_armed = false;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        kit::confirm_button(
+                            "server-leave-go",
+                            if is_owner { "Delete" } else { "Leave" },
+                            true,
+                            theme,
                         )
-                        .child(
-                            kit::confirm_button(
-                                "server-leave-go",
-                                if is_owner { "Delete" } else { "Leave" },
-                                true,
-                                theme,
-                            )
-                            .on_click(cx.listener(
-                                move |this, _, window, cx| {
-                                    this.server_leave_armed = false;
-                                    let sid = sid.clone();
-                                    this.state.update(cx, |s, cx| s.leave_server(sid, cx));
-                                    this.close_profile(window, cx);
-                                },
-                            )),
-                        ),
-                ),
-        )
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                this.server_leave_armed = false;
+                                let sid = sid.clone();
+                                this.state.update(cx, |s, cx| s.leave_server(sid, cx));
+                                this.close_profile(window, cx);
+                            },
+                        )),
+                    ),
+            )
+            .into_any_element()
     } else {
-        card(theme).child(
-            kit::danger_row("server-leave", label, theme).on_click(cx.listener(
-                |this, _, _, cx| {
-                    this.server_leave_armed = true;
-                    cx.notify();
-                },
-            )),
-        )
+        kit::danger_row("server-leave", label, theme)
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.server_leave_armed = true;
+                cx.notify();
+            }))
+            .into_any_element()
     };
-    body.child(leave)
+    vec![Section::Card(vec![leave])]
 }
