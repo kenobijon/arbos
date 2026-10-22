@@ -42,6 +42,12 @@ pub enum SyncEvent {
     },
     /// Who is signed in (`/auth/token` or `/me`); `None` after sign-out.
     Account(Option<AccountView>),
+    /// Remote feature flags from `GET /me` → `features` (one object, one place on the relay).
+    Features {
+        /// `features.voice_mode`: spoken replies, voice picker, reply playback. Absent on an
+        /// older relay = off (Jacob, 2026-10-22: hidden everywhere until it works end to end).
+        voice_mode: bool,
+    },
     /// `GET /users/search` results for the new-chat sheet (D72).
     PeopleSearch {
         query: String,

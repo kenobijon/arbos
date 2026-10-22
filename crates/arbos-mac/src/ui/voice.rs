@@ -676,6 +676,10 @@ impl Voice {
     }
 
     fn set_voice_mode(&mut self, on: bool, cx: &mut Context<Self>) {
+        // Relay kill switch (features.voice_mode): the switch cannot be turned on while off.
+        if on && !self.state.read(cx).voice_mode_available() {
+            return;
+        }
         if on {
             self.voice_since = now_ms();
         } else {
@@ -880,7 +884,8 @@ impl Voice {
     /// chat is spoken while voice mode is on (or during a call).
     fn check_replies(&mut self, cx: &mut Context<Self>) {
         self.drop_stale_notice(cx);
-        if self.voice_since == u64::MAX {
+        // Feature off: never request speech, whatever an older state said.
+        if self.voice_since == u64::MAX || !self.state.read(cx).voice_mode_available() {
             cx.notify();
             return;
         }
@@ -992,6 +997,9 @@ impl Voice {
     }
 
     fn replay(&mut self, message_id: Id, cx: &mut Context<Self>) {
+        if !self.state.read(cx).voice_mode_available() {
+            return;
+        }
         if let Some(bytes) = self.speech.get(&message_id).cloned() {
             self.play(message_id, bytes, cx);
             return;
