@@ -279,9 +279,14 @@ impl Shell {
     }
 
     pub fn new(state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let open_settings = std::env::var("ARBOS_OPEN_SETTINGS")
-            .ok()
-            .filter(|v| v == "1" || v == "bottom" || v == "connectors" || v.starts_with("secrets"));
+        let open_settings = std::env::var("ARBOS_OPEN_SETTINGS").ok().filter(|v| {
+            v == "1"
+                || v == "bottom"
+                || v == "connectors"
+                || v == "notifications"
+                || v == "machine"
+                || v.starts_with("secrets")
+        });
         let settings_scroll = ScrollHandle::new();
         if open_settings.as_deref() == Some("bottom") {
             settings_scroll.scroll_to_bottom();
@@ -614,6 +619,9 @@ impl Shell {
             // that page) — rig; the pane itself is opened below.
             settings_page: match open_settings.as_deref() {
                 Some("connectors") => SettingsPage::Connectors,
+                // Rig: `ARBOS_OPEN_SETTINGS=notifications|machine` — one-row cards.
+                Some("notifications") => SettingsPage::Notifications,
+                Some("machine") => SettingsPage::Machine,
                 Some(v) if v.starts_with("secrets") => SettingsPage::Secrets,
                 _ => SettingsPage::Root,
             },

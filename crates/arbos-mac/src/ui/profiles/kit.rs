@@ -57,6 +57,57 @@ pub fn card(theme: &Theme) -> Div {
         .overflow_hidden()
 }
 
+/// The one separator every grouped row uses: a 1 pt hairline hung 1 pt
+/// *below* the row's box (`.relative()` on the row). Between rows it lands on
+/// the next row's first pixel; under the last row the card's clip swallows it,
+/// and nothing sits above the first — separators only between rows, inside
+/// the card (Jacob, 2026-10-21). Drawn as a bottom border it would stay inside
+/// the box and show under a card's last row.
+pub fn hairline_below(inset: f32, theme: &Theme) -> Div {
+    div()
+        .absolute()
+        .left(px(inset))
+        .right(px(0.0))
+        .bottom(px(-1.0))
+        .h(px(1.0))
+        .bg(theme.border)
+}
+
+/// What a grouped section is made of, in order: rows with exactly one
+/// separator between each neighbouring pair — none before the first, none
+/// after the last. Pure, so it can be tested without a window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SectionPart {
+    Row(usize),
+    Separator,
+}
+
+pub fn section_parts(rows: usize) -> Vec<SectionPart> {
+    let mut parts = Vec::with_capacity(rows.saturating_mul(2));
+    for i in 0..rows {
+        if i > 0 {
+            parts.push(SectionPart::Separator);
+        }
+        parts.push(SectionPart::Row(i));
+    }
+    parts
+}
+
+/// A grouped card whose separators are explicit elements placed by
+/// [`section_parts`]: rows that carry no hairline of their own (plain
+/// content, custom rows) get exactly `rows - 1` lines, inside the card.
+pub fn section(rows: Vec<AnyElement>, inset: f32, theme: &Theme) -> Div {
+    let mut rows: Vec<Option<AnyElement>> = rows.into_iter().map(Some).collect();
+    let mut out = card(theme);
+    for part in section_parts(rows.len()) {
+        out = match part {
+            SectionPart::Row(i) => out.children(rows[i].take()),
+            SectionPart::Separator => out.child(div().ml(px(inset)).h(px(1.0)).bg(theme.border)),
+        };
+    }
+    out
+}
+
 fn leading_el(leading: Leading, theme: &Theme) -> Option<AnyElement> {
     match leading {
         Leading::None => None,
@@ -159,15 +210,7 @@ pub fn row(
         .when(chevron, |el| {
             el.child(icon("chevron-right", 13.0, theme.text_faint))
         })
-        .child(
-            div()
-                .absolute()
-                .left(px(sep))
-                .right(px(0.0))
-                .bottom(px(-1.0))
-                .h(px(1.0))
-                .bg(theme.border),
-        )
+        .child(hairline_below(sep, theme))
 }
 
 /// A row that pushes a page: tile, label, detail, chevron, hover.
@@ -307,13 +350,13 @@ pub fn confirm_row(
 ) -> Div {
     let _ = action;
     div()
+        .relative()
         .flex()
         .flex_col()
         .gap(px(8.0))
         .px(px(INSET))
         .py(px(10.0))
-        .border_b_1()
-        .border_color(theme.border)
+        .child(hairline_below(INSET, theme))
         .child(
             div()
                 .text_size(px(TEXT_SMALL))
@@ -329,4 +372,87 @@ pub fn confirm_row(
                 .child(cancel)
                 .child(go),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_one_row_section_has_no_separator() {
+        let parts = section_parts(1);
+        assert_eq!(parts, vec![SectionPart::Row(0)]);
+    }
+
+    #[test]
+    fn a_three_row_section_has_exactly_two_separators_between_rows() {
+        let parts = section_parts(3);
+        assert_eq!(
+            parts,
+            vec![
+                SectionPart::Row(0),
+                SectionPart::Separator,
+                SectionPart::Row(1),
+                SectionPart::Separator,
+                SectionPart::Row(2),
+            ]
+        );
+        assert!(parts.first() != Some(&SectionPart::Separator));
+        assert!(parts.last() != Some(&SectionPart::Separator));
+    }
+
+    #[test]
+    fn separators_are_always_rows_minus_one() {
+        for n in 0..12 {
+            let seps = section_parts(n)
+                .iter()
+                .filter(|p| **p == SectionPart::Separator)
+                .count();
+            assert_eq!(seps, n.saturating_sub(1), "{n} rows");
+        }
+    }
+
+    /// Headless GPUI render: a 1-row and a 3-row section draw without a panic
+    /// and keep their part counts (the structure the window paints from).
+    #[gpui::test]
+    fn one_and_three_row_sections_render_headless(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let theme = crate::ui::theme::Theme::for_pref(
+                crate::ui::theme::AppearancePref::Dark,
+                crate::ui::theme::Surface::Matte,
+                cx,
+            );
+            cx.set_global(theme);
+        });
+        struct Sections;
+        impl gpui::Render for Sections {
+            fn render(
+                &mut self,
+                _: &mut gpui::Window,
+                cx: &mut gpui::Context<Self>,
+            ) -> impl IntoElement {
+                let theme = Theme::of(cx).clone();
+                let row = |label: &str| {
+                    div()
+                        .h(px(ROW_MIN_H))
+                        .px(px(INSET))
+                        .child(label.to_string())
+                        .into_any_element()
+                };
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(section(vec![row("Only")], INSET, &theme))
+                    .child(section(
+                        vec![row("One"), row("Two"), row("Three")],
+                        INSET,
+                        &theme,
+                    ))
+            }
+        }
+        let (_view, vcx) = cx.add_window_view(|_, _| Sections);
+        vcx.run_until_parked();
+        assert_eq!(section_parts(1).len(), 1);
+        assert_eq!(section_parts(3).len(), 5);
+    }
 }
