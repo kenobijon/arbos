@@ -19,7 +19,9 @@ use arbos_core::api::{
 };
 use arbos_core::doc::{UserAttachment, UserMessageOpts};
 use arbos_core::wire::{BoxState as WireBox, PROJECT_DOC_CHAT_ID};
-use arbos_matrix::{Listener as MatrixListener, MatrixClient, MessageRow, Session, Snapshot};
+use arbos_matrix::{
+    Error as MatrixError, Listener as MatrixListener, MatrixClient, MessageRow, Session, Snapshot,
+};
 use futures::future::BoxFuture;
 use futures::{SinkExt, StreamExt};
 use serde_json::{json, Value};
@@ -1660,6 +1662,9 @@ fn handle_server_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                             .events
                             .send(SyncEvent::MatrixTimeline { room_id, rows });
                     }
+                    // Gone / not yet in the memory store after sync — wait for the next
+                    // snapshot; not a product bug.
+                    Err(MatrixError::NoRoom(_)) => {}
                     Err(err) => shared.diagnostic("channel-open", err.to_string()),
                 }
             });
@@ -1678,6 +1683,7 @@ fn handle_server_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                             .send(SyncEvent::MatrixTimeline { room_id, rows });
                     }
                     Ok(None) => {}
+                    Err(MatrixError::NoRoom(_)) => {}
                     Err(err) => shared.diagnostic("channel-history", err.to_string()),
                 }
             });
