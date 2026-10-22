@@ -91,7 +91,7 @@ if [ "${LT_COMMIT:-1}" = 1 ] && [ -n "${ARBOS_GITHUB:-}" ]; then
     git add evals/long-tasks/scoreboard
     if git -c user.name="Cursor agent (bc-dcc557ae)" -c user.email="agents@arbos.life" commit -qm "evals(long-tasks): run $RUN_ID scoreboard [feedback $FID]"; then
       git push -q "$REMOTE" "feedback/$FID"
-      PASS_LINE="$(python3 -c "import json; s=json.load(open('$EVAL/scoreboard/$RUN_ID.json'))['summary']; print(f\"{s['passed']}/{s['run']} passed ({s['pass_pct']} %), first reply p50 {s['ttfr_p50_s']} s, tool errors {s['tool_errors']}, cost \\${s.get('run_cost_usd') or s['cost_usd']:.2f}\")")"
+      PASS_LINE="$(python3 "$EVAL/report.py" --run "$RUN_ID" --one-line)"
       python3 - "$EVAL" "$FID" "$RUN_ID" "$PASS_LINE" <<'PY2'
 import sys
 sys.path.insert(0, sys.argv[1])
