@@ -14,8 +14,8 @@ use tokio::sync::mpsc;
 use crate::auth;
 use crate::calls::{self, CallCmd, CallEvent};
 use crate::model::{
-    call_ended_line, reachable_line, AccountView, Call, CallEnded, CallKind, CallMissed, Person,
-    Reachable, Sender, Voice,
+    add_members_plan, call_ended_line, reachable_line, AccountView, Call, CallEnded, CallKind,
+    CallMissed, Person, Reachable, Sender, Voice,
 };
 use crate::model::{
     new_id, now_ms, AttachmentKind, BoxState, ChannelsView, Chat, ChatKind, ConnectorsView, Effort,
@@ -251,6 +251,9 @@ pub struct AppState {
     awaiting_group: Option<Vec<String>>,
     /// The sheet invites into this project instead of starting a DM (step 3).
     pub invite_target: Option<Id>,
+    /// The group picker adds to this people group instead of creating one
+    /// (the group pane's "Add members").
+    pub add_members_target: Option<Id>,
     /// Avatar reply reaction window per project (ms): plays once after a turn.
     pub avatar_reply_until: HashMap<Id, u64>,
     /// Avatar picker open for this project.
@@ -566,6 +569,7 @@ impl AppState {
             awaiting_dm: None,
             awaiting_group: None,
             invite_target: None,
+            add_members_target: None,
             avatar_reply_until: HashMap::new(),
             avatar_picker: None,
             profile_from_name: false,
@@ -3925,6 +3929,7 @@ impl AppState {
         self.new_group_picked.clear();
         self.new_group_agents.clear();
         self.invite_target = None;
+        self.add_members_target = None;
         self.people_query.clear();
         self.people_results.clear();
         self.people_error = None;
@@ -3946,7 +3951,67 @@ impl AppState {
         self.awaiting_dm = None;
         self.awaiting_group = None;
         self.invite_target = None;
+        self.add_members_target = None;
         cx.notify();
+    }
+
+    /// Group pane → "Add members": the New group picker, titled for this
+    /// group, whose Add puts the picks into it (not into a new group).
+    pub fn open_add_members(&mut self, chat_id: Id, cx: &mut Context<Self>) {
+        if !self.project(&chat_id).is_some_and(|p| p.is_people()) {
+            return;
+        }
+        self.open_new_chat(cx);
+        self.new_group_open = true;
+        self.add_members_target = Some(chat_id);
+        cx.notify();
+    }
+
+    /// The group the picker adds to, when it was opened from a group pane.
+    pub fn add_members_group(&self) -> Option<&Project> {
+        self.add_members_target
+            .as_deref()
+            .and_then(|id| self.project(id))
+    }
+
+    /// "Add" in the Add members picker: one relay call per new person
+    /// (`POST /chats/{id}/members`) and per new agent (`POST /chats/{id}/agents`),
+    /// all on the group the picker was opened for. People already in the group
+    /// are skipped (the rows were disabled anyway). The pane shows them at once;
+    /// the relay's next list confirms. Returns whether the calls were sent (the
+    /// sheet closes then; an empty pick keeps it open with a line why).
+    pub fn add_members_to_group(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(space) = self.add_members_group().cloned() else {
+            return false;
+        };
+        let me_handle = self.me_handle();
+        let plan = add_members_plan(
+            &space,
+            &me_handle,
+            &self.new_group_picked,
+            &self.new_group_agents,
+        );
+        if plan.handles.is_empty() && plan.agent_ids.is_empty() {
+            self.people_error = Some("Pick someone who is not in the group yet".into());
+            cx.notify();
+            return false;
+        }
+        let picked: Vec<Person> = self
+            .new_group_picked
+            .iter()
+            .filter(|p| plan.handles.contains(&p.handle))
+            .cloned()
+            .collect();
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == plan.chat_id) {
+            p.people.extend(picked);
+        }
+        self.command(ClientCommand::AddMembers {
+            chat_id: plan.chat_id,
+            handles: plan.handles,
+            agent_ids: plan.agent_ids,
+        });
+        cx.notify();
+        true
     }
 
     /// New Message → New group: multi-select people and optional agents.
@@ -3973,6 +4038,14 @@ impl AppState {
     }
 
     pub fn toggle_group_person(&mut self, person: Person, cx: &mut Context<Self>) {
+        // Add members: someone already in the group is shown as added, not pickable.
+        let me_handle = self.me_handle();
+        if self
+            .add_members_group()
+            .is_some_and(|g| g.has_person(&me_handle, &person))
+        {
+            return;
+        }
         if let Some(i) = self
             .new_group_picked
             .iter()
@@ -3987,6 +4060,12 @@ impl AppState {
     }
 
     pub fn toggle_group_agent(&mut self, project_id: Id, cx: &mut Context<Self>) {
+        if self
+            .add_members_group()
+            .is_some_and(|g| g.has_agent(&project_id))
+        {
+            return;
+        }
         if let Some(i) = self
             .new_group_agents
             .iter()

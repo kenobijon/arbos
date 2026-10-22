@@ -148,14 +148,16 @@ pub(super) fn page(
                     .hover(|s| s.bg(theme.surface_2))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         let id = sid.clone();
-                        this.state.update(cx, |s, cx| {
-                            if is_people {
-                                s.select_project(id, cx);
-                            } else {
-                                s.invite_target = Some(id);
-                            }
-                            s.open_new_chat(cx);
-                        });
+                        // A people group gets the New group picker aimed at
+                        // it; a shared project keeps the one-pick invite sheet.
+                        if is_people {
+                            this.people_input.update(cx, |input, _| {
+                                input.set_placeholder("Add people or agents");
+                            });
+                            this.state.update(cx, |s, cx| s.open_add_members(id, cx));
+                        } else {
+                            this.state.update(cx, |s, cx| s.open_invite(id, cx));
+                        }
                         let handle = this.people_input.read(cx).focus_handle(cx);
                         window.focus(&handle, cx);
                     })),

@@ -286,6 +286,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         | ClientCommand::SetTyping { .. }
         | ClientCommand::AddAgent { .. }
         | ClientCommand::RemoveAgent { .. }
+        | ClientCommand::AddMembers { .. }
         | ClientCommand::RemoveMember { .. }
         | ClientCommand::LeaveChat { .. }
         | ClientCommand::BlockUser { .. }
@@ -5148,6 +5149,56 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                     space.agents.retain(|a| a.project_id != *project_id);
                 }
             }
+            emit_projects(shared);
+            true
+        }
+        ClientCommand::AddMembers {
+            chat_id,
+            handles,
+            agent_ids,
+        } => {
+            let mut projects = shared.projects.lock().unwrap();
+            let agents: Vec<AgentMember> = agent_ids
+                .iter()
+                .filter_map(|pid| {
+                    projects
+                        .iter()
+                        .find(|p| p.id == *pid && !p.is_people())
+                        .map(|p| AgentMember {
+                            project_id: p.id.clone(),
+                            name: p.name.clone(),
+                            icon: p.icon.clone(),
+                            color: p.color.clone(),
+                            handle: Project::mention_slug(&p.name),
+                            owner_id: ME_ID.into(),
+                            owner_handle: ME_HANDLE.into(),
+                            reply_policy: ReplyPolicy::Mention,
+                            avatar: p.avatar.clone(),
+                            avatar_color: p.avatar_color.clone(),
+                            avatar_color_index: p.avatar_color_index,
+                            description: None,
+                            model: None,
+                            owner: None,
+                        })
+                })
+                .collect();
+            if let Some(space) = projects.iter_mut().find(|p| p.id == *chat_id) {
+                for raw in handles {
+                    let handle = raw.trim().trim_start_matches('@').to_lowercase();
+                    let Some(other) = directory().into_iter().find(|p| p.handle == handle) else {
+                        continue;
+                    };
+                    if !space.people.iter().any(|x| x.id == other.id) {
+                        space.people.push(other);
+                    }
+                }
+                for agent in agents {
+                    if !space.has_agent(&agent.project_id) {
+                        space.agents.push(agent);
+                    }
+                }
+            }
+            drop(projects);
             emit_projects(shared);
             true
         }

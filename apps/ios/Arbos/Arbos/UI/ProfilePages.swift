@@ -780,7 +780,19 @@ struct GroupProfileView: View {
             if let project {
                 ProjectMembersSheet(project: project).environmentObject(model).environment(\.theme, theme)
             } else {
-                MembersSheet(chatId: chatId).environmentObject(model).environment(\.theme, theme)
+                // The New group picker aimed at this group: its members show as
+                // already in, Add puts the picks into it (not into a new group).
+                NavigationStack {
+                    NewGroupView(onDone: { showAdd = false }, addTo: chatId)
+                }
+                .tint(theme.text)
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
+                .presentationBackground(theme.bg)
+                .presentationCornerRadius(28)
+                .preferredColorScheme(theme.isDark ? .dark : .light)
+                .environmentObject(model)
+                .environment(\.theme, theme)
             }
         }
         .sheet(isPresented: $showEdit) {

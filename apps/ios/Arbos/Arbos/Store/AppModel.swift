@@ -2192,6 +2192,35 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// The group pane's Add members: every pick goes to THIS chat — people by
+    /// `POST /chats/{id}/members`, agents by `POST /chats/{id}/agents`. All are
+    /// tried; the first failure is reported once and the call returns false.
+    func addMembers(chatId: String, handles: [String], agentIds: [Id]) async -> Bool {
+        var failure: String?
+        for handle in handles {
+            do {
+                let chat = try await api.addMember(chatId: chatId, handle: handle)
+                if let i = peopleChats.firstIndex(where: { $0.id == chatId }) { peopleChats[i] = chat }
+            } catch {
+                let e = error as? RelayError
+                failure = failure ?? (e?.type == "already_member" ? "@\(handle) is already in this chat."
+                                      : e?.type == "not_available" ? "You can't add @\(handle)."
+                                      : "Could not add @\(handle): \(error.localizedDescription)")
+            }
+        }
+        for projectId in agentIds {
+            do {
+                let chat = try await api.addAgent(chatId: chatId, projectId: projectId)
+                if let i = peopleChats.firstIndex(where: { $0.id == chatId }) { peopleChats[i] = chat }
+            } catch {
+                failure = failure ?? ((error as? RelayError)?.type == "own_project_only" ? "You can only add your own agents."
+                                      : "Could not add the agent: \(error.localizedDescription)")
+            }
+        }
+        if let failure { notice = Notice(text: failure); return false }
+        return true
+    }
+
     /// Owner/admin removes a person from a people chat (`DELETE /chats/{id}/members/{userId}`).
     /// Writes a centred "@handle left" system line (same shape as "@handle joined") so the
     /// transcript keeps a chat event after the member is gone from the roster.
