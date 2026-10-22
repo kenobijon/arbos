@@ -61,6 +61,13 @@ pub enum Command {
     GetMessages {
         id: String,
     },
+    /// Compact the live session now (pi keeps `keepRecentTokens` of recent turns and summarises
+    /// the rest); `customInstructions` steer the summary.
+    Compact {
+        id: String,
+        #[serde(rename = "customInstructions", skip_serializing_if = "Option::is_none")]
+        custom_instructions: Option<String>,
+    },
 }
 
 impl Command {
@@ -78,7 +85,8 @@ impl Command {
             | Command::SetModel { id, .. }
             | Command::SetThinkingLevel { id, .. }
             | Command::GetLastAssistantText { id }
-            | Command::GetMessages { id } => id,
+            | Command::GetMessages { id }
+            | Command::Compact { id, .. } => id,
         }
     }
 }
