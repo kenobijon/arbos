@@ -397,7 +397,8 @@ pub fn element(seed: &str, name: &str, index: Option<u8>, size: f32, theme: &The
 }
 
 /// An agent (project): its id seeds the leaf and colour, the owner's picks override.
-/// A people space (DM / group) rides the same type and keeps its D79 initials.
+/// A people space (DM / group) rides the same `Project` type and keeps its D79
+/// initials: the leaf is for agents only.
 pub fn project(p: &Project, size: f32, theme: &Theme) -> Div {
     if p.is_people() {
         return element(&p.id, &p.name, p.avatar_color_index, size, theme);
