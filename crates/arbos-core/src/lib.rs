@@ -1,6 +1,7 @@
 //! Shared Arbos types. No I/O, no GPUI, no tokio: this crate must build on
 //! every target the clients and the box use (design §7.2).
 
+pub mod api;
 pub mod approval;
 pub mod auth;
 pub mod avatar;

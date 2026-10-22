@@ -1,0 +1,54 @@
+{
+  "archived_at": null,
+  "created_at": 1700000000000,
+  "created_by": "gh_101",
+  "head_seq": 0,
+  "id": "people_dm",
+  "image_key": null,
+  "kind": "dm",
+  "last_activity_at": 1700000000000,
+  "lock_state": "people_only",
+  "me": {
+    "archived_at": null,
+    "muted": false,
+    "read_receipts": true,
+    "role": "owner"
+  },
+  "members": [
+    {
+      "added_by": "gh_101",
+      "avatar_color_index_effective": 0,
+      "avatar_url": null,
+      "handle": "user101",
+      "joined_at": 1700000000000,
+      "last_seen_at": null,
+      "member": "user:gh_101",
+      "name": null,
+      "online": false,
+      "read_receipts": true,
+      "role": "owner",
+      "status": "member",
+      "user_id": "gh_101"
+    },
+    {
+      "added_by": "gh_101",
+      "avatar_color_index_effective": 1,
+      "avatar_url": null,
+      "handle": "user102",
+      "joined_at": 1700000000000,
+      "last_seen_at": null,
+      "member": "user:gh_102",
+      "name": null,
+      "online": false,
+      "read_receipts": true,
+      "role": "member",
+      "status": "member",
+      "user_id": "gh_102"
+    }
+  ],
+  "pending": false,
+  "read_seq": 0,
+  "room": "/room/people/people_dm",
+  "title": "user102",
+  "unread": false
+}

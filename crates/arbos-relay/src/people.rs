@@ -14,6 +14,10 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use arbos_core::api::{
+    ChatMeDto, ChatMemberDto, ChatMemberProjectDto, PeopleChatDto, ProjectMemberDto,
+    ProjectMembersDto,
+};
 use arbos_core::ids::{now_ms, ulid};
 use arbos_core::wire;
 
@@ -213,28 +217,58 @@ pub fn with_presence(state: &AppState, mut v: Value) -> Value {
     v
 }
 
-fn member_json(state: &AppState, m: &Membership) -> Value {
-    let mut v = json!({
-        "member": m.member, "role": m.role, "added_by": m.added_by, "joined_at": m.joined_at,
-    });
+#[allow(dead_code)] // helper kept for wire/fixture tests; people_chat_dto uses member_dto
+pub(crate) fn member_json(state: &AppState, m: &Membership) -> Value {
+    serde_json::to_value(member_dto(state, m)).expect("ChatMemberDto")
+}
+
+pub(crate) fn member_dto(state: &AppState, m: &Membership) -> ChatMemberDto {
+    let mut dto = ChatMemberDto {
+        member: m.member.clone(),
+        role: m.role.clone(),
+        added_by: m.added_by.clone(),
+        joined_at: m.joined_at,
+        handle: None,
+        avatar_url: None,
+        name: None,
+        status: None,
+        user_id: None,
+        last_seen_at: None,
+        online: None,
+        read_receipts: None,
+        avatar: None,
+        avatar_color: None,
+        avatar_color_index: None,
+        avatar_color_index_effective: None,
+        project: None,
+        description: None,
+        owner: None,
+        owner_handle: None,
+        settings: None,
+    };
     if let Some(uid) = m.user_id() {
         if let Ok(Some(card)) = state.db.user_card(uid) {
-            v["handle"] = card["handle"].clone();
-            v["avatar_url"] = card["avatar_url"].clone();
-            v["name"] = card["name"].clone();
-            v["status"] = card["status"].clone();
+            dto.handle = card["handle"].as_str().map(str::to_owned);
+            // Always present for humans (null or string), matching card["avatar_url"] / name.
+            dto.avatar_url = Some(card["avatar_url"].as_str().map(str::to_owned));
+            dto.name = Some(card["name"].as_str().map(str::to_owned));
+            dto.status = card["status"].as_str().map(str::to_owned);
         }
-        v["user_id"] = json!(uid);
-        v = with_presence(state, v);
-        v["read_receipts"] = json!(m
-            .settings
-            .get("read_receipts")
-            .and_then(Value::as_bool)
-            .unwrap_or(true));
+        dto.user_id = Some(uid.to_owned());
+        let seen = state.db.user_last_seen(uid).ok().flatten();
+        dto.last_seen_at = Some(seen.map(|t| t - t % 60_000));
+        dto.online = Some(seen.is_some_and(|t| now_ms() - t < ONLINE_MS));
+        dto.avatar_color_index_effective = Some(i64::from(crate::avatar::color_index(uid)));
+        dto.read_receipts = Some(
+            m.settings
+                .get("read_receipts")
+                .and_then(Value::as_bool)
+                .unwrap_or(true),
+        );
     }
     if let Some(pid) = m.project_id() {
         if let Ok(Some(p)) = state.db.project(pid) {
-            v["handle"] = json!(agent_slug(&p.name));
+            dto.handle = Some(agent_slug(&p.name));
             let avatar = p
                 .avatar
                 .clone()
@@ -242,38 +276,50 @@ fn member_json(state: &AppState, m: &Membership) -> Value {
             let avatar_color = p.avatar_color.clone().unwrap_or_else(|| {
                 crate::avatar::default_color_for(&p.id, &state.cfg.avatar_colors)
             });
-            v["avatar"] = json!(avatar);
-            v["avatar_color"] = json!(avatar_color);
-            v["avatar_color_index"] = json!(p.avatar_color_index);
-            v["avatar_color_index_effective"] = json!(crate::avatar::effective_color_index(
+            let effective = i64::from(crate::avatar::effective_color_index(
                 &p.id,
-                p.avatar_color_index
+                p.avatar_color_index,
             ));
-            v["project"] = json!({
-                "id": p.id, "name": p.name, "icon": p.icon, "color": p.color, "avatar": avatar, "avatar_color": avatar_color,
-                "avatar_color_index": p.avatar_color_index,
-                "avatar_color_index_effective": crate::avatar::effective_color_index(&p.id, p.avatar_color_index),
-                "description": p.description,
-                "model": p.models.get("talking_model").and_then(|m| m.get("id")).cloned().unwrap_or(Value::Null),
-                "owner": with_presence(state, crate::notify::Sender::user(state, &p.user_id).json()),
+            dto.avatar = Some(avatar.clone());
+            dto.avatar_color = Some(avatar_color.clone());
+            dto.avatar_color_index = Some(p.avatar_color_index);
+            dto.avatar_color_index_effective = Some(effective);
+            dto.project = Some(ChatMemberProjectDto {
+                id: p.id.clone(),
+                name: p.name.clone(),
+                icon: p.icon.clone(),
+                color: p.color.clone(),
+                avatar,
+                avatar_color,
+                avatar_color_index: p.avatar_color_index,
+                avatar_color_index_effective: effective,
+                description: p.description.clone(),
+                model: p
+                    .models
+                    .get("talking_model")
+                    .and_then(|m| m.get("id"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                owner: crate::api::project_owner_dto(state, &p.user_id),
             });
-            v["description"] = json!(p.description);
-            v["owner"] = json!(p.user_id);
-            v["owner_handle"] = state
-                .db
-                .user_card(&p.user_id)
-                .ok()
-                .flatten()
-                .map(|c| c["handle"].clone())
-                .unwrap_or(Value::Null);
+            dto.description = Some(p.description.clone());
+            dto.owner = Some(p.user_id.clone());
+            dto.owner_handle = Some(
+                state
+                    .db
+                    .user_card(&p.user_id)
+                    .ok()
+                    .flatten()
+                    .and_then(|c| c["handle"].as_str().map(str::to_owned)),
+            );
         }
-        v["settings"] = if m.settings.is_object() {
+        dto.settings = Some(if m.settings.is_object() {
             m.settings.clone()
         } else {
             json!({ "reply_policy": "mention", "restrict_guests": false })
-        };
+        });
     }
-    v
+    dto
 }
 
 /// The `@slug` a project agent answers to: its name lower-cased, spaces to hyphens.
@@ -295,6 +341,15 @@ fn member_alive(state: &AppState, m: &Membership) -> bool {
 }
 
 pub fn chat_json(state: &AppState, cm: &ChatWithMembers, me: &str, device_id: &str) -> Value {
+    serde_json::to_value(people_chat_dto(state, cm, me, device_id)).expect("PeopleChatDto")
+}
+
+pub fn people_chat_dto(
+    state: &AppState,
+    cm: &ChatWithMembers,
+    me: &str,
+    device_id: &str,
+) -> PeopleChatDto {
     let (head_seq, last_row_at) = state
         .db
         .room_activity(&room_of(&cm.chat.id))
@@ -309,18 +364,14 @@ pub fn chat_json(state: &AppState, cm: &ChatWithMembers, me: &str, device_id: &s
         .iter()
         .filter(|m| member_alive(state, m))
         .collect();
-    let members: Vec<Value> = live.iter().map(|m| member_json(state, m)).collect();
-    let others: Vec<&Value> = members
+    let members: Vec<ChatMemberDto> = live.iter().map(|m| member_dto(state, m)).collect();
+    let others: Vec<&ChatMemberDto> = members
         .iter()
-        .filter(|m| {
-            m["member"]
-                .as_str()
-                .is_some_and(|s| s.starts_with("user:") && s != format!("user:{me}"))
-        })
+        .filter(|m| m.member.starts_with("user:") && m.member != format!("user:{me}"))
         .collect();
     let computed = others
         .iter()
-        .filter_map(|m| m["handle"].as_str())
+        .filter_map(|m| m.handle.as_deref())
         .collect::<Vec<_>>()
         .join(", ");
     let title = cm
@@ -333,33 +384,49 @@ pub fn chat_json(state: &AppState, cm: &ChatWithMembers, me: &str, device_id: &s
         .to_owned();
     let pending = others
         .iter()
-        .any(|m| m["status"].as_str() == Some("invited"));
+        .any(|m| m.status.as_deref() == Some("invited"));
     let has_agent = live.iter().any(|m| m.project_id().is_some());
     let mine = live.iter().find(|m| m.user_id() == Some(me)).copied();
     let archived_at = state.db.chat_archived_at(me, &cm.chat.id).ok().flatten();
-    json!({
-        "id": cm.chat.id,
-        "archived_at": archived_at,
-        "kind": cm.chat.kind,
-        "created_by": cm.chat.created_by,
-        "created_at": cm.chat.created_at,
-        "title": title,
-        "image_key": cm.chat.image_key,
-        "pending": pending,
-        "members": members,
-        "room": format!("/room/{PEOPLE_PROJECT}/{}", cm.chat.id),
-        "head_seq": head_seq,
-        "last_activity_at": if last_row_at > 0 { last_row_at } else { cm.chat.created_at },
-        "read_seq": read_seq,
-        "unread": head_seq > read_seq,
-        "lock_state": if has_agent { "visible_to_agents" } else { "people_only" },
-        "me": {
-            "role": mine.map(|m| m.role.clone()),
-            "muted": mine.is_some_and(|m| m.muted),
-            "archived_at": archived_at,
-            "read_receipts": mine.map(|m| m.settings.get("read_receipts").and_then(Value::as_bool).unwrap_or(true)).unwrap_or(true),
+    PeopleChatDto {
+        id: cm.chat.id.clone(),
+        archived_at,
+        kind: cm.chat.kind.clone(),
+        created_by: cm.chat.created_by.clone(),
+        created_at: cm.chat.created_at,
+        title,
+        image_key: cm.chat.image_key.clone(),
+        pending,
+        members,
+        room: format!("/room/{PEOPLE_PROJECT}/{}", cm.chat.id),
+        head_seq,
+        last_activity_at: if last_row_at > 0 {
+            last_row_at
+        } else {
+            cm.chat.created_at
         },
-    })
+        read_seq,
+        unread: head_seq > read_seq,
+        lock_state: if has_agent {
+            "visible_to_agents".into()
+        } else {
+            "people_only".into()
+        },
+        me: ChatMeDto {
+            role: Some(mine.map(|m| m.role.clone())),
+            muted: Some(mine.is_some_and(|m| m.muted)),
+            archived_at,
+            read_receipts: Some(
+                mine.map(|m| {
+                    m.settings
+                        .get("read_receipts")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(true)
+                })
+                .unwrap_or(true),
+            ),
+        },
+    }
 }
 
 fn load_chat(state: &AppState, chat_id: &str) -> Result<ChatWithMembers, Box<Response>> {
@@ -1509,33 +1576,74 @@ pub fn people_chats_of_project(state: &AppState, project_id: &str, owner: &str) 
 
 // ---- projects together (step 3) ----------------------------------------------------------------
 
-fn project_members_json(state: &AppState, project: &crate::db::Project) -> Value {
-    let mut members = vec![{
-        let mut v = state
-            .db
-            .user_card(&project.user_id)
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| json!({ "id": project.user_id }));
-        v["user_id"] = json!(project.user_id);
-        v["role"] = json!("owner");
-        v["joined_at"] = json!(project.created_at);
-        with_presence(state, v)
-    }];
-    for (uid, added_by, joined_at) in state.db.project_members(&project.id).unwrap_or_default() {
-        let mut v = state
-            .db
-            .user_card(&uid)
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| json!({ "id": uid }));
-        v["user_id"] = json!(uid);
-        v["role"] = json!("member");
-        v["added_by"] = json!(added_by);
-        v["joined_at"] = json!(joined_at);
-        members.push(with_presence(state, v));
+pub(crate) fn project_members_json(state: &AppState, project: &crate::db::Project) -> Value {
+    serde_json::to_value(project_members_dto(state, project)).expect("ProjectMembersDto")
+}
+
+fn project_member_dto(
+    state: &AppState,
+    user_id: &str,
+    role: &str,
+    joined_at: i64,
+    added_by: Option<String>,
+) -> ProjectMemberDto {
+    let card = state
+        .db
+        .user_card(user_id)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| json!({ "id": user_id }));
+    let seen = state.db.user_last_seen(user_id).ok().flatten();
+    ProjectMemberDto {
+        id: card["id"].as_str().unwrap_or(user_id).to_owned(),
+        handle: card["handle"].as_str().map(str::to_owned),
+        avatar_url: match &card["avatar_url"] {
+            Value::Null => None,
+            Value::String(s) => Some(s.clone()),
+            _ => card["avatar_url"].as_str().map(str::to_owned),
+        },
+        name: match &card["name"] {
+            Value::Null => None,
+            Value::String(s) => Some(s.clone()),
+            _ => card["name"].as_str().map(str::to_owned),
+        },
+        status: card["status"].as_str().unwrap_or("").to_owned(),
+        created_at: card["created_at"].as_i64().unwrap_or(0),
+        user_id: user_id.to_owned(),
+        role: role.to_owned(),
+        joined_at,
+        added_by,
+        last_seen_at: seen.map(|t| t - t % 60_000),
+        online: seen.is_some_and(|t| now_ms() - t < ONLINE_MS),
+        avatar_color_index_effective: i64::from(crate::avatar::color_index(user_id)),
     }
-    json!({ "project_id": project.id, "owner": project.user_id, "members": members })
+}
+
+pub(crate) fn project_members_dto(
+    state: &AppState,
+    project: &crate::db::Project,
+) -> ProjectMembersDto {
+    let mut members = vec![project_member_dto(
+        state,
+        &project.user_id,
+        "owner",
+        project.created_at,
+        None,
+    )];
+    for (uid, added_by, joined_at) in state.db.project_members(&project.id).unwrap_or_default() {
+        members.push(project_member_dto(
+            state,
+            &uid,
+            "member",
+            joined_at,
+            Some(added_by),
+        ));
+    }
+    ProjectMembersDto {
+        project_id: project.id.clone(),
+        owner: project.user_id.clone(),
+        members,
+    }
 }
 
 fn project_for(state: &AppState, id: &str) -> Result<crate::db::Project, Box<Response>> {
