@@ -810,9 +810,7 @@ pub enum ClientCommand {
         server_id: Id,
         invite_id: Id,
     },
-    ServerResetInvite {
-        server_id: Id,
-    },
+
     /// D88: `PUT /servers/{id}/members/{uid} {role}` (owner); `admin` or `member`.
     ServerSetRole {
         server_id: Id,

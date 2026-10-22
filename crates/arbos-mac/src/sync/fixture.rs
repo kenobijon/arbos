@@ -313,7 +313,6 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         | ClientCommand::ServerRename { .. }
         | ClientCommand::ServerDelete { .. }
         | ClientCommand::ServerLeave { .. }
-        | ClientCommand::ServerResetInvite { .. }
         | ClientCommand::ServerSetRole { .. }
         | ClientCommand::ServerRemoveMember { .. }
         | ClientCommand::ChannelCreate { .. }

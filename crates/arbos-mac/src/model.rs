@@ -2552,10 +2552,6 @@ pub struct ServerInviteLink {
     pub usable: bool,
 }
 
-fn default_true() -> bool {
-    true
-}
-
 impl ServerInviteLink {
     /// "7 days left · 3 uses", "No limits", "Expired", "Used up".
     pub fn terms(&self, now_ms: i64) -> String {
