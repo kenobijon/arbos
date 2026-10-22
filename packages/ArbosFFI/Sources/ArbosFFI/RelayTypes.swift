@@ -1294,10 +1294,14 @@ public struct MeFeaturesDto: Codable {
 	public let vault_connect: Bool?
 	/// D92: agents without a photo draw a leaf, not initials (default on).
 	public let leaf_avatars: Bool?
+	/// D92 follow-on: the leaves play their committed Lottie (idle loop + gust) instead of the
+	/// native sway (default on).
+	public let leaf_lottie: Bool?
 
-	public init(vault_connect: Bool?, leaf_avatars: Bool?) {
+	public init(vault_connect: Bool?, leaf_avatars: Bool?, leaf_lottie: Bool?) {
 		self.vault_connect = vault_connect
 		self.leaf_avatars = leaf_avatars
+		self.leaf_lottie = leaf_lottie
 	}
 }
 

@@ -30,6 +30,8 @@ pub enum AvatarState {
 }
 
 pub use arbos_core::avatar::leaf::{self, LeafPick};
+
+use crate::ui::lottie;
 /// The palette, the index rule and the sender accent live in `arbos-core`
 /// (`avatar.rs`) so the iPhone draws the same colours through arbos-ffi.
 pub use arbos_core::avatar::{color_index, index_for, GRADIENTS, INITIALS_SCALE};
@@ -48,6 +50,18 @@ pub fn set_leaf_avatars(on: bool) {
 
 pub fn leaf_avatars_on() -> bool {
     LEAF_AVATARS.load(Ordering::Relaxed)
+}
+
+/// Remote flag `features.leaf_lottie` (default on): the leaves play their
+/// committed Lottie idle / gust files; off = the native sway and ruffle.
+static LEAF_LOTTIE: AtomicBool = AtomicBool::new(true);
+
+pub fn set_leaf_lottie(on: bool) {
+    LEAF_LOTTIE.store(on, Ordering::Relaxed);
+}
+
+pub fn leaf_lottie_on() -> bool {
+    LEAF_LOTTIE.load(Ordering::Relaxed)
 }
 
 /// The leaf and disc colour an agent shows: the owner's picks, else the id's cell.
@@ -161,8 +175,35 @@ pub fn leaf_element(pick: LeafPick, size: f32) -> Div {
     disc(pick, size).child(leaf_glyph(pick, size, 0.0))
 }
 
-/// One-shot hover gust (the Lottie's spring: ≈9° peak, settled in 1 s).
+/// One-shot hover gust: the leaf's committed gust Lottie while the flag is
+/// on (one play, settles on the rest pose), else the native spring (≈9° peak,
+/// settled in 1 s).
 fn ruffle_glyph(pick: LeafPick, size: f32, tick: u64) -> AnyElement {
+    if leaf_lottie_on() {
+        if let Some(comp) = lottie::composition(pick.leaf, lottie::Clip::Gust) {
+            let secs = lottie::duration_secs(&comp);
+            let ink = leaf_ink();
+            return div()
+                .size(px(size * leaf::LEAF_SCALE))
+                .flex_shrink_0()
+                .with_animation(
+                    ElementId::NamedInteger(
+                        SharedString::from(format!("leaf-lottie-gust-{}", pick.leaf)),
+                        tick,
+                    ),
+                    Animation::new(Duration::from_secs_f32(secs)),
+                    move |el, t| {
+                        el.child(lottie::frame_element(
+                            comp.clone(),
+                            t,
+                            size * leaf::LEAF_SCALE,
+                            ink,
+                        ))
+                    },
+                )
+                .into_any_element();
+        }
+    }
     let side = size * leaf::LEAF_SCALE;
     leaf_glyph(pick, size, 0.0)
         .with_animation(
@@ -178,9 +219,35 @@ fn ruffle_glyph(pick: LeafPick, size: f32, tick: u64) -> AnyElement {
         .into_any_element()
 }
 
-/// Idle sway: a few degrees about the stem, the leaf's own loop length
-/// (manifest `idle_frames`), forever. Profile hero only.
+/// Idle sway, profile hero only: the leaf's committed idle Lottie, looping
+/// (each leaf its own 2.3–2.8 s length), while the flag is on; else the
+/// native sway of a few degrees about the stem.
 fn sway_glyph(pick: LeafPick, size: f32) -> AnyElement {
+    if leaf_lottie_on() {
+        if let Some(comp) = lottie::composition(pick.leaf, lottie::Clip::Idle) {
+            let secs = lottie::duration_secs(&comp);
+            let ink = leaf_ink();
+            return div()
+                .size(px(size * leaf::LEAF_SCALE))
+                .flex_shrink_0()
+                .with_animation(
+                    ElementId::Name(SharedString::from(format!(
+                        "leaf-lottie-idle-{}",
+                        pick.leaf
+                    ))),
+                    Animation::new(Duration::from_secs_f32(secs)).repeat(),
+                    move |el, t| {
+                        el.child(lottie::frame_element(
+                            comp.clone(),
+                            t,
+                            size * leaf::LEAF_SCALE,
+                            ink,
+                        ))
+                    },
+                )
+                .into_any_element();
+        }
+    }
     let side = size * leaf::LEAF_SCALE;
     let period = leaf::LEAVES[(pick.leaf % leaf::LEAF_COUNT) as usize].idle_secs;
     leaf_glyph(pick, size, 0.0)

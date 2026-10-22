@@ -19,6 +19,7 @@
   },
   "features": {
     "leaf_avatars": true,
+    "leaf_lottie": true,
     "vault_connect": false
   },
   "limits": {

@@ -50,6 +50,8 @@ cpal = "0.15"
 cosmic-text = { version = "0.19", default-features = false, features = ["std", "swash"] }
 rodio = { version = "0.20", default-features = false, features = ["wav", "mp3", "symphonia-wav", "symphonia-isomp4", "symphonia-aac"] }
 hound = "3.5"
+velato = { version = "0.12", default-features = false }
+kurbo = "0.13"
 
 # Sign in with GitHub (ASWebAuthenticationSession), notifications
 # (UNUserNotificationCenter) and the Dock badge through objc2 (macOS only).

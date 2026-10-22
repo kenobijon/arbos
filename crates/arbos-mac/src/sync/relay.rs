@@ -769,8 +769,9 @@ async fn refresh_me(shared: &Arc<Shared>) {
     *shared.me.lock().unwrap() = Some(u);
     let view = account_view_from_me(&dto);
     let _ = shared.events.send(SyncEvent::Account(Some(view)));
-    // D92 remote flag: leaf avatars for agents (absent on older relays = on).
+    // D92 remote flags: leaf avatars for agents, and their Lottie playback (absent = on).
     crate::ui::avatars::set_leaf_avatars(dto.features.leaf_avatars.unwrap_or(true));
+    crate::ui::avatars::set_leaf_lottie(dto.features.leaf_lottie.unwrap_or(true));
     let m = &dto.machine;
     // D89: provider and waitlist place ride along with `always_on`.
     let position = m

@@ -5,6 +5,7 @@
 //! | --- | --- | --- |
 //! | `vault_connect` (#1265: the Connect 1Password flow) | `ARBOS_FEATURE_VAULT_CONNECT` (`vaults.rs`) | off |
 //! | `leaf_avatars` (D92: agents without a photo draw a leaf, not initials) | `ARBOS_FEATURE_LEAF_AVATARS` | on; `0` / `false` / `off` / `no` is the kill switch |
+//! | `leaf_lottie` (the leaves play their committed Lottie idle/gust instead of the native sway) | `ARBOS_FEATURE_LEAF_LOTTIE` | on; same kill switch |
 //!
 //! `GET /secrets` serves the same object (`vaults::features()` delegates here).
 
@@ -28,12 +29,18 @@ pub fn leaf_avatars() -> bool {
     env_flag("ARBOS_FEATURE_LEAF_AVATARS", true)
 }
 
+/// Lottie playback of the leaves (idle loop + gust). Default on.
+pub fn leaf_lottie() -> bool {
+    env_flag("ARBOS_FEATURE_LEAF_LOTTIE", true)
+}
+
 /// The `features` object on `GET /me` and `GET /secrets`. Key names are a contract with the
 /// shipped apps (Mac v0.6.104 / TestFlight read `vault_connect`); only add, never rename.
 pub fn dto() -> MeFeaturesDto {
     MeFeaturesDto {
         vault_connect: Some(crate::vaults::vault_connect()),
         leaf_avatars: Some(leaf_avatars()),
+        leaf_lottie: Some(leaf_lottie()),
     }
 }
 

@@ -514,6 +514,10 @@ pub struct MeFeaturesDto {
     /// D92: agents without a photo draw a leaf, not initials (default on).
     #[serde(default)]
     pub leaf_avatars: Option<bool>,
+    /// D92 follow-on: the leaves play their committed Lottie (idle loop + gust) instead of the
+    /// native sway (default on).
+    #[serde(default)]
+    pub leaf_lottie: Option<bool>,
 }
 
 /// `GET /me` success body.
