@@ -71,6 +71,11 @@ pub enum SyncEvent {
     },
     /// Error from a people-chat action (search, DM, members), shown inline.
     PeopleError(String),
+    /// `CreatePeopleGroup` succeeded: the new group's id, sent after the
+    /// registry refresh that lists it. The sheet closes and the group opens.
+    PeopleGroupCreated {
+        chat_id: Id,
+    },
     /// Calls v1: `POST …/calls` or `/join` answered with a call (and my token).
     /// `created` = 201: this device started it and writes the system line;
     /// `reachable` (201 only) says per callee whether anyone can pick up.
@@ -319,8 +324,9 @@ pub enum ClientCommand {
     StartDm {
         handle: String,
     },
-    /// `POST /chats {kind: group, members}`; then optional `POST /chats/{id}/agents`.
-    /// The chat lands in the next `Projects` event.
+    /// `POST /chats {kind: group, members, agent_ids}` — people, agents, or
+    /// both. The chat lands in the next `Projects` event, then
+    /// `PeopleGroupCreated` names it.
     CreatePeopleGroup {
         handles: Vec<String>,
         agent_ids: Vec<Id>,

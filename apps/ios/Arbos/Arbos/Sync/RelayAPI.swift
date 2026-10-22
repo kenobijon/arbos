@@ -660,8 +660,8 @@ final class RelayAPI {
         return chat
     }
 
-    func createGroup(handles: [String], title: String? = nil, leaf: LeafPick? = nil) async throws -> PeopleChat {
-        var body: [String: Any] = ["kind": "group", "members": handles]
+    func createGroup(handles: [String], agentIds: [Id] = [], title: String? = nil, leaf: LeafPick? = nil) async throws -> PeopleChat {
+        var body: [String: Any] = ["kind": "group", "members": handles, "agent_ids": agentIds]
         if let title, !title.isEmpty { body["title"] = title }
         if let leaf { body["avatar_leaf"] = Int(leaf.leaf); body["avatar_leaf_color"] = Int(leaf.color) }
         let v = try await json("POST", "/chats", body: body)

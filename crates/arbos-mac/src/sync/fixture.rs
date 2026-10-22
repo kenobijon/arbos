@@ -5045,12 +5045,6 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                 };
                 members.push(other);
             }
-            if members.is_empty() {
-                let _ = shared.events.send(SyncEvent::PeopleError(
-                    "Add at least one other person".into(),
-                ));
-                return true;
-            }
             let agents: Vec<AgentMember> = {
                 let projects = shared.projects.lock().unwrap();
                 agent_ids
@@ -5080,24 +5074,46 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                     })
                     .collect()
             };
+            // People, agents, or both — never nobody (the relay's rule).
+            if members.is_empty() && agents.is_empty() {
+                let _ = shared.events.send(SyncEvent::PeopleError(
+                    "Pick at least one person or agent".into(),
+                ));
+                return true;
+            }
             let id = new_id();
+            // The typed name, else the people's handles, else the agents'
+            // (a group of agents only).
             let title = draft_title
                 .clone()
                 .filter(|t| !t.trim().is_empty())
                 .unwrap_or_else(|| {
-                    members
-                        .iter()
-                        .map(|p| p.handle.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                    if members.is_empty() {
+                        agents
+                            .iter()
+                            .map(|a| a.handle.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    } else {
+                        members
+                            .iter()
+                            .map(|p| p.handle.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    }
                 });
-            let mut space = people_space(&id, members[0].clone(), agents);
+            let seed = members.first().cloned().unwrap_or_else(|| Person {
+                handle: title.clone(),
+                ..Person::default()
+            });
+            let mut space = people_space(&id, seed, agents);
             space.kind = SpaceKind::Group;
             space.name = title.clone();
             space.avatar_leaf = leaf.as_ref().map(|l| l.leaf);
             space.avatar_leaf_color = leaf.as_ref().map(|l| l.color);
             space.people = members;
             space.pending = space.people.iter().any(|p| p.status == "invited");
+            space.owner_handle = Some(ME_HANDLE.into());
             shared.projects.lock().unwrap().push(space);
             shared.chats.lock().unwrap().push(Chat {
                 id: id.clone(),
@@ -5114,6 +5130,10 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             add_doc(shared, ChatDoc::new(&id, "people"));
             emit_projects(shared);
             emit_chats(shared);
+            // Like the relay: the id arrives after the list that carries it.
+            let _ = shared
+                .events
+                .send(SyncEvent::PeopleGroupCreated { chat_id: id });
             true
         }
         ClientCommand::SetTyping { .. } => true,
@@ -5848,5 +5868,149 @@ mod seed_parity_tests {
                 assert_eq!(row["deviceId"], DEVICE);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod create_group_tests {
+    //! "Create" in the New group sheet, end to end through the source: the
+    //! command goes in, the next list carries the group, and the id event
+    //! names it so the sheet can close on it (2026-10-22: Create was dead for
+    //! a group of agents).
+
+    use std::time::Duration;
+
+    use tokio::time::timeout;
+
+    use super::*;
+    use crate::model::created_group;
+
+    const WAIT: Duration = Duration::from_secs(10);
+
+    fn start() -> (
+        mpsc::UnboundedSender<ClientCommand>,
+        mpsc::UnboundedReceiver<SyncEvent>,
+    ) {
+        let (ev_tx, ev_rx) = mpsc::unbounded_channel();
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        tokio::spawn(Box::new(FixtureSource::new()).run(ev_tx, cmd_rx));
+        (cmd_tx, ev_rx)
+    }
+
+    async fn next_projects(rx: &mut mpsc::UnboundedReceiver<SyncEvent>) -> Vec<Project> {
+        timeout(WAIT, async {
+            loop {
+                match rx.recv().await {
+                    Some(SyncEvent::Projects(p)) => return p,
+                    Some(_) => continue,
+                    None => panic!("source ended"),
+                }
+            }
+        })
+        .await
+        .expect("a Projects event")
+    }
+
+    /// Everything up to the id event: the latest list seen and the new id.
+    async fn until_created(rx: &mut mpsc::UnboundedReceiver<SyncEvent>) -> (Vec<Project>, Id) {
+        timeout(WAIT, async {
+            let mut latest = Vec::new();
+            loop {
+                match rx.recv().await {
+                    Some(SyncEvent::Projects(p)) => latest = p,
+                    Some(SyncEvent::PeopleGroupCreated { chat_id }) => return (latest, chat_id),
+                    Some(SyncEvent::PeopleError(e)) => panic!("create failed: {e}"),
+                    Some(_) => continue,
+                    None => panic!("source ended"),
+                }
+            }
+        })
+        .await
+        .expect("a PeopleGroupCreated event")
+    }
+
+    #[tokio::test]
+    async fn people_and_an_agent_make_a_group_that_the_list_and_the_id_event_name() {
+        let (cmd, mut rx) = start();
+        let before = next_projects(&mut rx).await;
+        cmd.send(ClientCommand::CreatePeopleGroup {
+            handles: vec!["sam".into()],
+            agent_ids: vec![PROJECT_ARBOS.into()],
+            title: None,
+            leaf: None,
+        })
+        .unwrap();
+        let (after, chat_id) = until_created(&mut rx).await;
+        let group = after
+            .iter()
+            .find(|p| p.id == chat_id)
+            .expect("the list that precedes the id event carries the group");
+        assert!(group.is_people_group());
+        assert_eq!(
+            group
+                .people
+                .iter()
+                .map(|p| p.handle.as_str())
+                .collect::<Vec<_>>(),
+            ["sam"]
+        );
+        assert!(group.agents.iter().any(|a| a.project_id == PROJECT_ARBOS));
+        // The members match (older relays) finds the same group.
+        assert_eq!(
+            created_group(&before, &after, &["sam".to_string()]),
+            Some(chat_id)
+        );
+    }
+
+    #[tokio::test]
+    async fn agents_alone_make_a_group_named_after_them() {
+        let (cmd, mut rx) = start();
+        let before = next_projects(&mut rx).await;
+        cmd.send(ClientCommand::CreatePeopleGroup {
+            handles: vec![],
+            agent_ids: vec![PROJECT_ARBOS.into(), PROJECT_COMMS.into()],
+            title: None,
+            leaf: None,
+        })
+        .unwrap();
+        let (after, chat_id) = until_created(&mut rx).await;
+        let group = after
+            .iter()
+            .find(|p| p.id == chat_id)
+            .expect("the agents' group");
+        assert!(group.is_people_group());
+        assert!(group.people.is_empty());
+        assert_eq!(group.agents.len(), 2);
+        assert_eq!(group.name, "arbos, comms");
+        // No handles to match on: only the id event can close the sheet.
+        assert_eq!(created_group(&before, &after, &[]), None);
+    }
+
+    #[tokio::test]
+    async fn nobody_is_refused() {
+        let (cmd, mut rx) = start();
+        let _ = next_projects(&mut rx).await;
+        cmd.send(ClientCommand::CreatePeopleGroup {
+            handles: vec![],
+            agent_ids: vec![],
+            title: None,
+            leaf: None,
+        })
+        .unwrap();
+        let err = timeout(WAIT, async {
+            loop {
+                match rx.recv().await {
+                    Some(SyncEvent::PeopleError(e)) => return e,
+                    Some(SyncEvent::PeopleGroupCreated { .. }) => {
+                        panic!("created a group of nobody")
+                    }
+                    Some(_) => continue,
+                    None => panic!("source ended"),
+                }
+            }
+        })
+        .await
+        .expect("a PeopleError");
+        assert!(err.contains("person or agent"), "{err}");
     }
 }

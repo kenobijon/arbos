@@ -202,6 +202,25 @@ impl Project {
     }
 }
 
+/// After "Create": the people group that just appeared (`after` but not
+/// `before`) with exactly the picked `handles`. Empty handles (a group of
+/// agents) never match — the relay names that group by id instead.
+pub fn created_group(before: &[Project], after: &[Project], handles: &[String]) -> Option<Id> {
+    if handles.is_empty() {
+        return None;
+    }
+    after
+        .iter()
+        .filter(|p| p.is_people_group() && !before.iter().any(|b| b.id == p.id))
+        .find(|p| {
+            p.people.len() == handles.len()
+                && handles
+                    .iter()
+                    .all(|h| p.people.iter().any(|x| x.handle == *h))
+        })
+        .map(|p| p.id.clone())
+}
+
 /// The relay calls "Add" makes for one group: new people by handle, new
 /// agents by project id, both on `chat_id`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -2701,6 +2720,32 @@ mod add_members_tests {
         );
         assert_eq!(plan.handles, vec!["alice".to_string()]);
         assert_eq!(plan.agent_ids, vec!["proj_other".to_string()]);
+    }
+
+    #[test]
+    fn created_group_is_the_new_group_with_exactly_the_picked_people() {
+        let old = testing_group();
+        let mut fresh = Project {
+            id: "chat_new".into(),
+            name: "alice, const".into(),
+            kind: SpaceKind::Group,
+            people: vec![person("gh_3", "alice"), person("gh_2", "const")],
+            ..Project::default()
+        };
+        let before = vec![old.clone()];
+        let after = vec![old.clone(), fresh.clone()];
+        let picked = ["const".to_string(), "alice".to_string()];
+        assert_eq!(
+            created_group(&before, &after, &picked),
+            Some("chat_new".into())
+        );
+        // An older group with the same people is not "the one just created".
+        assert_eq!(created_group(&after, &after, &picked), None);
+        // A superset of members is a different group.
+        fresh.people.push(person("gh_9", "zed"));
+        assert_eq!(created_group(&before, &[old.clone(), fresh], &picked), None);
+        // Agents only: nothing to match on; the id event names the group.
+        assert_eq!(created_group(&before, &after, &[]), None);
     }
 
     #[test]

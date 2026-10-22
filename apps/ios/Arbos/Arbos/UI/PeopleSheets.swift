@@ -737,7 +737,9 @@ struct NewGroupView: View {
     private var adding: Bool { addTo != nil }
     private var title: String { addToChat.map { "Add members to \($0.title)" } ?? (adding ? "Add members" : "New group") }
     /// Create needs a person (a group of one is a DM); Add takes agents alone too.
-    private var canSubmit: Bool { adding ? !(picked.isEmpty && pickedAgents.isEmpty) : !picked.isEmpty }
+    /// People, agents, or both — a group of your agents is a group (Create
+    /// greyed out with only agents picked read as broken, 2026-10-22).
+    private var canSubmit: Bool { !(picked.isEmpty && pickedAgents.isEmpty) }
 
     private func isIn(_ p: Person) -> Bool { addToChat?.hasPerson(p, meId: model.user?.id) ?? false }
     private func isIn(_ p: Project) -> Bool { addToChat?.hasAgent(p.id) ?? false }
@@ -915,7 +917,7 @@ struct NewGroupView: View {
     }
 
     private func create() {
-        guard !picked.isEmpty, !creating else { return }
+        guard canSubmit, !creating else { return }
         creating = true
         errorText = nil
         let agentIds = pickedAgents.map(\.id)

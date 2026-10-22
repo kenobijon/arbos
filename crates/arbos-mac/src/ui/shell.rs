@@ -2304,6 +2304,10 @@ impl Shell {
                 hero = hero.child(avatars::project(&space, 88.0, &theme));
             } else if let Some(person) = space.person() {
                 hero = hero.child(people::avatar(person_image, person, 88.0, &theme));
+            } else {
+                // A group of agents only: its own picture, else the initials disc.
+                let state = self.state.read(cx);
+                hero = hero.child(crate::ui::groups::picture(&space, state, 88.0, &theme));
             }
             column = column.child(
                 div()

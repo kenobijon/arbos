@@ -400,7 +400,17 @@ pub fn people_chat_dto(
         .iter()
         .filter(|m| m.member.starts_with("user:") && m.member != format!("user:{me}"))
         .collect();
-    let computed = others
+    // Untitled group: the other people's handles — or, with no other human
+    // (a group of my agents), the agents' handles.
+    let named: Vec<&ChatMemberDto> = if others.is_empty() {
+        members
+            .iter()
+            .filter(|m| m.member.starts_with("agent:"))
+            .collect()
+    } else {
+        others.clone()
+    };
+    let computed = named
         .iter()
         .filter_map(|m| m.handle.as_deref())
         .collect::<Vec<_>>()
@@ -644,6 +654,10 @@ pub struct CreateGroupBody {
     pub kind: String,
     /// GitHub handles of the other people (the caller is added as owner).
     pub members: Vec<String>,
+    /// The caller's own projects to add as agents (same rule as `POST /chats/{id}/agents`).
+    /// A group may be people, agents, or both — never nobody.
+    #[serde(default)]
+    pub agent_ids: Vec<String>,
     /// Create screen (D93): the group's name and its leaf picture; all optional.
     #[serde(default)]
     pub title: Option<String>,
@@ -653,9 +667,10 @@ pub struct CreateGroupBody {
     pub avatar_leaf_color: Option<i64>,
 }
 
-/// `POST /chats {kind: "group", members: [handles…]}` — a new people group. The caller is the
-/// owner; each handle becomes a member (invited via GitHub if they are not on Arbos yet). Always
-/// a fresh chat — unlike a DM, it does not reuse an existing 1:1.
+/// `POST /chats {kind: "group", members: [handles…], agent_ids: [project ids…]}` — a new people
+/// group. The caller is the owner; each handle becomes a member (invited via GitHub if they are
+/// not on Arbos yet); each agent id must be one of the caller's own projects. At least one person
+/// or one agent. Always a fresh chat — unlike a DM, it does not reuse an existing 1:1.
 pub async fn chats_create_group(
     State(state): State<AppState>,
     principal: Principal,
@@ -715,11 +730,25 @@ pub async fn chats_create_group(
         }
         other_ids.push(other_id);
     }
-    if other_ids.is_empty() {
+    // Agents are checked before anything is written: a foreign project fails the whole call.
+    let mut agent_projects = Vec::new();
+    for pid in &b.agent_ids {
+        if agent_projects
+            .iter()
+            .any(|p: &crate::db::Project| &p.id == pid)
+        {
+            continue;
+        }
+        match own_project(&state, &me, pid) {
+            Ok(p) => agent_projects.push(p),
+            Err(r) => return *r,
+        }
+    }
+    if other_ids.is_empty() && agent_projects.is_empty() {
         return api_error(
             StatusCode::BAD_REQUEST,
             "need_members",
-            "add at least one other person",
+            "add at least one person or one of your agents",
         );
     }
     let limit = if young_account(&state, &me) {
@@ -777,7 +806,30 @@ pub async fn chats_create_group(
             Some(&chat.id),
         );
     }
-    tracing::info!(chat = %chat.id, %me, members = other_ids.len(), "people group created");
+    for project in &agent_projects {
+        if let Err(e) = state.db.add_member(
+            &chat.id,
+            &format!("agent:{}", project.id),
+            "agent",
+            &me,
+            &default_agent_settings(),
+        ) {
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
+        }
+        let _ = state.db.enqueue_push(
+            &project.id,
+            "people_agent_added",
+            &json!({ "chat_id": chat.id }),
+        );
+        crate::boxes::ensure_awake(&state, &project.user_id, "people").await;
+    }
+    tracing::info!(
+        chat = %chat.id,
+        %me,
+        members = other_ids.len(),
+        agents = agent_projects.len(),
+        "people group created"
+    );
     state.matrix.touch_chat(&state, &chat.id, None);
     match load_chat(&state, &chat.id) {
         Ok(cm) => Json(chat_json(&state, &cm, &me, &device_of(&principal))).into_response(),
@@ -2741,6 +2793,7 @@ mod agent_tests {
             Json(CreateGroupBody {
                 kind: "group".into(),
                 members: vec!["user32".into(), "@user33".into(), "user32".into()],
+                agent_ids: vec![],
                 title: None,
                 avatar_leaf: None,
                 avatar_leaf_color: None,
@@ -2787,6 +2840,7 @@ mod agent_tests {
             Json(CreateGroupBody {
                 kind: "group".into(),
                 members: vec![],
+                agent_ids: vec![],
                 title: None,
                 avatar_leaf: None,
                 avatar_leaf_color: None,
@@ -2794,6 +2848,121 @@ mod agent_tests {
         )
         .await;
         assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    }
+}
+
+#[cfg(test)]
+mod create_group_tests {
+    //! `POST /chats {kind: group}`: a group of my agents alone is a group; a group of nobody
+    //! is not; a foreign agent fails before anything is written.
+
+    use axum::extract::State;
+    use axum::http::StatusCode;
+    use axum::Json;
+
+    use super::tests_support::{person, project_of};
+    use super::*;
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    #[tokio::test]
+    async fn agents_alone_make_a_group_titled_after_them() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 1);
+        let bob_proj = project_of(&state, &alice, "Bob");
+        let doug_proj = project_of(&state, &alice, "Doug");
+        let before = state
+            .db
+            .chats_of_member(&format!("user:{alice}"))
+            .unwrap()
+            .len();
+
+        let r = chats_create_group(
+            State(state.clone()),
+            alice_dev.clone(),
+            Json(CreateGroupBody {
+                kind: "group".into(),
+                members: vec![],
+                agent_ids: vec![bob_proj.clone(), doug_proj.clone()],
+                title: None,
+                avatar_leaf: None,
+                avatar_leaf_color: None,
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+
+        let chats = state.db.chats_of_member(&format!("user:{alice}")).unwrap();
+        assert_eq!(chats.len(), before + 1, "exactly one new chat");
+        let cm = chats
+            .iter()
+            .find(|cm| cm.chat.kind == "group" && cm.members.len() == 3)
+            .expect("a group with me and both agents");
+        for pid in [&bob_proj, &doug_proj] {
+            assert!(cm
+                .members
+                .iter()
+                .any(|m| m.project_id() == Some(pid.as_str())));
+            let pushes = state.db.take_pushes(pid).unwrap();
+            assert!(pushes.iter().any(|(_, k, _)| k == "people_agent_added"));
+        }
+        let dto = people_chat_dto(&state, cm, &alice, "dev");
+        let mut names: Vec<&str> = dto.title.split(", ").collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            ["bob", "doug"],
+            "untitled agent groups take the agents' handles"
+        );
+    }
+
+    #[tokio::test]
+    async fn nobody_or_a_foreign_agent_creates_nothing() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 1);
+        let (bob, _) = person(&state, 2);
+        let bobs_proj = project_of(&state, &bob, "Research");
+        let before = state
+            .db
+            .chats_of_member(&format!("user:{alice}"))
+            .unwrap()
+            .len();
+
+        let r = chats_create_group(
+            State(state.clone()),
+            alice_dev.clone(),
+            Json(CreateGroupBody {
+                kind: "group".into(),
+                members: vec![],
+                agent_ids: vec![],
+                title: None,
+                avatar_leaf: None,
+                avatar_leaf_color: None,
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+
+        let r = chats_create_group(
+            State(state.clone()),
+            alice_dev.clone(),
+            Json(CreateGroupBody {
+                kind: "group".into(),
+                members: vec![],
+                agent_ids: vec![bobs_proj],
+                title: None,
+                avatar_leaf: None,
+                avatar_leaf_color: None,
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        let after = state
+            .db
+            .chats_of_member(&format!("user:{alice}"))
+            .unwrap()
+            .len();
+        assert_eq!(after, before, "a refused create leaves no half-made chat");
     }
 }
 

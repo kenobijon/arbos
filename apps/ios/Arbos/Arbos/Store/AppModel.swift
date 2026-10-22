@@ -1740,22 +1740,25 @@ final class AppModel: ObservableObject {
     /// rest (`POST /chats/{id}/members` turns a DM into a group on the third person).
     /// Optional `agentIds` are added afterwards (`POST /chats/{id}/agents`) so the
     /// group can start with people and your agents in one step.
+    /// People, agents, or both — never nobody. Agents ride in the create body
+    /// (`agent_ids`); whatever the relay did not add (an older relay) is added
+    /// one by one afterwards.
     func createGroup(handles: [String], agentIds: [Id] = [], title: String? = nil, leaf: LeafPick? = nil) async -> Bool {
         let cleaned = handles
             .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "@ ")) }
             .filter { !$0.isEmpty }
-        guard !cleaned.isEmpty else {
-            notice = Notice(text: "Add at least one other person")
+        guard !cleaned.isEmpty || !agentIds.isEmpty else {
+            notice = Notice(text: "Pick at least one person or agent")
             return false
         }
         do {
             var chat: PeopleChat
             do {
-                chat = try await api.createGroup(handles: cleaned, title: title, leaf: leaf)
-            } catch let e as RelayError where e.status == 404 || e.status == 405 || e.status == 501 {
+                chat = try await api.createGroup(handles: cleaned, agentIds: agentIds, title: title, leaf: leaf)
+            } catch let e as RelayError where !cleaned.isEmpty && (e.status == 404 || e.status == 405 || e.status == 501) {
                 chat = try await createGroupViaDm(handles: cleaned)
             }
-            for pid in agentIds {
+            for pid in agentIds where !chat.hasAgent(pid) {
                 do {
                     chat = try await api.addAgent(chatId: chat.id, projectId: pid)
                 } catch {
