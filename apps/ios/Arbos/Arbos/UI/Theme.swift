@@ -135,25 +135,28 @@ struct Theme {
 
     // Light, measured from Grok's App Store shots: page #FCFCFC, assistant
     // bubble #F2F2F2, user bubble near-black, white field with a hairline.
+    // Greys meet WCAG AA on the surfaces they sit on (Jacob, 2026-10-21):
+    // muted 5.3:1 on white / 4.7:1 on a bubble (#8A8A8E was 3.4:1), placeholder
+    // 4.6:1, link blue 4.8:1 (#1084FE was 3.7:1); the unread dot keeps Grok's blue.
     static let light = Theme(
         isDark: false, surface: .matte,
         bg: Color(hex: "#FCFCFC")!,
         bubbleAssistant: Color(hex: "#F2F2F2")!,
         bubbleUser: Color(hex: "#111111")!,
         field: .white,
-        fieldBorder: Color(hex: "#E3E3E3")!,
+        fieldBorder: Color(hex: "#DEDEDE")!,
         text: Color(hex: "#111111")!,
-        muted: Color(hex: "#8A8A8E")!,
-        placeholder: Color(hex: "#A0A0A5")!,
+        muted: Color(hex: "#6B6B70")!,
+        placeholder: Color(hex: "#757579")!,
         icon: Color(hex: "#6E6E73")!,
-        accent: Color(hex: "#1084FE")!,
+        accent: Color(hex: "#0A6FE0")!,
         unread: Color(hex: "#1084FE")!,
         online: Color(hex: "#34C759")!,
         warn: Color(hex: "#E59A00")!,
         danger: Color(hex: "#D7332A")!,
         dangerSoft: Color(hex: "#D7332A")!.opacity(0.10),
         card: .white,
-        separator: Color.black.opacity(0.08),
+        separator: Color.black.opacity(0.10),
         codeChip: Color.black.opacity(0.06),
         userCodeChip: Color.white.opacity(0.14)
     )

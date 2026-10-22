@@ -25,6 +25,7 @@ mod feedback;
 mod fleet;
 mod goals;
 mod groups;
+mod image_sniff;
 mod images;
 mod livekit;
 mod local;

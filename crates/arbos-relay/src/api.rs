@@ -9,7 +9,8 @@ use serde_json::{json, Value};
 
 use arbos_core::api::{
     ChatDto, ChatMeDto, CreateChatResponseDto, CreateProjectResponseDto, CreateProjectRoomsDto,
-    CreateProjectSandboxDto, GetProjectResponseDto, MachineDto, ProjectDto, ProjectOwnerDto,
+    CreateProjectSandboxDto, GetProjectResponseDto, MachineDto, MachineImageDto, MachineSpecDto,
+    MachineStateDto, MachineStatusDto, MachineWorkspaceDto, ProjectDto, ProjectOwnerDto,
 };
 use arbos_core::auth::{hash, mint, pairing_code, TokenKind};
 use arbos_core::ids::{now_ms, ulid};
@@ -396,7 +397,7 @@ pub async fn list_projects(State(state): State<AppState>, principal: Principal) 
                                 .user_card(&p.user_id)
                                 .ok()
                                 .flatten()
-                                .and_then(|c| c["handle"].as_str().map(str::to_owned)),
+                                .map(|c| c.handle),
                         );
                         let mut v = serde_json::to_value(dto).expect("ProjectDto");
                         v["owner"] = json!(p.user_id);
@@ -691,7 +692,10 @@ pub async fn delete_chat(
             StatusCode::CONFLICT,
             "the pinned chat cannot be closed".into(),
         )),
-        Some(true) => Ok(StatusCode::NO_CONTENT.into_response()),
+        Some(true) => {
+            state.matrix.close_chat(&state, &chat);
+            Ok(StatusCode::NO_CONTENT.into_response())
+        }
     }
 }
 
@@ -1000,44 +1004,65 @@ pub async fn machine(State(state): State<AppState>, principal: Principal) -> Api
         }
     }
     let projects = state.db.projects_of_user(&user_id).map_err(internal)?;
-    let workspaces: Vec<Value> = projects
+    let workspaces: Vec<MachineWorkspaceDto> = projects
         .iter()
-        .map(|p| {
-            json!({
-                "project_id": p.id,
-                "state": if bs == arbos_core::wire::BoxState::Awake { p.workspace_state.as_str() } else { "stopped" },
-            })
+        .map(|p| MachineWorkspaceDto {
+            project_id: p.id.clone(),
+            state: if bs == arbos_core::wire::BoxState::Awake {
+                p.workspace_state.clone()
+            } else {
+                "stopped".into()
+            },
         })
         .collect();
     let spend_today = state
         .db
         .user_usage_since(&user_id, start_of_day())
         .map_err(internal)?;
-    Ok(Json(json!({
-        "user_id": user_id,
-        "state": bs,
-        "since": since,
-        "provider": sb.as_ref().map(|s| s.provider.clone()),
-        "sandbox_id": sb.as_ref().and_then(|s| s.sandbox_id.clone()),
-        "spec": { "cpu": cpu, "mem_gib": mem, "disk_gib": disk, "class": snapshot_name },
-        "spend_today_usd": spend_today,
-        "spend_cap_usd": state.db.user_spend_cap(&user_id).map_err(internal)?,
-        "workspaces": workspaces,
-        "migrated_from": sb.as_ref().map(|s| s.migrated_from.clone()).unwrap_or_default(),
+    let spend_cap_usd = state.db.user_spend_cap(&user_id).map_err(internal)?;
+    let image_outdated = sb
+        .as_ref()
+        .is_some_and(|s| crate::upgrade::image_outdated(&state, s));
+    let upgrade = crate::upgrade::status_json(&state, &user_id).await;
+    let held = state.db.box_held(&user_id).unwrap_or(false);
+    let machine_today_usd = state
+        .db
+        .credits(&user_id, start_of_day())
+        .map(|c| c.machine_today_usd)
+        .unwrap_or(0.0);
+    Ok(Json(MachineStatusDto {
+        user_id,
+        state: bs,
+        since,
+        provider: sb.as_ref().map(|s| s.provider.clone()),
+        sandbox_id: sb.as_ref().and_then(|s| s.sandbox_id.clone()),
+        spec: MachineSpecDto {
+            cpu,
+            mem_gib: mem,
+            disk_gib: disk,
+            class: snapshot_name,
+        },
+        spend_today_usd: spend_today,
+        spend_cap_usd,
+        workspaces,
+        migrated_from: sb
+            .as_ref()
+            .map(|s| s.migrated_from.clone())
+            .unwrap_or_default(),
         // Image: the snapshot this box was made from vs the relay's current default. An outdated
         // box lacks newer agent features until `POST /machine/upgrade` recreates it.
-        "image": {
-            "current": sb.as_ref().and_then(|s| s.snapshot.clone()),
-            "default": state.cfg.daytona_snapshot,
+        image: MachineImageDto {
+            current: sb.as_ref().and_then(|s| s.snapshot.clone()),
+            default: state.cfg.daytona_snapshot.clone(),
         },
-        "image_outdated": sb.as_ref().is_some_and(|s| crate::upgrade::image_outdated(&state, s)),
-        "upgrade": crate::upgrade::status_json(&state, &user_id).await,
+        image_outdated,
+        upgrade,
         // Always-on: the machine runs all the time (no idle stop, no waking to show); `held`
         // is a manual Stop that the next Start or message lifts.
-        "always_on": state.cfg.always_on,
-        "held": state.db.box_held(&user_id).unwrap_or(false),
-        "machine_today_usd": state.db.credits(&user_id, start_of_day()).map(|c| c.machine_today_usd).unwrap_or(0.0),
-    }))
+        always_on: state.cfg.always_on,
+        held,
+        machine_today_usd,
+    })
     .into_response())
 }
 
@@ -1069,7 +1094,12 @@ pub async fn machine_start(State(state): State<AppState>, principal: Principal) 
     }
     boxes::ensure_awake(&state, &user_id, "api").await;
     let (bs, since) = state.box_state(&user_id).await;
-    Ok(Json(json!({ "state": bs, "since": since })).into_response())
+    Ok(Json(MachineStateDto {
+        state: bs,
+        since,
+        held: None,
+    })
+    .into_response())
 }
 
 /// `POST /machine/stop`: hibernate the caller's box; every workspace stops with it.
@@ -1093,7 +1123,12 @@ pub async fn machine_stop(
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
     let (bs, since) = state.box_state(&user_id).await;
-    Ok(Json(json!({ "state": bs, "since": since, "held": true })).into_response())
+    Ok(Json(MachineStateDto {
+        state: bs,
+        since,
+        held: Some(true),
+    })
+    .into_response())
 }
 
 /// `DELETE /projects/{id}` — owner only. Soft delete: the project leaves every list and the box
@@ -1214,7 +1249,11 @@ pub async fn machine_restart(State(state): State<AppState>, principal: Principal
     let (bs, since) = state.box_state(&user_id).await;
     Ok((
         StatusCode::ACCEPTED,
-        Json(json!({ "state": bs, "since": since, "held": false })),
+        Json(MachineStateDto {
+            state: bs,
+            since,
+            held: Some(false),
+        }),
     )
         .into_response())
 }

@@ -432,6 +432,12 @@ struct ChatView: View {
                     case "userprofile": if let c = counterpart { model.showProfile(.user(ProfilePerson(c))) }
                     // `addmembers`: the group pane opens its Add members sheet on appear.
                     case "groupprofile", "addmembers": model.showProfile(.group(chatId: chatId, projectId: isPeople ? nil : projectId))
+                    case "member":
+                        // The group page, then its first other member pushed over it (rig).
+                        openHeaderProfile()
+                        if let other = people?.humans.first(where: { $0.id != model.user?.id }) {
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { model.showProfile(.user(ProfilePerson(other))) }
+                        }
                     case "members", "addperson": openHeaderProfile()
                     case "feedback": FeedbackCenter.shared.open(screen: "chat", chatId: chatId, projectId: isPeople ? nil : projectId)
                     case "call":
@@ -1084,8 +1090,8 @@ struct ChatView: View {
                         .buttonStyle(.plain)
                 }
                 .padding(.horizontal, 14).padding(.vertical, 8)
+                // Full composer width: the same edges as the message field (Jacob, Oct 21).
                 .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(theme.bubbleAssistant))
-                .padding(.leading, Theme.plusButton + 12)
             }
             if !pending.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {

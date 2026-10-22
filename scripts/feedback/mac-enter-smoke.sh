@@ -12,10 +12,31 @@ BIN=${1:?arbos-mac binary}
 export ARBOS_FIXTURE=1 ARBOS_FIXTURE_OPEN=${ARBOS_FIXTURE_OPEN:-Affine} ARBOS_SURFACE=matte ARBOS_UPDATE_AUTO=0
 LOG=$(mktemp -t enter-smoke)
 TEXT="enter smoke $(date +%s)"
+# One GUI app at a time on the shared display (scripts/runner/gui-lock.sh): take the lock, give it back at exit.
+GUI_LOCK=/Users/Shared/arbos-run/gui-lock.sh
+if [[ -x "$GUI_LOCK" ]]; then
+  if ! "$GUI_LOCK" acquire release-smoke 240; then
+    echo "::warning title=enter smoke::display busy ($("$GUI_LOCK" status)); skipped — the GPUI enter_tests remain the gate"
+    echo "== enter smoke: display busy; skipped"
+    exit 0
+  fi
+  trap '"$GUI_LOCK" release release-smoke >/dev/null 2>&1' EXIT
+fi
 "$BIN" >"$LOG" 2>&1 &
 PID=$!
 sleep 8
 if ! kill -0 "$PID" 2>/dev/null; then echo "== enter smoke: the app did not stay up after launch"; tail -n 20 "$LOG"; exit 2; fi
+# Driving the app needs Automation (System Events) for the runner's node process. The first osascript from
+# an ungranted session puts a TCC prompt on the shared display that blocks the job until a human clicks
+# Allow (03:5x Oct 22: three such prompts sat on the Mac). So: no keystrokes unless the session was granted
+# once by hand and the marker exists — until then this smoke is "launches and stays up" only.
+GUI_OK=${ARBOS_SMOKE_GUI_OK_MARKER:-$HOME/.arbos-smoke-gui-ok}
+if [[ ! -f "$GUI_OK" ]]; then
+  echo "::notice title=enter smoke::launch-only — the app stayed up 8 s; typing is off until the runner session has Accessibility + Automation and $GUI_OK exists (runbook: EC2 Mac hygiene)"
+  echo "== enter smoke: ALIVE after launch (typing disabled: no Automation grant marker)"
+  kill "$PID" 2>/dev/null; sleep 1; kill -9 "$PID" 2>/dev/null
+  exit 0
+fi
 cannot_drive() {
   echo "::warning title=enter smoke::could not drive the app ($1: this session lacks Accessibility/Automation for the runner); the GPUI enter_tests remain the gate"
   echo "== enter smoke: could not drive the app ($1); skipped"
