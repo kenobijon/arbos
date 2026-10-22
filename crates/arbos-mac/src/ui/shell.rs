@@ -7,7 +7,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
-    actions, div, prelude::*, px, Animation, AnimationExt, App, Context, Div, Entity,
+    actions, div, prelude::*, px, Animation, AnimationExt, AnyElement, App, Context, Div, Entity,
     ExternalPaths, FocusHandle, Focusable, FontWeight, Render, ScrollHandle, SharedString,
     Stateful, Window,
 };
@@ -53,8 +53,6 @@ actions!(
     [CloseTab, NewTab, PrevTab, NextTab, ToggleRail, Escape, Quit]
 );
 
-/// How far the header's window-drag catchment overhangs the transcript (its top fade band).
-const HEADER_DRAG_OVERHANG: f32 = 24.0;
 /// Left inset for the conversation header while the sidebar is hidden: the window's traffic lights.
 /// The sidebar's collapse control sits at the same inset, so it never moves when the pane folds.
 pub(crate) const TRAFFIC_LIGHTS_INSET: f32 = 72.0;
@@ -2069,6 +2067,50 @@ impl Shell {
 
     // ----- conversation pane ---------------------------------------------------
 
+    /// The one chat scaffold every kind uses — agent, DM, group, server channel
+    /// (Jacob, Oct 22: "match the server design and the group chat design"):
+    /// `pre` (call bar, banner, chips) starts under the bar; the transcript
+    /// runs up under the floating header and fades over `metrics::FADE_BAND`;
+    /// a transparent drag strip continues `metrics::DRAG_OVERHANG` below the
+    /// bar; the header is appended last so its pill, toggle and drag band keep
+    /// their hitboxes on top. `bottom` is the composer (or the channel's quiet
+    /// line). Geometry lives in `header::metrics`; `header::header_tests`
+    /// checks it for every kind.
+    fn chat_frame(
+        mut column: Stateful<Div>,
+        header_bar: Div,
+        pre: Vec<AnyElement>,
+        transcript: AnyElement,
+        bottom: Vec<AnyElement>,
+    ) -> Stateful<Div> {
+        let has_pre = !pre.is_empty();
+        if has_pre {
+            column = column.child(div().pt(px(header::metrics::HEIGHT)).children(pre));
+        }
+        let body = div().flex_1().min_h_0().relative().child(transcript).child(
+            div()
+                .absolute()
+                .top(px(if has_pre {
+                    0.0
+                } else {
+                    header::metrics::HEIGHT
+                }))
+                .left_0()
+                .right_0()
+                .h(px(header::metrics::DRAG_OVERHANG))
+                .window_drag(),
+        );
+        column.child(body).children(bottom).child(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .right_0()
+                .h(px(header::metrics::HEIGHT))
+                .child(header_bar),
+        )
+    }
+
     fn render_center(&self, sidebar_hidden: bool, cx: &mut Context<Self>) -> Stateful<Div> {
         let theme = Theme::of(cx).clone();
         let state = self.state.read(cx);
@@ -2131,26 +2173,23 @@ impl Shell {
             .bg(theme.chat_wash());
 
         if let Some((server, ch, can_post)) = channel {
-            column = column.child(
-                div()
-                    .relative()
-                    .when(sidebar_hidden, |el| el.pl(px(TRAFFIC_LIGHTS_INSET)))
-                    .child(header::render_channel(
-                        self,
-                        &server,
-                        &ch,
-                        sidebar_hidden,
-                        cx,
-                    )),
-            );
-            if let Some(banner) = self.render_banner(cx) {
-                column = column.child(banner);
-            }
-            let body = div()
-                .flex_1()
-                .min_h_0()
+            // D88 rule 3: the channel is a chat like any other — the same
+            // floating header, fade band and drag catchment (`chat_frame`).
+            let header_bar = div()
                 .relative()
-                .child(self.transcript.clone());
+                .when(sidebar_hidden, |el| el.pl(px(TRAFFIC_LIGHTS_INSET)))
+                .child(header::render_channel(
+                    self,
+                    &server,
+                    &ch,
+                    sidebar_hidden,
+                    cx,
+                ));
+            let pre: Vec<AnyElement> = self
+                .render_banner(cx)
+                .into_iter()
+                .map(IntoElement::into_any_element)
+                .collect();
             let bottom = div()
                 .w_full()
                 .flex()
@@ -2169,16 +2208,20 @@ impl Shell {
                         .child("Only admins post here"),
                 )
             };
-            return column
-                .child(body)
-                .child(bottom)
-                .group("chat-drop")
-                .can_drop(|dragged, _, _| dragged.is::<ExternalPaths>())
-                .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
-                    this.composer.update(cx, |c, cx| {
-                        c.add_paths(paths.paths().iter().cloned(), cx);
-                    });
-                }));
+            return Self::chat_frame(
+                column,
+                header_bar,
+                pre,
+                self.transcript.clone().into_any_element(),
+                vec![bottom.into_any_element()],
+            )
+            .group("chat-drop")
+            .can_drop(|dragged, _, _| dragged.is::<ExternalPaths>())
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+                this.composer.update(cx, |c, cx| {
+                    c.add_paths(paths.paths().iter().cloned(), cx);
+                });
+            }));
         }
 
         let Some(space) = project else {
@@ -2233,22 +2276,13 @@ impl Shell {
             .when(sidebar_hidden, |el| el.pl(px(TRAFFIC_LIGHTS_INSET)))
             .child(header::render(self, &space, sidebar_hidden, cx));
         let floating_header = dropped;
-        let mut flow_under_header = !floating_header;
+        let mut pre: Vec<AnyElement> = Vec::new();
         let mut header_bar = Some(header_bar);
         if !floating_header {
-            column = column.child(header_bar.take().expect("header built once"));
+            column = column.child(header_bar.take().expect("the header is built once"));
         }
-        // Flow children between the header and the list start under the bar.
-        let mut pad_first = |el: Div| -> Div {
-            if !flow_under_header {
-                flow_under_header = true;
-                el.pt(px(HEADER_HEIGHT))
-            } else {
-                el
-            }
-        };
         if let Some(chips) = header::chips(self, &space, cx) {
-            column = column.child(pad_first(div()).child(chips));
+            pre.push(chips);
         }
         // Calls v1: my call (bar, or the full screen below), or a live call to join.
         let my_call = self.state.read(cx).my_call.clone();
@@ -2258,7 +2292,7 @@ impl Shell {
             .map(|c| c.expanded && c.call.space_id() == space.id)
             .unwrap_or(false);
         if let Some(active) = my_call.as_ref().filter(|_| !screen_open) {
-            column = column.child(pad_first(div()).child(callview::bar(self, active, cx)));
+            pre.push(callview::bar(self, active, cx).into_any_element());
         } else if let Some(call) = call_here.filter(|c| {
             c.is_live()
                 && my_call
@@ -2266,18 +2300,21 @@ impl Shell {
                     .map(|m| m.call.call_id != c.call_id)
                     .unwrap_or(true)
         }) {
-            column = column.child(pad_first(div()).child(callview::join_bar(&call, cx)));
+            pre.push(callview::join_bar(&call, cx).into_any_element());
         }
         if let Some(banner) = self.render_banner(cx) {
-            column = column.child(pad_first(div()).child(banner));
+            pre.push(banner.into_any_element());
         }
         if screen_open {
             if let Some(active) = my_call.as_ref() {
-                return column.child(callview::screen(self, active, cx));
+                return column
+                    .children(pre)
+                    .child(callview::screen(self, active, cx));
             }
         }
 
         if !dropped {
+            column = column.children(pre);
             // S1/S2: empty chat — the agent's picture and a line, composer centred.
             let is_people = space.is_people();
             let name = if space.is_people_group() {
@@ -2342,30 +2379,6 @@ impl Shell {
             // Transcript above, composer pinned at the bottom. On the first
             // send the composer slides down from the centre over 220 ms using
             // a relative `top` inset (GPUI has no transform).
-            // Grok's header treatment (Jacob, Oct 22 12:49 CR, superseding the
-            // opaque band): the list runs up under the floating pill and fades
-            // out through the top band (`Transcript` fades `HEADER_FADE_BAND`).
-            // The window-drag catchment is the 44 pt header plus 24 pt below
-            // it; the strip arms a move only after `WINDOW_DRAG_SLOP`, so a
-            // click there still lands on the faded bubble beneath.
-            let body = div()
-                .flex_1()
-                .min_h_0()
-                .relative()
-                .child(self.transcript.clone())
-                .child(
-                    div()
-                        .absolute()
-                        .top(px(if flow_under_header {
-                            0.0
-                        } else {
-                            HEADER_HEIGHT
-                        }))
-                        .left_0()
-                        .right_0()
-                        .h(px(HEADER_DRAG_OVERHANG))
-                        .window_drag(),
-                );
             if typing.is_some() {
                 PulseClock::request(cx);
             }
@@ -2395,20 +2408,14 @@ impl Shell {
                 composer_row.into_any_element()
             };
             // F11 call strip renders above the composer only during a call.
-            column = column
-                .child(body)
-                .child(self.voice.clone())
-                .child(composer_row);
-            // Last, so it paints over the list: the floating header (its own
-            // hitboxes — pill, toggle, drag band — stay on top as well).
-            column = column.child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .right_0()
-                    .h(px(HEADER_HEIGHT))
-                    .children(header_bar.take()),
+            column = Self::chat_frame(
+                column,
+                header_bar
+                    .take()
+                    .expect("the transcript header is built once"),
+                pre,
+                self.transcript.clone().into_any_element(),
+                vec![self.voice.clone().into_any_element(), composer_row],
             );
         }
         // Accept Finder / file drops anywhere over the conversation (transcript,

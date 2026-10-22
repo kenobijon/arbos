@@ -25,9 +25,7 @@ use crate::ui::motion::PulseClock;
 use crate::ui::people;
 use crate::ui::shell::Shell;
 use crate::ui::sidebar::{self, machine_dot};
-use crate::ui::theme::{
-    Theme, AVATAR_HEADER, CONTROL, HEADER_HEIGHT, TEXT_BODY, TEXT_SMALL, TEXT_TINY,
-};
+use crate::ui::theme::{Theme, AVATAR_HEADER, CONTROL, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
 
 /// The pinned chat reads "Main" until it is renamed away from the agent's name.
 pub(crate) fn tab_title(chat: &Chat, space: &Project) -> String {
@@ -244,50 +242,79 @@ pub fn render(
         }
     }
 
-    // ----- the bar: equal side slots keep the pill centred ---------------------
-    let button = |id: &'static str, glyph: &str, on: bool, theme: &Theme| {
-        // The same 28 pt tile as the sidebar strip's collapse control, at the
-        // same spot (72 + 12 pt), so folding the pane swaps one for the other
-        // without a visible move ([feedback mac-collapsed-toggle-inline]).
-        let _ = on;
-        div()
-            .id(id)
-            .size(px(28.0))
-            .flex_shrink_0()
-            .rounded(px(7.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .cursor_pointer()
-            .bg(theme.surface_2)
-            .hover(|s| s.bg(theme.surface_2))
-            .child(icon(glyph, 17.0, theme.text))
-            // The bar is a window-drag region; a control is not part of it.
-            .on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.close_popovers(cx);
-                }),
-            )
-    };
-    // Expand only when the rail is hidden (collapsed or too narrow). Collapse
-    // lives next to "+" in the sidebar.
-    let sidebar_toggle = sidebar_hidden.then(|| {
-        let overlay = shell.state.read(cx).sidebar_overlay;
-        button("header-sidebar", "sidebar-left", overlay, &theme).on_click(cx.listener(
-            |this, _, window, cx| {
-                let width: f32 = window.viewport_size().width.into();
-                this.state.update(cx, |s, cx| {
-                    let narrow = s.window_is_narrow(width);
-                    s.toggle_rail(narrow, cx)
-                });
-            },
-        ))
-    });
+    // ----- the bar: one frame for every chat kind ---------------------------------
+    let sidebar_toggle = sidebar_hidden.then(|| sidebar_toggle(shell, &theme, cx));
+    bar_frame(
+        sidebar_toggle.map(IntoElement::into_any_element),
+        pill.into_any_element(),
+    )
+}
+
+/// The expand control while the sidebar is hidden: the same 28 pt tile as the
+/// sidebar strip's collapse control, at the same spot (72 + 12 pt), so folding
+/// the pane swaps one for the other without a visible move
+/// ([feedback mac-collapsed-toggle-inline]).
+fn sidebar_toggle(shell: &Shell, theme: &Theme, cx: &mut Context<Shell>) -> Stateful<Div> {
+    let _ = shell.state.read(cx).sidebar_overlay;
+    div()
+        .id("header-sidebar")
+        .size(px(28.0))
+        .flex_shrink_0()
+        .rounded(px(7.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .bg(theme.surface_2)
+        .hover(|s| s.bg(theme.surface_2))
+        .child(icon("sidebar-left", 17.0, theme.text))
+        // The bar is a window-drag region; a control is not part of it.
+        .on_mouse_down(
+            gpui::MouseButton::Left,
+            cx.listener(|this, _, _, cx| {
+                cx.stop_propagation();
+                this.close_popovers(cx);
+            }),
+        )
+        .on_click(cx.listener(|this, _, window, cx| {
+            let width: f32 = window.viewport_size().width.into();
+            this.state.update(cx, |s, cx| {
+                let narrow = s.window_is_narrow(width);
+                s.toggle_rail(narrow, cx)
+            });
+        }))
+}
+
+/// Geometry every chat header shares — one number each, read by the tests.
+pub mod metrics {
+    use crate::ui::theme::HEADER_HEIGHT;
+    /// The bar: Grok's 44 pt.
+    pub const HEIGHT: f32 = HEADER_HEIGHT;
+    /// The bar's content box is centred on the traffic lights' line (20.75 pt
+    /// in this window): 2 pt off the bottom.
+    pub const BOTTOM_PAD: f32 = 2.0;
+    /// The pill: 34 pt tall, its top 7 pt under the window edge (Grok, Jacob's
+    /// reference at 2 px/pt).
+    pub const PILL_HEIGHT: f32 = 34.0;
+    pub const PILL_TOP: f32 = 7.0;
+    /// Top margin inside the content box that lands the pill at `PILL_TOP`.
+    pub const PILL_MT: f32 = PILL_TOP * 2.0 - (HEIGHT - BOTTOM_PAD - PILL_HEIGHT);
+    /// The list fades out under the floating bar over this band (Grok: text
+    /// gone at the edge, full ~50 pt down).
+    pub const FADE_BAND: f32 = HEADER_HEIGHT + 6.0;
+    /// The window-drag catchment continues this far below the bar.
+    pub const DRAG_OVERHANG: f32 = 24.0;
+}
+
+/// The frame of every chat header — agent, DM, group, server channel: 44 pt,
+/// equal side slots (the sidebar toggle left when the sidebar is hidden), the
+/// pill centred with its top 7 pt under the window edge, the whole bar a
+/// window-drag region (the pill and the toggle stop the drag themselves). The
+/// list runs under it and fades (`metrics::FADE_BAND`), so there is no hairline.
+pub(crate) fn bar_frame(left: Option<AnyElement>, pill: AnyElement) -> Div {
     let side = px(CONTROL + 8.0);
     div()
-        .h(px(HEADER_HEIGHT))
+        .h(px(metrics::HEIGHT))
         .flex_shrink_0()
         .w_full()
         .flex()
@@ -296,19 +323,16 @@ pub fn render(
         .gap(px(10.0))
         .pl(px(12.0))
         .pr(px(10.0))
-        // Centred on the traffic lights' line (20.75 pt in this window), like
-        // the sidebar strip ([feedback mac-collapsed-toggle-inline]).
-        .pb(px(2.0))
-        // No hard hairline under the pill — the transcript's top edge fade
-        // (iPhone Settings glass fade) softens the join instead.
+        .pb(px(metrics::BOTTOM_PAD))
         .window_drag()
+        .debug_selector(|| "chat-header-bar".into())
         .child(
             div()
                 .w(side)
                 .flex_shrink_0()
                 .flex()
                 .items_center()
-                .children(sidebar_toggle),
+                .children(left),
         )
         .child(
             div()
@@ -316,12 +340,14 @@ pub fn render(
                 .min_w_0()
                 .flex()
                 .justify_center()
-                // Grok's pill sits 7 pt under the window edge (Jacob's
-                // reference, 2 px/pt: 14 px); ours sat at 4–5. The 6 pt top
-                // margin inside the 42 pt content box lands the 34 pt pill at
-                // 7–41 while the toggle stays on the lights' line.
-                .mt(px(6.0))
-                .child(pill.flex_shrink_0().max_w(px(460.0))),
+                .mt(px(metrics::PILL_MT))
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .max_w(px(460.0))
+                        .debug_selector(|| "chat-header-pill".into())
+                        .child(pill),
+                ),
         )
         .child(div().w(side).flex_shrink_0())
 }
@@ -406,68 +432,12 @@ pub fn render_channel(
         )
         .child(name_part);
 
-    let sidebar_toggle = sidebar_hidden.then(|| {
-        div()
-            .id("header-sidebar")
-            .size(px(CONTROL))
-            .flex_shrink_0()
-            .rounded(px(8.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .cursor_pointer()
-            .bg(if overlay {
-                theme.surface_2
-            } else {
-                gpui::transparent_black()
-            })
-            .hover(|s| s.bg(theme.surface_2))
-            .child(icon(
-                "sidebar-left",
-                17.0,
-                if overlay {
-                    theme.text
-                } else {
-                    theme.text_muted
-                },
-            ))
-            .on_click(cx.listener(|this, _, window, cx| {
-                let width: f32 = window.viewport_size().width.into();
-                this.state.update(cx, |s, cx| {
-                    let narrow = s.window_is_narrow(width);
-                    s.toggle_rail(narrow, cx)
-                });
-            }))
-    });
-    let side = px(CONTROL + 8.0);
-    div()
-        .h(px(HEADER_HEIGHT))
-        .flex_shrink_0()
-        .w_full()
-        .flex()
-        .items_center()
-        .justify_between()
-        .gap(px(10.0))
-        .pl(px(12.0))
-        .pr(px(10.0))
-        .window_drag()
-        .child(
-            div()
-                .w(side)
-                .flex_shrink_0()
-                .flex()
-                .items_center()
-                .children(sidebar_toggle),
-        )
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .justify_center()
-                .child(pill.flex_shrink_0().max_w(px(460.0))),
-        )
-        .child(div().w(side).flex_shrink_0())
+    let sidebar_toggle = sidebar_hidden.then(|| sidebar_toggle(shell, &theme, cx));
+    let _ = overlay;
+    bar_frame(
+        sidebar_toggle.map(IntoElement::into_any_element),
+        pill.into_any_element(),
+    )
 }
 
 /// "+" inside the agent pill: starts a new chat with this agent (same as ⌘T).
@@ -922,4 +892,149 @@ fn anchored_chat_menu(
 /// sit in the right pane's Members list.
 pub fn chips(_shell: &Shell, _space: &Project, _cx: &mut Context<Shell>) -> Option<AnyElement> {
     None
+}
+
+#[cfg(test)]
+mod header_tests {
+    use gpui::{point, px, Modifiers, MouseButton, MouseDownEvent, TestAppContext};
+
+    use super::metrics;
+    use super::*;
+    use crate::ui::glass::WindowDragPress;
+
+    /// The four chat kinds, drawn through the one `bar_frame` with each kind's
+    /// pill content (what differs in the real pages), with and without the
+    /// sidebar (the toggle appears in the left slot when it is hidden).
+    #[derive(Clone, Copy)]
+    enum Kind {
+        Agent,
+        Dm,
+        Group,
+        Channel,
+    }
+
+    struct Bar {
+        kind: Kind,
+        folded: bool,
+    }
+
+    const WIDTH: f32 = 884.0;
+
+    impl gpui::Render for Bar {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let pill_w = match self.kind {
+                Kind::Agent => 150.0,
+                Kind::Dm => 110.0,
+                Kind::Group => 130.0,
+                Kind::Channel => 170.0,
+            };
+            let pill = div()
+                .id("pill")
+                .h(px(metrics::PILL_HEIGHT))
+                .w(px(pill_w))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .into_any_element();
+            let left = self.folded.then(|| {
+                div()
+                    .id("toggle")
+                    .size(px(28.0))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .into_any_element()
+            });
+            div().w(px(WIDTH)).h(px(400.0)).child(
+                div()
+                    .when(self.folded, |el| el.pl(px(72.0)))
+                    .child(bar_frame(left, pill)),
+            )
+        }
+    }
+
+    fn moves_after(cx: &mut TestAppContext, kind: Kind, folded: bool, x: f32) -> u32 {
+        cx.update(|cx| {
+            cx.set_global(WindowDragPress {
+                record_only: true,
+                ..Default::default()
+            })
+        });
+        let (view, vcx) = cx.add_window_view(|_, _| Bar { kind, folded });
+        vcx.run_until_parked();
+        let at = point(px(x), px(22.0));
+        vcx.simulate_event(MouseDownEvent {
+            button: MouseButton::Left,
+            position: at,
+            modifiers: Modifiers::default(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        view.update(vcx, |_, cx| cx.notify());
+        vcx.run_until_parked();
+        vcx.simulate_mouse_move(
+            point(at.x + px(12.0), at.y + px(3.0)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        vcx.run_until_parked();
+        vcx.update(|_, cx| cx.default_global::<WindowDragPress>().moves)
+    }
+
+    #[gpui::test]
+    fn every_kind_has_the_same_bar_height_and_pill_position(cx: &mut TestAppContext) {
+        for kind in [Kind::Agent, Kind::Dm, Kind::Group, Kind::Channel] {
+            for folded in [false, true] {
+                let (_view, vcx) = cx.add_window_view(|_, _| Bar { kind, folded });
+                vcx.run_until_parked();
+                let bar = vcx.debug_bounds("chat-header-bar").expect("bar drawn");
+                let pill = vcx.debug_bounds("chat-header-pill").expect("pill drawn");
+                let h: f32 = bar.size.height.into();
+                let top: f32 = (pill.origin.y - bar.origin.y).into();
+                let ph: f32 = pill.size.height.into();
+                assert_eq!(h, metrics::HEIGHT, "bar height, folded={folded}");
+                assert_eq!(top, metrics::PILL_TOP, "pill top, folded={folded}");
+                assert_eq!(ph, metrics::PILL_HEIGHT, "pill height, folded={folded}");
+                let cx_pill: f32 = (pill.origin.x + pill.size.width / 2.0).into();
+                let cx_bar: f32 = (bar.origin.x + bar.size.width / 2.0).into();
+                assert!(
+                    (cx_pill - cx_bar).abs() <= 1.0,
+                    "pill centred, folded={folded}"
+                );
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn the_empty_band_drags_for_every_kind_and_the_pill_does_not(cx: &mut TestAppContext) {
+        for kind in [Kind::Agent, Kind::Dm, Kind::Group, Kind::Channel] {
+            // Left of the pill, right of the side slot.
+            assert_eq!(moves_after(cx, kind, false, 120.0), 1, "band drags");
+            assert_eq!(
+                moves_after(cx, kind, true, 72.0 + 60.0),
+                1,
+                "band drags, folded"
+            );
+            // The pill's centre.
+            assert_eq!(
+                moves_after(cx, kind, false, WIDTH / 2.0),
+                0,
+                "pill is a control"
+            );
+            // The toggle.
+            assert_eq!(
+                moves_after(cx, kind, true, 72.0 + 12.0 + 14.0),
+                0,
+                "toggle is a control"
+            );
+        }
+    }
+
+    #[test]
+    fn the_fade_band_covers_the_bar_and_the_drag_overhang_follows_it() {
+        assert!(metrics::FADE_BAND >= metrics::HEIGHT);
+        assert_eq!(metrics::FADE_BAND, metrics::HEIGHT + 6.0);
+        assert_eq!(metrics::DRAG_OVERHANG, 24.0);
+        assert_eq!(metrics::PILL_TOP + metrics::PILL_HEIGHT, 41.0);
+    }
 }
