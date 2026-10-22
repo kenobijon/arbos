@@ -6,7 +6,7 @@ import Foundation
 enum DebugHooks {
     static var openProject: Id? { value("ARBOS_OPEN_PROJECT") }
     static var openChat: Id? { value("ARBOS_OPEN_CHAT") }
-    /// D88: `<name or id>[:list|:home|:#channel]` — land in a server (screenshot rig).
+    /// D88: `<name or id>[:list|:home|:page|:page-settings|:#channel]` — land in a server (screenshot rig).
     static var openServer: String? { value("ARBOS_OPEN_SERVER") }
     /// With `ARBOS_OPEN_SERVER=…:panel`: the server page's tab to land on (Channels | Members | Settings).
     static var panelTab: String? { value("ARBOS_PANEL_TAB") }
@@ -56,6 +56,19 @@ enum DebugHooks {
     static var appearance: Appearance? { value("ARBOS_APPEARANCE").flatMap(Appearance.init(rawValue:)) }
     /// `matte | glass`: the surface for one launch, same precedence.
     static var surface: Surface? { value("ARBOS_SURFACE").flatMap(Surface.init(rawValue:)) }
+    /// `offline | relay-down | reconnecting | syncing | restart-soon`: the open chat's link state for the
+    /// header's connection pill; `ARBOS_LINK_CLEARS_MS=<ms>` sets it back to live after that long.
+    static var link: LinkState? {
+        switch value("ARBOS_LINK") {
+        case "offline": return .offline
+        case "relay-down": return .relayDown
+        case "reconnecting": return .reconnecting
+        case "syncing": return .syncing
+        case "restart-soon": return .restartSoon
+        default: return nil
+        }
+    }
+    static var linkClearsMs: Int? { value("ARBOS_LINK_CLEARS_MS").flatMap { Int($0) } }
     /// Scripted tour for the screen recording (fixture only).
     static var demo: Bool { value("ARBOS_DEMO") == "1" }
     /// Scripted tour against the live relay: sends ARBOS_AUTO_SEND, waits for the reply, tours the sheets.

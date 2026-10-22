@@ -1668,25 +1668,48 @@ struct ProfilePane: View {
         self.footer = footer
     }
 
+    /// How far the content fades out under the pinned hero + tabs (the chat
+    /// header's treatment, #1336; Jacob Oct 22: sticky header, no hard cut).
+    static let fadeBand: CGFloat = 24
+
     var body: some View {
-        VStack(spacing: 18) {
-            PaneHeader(name: hero.name, subtitle: hero.subtitle, badge: hero.badge) {
-                switch hero.picture {
-                case .image(let v): v
-                case .glyph(let glyph):
-                    RoundedRectangle(cornerRadius: PaneKit.heroAvatar * 0.28, style: .continuous)
-                        .fill(theme.field)
-                        .frame(width: PaneKit.heroAvatar, height: PaneKit.heroAvatar)
-                        .overlay(Image(systemName: glyph).font(.system(size: PaneKit.heroAvatar * 0.42, weight: .medium)).foregroundStyle(theme.text))
+        // Hero + tab pill pin at the top of the scroll view (a pinned section
+        // header); the sections scroll beneath and fade out at the join.
+        LazyVStack(spacing: 18, pinnedViews: [.sectionHeaders]) {
+            Section {
+                ForEach(Array(sections.enumerated()), id: \.offset) { _, s in section(s) }
+                if !footer.isEmpty {
+                    Color.clear.frame(height: 1)
+                    ForEach(Array(footer.enumerated()), id: \.offset) { _, s in section(s) }
                 }
-            }
-            if tabs.count > 1 {
-                ProfileTabs(tabs: tabs, selected: $selected)
-            }
-            ForEach(Array(sections.enumerated()), id: \.offset) { _, s in section(s) }
-            if !footer.isEmpty {
-                Color.clear.frame(height: 1)
-                ForEach(Array(footer.enumerated()), id: \.offset) { _, s in section(s) }
+            } header: {
+                VStack(spacing: 18) {
+                    PaneHeader(name: hero.name, subtitle: hero.subtitle, badge: hero.badge) {
+                        switch hero.picture {
+                        case .image(let v): v
+                        case .glyph(let glyph):
+                            RoundedRectangle(cornerRadius: PaneKit.heroAvatar * 0.28, style: .continuous)
+                                .fill(theme.field)
+                                .frame(width: PaneKit.heroAvatar, height: PaneKit.heroAvatar)
+                                .overlay(Image(systemName: glyph).font(.system(size: PaneKit.heroAvatar * 0.42, weight: .medium)).foregroundStyle(theme.text))
+                        }
+                    }
+                    if tabs.count > 1 {
+                        ProfileTabs(tabs: tabs, selected: $selected)
+                    }
+                }
+                .padding(.bottom, 4)
+                .background(alignment: .bottom) {
+                    // Opaque behind the pinned block, then a fade band below it so
+                    // rows pass under softly.
+                    VStack(spacing: 0) {
+                        theme.bg
+                        LinearGradient(colors: [theme.bg, theme.bg.opacity(0)], startPoint: .top, endPoint: .bottom)
+                            .frame(height: Self.fadeBand)
+                    }
+                    .padding(.bottom, -Self.fadeBand)
+                    .padding(.top, -200)
+                }
             }
         }
     }
@@ -1738,19 +1761,27 @@ struct PaneTextRow: View {
     }
 }
 
-// MARK: - Channel (D88, #1317) on the shared profile pane (D93)
+// MARK: - Channel (D88 rule 13) on the shared profile pane (D93)
 
-/// A channel's page: minimal until the approved channel profile (Profile | Settings) lands — the
-/// `#` glyph tile, the name (never with a leading `#`) with a lock badge when admins-only, the
-/// topic, who posts, the server's member count, and a row that pushes the server's page.
+/// A channel's page: `#` glyph tile, the name (never with a leading `#`) with a lock badge when
+/// admins-only, `N members · <server>`; **Profile** (topic, members, privacy, who posts, the
+/// server, mute) | **Settings** (owner/admin: Name, Topic, Notifications, Privacy, Admins only
+/// post). Footer on both tabs: Archive (everyone), Delete channel (owner/admin; asks first).
 struct ChannelProfileView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
+    @Environment(\.dismiss) private var dismiss
     let channelId: String
-    @State private var tab = ""
+    @State private var tab = "Profile"
+    @State private var showRename = false
+    @State private var renameDraft = ""
+    @State private var showTopic = false
+    @State private var topicDraft = ""
+    @State private var confirmDelete = false
 
     private var channel: ServerChannel? { model.channel(channelId) }
     private var server: Server? { channel.flatMap { model.server($0.serverId) } }
+    private var isAdmin: Bool { server?.isAdmin ?? false }
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -1765,19 +1796,12 @@ struct ChannelProfileView: View {
                             hero: PaneHero(picture: .glyph("number"), name: channel.name,
                                            badge: restricted ? "lock.fill" : nil,
                                            subtitle: "\(count) member\(count == 1 ? "" : "s") · \(server.name)"),
-                            tabs: [],
+                            tabs: ["Profile", "Settings"],
                             selected: $tab,
-                            body: [
-                                .card(aboutRows(channel, restricted: restricted)),
-                                .card([AnyView(Button {
-                                    model.showProfile(.server(serverId: server.id))
-                                } label: {
-                                    PaneRow(leading: .avatar(AnyView(
-                                        InitialsAvatar(name: server.name, handle: nil, id: server.id,
-                                                       override: server.avatarColorIndex, size: PaneKit.avatar)
-                                    )), title: server.name, subtitle: "Server", chevron: true)
-                                }.buttonStyle(.plain))], separatorInset: PaneKit.separatorInset(.avatar(AnyView(EmptyView())))),
-                            ]
+                            body: tab == "Profile"
+                                ? profileSections(channel, server, restricted: restricted, count: count)
+                                : settingsSections(channel, server, restricted: restricted),
+                            footer: footerSections(channel, server)
                         )
                     } else {
                         Text("This channel is no longer available.")
@@ -1790,16 +1814,129 @@ struct ChannelProfileView: View {
             ProfileTopBar { EmptyView() }
         }
         .task {
+            if let t = model.openServerHookTab { tab = t; model.openServerHookTab = nil }
             if let channel { await model.refreshServer(channel.serverId) }
+        }
+        .alert("Rename channel", isPresented: $showRename) {
+            TextField("Channel name", text: $renameDraft)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+            Button("Save") { if let c = channel { Task { _ = await model.renameChannel(c, name: renameDraft) } } }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("Letters, digits and dashes.")
+        }
+        .alert("Topic", isPresented: $showTopic) {
+            TextField("What this channel is for", text: $topicDraft)
+            Button("Save") { if let c = channel { Task { await model.setChannelTopic(c, topic: topicDraft) } } }
+            Button("Cancel", role: .cancel) { }
+        }
+        .confirmationDialog(
+            channel.map { "Delete #\($0.name)?" } ?? "Delete channel?",
+            isPresented: $confirmDelete, titleVisibility: .visible
+        ) {
+            Button("Delete", role: .destructive) {
+                if let c = channel { Task { if await model.deleteChannel(c) { dismiss() } } }
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("Deletes the channel and its messages for everyone in the server.")
         }
     }
 
-    private func aboutRows(_ channel: ServerChannel, restricted: Bool) -> [AnyView] {
-        var rows: [AnyView] = []
+    private func privacyLabel(_ restricted: Bool) -> String {
+        restricted ? "Everyone reads · admins post" : "Everyone in the server"
+    }
+
+    private func serverRow(_ server: Server) -> AnyView {
+        AnyView(Button {
+            model.showProfile(.server(serverId: server.id))
+        } label: {
+            PaneRow(leading: .avatar(AnyView(
+                InitialsAvatar(name: server.name, handle: nil, id: server.id,
+                               override: server.avatarColorIndex, size: PaneKit.avatar)
+            )), title: server.name, subtitle: "Server", chevron: true)
+        }.buttonStyle(.plain))
+    }
+
+    private func muteRow(_ channel: ServerChannel, title: String, subtitle: String?) -> AnyView {
+        AnyView(PaneRow(title: title, subtitle: subtitle, trailing: AnyView(
+            Toggle("", isOn: Binding(
+                get: { model.isChannelMuted(channel) },
+                set: { _ in model.toggleChannelMute(channel) }
+            )).labelsHidden().tint(theme.text)
+        )))
+    }
+
+    private func profileSections(_ channel: ServerChannel, _ server: Server, restricted: Bool, count: Int) -> [PaneSection] {
+        var about: [AnyView] = []
         if let topic = channel.topic, !topic.trimmingCharacters(in: .whitespaces).isEmpty {
-            rows.append(AnyView(PaneTextRow(text: topic)))
+            about.append(AnyView(PaneTextRow(text: topic)))
         }
-        rows.append(AnyView(PaneRow(title: "Posting", value: restricted ? "Admins only" : "Everyone")))
-        return rows
+        about.append(AnyView(Button {
+            model.showProfile(.server(serverId: server.id))
+        } label: {
+            PaneRow(title: "Members", value: "\(count)", chevron: true)
+        }.buttonStyle(.plain)))
+        about.append(AnyView(PaneRow(title: "Privacy", value: privacyLabel(restricted))))
+        about.append(AnyView(PaneRow(title: "Posting", value: restricted ? "Admins only" : "Everyone")))
+        return [
+            .card(about),
+            .card([serverRow(server)], separatorInset: PaneKit.separatorInset(.avatar(AnyView(EmptyView())))),
+            .card([muteRow(channel, title: "Mute channel", subtitle: "No banners from this channel on this phone")]),
+        ]
+    }
+
+    private func settingsSections(_ channel: ServerChannel, _ server: Server, restricted: Bool) -> [PaneSection] {
+        var identity: [AnyView] = []
+        if isAdmin {
+            identity.append(AnyView(Button {
+                renameDraft = channel.name
+                showRename = true
+            } label: { PaneRow(title: "Name", value: channel.name, chevron: true) }.buttonStyle(.plain)))
+            identity.append(AnyView(Button {
+                topicDraft = channel.topic ?? ""
+                showTopic = true
+            } label: { PaneRow(title: "Topic", value: channel.topic ?? "Add a topic", chevron: true) }.buttonStyle(.plain)))
+        } else {
+            identity.append(AnyView(PaneRow(title: "Name", value: channel.name)))
+            identity.append(AnyView(PaneRow(title: "Topic", value: channel.topic ?? "None")))
+        }
+        var behaviour: [AnyView] = [
+            muteRow(channel, title: "Notifications", subtitle: model.isChannelMuted(channel) ? "Muted on this phone" : "Banners on this phone"),
+            AnyView(PaneRow(title: "Privacy", value: privacyLabel(restricted))),
+        ]
+        if isAdmin {
+            behaviour.append(AnyView(PaneRow(title: "Admins only post", subtitle: "Members read", trailing: AnyView(
+                Toggle("", isOn: Binding(
+                    get: { restricted },
+                    set: { on in Task { await model.setChannelRestricted(channel, on) } }
+                )).labelsHidden().tint(theme.text)
+            ))))
+        } else {
+            behaviour.append(AnyView(PaneRow(title: "Posting", value: restricted ? "Admins only" : "Everyone")))
+        }
+        var out: [PaneSection] = [
+            .card(identity),
+            .card(behaviour),
+            .card([serverRow(server)], separatorInset: PaneKit.separatorInset(.avatar(AnyView(EmptyView())))),
+        ]
+        if isAdmin { out.append(.footnote("Name and topic change for everyone in the server.")) }
+        return out
+    }
+
+    private func footerSections(_ channel: ServerChannel, _ server: Server) -> [PaneSection] {
+        let archived = channel.archived
+        var rows: [AnyView] = [AnyView(Button {
+            Task { await model.archiveChannel(channel, !archived) }
+        } label: {
+            PaneRow(leading: .tile(archived ? "tray.and.arrow.up" : "archivebox"),
+                    title: archived ? "Unarchive channel" : "Archive channel",
+                    subtitle: archived ? "Back in your channel list" : "Hidden from your list; the server page brings it back")
+        }.buttonStyle(.plain))]
+        if isAdmin, channel.id != server.general?.id {
+            rows.append(AnyView(PaneDangerRow(title: "Delete channel") { confirmDelete = true }))
+        }
+        return [.card(rows, separatorInset: PaneKit.separatorInset(.tile("")))]
     }
 }

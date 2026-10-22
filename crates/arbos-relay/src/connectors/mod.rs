@@ -938,6 +938,7 @@ mod tests {
             voice_conns: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             default_snapshot: Arc::new(std::sync::RwLock::new(String::new())),
             started_at: std::time::Instant::now(),
+            restart: Arc::new(crate::state::RestartSignal::default()),
             voice_dispatched: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             voice_worker: Arc::new(tokio::sync::Mutex::new(None)),
             client_seen: Arc::new(std::sync::Mutex::new(HashMap::new())),

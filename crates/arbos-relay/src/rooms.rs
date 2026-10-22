@@ -2,6 +2,7 @@
 //! stores and forwards opaque rows; it never parses Loro bytes.
 
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -104,6 +105,32 @@ fn error_frame(code: &str, message: &str) -> Message {
     )
 }
 
+/// The close frame a planned restart sends: 1012 Service Restart. Clients treat it as "redial
+/// now" rather than a fault (connection pill, #1339).
+fn restart_close() -> Message {
+    Message::Close(Some(axum::extract::ws::CloseFrame {
+        code: axum::extract::ws::close_code::RESTART,
+        reason: "service restart".into(),
+    }))
+}
+
+/// Counts this socket in `RestartSignal::open_sockets` for as long as it lives, so a restart
+/// can drain (wait for the 1012 closes to go out) before the process exits.
+struct OpenSocket(Arc<crate::state::RestartSignal>);
+
+impl OpenSocket {
+    fn new(state: &AppState) -> Self {
+        state.restart.open_sockets.fetch_add(1, Ordering::Relaxed);
+        Self(state.restart.clone())
+    }
+}
+
+impl Drop for OpenSocket {
+    fn drop(&mut self) {
+        self.0.open_sockets.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 async fn run(
     socket: WebSocket,
     state: AppState,
@@ -115,6 +142,14 @@ async fn run(
     let room = state.room(&room_name).await;
     let mut rx = room.tx.subscribe();
     let (mut sink, mut stream) = socket.split();
+    // A planned restart (restart.rs): the socket closes with 1012 so the client redials at once
+    // instead of backing off. A socket that arrives mid-drain is told the same thing right away.
+    let mut closing = state.restart.closing.subscribe();
+    if *closing.borrow_and_update() {
+        let _ = sink.send(restart_close()).await;
+        return;
+    }
+    let _open = OpenSocket::new(&state);
     let is_box = principal.is_box();
     // Rows from the box carry the box's device id (`box:<sandbox>` / `box:local-<user>`), the same
     // id agentd writes into the doc, so clients see one stable author across restarts.
@@ -213,6 +248,12 @@ async fn run(
                 // No ROWS_REQ came: release held rows rather than starving the socket.
                 delivery.catching_up = false;
                 if flush_held(&mut delivery, &mut sink).await.is_err() {
+                    break;
+                }
+            }
+            changed = closing.changed() => {
+                if changed.is_err() || *closing.borrow_and_update() {
+                    let _ = sink.send(restart_close()).await;
                     break;
                 }
             }
@@ -552,12 +593,13 @@ mod ordering_tests {
     //! any one socket, row seqs arrive strictly increasing with no gaps from `after + 1` to the
     //! last one the writer produced.
 
-    use std::net::SocketAddr;
-
     use axum::routing::get;
     use axum::Router;
     use futures::{SinkExt, StreamExt};
     use serde_json::json;
+    use std::net::SocketAddr;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
     use tokio_tungstenite::tungstenite::Message as TMsg;
 
     use arbos_core::ids::{now_ms, ulid};
@@ -754,5 +796,90 @@ mod ordering_tests {
                 "iteration {it}: rows must arrive strictly in order with no gaps and no duplicates"
             );
         }
+    }
+
+    /// #1347: a planned restart tells every room socket `restart_soon`, then closes it with 1012
+    /// (not a dropped stream), drains to zero, and a socket that arrives mid-drain gets 1012 at once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn planned_restart_notifies_then_closes_room_sockets_with_1012() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let project = project_of(&state, &alice, "Restart");
+        let (_, token) = device_with_token(&state, &alice);
+        let addr = serve(state.clone()).await;
+        let chat = ulid();
+        state
+            .db
+            .insert_chat(&Chat {
+                id: chat.clone(),
+                project_id: project.clone(),
+                title: "t".into(),
+                is_pinned: false,
+                position: 0,
+                created_at: now_ms(),
+                doc_epoch: 1,
+                kind: "chat".into(),
+                participants: Vec::new(),
+                forked_from: None,
+            })
+            .unwrap();
+        let url = format!("ws://{addr}/room/{project}/{chat}?token={token}");
+        let hello = || {
+            TMsg::Binary(
+                Frame::new(
+                    FrameType::Hello,
+                    json!({ "cursor": 0, "device": "dev:a", "room": format!("{project}/{chat}"), "proto": arbos_core::PROTO_VERSION }),
+                    bytes::Bytes::new(),
+                )
+                .encode(),
+            )
+        };
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        ws.send(hello()).await.unwrap();
+        // Drain the catch-up reply (State/Rows frames) until the socket is idle.
+        while tokio::time::timeout(Duration::from_millis(300), ws.next())
+            .await
+            .ok()
+            .flatten()
+            .is_some()
+        {}
+        assert_eq!(state.restart.open_sockets.load(Ordering::Relaxed), 1);
+
+        let rooms = crate::restart::announce(&state, 10).await;
+        assert_eq!(rooms, 1);
+        let notice = tokio::time::timeout(Duration::from_secs(2), ws.next())
+            .await
+            .expect("notice in time")
+            .unwrap()
+            .unwrap();
+        let f = decode(notice).expect("a frame");
+        assert_eq!(f.ty, FrameType::Error);
+        assert_eq!(f.header["code"], "restart_soon");
+        assert_eq!(f.header["message"], "10");
+
+        let (before, left) = crate::restart::close_and_drain(&state, Duration::from_secs(3)).await;
+        assert_eq!((before, left), (1, 0), "one socket closed, drained to zero");
+        let close = tokio::time::timeout(Duration::from_secs(2), ws.next())
+            .await
+            .expect("close in time")
+            .unwrap()
+            .unwrap();
+        match close {
+            TMsg::Close(Some(cf)) => assert_eq!(u16::from(cf.code), 1012),
+            other => panic!("expected a 1012 close frame, got {other:?}"),
+        }
+
+        // Mid-drain arrival: closed with 1012 right away, never counted.
+        let (mut late, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let first = tokio::time::timeout(Duration::from_secs(2), late.next())
+            .await
+            .expect("late close in time")
+            .unwrap()
+            .unwrap();
+        match first {
+            TMsg::Close(Some(cf)) => assert_eq!(u16::from(cf.code), 1012),
+            other => panic!("late socket: expected 1012, got {other:?}"),
+        }
+        assert_eq!(state.restart.open_sockets.load(Ordering::Relaxed), 0);
     }
 }
