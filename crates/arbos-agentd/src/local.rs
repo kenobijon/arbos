@@ -72,7 +72,10 @@ async fn relay_devices(agent: &Agent) -> Result<Vec<Value>, String> {
     let status = r.status();
     let text = r.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(format!("relay /local/devices: HTTP {status} {text}"));
+        return Err(format!(
+            "relay /local/devices: HTTP {status} {}",
+            crate::relay_error::message(&text)
+        ));
     }
     let v: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
     Ok(v["items"].as_array().cloned().unwrap_or_default())
@@ -229,7 +232,11 @@ pub async fn local_call(agent: &Arc<Agent>, name: &str, args: &Value, chat_hint:
     let result: LocalResult = match serde_json::from_str(&text) {
         Ok(r) => r,
         Err(_) if !status.is_success() => {
-            return err_result(format!("{} on {dev_name}: HTTP {status} {text}", op.name()))
+            return err_result(format!(
+                "{} on {dev_name}: HTTP {status} {}",
+                op.name(),
+                crate::relay_error::message(&text)
+            ))
         }
         Err(e) => return err_result(format!("bad result from relay: {e}")),
     };

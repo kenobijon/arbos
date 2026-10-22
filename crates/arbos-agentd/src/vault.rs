@@ -527,10 +527,10 @@ async fn relay_get(agent: &Agent, path: &str) -> Result<Value, String> {
 
 /// `(status, body)` → one line for the model: the relay's `error.message` when it has one.
 fn relay_error(status: reqwest::StatusCode, text: &str, path: &str) -> String {
-    let v: Value = serde_json::from_str(text).unwrap_or(Value::Null);
-    match v["error"]["message"].as_str() {
-        Some(m) => m.to_owned(),
-        None => format!("relay {path}: HTTP {status} {text}"),
+    if serde_json::from_str::<arbos_core::api::ApiErrorDto>(text).is_ok() {
+        crate::relay_error::message(text)
+    } else {
+        format!("relay {path}: HTTP {status} {text}")
     }
 }
 

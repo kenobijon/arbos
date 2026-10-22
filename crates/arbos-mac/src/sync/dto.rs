@@ -1548,4 +1548,33 @@ mod tests {
         assert!(!reply.has_image);
         assert!(reply.duplicate.is_none() && reply.occurrences.is_none());
     }
+
+    #[test]
+    fn relay_error_from_api_error_fixtures() {
+        use crate::sync::relay::RelayError;
+
+        let converted = fixture("api_error_converted.json");
+        let err = RelayError::from_body(reqwest::StatusCode::NOT_FOUND, &converted);
+        assert_eq!(err.status, 404);
+        assert_eq!(err.kind, "not_found");
+        assert_eq!(err.message, "no such project");
+
+        let body = r#"{"error":{"type":"token_expired","message":"access token expired"}}"#;
+        let expired = RelayError::from_body(reqwest::StatusCode::UNAUTHORIZED, body);
+        assert_eq!(expired.kind, "token_expired");
+        assert_eq!(expired.message, "access token expired");
+        assert!(expired.is_token_expired());
+
+        let taken = RelayError::from_body(
+            reqwest::StatusCode::CONFLICT,
+            r#"{"error":{"type":"handle_taken","message":"that handle is taken"}}"#,
+        );
+        assert_eq!(taken.kind, "handle_taken");
+
+        let plain =
+            RelayError::from_body(reqwest::StatusCode::SERVICE_UNAVAILABLE, "relay restarting");
+        assert!(plain.kind.is_empty());
+        assert_eq!(plain.message, "relay restarting");
+        assert!(!plain.is_token_expired());
+    }
 }

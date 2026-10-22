@@ -560,6 +560,25 @@ final class CoreFixturesTests: XCTestCase {
         XCTAssertEqual(stored.connector?.id, "conn_fixture")
     }
 
+    func testApiErrorDtoDecodesIntoRelayError() throws {
+        let converted = try apiFixtureData("api_error_converted.json")
+        let fromFixture = RelayError.from(status: 404, body: converted)
+        XCTAssertEqual(fromFixture.status, 404)
+        XCTAssertEqual(fromFixture.type, "not_found")
+        XCTAssertEqual(fromFixture.message, "no such project")
+
+        let body = Data(#"{"error":{"type":"token_expired","message":"access token expired"}}"#.utf8)
+        let typed = RelayError.from(status: 401, body: body)
+        XCTAssertEqual(typed.status, 401)
+        XCTAssertEqual(typed.type, "token_expired")
+        XCTAssertEqual(typed.message, "access token expired")
+
+        let plain = RelayError.from(status: 503, body: Data("relay restarting".utf8))
+        XCTAssertEqual(plain.status, 503)
+        XCTAssertNil(plain.type)
+        XCTAssertEqual(plain.message, "relay restarting")
+    }
+
     func testChannelsSkillsLocalFeedbackFixtures() throws {
         let overview = try JSONDecoder().decode(ChannelsOverviewDto.self, from: try apiFixtureData("channels_overview.json"))
         XCTAssertTrue(overview.mock)

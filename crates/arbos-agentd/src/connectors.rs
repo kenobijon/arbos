@@ -94,7 +94,10 @@ async fn relay_get(agent: &Agent, path: &str) -> Result<Value, String> {
     let status = r.status();
     let text = r.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(format!("relay {path}: HTTP {status} {text}"));
+        return Err(format!(
+            "relay {path}: HTTP {status} {}",
+            crate::relay_error::message(&text)
+        ));
     }
     serde_json::from_str(&text).map_err(|e| e.to_string())
 }
@@ -284,7 +287,10 @@ pub(crate) async fn send_through_relay(
         Err(e) => return Err(format!("relay unreachable: {e}")),
     };
     if !status.is_success() {
-        return Err(format!("{provider}.{action}: {text}"));
+        return Err(format!(
+            "{provider}.{action}: {}",
+            crate::relay_error::message(&text)
+        ));
     }
     Ok(text)
 }
