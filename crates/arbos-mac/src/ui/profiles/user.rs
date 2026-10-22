@@ -12,7 +12,7 @@ use crate::ui::avatars;
 use crate::ui::groups;
 use crate::ui::people;
 use crate::ui::shell::Shell;
-use crate::ui::theme::{Theme, TEXT_SMALL};
+use crate::ui::theme::Theme;
 
 use super::{
     card, chats_of, collect, editable_name, editable_picture, empty, hero, kit, link_list,
@@ -29,7 +29,7 @@ pub(super) fn page(
 ) -> Option<Stateful<Div>> {
     let theme = Theme::of(cx).clone();
     // Own everything we need from state so link_list can request favicons after.
-    let (person, me, image, tab, links, any_chats, groups, group_pictures) = {
+    let (person, me, image, tab, links, groups, group_pictures) = {
         let state = shell.state.read(cx);
         let person: Person = state.person_by_handle(handle).unwrap_or_else(|| Person {
             handle: handle.to_string(),
@@ -56,7 +56,6 @@ pub(super) fn page(
         let all_chats: Vec<&crate::model::Chat> =
             shared.iter().flat_map(|p| chats_of(state, &p.id)).collect();
         let content = collect(state, &all_chats);
-        let any_chats = !all_chats.is_empty();
         let by = format!("@{}", person.handle);
         let links: Vec<super::Link> = content.links.into_iter().filter(|l| l.by == by).collect();
         let group_pictures: Vec<gpui::AnyElement> = groups
@@ -69,16 +68,7 @@ pub(super) fn page(
                 }
             })
             .collect();
-        (
-            person,
-            me,
-            image,
-            tab,
-            links,
-            any_chats,
-            groups,
-            group_pictures,
-        )
+        (person, me, image, tab, links, groups, group_pictures)
     };
 
     // ----- hero: picture and name read-only, @handle as the subtitle --------------
@@ -165,16 +155,6 @@ pub(super) fn page(
         .child(hero)
         .child(tabs)
         .child(body_tab)
-        .when(links.is_empty() && tab == 0 && any_chats, |el| {
-            el.child(
-                div()
-                    .px(px(16.0))
-                    .pb(px(12.0))
-                    .text_size(px(TEXT_SMALL - 1.0))
-                    .text_color(theme.text_faint)
-                    .child("Links appear here as chats load."),
-            )
-        })
         .children(block);
     Some(pushed_frame(
         &person.display_name(),

@@ -477,6 +477,8 @@ impl Shell {
             let weak = cx.entity().downgrade();
             people_input.update(cx, |input, _| {
                 input.set_placeholder("Search people");
+                // Grok Mac's search placeholder is ~14 pt (ref 57).
+                input.set_font_size(people::SEARCH_FONT_SIZE);
                 input.on_submit = Some(Rc::new(move |_window, cx| {
                     let _ = weak.update(cx, |this, cx| {
                         let typed = this.people_input.read(cx).text().trim().to_string();
@@ -503,7 +505,12 @@ impl Shell {
         })
         .detach();
         // Rig: `ARBOS_OPEN_NEW_AGENT=1` opens the New Message sheet with the
-        // "New agent" form expanded.
+        // "New agent" form expanded; `ARBOS_OPEN_NEW_CHAT=1` the plain sheet
+        // (`ARBOS_OPEN_NEW_GROUP=1` lives in app.rs: it needs the fixture's
+        // projects to pick members from).
+        if std::env::var("ARBOS_OPEN_NEW_CHAT").is_ok_and(|v| v == "1") {
+            state.update(cx, |s, cx| s.open_new_chat(cx));
+        }
         if std::env::var("ARBOS_OPEN_NEW_AGENT").is_ok_and(|v| v == "1") {
             state.update(cx, |s, cx| {
                 s.open_new_chat(cx);
