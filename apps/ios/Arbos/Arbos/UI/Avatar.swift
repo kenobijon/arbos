@@ -48,20 +48,32 @@ extension AvatarPalette {
     }
 }
 
-/// An agent: initials of its name on its colour, with the optional machine dot.
-/// `working` / `still` are accepted for call-site compatibility (the art no longer animates).
+/// An agent: its D91 leaf on its autumn disc while the relay flag is on (else
+/// initials on its D79 colour), with the optional machine dot. `idle` sways the
+/// leaf (profile heroes); a `working` start plays one gust; `still` keeps it
+/// quiet. Reduce Motion stops both.
 struct AgentAvatar: View {
+    @ObservedObject private var flag = LeafAvatarsFlag.shared
     let project: Project
     let theme: Theme
     var size: CGFloat = Theme.avatar
     var dot: Color? = nil
     var working: Bool = false
     var still: Bool = false
+    var idle: Bool = false
+    @State private var gust = 0
 
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
-            InitialsAvatar(name: project.name, handle: mentionSlug(project.name), id: project.id,
-                           override: project.effectiveAvatarColorIndex, size: size)
+            if flag.on {
+                LeafAvatar(pick: LeafArt.pick(project), size: size, idle: idle && !still, gust: gust)
+                    .onChange(of: working) { _, now in
+                        if now && !still { gust += 1 }
+                    }
+            } else {
+                InitialsAvatar(name: project.name, handle: mentionSlug(project.name), id: project.id,
+                               override: project.effectiveAvatarColorIndex, size: size)
+            }
             if let dot {
                 // Grok's status badge is 12 pt on a 48 pt row avatar; smaller avatars scale.
                 let d = min(size * 0.36, 12)

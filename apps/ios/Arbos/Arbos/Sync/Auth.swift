@@ -191,7 +191,10 @@ extension RelayAPI {
             credits = Credits(balanceUsd: n("balance_usd"), grantedUsd: n("granted_usd"), spentUsd: n("spent_usd"),
                               spentTodayUsd: n("spent_today_usd"), dailyCapUsd: (c["daily_cap_usd"] as? NSNumber)?.doubleValue)
         }
-        return (user, credits, m["machine"] as? [String: Any] ?? [:])
+        var summary = m["machine"] as? [String: Any] ?? [:]
+        // Remote feature flags ride along with the machine summary (one tuple, no new callers).
+        if let features = m["features"] as? [String: Any] { summary["features"] = features }
+        return (user, credits, summary)
     }
 
     /// `PATCH /me {name?, login?}` → updated user (display name and/or handle).

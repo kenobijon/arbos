@@ -945,9 +945,11 @@ struct RowView: View {
         accents.color(url: avatar, seed: model.personId(handle: handle) ?? handle, dark: theme.isDark)
     }
 
-    /// Mac parity: an agent's bubbles in a people chat carry its disc colour.
+    /// Mac parity: an agent's bubbles in a people chat carry its disc colour
+    /// (the leaf's disc under D91, the D79 gradient midpoint otherwise).
     private func memberAccent(handle: String, avatar: String?) -> Color {
         if let project = memberProject(handle: handle) {
+            if LeafAvatarsFlag.shared.on { return LeafArt.accent(project, dark: theme.isDark) }
             return accents.color(url: nil, seed: project.id, override: project.effectiveAvatarColorIndex, dark: theme.isDark)
         }
         return personAccent(handle: handle, avatar: avatar)

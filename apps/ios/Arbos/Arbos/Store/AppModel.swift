@@ -825,6 +825,8 @@ final class AppModel: ObservableObject {
             let waitlisted = (summary["waitlisted"] as? NSNumber)?.boolValue ?? false
             let position = waitlisted ? ((summary["waitlist_position"] as? NSNumber)?.intValue ?? 1) : nil
             if position != waitlistPosition { waitlistPosition = position }
+            // D91 remote flag `features.leaf_avatars` (absent on an older relay = on).
+            LeafAvatarsFlag.shared.set(((summary["features"] as? [String: Any])?["leaf_avatars"] as? NSNumber)?.boolValue ?? true)
             if let on = (summary["always_on"] as? NSNumber)?.boolValue {
                 meAlwaysOn = on
                 if let held = (summary["held"] as? NSNumber)?.boolValue { machine.held = held }
@@ -1865,6 +1867,23 @@ final class AppModel: ObservableObject {
                 }
             } catch {
                 notice = Notice(text: "Avatar colour: \(error.localizedDescription)")
+                await refreshRegistry()
+            }
+        }
+    }
+
+    /// D91: the owner's leaf and disc colour picks (nil = automatic). Optimistic, then PATCH.
+    func pickAvatarLeaf(_ projectId: Id, leaf: Int?, color: Int?) {
+        if let i = projects.firstIndex(where: { $0.id == projectId }) {
+            projects[i].avatarLeaf = leaf
+            projects[i].avatarLeafColor = color
+        }
+        guard !isFixture else { return }
+        Task {
+            do {
+                try await api.setProjectAvatarLeaf(projectId, leaf: leaf, color: color)
+            } catch {
+                notice = Notice(text: "Avatar: \(error.localizedDescription)")
                 await refreshRegistry()
             }
         }

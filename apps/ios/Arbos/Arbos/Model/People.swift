@@ -84,6 +84,8 @@ extension ChatMember {
             )
             project?.avatarColorIndex = p.avatar_color_index.map(Int.init)
             project?.avatarColorIndexEffective = Int(p.avatar_color_index_effective)
+            project?.avatarLeaf = p.avatar_leaf.map(Int.init)
+            project?.avatarLeafColor = p.avatar_leaf_color.map(Int.init)
         }
         self.id = id
         self.kind = isAgent ? .agent : .user
