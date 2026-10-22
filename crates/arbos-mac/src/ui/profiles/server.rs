@@ -133,7 +133,7 @@ pub(super) fn page(
             &theme,
             cx,
         ),
-        _ => settings_tab(&server, is_owner, can_admin, &theme, cx),
+        _ => settings_tab(&server, is_owner, shell, &theme, cx),
     };
     let footer = leave_footer(&server, is_owner, leave_armed, &theme, cx);
 
@@ -420,6 +420,30 @@ fn members_tab(
     let is_owner = server.is_owner();
     let can_admin = server.can_admin();
     let mut list: Vec<AnyElement> = Vec::new();
+    if can_admin {
+        // The main way in (Jacob 2026-10-22): pick people by name, the groups' picker.
+        let sid = server.id.clone();
+        list.push(
+            kit::row(
+                "server-add-members",
+                kit::Leading::Glyph("person-plus"),
+                "Add members",
+                None,
+                None,
+                None,
+                false,
+                theme,
+            )
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.surface_2))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let sid = sid.clone();
+                this.state
+                    .update(cx, |s, cx| s.open_add_server_members(sid, cx));
+            }))
+            .into_any_element(),
+        );
+    }
     for (i, m) in members.iter().enumerate() {
         let is_me = m.id == me_id;
         let key = m.id.clone();
@@ -592,97 +616,168 @@ fn remove_confirm(server: &ServerInfo, m: &Person, theme: &Theme, cx: &mut Conte
         )
 }
 
-/// Settings (D93 order: relations): the invite link for owner/admin — Copy, and Reset for the
-/// owner. Members have nothing to set yet; Leave / Delete server sit in the footer.
+/// Settings (D93 order: relations): the owner's invite links — the fallback for people not on
+/// Arbos yet (Jacob 2026-10-22: demoted; Add members by name is the main way in). Each link
+/// shows its terms, Copy and ✕ (revoke); "New invite link" mints one with the two options
+/// above it. Admins and members have nothing to set yet.
 fn settings_tab(
     server: &ServerInfo,
     is_owner: bool,
-    can_admin: bool,
+    shell: &Shell,
     theme: &Theme,
     cx: &mut Context<Shell>,
 ) -> Vec<Section> {
-    let mut body: Vec<Section> = Vec::new();
-    if can_admin {
-        let mut invite: Vec<AnyElement> = Vec::new();
-        match &server.invite {
-            Some(link) => {
-                let url = link.url.clone();
-                let copy = glass::sheet_button("server-invite-copy", "Copy", theme)
-                    .h(px(28.0))
-                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        cx.stop_propagation();
-                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(url.clone()));
-                        this.state.update(cx, |s, cx| {
-                            s.push_notice("Invite link copied");
-                            cx.notify();
-                        });
-                    }));
-                invite.push(
-                    kit::row(
-                        "server-invite",
-                        kit::Leading::Tile("link"),
-                        "Invite link",
-                        Some(SharedString::from(link.url.clone())),
-                        None,
-                        Some(copy.into_any_element()),
-                        false,
-                        theme,
-                    )
-                    .into_any_element(),
-                );
-                if is_owner {
-                    let sid = server.id.clone();
-                    invite.push(
-                        kit::row(
-                            "server-invite-reset",
-                            kit::Leading::None,
-                            "Reset invite link",
-                            None,
-                            None,
-                            None,
-                            false,
-                            theme,
-                        )
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme.surface_2))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            let sid = sid.clone();
-                            this.state.update(cx, |s, cx| s.reset_invite(sid, cx));
-                        }))
-                        .into_any_element(),
-                    );
-                }
-            }
-            None => {
-                invite.push(
-                    kit::row(
-                        "server-invite",
-                        kit::Leading::Tile("link"),
-                        "Invite link",
-                        Some(SharedString::from("Loading…")),
-                        None,
-                        None,
-                        false,
-                        theme,
-                    )
-                    .into_any_element(),
-                );
-            }
-        }
-        body.push(Section::Card(invite));
-        body.push(Section::Footnote(
-            if is_owner {
-                "Anyone with the link joins as a member. Resetting it makes the old link stop working."
-            } else {
-                "Anyone with the link joins as a member."
-            }
-            .into(),
-        ));
-    } else {
-        body.push(Section::Empty("Nothing to set up here yet.".into()));
+    if !is_owner {
+        return vec![Section::Empty("Nothing to set up here yet.".into())];
     }
-    body
+    let now = arbos_core::ids::now_ms();
+    let mut rows: Vec<AnyElement> = Vec::new();
+    if server.invites.is_empty() {
+        rows.push(
+            kit::row(
+                "server-invites-none",
+                kit::Leading::Tile("link"),
+                "No invite links",
+                Some("People you add by name need none".into()),
+                None,
+                None,
+                false,
+                theme,
+            )
+            .into_any_element(),
+        );
+    }
+    for inv in &server.invites {
+        let url = inv.url.clone();
+        let copy = glass::sheet_button(
+            ElementId::Name(SharedString::from(format!("server-invite-copy-{}", inv.id))),
+            "Copy",
+            theme,
+        )
+        .h(px(28.0))
+        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(cx.listener(move |this, _, _, cx| {
+            cx.stop_propagation();
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(url.clone()));
+            this.state.update(cx, |s, cx| {
+                s.push_notice("Invite link copied");
+                cx.notify();
+            });
+        }));
+        let (sid, iid) = (server.id.clone(), inv.id.clone());
+        let revoke = div()
+            .id(ElementId::Name(SharedString::from(format!(
+                "server-invite-revoke-{}",
+                inv.id
+            ))))
+            .size(px(24.0))
+            .flex_shrink_0()
+            .rounded_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.surface_2))
+            .child(icon("xmark", 11.0, theme.text_muted))
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                let (sid, iid) = (sid.clone(), iid.clone());
+                this.state.update(cx, |s, cx| s.revoke_invite(sid, iid, cx));
+            }));
+        let controls = div()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .flex_shrink_0()
+            .when(inv.usable, |el| el.child(copy))
+            .child(revoke)
+            .into_any_element();
+        let short = inv.url.rsplit('/').next().unwrap_or(&inv.code).to_owned();
+        rows.push(
+            kit::row(
+                ElementId::Name(SharedString::from(format!("server-invite-{}", inv.id))),
+                kit::Leading::Tile("link"),
+                format!("…/s/{short}"),
+                Some(inv.terms(now).into()),
+                None,
+                Some(controls),
+                false,
+                theme,
+            )
+            .when(!inv.usable, |el| el.opacity(0.55))
+            .into_any_element(),
+        );
+    }
+
+    // ----- New link: two options, then the action ---------------------------------
+    let (expires, single) = (shell.invite_expires, shell.invite_single_use);
+    let sid = server.id.clone();
+    let new_link: Vec<AnyElement> = vec![
+        kit::row(
+            "server-invite-expires",
+            kit::Leading::None,
+            "Expires after 7 days",
+            None,
+            None,
+            Some(glass::switch(expires, theme).into_any_element()),
+            false,
+            theme,
+        )
+        .cursor_pointer()
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.invite_expires = !this.invite_expires;
+            cx.notify();
+        }))
+        .into_any_element(),
+        kit::row(
+            "server-invite-single",
+            kit::Leading::None,
+            "Single use",
+            Some("One person joins, then the link is spent".into()),
+            None,
+            Some(glass::switch(single, theme).into_any_element()),
+            false,
+            theme,
+        )
+        .cursor_pointer()
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.invite_single_use = !this.invite_single_use;
+            cx.notify();
+        }))
+        .into_any_element(),
+        kit::row(
+            "server-invite-new",
+            kit::Leading::Glyph("plus"),
+            "New invite link",
+            None,
+            None,
+            None,
+            false,
+            theme,
+        )
+        .cursor_pointer()
+        .hover(|s| s.bg(theme.surface_2))
+        .on_click(cx.listener(move |this, _, _, cx| {
+            let sid = sid.clone();
+            let (expires, single) = (this.invite_expires, this.invite_single_use);
+            this.state.update(cx, |s, cx| {
+                s.create_invite(sid, expires, single.then_some(1), cx);
+            });
+        }))
+        .into_any_element(),
+    ];
+
+    vec![
+        Section::Title("Invite links".into()),
+        Section::Card(rows),
+        Section::Card(new_link),
+        Section::Footnote(
+            "A fallback for people who are not on Arbos yet: the link opens Arbos and joins \
+             them. Add people who already have an account from the Members tab."
+                .into(),
+        ),
+    ]
 }
 
 /// The footer on every tab: Leave server — or Delete server for the owner — asking first.

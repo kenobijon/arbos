@@ -208,6 +208,9 @@ pub struct Shell {
     /// on the server page; `channel_rename` is the channel being renamed there.
     pub(crate) server_input: Entity<ComposerInput>,
     pub(crate) channel_rename: Option<crate::model::Id>,
+    /// Server pane › Settings › New link options (owner): 7-day expiry, single use.
+    pub(crate) invite_expires: bool,
+    pub(crate) invite_single_use: bool,
     /// Channel page › Settings: the channel whose topic is being edited in `server_input`.
     pub(crate) channel_topic_edit: Option<crate::model::Id>,
     /// D88: the "Admins only post" toggle of the new-channel sheet.
@@ -342,7 +345,16 @@ impl Shell {
         cx.observe(&state, |this, state, cx| {
             // The Add members picker (from a group pane or the rig hook) searches
             // agents too; Cancel / Add put "Search people" back.
-            if state.read(cx).add_members_target.is_some() {
+            // An invite link opened the Join sheet: the code goes into its field.
+            if let Some(code) = state.update(cx, |s, _| s.pending_join_code.take()) {
+                this.server_input
+                    .update(cx, |input, cx| input.set_text(code, cx));
+            }
+            let st = state.read(cx);
+            if st.add_members_server.is_some() {
+                this.people_input
+                    .update(cx, |input, _| input.set_placeholder("Add people"));
+            } else if st.add_members_target.is_some() {
                 this.people_input
                     .update(cx, |input, _| input.set_placeholder("Add people or agents"));
             }
@@ -688,6 +700,8 @@ impl Shell {
             search_open: false,
             server_input,
             channel_rename: None,
+            invite_expires: false,
+            invite_single_use: false,
             channel_topic_edit: None,
             new_channel_restricted: false,
             server_member_armed: None,

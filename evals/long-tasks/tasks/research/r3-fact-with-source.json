@@ -1,0 +1,16 @@
+{
+  "id": "r3-fact-with-source",
+  "lane": "a",
+  "category": "research",
+  "title": "Latest stable Python release, with its python.org source",
+  "turns": [
+    {
+      "prompt": "What is the latest stable Python 3 release version right now? Check python.org (or another authoritative source) and include the URL you used in your answer.",
+      "truth": {
+        "kind": "python_latest"
+      },
+      "reply_regex": "https?://",
+      "timeout_s": 300
+    }
+  ]
+}

@@ -30,6 +30,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libpango-1.0-0 libcairo2 libx11-xcb1 libxshmfence1 libnss3-tools \
  && ln -s /usr/bin/fdfind /usr/local/bin/fd \
  && rm -rf /var/lib/apt/lists/*
+# A system-level git identity so an agent's first `git commit` in a scratch repo does not fail
+# with "Author identity unknown" (#1359). System config has the lowest precedence: a repo or a
+# user config the agent (or the owner) sets wins over it.
+RUN git config --system user.name "Arbos agent" \
+ && git config --system user.email "agent@arbos.life" \
+ && git config --system init.defaultBranch main
 
 # --- ripgrep, gh, doppler (pinned release artifacts)
 RUN curl -fsSLo /tmp/rg.deb https://github.com/BurntSushi/ripgrep/releases/download/${RIPGREP_VERSION}/ripgrep_${RIPGREP_VERSION}-1_amd64.deb \

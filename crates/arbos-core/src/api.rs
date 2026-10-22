@@ -521,6 +521,10 @@ pub struct MeFeaturesDto {
     /// D92: agents without a photo draw a leaf, not initials (default on).
     #[serde(default)]
     pub leaf_avatars: Option<bool>,
+    /// D92 follow-on: the leaves play their committed Lottie (idle loop + gust) instead of the
+    /// native sway (default on).
+    #[serde(default)]
+    pub leaf_lottie: Option<bool>,
     /// Voice mode — spoken replies, the voice picker, reply playback (default off since
     /// 2026-10-22, Jacob: hidden everywhere until it works end to end). Absent = off.
     #[serde(default)]

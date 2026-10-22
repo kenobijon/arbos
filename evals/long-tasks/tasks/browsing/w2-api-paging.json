@@ -1,0 +1,17 @@
+{
+  "id": "w2-api-paging",
+  "lane": "a",
+  "category": "browsing",
+  "title": "Five newest release tags of a GitHub repo",
+  "turns": [
+    {
+      "prompt": "Using the public GitHub API, list the five most recent releases of the repository unarbos/arbos, newest first, one tag per line, into {D}/releases.txt. Then tell me the newest tag.",
+      "verify": "f={D}/releases.txt; test -f $f || { echo FAIL: no releases.txt; exit 0; }; sed 's/^/SHOW /' $f | head -10; n=$(grep -c . $f); [ $n -ge 5 ] && echo PASS || echo FAIL: only $n lines",
+      "truth": {
+        "kind": "github_releases",
+        "repo": "unarbos/arbos"
+      },
+      "timeout_s": 300
+    }
+  ]
+}

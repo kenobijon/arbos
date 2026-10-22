@@ -1,0 +1,13 @@
+{
+  "id": "w1-form-submit",
+  "lane": "b",
+  "category": "browsing",
+  "title": "Fill and submit the httpbin form",
+  "turns": [
+    {
+      "prompt": "Go to https://httpbin.org/forms/post and submit the form with customer name Ada, pizza size large, topping bacon, delivery time 18:30 and the comment 'eval run'. Save the JSON that the site echoes back to {D}/response.json and tell me which fields it echoed.",
+      "verify": "f={D}/response.json; test -f $f || { echo FAIL: no response.json; exit 0; }; sed 's/^/SHOW /' $f | head -40; python3 - <<'EOF'\nimport json\nd=json.load(open('{D}/response.json'))\nform=d.get('form',d)\ns=json.dumps(form).lower()\nok='ada' in s and 'large' in s and 'bacon' in s\nprint('PASS' if ok else 'FAIL: fields missing in '+s[:200])\nEOF",
+      "timeout_s": 600
+    }
+  ]
+}

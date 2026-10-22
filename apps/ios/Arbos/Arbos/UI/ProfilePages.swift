@@ -938,6 +938,10 @@ struct ServerProfileView: View {
     @State private var confirmReset = false
     @State private var copied = false
     @State private var loadedMembers = false
+    @State private var showAddMembers = false
+    /// Settings › Invite links › New link options (owner).
+    @State private var inviteExpires = false
+    @State private var inviteSingleUse = false
 
     private var server: Server? { model.server(serverId) }
     private var isAdmin: Bool { server?.isAdmin ?? false }
@@ -949,7 +953,18 @@ struct ServerProfileView: View {
             .sheet(isPresented: $showNewChannel) {
                 NewChannelSheet(serverId: serverId).environmentObject(model).environment(\.theme, theme)
             }
+            .sheet(isPresented: $showAddMembers) {
+                // The groups' picker, people only; a sheet over the profile sheet (no
+                // presentation modifiers here — they unseat the presenting sheet).
+                NavigationStack {
+                    NewGroupView(onDone: { showAddMembers = false }, addToServer: serverId)
+                }
+                .tint(theme.text)
+                .environmentObject(model)
+                .environment(\.theme, theme)
+            }
             .task {
+                if let t = DebugHooks.panelTab { tab = t }
                 await model.refreshServer(serverId)
                 loadedMembers = true
             }
@@ -1025,6 +1040,8 @@ struct ServerProfileView: View {
     }
 
     /// Settings (D93 order): identity (Rename) → behaviour (Open server) → relations (invite link).
+    /// Settings (D93 order): identity (Rename) → behaviour (Open server) → relations (the
+    /// owner's invite links — demoted to a fallback on 2026-10-22; admins see none).
     private func settingsSections(_ server: Server) -> [PaneSection] {
         guard isAdmin else { return [.empty("Nothing to set up here yet.")] }
         var out: [PaneSection] = [
@@ -1034,10 +1051,78 @@ struct ServerProfileView: View {
             })]),
             .custom(AnyView(openCard(server))),
         ]
-        if let invite = server.invite {
-            out.append(.custom(AnyView(inviteCard(invite))))
+        if isOwner {
+            out += inviteSections(server)
         }
         return out
+    }
+
+    /// The owner's invite links: each with its terms, Copy / Share and revoke; then the two
+    /// options and "New invite link".
+    private func inviteSections(_ server: Server) -> [PaneSection] {
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        var rows: [AnyView] = []
+        if server.invites.isEmpty {
+            rows.append(AnyView(PaneRow(leading: .tile("link"), title: "No invite links",
+                                        subtitle: "People you add by name need none")))
+        }
+        for inv in server.invites {
+            let short = inv.url.split(separator: "/").last.map(String.init) ?? inv.code
+            rows.append(AnyView(
+                PaneRow(leading: .tile("link"), title: "…/s/\(short)", subtitle: inv.terms(now: now),
+                        trailing: AnyView(HStack(spacing: 4) {
+                            if inv.usable {
+                                Button {
+                                    UIPasteboard.general.string = inv.url
+                                    copied = true
+                                    Task { @MainActor in
+                                        try? await Task.sleep(for: .seconds(1.5))
+                                        copied = false
+                                    }
+                                } label: {
+                                    Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                                        .font(theme.font(15)).foregroundStyle(theme.muted)
+                                        .frame(width: 30, height: 44).contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("Copy link")
+                                if let url = URL(string: inv.url) {
+                                    ShareLink(item: url) {
+                                        Image(systemName: "square.and.arrow.up")
+                                            .font(theme.font(15)).foregroundStyle(theme.muted)
+                                            .frame(width: 30, height: 44).contentShape(Rectangle())
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                            Button {
+                                Task { await model.revokeServerInvite(serverId, inviteId: inv.id) }
+                            } label: {
+                                Image(systemName: "xmark.circle")
+                                    .font(theme.font(17)).foregroundStyle(theme.muted)
+                                    .frame(width: 30, height: 44).contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Revoke link")
+                        }))
+                .opacity(inv.usable ? 1 : 0.55)
+            ))
+        }
+        let options: [AnyView] = [
+            AnyView(PaneToggleRow(title: "Expires after 7 days", isOn: $inviteExpires)),
+            AnyView(PaneToggleRow(title: "Single use", subtitle: "One person joins, then the link is spent", isOn: $inviteSingleUse)),
+            AnyView(Button {
+                Task { await model.createServerInvite(serverId, expires: inviteExpires, singleUse: inviteSingleUse) }
+            } label: {
+                PaneRow(leading: .glyph("plus"), title: "New invite link")
+            }.buttonStyle(.plain)),
+        ]
+        return [
+            .title("Invite links"),
+            .card(rows, separatorInset: PaneKit.separatorInset(.tile(""))),
+            .card(options),
+            .footnote("A fallback for people who are not on Arbos yet: the link opens Arbos and joins them. Add people who already have an account from the Members tab."),
+        ]
     }
 
     private func channelDialogs<V: View>(_ v: V) -> some View {
@@ -1208,13 +1293,19 @@ struct ServerProfileView: View {
     // MARK: Members
 
     private func memberSections(_ server: Server) -> [PaneSection] {
-        if server.members.isEmpty {
-            return loadedMembers
-                ? [.empty("No members to show.")]
-                : [.custom(AnyView(HStack { Spacer(); ProgressView().tint(theme.muted); Spacer() }.padding(.top, 36)))]
+        var rows: [AnyView] = []
+        if isAdmin {
+            // The main way in (Jacob 2026-10-22): pick people by name, the groups' picker.
+            rows.append(AnyView(Button { showAddMembers = true } label: {
+                PaneRow(leading: .glyph("person.badge.plus"), title: "Add members")
+            }.buttonStyle(.plain)))
         }
-        return [.card(sortedMembers(server).map { m in AnyView(memberRow(m)) },
-                      separatorInset: PaneKit.separatorInset(.glyph("")))]
+        if server.members.isEmpty, !loadedMembers {
+            return [.custom(AnyView(HStack { Spacer(); ProgressView().tint(theme.muted); Spacer() }.padding(.top, 36)))]
+        }
+        rows += sortedMembers(server).map { m in AnyView(memberRow(m)) }
+        if rows.isEmpty { return [.empty("No members to show.")] }
+        return [.card(rows, separatorInset: PaneKit.separatorInset(.glyph("")))]
     }
 
     /// Owner first, then admins, then members; each group by name.
@@ -1302,34 +1393,6 @@ struct ServerProfileView: View {
         .padding(.horizontal, PaneKit.inset)
     }
 
-    private func inviteCard(_ invite: ServerInvite) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            PaneCard(header: "Invite link", footer: isOwner ? "Anyone with the link can join. Reset it to stop old copies working." : "Anyone with the link can join.") {
-                PaneRow(title: "Link", value: invite.url)
-                Button {
-                    UIPasteboard.general.string = invite.url
-                    copied = true
-                    Task { @MainActor in
-                        try? await Task.sleep(for: .seconds(1.5))
-                        copied = false
-                    }
-                } label: {
-                    PaneRow(title: copied ? "Copied" : "Copy link")
-                }
-                .buttonStyle(.plain)
-                if let url = URL(string: invite.url) {
-                    ShareLink(item: url) {
-                        PaneRow(title: "Share link", chevron: true)
-                    }
-                    .buttonStyle(.plain)
-                }
-                if isOwner {
-                    ProfileLinkRow(title: "Reset link") { confirmReset = true }
-                }
-            }
-        }
-        .padding(.horizontal, PaneKit.inset)
-    }
 }
 
 /// Finds the SwiftUI-hosted `UITextField` and makes a double-tap select the

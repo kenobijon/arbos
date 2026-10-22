@@ -533,6 +533,12 @@ pub enum ClientCommand {
         project_id: Id,
         voice: Option<String>,
     },
+    /// `PATCH /projects/{id} {"vision_enabled": bool}` — may the agent look
+    /// through my camera on calls (voice API §11). Set from the call screen.
+    SetVision {
+        project_id: Id,
+        enabled: bool,
+    },
     /// `GET /voices` → [`SyncEvent::Voices`].
     FetchVoices,
     /// Download (once; cached in the config dir) a voice sample → [`SyncEvent::VoiceSample`].
@@ -812,9 +818,18 @@ pub enum ClientCommand {
         server_id: Id,
     },
     /// D88: `POST /servers/{id}/invite/reset` (owner).
-    ServerResetInvite {
+    /// D88: `POST /servers/{id}/invites {expires, max_uses}` — the owner mints a link.
+    ServerInviteCreate {
         server_id: Id,
+        expires: bool,
+        max_uses: Option<i64>,
     },
+    /// D88: `DELETE /servers/{id}/invites/{iid}` — the owner revokes a link.
+    ServerInviteRevoke {
+        server_id: Id,
+        invite_id: Id,
+    },
+
     /// D88: `PUT /servers/{id}/members/{uid} {role}` (owner); `admin` or `member`.
     ServerSetRole {
         server_id: Id,
@@ -845,6 +860,11 @@ pub enum ClientCommand {
     ChannelDelete {
         server_id: Id,
         channel_id: Id,
+    },
+    /// D88: `POST /servers/{id}/members {user_id}` per person — owner/admin adds people by name.
+    ServerAddMembers {
+        server_id: Id,
+        user_ids: Vec<Id>,
     },
     /// D88: `POST /servers/{id}/channels/{cid}/archive {archived}` — hide the channel from my
     /// list or bring it back (per user, mirrored as the room's `m.lowpriority` tag).

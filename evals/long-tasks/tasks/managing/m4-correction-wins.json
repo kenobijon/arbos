@@ -1,0 +1,24 @@
+{
+  "id": "m4-correction-wins",
+  "lane": "a",
+  "category": "managing",
+  "title": "A corrected fact must win over the original",
+  "turns": [
+    {
+      "prompt": "Remember: the weekly release train for the Kestrel app leaves on Tuesdays.",
+      "timeout_s": 240
+    },
+    {
+      "prompt": "Correction: the Kestrel release train moved — it now leaves on Thursdays, not Tuesdays. Please remember the new day.",
+      "timeout_s": 240
+    },
+    {
+      "prompt": "On which weekday does the Kestrel release train leave?",
+      "new_chat": true,
+      "pre_wait_s": 40,
+      "reply_regex": "Thursday",
+      "reply_regex_not": "^(?![\\s\\S]*Thursday)[\\s\\S]*Tuesday",
+      "timeout_s": 300
+    }
+  ]
+}

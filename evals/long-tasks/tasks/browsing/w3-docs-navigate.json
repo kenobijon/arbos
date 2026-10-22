@@ -1,0 +1,17 @@
+{
+  "id": "w3-docs-navigate",
+  "lane": "a",
+  "category": "browsing",
+  "title": "Find a function signature in the Python docs",
+  "turns": [
+    {
+      "prompt": "From the official Python documentation at https://docs.python.org/3/ find the exact full signature of json.dumps (all keyword parameters with their defaults) and write it on one line to {D}/sig.txt. Then quote it to me.",
+      "verify": "f={D}/sig.txt; test -f $f || { echo FAIL: no sig.txt; exit 0; }; sed 's/^/SHOW /' $f; grep -q skipkeys $f && grep -q indent $f && grep -q sort_keys $f && echo PASS || echo FAIL: signature incomplete",
+      "rubric": {
+        "criteria": "The signature matches the real json.dumps signature: obj, *, skipkeys=False, ensure_ascii=True, check_circular=True, allow_nan=True, cls=None, indent=None, separators=None, default=None, sort_keys=False, **kw.",
+        "min": 3
+      },
+      "timeout_s": 300
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "id": "m3-recall-cross-chat",
+  "lane": "a",
+  "category": "managing",
+  "title": "Plant a fact in one chat, ask from a new chat",
+  "turns": [
+    {
+      "prompt": "Note for later: the API gateway for the Zephyr project listens on port 8443 and its on-call engineer is Mateo.",
+      "timeout_s": 240
+    },
+    {
+      "prompt": "Which port does the Zephyr API gateway listen on, and who is on call for it?",
+      "new_chat": true,
+      "pre_wait_s": 40,
+      "reply_regex": "8443[\\s\\S]*Mateo|Mateo[\\s\\S]*8443",
+      "timeout_s": 300
+    }
+  ]
+}

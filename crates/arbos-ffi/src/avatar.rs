@@ -194,6 +194,18 @@ pub fn leaf_gust_secs() -> f32 {
     leaf::GUST_SECS
 }
 
+/// Shape `index`'s Lottie file (`gust` = the 1 s hover/activity gust, else the idle loop) as
+/// JSON text, for lottie-ios; transparent background, recolour keypath `**.leaf.Color`.
+#[uniffi::export]
+pub fn leaf_lottie_json(index: u8, gust: bool) -> String {
+    let l = &leaf::LEAVES[(index % leaf::LEAF_COUNT) as usize];
+    if gust {
+        l.gust_lottie.to_owned()
+    } else {
+        l.idle_lottie.to_owned()
+    }
+}
+
 /// The bubble-bar accent of a leaf agent: its disc colour.
 #[uniffi::export]
 pub fn leaf_accent(seed: String, leaf: Option<u8>, color: Option<u8>) -> AccentHex {

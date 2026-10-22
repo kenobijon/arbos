@@ -61,18 +61,6 @@ struct AgentEditSheet: View {
                                 row(icon: "waveform", title: "Voice", value: voiceLabel(project))
                             }
                             .buttonStyle(.plain)
-                            PaneRow(
-                                leading: .tile("eye"),
-                                title: "Camera vision",
-                                subtitle: "On video calls \(project.name) can see your camera while it is on.",
-                                trailing: AnyView(
-                                    Toggle("", isOn: Binding(get: { project.visionEnabled }, set: { model.setVision(projectId, enabled: $0) }))
-                                        .labelsHidden()
-                                        .tint(theme.online)
-                                        .disabled(project.shared)
-                                        .accessibilityLabel("Camera vision")
-                                )
-                            )
                         }
                         .padding(.horizontal, 16)
                         .padding(.top, 14)
@@ -238,21 +226,18 @@ struct AgentProfileView: View {
     /// For an agent that is not in my project list (someone else's agent in a DM).
     var fallback: Project? = nil
     /// Jacob's rule (2026-10-22): one tab set per entity, identical on Mac
-    /// and iPhone. Agents: Profile | Settings | Library (the Mac's `agent.rs`).
+    /// and iPhone. Agents: Profile | Settings (the Mac's `agent.rs`); what the
+    /// agent's chats hold is reached from the group and person panes.
     @State private var tab = "Profile"
     @State private var showEdit = false
     @State private var showModel = false
     @State private var showDescription = false
     @State private var descriptionDraft = ""
-    @State private var showSecrets = false
+    @State private var showReasoning = false
     @State private var confirmDelete = false
 
     private var project: Project? { model.project(projectId) ?? fallback }
     private var isMine: Bool { model.project(projectId) != nil && project?.shared != true }
-    private var items: [ChatItem] {
-        let msgs = model.chats(of: projectId).flatMap { model.messages(of: $0.id) }
-        return ChatMedia.items(messages: msgs, slot: projectId, model: model)
-    }
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -262,11 +247,11 @@ struct AgentProfileView: View {
                     VStack(spacing: 18) {
                         Color.clear.frame(height: 80)
                         // The shared pane (D93): leaf / photo with the owner's crayon,
-                        // name, "working" or who runs it; Profile | Settings | Library
+                        // name, "working" or who runs it; Profile | Settings
                         // (the Mac's set); Delete agent for the owner.
                         ProfilePane(
                             hero: PaneHero(picture: .image(AnyView(heroPicture(project))), name: project.name, subtitle: subtitleLine(project)),
-                            tabs: ["Profile", "Settings", "Library"],
+                            tabs: ["Profile", "Settings"],
                             selected: $tab,
                             body: sections(project),
                             footer: isMine ? [.card([AnyView(ProfileLinkRow(title: "Delete agent", destructive: true) { confirmDelete = true })])] : []
@@ -293,13 +278,9 @@ struct AgentProfileView: View {
         .sheet(isPresented: $showEdit) {
             AgentEditSheet(projectId: projectId).environmentObject(model).environment(\.theme, theme)
         }
-        .sheet(isPresented: $showSecrets) {
-            NavigationStack { AgentSecretsPage(projectId: projectId) }
-                .environmentObject(model).environment(\.theme, theme)
-                .presentationBackground(theme.bg)
-                .preferredColorScheme(theme.isDark ? .dark : .light)
+        .sheet(isPresented: $showReasoning) {
+            if let project = model.project(projectId) { ReasoningPickerView(project: project).environmentObject(model).environment(\.theme, theme) }
         }
-        .task { await model.refreshProjectSecrets(projectId) }
         .alert("Description", isPresented: $showDescription) {
             TextField("One paragraph about this agent", text: $descriptionDraft)
             Button("Save") { model.updateProject(projectId, description: descriptionDraft.trimmingCharacters(in: .whitespacesAndNewlines)) }
@@ -336,39 +317,26 @@ struct AgentProfileView: View {
     private func sections(_ project: Project) -> [PaneSection] {
         switch tab {
         case "Settings":
-            var rows: [AnyView] = [
+            // Identical to the Mac: Model · Reasoning. Per-agent secrets are reached
+            // like the Mac's — Settings → Secrets → the secret's Agents; camera vision
+            // is the call screen's "Let <agent> see" switch.
+            let rows: [AnyView] = [
                 AnyView(
                     Button { if isMine { showModel = true } } label: {
-                        PaneRow(title: "Model", value: "\(project.shortModel) · \(project.effort.label)", chevron: isMine)
+                        PaneRow(title: "Model", value: project.shortModel, chevron: isMine)
                     }
                     .buttonStyle(.plain)
                     .disabled(!isMine)
-                )
+                ),
+                AnyView(
+                    Button { if isMine { showReasoning = true } } label: {
+                        PaneRow(title: "Reasoning", value: project.effort.label, chevron: isMine)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!isMine)
+                ),
             ]
-            if isMine {
-                rows.append(AnyView(PaneToggleRow(title: "Camera vision", isOn: Binding(get: { project.visionEnabled }, set: { model.setVision(projectId, enabled: $0) }))))
-            }
-            rows.append(AnyView(
-                Button { showSecrets = true } label: {
-                    PaneRow(title: "Secrets", value: secretsLine(project), chevron: true)
-                }
-                .buttonStyle(.plain)
-            ))
             return [.card(rows)]
-        case "Library":
-            let media = items.filter { $0.kind == .media }
-            let files = items.filter { $0.kind == .file }
-            let voice = items.filter { $0.kind == .voice }
-            let links = items.filter { $0.kind == .link }
-            if media.isEmpty && files.isEmpty && voice.isEmpty && links.isEmpty {
-                return [.empty("Nothing shared in \(project.name)'s chats yet.")]
-            }
-            var out: [PaneSection] = []
-            if !media.isEmpty { out += [.title("Images · \(media.count)"), .grid(media)] }
-            if !files.isEmpty { out += [.title("Files · \(files.count)"), .files(files)] }
-            if !voice.isEmpty { out += [.title("Voice · \(voice.count)"), .voice(voice)] }
-            if !links.isEmpty { out += [.title("Links · \(links.count)"), .links(links)] }
-            return out
         default:
             // Profile: name, handle, description (the owner edits by tapping).
             var rows: [AnyView] = [
@@ -397,13 +365,52 @@ struct AgentProfileView: View {
         }
     }
 
-    /// "3 · STRIPE_KEY, Arbos — Res…" from the agent's Access rows; "none" before any.
-    private func secretsLine(_ p: Project) -> String {
-        guard let d = model.projectSecrets[p.id] else { return "—" }
-        let on = d.items.filter(\.enabled)
-        if on.isEmpty { return d.requests.contains(where: \.isPending) ? "waiting for you" : "none" }
-        let names = on.map(\.title).joined(separator: ", ")
-        return "\(on.count) · \(names)"
-    }
+}
 
+// MARK: - Reasoning picker (the Mac's Reasoning dropdown)
+
+/// The agent's reasoning effort: one row per level, checkmark on the current
+/// one; a tap saves (the same write as the Model sheet's Reasoning control).
+struct ReasoningPickerView: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.theme) private var theme
+    @Environment(\.dismiss) private var dismiss
+    let project: Project
+    private var current: Project { model.project(project.id) ?? project }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    ForEach(Effort.allCases) { e in
+                        Button {
+                            model.setModel(projectId: project.id, model: current.model, effort: e)
+                        } label: {
+                            HStack {
+                                Text(e.label).foregroundStyle(theme.text)
+                                Spacer()
+                                if current.effort == e {
+                                    Image(systemName: "checkmark").font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.text)
+                                }
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .listRowBackground(theme.card)
+                    }
+                } footer: {
+                    Text("How hard \(current.name) thinks before it answers.")
+                        .font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
+                }
+            }
+            .scrollContentBackground(.hidden)
+            .background(theme.bg)
+            .navigationTitle("Reasoning")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } }
+            }
+        }
+        .presentationDetents([.medium])
+    }
 }

@@ -1,0 +1,16 @@
+{
+  "id": "e2-hanging-command",
+  "lane": "b",
+  "category": "recovery",
+  "title": "A command that never ends",
+  "turns": [
+    {
+      "prompt": "Run {D}/slow.sh and tell me its result. If it has not finished within 30 seconds, stop it, tell me it did not finish, and move on.",
+      "seed": "mkdir -p {D} && printf '#!/bin/bash\\necho starting\\nwhile true; do sleep 5; done\\n' > {D}/slow.sh && chmod +x {D}/slow.sh",
+      "reply_regex": "did not finish|didn't finish|not finish|timed out|time limit|hung|hang|never (finished|completed|ended)|stopped it|killed",
+      "wall_max_s": 200,
+      "forbid_question": true,
+      "timeout_s": 300
+    }
+  ]
+}
