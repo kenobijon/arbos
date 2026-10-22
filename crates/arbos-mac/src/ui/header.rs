@@ -93,9 +93,10 @@ pub fn render(
             }),
         );
 
+    // Grok Mac's title: 13 pt semibold (ref 57) — the topbar-unify mock's size too.
     let name_label = |text: String, theme: &Theme| {
         div()
-            .text_size(px(TEXT_BODY))
+            .text_size(px(TEXT_SMALL))
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(theme.text)
             .truncate()
@@ -170,7 +171,7 @@ pub fn render(
                 .bg(theme.field)
                 .border_1()
                 .border_color(theme.field_border)
-                .text_size(px(TEXT_BODY))
+                .text_size(px(TEXT_SMALL))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme.text)
                 .child(shell.agent_name_input.clone())
@@ -262,6 +263,14 @@ pub fn render(
                 17.0,
                 if on { theme.text } else { theme.text_muted },
             ))
+            // The bar is a window-drag region; a control is not part of it.
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.close_popovers(cx);
+                }),
+            )
     };
     // Expand only when the rail is hidden (collapsed or too narrow). Collapse
     // lives next to "+" in the sidebar.

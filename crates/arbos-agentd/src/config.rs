@@ -39,6 +39,8 @@ pub fn parse_switch(s: &str) -> Option<bool> {
 pub const STABLE_PREFIX_FILE: &str = "stable-prefix";
 /// Box-local override of the compact memory pack: `<work_root>/.arbos/memory-pack-compact`, `on` or `off`.
 pub const MEMORY_PACK_COMPACT_FILE: &str = "memory-pack-compact";
+/// Box-local override of the fast memory walk: `<work_root>/.arbos/memory-walk-fast`, `on` or `off`.
+pub const MEMORY_WALK_FAST_FILE: &str = "memory-walk-fast";
 
 /// A box-wide experiment switch: the box-local `override_file` wins when it holds a valid value (so one
 /// test box can run the other arm), else the environment variable `env` (the relay passes its own
@@ -80,6 +82,15 @@ pub fn stable_prefix_on(override_file: &std::path::Path) -> bool {
 /// held, block p90 4.7k → 2.0k tokens).
 pub fn memory_pack_compact_on(override_file: &std::path::Path) -> bool {
     switch_on("ARBOS_MEMORY_PACK_COMPACT", override_file, true)
+}
+
+/// Fast memory walk (D77 follow-up, 2026-10-21): threads with no stemmed content word in common
+/// with the question (in a leaf or an index card) are not sent to Jev; every Jev score is cached
+/// per (card, question words, day); a small candidate set is scored in one round instead of
+/// three. Keep rules and thresholds are unchanged. `ARBOS_MEMORY_WALK_FAST=on|off`, read at every
+/// walk. Default **on**; `off` restores the D77 walk exactly.
+pub fn memory_walk_fast_on(override_file: &std::path::Path) -> bool {
+    switch_on("ARBOS_MEMORY_WALK_FAST", override_file, true)
 }
 
 /// Box-level settings: what every workspace shares.
@@ -361,6 +372,19 @@ impl Config {
     /// Compact per-turn memory pack; read at every walk, so a toggle needs no restart.
     pub fn memory_pack_compact(&self) -> bool {
         memory_pack_compact_on(&self.box_flag_file(MEMORY_PACK_COMPACT_FILE))
+    }
+
+    /// Fast memory walk (prefilter, score cache, one-round scoring); read at every walk.
+    pub fn memory_walk_fast(&self) -> bool {
+        memory_walk_fast_on(&self.box_flag_file(MEMORY_WALK_FAST_FILE))
+    }
+
+    /// Both per-walk switches at once.
+    pub fn walk_options(&self) -> crate::tree::WalkOptions {
+        crate::tree::WalkOptions {
+            compact: self.memory_pack_compact(),
+            fast: self.memory_walk_fast(),
+        }
     }
 
     /// `<work_root>/.arbos/<name>`: a box-wide flag file an operator can set for one box.

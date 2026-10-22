@@ -1,0 +1,98 @@
+{
+  "note": "Cross-chat memory recall set for the D77 walk (tree.rs tests). One project, several chats and one subagent session, shaped like real history: user and assistant turns, a tool call with a long output, a 45-minute gap that splits an episode. `t` is minutes before 'now'. Each case asks from a chat that does not hold the answer; `gold` substrings must appear in the pack, `expect_empty` cases must inject nothing.",
+  "chats": [
+    {
+      "id": "chat-hello",
+      "title": "Getting started",
+      "leaves": [
+        { "t": 7200, "kind": "user", "role": "user", "text": "Hi Bob. My name is Jacob, remember that. I live in Austin and I am allergic to peanuts." },
+        { "t": 7199, "kind": "assistant", "role": "assistant", "text": "Got it, Jacob. Austin, and a peanut allergy — I will keep both in mind." },
+        { "t": 7197, "kind": "user", "role": "user", "text": "Also my GitHub handle is unconst, in case you need it for repos." },
+        { "t": 7196, "kind": "assistant", "role": "assistant", "text": "Noted: your GitHub handle is @unconst." },
+        { "t": 7100, "kind": "user", "role": "user", "text": "What can you do for me here?" },
+        { "t": 7099, "kind": "assistant", "role": "assistant", "text": "I can run code, browse, manage files in this workspace, and start subagents for long jobs." }
+      ]
+    },
+    {
+      "id": "chat-pets",
+      "title": "Cat questions",
+      "leaves": [
+        { "t": 5000, "kind": "user", "role": "user", "text": "Our cat Whiskers keeps scratching the couch. Any ideas?" },
+        { "t": 4999, "kind": "assistant", "role": "assistant", "text": "A tall sisal scratching post next to the couch, double-sided tape on the armrests for two weeks, and trim Whiskers' claws every ten days." },
+        { "t": 4997, "kind": "user", "role": "user", "text": "She is a three year old tabby, if that matters." },
+        { "t": 4996, "kind": "assistant", "role": "assistant", "text": "It does not change the plan; a young tabby just needs the post to be taller than she is when stretched." }
+      ]
+    },
+    {
+      "id": "chat-ops",
+      "title": "Deploy the landing page",
+      "leaves": [
+        { "t": 3000, "kind": "user", "role": "user", "text": "Deploy the landing site to the staging server please." },
+        { "t": 2999, "kind": "assistant", "role": "assistant", "text": "Running the staging deploy now." },
+        { "t": 2998, "kind": "tool_call", "role": "tool", "text": "bash: ./scripts/deploy.sh staging" },
+        { "t": 2997, "kind": "tool_output", "role": "tool", "text": "== deploy.sh staging ==\nBuilding site version 0.6.12\nvite v6.0.3 building for production...\n✓ 42 modules transformed.\ndist/index.html                   1.21 kB\ndist/assets/index-BxKq3.css      14.80 kB\ndist/assets/index-9fJd2.js      188.42 kB\nUploading 42 files to staging-01.arbos.internal\nRestarting arbos-landing.service\nListening on PORT=4173 (http://0.0.0.0:4173)\nHealth check: GET /healthz -> 200 OK in 31 ms\nSmoke: / -> 200, /pricing -> 200, /docs -> 200\nDone in 48.2s\n-- padding so this output is long enough to earn a page card --\nlog line 01: cache warm\nlog line 02: cache warm\nlog line 03: cache warm\nlog line 04: cache warm\nlog line 05: cache warm\nlog line 06: cache warm\nlog line 07: cache warm\nlog line 08: cache warm\nlog line 09: cache warm\nlog line 10: cache warm\nlog line 11: cache warm\nlog line 12: cache warm\nlog line 13: cache warm\nlog line 14: cache warm\nlog line 15: cache warm\nlog line 16: cache warm\nlog line 17: cache warm\nlog line 18: cache warm\nlog line 19: cache warm\nlog line 20: cache warm\nlog line 21: cache warm\nlog line 22: cache warm\nlog line 23: cache warm\nlog line 24: cache warm\nlog line 25: cache warm\nlog line 26: cache warm\nlog line 27: cache warm\nlog line 28: cache warm\nlog line 29: cache warm\nlog line 30: cache warm\nlog line 31: cache warm\nlog line 32: cache warm\nlog line 33: cache warm\nlog line 34: cache warm\nlog line 35: cache warm\nlog line 36: cache warm\nlog line 37: cache warm\nlog line 38: cache warm\nlog line 39: cache warm\nlog line 40: cache warm\nlog line 41: cache warm\nlog line 42: cache warm\nlog line 43: cache warm\nlog line 44: cache warm\nlog line 45: cache warm\nlog line 46: cache warm\nlog line 47: cache warm\nlog line 48: cache warm\nlog line 49: cache warm\nlog line 50: cache warm\nlog line 51: cache warm\nlog line 52: cache warm\nlog line 53: cache warm\nlog line 54: cache warm\nlog line 55: cache warm\nlog line 56: cache warm\nlog line 57: cache warm\nlog line 58: cache warm\nlog line 59: cache warm\nlog line 60: cache warm\n" },
+        { "t": 2996, "kind": "assistant", "role": "assistant", "text": "Deployed. Staging serves version 0.6.12 and listens on port 4173; the health check and the smoke pages all answered 200." },
+        { "t": 2940, "kind": "user", "role": "user", "text": "Great. From now on, no deploys on Fridays — Thursday noon is the cutoff." },
+        { "t": 2939, "kind": "assistant", "role": "assistant", "text": "Understood: no Friday deploys, Thursday noon is the cutoff." }
+      ]
+    },
+    {
+      "id": "chat-recipes",
+      "title": "Dinner ideas",
+      "leaves": [
+        { "t": 2000, "kind": "user", "role": "user", "text": "Give me a weeknight pasta recipe without garlic." },
+        { "t": 1999, "kind": "assistant", "role": "assistant", "text": "Lemon ricotta pasta: boil 300 g spaghetti, stir 250 g ricotta with the zest and juice of one lemon, black pepper and a ladle of pasta water, toss, finish with basil." },
+        { "t": 1998, "kind": "user", "role": "user", "text": "Perfect, that is dinner on Tuesday." },
+        { "t": 1997, "kind": "assistant", "role": "assistant", "text": "Enjoy your Tuesday dinner." }
+      ]
+    },
+    {
+      "id": "chat-budget",
+      "title": "Q4 budget",
+      "leaves": [
+        { "t": 1500, "kind": "user", "role": "user", "text": "Our Q4 cloud budget is $1,800 a month. Flag anything that would push a month over $2,000." },
+        { "t": 1499, "kind": "assistant", "role": "assistant", "text": "Noted: $1,800 a month for Q4 cloud spend, with a warning above $2,000." },
+        { "t": 1498, "kind": "user", "role": "user", "text": "The biggest line is the GPU box at $1,100." },
+        { "t": 1497, "kind": "assistant", "role": "assistant", "text": "So the GPU box is 61 % of the budget; everything else has to fit in $700." }
+      ]
+    },
+    {
+      "id": "chat-dog",
+      "title": "Weekend plans",
+      "leaves": [
+        { "t": 900, "kind": "user", "role": "user", "text": "Taking Biscuit, our golden retriever, to the lake on Saturday." },
+        { "t": 899, "kind": "assistant", "role": "assistant", "text": "Sounds great. Bring a towel for Biscuit; the lake water will be cold." }
+      ]
+    },
+    {
+      "id": "chat-new",
+      "title": "New chat",
+      "leaves": []
+    }
+  ],
+  "subagents": [
+    {
+      "id": "sub-certs",
+      "name": "cert-renewal",
+      "purpose": "renew the TLS certificate on staging",
+      "chat_id": "chat-ops",
+      "leaves": [
+        { "t": 2900, "kind": "session_entry", "role": "tool", "text": "$ sudo certbot renew --cert-name staging.arbos.life\nSaving debug log to /var/log/letsencrypt/letsencrypt.log\nRenewing an existing certificate for staging.arbos.life\nCertificate not yet due for renewal\nThe following certificates are not due for renewal yet:\n  /etc/letsencrypt/live/staging.arbos.life/fullchain.pem expires on 2027-01-14 (skipped)\nNo renewals were attempted." },
+        { "t": 2899, "kind": "session_entry", "role": "assistant", "text": "The staging certificate is valid until 2027-01-14; nothing to renew today." }
+      ]
+    }
+  ],
+  "cases": [
+    { "id": "name", "from": "chat-new", "query": "What is my name?", "gold": ["My name is Jacob"] },
+    { "id": "city", "from": "chat-pets", "query": "Which city do I live in?", "gold": ["I live in Austin"] },
+    { "id": "handle", "from": "chat-new", "query": "What's my GitHub handle?", "gold": ["unconst"] },
+    { "id": "cat", "from": "chat-budget", "query": "What is my cat called?", "gold": ["Whiskers"] },
+    { "id": "port", "from": "chat-new", "query": "Which port does the staging server listen on?", "gold": ["4173"] },
+    { "id": "cert", "from": "chat-hello", "query": "When does the staging TLS certificate expire?", "gold": ["2027-01-14"] },
+    { "id": "budget", "from": "chat-new", "query": "How much is our monthly cloud budget?", "gold": ["$1,800"] },
+    { "id": "cutoff", "from": "chat-recipes", "query": "Is there a deploy cutoff I should know about?", "gold": ["Thursday noon is the cutoff"] },
+    { "id": "pet-breed", "from": "chat-new", "query": "What breed is my pet?", "gold": ["golden retriever"], "note": "no shared word with the record; found through the first-person fallback" },
+    { "id": "haiku", "from": "chat-new", "query": "Write a haiku about autumn rain.", "gold": [], "expect_empty": true },
+    { "id": "sort", "from": "chat-pets", "query": "Explain quicksort in two sentences.", "gold": [], "expect_empty": true }
+  ]
+}

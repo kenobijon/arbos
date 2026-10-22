@@ -1777,11 +1777,14 @@ class Loop:
             self.rust_gate_mac_start(cur)
             return
         plan = cur.get("rust_gate_plan") or []
-        members: dict[str, str] = {}
+        # Pinned items (operator gate-next, owner priority) always form the next batch, on their own, ahead of the
+        # pool AND ahead of bisect / conflict-retry plan halves — the pin survives a conflict → owner-merges-main
+        # → re-push cycle (00:58 Oct 22: #1241 was merged third behind a retry half and hit a sibling conflict).
+        members: dict[str, str] = {fid: st["branch_head"] for fid, st in ready if st.get("gate_pinned")}
         while plan and not members:
             half = plan.pop(0)
-            # Match by item, gate at its CURRENT head: a pinned (gate-next) or bisected item whose owner pushed a
-            # repair / merged main meanwhile keeps its place in the queue instead of dropping to the back.
+            # Match by item, gate at its CURRENT head: a bisected item whose owner pushed a repair meanwhile keeps
+            # its place in the queue instead of dropping to the back.
             members = {f: st["branch_head"] for f, st in ready if f in half}
         if not members:
             members = {fid: st["branch_head"] for fid, st in ready}
@@ -2122,6 +2125,7 @@ class Loop:
                   commit_message=fix["commit"]["message"].splitlines()[0], pushed_at=iso(), merge_sha=merged["sha"],
                   merge_url=merged["html_url"], commit_date=merged["commit"]["committer"]["date"])
         st.pop("gated_head", None)
+        st.pop("gate_pinned", None)
         self.store.save_state(fid, st)
         self.store.event(fid, "pushed", commit=fix["sha"], merge=merged["sha"], files=st.get("files"))
         gate_note = ""
@@ -3512,10 +3516,12 @@ def main(argv: list[str]) -> int:
         then_heads: dict[str, str] = {}
         for fid, into in [(f, heads) for f in ids] + [(f, then_heads) for f in then_ids]:
             st = loop.store.state(fid)
-            if not st or st.get("status") != "gating" or not st.get("branch_head"):
-                print(f"{fid}: not a gating item with a branch head")
+            if not st or st.get("status") not in ("gating", "handed_off") or not st.get("branch_head"):
+                print(f"{fid}: not a gating / handed-off item with a branch head")
                 return 2
             into[fid] = st["branch_head"]
+            st["gate_pinned"] = True  # stays ahead of the pool until it merges, through conflict/re-push cycles
+            loop.store.save_state(fid, st)
         batches = [heads] + ([then_heads] if then_heads else [])
         with (cfg.state_dir / ".lock").open("w") as lock:
             try:

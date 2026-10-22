@@ -1,0 +1,533 @@
+// Servers and channels (D88) on AppModel. The relay is the control plane
+// (`GET /servers`: names, roles, channels, invite link, members); the shared
+// Matrix client (crates/arbos-matrix through ArbosFFI) is the data plane
+// (room list, channel timelines, send, read). The home list combines both:
+// names from the relay, previews / unread / last activity from the snapshot.
+
+import Foundation
+import os
+import ArbosFFI
+
+private let matrixLog = Logger(subsystem: "com.unarbos.arbos.ios", category: "matrix")
+
+/// UniFFI callbacks arrive on the Rust sync task; hop to the main actor before touching AppModel.
+final class MatrixBridgeListener: ArbosFFI.MatrixListener, @unchecked Sendable {
+    private weak var model: AppModel?
+
+    init(model: AppModel) {
+        self.model = model
+    }
+
+    func onRooms(snapshot: ArbosFFI.MatrixSnapshot) {
+        let model = self.model
+        Task { @MainActor in model?.applyMatrixSnapshot(snapshot) }
+    }
+
+    func onTimeline(roomId: String, rows: [ArbosFFI.MatrixMessageRow]) {
+        let model = self.model
+        Task { @MainActor in model?.applyMatrixTimeline(roomId: roomId, rows: rows) }
+    }
+
+    func onConnection(connected: Bool, error: String?) {
+        let model = self.model
+        Task { @MainActor in model?.applyMatrixConnection(connected: connected, error: error) }
+    }
+}
+
+extension AppModel {
+    // MARK: Lookups
+
+    func server(_ id: Id) -> Server? { servers.first { $0.id == id } }
+
+    func channel(_ id: Id) -> ServerChannel? {
+        for s in servers {
+            if let c = s.channels.first(where: { $0.id == id }) { return c }
+        }
+        return nil
+    }
+
+    /// The snapshot row for a channel: by relay channel id, else by room id.
+    func matrixChannelRow(_ channel: ServerChannel) -> ArbosFFI.MatrixChannelRow? {
+        matrixSnapshot.channels.first {
+            $0.channelId == channel.id || (channel.roomId != nil && $0.roomId == channel.roomId)
+        }
+    }
+
+    func matrixSpaceRow(_ serverId: Id) -> ArbosFFI.MatrixSpaceRow? {
+        matrixSnapshot.spaces.first { $0.serverId == serverId }
+    }
+
+    /// "Mine" in a channel: the client's member id (`user:<id>`), the account's until it runs.
+    var channelMe: String? {
+        matrixClient?.meMember() ?? myUserId
+    }
+
+    /// The room behind a channel — the snapshot is the source of truth; the relay's
+    /// `room_id` fills in until the first snapshot lands.
+    func channelRoomId(_ channel: ServerChannel) -> String? {
+        matrixChannelRow(channel)?.roomId ?? channel.roomId
+    }
+
+    /// Rule 9: may I write here? The room's power levels decide; the relay's role is the fallback.
+    func channelCanPost(_ channelId: Id) -> Bool {
+        guard let c = channel(channelId) else { return true }
+        if let row = matrixChannelRow(c) { return row.canPost }
+        return !c.restricted || (server(c.serverId)?.isAdmin ?? false)
+    }
+
+    func channelRestricted(_ channel: ServerChannel) -> Bool {
+        matrixChannelRow(channel)?.restricted ?? channel.restricted
+    }
+
+    func channelUnread(_ channel: ServerChannel) -> Bool {
+        guard visibleChatId != channel.id else { return false }
+        return (matrixChannelRow(channel)?.unread ?? 0) > 0
+    }
+
+    /// Last activity (ms) for sorting and the time label; the relay's creation time until a row lands.
+    func channelActivity(_ channel: ServerChannel) -> Int64 {
+        let ts = matrixChannelRow(channel)?.lastTs ?? 0
+        return ts > 0 ? ts : channel.createdAt
+    }
+
+    /// "You: text" / "Name: text", one line, same shape as the people rows.
+    func channelPreview(_ channel: ServerChannel) -> String {
+        guard let row = matrixChannelRow(channel), !row.lastText.isEmpty else { return "No messages yet" }
+        let line = row.lastText.split(separator: "\n").first.map(String.init) ?? ""
+        return (Self.previewWho(row.lastSenderName, me: user).map { $0 + ": " } ?? "") + HomeView.plain(line)
+    }
+
+    func serverUnread(_ server: Server) -> Bool {
+        if (matrixSpaceRow(server.id)?.unread ?? 0) > 0 { return true }
+        return server.channels.contains { channelUnread($0) }
+    }
+
+    func serverActivity(_ server: Server) -> Int64 {
+        var ts = matrixSpaceRow(server.id)?.lastTs ?? 0
+        for c in server.channels { ts = max(ts, matrixChannelRow(c)?.lastTs ?? 0) }
+        return ts > 0 ? ts : server.createdAt
+    }
+
+    /// The space row carries "#general · text"; fall back to the newest channel row.
+    func serverPreview(_ server: Server) -> String {
+        if let space = matrixSpaceRow(server.id), !space.lastText.isEmpty {
+            return HomeView.plain(space.lastText.split(separator: "\n").first.map(String.init) ?? "")
+        }
+        let rows = server.channels.compactMap { matrixChannelRow($0) }.filter { !$0.lastText.isEmpty }
+        guard let newest = rows.max(by: { $0.lastTs < $1.lastTs }) else { return "No messages yet" }
+        let line = newest.lastText.split(separator: "\n").first.map(String.init) ?? ""
+        return "#\(newest.name) · " + HomeView.plain(line)
+    }
+
+    private static func previewWho(_ senderName: String, me: AuthUser?) -> String? {
+        let name = senderName.trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty else { return nil }
+        if let me, name == me.name || name == me.login || name == "@\(me.login)" { return "You" }
+        return name
+    }
+
+    // MARK: Navigation
+
+    /// Rule 3: a server opens on `#general`, with its channel list underneath.
+    func open(server: Server) {
+        if let g = server.general {
+            path = [.server(serverId: server.id), .chat(chatId: g.id, projectId: channelSlot)]
+        } else {
+            path = [.server(serverId: server.id)]
+        }
+    }
+
+    func open(channel: ServerChannel) {
+        path = [.server(serverId: channel.serverId), .chat(chatId: channel.id, projectId: channelSlot)]
+    }
+
+    // MARK: Relay (control plane)
+
+    /// `GET /servers`; refetched on the 15 s loop and on every `server_*` push.
+    func refreshServers() async {
+        guard credentials != nil, !isFixture else { return }
+        do {
+            var list = try await relay.servers()
+            // The list has no members; keep the ones a profile page already fetched.
+            for i in list.indices where list[i].members.isEmpty {
+                if let prev = server(list[i].id) { list[i].members = prev.members }
+            }
+            servers = list
+            serversAvailable = true
+        } catch let e as RelayError where e.status == 404 || e.status == 405 || e.status == 503 {
+            // Relays without servers: nothing server-related.
+            servers = []
+            serversAvailable = false
+        } catch {
+            // Keep the last list; the loop tries again.
+        }
+    }
+
+    /// `GET /servers/{id}` — members for the profile page.
+    @discardableResult
+    func refreshServer(_ id: Id) async -> Server? {
+        guard credentials != nil, !isFixture else { return server(id) }
+        guard let s = try? await relay.server(id) else { return server(id) }
+        upsert(server: s)
+        return s
+    }
+
+    private func upsert(server s: Server) {
+        if let i = servers.firstIndex(where: { $0.id == s.id }) {
+            var merged = s
+            if merged.members.isEmpty { merged.members = servers[i].members }
+            servers[i] = merged
+        } else {
+            servers.append(s)
+        }
+    }
+
+    /// Rule 8: "Server" in the `+` menu → `POST /servers {name}`, then land on `#general`.
+    func createServer(name: String) async -> Bool {
+        do {
+            let s = try await relay.createServer(name: name)
+            upsert(server: s)
+            open(server: s)
+            await startMatrixIfNeeded()
+            return true
+        } catch {
+            notice = Notice(text: "Could not create the server: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    /// Rule 8: "Join a server" → `POST /servers/join {code}` (the code or the whole link).
+    func joinServer(code: String) async -> Bool {
+        do {
+            let s = try await relay.joinServer(code: code)
+            upsert(server: s)
+            open(server: s)
+            await startMatrixIfNeeded()
+            return true
+        } catch {
+            let type = (error as? RelayError)?.type
+            notice = Notice(text: type == "banned" ? "You can't join this server."
+                            : type == "not_found" || (error as? RelayError)?.status == 404 ? "That invite link is not valid."
+                            : "Could not join the server: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    func renameServer(_ id: Id, name: String) async -> Bool {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        if let i = servers.firstIndex(where: { $0.id == id }) { servers[i].name = trimmed }
+        do {
+            try await relay.patchServer(id, name: trimmed)
+            await refreshServers()
+            return true
+        } catch {
+            notice = Notice(text: "Could not rename the server: \(error.localizedDescription)")
+            await refreshServers()
+            return false
+        }
+    }
+
+    /// Owner only: the server goes for everyone.
+    func deleteServer(_ id: Id) async -> Bool {
+        do {
+            try await relay.deleteServer(id)
+            forgetServer(id)
+            return true
+        } catch {
+            notice = Notice(text: "Could not delete the server: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    func leaveServer(_ id: Id) async -> Bool {
+        do {
+            try await relay.leaveServer(id)
+            forgetServer(id)
+            return true
+        } catch {
+            notice = Notice(text: "Could not leave the server: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    private func forgetServer(_ id: Id) {
+        if let s = server(id) {
+            for c in s.channels {
+                channelRows[c.id] = nil
+                caughtUp.remove(c.id)
+                channelAtStart.remove(c.id)
+            }
+        }
+        servers.removeAll { $0.id == id }
+        if path.contains(where: { if case .server(let sid) = $0 { return sid == id } else { return false } }) {
+            path = []
+        }
+    }
+
+    /// Rule 7: a new channel (owner/admin): name (letters, digits, dashes), admins-only toggle.
+    func createChannel(serverId: Id, name: String, restricted: Bool) async -> ServerChannel? {
+        do {
+            let c = try await relay.createChannel(serverId: serverId, name: Self.channelSlug(name), restricted: restricted)
+            if let i = servers.firstIndex(where: { $0.id == serverId }),
+               !servers[i].channels.contains(where: { $0.id == c.id }) {
+                servers[i].channels.append(c)
+            }
+            await refreshServers()
+            return channel(c.id) ?? c
+        } catch {
+            notice = Notice(text: "Could not create the channel: \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    func renameChannel(_ channel: ServerChannel, name: String) async -> Bool {
+        let slug = Self.channelSlug(name)
+        guard !slug.isEmpty else { return false }
+        do {
+            try await relay.patchChannel(serverId: channel.serverId, channelId: channel.id, name: slug)
+            await refreshServers()
+            return true
+        } catch {
+            notice = Notice(text: "Could not rename the channel: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    func setChannelRestricted(_ channel: ServerChannel, _ restricted: Bool) async {
+        if let si = servers.firstIndex(where: { $0.id == channel.serverId }),
+           let ci = servers[si].channels.firstIndex(where: { $0.id == channel.id }) {
+            servers[si].channels[ci].restricted = restricted
+        }
+        do {
+            try await relay.patchChannel(serverId: channel.serverId, channelId: channel.id, restricted: restricted)
+        } catch {
+            notice = Notice(text: "Could not change who posts: \(error.localizedDescription)")
+        }
+        await refreshServers()
+    }
+
+    func deleteChannel(_ channel: ServerChannel) async -> Bool {
+        do {
+            try await relay.deleteChannel(serverId: channel.serverId, channelId: channel.id)
+            channelRows[channel.id] = nil
+            caughtUp.remove(channel.id)
+            if case .chat(let id, _)? = path.last, id == channel.id {
+                path = [.server(serverId: channel.serverId)]
+            }
+            await refreshServers()
+            return true
+        } catch {
+            notice = Notice(text: (error as? RelayError)?.status == 409 ? "#general stays." : "Could not delete the channel: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    /// Rule 6: owner resets the invite link (the old one stops working).
+    func resetServerInvite(_ id: Id) async -> ServerInvite? {
+        do {
+            let inv = try await relay.resetServerInvite(id)
+            if let i = servers.firstIndex(where: { $0.id == id }) { servers[i].invite = inv }
+            return inv
+        } catch {
+            notice = Notice(text: "Could not reset the invite link: \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    func setServerRole(serverId: Id, userId: String, role: String) async {
+        do {
+            try await relay.setServerMemberRole(serverId: serverId, userId: userId, role: role)
+        } catch {
+            notice = Notice(text: "Could not change the role: \(error.localizedDescription)")
+        }
+        await refreshServer(serverId)
+    }
+
+    func removeServerMember(serverId: Id, userId: String, ban: Bool) async {
+        do {
+            try await relay.removeServerMember(serverId: serverId, userId: userId, ban: ban)
+        } catch {
+            notice = Notice(text: "Could not remove the member: \(error.localizedDescription)")
+        }
+        await refreshServer(serverId)
+    }
+
+    /// Channel names: lower-case letters, digits and dashes (rule 7).
+    static func channelSlug(_ raw: String) -> String {
+        let lowered = raw.lowercased().replacingOccurrences(of: " ", with: "-")
+        let kept = lowered.unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) || $0 == "-" }
+        var out = String(String.UnicodeScalarView(kept))
+        while out.contains("--") { out = out.replacingOccurrences(of: "--", with: "-") }
+        return out.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+    }
+
+    // MARK: Matrix (data plane)
+
+    /// Start the shared client once `GET /me/matrix` answers; a relay without servers (503
+    /// `servers_off`) leaves `matrixClient` nil and nothing server-related shows.
+    func startMatrixIfNeeded() async {
+        guard credentials != nil, !isFixture, matrixClient == nil, !matrixStarting else { return }
+        matrixStarting = true
+        defer { matrixStarting = false }
+        do {
+            guard let creds = try await relay.matrixSession() else { return }
+            let listener = MatrixBridgeListener(model: self)
+            let session = ArbosFFI.MatrixSession(homeserver: creds.homeserver, userId: creds.userId,
+                                                 accessToken: creds.accessToken, deviceId: creds.deviceId)
+            let client = try await matrixStart(session: session, listener: listener)
+            // Signed out (or started twice) while the handshake ran.
+            guard credentials != nil, matrixClient == nil else {
+                client.stop()
+                return
+            }
+            matrixListener = listener
+            matrixClient = client
+            matrixConnected = true
+            applyMatrixSnapshot(await client.snapshot())
+        } catch {
+            matrixLog.notice("matrix start failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    func stopMatrix() {
+        matrixClient?.stop()
+        matrixClient = nil
+        matrixListener = nil
+        matrixSnapshot = ArbosFFI.MatrixSnapshot(spaces: [], channels: [])
+        matrixConnected = true
+        for id in channelRows.keys { caughtUp.remove(id) }
+        channelRows = [:]
+        channelAtStart = []
+        channelLoading = []
+    }
+
+    func applyMatrixSnapshot(_ snapshot: ArbosFFI.MatrixSnapshot) {
+        matrixSnapshot = snapshot
+        // A channel opened before its room was known (just created, or the client was still
+        // starting): open it now that the snapshot lists the room.
+        if let id = visibleChatId, channel(id) != nil, !caughtUp.contains(id) {
+            openChannel(id)
+        }
+    }
+
+    func applyMatrixConnection(connected: Bool, error: String?) {
+        matrixConnected = connected
+        if let error, !connected {
+            matrixLog.notice("matrix link down: \(error, privacy: .public)")
+        }
+    }
+
+    /// The full row list of an open room, after every new message.
+    func applyMatrixTimeline(roomId: String, rows: [ArbosFFI.MatrixMessageRow]) {
+        guard let channelId = channelId(forRoom: roomId) else { return }
+        setChannelRows(channelId, rows)
+        if visibleChatId == channelId { markChannelRead(channelId) }
+    }
+
+    private func channelId(forRoom roomId: String) -> Id? {
+        if let row = matrixSnapshot.channels.first(where: { $0.roomId == roomId }), !row.channelId.isEmpty {
+            return row.channelId
+        }
+        for s in servers {
+            if let c = s.channels.first(where: { $0.roomId == roomId }) { return c.id }
+        }
+        return nil
+    }
+
+    /// Decode the chat-doc rows and keep optimistic sends whose echo has not landed yet
+    /// (the echo carries the same id, so it simply replaces the pending row).
+    private func setChannelRows(_ channelId: Id, _ rows: [ArbosFFI.MatrixMessageRow]) {
+        var decoded = rows.compactMap { Self.decodeMatrixRow($0, chatId: channelId) }
+        let ids = Set(decoded.map(\.id))
+        let cutoff = nowMs() - 60_000
+        for m in channelRows[channelId] ?? [] where m.pending && !ids.contains(m.id) && m.createdAt > cutoff {
+            decoded.append(m)
+        }
+        decoded.sort { $0.createdAt == $1.createdAt ? $0.id < $1.id : $0.createdAt < $1.createdAt }
+        channelRows[channelId] = decoded
+        caughtUp.insert(channelId)
+    }
+
+    /// `MatrixMessageRow.json` is a chat-doc message row: the app's decoder reads it as is.
+    static func decodeMatrixRow(_ row: ArbosFFI.MatrixMessageRow, chatId: Id) -> Message? {
+        guard let data = row.json.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data),
+              var m = DocJSON.message(json, chatId: chatId) else { return nil }
+        if m.createdAt == 0 { m.createdAt = row.createdAt }
+        return m
+    }
+
+    // MARK: Channel timelines
+
+    /// `openRoom`: the newest page, then live rows through the listener. Safe to call again.
+    func openChannel(_ channelId: Id) {
+        guard let c = channel(channelId), let client = matrixClient, let roomId = channelRoomId(c),
+              !channelLoading.contains(channelId) else { return }
+        channelLoading.insert(channelId)
+        Task {
+            defer { channelLoading.remove(channelId) }
+            do {
+                let rows = try await client.openRoom(roomId: roomId)
+                setChannelRows(channelId, rows)
+                try? await client.markRead(roomId: roomId)
+            } catch {
+                matrixLog.notice("open room failed: \(error.localizedDescription, privacy: .public)")
+                // Paint the empty transcript rather than a spinner that never ends.
+                caughtUp.insert(channelId)
+            }
+        }
+    }
+
+    func markChannelRead(_ channelId: Id) {
+        guard let c = channel(channelId), let client = matrixClient, let roomId = channelRoomId(c) else { return }
+        Task { try? await client.markRead(roomId: roomId) }
+    }
+
+    /// One older page when the transcript is scrolled near its top; stops at the room's start.
+    func loadOlderChannel(_ channelId: Id) {
+        guard let c = channel(channelId), let client = matrixClient, let roomId = channelRoomId(c),
+              caughtUp.contains(channelId), !channelAtStart.contains(channelId),
+              !channelLoading.contains(channelId) else { return }
+        channelLoading.insert(channelId)
+        Task {
+            defer { channelLoading.remove(channelId) }
+            do {
+                if let rows = try await client.loadOlder(roomId: roomId) {
+                    setChannelRows(channelId, rows)
+                } else {
+                    channelAtStart.insert(channelId)
+                }
+            } catch {
+                matrixLog.notice("load older failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
+    /// Send into a channel: the row shows at once with a client ULID as its id; the echo
+    /// arrives in the timeline with the same id (`life.arbos.id`).
+    func sendChannel(chatId channelId: Id, text: String) {
+        guard let c = channel(channelId), let me = user else { return }
+        guard let client = matrixClient, let roomId = channelRoomId(c) else {
+            notice = Notice(text: "Not connected to the server yet.")
+            return
+        }
+        let messageId = newId()
+        var m = Message(id: messageId, chatId: channelId, role: .user, sender: client.meMember(), status: .done, turn: nil,
+                        decision: nil, subagentId: nil, subagentName: nil, inReplyTo: nil, usage: [:], model: nil,
+                        createdAt: nowMs(), completedAt: nowMs(), pending: true,
+                        parts: [.text(id: "\(messageId)-t", text: text)], hiddenCount: 0)
+        m.senderHandle = me.login
+        m.senderName = me.name
+        m.senderAvatar = me.avatarUrl
+        channelRows[channelId, default: []].append(m)
+        Task {
+            do {
+                _ = try await client.sendText(roomId: roomId, text: text, localId: messageId)
+            } catch {
+                channelRows[channelId]?.removeAll { $0.id == messageId }
+                notice = Notice(text: "Could not send: \(error.localizedDescription)")
+            }
+        }
+    }
+}
