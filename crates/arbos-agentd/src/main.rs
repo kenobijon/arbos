@@ -26,6 +26,7 @@ mod routines;
 mod rpc_child;
 mod settings;
 mod skills;
+mod status;
 mod store;
 mod sync;
 mod tree;

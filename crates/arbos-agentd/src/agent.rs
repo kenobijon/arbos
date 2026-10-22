@@ -906,7 +906,13 @@ pub enum TurnKind {
     /// A user message (`send` / `answer`).
     User,
     /// A finished subagent's result, relayed to the user in prose by the main agent.
-    SubagentResult { subagent_id: String, name: String },
+    SubagentResult {
+        subagent_id: String,
+        name: String,
+        /// `done` / `failed` / `cancelled`: the plain line agentd writes itself when the model
+        /// cannot relay the result (cut short for a waiting user, tried to start work).
+        status: String,
+    },
     /// An approval card was decided after its turn ended (feature `approve`): the main agent
     /// dispatches or acknowledges, in prose.
     ApprovalOutcome { approval_id: String, title: String },
@@ -1037,6 +1043,16 @@ pub struct TurnState {
     pub model_error: Option<ModelError>,
     /// Fresh-session retry after a refusal already happened this turn (at most one).
     pub session_rotated: bool,
+    /// Relay turns (a subagent's result, an approval outcome) only speak: `route` must be
+    /// `reply`, a tool call ends the turn, and a waiting user message preempts it. Doug,
+    /// 2026-10-22: a result turn routed `act`, ran tools for 13 minutes and held every chat.
+    pub reply_only: bool,
+    /// A user message was waiting and this relay turn was cut short for it.
+    pub preempted: bool,
+    /// Limit / error lines already written this turn; the same line is never written twice.
+    pub notices: Vec<String>,
+    /// What a relay turn says when it is cut short and the model wrote nothing yet.
+    pub relay_fallback: String,
 }
 
 /// How the model call failed, as pi reported it.
@@ -1131,6 +1147,10 @@ impl TurnState {
             skills_used: Vec::new(),
             model_error: None,
             session_rotated: false,
+            reply_only: false,
+            preempted: false,
+            notices: Vec::new(),
+            relay_fallback: String::new(),
         }
     }
 }
@@ -1181,6 +1201,14 @@ pub struct Agent {
     /// D91 soft-compaction hysteresis per chat: `None` right after a compaction (the floor is
     /// not known yet), then the window observed on the first turn after it.
     compaction_floor: std::sync::Mutex<HashMap<String, Option<i64>>>,
+    /// User messages waiting for `turn_lock` right now. Relay turns and the soft compaction
+    /// yield to them (see `status.rs`).
+    pub(crate) pending_sends: std::sync::atomic::AtomicUsize,
+    /// Per chat: questions a quick reply answered while the agent was busy, for the main
+    /// session's next prompt so it does not answer them again.
+    pub(crate) side_notes: std::sync::Mutex<HashMap<String, Vec<String>>>,
+    /// Per chat: when quick-reply model calls were made (rate limit, `status.rs`).
+    pub(crate) quick_calls: std::sync::Mutex<HashMap<String, Vec<Instant>>>,
 }
 
 impl Agent {
@@ -1255,7 +1283,29 @@ impl Agent {
             goals_cache: std::sync::Mutex::new(String::new()),
             prompt_memory: std::sync::Mutex::new(None),
             compaction_floor: std::sync::Mutex::new(HashMap::new()),
+            pending_sends: std::sync::atomic::AtomicUsize::new(0),
+            side_notes: std::sync::Mutex::new(HashMap::new()),
+            quick_calls: std::sync::Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Relay turns queue behind the user: wait (up to a minute) while user messages are waiting
+    /// for the lock, so "what is going on?" is not stuck behind a result that can wait.
+    pub(crate) async fn let_user_sends_go_first(&self) {
+        let t0 = Instant::now();
+        while self.sends_waiting() > 0 && t0.elapsed() < Duration::from_secs(60) {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+
+    /// A turn holds `turn_lock` right now (running or in its setup). Never waits.
+    pub(crate) fn turn_lock_busy(&self) -> bool {
+        self.turn_lock.try_lock().is_err()
+    }
+
+    /// User messages waiting for the turn lock.
+    pub(crate) fn sends_waiting(&self) -> usize {
+        self.pending_sends.load(Ordering::SeqCst)
     }
 
     /// Refresh the active-goals blurb used by the working set.
@@ -1663,13 +1713,22 @@ impl Agent {
                 .doc
                 .set_command_status(&cmd.id, CommandStatus::Taken, None);
         }
-        let res = match cmd.kind.as_str() {
-            "send" => self.handle_send(chat_id, &host, &cmd).await,
-            "stop" => self.handle_stop(chat_id).await,
+        // Busy agent (a turn holds the lock): the message gets its quick reply first — a status
+        // answer ends here, guidance goes into the running turn, anything else queues as before
+        // with its acknowledgement already in the chat (`status.rs`).
+        let quick = match cmd.kind.as_str() {
+            "send" | "steer" | "guide" => self.quick_reply(chat_id, &host, &cmd).await,
+            _ => crate::status::QuickOutcome::NotBusy,
+        };
+        let res = match (cmd.kind.as_str(), quick) {
+            (_, crate::status::QuickOutcome::Answered)
+            | (_, crate::status::QuickOutcome::Steered) => Ok(()),
+            ("send", _) => self.handle_send(chat_id, &host, &cmd).await,
+            ("stop", _) => self.handle_stop(chat_id).await,
             // Guide: inject into the running turn (no turn_lock). Same as stop — mid-task.
-            "steer" | "guide" => self.handle_steer(chat_id, &host, &cmd).await,
-            "answer" => self.handle_send(chat_id, &host, &cmd).await,
-            "retitle" => {
+            ("steer", _) | ("guide", _) => self.handle_steer(chat_id, &host, &cmd).await,
+            ("answer", _) => self.handle_send(chat_id, &host, &cmd).await,
+            ("retitle", _) => {
                 let title = cmd
                     .payload
                     .get("title")
@@ -1679,8 +1738,8 @@ impl Agent {
                     .to_owned();
                 self.retitle(chat_id, &title).await
             }
-            "retry" => self.handle_retry(chat_id, &host, &cmd).await,
-            "approve" | "reject" => {
+            ("retry", _) => self.handle_retry(chat_id, &host, &cmd).await,
+            ("approve", _) | ("reject", _) => {
                 let approval_id = cmd
                     .payload
                     .get("approvalId")
@@ -1703,7 +1762,7 @@ impl Agent {
                 self.decide_approval(&approval_id, outcome, &cmd.issued_by)
                     .await
             }
-            other => Err(anyhow!("unknown command kind {other}")),
+            (other, _) => Err(anyhow!("unknown command kind {other}")),
         };
         let leave_taken = match (&res, people_msg_id.as_deref()) {
             (Ok(()), Some(msg_id)) => self.people_shared_send_open(chat_id, &host, msg_id).await,
@@ -1884,7 +1943,7 @@ impl Agent {
         }
     }
 
-    async fn handle_steer(
+    pub(crate) async fn handle_steer(
         self: &Arc<Self>,
         chat_id: &str,
         host: &SharedHost,
@@ -2014,7 +2073,10 @@ impl Agent {
                 .as_ref()
                 .is_some_and(message_from_voice)
         };
+        // Counted while waiting: relay turns and the soft compaction step aside for it.
+        self.pending_sends.fetch_add(1, Ordering::SeqCst);
         let _guard = self.acquire_turn_lock(chat_id, this_is_voice).await;
+        self.pending_sends.fetch_sub(1, Ordering::SeqCst);
         // Claim before attachments / tree_pack so hang-up `voice_cancel` and a later typed send
         // can preempt this turn while setup still holds the lock.
         *self.turn.lock().await = Some(TurnState::claim(chat_id, &user_msg_id, this_is_voice));
@@ -2178,6 +2240,11 @@ impl Agent {
             prompt_text = format!("{extra}\n\n{prompt_text}");
         }
         *self.turn_images.lock().expect("turn images") = attachments.images;
+        // Messages a quick reply already answered while this agent was busy: the main session
+        // learns what was said and does not answer them again (user turn, not the D87 prefix).
+        if let Some(note) = self.take_side_notes(chat_id) {
+            prompt_text = format!("{note}\n\n{prompt_text}");
+        }
 
         // Hang-up / typed preempt during setup: drop the claim and leave without opening a row.
         if self.turn.lock().await.as_ref().is_some_and(|t| t.stopped) {
@@ -2363,6 +2430,10 @@ impl Agent {
                             .map(|r| r.id)
                     })
                     .unwrap_or_default();
+                // One plain line in the chat, on the helper's own progress row when it has one,
+                // else on a new row — never both (Doug, 2026-10-22: the raw rpc error showed twice).
+                let line = subagent_start_failure_line(&e.to_string());
+                let mut told = false;
                 if !sub_id.is_empty() {
                     me.subagent_msgs.lock().await.remove(&sub_id);
                     let _ = me.store.set_subagent_status(&sub_id, "idle");
@@ -2383,7 +2454,16 @@ impl Agent {
                             .collect();
                         for id in stale {
                             h.doc.add_status_part(&id, "failed", "Failed");
-                            h.doc.add_error_part(&id, "subagent_failed", &e.to_string());
+                            if !told {
+                                h.doc.add_error_part(&id, "subagent_failed", &line);
+                                h.doc.add_hidden_part(
+                                    &id,
+                                    "subagent_failed_detail",
+                                    &e.to_string(),
+                                    &json!({ "subagentId": sub_id }),
+                                );
+                                told = true;
+                            }
                             h.doc.finish_message(&id, MessageStatus::Error);
                             h.doc
                                 .set_message_fields(&id, &[("handoffMessages", json!(2))]);
@@ -2391,13 +2471,19 @@ impl Agent {
                     }
                     me.write_threads_index().await;
                 }
-                {
+                if !told {
                     let h = host2.lock().await;
                     let id = ulid();
                     h.doc
                         .start_assistant_message(&id, &user_msg, &me.cfg.device_id);
                     h.doc.add_status_part(&id, "failed", "Failed");
-                    h.doc.add_error_part(&id, "subagent_failed", &e.to_string());
+                    h.doc.add_error_part(&id, "subagent_failed", &line);
+                    h.doc.add_hidden_part(
+                        &id,
+                        "subagent_failed_detail",
+                        &e.to_string(),
+                        &json!({ "subagentId": sub_id }),
+                    );
                     h.doc.finish_message(&id, MessageStatus::Error);
                 }
                 // The main agent must learn about the failure too, or its next turn still believes
@@ -2525,7 +2611,17 @@ impl Agent {
         let chat = chat_id.to_owned();
         let usage = usage.cloned();
         tokio::spawn(async move {
+            // A user message waiting for the lock goes first; the window is checked again after
+            // that turn (Doug, 2026-10-22: an 11 s compaction sat between two replies).
+            if me.sends_waiting() > 0 {
+                tracing::debug!(chat_id = %chat, "soft compaction deferred: a user message is waiting");
+                return;
+            }
             let _guard = me.turn_lock.lock().await;
+            if me.sends_waiting() > 0 {
+                tracing::debug!(chat_id = %chat, "soft compaction skipped: a user message arrived");
+                return;
+            }
             me.maybe_soft_compact(&chat, usage.as_ref()).await;
         });
     }
@@ -2695,7 +2791,11 @@ impl Agent {
                         h.doc.set_message_fields(&assistant_msg_id, &attr.fields);
                     }
                 }
-                TurnKind::SubagentResult { subagent_id, name } => {
+                TurnKind::SubagentResult {
+                    subagent_id,
+                    name,
+                    status: _,
+                } => {
                     h.doc
                         .add_status_part(&assistant_msg_id, "working", "Working…");
                     h.doc.set_message_fields(
@@ -2796,6 +2896,10 @@ impl Agent {
             skills_used: Vec::new(),
             model_error: None,
             session_rotated: false,
+            reply_only: !matches!(kind, TurnKind::User),
+            preempted: false,
+            notices: Vec::new(),
+            relay_fallback: relay_fallback_line(&kind),
         });
         self.turn_running.store(true, Ordering::SeqCst);
         let keepalive = self.spawn_keepalive();
@@ -3048,6 +3152,7 @@ impl Agent {
         raw: &str,
         error: Option<&str>,
     ) -> Result<()> {
+        self.let_user_sends_go_first().await;
         let _guard = self.turn_lock.lock().await;
         let ask = {
             let h = host.lock().await;
@@ -3095,6 +3200,7 @@ impl Agent {
         let kind = TurnKind::SubagentResult {
             subagent_id: subagent_id.to_owned(),
             name: name.to_owned(),
+            status: status.to_owned(),
         };
         let outcome = self
             .drive_turn(
@@ -3132,6 +3238,7 @@ impl Agent {
         prompt: &str,
         kind: TurnKind,
     ) -> Result<()> {
+        self.let_user_sends_go_first().await;
         let _guard = self.turn_lock.lock().await;
         let outcome = self
             .drive_turn(
@@ -3297,7 +3404,17 @@ impl Agent {
         }
         let started = Instant::now();
         let mut deadline_announced = false;
-        let deadline = Duration::from_secs(turn_deadline_secs());
+        let reply_only = self
+            .turn
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|t| t.reply_only);
+        let deadline = Duration::from_secs(if reply_only {
+            relay_turn_deadline_secs()
+        } else {
+            turn_deadline_secs()
+        });
         // Time the turn spends blocked on an approval card is the user's, not the agent's: it
         // does not count toward the turn deadline.
         let mut approval_paused = Duration::ZERO;
@@ -3324,6 +3441,23 @@ impl Agent {
                         continue;
                     }
                     let elapsed = started.elapsed().saturating_sub(approval_paused);
+                    // A relay turn steps aside for a waiting user message, and never escalates:
+                    // it writes its plain line and ends.
+                    if reply_only
+                        && !deadline_announced
+                        && (elapsed > deadline
+                            || (self.sends_waiting() > 0
+                                && elapsed > Duration::from_secs(RELAY_TURN_YIELD_SECS)))
+                    {
+                        deadline_announced = true;
+                        let reason = if elapsed > deadline {
+                            "deadline"
+                        } else {
+                            "user waiting"
+                        };
+                        self.cut_relay_turn_short(host, &pi, reason).await;
+                        continue;
+                    }
                     // Turn deadline: announce in chat, hand remaining work to a subagent, never silent.
                     if elapsed > deadline && !deadline_announced {
                         deadline_announced = true;
@@ -3367,6 +3501,61 @@ impl Agent {
             }
         }
         Ok(())
+    }
+
+    /// End a relay turn now: the plain fallback line when the model wrote nothing yet, the turn
+    /// marked stopped and preempted (no hand-off follows), the pi turn aborted.
+    async fn cut_relay_turn_short(&self, host: &SharedHost, pi: &Arc<RpcChild>, reason: &str) {
+        {
+            let mut tl = self.turn.lock().await;
+            let Some(t) = tl.as_mut() else {
+                return;
+            };
+            self.cut_relay_turn_short_locked(host, t, reason).await;
+        }
+        let _ = pi
+            .call_timeout(
+                RpcCommand::Abort {
+                    id: pi.next_id("ab"),
+                },
+                Duration::from_secs(5),
+            )
+            .await;
+    }
+
+    async fn cut_relay_turn_short_locked(
+        &self,
+        host: &SharedHost,
+        t: &mut TurnState,
+        reason: &str,
+    ) {
+        if t.stopped {
+            return;
+        }
+        tracing::info!(chat_id = %t.chat_id, reason, "relay turn cut short");
+        t.stopped = true;
+        t.preempted = true;
+        t.escalate = false;
+        if t.streamed_text.trim().is_empty() && !t.relay_fallback.is_empty() {
+            let line = t.relay_fallback.clone();
+            self.write_notice(host, t, &line).await;
+        }
+        self.set_activity(host, t, None).await;
+    }
+
+    /// A limit / error line, written once per turn: the same event reported twice (two script
+    /// timeouts, two failed starts) must not read as two lines.
+    pub(crate) async fn write_notice(&self, host: &SharedHost, t: &mut TurnState, line: &str) {
+        if t.notices.iter().any(|n| n == line) {
+            return;
+        }
+        t.notices.push(line.to_owned());
+        let sep = if t.streamed_text.is_empty() || t.streamed_text.ends_with('\n') {
+            ""
+        } else {
+            "\n\n"
+        };
+        self.write_text(host, t, &format!("{sep}{line}")).await;
     }
 
     /// Fold one pi event into the chat doc and the turn state. Returns true when the turn settled.
@@ -3475,6 +3664,23 @@ impl Agent {
             } => {
                 // Talking to the user is not a tool step: no tool part, no count, no activity.
                 if tool_name == "route" || tool_name == "send_message" {
+                    return Ok(false);
+                }
+                // A relay turn that starts real work is ended here (the route hook already
+                // refused `act`; this catches a tool call without one).
+                if t.reply_only && tool_name != "ask_user" && tool_name != "mcp__arbos__ask_user" {
+                    self.cut_relay_turn_short_locked(host, t, "tool call in a relay turn")
+                        .await;
+                    if let Ok(pi) = self.pi().await {
+                        let _ = pi
+                            .call_timeout(
+                                RpcCommand::Abort {
+                                    id: pi.next_id("ab"),
+                                },
+                                Duration::from_secs(5),
+                            )
+                            .await;
+                    }
                     return Ok(false);
                 }
                 // Agent-flow §1: never start real work on a bare "Working…" row. If route
@@ -3610,7 +3816,7 @@ impl Agent {
                         if escalate {
                             t.escalate = true;
                         }
-                        self.write_text(host, t, notice).await;
+                        self.write_notice(host, t, notice).await;
                     }
                 }
             }
@@ -3925,7 +4131,14 @@ impl Agent {
             return Err("no turn is running".into());
         };
         t.route_attempts += 1;
-        match validate(args) {
+        let validated = validate(args).and_then(|r| {
+            if t.reply_only && !matches!(r, ValidRoute::Reply { .. }) {
+                Err("this is a relay turn: route `reply` and write the update for the user; start no work here".to_owned())
+            } else {
+                Ok(r)
+            }
+        });
+        match validated {
             Ok(r) => {
                 let action = route_name(&r);
                 tracing::info!(route = action, attempt = t.route_attempts, "route accepted");
@@ -4104,7 +4317,7 @@ impl Agent {
                     t.escalate = true;
                 }
                 // Visible chat line: never stop silently on a hard limit.
-                self.write_text(host, t, notice).await;
+                self.write_notice(host, t, notice).await;
             }
         }
         t.model_error = Some(m);
@@ -4178,7 +4391,7 @@ impl Agent {
                 Some(&json!({ "before": "limit_notice" })),
             );
         }
-        self.write_text(host, t, text).await;
+        self.write_notice(host, t, text).await;
     }
 
     /// Mark subagents whose work ended without cleanup as finished: store status
@@ -5161,6 +5374,47 @@ fn turn_deadline_secs() -> u64 {
         .unwrap_or(TURN_DEADLINE_SECS)
 }
 
+/// The chat line for a helper that could not be started; the raw error stays in a hidden part.
+pub(crate) fn subagent_start_failure_line(err: &str) -> String {
+    let lower = err.to_ascii_lowercase();
+    if lower.contains("timed out") {
+        "I couldn't start the helper for this step: it did not respond in time.".to_owned()
+    } else if lower.contains("no such file") || lower.contains("not found") {
+        "I couldn't start the helper for this step: its program is missing on this machine."
+            .to_owned()
+    } else {
+        "I couldn't start the helper for this step.".to_owned()
+    }
+}
+
+/// Relay turns (subagent result, approval outcome) only write a few sentences: their deadline
+/// is short, and it is not an escalation point. `ARBOS_RELAY_TURN_DEADLINE_SECS` (default 120).
+pub(crate) fn relay_turn_deadline_secs() -> u64 {
+    std::env::var("ARBOS_RELAY_TURN_DEADLINE_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(120)
+}
+
+/// How long a relay turn may keep a waiting user message behind it before it is cut short.
+pub(crate) const RELAY_TURN_YIELD_SECS: u64 = 15;
+
+/// The plain line agentd writes for a relay turn the model did not finish.
+pub(crate) fn relay_fallback_line(kind: &TurnKind) -> String {
+    match kind {
+        TurnKind::User => String::new(),
+        TurnKind::SubagentResult { status, .. } => match status.as_str() {
+            "done" => "The background work I started has finished. Ask me for the details whenever you like.".to_owned(),
+            "cancelled" => "The background work I started was stopped before it finished.".to_owned(),
+            _ => "The background work I started did not finish: it failed or timed out. Tell me if you want me to try again.".to_owned(),
+        },
+        TurnKind::ApprovalOutcome { title, .. } => {
+            format!("Noted your decision on “{title}”.")
+        }
+    }
+}
+
 /// A failed `codemode` script (D86): the sandbox's own limits — the script deadline, the 256 MB VM
 /// heap, the output-item cap — get a chat line; a plain script error (a thrown `Error`, a bad tool
 /// name) returns `None` and stays between the model and its tools.
@@ -5246,6 +5500,27 @@ pub fn project_section(project_name: &str, work_dir: &str, talking_model: &str) 
     format!(
         "\n\n## This project\n\n{identity} Arbos is the app you run in; it is never the user's name — call the user by the name given with their message. Your folder is `{work_dir}`: every file you create or read for this project goes there (relative paths resolve there; do not use `/work` itself, other folders under `/work` belong to other projects). You run on model `{talking_model}`.\n"
     )
+}
+
+#[cfg(test)]
+impl Agent {
+    /// Test seam: hold the turn lock as a running act turn of `chat_id` would, with a turn state
+    /// the quick-reply snapshot can read. Dropping the guard frees the lock; the state stays.
+    pub(crate) async fn test_hold_turn(&self, chat_id: &str) -> tokio::sync::MutexGuard<'_, ()> {
+        let g = self.turn_lock.lock().await;
+        let mut t = TurnState::claim(chat_id, "m-busy", false);
+        t.activity = Some("Running a command…".into());
+        t.ack_text = "Starting the long benchmark now.".into();
+        t.act_transcript
+            .push("→ bash {\"command\":\"sleep 100 && echo finished\"}".into());
+        *self.turn.lock().await = Some(t);
+        g
+    }
+
+    /// Test seam: give the held turn a live assistant row to write into.
+    pub(crate) async fn test_open_row(&self, host: &SharedHost, t: &mut TurnState) {
+        self.open_row(host, t, "result").await;
+    }
 }
 
 #[cfg(test)]

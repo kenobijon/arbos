@@ -93,10 +93,13 @@ impl Isolation {
                 let box_mem: Option<u64> = std::fs::read_to_string(root.join("memory.max"))
                     .ok()
                     .and_then(|s| s.trim().parse().ok());
-                // Half the box for one workspace (kill), a bit less as the throttle point.
+                // Half the box for one workspace, enforced by the kernel's OOM killer (it takes
+                // the largest task, i.e. the runaway script). No `memory.high`: the throttle
+                // stalls every task of the workspace — pi and the harness children included —
+                // once one script passes it, and the agent stops answering (Doug, 2026-10-22:
+                // 82–89 % "full" memory pressure, 9 s tool round trips, 37 s to first token).
                 let mem_max = box_mem.map(|m| m / 2);
-                let mem_high = box_mem.map(|m| m * 3 / 8);
-                (cpus, mem_high, mem_max)
+                (cpus, None, mem_max)
             }
             None => (None, None, None),
         };

@@ -548,6 +548,15 @@ roll_image() {
     bash "$REPO/image/register-snapshot.sh" "$snapshot" "$image" 4 8 10 > "$STATE/runs/agentd-$version-register.log" 2>&1 \
     || { record_failure agentd "$sha" "snapshot registration failed: $(tail -2 "$STATE/runs/agentd-$version-register.log" | tr '\n' ' ')"; exit 1; }
   log "agentd: snapshot $snapshot active"
+  # Busy-reply gate on the canary box first (scripts/deploy/agentd-canary-smoke.sh, from the
+  # rolled commit): a failed gate stops here — default unchanged, no real box moves.
+  local smoke_rc=0
+  RELAY_URL="$RELAY_URL" RELAY_ENV="$RELAY_ENV" STATE="$STATE" EVENTS="$EVENTS" \
+    bash "$REPO/scripts/deploy/agentd-canary-smoke.sh" "$sha" "$version" "$snapshot" || smoke_rc=$?
+  if (( smoke_rc == 1 )); then
+    record_failure agentd "$sha" "busy-reply smoke failed on the canary box (image $version); default not switched, nothing rolled"
+    exit 1
+  fi
   if grep -q '^ARBOS_DAYTONA_SNAPSHOT=' "$RELAY_ENV"; then
     sed -i "s|^ARBOS_DAYTONA_SNAPSHOT=.*|ARBOS_DAYTONA_SNAPSHOT=$snapshot|" "$RELAY_ENV"
   else
