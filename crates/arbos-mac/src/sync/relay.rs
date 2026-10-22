@@ -15,8 +15,7 @@ use anyhow::{anyhow, Context as _, Result};
 use arbos_client::room::{self, RoomAction, RoomSession};
 use arbos_core::api::{
     CreateChatResponseDto, GetProjectResponseDto, GroupDto, MachineStateDto, MachineStatusDto,
-    MeResponseDto, MeUserResponseDto, PeopleChatDto, ProjectDto, ProjectMembersDto, UserCardDto,
-    UsersPageDto,
+    MeResponseDto, MeUserResponseDto, PeopleChatDto, ProjectMembersDto, UserCardDto, UsersPageDto,
 };
 use arbos_core::doc::{UserAttachment, UserMessageOpts};
 use arbos_core::wire::{BoxState as WireBox, PROJECT_DOC_CHAT_ID};
@@ -415,7 +414,8 @@ impl Shared {
     /// An app error the user did not cause and cannot act on (a thumbnail that did not load, a
     /// list that did not refresh). Logged, and reported once per signature per week as a silent
     /// feedback item (`submitted_by: "app"`); nothing is shown in the chat. Transient network
-    /// blips (timeout, reset, DNS, TLS decrypt) only log — they are not product bugs.
+    /// blips (timeout, reset, DNS, TLS decrypt, empty/truncated body) only log — they are not
+    /// product bugs.
     fn diagnostic(self: &Arc<Self>, kind: &'static str, detail: impl Into<String>) {
         let detail = detail.into();
         log::warn!(target: "arbos_mac::diagnostic", "{kind}: {detail}");
@@ -489,6 +489,11 @@ impl Shared {
             }
             if !status.is_success() {
                 return Err(anyhow!("GET {path}: HTTP {status} {body}"));
+            }
+            // A 200 with no bytes is a cut connection / proxy blip, not valid JSON — surface it
+            // so people-chats can retry and diagnostics treat it as transient.
+            if body.trim().is_empty() {
+                return Err(anyhow!("GET {path}: empty body"));
             }
             return serde_json::from_str(&body).with_context(|| format!("GET {path}: bad JSON"));
         }
@@ -1883,14 +1888,18 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
     let mut all_chats: Vec<Chat> = Vec::new();
     let me_id = shared.me_id();
     for item in items {
-        let list_dto: ProjectDto = match serde_json::from_value(item) {
-            Ok(d) => d,
-            Err(err) => {
-                log::warn!(target: "arbos_mac::relay", "ProjectDto: bad list item: {err}");
-                continue;
-            }
+        // `GET /projects` overwrites `owner` with the user-id string (not a
+        // ProjectOwnerDto object), so the list row is not a full ProjectDto.
+        // Only id + list extras are read here; detail fills the rest.
+        let Some(id) = item.get("id").and_then(Value::as_str).map(str::to_owned) else {
+            continue;
         };
-        let id = list_dto.id.clone();
+        let list_shared = item.get("shared").and_then(Value::as_bool);
+        let list_owner_handle = item
+            .get("owner_handle")
+            .and_then(Value::as_str)
+            .filter(|h| !h.is_empty())
+            .map(str::to_owned);
         let detail_val = shared.get_json(&format!("/projects/{id}")).await?;
         let detail: GetProjectResponseDto = match serde_json::from_value(detail_val) {
             Ok(d) => d,
@@ -1919,15 +1928,11 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
             .cloned();
         let mut project = project_from_dto(&detail, members.as_ref());
         // list_projects extras (shared / owner_handle) live on the list row.
-        if let Some(shared_flag) = list_dto.shared {
+        if let Some(shared_flag) = list_shared {
             project.shared = shared_flag;
         }
         if project.owner_handle.is_none() {
-            project.owner_handle = list_dto
-                .owner_handle
-                .clone()
-                .flatten()
-                .filter(|h| !h.is_empty());
+            project.owner_handle = list_owner_handle;
         }
         project.people.retain(|p| p.id != me_id);
         if let Some(prev) = &previous {

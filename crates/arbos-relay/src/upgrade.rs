@@ -5,7 +5,8 @@
 //! Steps (one task per user, idempotent while it runs):
 //!   pack   — start the old sandbox if needed, stop its agentd, tar `/work` (logs excluded), pull
 //!            the tarball through the relay;
-//!   stop   — hibernate the old sandbox and record it in `box_history` (kept 7 days as fallback);
+//!   stop   — hibernate the old sandbox and record it in `box_history` (kept 7 days as fallback; the 2
+//!            newest per user stay unarchived, older retained ones are Daytona-archived at once);
 //!   create — a fresh box from the target snapshot (new tokens; the `boxes` row is replaced);
 //!   unpack — stop the new agentd, extract `/work`, reset the per-workspace owner markers;
 //!   start  — bounce the sandbox so the entrypoint starts agentd on the carried `/work`.
@@ -31,6 +32,11 @@ use crate::signin::api_error;
 use crate::state::{AppState, UpgradeStatus};
 
 const KEEP_OLD_SANDBOX_MS: i64 = 7 * 24 * 3_600_000;
+/// Retained sandboxes a user keeps *unarchived* (started in seconds for rollback / repair); older ones
+/// are Daytona-archived right after the next upgrade — still within the 7-day window, never deleted
+/// early, just off the disk quota (2026-10-22: 308 retained 10 GiB sandboxes filled the 5000 GiB quota,
+/// `daytona create` answered 400 and four real users' boxes went to `error`).
+const KEEP_UNARCHIVED_RETAINED: usize = 2;
 const MAX_WORK_MIB: i64 = 3500;
 
 /// Is the box behind the relay's default snapshot?
@@ -444,12 +450,45 @@ async fn run(state: &AppState, user_id: &str, target: &str, source: Source) -> R
         }
         return Err(e.context("carry /work onto the new box"));
     }
+    let archived = archive_excess_retained(state, dt, Some(user_id)).await;
     Ok(json!({
-        "source_sandbox": source_id, "new_sandbox": new_id,
+        "source_sandbox": source_id, "new_sandbox": new_id, "archived_retained": archived,
         "from": old_row.as_ref().and_then(|o| o.snapshot.clone()), "to": target, "work_mib": mib,
         "old_kept_until": old_row.as_ref().map(|_| now_ms() + KEEP_OLD_SANDBOX_MS),
         "repair": matches!(source, Source::History { .. }),
     }))
+}
+
+/// Daytona-archive every retained sandbox beyond the [`KEEP_UNARCHIVED_RETAINED`] newest (one user, or
+/// all when `user_id` is `None`). Archive, never delete: `start` restores an archived sandbox (slower —
+/// see the runbook); the fallback window and the delete sweeper are unchanged. Returns how many were
+/// archived; a sandbox that is not stopped yet (409) is left for the hourly sweeper.
+pub async fn archive_excess_retained(
+    state: &AppState,
+    dt: &crate::daytona::Daytona,
+    user_id: Option<&str>,
+) -> usize {
+    let due = state
+        .db
+        .box_history_to_archive(user_id, KEEP_UNARCHIVED_RETAINED)
+        .unwrap_or_default();
+    let mut n = 0;
+    for (uid, sandbox_id) in due {
+        match dt.archive(&sandbox_id).await {
+            Ok(_) => {
+                let _ = state.db.mark_box_history_archived(&sandbox_id);
+                tracing::info!(user = %uid, sandbox = %sandbox_id, "retained box archived (beyond the newest {KEEP_UNARCHIVED_RETAINED})");
+                n += 1;
+            }
+            Err(e) if e.to_string().contains("404") => {
+                let _ = state.db.mark_box_history_deleted(&sandbox_id);
+            }
+            Err(e) => {
+                tracing::warn!(user = %uid, sandbox = %sandbox_id, error = %e, "retained box archive")
+            }
+        }
+    }
+    n
 }
 
 /// Repair: the user's row has no usable sandbox (a failed upgrade, a deleted sandbox) but a
@@ -582,6 +621,8 @@ pub async fn spawn_history_sweeper(state: AppState) {
             let Some(dt) = state.daytona.as_ref() else {
                 return;
             };
+            // Anything the per-upgrade pass could not archive (409: not stopped yet, API hiccup).
+            archive_excess_retained(&state, dt, None).await;
             for (user_id, sandbox_id) in state.db.box_history_due().unwrap_or_default() {
                 match dt.delete(&sandbox_id).await {
                     Ok(_) => {
