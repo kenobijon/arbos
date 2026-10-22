@@ -311,6 +311,11 @@ pub fn render(
                 .min_w_0()
                 .flex()
                 .justify_center()
+                // Grok's pill sits 7 pt under the window edge (Jacob's
+                // reference, 2 px/pt: 14 px); ours sat at 4–5. The 6 pt top
+                // margin inside the 42 pt content box lands the 34 pt pill at
+                // 7–41 while the toggle stays on the lights' line.
+                .mt(px(6.0))
                 .child(pill.flex_shrink_0().max_w(px(460.0))),
         )
         .child(div().w(side).flex_shrink_0())
