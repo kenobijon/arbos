@@ -22,6 +22,7 @@ import select
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -53,8 +54,8 @@ def api(relay, token, method, path, body=None):
 class Timed:
     """Run `arbosctl chat send … --stream` and time what a user would see on screen."""
 
-    def __init__(self, cmd, log):
-        self.cmd, self.log = cmd, log
+    def __init__(self, cmd, log, env=None):
+        self.cmd, self.log, self.env = cmd, log, env
         self.t_sent = self.t_row = self.t_text = self.t_done = None
         self.rows_before, self.rows_after = set(), set()
         self.cur_row, self.first_text = None, ""
@@ -62,7 +63,7 @@ class Timed:
     def _handle(self, fd, data):
         now = time.time()
         text = data.decode("utf-8", "replace")
-        self.log.write(f"{now:.3f} {fd} {text!r}\n")
+        self.log.write(f"{now:.3f} {self.cmd[4][-6:]} {fd} {text!r}\n")
         if fd == 2:
             if self.t_sent is None and "[sent message" in text:
                 self.t_sent = now
@@ -92,7 +93,7 @@ class Timed:
             self.first_text = re.sub(r"\[[^\]]*\]", "", text).strip()[:200]
 
     def run(self):
-        p = subprocess.Popen(self.cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+        p = subprocess.Popen(self.cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0, env=self.env)
         fds = {p.stdout.fileno(): 1, p.stderr.fileno(): 2}
         while fds:
             r, _, _ = select.select(list(fds), [], [], 0.2)
@@ -180,18 +181,28 @@ def main():
              BUSY_PROMPT.format(n=args.busy_seconds, t=args.busy_seconds + 60),
              "--stream", "--timeout", str(args.busy_seconds + 240)],
             env=busy_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        time.sleep(args.probe_delay)
-        # Each probe runs under its own arbosctl config (own room replica), via os.environ.
-        os.environ["ARBOSCTL_CONFIG"] = cfgs[1]
-        same = Timed(["arbosctl", "chat", "send", project, chat1, PROBE_SAME,
-                      "--stream", "--timeout", "120"], log)
-        r_same = same.run()
         chat2 = open_chat(cfgs[2], f"busy-reply smoke (other chat) {stamp}")
-        os.environ["ARBOSCTL_CONFIG"] = cfgs[2]
-        other = Timed(["arbosctl", "chat", "send", project, chat2, PROBE_OTHER,
-                       "--stream", "--timeout", "120"], log)
-        r_other = other.run()
-        busy_still_running = busy.poll() is None
+        time.sleep(args.probe_delay)
+        # Both probes run while the long turn is still going: the same-chat one first, the
+        # new-chat one 10 s later, each under its own arbosctl config (own room replica).
+        results = {}
+        running_at = {}
+
+        def probe(name, cfg, chat, text):
+            running_at[name] = busy.poll() is None
+            env_p = dict(os.environ, ARBOSCTL_CONFIG=cfg)
+            results[name] = Timed(["arbosctl", "chat", "send", project, chat, text,
+                                   "--stream", "--timeout", "150"], log, env_p).run()
+
+        t_same = threading.Thread(target=probe, args=("same_chat", cfgs[1], chat1, PROBE_SAME))
+        t_other = threading.Thread(target=probe, args=("other_chat", cfgs[2], chat2, PROBE_OTHER))
+        t_same.start()
+        time.sleep(10)
+        t_other.start()
+        t_same.join()
+        t_other.join()
+        r_same, r_other = results["same_chat"], results["other_chat"]
+        busy_still_running = all(running_at.values())
         try:
             busy.wait(timeout=args.busy_seconds + 300)
         except subprocess.TimeoutExpired:
