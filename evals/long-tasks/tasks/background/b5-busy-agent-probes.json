@@ -1,0 +1,49 @@
+{
+  "id": "b5-busy-agent-probes",
+  "lane": "c",
+  "category": "background",
+  "title": "Probes in the busy chat and in a new chat answer within 5 s while a long act turn runs",
+  "turns": [
+    {
+      "prompt": "Run this exact command with your shell tool and wait for it to finish in the foreground (do not background it), then tell me what it printed: `sleep 95 && echo SLEEP_FINISHED`.",
+      "seed": "mkdir -p {D}",
+      "background": true,
+      "latency_max_s": 10,
+      "timeout_s": 60
+    },
+    {
+      "prompt": "what is going on now?",
+      "pre_wait_s": 2,
+      "background": true,
+      "latency_max_s": 5,
+      "after_s": 8,
+      "rubric": {
+        "criteria": "Judge the reply text only. It must describe the work that is running right now (a sleep / shell command in progress, or that it is still working on the previous request). A reply saying nothing is running, or an empty reply, scores 0.",
+        "min": 3
+      },
+      "timeout_s": 60
+    },
+    {
+      "prompt": "hello? are you there?",
+      "new_chat": true,
+      "pre_wait_s": 2,
+      "background": true,
+      "latency_max_s": 5,
+      "after_s": 6,
+      "reply_regex": "\\w",
+      "timeout_s": 60
+    },
+    {
+      "prompt": "Did the sleep command finish? What did it print?",
+      "pre_wait_s": 95,
+      "reply_regex": "SLEEP_FINISHED",
+      "timeout_s": 240
+    }
+  ],
+  "doc_checks": {
+    "no_duplicate_status": true,
+    "no_empty_result_rows": true,
+    "no_repeated_sentence": true
+  },
+  "regression": "busy-agent quick replies (bc-d117b386, #1349) + reply lost after act (#1355)"
+}
