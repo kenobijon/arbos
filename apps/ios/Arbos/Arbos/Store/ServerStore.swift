@@ -108,7 +108,7 @@ extension AppModel {
         return ts > 0 ? ts : server.createdAt
     }
 
-    /// The space row carries "#general · text"; fall back to the newest channel row.
+    /// The space row carries "general · text"; fall back to the newest channel row.
     func serverPreview(_ server: Server) -> String {
         if let space = matrixSpaceRow(server.id), !space.lastText.isEmpty {
             return HomeView.plain(space.lastText.split(separator: "\n").first.map(String.init) ?? "")
@@ -116,7 +116,7 @@ extension AppModel {
         let rows = server.channels.compactMap { matrixChannelRow($0) }.filter { !$0.lastText.isEmpty }
         guard let newest = rows.max(by: { $0.lastTs < $1.lastTs }) else { return "No messages yet" }
         let line = newest.lastText.split(separator: "\n").first.map(String.init) ?? ""
-        return "#\(newest.name) · " + HomeView.plain(line)
+        return "\(newest.name) · " + HomeView.plain(line)
     }
 
     private static func previewWho(_ senderName: String, me: AuthUser?) -> String? {

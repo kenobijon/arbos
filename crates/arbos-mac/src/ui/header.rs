@@ -56,7 +56,10 @@ pub fn render(
         Some(ProfilePage::User { space_id, .. }) => space_id.as_deref() == Some(space.id.as_str()),
         Some(ProfilePage::Group { space_id }) => space_id == &space.id,
         Some(ProfilePage::Agent { project_id }) => project_id == &space.id,
-        Some(ProfilePage::Me) | Some(ProfilePage::Server { .. }) | None => false,
+        Some(ProfilePage::Me)
+        | Some(ProfilePage::Server { .. })
+        | Some(ProfilePage::Channel { .. })
+        | None => false,
     };
     // Agents with multi-chat keep a trailing "+" inside the pill, so the right
     // pad is tighter than the people/group pill's.
@@ -323,8 +326,9 @@ pub fn render(
         .child(div().w(side).flex_shrink_0())
 }
 
-/// The same bar for a channel (D88 rule 3): the pill carries the server's disc and
-/// `# general`; click → the server's page in the right pane (rule 5).
+/// The same bar for a channel (D88 rule 3): the pill carries the server's disc, the `#`
+/// glyph and the channel's name; click → the channel's page in the right pane (#1317 —
+/// the server's page is the server header in the sidebar).
 pub fn render_channel(
     shell: &Shell,
     server: &ServerInfo,
@@ -334,8 +338,9 @@ pub fn render_channel(
 ) -> Div {
     let theme = Theme::of(cx).clone();
     let state = shell.state.read(cx);
-    let page = ProfilePage::Server {
+    let page = ProfilePage::Channel {
         server_id: server.id.clone(),
+        channel_id: channel.id.clone(),
     };
     let pane_open = state.profile.as_ref() == Some(&page);
     let overlay = state.sidebar_overlay;
@@ -357,15 +362,16 @@ pub fn render_channel(
             div()
                 .flex()
                 .items_center()
-                .gap(px(6.0))
+                .gap(px(5.0))
                 .min_w_0()
+                .child(icon("hash", 14.0, theme.text_muted))
                 .child(
                     div()
                         .text_size(px(TEXT_BODY))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(theme.text)
                         .truncate()
-                        .child(format!("# {}", channel.name)),
+                        .child(channel.name.clone()),
                 )
                 .when(locked, |el| el.child(icon("lock", 11.0, theme.text_faint))),
         )

@@ -217,7 +217,7 @@ fn server_preview(state: &AppState, server: &ServerInfo) -> String {
         .filter(|c| c.server_id == server.id && c.last_ts > 0)
         .max_by_key(|c| c.last_ts);
     match newest {
-        Some(c) => format!("#{} · {}", c.name, channel_last_line(c)),
+        Some(c) => format!("{} · {}", c.name, channel_last_line(c)),
         None => state
             .space_row(server)
             .map(|s| s.last_text.clone())
@@ -855,7 +855,6 @@ fn server_channels(
     let page = crate::app::ProfilePage::Server {
         server_id: server.id.clone(),
     };
-    let page_open = state.profile.as_ref() == Some(&page);
     let selected_channel = state
         .selected_channel
         .as_ref()
@@ -894,8 +893,6 @@ fn server_channels(
                 .min_w_0()
                 .flex_1()
                 .cursor_pointer()
-                .rounded(px(8.0))
-                .when(page_open, |el| el.bg(theme.surface_2))
                 .child(server_picture(server, 26.0, theme))
                 .child(
                     div()

@@ -9,6 +9,7 @@
 //! presence from the room frames.
 
 mod agent;
+mod channel;
 mod group;
 pub(crate) mod kit;
 mod me;
@@ -44,6 +45,10 @@ pub fn pane(page: &ProfilePage, shell: &Shell, cx: &mut Context<Shell>) -> Optio
         ProfilePage::Agent { project_id } => agent::page(project_id, shell, cx),
         ProfilePage::Me => Some(me::page(shell, cx)),
         ProfilePage::Server { server_id } => server::page(server_id, shell, cx),
+        ProfilePage::Channel {
+            server_id,
+            channel_id,
+        } => channel::page(server_id, channel_id, shell, cx),
     }
 }
 
