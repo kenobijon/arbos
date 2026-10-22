@@ -2345,6 +2345,16 @@ class Loop:
         if st.get("expects_ci") and not st.get("release_done") and ci and ci["status"] == "completed" and ci["conclusion"] == "success" \
                 and (rel is None or (rel["status"] == "completed" and rel["conclusion"] in ("cancelled", "skipped"))):
             later = self.gh.later_release(sha, since)
+            if not later:
+                # Auto-stable builds the bump on top of a target newer than the CI run that triggered it (the debounce
+                # lets main move), so the run's head_sha may not contain the fix although the published tag does
+                # (#1241: merged 01:19, run head 76222502 from 01:13, tag v0.6.103 at 02:29). The release itself is
+                # the evidence: the newest published stable tag that carries the commit.
+                tag_rel = next((r for r in self.gh.releases() if not r.get("draft") and re.fullmatch(r"v\d+\.\d+\.\d+", r.get("tag_name") or "")
+                                and (r.get("published_at") or "") >= since and self.gh.contains(r["tag_name"], sha)), None)
+                if tag_rel:
+                    later = {"head_sha": tag_rel["tag_name"], "html_url": tag_rel["html_url"], "status": "completed",
+                             "conclusion": "success", "updated_at": tag_rel["published_at"]}
             log(f"[{fid}] no Release for the commit; superseding edge release run: {later['head_sha'][:8] if later else 'none yet'}")
             if later:
                 rel = later
