@@ -5,6 +5,7 @@
 //! | --- | --- | --- |
 //! | `vault_connect` (#1265: the Connect 1Password flow) | `ARBOS_FEATURE_VAULT_CONNECT` (`vaults.rs`) | off |
 //! | `leaf_avatars` (D92: agents without a photo draw a leaf, not initials) | `ARBOS_FEATURE_LEAF_AVATARS` | on; `0` / `false` / `off` / `no` is the kill switch |
+//! | `leaf_lottie` (the leaves play their committed Lottie idle/gust instead of the native sway) | `ARBOS_FEATURE_LEAF_LOTTIE` | on; same kill switch |
 //! | `voice_mode` (spoken replies, voice picker, reply playback; 2026-10-22 Jacob: hidden until it works end to end) | `ARBOS_FEATURE_VOICE_MODE` | off; the relay also refuses `/proxy/v1/audio/speech` while off, so no client can spend on TTS |
 //!
 //! `GET /secrets` serves the same object (`vaults::features()` delegates here).
@@ -29,6 +30,11 @@ pub fn leaf_avatars() -> bool {
     env_flag("ARBOS_FEATURE_LEAF_AVATARS", true)
 }
 
+/// Lottie playback of the leaves (idle loop + gust). Default on.
+pub fn leaf_lottie() -> bool {
+    env_flag("ARBOS_FEATURE_LEAF_LOTTIE", true)
+}
+
 /// Voice mode (spoken replies, voice picker, playback). Default off; `ARBOS_FEATURE_VOICE_MODE=1`
 /// brings it back without a client release.
 pub fn voice_mode() -> bool {
@@ -41,6 +47,7 @@ pub fn dto() -> MeFeaturesDto {
     MeFeaturesDto {
         vault_connect: Some(crate::vaults::vault_connect()),
         leaf_avatars: Some(leaf_avatars()),
+        leaf_lottie: Some(leaf_lottie()),
         voice_mode: Some(voice_mode()),
     }
 }

@@ -1294,13 +1294,17 @@ public struct MeFeaturesDto: Codable {
 	public let vault_connect: Bool?
 	/// D92: agents without a photo draw a leaf, not initials (default on).
 	public let leaf_avatars: Bool?
+	/// D92 follow-on: the leaves play their committed Lottie (idle loop + gust) instead of the
+	/// native sway (default on).
+	public let leaf_lottie: Bool?
 	/// Voice mode — spoken replies, the voice picker, reply playback (default off since
 	/// 2026-10-22, Jacob: hidden everywhere until it works end to end). Absent = off.
 	public let voice_mode: Bool?
 
-	public init(vault_connect: Bool?, leaf_avatars: Bool?, voice_mode: Bool?) {
+	public init(vault_connect: Bool?, leaf_avatars: Bool?, leaf_lottie: Bool?, voice_mode: Bool?) {
 		self.vault_connect = vault_connect
 		self.leaf_avatars = leaf_avatars
+		self.leaf_lottie = leaf_lottie
 		self.voice_mode = voice_mode
 	}
 }

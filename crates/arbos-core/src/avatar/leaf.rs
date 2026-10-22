@@ -41,6 +41,11 @@ pub struct Leaf {
     pub slug: &'static str,
     pub name: &'static str,
     pub svg: &'static str,
+    /// Jacob's Lottie files (bodymovin 5.7, 100 × 100, 60 fps): the seamless idle loop and the
+    /// one-shot 1 s gust. One shape layer `leaf` → group → fill `leaf`; recolour via keypath
+    /// `**.leaf.Color`; transparent background (the app draws the disc).
+    pub idle_lottie: &'static str,
+    pub gust_lottie: &'static str,
     pub pivot: (f32, f32),
     pub idle_secs: f32,
     /// The leaf's own default disc colour from the manifest (index into [`COLORS`]).
@@ -56,6 +61,16 @@ macro_rules! leaf {
                 "../../../../assets/avatars/leaves/svg/",
                 $slug,
                 ".svg"
+            )),
+            idle_lottie: include_str!(concat!(
+                "../../../../assets/avatars/leaves/lottie/",
+                $slug,
+                "-idle.json"
+            )),
+            gust_lottie: include_str!(concat!(
+                "../../../../assets/avatars/leaves/lottie/",
+                $slug,
+                "-gust.json"
             )),
             pivot: $pivot,
             idle_secs: $frames as f32 / 60.0,
@@ -719,6 +734,32 @@ mod tests {
             m["avatar"]["leaf_fraction_of_circle"].as_f64().unwrap() as f32,
             LEAF_SCALE
         );
+    }
+
+    #[test]
+    fn lottie_files_are_the_manifests() {
+        let m: serde_json::Value = serde_json::from_str(MANIFEST_JSON).unwrap();
+        for (l, j) in LEAVES.iter().zip(m["leaves"].as_array().unwrap()) {
+            for (src, key, frames) in [
+                (l.idle_lottie, "idle", j["idle_frames"].as_f64().unwrap()),
+                (l.gust_lottie, "gust", j["gust_frames"].as_f64().unwrap()),
+            ] {
+                assert_eq!(
+                    j["lottie"][key].as_str().unwrap(),
+                    format!("lottie/{}-{key}.json", l.slug)
+                );
+                let v: serde_json::Value = serde_json::from_str(src).unwrap();
+                assert_eq!(v["fr"].as_f64().unwrap(), 60.0, "{} {key}", l.slug);
+                assert_eq!(v["op"].as_f64().unwrap(), frames, "{} {key}", l.slug);
+                assert_eq!(
+                    (v["w"].as_f64().unwrap(), v["h"].as_f64().unwrap()),
+                    (100.0, 100.0)
+                );
+                let layers = v["layers"].as_array().unwrap();
+                assert_eq!(layers.len(), 1, "{} {key}: one shape layer", l.slug);
+                assert_eq!(layers[0]["nm"].as_str().unwrap(), "leaf");
+            }
+        }
     }
 
     #[test]
