@@ -16,6 +16,7 @@ import json
 import os
 import re
 import urllib.request
+from pathlib import Path
 
 from . import relay as rl
 
@@ -70,11 +71,25 @@ def truth_check(spec, ctx):
         rels = _get_json(f"https://api.github.com/repos/{spec['repo']}/releases?per_page=8")
         tags = [r["tag_name"] for r in rels]
         truth["tags"] = tags[:5]
-        hits = [t for t in tags[:6] if t in produced]
-        if len(hits) < 4:
-            reasons.append(f"only {len(hits)} of the newest release tags {tags[:5]} appear in the file")
-        elif produced and tags[0] not in produced and tags[1] not in produced:
+        hay = reply if spec.get("where") == "reply" else produced
+        hits = [t for t in tags[:6] if t in hay]
+        if len(hits) < spec.get("min_hits", 4):
+            reasons.append(f"only {len(hits)} of the newest release tags {tags[:5]} appear in the output")
+        elif hay and tags[0] not in hay and tags[1] not in hay:
             reasons.append("newest tag missing")
+    elif kind == "fixture_json":
+        # truth committed next to the web fixtures (static files the agent fetches over the web)
+        gt = json.loads((Path(__file__).resolve().parent.parent / "fixtures" / spec["file"]).read_text())
+        hay = produced + "\n" + reply
+        for key in spec["keys"]:
+            val = gt.get(key)
+            truth[key] = val
+            if isinstance(val, dict):
+                missing = [k for k, v in val.items() if not number_in(v, hay)]
+                if missing:
+                    reasons.append(f"{key}: values missing for {missing}")
+            elif isinstance(val, (int, float)) and not number_in(val, hay):
+                reasons.append(f"{key}: {val} not in the output")
     elif kind == "urls_resolve":
         text = produced or reply
         if spec.get("file") and ctx.get("read_file"):

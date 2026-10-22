@@ -1,0 +1,19 @@
+{
+  "id": "r5-latest-release-search",
+  "lane": "a",
+  "category": "research",
+  "title": "Find a project's latest release with the web",
+  "turns": [
+    {
+      "prompt": "Search the web for the gVisor project (google/gvisor on GitHub) and tell me its most recent release tag and the date it was published, with the URL of the release page you used.",
+      "truth": {
+        "kind": "github_releases",
+        "repo": "google/gvisor",
+        "where": "reply",
+        "min_hits": 1
+      },
+      "reply_regex": "https?://",
+      "timeout_s": 300
+    }
+  ]
+}

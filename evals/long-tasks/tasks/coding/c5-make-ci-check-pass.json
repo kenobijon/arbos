@@ -1,0 +1,15 @@
+{
+  "id": "c5-make-ci-check-pass",
+  "lane": "b",
+  "category": "coding",
+  "title": "Make the project's CI check pass (lint + a failing test), commit",
+  "turns": [
+    {
+      "prompt": "{D}/tally is a small Python package with a CI check script, `./check.sh`, that currently fails. Run it, fix everything it complains about in the package code (do not edit check.sh or the tests), run it again until it passes, and commit with a message starting `fix:`. Tell me what was wrong.",
+      "seed": "mkdir -p {D}/tally/tally {D}/tally/tests && cd {D}/tally && touch tests/__init__.py && cat > tally/__init__.py <<'EOF'\nimport os\nimport sys\nfrom collections import Counter\n\n\ndef tally(words):\n    \"\"\"Count words case-insensitively; return (word, count) pairs, most common first.\"\"\"\n    c = Counter(w.lower() for w in words)\n    return sorted(c.items(), key=lambda kv: (-kv[1], kv[0]))\n\n\ndef top(words, n):\n    return tally(words)[:n + 1]\nEOF\ncat > tests/test_tally.py <<'EOF'\nimport unittest\nfrom tally import tally, top\n\nclass T(unittest.TestCase):\n    def test_tally(self):\n        self.assertEqual(tally([\"a\", \"B\", \"b\"]), [(\"b\", 2), (\"a\", 1)])\n    def test_top(self):\n        self.assertEqual(top([\"a\", \"b\", \"b\", \"c\"], 2), [(\"b\", 2), (\"a\", 1)])\n\nif __name__ == \"__main__\":\n    unittest.main()\nEOF\ncat > check.sh <<'EOF'\n#!/bin/bash\n# The project's CI check: no unused imports, tests green.\nset -e\npython3 - <<'PYCHK'\nimport ast, sys, pathlib\nbad = []\nfor p in pathlib.Path(\"tally\").glob(\"*.py\"):\n    tree = ast.parse(p.read_text())\n    names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}\n    for node in tree.body:\n        if isinstance(node, (ast.Import, ast.ImportFrom)):\n            for a in node.names:\n                nm = (a.asname or a.name).split(\".\")[0]\n                if nm not in names:\n                    bad.append(f\"{p}: unused import {nm}\")\nif bad:\n    print(\"\\n\".join(bad)); sys.exit(1)\nPYCHK\npython3 -m unittest discover -s tests -t . 2>&1 | tail -1\npython3 -m unittest discover -s tests -t . >/dev/null 2>&1\nEOF\nchmod +x check.sh && git init -q && git -c user.email=eval@arbos.life -c user.name=eval add -A && git -c user.email=eval@arbos.life -c user.name=eval commit -qm initial && sha256sum tests/test_tally.py check.sh | cut -d' ' -f1 | tr '\\n' ' ' > ../.locked_sha",
+      "verify": "cd {D}/tally && out=$(./check.sh 2>&1); rc=$?; locked=$(sha256sum tests/test_tally.py check.sh | cut -d' ' -f1 | tr '\\n' ' '); n=$(git log --oneline | wc -l); msg=$(git log -1 --pretty=%s); echo \"SHOW rc=$rc commits=$n last='$msg' locked_unchanged=$([ \"$locked\" = \"$(cat ../.locked_sha)\" ] && echo yes || echo no)\"; echo \"SHOW $out\" | tail -3; if [ $rc -eq 0 ] && [ \"$locked\" = \"$(cat ../.locked_sha)\" ] && [ $n -ge 2 ] && echo \"$msg\" | grep -qi '^fix'; then echo PASS; else echo FAIL: rc=$rc commits=$n; fi",
+      "forbid_question": true,
+      "timeout_s": 600
+    }
+  ]
+}
