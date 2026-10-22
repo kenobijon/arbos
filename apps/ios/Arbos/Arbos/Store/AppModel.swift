@@ -828,10 +828,12 @@ final class AppModel: ObservableObject {
     func refreshAccount() async {
         guard credentials != nil, !isFixture else { return }
         if tokens?.isExpiringSoon == true { _ = await refreshTokens() }
-        if let (who, cr, summary) = try? await api.me() {
+        if let (who, cr, summary, features) = try? await api.me() {
             user = who
             credits = cr
             saveAccountCache()
+            // D92 remote flag `features.leaf_avatars` (absent on an older relay = on).
+            LeafAvatarsFlag.shared.set(features?.leaf_avatars ?? true)
             let position = summary.waitlisted ? Int(summary.waitlist_position ?? 1) : nil
             if position != waitlistPosition { waitlistPosition = position }
             meAlwaysOn = summary.always_on
@@ -1874,6 +1876,23 @@ final class AppModel: ObservableObject {
                 }
             } catch {
                 notice = Notice(text: "Avatar colour: \(error.localizedDescription)")
+                await refreshRegistry()
+            }
+        }
+    }
+
+    /// D92: the owner's leaf and disc colour picks (nil = automatic). Optimistic, then PATCH.
+    func pickAvatarLeaf(_ projectId: Id, leaf: Int?, color: Int?) {
+        if let i = projects.firstIndex(where: { $0.id == projectId }) {
+            projects[i].avatarLeaf = leaf
+            projects[i].avatarLeafColor = color
+        }
+        guard !isFixture else { return }
+        Task {
+            do {
+                try await api.setProjectAvatarLeaf(projectId, leaf: leaf, color: color)
+            } catch {
+                notice = Notice(text: "Avatar: \(error.localizedDescription)")
                 await refreshRegistry()
             }
         }

@@ -66,6 +66,11 @@ fn color_index(effective: i64) -> u8 {
     (effective.rem_euclid(7)) as u8
 }
 
+/// D92 leaf / colour indices travel as small non-negative integers; anything else = automatic.
+fn leaf_index(v: i64) -> Option<u8> {
+    u8::try_from(v).ok()
+}
+
 impl From<&ProjectOwnerDto> for Person {
     fn from(o: &ProjectOwnerDto) -> Self {
         Person {
@@ -123,6 +128,8 @@ impl From<&SenderDto> for Sender {
             avatar: s.avatar.clone(),
             avatar_color: s.avatar_color.clone(),
             avatar_color_index: Some(color_index(s.avatar_color_index_effective)),
+            avatar_leaf: s.avatar_leaf_effective.and_then(leaf_index),
+            avatar_leaf_color: s.avatar_leaf_color_effective.and_then(leaf_index),
             avatar_url: s.avatar_url.clone().unwrap_or_default(),
         }
     }
@@ -344,6 +351,8 @@ pub(crate) fn project_from_dto(
         vision_enabled: p.vision_enabled,
         avatar_color_index: Some(color_index(p.avatar_color_index_effective)),
         avatar_color_override: p.avatar_color_index.map(color_index),
+        avatar_leaf: p.avatar_leaf.and_then(leaf_index),
+        avatar_leaf_color: p.avatar_leaf_color.and_then(leaf_index),
         image_url: None,
     }
 }
@@ -447,6 +456,15 @@ fn agent_from_member(m: &ChatMemberDto, pid: &str) -> AgentMember {
         avatar_color_index: project
             .map(|p| color_index(p.avatar_color_index_effective))
             .or(m.avatar_color_index_effective.map(color_index)),
+        // D92: the pair in effect (the relay applies the owner's picks and the rule).
+        avatar_leaf: project
+            .and_then(|p| p.avatar_leaf_effective)
+            .or(m.avatar_leaf_effective)
+            .and_then(leaf_index),
+        avatar_leaf_color: project
+            .and_then(|p| p.avatar_leaf_color_effective)
+            .or(m.avatar_leaf_color_effective)
+            .and_then(leaf_index),
     }
 }
 
@@ -541,6 +559,8 @@ pub(crate) fn people_space_from(
         vision_enabled: true,
         avatar_color_index: None,
         avatar_color_override: None,
+        avatar_leaf: None,
+        avatar_leaf_color: None,
         image_url: dto
             .image_key
             .as_deref()

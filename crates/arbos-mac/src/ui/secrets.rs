@@ -1134,7 +1134,7 @@ impl SecretsPanel {
             sub.push(secret_usage(a.last_used_at, a.disabled_at, a.enabled));
             let avatar = match projects.iter().find(|p| p.id == a.project_id) {
                 Some(p) => avatars::project(p, 30.0, theme),
-                None => avatars::element(&a.project_id, &a.name, None, 30.0, theme),
+                None => avatars::agent(&a.project_id, &a.name, None, None, None, 30.0, theme),
             };
             let (sid_a, pid_a, on) = (sid.clone(), a.project_id.clone(), a.enabled);
             g = g.child(
@@ -1895,7 +1895,7 @@ impl SecretsPanel {
         for a in &v.agents {
             let avatar = match projects.iter().find(|p| p.id == a.project_id) {
                 Some(p) => avatars::project(p, 30.0, theme),
-                None => avatars::element(&a.project_id, &a.name, None, 30.0, theme),
+                None => avatars::agent(&a.project_id, &a.name, None, None, None, 30.0, theme),
             };
             let (vid, pid, on) = (v.id.clone(), a.project_id.clone(), a.enabled);
             g = g.child(

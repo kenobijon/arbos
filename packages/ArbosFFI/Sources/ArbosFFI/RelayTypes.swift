@@ -42,8 +42,11 @@ public struct SenderDto: Codable {
 	public let avatar_url: String?
 	public let avatar_color_index: Int64?
 	public let avatar_color_index_effective: Int64
+	/// D92: agents get the leaf pair in effect; people send JSON null.
+	public let avatar_leaf_effective: Int64?
+	public let avatar_leaf_color_effective: Int64?
 
-	public init(kind: String, id: String, name: String, handle: String, avatar: String?, avatar_color: String?, avatar_url: String?, avatar_color_index: Int64?, avatar_color_index_effective: Int64) {
+	public init(kind: String, id: String, name: String, handle: String, avatar: String?, avatar_color: String?, avatar_url: String?, avatar_color_index: Int64?, avatar_color_index_effective: Int64, avatar_leaf_effective: Int64?, avatar_leaf_color_effective: Int64?) {
 		self.kind = kind
 		self.id = id
 		self.name = name
@@ -53,6 +56,8 @@ public struct SenderDto: Codable {
 		self.avatar_url = avatar_url
 		self.avatar_color_index = avatar_color_index
 		self.avatar_color_index_effective = avatar_color_index_effective
+		self.avatar_leaf_effective = avatar_leaf_effective
+		self.avatar_leaf_color_effective = avatar_leaf_color_effective
 	}
 }
 
@@ -339,11 +344,16 @@ public struct ChatMemberProjectDto: Codable {
 	public let avatar_color: String
 	public let avatar_color_index: Int64?
 	public let avatar_color_index_effective: Int64
+	public let avatar_leaf: Int64?
+	public let avatar_leaf_color: Int64?
+	/// Always sent by relays with D92; optional so older relays still decode.
+	public let avatar_leaf_effective: Int64?
+	public let avatar_leaf_color_effective: Int64?
 	public let description: String
 	public let model: String?
 	public let owner: ProjectOwnerDto
 
-	public init(id: String, name: String, icon: String, color: String, avatar: String, avatar_color: String, avatar_color_index: Int64?, avatar_color_index_effective: Int64, description: String, model: String?, owner: ProjectOwnerDto) {
+	public init(id: String, name: String, icon: String, color: String, avatar: String, avatar_color: String, avatar_color_index: Int64?, avatar_color_index_effective: Int64, avatar_leaf: Int64?, avatar_leaf_color: Int64?, avatar_leaf_effective: Int64?, avatar_leaf_color_effective: Int64?, description: String, model: String?, owner: ProjectOwnerDto) {
 		self.id = id
 		self.name = name
 		self.icon = icon
@@ -352,6 +362,10 @@ public struct ChatMemberProjectDto: Codable {
 		self.avatar_color = avatar_color
 		self.avatar_color_index = avatar_color_index
 		self.avatar_color_index_effective = avatar_color_index_effective
+		self.avatar_leaf = avatar_leaf
+		self.avatar_leaf_color = avatar_leaf_color
+		self.avatar_leaf_effective = avatar_leaf_effective
+		self.avatar_leaf_color_effective = avatar_leaf_color_effective
 		self.description = description
 		self.model = model
 		self.owner = owner
@@ -377,13 +391,18 @@ public struct ChatMemberDto: Codable {
 	public let avatar_color: String?
 	public let avatar_color_index: Int64??
 	public let avatar_color_index_effective: Int64?
+	/// Agent: D92 leaf picks and the pair in effect. Human: omitted.
+	public let avatar_leaf: Int64??
+	public let avatar_leaf_color: Int64??
+	public let avatar_leaf_effective: Int64?
+	public let avatar_leaf_color_effective: Int64?
 	public let project: ChatMemberProjectDto?
 	public let description: String?
 	/// Agent: owning user id string.
 	public let owner: String?
 	public let owner_handle: String??
 
-	public init(member: String, role: String, added_by: String, joined_at: Int64, handle: String?, avatar_url: String??, name: String??, status: String?, user_id: String?, last_seen_at: Int64??, online: Bool?, read_receipts: Bool?, avatar: String?, avatar_color: String?, avatar_color_index: Int64??, avatar_color_index_effective: Int64?, project: ChatMemberProjectDto?, description: String?, owner: String?, owner_handle: String??) {
+	public init(member: String, role: String, added_by: String, joined_at: Int64, handle: String?, avatar_url: String??, name: String??, status: String?, user_id: String?, last_seen_at: Int64??, online: Bool?, read_receipts: Bool?, avatar: String?, avatar_color: String?, avatar_color_index: Int64??, avatar_color_index_effective: Int64?, avatar_leaf: Int64??, avatar_leaf_color: Int64??, avatar_leaf_effective: Int64?, avatar_leaf_color_effective: Int64?, project: ChatMemberProjectDto?, description: String?, owner: String?, owner_handle: String??) {
 		self.member = member
 		self.role = role
 		self.added_by = added_by
@@ -400,6 +419,10 @@ public struct ChatMemberDto: Codable {
 		self.avatar_color = avatar_color
 		self.avatar_color_index = avatar_color_index
 		self.avatar_color_index_effective = avatar_color_index_effective
+		self.avatar_leaf = avatar_leaf
+		self.avatar_leaf_color = avatar_leaf_color
+		self.avatar_leaf_effective = avatar_leaf_effective
+		self.avatar_leaf_color_effective = avatar_leaf_color_effective
 		self.project = project
 		self.description = description
 		self.owner = owner
@@ -460,6 +483,12 @@ public struct ProjectDto: Codable {
 	public let vision_enabled: Bool
 	public let avatar_color_index: Int64?
 	public let avatar_color_index_effective: Int64
+	/// D92 leaf avatar: the owner's picks (`null` = automatic) and the pair in effect.
+	public let avatar_leaf: Int64?
+	public let avatar_leaf_color: Int64?
+	/// Always sent by relays with D92; optional so older relays still decode.
+	public let avatar_leaf_effective: Int64?
+	public let avatar_leaf_color_effective: Int64?
 	public let primary_chat_id: String?
 	public let owner: ProjectOwnerDto
 	public let model: String?
@@ -471,7 +500,7 @@ public struct ProjectDto: Codable {
 	/// `list_projects` shared rows only; `None` omits, `Some(None)` is JSON null.
 	public let owner_handle: String??
 
-	public init(id: String, name: String, icon: String, color: String, instructions: String, avatar: String, avatar_color: String, state: String, box: String, box_since: Int64, spend_today_usd: Double, spend_cap_usd: Double, created_at: Int64, last_active_at: Int64, description: String, voice: String?, vision_enabled: Bool, avatar_color_index: Int64?, avatar_color_index_effective: Int64, primary_chat_id: String?, owner: ProjectOwnerDto, model: String?, machine: MachineDto, shared: Bool?, my_role: String?, owner_handle: String??) {
+	public init(id: String, name: String, icon: String, color: String, instructions: String, avatar: String, avatar_color: String, state: String, box: String, box_since: Int64, spend_today_usd: Double, spend_cap_usd: Double, created_at: Int64, last_active_at: Int64, description: String, voice: String?, vision_enabled: Bool, avatar_color_index: Int64?, avatar_color_index_effective: Int64, avatar_leaf: Int64?, avatar_leaf_color: Int64?, avatar_leaf_effective: Int64?, avatar_leaf_color_effective: Int64?, primary_chat_id: String?, owner: ProjectOwnerDto, model: String?, machine: MachineDto, shared: Bool?, my_role: String?, owner_handle: String??) {
 		self.id = id
 		self.name = name
 		self.icon = icon
@@ -491,6 +520,10 @@ public struct ProjectDto: Codable {
 		self.vision_enabled = vision_enabled
 		self.avatar_color_index = avatar_color_index
 		self.avatar_color_index_effective = avatar_color_index_effective
+		self.avatar_leaf = avatar_leaf
+		self.avatar_leaf_color = avatar_leaf_color
+		self.avatar_leaf_effective = avatar_leaf_effective
+		self.avatar_leaf_color_effective = avatar_leaf_color_effective
 		self.primary_chat_id = primary_chat_id
 		self.owner = owner
 		self.model = model
@@ -751,6 +784,21 @@ public struct MeDeviceDto: Codable {
 	}
 }
 
+/// Remote feature flags on `GET /me` (and `GET /secrets`). Every key is optional on the
+/// wire so a client decodes an older relay that does not know a flag; the relay always sends
+/// all of them. Key names are a contract with shipped apps: only add, never rename.
+public struct MeFeaturesDto: Codable {
+	/// #1265: the Connect 1Password flow (default off).
+	public let vault_connect: Bool?
+	/// D92: agents without a photo draw a leaf, not initials (default on).
+	public let leaf_avatars: Bool?
+
+	public init(vault_connect: Bool?, leaf_avatars: Bool?) {
+		self.vault_connect = vault_connect
+		self.leaf_avatars = leaf_avatars
+	}
+}
+
 /// `limits` on `GET /me`.
 public struct MeLimitsDto: Codable {
 	public let read_only: Bool
@@ -799,13 +847,15 @@ public struct MeResponseDto: Codable {
 	public let device: MeDeviceDto?
 	public let credits: CreditsDto
 	public let limits: MeLimitsDto
+	public let features: MeFeaturesDto?
 	public let machine: MeMachineDto
 
-	public init(user: AccountUserDto, device: MeDeviceDto?, credits: CreditsDto, limits: MeLimitsDto, machine: MeMachineDto) {
+	public init(user: AccountUserDto, device: MeDeviceDto?, credits: CreditsDto, limits: MeLimitsDto, features: MeFeaturesDto?, machine: MeMachineDto) {
 		self.user = user
 		self.device = device
 		self.credits = credits
 		self.limits = limits
+		self.features = features
 		self.machine = machine
 	}
 }

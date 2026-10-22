@@ -77,12 +77,13 @@ impl Diagnostics {
     }
 }
 
-/// Brief network failures (timeout, reset, DNS, send, TLS) are not product bugs — log them, do
-/// not file a weekly feedback item. Real HTTP answers (4xx/5xx) and unexpected client errors
-/// still report. Reqwest's top-level "error sending request for url …" means the request never
-/// got an HTTP response (connect/TLS/send); the cause may be omitted when the caller formats
-/// with `{err}` instead of `{err:#}`. Explicit rustls decrypt/handshake strings still match when
-/// only the cause is present.
+/// Brief network failures (timeout, reset, DNS, send, TLS, empty/truncated body) are not product
+/// bugs — log them, do not file a weekly feedback item. Real HTTP answers (4xx/5xx) and unexpected
+/// client errors still report. Reqwest's top-level "error sending request for url …" means the
+/// request never got an HTTP response (connect/TLS/send); the cause may be omitted when the caller
+/// formats with `{err}` instead of `{err:#}`. Explicit rustls decrypt/handshake strings still
+/// match when only the cause is present. A 200 with no body (serde "EOF while parsing … column 0")
+/// or a cut-off JSON frame is the same class of blip as a closed connection.
 pub fn is_transient(detail: &str) -> bool {
     let d = detail.to_ascii_lowercase();
     d.contains("error sending request")
@@ -105,6 +106,9 @@ pub fn is_transient(detail: &str) -> bool {
         || d.contains("received fatal alert")
         || d.contains("tls handshake")
         || d.contains("connection closed before message completed")
+        // Empty or truncated response body after HTTP success (e.g. GET /chats on a flaky link).
+        || d.contains("eof while parsing")
+        || d.contains("empty body")
 }
 
 /// `mac:<kind>:<normalized error>` — stable across launches, files and users: ids, hashes,

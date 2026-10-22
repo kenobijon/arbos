@@ -839,6 +839,12 @@ impl Transcript {
         name: &str,
         cx: &Context<Self>,
     ) -> (String, String, Option<u8>, Option<Id>) {
+        let a = self.agent_identity_full(seed, name, cx);
+        (a.name, a.seed, a.color_index, a.project_id)
+    }
+
+    /// `agent_identity` plus the D92 leaf pair in effect.
+    fn agent_identity_full(&self, seed: &str, name: &str, cx: &Context<Self>) -> AgentIdentity {
         let state = self.state.read(cx);
         let agent_pid = seed
             .strip_prefix("agent:")
@@ -848,29 +854,52 @@ impl Transcript {
             state
                 .selected()
                 .and_then(|space| space.agents.iter().find(|a| a.project_id == pid))
-                .map(|a| (a.name.clone(), a.avatar_color_index))
+                .map(|a| {
+                    (
+                        a.name.clone(),
+                        a.avatar_color_index,
+                        (a.avatar_leaf, a.avatar_leaf_color),
+                    )
+                })
                 .or_else(|| {
-                    state
-                        .projects
-                        .iter()
-                        .find(|p| p.id == pid)
-                        .map(|p| (p.name.clone(), p.avatar_color_index))
+                    state.projects.iter().find(|p| p.id == pid).map(|p| {
+                        (
+                            p.name.clone(),
+                            p.avatar_color_index,
+                            (p.avatar_leaf, p.avatar_leaf_color),
+                        )
+                    })
                 })
         });
         let resolved_name = match &member {
-            Some((n, _)) if name == "Agent" || name == "Project" => n.clone(),
+            Some((n, _, _)) if name == "Agent" || name == "Project" => n.clone(),
             _ => name.to_string(),
         };
-        let color_index = member.as_ref().and_then(|(_, c)| *c);
+        let color_index = member.as_ref().and_then(|(_, c, _)| *c);
+        let leaf = member.as_ref().map(|(_, _, l)| *l).unwrap_or((None, None));
         let disc_seed = agent_pid.clone().unwrap_or_else(|| seed.to_string());
-        (resolved_name, disc_seed, color_index, agent_pid)
+        AgentIdentity {
+            name: resolved_name,
+            seed: disc_seed,
+            color_index,
+            leaf,
+            project_id: agent_pid,
+        }
     }
 
     /// The 24 pt disc for an agent's message in a people chat.
     fn agent_disc(&self, seed: &str, cx: &Context<Self>) -> Div {
         let theme = Theme::of(cx).clone();
-        let (name, disc_seed, color_index, _) = self.agent_identity(seed, "Agent", cx);
-        avatars::element(&disc_seed, &name, color_index, SENDER_DISC, &theme)
+        let a = self.agent_identity_full(seed, "Agent", cx);
+        avatars::agent(
+            &a.seed,
+            &a.name,
+            a.color_index,
+            a.leaf.0,
+            a.leaf.1,
+            SENDER_DISC,
+            &theme,
+        )
     }
 
     /// One assistant bubble block (the Markdown row and the no-answer line share it).
@@ -906,8 +935,8 @@ impl Transcript {
         // People-chat agent bubbles get the same coloured left-edge
         // sliver as person messages, from the agent's disc colour.
         let agent_accent = lane.as_deref().map(|seed| {
-            let (_, disc_seed, color_index, _) = self.agent_identity(seed, "Agent", cx);
-            avatars::accent_fallback(&disc_seed, color_index, theme)
+            let a = self.agent_identity_full(seed, "Agent", cx);
+            avatars::agent_accent(&a.seed, a.color_index, a.leaf.0, a.leaf.1, theme)
         });
         let r = px(BUBBLE_RADIUS);
         let bubble = self
@@ -1797,6 +1826,16 @@ impl Render for Transcript {
 // ---------------------------------------------------------------------------
 // Rows
 // ---------------------------------------------------------------------------
+
+/// Who an agent lane belongs to: display name, disc seed, D79 colour, D92
+/// leaf pair in effect, and the project id when the lane names one.
+struct AgentIdentity {
+    name: String,
+    seed: String,
+    color_index: Option<u8>,
+    leaf: (Option<u8>, Option<u8>),
+    project_id: Option<Id>,
+}
 
 fn hash_version<T: Hash>(value: &T, live: bool) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();

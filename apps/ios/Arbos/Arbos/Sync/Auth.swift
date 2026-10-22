@@ -183,7 +183,7 @@ extension RelayAPI {
     }
 
     /// `GET /me` → user, credits, machine summary.
-    func me() async throws -> (AuthUser, Credits?, MeMachineDto) {
+    func me() async throws -> (AuthUser, Credits?, MeMachineDto, MeFeaturesDto?) {
         let v = try await json("GET", AuthEndpoints.me)
         guard JSONSerialization.isValidJSONObject(v),
               let data = try? JSONSerialization.data(withJSONObject: v) else {
@@ -205,7 +205,7 @@ extension RelayAPI {
             spentTodayUsd: c.spent_today_usd,
             dailyCapUsd: c.daily_cap_usd
         )
-        return (user, credits, dto.machine)
+        return (user, credits, dto.machine, dto.features)
     }
 
     /// `PATCH /me {name?, login?}` → updated user (display name and/or handle).

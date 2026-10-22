@@ -563,11 +563,21 @@ pub async fn stop_box(state: &AppState, user_id: &str, force: bool) -> Result<()
             if force {
                 let _ = dt.update_secrets(&id, vec![]).await;
             }
-            let s = dt
+            let mut s = dt
                 .wait_for(&id, Duration::from_secs(120), |s| {
                     matches!(s.state, SandboxState::Stopped | SandboxState::Archived)
                 })
                 .await?;
+            if user_id.starts_with("test_") && matches!(s.state, SandboxState::Stopped) {
+                // Test users' boxes (rigs, evals, demo accounts) do not need a warm restart: archive
+                // them off the disk quota as soon as they stop; `start` restores an archived sandbox.
+                match dt.archive(&id).await {
+                    Ok(a) => s = a,
+                    Err(e) => {
+                        tracing::warn!(user = %user_id, sandbox = %id, error = %e, "archive of a stopped test box")
+                    }
+                }
+            }
             sb.daytona_state = Some(format!("{:?}", s.state).to_ascii_lowercase());
             state.db.record_timing(
                 &timing_key(user_id),

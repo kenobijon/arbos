@@ -40,7 +40,7 @@ CREATE INDEX IF NOT EXISTS credit_ledger_user_at ON credit_ledger(user_id, at);
 CREATE INDEX IF NOT EXISTS credit_ledger_at ON credit_ledger(at);
 CREATE TABLE IF NOT EXISTS box_history (
   sandbox_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, snapshot TEXT, replaced_at INTEGER NOT NULL,
-  delete_after INTEGER NOT NULL, deleted_at INTEGER
+  delete_after INTEGER NOT NULL, deleted_at INTEGER, row_json TEXT, archived_at INTEGER
 );
 CREATE TABLE IF NOT EXISTS machine_meter (
   user_id TEXT PRIMARY KEY, last_tick_at INTEGER NOT NULL, last_state TEXT NOT NULL
@@ -61,6 +61,7 @@ pub fn migrate_accounts(c: &Connection) {
         "ALTER TABLE users ADD COLUMN test INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE boxes ADD COLUMN held_stopped INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE box_history ADD COLUMN row_json TEXT",
+        "ALTER TABLE box_history ADD COLUMN archived_at INTEGER",
     ] {
         let _ = c.execute(stmt, []);
     }
@@ -906,6 +907,22 @@ impl Db {
         })
     }
 
+    #[cfg(test)]
+    pub fn insert_box_history_at(
+        &self,
+        user_id: &str,
+        sandbox_id: &str,
+        replaced_at: i64,
+    ) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO box_history(sandbox_id, user_id, snapshot, replaced_at, delete_after) VALUES (?1, ?2, NULL, ?3, ?3 + 1000)",
+                params![sandbox_id, user_id, replaced_at],
+            )
+            .map(|_| ())
+        })
+    }
+
     /// Forget a history entry (the upgrade that made it was rolled back).
     pub fn remove_box_history(&self, sandbox_id: &str) -> Result<()> {
         self.with(|c| {
@@ -947,6 +964,39 @@ impl Db {
         })
     }
 
+    /// Retained sandboxes to Daytona-archive now: per user, every live (not deleted, not yet archived)
+    /// history row beyond the `keep` newest by `replaced_at`. The newest `keep` stay unarchived so a
+    /// rollback / repair restarts in seconds; the rest sit archived (cold, no disk quota) until their
+    /// fallback window ends. 2026-10-22: 308 retained 10 GiB sandboxes filled the org's 5000 GiB quota.
+    pub fn box_history_to_archive(
+        &self,
+        user_id: Option<&str>,
+        keep: usize,
+    ) -> Result<Vec<(String, String)>> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT user_id, sandbox_id FROM (
+                   SELECT user_id, sandbox_id,
+                          ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY replaced_at DESC, sandbox_id DESC) AS rn
+                   FROM box_history WHERE deleted_at IS NULL AND archived_at IS NULL
+                     AND (?1 IS NULL OR user_id = ?1)
+                 ) WHERE rn > ?2 ORDER BY user_id, rn",
+            )?;
+            let rows = st.query_map(params![user_id, keep as i64], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            rows.collect()
+        })
+    }
+
+    pub fn mark_box_history_archived(&self, sandbox_id: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE box_history SET archived_at = ?2 WHERE sandbox_id = ?1",
+                params![sandbox_id, now_ms()],
+            )
+            .map(|_| ())
+        })
+    }
+
     pub fn mark_box_history_deleted(&self, sandbox_id: &str) -> Result<()> {
         self.with(|c| {
             c.execute(
@@ -980,5 +1030,62 @@ impl Db {
             )
             .map(|_| ())
         })
+    }
+}
+
+#[cfg(test)]
+mod box_history_archive_tests {
+    use crate::db::Db;
+
+    fn temp_db() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "arbos-boxhist-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    /// Invariant: per user, the 2 newest retained sandboxes stay unarchived (fast rollback); older ones
+    /// are archived; archived and deleted rows are never returned again.
+    #[test]
+    fn keeps_two_newest_per_user_and_archives_the_rest() {
+        let dir = temp_db();
+        let db = Db::open(&dir.join("relay.db")).expect("db");
+        for (i, id) in ["a-old1", "a-old2", "a-new1", "a-new2"].iter().enumerate() {
+            db.insert_box_history_at("gh_a", id, 1000 + i as i64)
+                .unwrap();
+        }
+        db.insert_box_history_at("gh_b", "b-only", 5000).unwrap();
+        db.insert_box_history_at("test_x", "t-old", 100).unwrap();
+        db.insert_box_history_at("test_x", "t-mid", 200).unwrap();
+        db.insert_box_history_at("test_x", "t-new", 300).unwrap();
+
+        let all = db.box_history_to_archive(None, 2).unwrap();
+        assert_eq!(
+            all,
+            vec![
+                ("gh_a".into(), "a-old2".into()),
+                ("gh_a".into(), "a-old1".into()),
+                ("test_x".into(), "t-old".into())
+            ]
+        );
+
+        let only_a = db.box_history_to_archive(Some("gh_a"), 2).unwrap();
+        assert_eq!(only_a.len(), 2);
+        assert!(only_a.iter().all(|(u, _)| u == "gh_a"));
+
+        db.mark_box_history_archived("a-old1").unwrap();
+        db.mark_box_history_archived("a-old2").unwrap();
+        db.mark_box_history_deleted("t-old").unwrap();
+        assert!(db.box_history_to_archive(None, 2).unwrap().is_empty());
+
+        // A new upgrade pushes one of the kept two out: it becomes the next to archive.
+        db.insert_box_history_at("gh_a", "a-new3", 9000).unwrap();
+        assert_eq!(
+            db.box_history_to_archive(Some("gh_a"), 2).unwrap(),
+            vec![("gh_a".into(), "a-new1".into())]
+        );
     }
 }

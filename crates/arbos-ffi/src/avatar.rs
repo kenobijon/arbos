@@ -1,7 +1,7 @@
 //! Avatar colours for Swift: the D79 index rule and the sender accent bar
 //! (`arbos_core::avatar`), so the iPhone draws the same hex as the Mac.
 
-use arbos_core::avatar;
+use arbos_core::avatar::{self, leaf};
 
 /// A sender accent in both appearances, as `#RRGGBB`.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -42,4 +42,160 @@ pub fn avatar_fallback_accent(seed: String, override_index: Option<u8>) -> Accen
 #[uniffi::export]
 pub fn avatar_accent_version() -> u32 {
     avatar::ACCENT_VERSION
+}
+
+// ---- D92 leaf avatars --------------------------------------------------------------------------
+
+/// The leaf avatar in effect for an agent: shape 0–8 and disc colour 0–9.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct LeafPick {
+    pub leaf: u8,
+    pub color: u8,
+}
+
+impl From<leaf::LeafPick> for LeafPick {
+    fn from(p: leaf::LeafPick) -> Self {
+        Self {
+            leaf: p.leaf,
+            color: p.color,
+        }
+    }
+}
+
+/// One absolute outline command in the 100 × 100 leaf box. Fill even-odd.
+#[derive(Debug, Clone, PartialEq, uniffi::Enum)]
+pub enum LeafSegment {
+    MoveTo {
+        x: f32,
+        y: f32,
+    },
+    LineTo {
+        x: f32,
+        y: f32,
+    },
+    CubicTo {
+        x1: f32,
+        y1: f32,
+        x2: f32,
+        y2: f32,
+        x: f32,
+        y: f32,
+    },
+    Close,
+}
+
+impl From<&leaf::Segment> for LeafSegment {
+    fn from(s: &leaf::Segment) -> Self {
+        match *s {
+            leaf::Segment::MoveTo { x, y } => LeafSegment::MoveTo { x, y },
+            leaf::Segment::LineTo { x, y } => LeafSegment::LineTo { x, y },
+            leaf::Segment::CubicTo {
+                x1,
+                y1,
+                x2,
+                y2,
+                x,
+                y,
+            } => LeafSegment::CubicTo {
+                x1,
+                y1,
+                x2,
+                y2,
+                x,
+                y,
+            },
+            leaf::Segment::Close => LeafSegment::Close,
+        }
+    }
+}
+
+/// D92: the leaf and colour for an agent id, honouring the owner's picks.
+#[uniffi::export]
+pub fn leaf_pick(seed: String, leaf: Option<u8>, color: Option<u8>) -> LeafPick {
+    leaf::pick_for(&seed, leaf, color).into()
+}
+
+/// Number of leaf shapes.
+#[uniffi::export]
+pub fn leaf_count() -> u8 {
+    leaf::LEAF_COUNT
+}
+
+/// Number of disc colours.
+#[uniffi::export]
+pub fn leaf_color_count() -> u8 {
+    leaf::COLOR_COUNT
+}
+
+/// Picker labels of the shapes, index order.
+#[uniffi::export]
+pub fn leaf_names() -> Vec<String> {
+    leaf::LEAVES.iter().map(|l| l.name.to_owned()).collect()
+}
+
+/// Picker labels of the colours, index order.
+#[uniffi::export]
+pub fn leaf_color_names() -> Vec<String> {
+    leaf::COLORS.iter().map(|c| c.name.to_owned()).collect()
+}
+
+/// Disc colour `index` as `#RRGGBB`.
+#[uniffi::export]
+pub fn leaf_color_hex(index: u8) -> String {
+    leaf::COLORS[(index % leaf::COLOR_COUNT) as usize].rgb.hex()
+}
+
+/// The leaf ink (cream) as `#RRGGBB`.
+#[uniffi::export]
+pub fn leaf_ink_hex() -> String {
+    leaf::LEAF_INK.hex()
+}
+
+/// The leaf's span as a share of the disc diameter.
+#[uniffi::export]
+pub fn leaf_scale() -> f32 {
+    leaf::LEAF_SCALE
+}
+
+/// The outline of shape `index` in the 100 × 100 box, absolute commands.
+#[uniffi::export]
+pub fn leaf_segments(index: u8) -> Vec<LeafSegment> {
+    leaf::segments(index).iter().map(Into::into).collect()
+}
+
+/// The stem pivot of shape `index` in the 100 × 100 box: `[x, y]`.
+#[uniffi::export]
+pub fn leaf_pivot(index: u8) -> Vec<f32> {
+    let p = leaf::LEAVES[(index % leaf::LEAF_COUNT) as usize].pivot;
+    vec![p.0, p.1]
+}
+
+/// Length of shape `index`'s idle sway loop, seconds (staggered per leaf).
+#[uniffi::export]
+pub fn leaf_idle_secs(index: u8) -> f32 {
+    leaf::LEAVES[(index % leaf::LEAF_COUNT) as usize].idle_secs
+}
+
+/// Idle sway angle at `t` seconds, radians.
+#[uniffi::export]
+pub fn leaf_idle_angle(index: u8, t: f32) -> f32 {
+    leaf::idle_angle(index, t)
+}
+
+/// Gust angle `t` seconds after it starts, radians; 0 outside `0..leaf_gust_secs()`.
+#[uniffi::export]
+pub fn leaf_gust_angle(t: f32) -> f32 {
+    leaf::gust_angle(t)
+}
+
+/// Length of the hover / activity gust, seconds.
+#[uniffi::export]
+pub fn leaf_gust_secs() -> f32 {
+    leaf::GUST_SECS
+}
+
+/// The bubble-bar accent of a leaf agent: its disc colour.
+#[uniffi::export]
+pub fn leaf_accent(seed: String, leaf: Option<u8>, color: Option<u8>) -> AccentHex {
+    leaf::accent(leaf::pick_for(&seed, leaf, color)).into()
 }
