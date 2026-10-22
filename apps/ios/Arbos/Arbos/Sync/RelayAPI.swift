@@ -16,6 +16,16 @@ struct RelayError: Error, LocalizedError {
     }
 
     var isUnauthorized: Bool { status == 401 }
+
+    /// Decode `ApiErrorDto` when the body is the current shape; plain text for older relays.
+    static func from(status: Int, body: Data) -> RelayError {
+        if let dto = try? JSONDecoder().decode(ApiErrorDto.self, from: body) {
+            return RelayError(status: status, message: dto.error.message, type: dto.error.type)
+        }
+        let text = (String(data: body, encoding: .utf8) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return RelayError(status: status, message: text)
+    }
 }
 
 /// Accepts `http://`, `https://`, `ws://` or `wss://`; derives the other.
@@ -119,13 +129,7 @@ final class RelayAPI {
             throw RelayError(status: 0, message: "No HTTP response")
         }
         if http.statusCode >= 400 {
-            let text = String(data: data, encoding: .utf8) ?? ""
-            // Self-serve relay errors: {"error":{"type","message"}}.
-            if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let err = obj["error"] as? [String: Any] {
-                throw RelayError(status: http.statusCode, message: err["message"] as? String ?? text, type: err["type"] as? String)
-            }
-            throw RelayError(status: http.statusCode, message: text.trimmingCharacters(in: .whitespacesAndNewlines))
+            throw RelayError.from(status: http.statusCode, body: data)
         }
         return (data, http)
     }
@@ -407,7 +411,7 @@ final class RelayAPI {
         let (body, response) = try await session.data(for: req)
         guard let http = response as? HTTPURLResponse, http.statusCode < 400 else {
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-            throw RelayError(status: status, message: String(data: body, encoding: .utf8) ?? "")
+            throw RelayError.from(status: status, body: body)
         }
         return key
     }
@@ -425,7 +429,7 @@ final class RelayAPI {
         let (body, response) = try await session.data(for: req)
         guard let http = response as? HTTPURLResponse, http.statusCode < 400 else {
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-            throw RelayError(status: status, message: String(data: body, encoding: .utf8) ?? "Avatar upload failed")
+            throw RelayError.from(status: status, body: body)
         }
         guard let dto = try? JSONDecoder().decode(MeUserResponseDto.self, from: body) else {
             throw RelayError(status: 0, message: "The relay returned no avatar URL")

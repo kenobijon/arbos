@@ -67,10 +67,12 @@ impl Agent {
             .send()
             .await?;
         if !r.status().is_success() {
+            let status = r.status();
+            let text = r.text().await.unwrap_or_default();
             return Err(anyhow!(
                 "channel reply: HTTP {} {}",
-                r.status(),
-                r.text().await.unwrap_or_default()
+                status,
+                crate::relay_error::message(&text)
             ));
         }
         Ok(())

@@ -107,7 +107,10 @@ async fn relay_goals_json(
     let status = r.status();
     let text = r.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(format!("relay goals{suffix}: HTTP {status} {text}"));
+        return Err(format!(
+            "relay goals{suffix}: HTTP {status} {}",
+            crate::relay_error::message(&text)
+        ));
     }
     if text.trim().is_empty() {
         return Ok(json!({ "ok": true }));

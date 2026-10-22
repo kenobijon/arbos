@@ -477,7 +477,15 @@ async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
             .send()
             .await
         {
-            Ok(r) => text_result(r.text().await.unwrap_or_default()),
+            Ok(r) => {
+                let status = r.status();
+                let text = r.text().await.unwrap_or_default();
+                if status.is_success() {
+                    text_result(text)
+                } else {
+                    err_result(crate::relay_error::message(&text))
+                }
+            }
             Err(e) => err_result(e),
         },
         "projects_send" => {
@@ -616,11 +624,15 @@ async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
                         json!({ "slug": slug, "version": version, "status": "saved" }).to_string(),
                     )
                 }
-                Ok(r) => err_result(format!(
-                    "relay refused: HTTP {} {}",
-                    r.status(),
-                    r.text().await.unwrap_or_default()
-                )),
+                Ok(r) => {
+                    let status = r.status();
+                    let text = r.text().await.unwrap_or_default();
+                    err_result(format!(
+                        "relay refused: HTTP {} {}",
+                        status,
+                        crate::relay_error::message(&text)
+                    ))
+                }
                 Err(e) => err_result(e),
             }
         }

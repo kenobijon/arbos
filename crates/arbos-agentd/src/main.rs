@@ -19,6 +19,7 @@ mod mcp;
 mod media;
 mod memory;
 mod people;
+mod relay_error;
 mod reply;
 mod responders;
 mod routines;
@@ -355,9 +356,10 @@ async fn boot() -> Result<()> {
         match hello {
             Ok(r) if r.status().is_success() => break r.json::<Value>().await.unwrap_or_default(),
             Ok(r) if r.status() == reqwest::StatusCode::CONFLICT => {
+                let text = r.text().await.unwrap_or_default();
                 anyhow::bail!(
                     "relay refused this agentd: {}",
-                    r.text().await.unwrap_or_default()
+                    crate::relay_error::message(&text)
                 )
             }
             Ok(r) => tracing::warn!(status = %r.status(), "box hello refused; retrying"),

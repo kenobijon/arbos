@@ -596,7 +596,7 @@ pub async fn submit_feedback(a: &Arc<Agent>, args: &Value, chat_id: &str) -> Val
             a.post_activity(chat_id, None);
             return err_result(format!(
                 "the relay refused the report (HTTP {status}: {}). Tell the user it could not be filed right now and that you will try again when they ask.",
-                clip(&text, 200)
+                clip(&crate::relay_error::message(&text), 200)
             ));
         }
         Err(e) => {

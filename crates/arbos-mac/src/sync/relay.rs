@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Context as _, Result};
 use arbos_client::room::{self, RoomAction, RoomSession};
 use arbos_core::api::{
-    CallDto, CallEnvelopeDto, ChannelsOverviewDto, ChatDto, ConnectConnectorReplyDto,
+    ApiErrorDto, CallDto, CallEnvelopeDto, ChannelsOverviewDto, ChatDto, ConnectConnectorReplyDto,
     ConnectorsCatalogDto, ConnectorsListDto, CreateChatResponseDto, DecideSecretResponseDto,
     GetProjectResponseDto, GroupDto, LeaveCallResponseDto, LocalDevicesDto, MachineStateDto,
     MachineStatusDto, MeResponseDto, MeUserResponseDto, ModelListDto, PairResponseDto,
@@ -62,6 +62,48 @@ const PRESENCE_EVERY: Duration = room::PRESENCE_EVERY;
 const REGISTRY_POLL: Duration = Duration::from_secs(15);
 /// `GET /machine` is the source of truth for the rail indicator and Settings.
 const MACHINE_POLL: Duration = Duration::from_secs(10);
+
+/// Typed relay HTTP failure: `ApiErrorDto` when the body is the current shape, else plain text.
+#[derive(Debug, Clone)]
+pub(crate) struct RelayError {
+    pub status: u16,
+    pub kind: String,
+    pub message: String,
+}
+
+impl RelayError {
+    pub(crate) fn from_body(status: reqwest::StatusCode, body: &str) -> Self {
+        if let Ok(dto) = serde_json::from_str::<ApiErrorDto>(body) {
+            Self {
+                status: status.as_u16(),
+                kind: dto.error.type_,
+                message: dto.error.message,
+            }
+        } else {
+            Self {
+                status: status.as_u16(),
+                kind: String::new(),
+                message: body.trim().to_owned(),
+            }
+        }
+    }
+
+    pub(crate) fn is_token_expired(&self) -> bool {
+        self.status == 401 && self.kind == "token_expired"
+    }
+}
+
+impl std::fmt::Display for RelayError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.message.is_empty() {
+            write!(f, "HTTP {}", self.status)
+        } else {
+            write!(f, "HTTP {} {}", self.status, self.message)
+        }
+    }
+}
+
+impl std::error::Error for RelayError {}
 
 pub struct RelaySource {
     http_url: String,
@@ -220,10 +262,10 @@ impl Shared {
         let text = resp.text().await.unwrap_or_default();
         if status.as_u16() == 401 {
             self.sign_out_locally();
-            return Err(anyhow!("refresh rejected: {text}"));
+            return Err(RelayError::from_body(status, &text).into());
         }
         if !status.is_success() {
-            return Err(anyhow!("POST /auth/refresh: HTTP {status} {text}"));
+            return Err(RelayError::from_body(status, &text).into());
         }
         let v: Value = serde_json::from_str(&text).context("refresh: bad JSON")?;
         self.apply_token_response(&v)?;
@@ -314,7 +356,7 @@ impl Shared {
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("DELETE {path}: HTTP {status} {text}"));
+            return Err(RelayError::from_body(status, &text).into());
         }
         Ok(())
     }
@@ -331,7 +373,7 @@ impl Shared {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
-            return Err(anyhow!("PUT {path}: HTTP {status} {text}"));
+            return Err(RelayError::from_body(status, &text).into());
         }
         Ok(serde_json::from_str(&text).unwrap_or(Value::Null))
     }
@@ -375,10 +417,6 @@ impl Shared {
             drop(s);
             store::remove_files(&path);
         }
-    }
-
-    fn is_token_expired(status: reqwest::StatusCode, body: &str) -> bool {
-        status.as_u16() == 401 && body.contains("token_expired")
     }
 
     fn device_id(&self) -> String {
@@ -467,13 +505,14 @@ impl Shared {
                 .with_context(|| format!("GET {path}"))?;
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            if Self::is_token_expired(status, &body) && !refreshed {
-                refreshed = true;
-                self.refresh_tokens(Some(&token)).await?;
-                continue;
-            }
             if !status.is_success() {
-                return Err(anyhow!("GET {path}: HTTP {status} {body}"));
+                let err = RelayError::from_body(status, &body);
+                if err.is_token_expired() && !refreshed {
+                    refreshed = true;
+                    self.refresh_tokens(Some(&token)).await?;
+                    continue;
+                }
+                return Err(err.into());
             }
             // A 200 with no bytes is a cut connection / proxy blip, not valid JSON — surface it
             // so people-chats can retry and diagnostics treat it as transient.
@@ -506,13 +545,14 @@ impl Shared {
             let resp = req.send().await.with_context(|| format!("POST {path}"))?;
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            if Self::is_token_expired(status, &text) && !refreshed {
-                refreshed = true;
-                self.refresh_tokens(Some(&token)).await?;
-                continue;
-            }
             if !status.is_success() {
-                return Err(anyhow!("POST {path}: HTTP {status} {text}"));
+                let err = RelayError::from_body(status, &text);
+                if err.is_token_expired() && !refreshed {
+                    refreshed = true;
+                    self.refresh_tokens(Some(&token)).await?;
+                    continue;
+                }
+                return Err(err.into());
             }
             let value = if text.trim().is_empty() {
                 Value::Null
@@ -537,13 +577,14 @@ impl Shared {
                 .with_context(|| format!("POST {path}"))?;
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            if Self::is_token_expired(status, &text) && !refreshed {
-                refreshed = true;
-                self.refresh_tokens(Some(&token)).await?;
-                continue;
-            }
             if !status.is_success() {
-                return Err(anyhow!("POST {path}: HTTP {status} {text}"));
+                let err = RelayError::from_body(status, &text);
+                if err.is_token_expired() && !refreshed {
+                    refreshed = true;
+                    self.refresh_tokens(Some(&token)).await?;
+                    continue;
+                }
+                return Err(err.into());
             }
             if text.trim().is_empty() {
                 return Ok(Value::Null);
@@ -566,13 +607,14 @@ impl Shared {
                 .with_context(|| format!("PATCH {path}"))?;
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            if Self::is_token_expired(status, &text) && !refreshed {
-                refreshed = true;
-                self.refresh_tokens(Some(&token)).await?;
-                continue;
-            }
             if !status.is_success() {
-                return Err(anyhow!("PATCH {path}: HTTP {status} {text}"));
+                let err = RelayError::from_body(status, &text);
+                if err.is_token_expired() && !refreshed {
+                    refreshed = true;
+                    self.refresh_tokens(Some(&token)).await?;
+                    continue;
+                }
+                return Err(err.into());
             }
             return Ok(serde_json::from_str(&text).unwrap_or(Value::Null));
         }
@@ -1814,21 +1856,14 @@ fn write_greeting(shared: &Arc<Shared>, chat_id: &str, project_id: &str, agent_n
 }
 
 fn people_error(err: &anyhow::Error) -> String {
-    let text = format!("{err:#}");
-    serde_json::from_str::<Value>(
-        text.split_once(" HTTP ")
-            .map(|(_, r)| r)
-            .and_then(|r| r.split_once(' '))
-            .map(|(_, b)| b)
-            .unwrap_or(""),
-    )
-    .ok()
-    .and_then(|v| {
-        v.pointer("/error/message")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-    })
-    .unwrap_or(text)
+    if let Some(e) = err.downcast_ref::<RelayError>() {
+        return if e.message.is_empty() {
+            format!("HTTP {}", e.status)
+        } else {
+            e.message.clone()
+        };
+    }
+    format!("{err:#}")
 }
 
 /// `GET /projects` then `GET /projects/{id}` for chats, models and spend.
@@ -4665,13 +4700,23 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         refresh_me(&shared).await;
                     }
                     Err(err) => {
-                        let text = format!("{err:#}");
-                        let human = if text.contains("handle_taken") {
-                            "That handle is already taken.".to_string()
-                        } else if text.contains("bad_handle") {
-                            "Handle must be 1–39 letters, numbers, or hyphens.".to_string()
+                        let human = if let Some(e) = err.downcast_ref::<RelayError>() {
+                            match e.kind.as_str() {
+                                "handle_taken" => "That handle is already taken.".to_string(),
+                                "bad_handle" => {
+                                    "Handle must be 1–39 letters, numbers, or hyphens.".to_string()
+                                }
+                                _ => format!(
+                                    "Profile: {}",
+                                    if e.message.is_empty() {
+                                        format!("HTTP {}", e.status)
+                                    } else {
+                                        e.message.clone()
+                                    }
+                                ),
+                            }
                         } else {
-                            format!("Profile: {text}")
+                            format!("Profile: {err:#}")
                         };
                         shared.notice(human);
                         refresh_me(&shared).await;
@@ -5817,15 +5862,14 @@ async fn refresh_connectors(shared: &Arc<Shared>) {
 
 /// The relay's `error.message` out of an HTTP error, else the whole chain.
 fn relay_message(err: &anyhow::Error) -> String {
-    let text = format!("{err:#}");
-    if let Some(i) = text.find('{') {
-        if let Ok(v) = serde_json::from_str::<Value>(&text[i..]) {
-            if let Some(m) = v["error"]["message"].as_str() {
-                return m.to_string();
-            }
-        }
+    if let Some(e) = err.downcast_ref::<RelayError>() {
+        return if e.message.is_empty() {
+            format!("HTTP {}", e.status)
+        } else {
+            e.message.clone()
+        };
     }
-    text
+    format!("{err:#}")
 }
 
 /// Settings → Secrets: `GET /secrets` + `GET /secrets/requests` → one view (D83). Never values.
