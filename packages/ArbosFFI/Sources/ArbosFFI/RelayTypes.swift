@@ -7,6 +7,30 @@
 
 import Foundation
 
+/// `user` on `/auth/token`, `/me`, and profile update replies.
+/// 
+/// Full rows always send `github_id`/`login`/… (null when unset). The
+/// fallback `{ "id" }` omits those keys (`None` outer Option).
+public struct AccountUserDto: Codable {
+	public let id: String
+	public let github_id: Int64??
+	public let login: String??
+	public let avatar_url: String??
+	public let name: String??
+	public let created_at: Int64?
+	public let last_login_at: Int64??
+
+	public init(id: String, github_id: Int64??, login: String??, avatar_url: String??, name: String??, created_at: Int64?, last_login_at: Int64??) {
+		self.id = id
+		self.github_id = github_id
+		self.login = login
+		self.avatar_url = avatar_url
+		self.name = name
+		self.created_at = created_at
+		self.last_login_at = last_login_at
+	}
+}
+
 /// `me` on a project chat or a people chat.
 public struct ChatMeDto: Codable {
 	/// People chats always send this (null when the viewer is not a member). Project chats omit it.
@@ -328,6 +352,29 @@ public struct CreateProjectResponseDto: Codable {
 	}
 }
 
+/// Credits block on `GET /me`.
+public struct CreditsDto: Codable {
+	public let balance_usd: Double
+	public let granted_usd: Double
+	public let spent_usd: Double
+	public let spent_today_usd: Double
+	public let daily_cap_usd: Double?
+	public let allow_negative: Bool
+	public let machine_today_usd: Double
+	public let machine_total_usd: Double
+
+	public init(balance_usd: Double, granted_usd: Double, spent_usd: Double, spent_today_usd: Double, daily_cap_usd: Double?, allow_negative: Bool, machine_today_usd: Double, machine_total_usd: Double) {
+		self.balance_usd = balance_usd
+		self.granted_usd = granted_usd
+		self.spent_usd = spent_usd
+		self.spent_today_usd = spent_today_usd
+		self.daily_cap_usd = daily_cap_usd
+		self.allow_negative = allow_negative
+		self.machine_today_usd = machine_today_usd
+		self.machine_total_usd = machine_total_usd
+	}
+}
+
 /// `GET /projects/{id}` success body.
 public struct GetProjectResponseDto: Codable {
 	public let project: ProjectDto
@@ -392,6 +439,200 @@ public struct GroupDto: Codable {
 		self.doc_epoch = doc_epoch
 		self.room = room
 		self.participants_detail = participants_detail
+	}
+}
+
+/// Image block on `GET /machine`.
+public struct MachineImageDto: Codable {
+	public let current: String?
+	public let `default`: String
+
+	public init(current: String?, default: String) {
+		self.current = current
+		self.default = `default`
+	}
+}
+
+/// Spec line on `GET /machine`.
+public struct MachineSpecDto: Codable {
+	public let cpu: Int64
+	public let mem_gib: Int64
+	public let disk_gib: Int64
+	public let `class`: String
+
+	public init(cpu: Int64, mem_gib: Int64, disk_gib: Int64, class: String) {
+		self.cpu = cpu
+		self.mem_gib = mem_gib
+		self.disk_gib = disk_gib
+		self.class = `class`
+	}
+}
+
+/// `POST /machine/start|stop|restart` reply.
+public struct MachineStateDto: Codable {
+	public let state: String
+	public let since: Int64
+	public let held: Bool?
+
+	public init(state: String, since: Int64, held: Bool?) {
+		self.state = state
+		self.since = since
+		self.held = held
+	}
+}
+
+/// One workspace row on `GET /machine`.
+public struct MachineWorkspaceDto: Codable {
+	public let project_id: String
+	public let state: String
+
+	public init(project_id: String, state: String) {
+		self.project_id = project_id
+		self.state = state
+	}
+}
+
+/// `GET /machine` success body.
+public struct MachineStatusDto: Codable {
+	public let user_id: String
+	public let state: String
+	public let since: Int64
+	public let provider: String?
+	public let sandbox_id: String?
+	public let spec: MachineSpecDto
+	public let spend_today_usd: Double
+	public let spend_cap_usd: Double
+	public let workspaces: [MachineWorkspaceDto]
+	public let migrated_from: [String]
+	public let image: MachineImageDto
+	public let image_outdated: Bool
+	public let always_on: Bool
+	public let held: Bool
+	public let machine_today_usd: Double
+
+	public init(user_id: String, state: String, since: Int64, provider: String?, sandbox_id: String?, spec: MachineSpecDto, spend_today_usd: Double, spend_cap_usd: Double, workspaces: [MachineWorkspaceDto], migrated_from: [String], image: MachineImageDto, image_outdated: Bool, always_on: Bool, held: Bool, machine_today_usd: Double) {
+		self.user_id = user_id
+		self.state = state
+		self.since = since
+		self.provider = provider
+		self.sandbox_id = sandbox_id
+		self.spec = spec
+		self.spend_today_usd = spend_today_usd
+		self.spend_cap_usd = spend_cap_usd
+		self.workspaces = workspaces
+		self.migrated_from = migrated_from
+		self.image = image
+		self.image_outdated = image_outdated
+		self.always_on = always_on
+		self.held = held
+		self.machine_today_usd = machine_today_usd
+	}
+}
+
+/// Device row on `GET /me` (the caller's device when known).
+public struct MeDeviceDto: Codable {
+	public let id: String
+	public let name: String
+	public let created_at: Int64
+	public let revoked_at: Int64?
+	public let last_seen_at: Int64?
+	public let kind: String
+
+	public init(id: String, name: String, created_at: Int64, revoked_at: Int64?, last_seen_at: Int64?, kind: String) {
+		self.id = id
+		self.name = name
+		self.created_at = created_at
+		self.revoked_at = revoked_at
+		self.last_seen_at = last_seen_at
+		self.kind = kind
+	}
+}
+
+/// Remote feature flags on `GET /me` (and `GET /secrets`). Every key is optional on the
+/// wire so a client decodes an older relay that does not know a flag; the relay always sends
+/// all of them. Key names are a contract with shipped apps: only add, never rename.
+public struct MeFeaturesDto: Codable {
+	/// #1265: the Connect 1Password flow (default off).
+	public let vault_connect: Bool?
+	/// D92: agents without a photo draw a leaf, not initials (default on).
+	public let leaf_avatars: Bool?
+
+	public init(vault_connect: Bool?, leaf_avatars: Bool?) {
+		self.vault_connect = vault_connect
+		self.leaf_avatars = leaf_avatars
+	}
+}
+
+/// `limits` on `GET /me`.
+public struct MeLimitsDto: Codable {
+	public let read_only: Bool
+	public let read_only_reason: String?
+	public let signup: String
+	public let auth_mode: String
+
+	public init(read_only: Bool, read_only_reason: String?, signup: String, auth_mode: String) {
+		self.read_only = read_only
+		self.read_only_reason = read_only_reason
+		self.signup = signup
+		self.auth_mode = auth_mode
+	}
+}
+
+/// `machine` summary on `GET /me`.
+public struct MeMachineDto: Codable {
+	public let exists: Bool
+	public let state: String
+	public let since: Int64
+	public let provider: String?
+	public let sandbox_id: String?
+	public let always_on: Bool
+	public let held: Bool
+	public let waitlisted: Bool
+	public let waitlist_position: Int64?
+	public let evicted: Bool
+
+	public init(exists: Bool, state: String, since: Int64, provider: String?, sandbox_id: String?, always_on: Bool, held: Bool, waitlisted: Bool, waitlist_position: Int64?, evicted: Bool) {
+		self.exists = exists
+		self.state = state
+		self.since = since
+		self.provider = provider
+		self.sandbox_id = sandbox_id
+		self.always_on = always_on
+		self.held = held
+		self.waitlisted = waitlisted
+		self.waitlist_position = waitlist_position
+		self.evicted = evicted
+	}
+}
+
+/// `GET /me` success body.
+public struct MeResponseDto: Codable {
+	public let user: AccountUserDto
+	public let device: MeDeviceDto?
+	public let credits: CreditsDto
+	public let limits: MeLimitsDto
+	public let features: MeFeaturesDto?
+	public let machine: MeMachineDto
+
+	public init(user: AccountUserDto, device: MeDeviceDto?, credits: CreditsDto, limits: MeLimitsDto, features: MeFeaturesDto?, machine: MeMachineDto) {
+		self.user = user
+		self.device = device
+		self.credits = credits
+		self.limits = limits
+		self.features = features
+		self.machine = machine
+	}
+}
+
+/// `PATCH /me` and avatar route replies: `user`, optional `avatar_url`.
+public struct MeUserResponseDto: Codable {
+	public let user: AccountUserDto
+	/// Present on avatar PUT/DELETE (`null` when cleared to no GitHub picture).
+	public let avatar_url: String??
+
+	public init(user: AccountUserDto, avatar_url: String??) {
+		self.user = user
+		self.avatar_url = avatar_url
 	}
 }
 
@@ -477,5 +718,75 @@ public struct ProjectMembersDto: Codable {
 		self.project_id = project_id
 		self.owner = owner
 		self.members = members
+	}
+}
+
+/// One unread row on `GET /me/unread`.
+public struct UnreadChatDto: Codable {
+	public let chat_id: String
+	public let project_id: String
+	public let unread: Int64
+
+	public init(chat_id: String, project_id: String, unread: Int64) {
+		self.chat_id = chat_id
+		self.project_id = project_id
+		self.unread = unread
+	}
+}
+
+/// `GET /me/unread`.
+public struct UnreadDto: Codable {
+	public let chats: [UnreadChatDto]
+	public let total: Int64
+
+	public init(chats: [UnreadChatDto], total: Int64) {
+		self.chats = chats
+		self.total = total
+	}
+}
+
+/// Public person card (`user_card`, directory, search, GitHub fallback, + presence).
+/// 
+/// Optional keys stay omitted when a builder does not set them
+/// (`skip_serializing_if`), so no card gains keys it did not have before.
+public struct UserCardDto: Codable {
+	public let id: String
+	public let handle: String
+	public let avatar_url: String?
+	public let name: String?
+	public let status: String
+	public let created_at: Int64?
+	public let test: Bool?
+	/// Absent before `with_presence`; after it, `Some(None)` is JSON null.
+	public let last_seen_at: Int64??
+	public let online: Bool?
+	public let avatar_color_index_effective: Int64?
+
+	public init(id: String, handle: String, avatar_url: String?, name: String?, status: String, created_at: Int64?, test: Bool?, last_seen_at: Int64??, online: Bool?, avatar_color_index_effective: Int64?) {
+		self.id = id
+		self.handle = handle
+		self.avatar_url = avatar_url
+		self.name = name
+		self.status = status
+		self.created_at = created_at
+		self.test = test
+		self.last_seen_at = last_seen_at
+		self.online = online
+		self.avatar_color_index_effective = avatar_color_index_effective
+	}
+}
+
+/// `GET /users` directory page.
+public struct UsersPageDto: Codable {
+	public let users: [UserCardDto]
+	public let total: Int64
+	public let offset: Int64
+	public let next_offset: Int64?
+
+	public init(users: [UserCardDto], total: Int64, offset: Int64, next_offset: Int64?) {
+		self.users = users
+		self.total = total
+		self.offset = offset
+		self.next_offset = next_offset
 	}
 }

@@ -1774,9 +1774,12 @@ impl Render for Transcript {
             .track_focus(&focus)
             .on_action(cx.listener(Self::copy_selection))
             .on_scroll_wheel(cx.listener(|this, event, _, cx| this.on_wheel(event, cx)))
+            // No top fade: the header is opaque and the list starts under it on
+            // the pane's own background, so bubbles never fade or slide behind
+            // the pill (Jacob, Oct 21; [feedback mac-collapsed-toggle-inline]).
             .child(edge_faded(
                 24.0,
-                true,
+                false,
                 false,
                 list(self.list.clone(), cx.processor(Self::render_row)).size_full(),
             ))

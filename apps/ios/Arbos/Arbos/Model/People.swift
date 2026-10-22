@@ -19,13 +19,49 @@ struct Person: Identifiable, Equatable, Hashable {
 
     var displayName: String { name?.isEmpty == false ? name! : handle }
 
+    /// Memberwise init (kept explicit because `init(dto:)` would suppress synthesis).
+    init(
+        id: String,
+        handle: String,
+        avatarUrl: String? = nil,
+        name: String? = nil,
+        status: String = "member",
+        lastSeenAt: Int64? = nil,
+        online: Bool = false,
+        avatarColorIndex: Int? = nil
+    ) {
+        self.id = id
+        self.handle = handle
+        self.avatarUrl = avatarUrl
+        self.name = name
+        self.status = status
+        self.lastSeenAt = lastSeenAt
+        self.online = online
+        self.avatarColorIndex = avatarColorIndex
+    }
+
+    init(dto: UserCardDto) {
+        self.init(
+            id: dto.id,
+            handle: dto.handle,
+            avatarUrl: dto.avatar_url,
+            name: dto.name,
+            status: dto.status.isEmpty ? "member" : dto.status,
+            lastSeenAt: dto.last_seen_at.flatMap { $0 },
+            online: dto.online ?? false,
+            avatarColorIndex: dto.avatar_color_index_effective.map(Int.init)
+        )
+    }
+
     static func parse(_ raw: Any) -> Person? {
-        guard let d = raw as? [String: Any], let id = d["id"] as? String, let handle = d["handle"] as? String else { return nil }
-        var person = Person(id: id, handle: handle, avatarUrl: d["avatar_url"] as? String, name: d["name"] as? String,
-                            status: d["status"] as? String ?? "member",
-                            lastSeenAt: (d["last_seen_at"] as? NSNumber)?.int64Value, online: (d["online"] as? NSNumber)?.boolValue ?? false)
-        person.avatarColorIndex = (d["avatar_color_index_effective"] as? NSNumber)?.intValue
-        return person
+        guard JSONSerialization.isValidJSONObject(raw),
+              let data = try? JSONSerialization.data(withJSONObject: raw) else { return nil }
+        do {
+            return Person(dto: try JSONDecoder().decode(UserCardDto.self, from: data))
+        } catch {
+            NSLog("UserCardDto: \(error)")
+            return nil
+        }
     }
 }
 

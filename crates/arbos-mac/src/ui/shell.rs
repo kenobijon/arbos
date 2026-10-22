@@ -53,8 +53,11 @@ actions!(
     [CloseTab, NewTab, PrevTab, NextTab, ToggleRail, Escape, Quit]
 );
 
+/// How far the header's window-drag catchment overhangs the transcript (its top fade band).
+const HEADER_DRAG_OVERHANG: f32 = 24.0;
 /// Left inset for the conversation header while the sidebar is hidden: the window's traffic lights.
-const TRAFFIC_LIGHTS_INSET: f32 = 72.0;
+/// The sidebar's collapse control sits at the same inset, so it never moves when the pane folds.
+pub(crate) const TRAFFIC_LIGHTS_INSET: f32 = 72.0;
 
 /// What the shared name field (`agent_name_input`) renames when Return is pressed.
 #[derive(Clone, Copy)]
@@ -237,9 +240,12 @@ pub struct Shell {
     name_click_serial: u64,
     /// Agent page: the filter field in the Model dropdown (`ui::hoverpick`).
     pub(crate) model_search_input: Entity<ComposerInput>,
-    /// Agent page: the sheet body's scroll, so a dropped-down row can be
-    /// scrolled into view once (`agent_pick_reveal`) when it opens.
+    /// The right pane body's scroll (every page): a dropped-down agent row is
+    /// scrolled into view once (`agent_pick_reveal`), a page pushed over
+    /// another starts at the top, and `‹` restores the page underneath.
+    /// `profile_scroll_epoch` mirrors `AppState::profile_opened`.
     pub(crate) profile_scroll: ScrollHandle,
+    profile_scroll_epoch: u64,
     pub(crate) agent_pick_reveal: bool,
     /// Settings header: editing my display name and handle (`PATCH /me`).
     pub(crate) profile_edit_open: bool,
@@ -276,9 +282,14 @@ impl Shell {
     }
 
     pub fn new(state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let open_settings = std::env::var("ARBOS_OPEN_SETTINGS")
-            .ok()
-            .filter(|v| v == "1" || v == "bottom" || v == "connectors" || v.starts_with("secrets"));
+        let open_settings = std::env::var("ARBOS_OPEN_SETTINGS").ok().filter(|v| {
+            v == "1"
+                || v == "bottom"
+                || v == "connectors"
+                || v == "notifications"
+                || v == "machine"
+                || v.starts_with("secrets")
+        });
         let settings_scroll = ScrollHandle::new();
         if open_settings.as_deref() == Some("bottom") {
             settings_scroll.scroll_to_bottom();
@@ -474,6 +485,8 @@ impl Shell {
             let weak = cx.entity().downgrade();
             people_input.update(cx, |input, _| {
                 input.set_placeholder("Search people");
+                // Grok Mac's search placeholder is ~14 pt (ref 57).
+                input.set_font_size(people::SEARCH_FONT_SIZE);
                 input.on_submit = Some(Rc::new(move |_window, cx| {
                     let _ = weak.update(cx, |this, cx| {
                         let typed = this.people_input.read(cx).text().trim().to_string();
@@ -500,7 +513,12 @@ impl Shell {
         })
         .detach();
         // Rig: `ARBOS_OPEN_NEW_AGENT=1` opens the New Message sheet with the
-        // "New agent" form expanded.
+        // "New agent" form expanded; `ARBOS_OPEN_NEW_CHAT=1` the plain sheet
+        // (`ARBOS_OPEN_NEW_GROUP=1` lives in app.rs: it needs the fixture's
+        // projects to pick members from).
+        if std::env::var("ARBOS_OPEN_NEW_CHAT").is_ok_and(|v| v == "1") {
+            state.update(cx, |s, cx| s.open_new_chat(cx));
+        }
         if std::env::var("ARBOS_OPEN_NEW_AGENT").is_ok_and(|v| v == "1") {
             state.update(cx, |s, cx| {
                 s.open_new_chat(cx);
@@ -604,6 +622,9 @@ impl Shell {
             // that page) — rig; the pane itself is opened below.
             settings_page: match open_settings.as_deref() {
                 Some("connectors") => SettingsPage::Connectors,
+                // Rig: `ARBOS_OPEN_SETTINGS=notifications|machine` — one-row cards.
+                Some("notifications") => SettingsPage::Notifications,
+                Some("machine") => SettingsPage::Machine,
                 Some(v) if v.starts_with("secrets") => SettingsPage::Secrets,
                 _ => SettingsPage::Root,
             },
@@ -641,6 +662,7 @@ impl Shell {
             name_click_serial: 0,
             model_search_input,
             profile_scroll: ScrollHandle::new(),
+            profile_scroll_epoch: 0,
             agent_pick_reveal: false,
             profile_edit_open: false,
             name_input,
@@ -1233,6 +1255,42 @@ impl Shell {
             s.close_profile(cx);
         });
         Composer::focus(&self.composer, window, cx);
+    }
+
+    /// A member row in a group's pane (or an owner on an agent's): push the
+    /// person's page over the open one, which keeps its tab and body scroll.
+    pub(crate) fn push_profile(&mut self, page: ProfilePage, cx: &mut Context<Self>) {
+        let scroll = -f32::from(self.profile_scroll.offset().y);
+        self.member_remove_armed = None;
+        self.state.update(cx, |s, cx| {
+            let depth = s.profile_stack.len();
+            s.push_profile(page, cx);
+            // The page just covered is the new top frame; only the shell knows
+            // how far its body was scrolled.
+            if s.profile_stack.len() > depth {
+                if let Some(frame) = s.profile_stack.last_mut() {
+                    frame.scroll = scroll;
+                }
+            }
+        });
+    }
+
+    /// The pane's `‹`: back to the page underneath, its tab and scroll as left
+    /// (closes the pane when nothing is underneath).
+    pub(crate) fn back_profile(&mut self, cx: &mut Context<Self>) {
+        self.member_remove_armed = None;
+        let (scroll, epoch) = self.state.update(cx, |s, cx| {
+            let scroll = s.back_profile(cx);
+            (scroll, s.profile_opened)
+        });
+        if let Some(scroll) = scroll {
+            // Mark the epoch seen so render keeps this offset instead of
+            // starting the page at the top like a fresh one.
+            self.profile_scroll_epoch = epoch;
+            self.profile_scroll
+                .set_offset(gpui::point(px(0.0), px(-scroll)));
+        }
+        cx.notify();
     }
 
     /// Close the New Message sheet (Cancel, click outside); drops an in-progress
@@ -1923,7 +1981,8 @@ impl Shell {
             .flex_col()
             .flex_1()
             .min_w_0()
-            .h_full();
+            .h_full()
+            .bg(theme.chat_wash());
 
         if let Some((server, ch, can_post)) = channel {
             column = column.child(
@@ -2120,11 +2179,25 @@ impl Shell {
             // Transcript above, composer pinned at the bottom. On the first
             // send the composer slides down from the centre over 220 ms using
             // a relative `top` inset (GPUI has no transform).
+            // The window-drag catchment reaches 24 pt past the 44 pt header,
+            // over the transcript's top fade (Jacob: the band alone was too
+            // small to grab). The strip arms a move only after the pointer
+            // travels `WINDOW_DRAG_SLOP`, so a click there still lands on the
+            // faded bubble beneath ([feedback mac-collapsed-toggle-inline]).
             let body = div()
                 .flex_1()
                 .min_h_0()
                 .relative()
-                .child(self.transcript.clone());
+                .child(self.transcript.clone())
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .right_0()
+                        .h(px(HEADER_DRAG_OVERHANG))
+                        .window_drag(),
+                );
             if typing.is_some() {
                 PulseClock::request(cx);
             }
@@ -3009,8 +3082,17 @@ impl Render for Shell {
         }
         // The right pane (three-pane rule): a flex sibling beside the chat, so
         // it never covers it; the floating menus below paint over both.
-        let profile = self.state.read(cx).profile.clone();
+        let (profile, opened) = {
+            let state = self.state.read(cx);
+            (state.profile.clone(), state.profile_opened)
+        };
         if let Some(page) = profile {
+            // A page that just filled the pane starts at the top; a popped
+            // one already carries its restored offset (see `back_profile`).
+            if self.profile_scroll_epoch != opened {
+                self.profile_scroll_epoch = opened;
+                self.profile_scroll.set_offset(gpui::Point::default());
+            }
             if page == ProfilePage::Me && !self.settings_page_alive(cx) {
                 self.settings_page = SettingsPage::Root;
             }

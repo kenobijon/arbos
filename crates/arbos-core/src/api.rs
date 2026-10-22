@@ -1,4 +1,5 @@
-//! Shared HTTP response shapes for projects and chats (crdt-sync).
+//! Shared HTTP response shapes for projects, chats, people, me, machine, and
+//! unread (crdt-sync).
 //!
 //! No I/O. The relay builds these and serializes them; clients will decode the
 //! same JSON. Regenerate Swift with `./scripts/gen-swift-types.sh`.
@@ -386,4 +387,251 @@ pub struct CreateChatResponseDto {
     pub room: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub primary: Option<bool>,
+}
+
+/// Public person card (`user_card`, directory, search, GitHub fallback, + presence).
+///
+/// Optional keys stay omitted when a builder does not set them
+/// (`skip_serializing_if`), so no card gains keys it did not have before.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct UserCardDto {
+    pub id: String,
+    pub handle: String,
+    pub avatar_url: Option<String>,
+    pub name: Option<String>,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub created_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test: Option<bool>,
+    /// Absent before `with_presence`; after it, `Some(None)` is JSON null.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[typeshare(serialized_as = "Option<Option<I54>>")]
+    pub last_seen_at: Option<Option<i64>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub online: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub avatar_color_index_effective: Option<i64>,
+}
+
+/// `user` on `/auth/token`, `/me`, and profile update replies.
+///
+/// Full rows always send `github_id`/`login`/… (null when unset). The
+/// fallback `{ "id" }` omits those keys (`None` outer Option).
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AccountUserDto {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[typeshare(serialized_as = "Option<Option<I54>>")]
+    pub github_id: Option<Option<i64>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_url: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub created_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[typeshare(serialized_as = "Option<Option<I54>>")]
+    pub last_login_at: Option<Option<i64>>,
+}
+
+/// Credits block on `GET /me`.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreditsDto {
+    pub balance_usd: f64,
+    pub granted_usd: f64,
+    pub spent_usd: f64,
+    pub spent_today_usd: f64,
+    pub daily_cap_usd: Option<f64>,
+    pub allow_negative: bool,
+    pub machine_today_usd: f64,
+    pub machine_total_usd: f64,
+}
+
+/// `limits` on `GET /me`.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MeLimitsDto {
+    pub read_only: bool,
+    pub read_only_reason: Option<String>,
+    pub signup: String,
+    pub auth_mode: String,
+}
+
+/// `machine` summary on `GET /me`.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MeMachineDto {
+    pub exists: bool,
+    #[typeshare(serialized_as = "String")]
+    pub state: BoxState,
+    #[typeshare(serialized_as = "I54")]
+    pub since: i64,
+    pub provider: Option<String>,
+    pub sandbox_id: Option<String>,
+    pub always_on: bool,
+    pub held: bool,
+    pub waitlisted: bool,
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub waitlist_position: Option<i64>,
+    pub evicted: bool,
+}
+
+/// Device row on `GET /me` (the caller's device when known).
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MeDeviceDto {
+    pub id: String,
+    pub name: String,
+    #[typeshare(serialized_as = "I54")]
+    pub created_at: i64,
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub revoked_at: Option<i64>,
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub last_seen_at: Option<i64>,
+    pub kind: String,
+}
+
+/// Remote feature flags on `GET /me` (and `GET /secrets`). Every key is optional on the
+/// wire so a client decodes an older relay that does not know a flag; the relay always sends
+/// all of them. Key names are a contract with shipped apps: only add, never rename.
+#[typeshare]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MeFeaturesDto {
+    /// #1265: the Connect 1Password flow (default off).
+    #[serde(default)]
+    pub vault_connect: Option<bool>,
+    /// D92: agents without a photo draw a leaf, not initials (default on).
+    #[serde(default)]
+    pub leaf_avatars: Option<bool>,
+}
+
+/// `GET /me` success body.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MeResponseDto {
+    pub user: AccountUserDto,
+    pub device: Option<MeDeviceDto>,
+    pub credits: CreditsDto,
+    pub limits: MeLimitsDto,
+    #[serde(default)]
+    pub features: MeFeaturesDto,
+    pub machine: MeMachineDto,
+}
+
+/// `PATCH /me` and avatar route replies: `user`, optional `avatar_url`.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MeUserResponseDto {
+    pub user: AccountUserDto,
+    /// Present on avatar PUT/DELETE (`null` when cleared to no GitHub picture).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_url: Option<Option<String>>,
+}
+
+/// `GET /users` directory page.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UsersPageDto {
+    pub users: Vec<UserCardDto>,
+    #[typeshare(serialized_as = "I54")]
+    pub total: i64,
+    #[typeshare(serialized_as = "I54")]
+    pub offset: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub next_offset: Option<i64>,
+}
+
+/// One unread row on `GET /me/unread`.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UnreadChatDto {
+    pub chat_id: String,
+    pub project_id: String,
+    #[typeshare(serialized_as = "I54")]
+    pub unread: i64,
+}
+
+/// `GET /me/unread`.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UnreadDto {
+    pub chats: Vec<UnreadChatDto>,
+    #[typeshare(serialized_as = "I54")]
+    pub total: i64,
+}
+
+/// Spec line on `GET /machine`.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MachineSpecDto {
+    #[typeshare(serialized_as = "I54")]
+    pub cpu: i64,
+    #[typeshare(serialized_as = "I54")]
+    pub mem_gib: i64,
+    #[typeshare(serialized_as = "I54")]
+    pub disk_gib: i64,
+    pub class: String,
+}
+
+/// One workspace row on `GET /machine`.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MachineWorkspaceDto {
+    pub project_id: String,
+    pub state: String,
+}
+
+/// Image block on `GET /machine`.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MachineImageDto {
+    pub current: Option<String>,
+    pub default: String,
+}
+
+/// `GET /machine` success body.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MachineStatusDto {
+    pub user_id: String,
+    #[typeshare(serialized_as = "String")]
+    pub state: BoxState,
+    #[typeshare(serialized_as = "I54")]
+    pub since: i64,
+    pub provider: Option<String>,
+    pub sandbox_id: Option<String>,
+    pub spec: MachineSpecDto,
+    pub spend_today_usd: f64,
+    pub spend_cap_usd: f64,
+    pub workspaces: Vec<MachineWorkspaceDto>,
+    pub migrated_from: Vec<String>,
+    pub image: MachineImageDto,
+    pub image_outdated: bool,
+    #[typeshare(skip)]
+    pub upgrade: Value,
+    pub always_on: bool,
+    pub held: bool,
+    pub machine_today_usd: f64,
+}
+
+/// `POST /machine/start|stop|restart` reply.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MachineStateDto {
+    #[typeshare(serialized_as = "String")]
+    pub state: BoxState,
+    #[typeshare(serialized_as = "I54")]
+    pub since: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held: Option<bool>,
 }

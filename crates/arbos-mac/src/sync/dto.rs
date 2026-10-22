@@ -5,16 +5,18 @@
 //! effort, spend today, and reply policy are read from them.
 
 use arbos_core::api::{
-    ChatDto, ChatMemberDto, CreateChatResponseDto, GetProjectResponseDto, GroupDto, PeopleChatDto,
-    ProjectMemberDto, ProjectMembersDto, ProjectOwnerDto,
+    AccountUserDto, ChatDto, ChatMemberDto, CreateChatResponseDto, GetProjectResponseDto, GroupDto,
+    MachineStatusDto, MeResponseDto, PeopleChatDto, ProjectMemberDto, ProjectMembersDto,
+    ProjectOwnerDto, UserCardDto,
 };
 use arbos_core::wire::BoxState as WireBox;
 use serde_json::Value;
 
 use crate::model::{
-    AgentMember, BoxState, Chat, ChatKind, Effort, Person, Project, ProjectMachine, ReplyPolicy,
-    SpaceKind,
+    AccountView, AgentMember, BoxState, Chat, ChatKind, Effort, Machine, MachineState, Person,
+    Project, ProjectMachine, ReplyPolicy, SpaceKind,
 };
+use crate::sync::credentials::AccountUser;
 
 /// Wire box word → the string `box_state_from` already understands.
 fn wire_box_word(state: WireBox) -> &'static str {
@@ -82,6 +84,102 @@ impl From<&ProjectOwnerDto> for Person {
             online: o.online,
         }
     }
+}
+
+impl From<&UserCardDto> for Person {
+    fn from(c: &UserCardDto) -> Self {
+        Person {
+            id: c.id.clone(),
+            handle: c.handle.clone(),
+            name: c.name.clone().filter(|n| !n.is_empty()),
+            avatar_url: c.avatar_url.clone().unwrap_or_default(),
+            avatar_color_index: c.avatar_color_index_effective.map(color_index),
+            status: if c.status.is_empty() {
+                "member".into()
+            } else {
+                c.status.clone()
+            },
+            role: String::new(),
+            last_seen_at: c.last_seen_at.flatten(),
+            online: c.online.unwrap_or(false),
+        }
+    }
+}
+
+impl From<&AccountUserDto> for AccountUser {
+    fn from(u: &AccountUserDto) -> Self {
+        AccountUser {
+            id: u.id.clone(),
+            login: u.login.clone().flatten().unwrap_or_default(),
+            avatar_url: u.avatar_url.clone().flatten().unwrap_or_default(),
+            name: u.name.clone().flatten().unwrap_or_default(),
+        }
+    }
+}
+
+/// `GET /me` → Settings account header.
+pub fn account_view_from_me(dto: &MeResponseDto) -> AccountView {
+    AccountView {
+        id: dto.user.id.clone(),
+        login: dto.user.login.clone().flatten().unwrap_or_default(),
+        name: dto.user.name.clone().flatten().unwrap_or_default(),
+        avatar_url: dto.user.avatar_url.clone().flatten().unwrap_or_default(),
+        device_name: dto
+            .device
+            .as_ref()
+            .map(|d| d.name.clone())
+            .unwrap_or_default(),
+        balance_usd: dto.credits.balance_usd,
+        spent_today_usd: dto.credits.spent_today_usd,
+        daily_cap_usd: dto.credits.daily_cap_usd,
+    }
+}
+
+fn machine_state_from_word(word: &str) -> MachineState {
+    match word {
+        "awake" => MachineState::Awake,
+        "waking" => MachineState::Waking,
+        "error" => MachineState::Error,
+        _ => MachineState::Asleep,
+    }
+}
+
+/// Apply `GET /machine` onto the live machine snapshot (keeps waitlist/provider when absent).
+pub fn apply_machine_status(m: &mut Machine, dto: &MachineStatusDto) {
+    let word = match dto.state {
+        WireBox::Awake => "awake",
+        WireBox::Waking => "waking",
+        WireBox::Asleep => "asleep",
+        WireBox::Error => "error",
+    };
+    let state = machine_state_from_word(word);
+    let since = (dto.since > 0).then_some(dto.since as u64);
+    if m.state != state {
+        m.since = since.or(Some(crate::model::now_ms()));
+    } else if since.is_some() {
+        m.since = since;
+    }
+    m.state = state;
+    m.detail = None;
+    m.progress = None;
+    m.spec = Some(format!(
+        "{} vCPU · {} GiB · {} GiB",
+        dto.spec.cpu, dto.spec.mem_gib, dto.spec.disk_gib
+    ));
+    if !dto.spec.class.is_empty() {
+        m.class = Some(dto.spec.class.clone());
+    }
+    m.cpu = Some(dto.spec.cpu as u32);
+    m.mem_gib = Some(dto.spec.mem_gib as u32);
+    if let Some(p) = dto.provider.as_deref().filter(|s| !s.is_empty()) {
+        m.provider = Some(p.to_owned());
+    }
+    if let Some(img) = dto.image.current.as_deref().filter(|s| !s.is_empty()) {
+        m.image = Some(img.to_owned());
+    }
+    m.spend_today_usd = dto.spend_today_usd;
+    m.spend_cap_usd = dto.spend_cap_usd;
+    m.always_on = dto.always_on;
 }
 
 fn person_from_project_member(m: &ProjectMemberDto) -> Person {
@@ -415,7 +513,7 @@ pub(crate) fn people_space_from(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arbos_core::api::{ChatMemberDto, ProjectDto};
+    use arbos_core::api::{ChatMemberDto, MeResponseDto, ProjectDto, UnreadDto};
     use std::fs;
     use std::path::PathBuf;
 
@@ -428,6 +526,47 @@ mod tests {
 
     fn load_json<T: serde::de::DeserializeOwned>(name: &str) -> T {
         serde_json::from_str(&fixture(name)).unwrap_or_else(|e| panic!("{name}: {e}"))
+    }
+
+    #[test]
+    fn person_from_user_card_fixtures() {
+        let legacy: UserCardDto = load_json("user_card_legacy.json");
+        let p = Person::from(&legacy);
+        assert_eq!(p.id, "u_mac");
+        assert_eq!(p.handle, "jacobs-mac");
+        assert_eq!(p.name.as_deref(), Some("Jacob's Mac"));
+
+        let presence: UserCardDto = load_json("user_card_presence.json");
+        let p = Person::from(&presence);
+        assert_eq!(p.handle, "user301");
+        assert!(!p.online);
+        assert_eq!(p.avatar_color_index, Some(2));
+
+        let github: UserCardDto = load_json("user_card_github.json");
+        let p = Person::from(&github);
+        assert_eq!(p.status, "github");
+        assert_eq!(p.handle, "ghostuser");
+    }
+
+    #[test]
+    fn machine_and_account_from_fixtures() {
+        let status: MachineStatusDto = load_json("machine_status.json");
+        let mut m = Machine::default();
+        apply_machine_status(&mut m, &status);
+        assert_eq!(m.state, MachineState::Asleep);
+        assert_eq!(m.cpu, Some(4));
+        assert_eq!(m.mem_gib, Some(8));
+
+        let me: MeResponseDto = load_json("me_with_machine.json");
+        let view = account_view_from_me(&me);
+        assert_eq!(view.id, "gh_301");
+        assert_eq!(view.login, "user301");
+        assert_eq!(view.device_name, "Test Mac");
+        assert!((view.balance_usd - 20.0).abs() < f64::EPSILON);
+
+        let unread: UnreadDto = load_json("unread.json");
+        assert_eq!(unread.total, 2);
+        assert_eq!(unread.chats[0].chat_id, "people_dm");
     }
 
     #[test]

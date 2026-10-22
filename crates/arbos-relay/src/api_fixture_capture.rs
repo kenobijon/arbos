@@ -4,6 +4,13 @@
 
 use serde_json::{json, Value};
 
+use arbos_core::api::{
+    AccountUserDto, CreditsDto, MachineImageDto, MachineSpecDto, MachineStatusDto,
+    MachineWorkspaceDto, MeDeviceDto, MeLimitsDto, MeMachineDto, MeResponseDto, UnreadChatDto,
+    UnreadDto, UserCardDto,
+};
+use arbos_core::wire::BoxState;
+
 use crate::api::{chat_dto, chat_dto_for, project_dto};
 use crate::auth::Principal;
 use crate::db::{Chat, Project};
@@ -26,6 +33,11 @@ fn load(name: &str) -> Value {
 
 fn assert_dto(name: &str, dto: impl serde::Serialize) {
     let got = serde_json::to_value(dto).expect("serialize dto");
+    let path = fixtures_dir().join(name);
+    if !path.exists() || std::env::var_os("UPDATE_API_FIXTURES").is_some() {
+        let pretty = serde_json::to_string_pretty(&got).expect("pretty");
+        std::fs::write(&path, format!("{pretty}\n")).expect("write fixture");
+    }
     let want = load(name);
     assert_eq!(got, want, "fixture {name}");
 }
@@ -322,6 +334,156 @@ async fn group_json_matches_fixture() {
         "group_json.json",
         crate::groups::group_dto(&state, &group).await,
     );
+}
+
+#[test]
+fn user_card_fixtures() {
+    let state = test_state(AuthMode::Github);
+    // Legacy device-token account (no GitHub login).
+    state
+        .db
+        .with(|c| {
+            c.execute(
+                "INSERT INTO users(id, snapshot, spend_cap_usd, created_at) VALUES ('u_mac', NULL, 0, ?1)",
+                rusqlite::params![FIXED_AT],
+            )
+        })
+        .unwrap();
+    state
+        .db
+        .insert_device("dev-mac", "Jacob's Mac", "tok", "u_mac", "paircode")
+        .unwrap();
+    let legacy = state.db.user_card("u_mac").unwrap().unwrap();
+    assert_dto("user_card_legacy.json", legacy);
+
+    let (alice, _) = person(&state, 301);
+    fix_user_created_at(&state, &alice);
+    let card = state.db.user_card(&alice).unwrap().unwrap();
+    let with_presence = people::with_presence(&state, card);
+    assert_dto("user_card_presence.json", with_presence);
+
+    let github = UserCardDto {
+        id: "gh_999001".into(),
+        handle: "ghostuser".into(),
+        avatar_url: Some("https://avatars.githubusercontent.com/u/999001?v=4".into()),
+        name: Some("Ghost".into()),
+        status: "github".into(),
+        created_at: None,
+        test: None,
+        last_seen_at: None,
+        online: None,
+        avatar_color_index_effective: None,
+    };
+    assert_dto("user_card_github.json", github);
+}
+
+#[test]
+fn me_and_machine_unread_fixtures() {
+    let me_no_machine = MeResponseDto {
+        user: AccountUserDto {
+            id: "gh_301".into(),
+            github_id: Some(Some(301)),
+            login: Some(Some("user301".into())),
+            avatar_url: Some(None),
+            name: Some(None),
+            created_at: Some(FIXED_AT),
+            last_login_at: Some(Some(FIXED_AT)),
+        },
+        device: Some(MeDeviceDto {
+            id: "dev_fixture".into(),
+            name: "Test Mac".into(),
+            created_at: FIXED_AT,
+            revoked_at: None,
+            last_seen_at: Some(FIXED_AT),
+            kind: "github".into(),
+        }),
+        credits: CreditsDto {
+            balance_usd: 20.0,
+            granted_usd: 20.0,
+            spent_usd: 0.0,
+            spent_today_usd: 0.0,
+            daily_cap_usd: None,
+            allow_negative: false,
+            machine_today_usd: 0.0,
+            machine_total_usd: 0.0,
+        },
+        limits: MeLimitsDto {
+            read_only: false,
+            read_only_reason: None,
+            signup: "open".into(),
+            auth_mode: "github".into(),
+        },
+        features: json!({ "vault_connect": false }),
+        machine: MeMachineDto {
+            exists: false,
+            state: BoxState::Asleep,
+            since: 0,
+            provider: None,
+            sandbox_id: None,
+            always_on: false,
+            held: false,
+            waitlisted: false,
+            waitlist_position: None,
+            evicted: false,
+        },
+    };
+    assert_dto("me_without_machine.json", me_no_machine.clone());
+
+    let mut me_with = me_no_machine;
+    me_with.machine = MeMachineDto {
+        exists: true,
+        state: BoxState::Awake,
+        since: FIXED_AT,
+        provider: Some("gvisor".into()),
+        sandbox_id: Some("sb_fixture".into()),
+        always_on: false,
+        held: false,
+        waitlisted: false,
+        waitlist_position: None,
+        evicted: false,
+    };
+    assert_dto("me_with_machine.json", me_with);
+
+    let machine = MachineStatusDto {
+        user_id: "gh_301".into(),
+        state: BoxState::Asleep,
+        since: 0,
+        provider: None,
+        sandbox_id: None,
+        spec: MachineSpecDto {
+            cpu: 4,
+            mem_gib: 8,
+            disk_gib: 10,
+            class: String::new(),
+        },
+        spend_today_usd: 0.0,
+        spend_cap_usd: 0.0,
+        workspaces: vec![MachineWorkspaceDto {
+            project_id: "proj_fixture".into(),
+            state: "stopped".into(),
+        }],
+        migrated_from: Vec::new(),
+        image: MachineImageDto {
+            current: None,
+            default: String::new(),
+        },
+        image_outdated: false,
+        upgrade: json!({ "in_progress": false }),
+        always_on: false,
+        held: false,
+        machine_today_usd: 0.0,
+    };
+    assert_dto("machine_status.json", machine);
+
+    let unread = UnreadDto {
+        chats: vec![UnreadChatDto {
+            chat_id: "people_dm".into(),
+            project_id: "people".into(),
+            unread: 2,
+        }],
+        total: 2,
+    };
+    assert_dto("unread.json", unread);
 }
 
 #[tokio::test]

@@ -196,4 +196,42 @@ final class CoreFixturesTests: XCTestCase {
     func testParseChatWithoutIdReturnsNil() throws {
         XCTAssertNil(RelayAPI.parseChat(["project_id": "proj_fixture", "title": "Nope"] as [String: Any]))
     }
+
+    // MARK: People / me / machine / unread (step 6b-2a)
+
+    func testUserCardParseFixtures() throws {
+        let legacy = try XCTUnwrap(Person.parse(try apiFixtureJSON("user_card_legacy.json")))
+        XCTAssertEqual(legacy.id, "u_mac")
+        XCTAssertEqual(legacy.handle, "jacobs-mac")
+        XCTAssertEqual(legacy.name, "Jacob's Mac")
+
+        let presence = try XCTUnwrap(Person.parse(try apiFixtureJSON("user_card_presence.json")))
+        XCTAssertEqual(presence.handle, "user301")
+        XCTAssertEqual(presence.online, false)
+        XCTAssertEqual(presence.avatarColorIndex, 2)
+
+        let github = try XCTUnwrap(Person.parse(try apiFixtureJSON("user_card_github.json")))
+        XCTAssertEqual(github.status, "github")
+        XCTAssertEqual(github.handle, "ghostuser")
+    }
+
+    func testMachineStatusFixture() throws {
+        let data = try apiFixtureData("machine_status.json")
+        let dto = try JSONDecoder().decode(MachineStatusDto.self, from: data)
+        let machine = Machine(dto: dto)
+        XCTAssertEqual(machine.state, .hibernatedLight)
+        XCTAssertEqual(machine.cpu, 4)
+        XCTAssertEqual(machine.memGib, 8)
+        XCTAssertEqual(machine.workspaces["proj_fixture"], .idle)
+        XCTAssertEqual(dto.user_id, "gh_301")
+    }
+
+    func testUnreadFixture() throws {
+        let data = try apiFixtureData("unread.json")
+        let dto = try JSONDecoder().decode(UnreadDto.self, from: data)
+        XCTAssertEqual(dto.total, 2)
+        XCTAssertEqual(dto.chats.count, 1)
+        XCTAssertEqual(dto.chats[0].chat_id, "people_dm")
+        XCTAssertEqual(dto.chats[0].unread, 2)
+    }
 }

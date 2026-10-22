@@ -296,7 +296,6 @@ struct SecretsPage: View {
     @Environment(\.theme) private var theme
     @State private var showAdd = false
     @State private var showConnect = false
-    @State private var confirmPause = false
     /// Rig: `ARBOS_SETTINGS_PAGE=secret:<ENV>` pushes that secret's page once the list arrives.
     @State private var rigSecretId: String?
     @State private var showRigSecret = false
@@ -314,9 +313,9 @@ struct SecretsPage: View {
                           ? "Secrets are paused. Agents can't use any secret until you turn this off."
                           : "Agents can't use any secret while paused.") {
                 SecretToggleRow(icon: "pause.fill", title: "Pause all secrets", tint: theme.danger,
-                                isOn: Binding(get: { paused }, set: { on in
-                                    if on { confirmPause = true } else { model.setSecretsPaused(false) }
-                                }), disabled: model.isFixture || overview == nil)
+                                // Flips at once (optimistic; a relay error puts it back) — no confirm (Jacob, Oct 21).
+                                isOn: Binding(get: { paused }, set: { on in model.setSecretsPaused(on) }),
+                                disabled: model.isFixture || overview == nil)
             }
             if !pending.isEmpty {
                 SettingsGroup(header: "Waiting for you") {
@@ -385,11 +384,6 @@ struct SecretsPage: View {
         }
         .navigationDestination(isPresented: $showRigVault) {
             if let id = rigVaultId { VaultPage(vaultId: id) }
-        }
-        .confirmationDialog("Pause all secrets?", isPresented: $confirmPause, titleVisibility: .visible) {
-            Button("Pause all secrets", role: .destructive) { model.setSecretsPaused(true) }
-        } message: {
-            Text("Every agent loses every secret within seconds.")
         }
         .sheet(isPresented: $showAdd) {
             NavigationStack { NewSecretSheet() }

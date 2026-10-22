@@ -161,6 +161,7 @@ extension AppModel {
         firstLogin = nil
         greetingBubbleFrame = nil
         UserDefaults.standard.removeObject(forKey: AppModel.pendingKey)
+        applyOpenServerHook()
     }
 
     /// Retry from the S14 block: ask the relay to (re)start the machine and

@@ -8,6 +8,7 @@
 //!
 //! `GET /secrets` serves the same object (`vaults::features()` delegates here).
 
+use arbos_core::api::MeFeaturesDto;
 use serde_json::{json, Value};
 
 /// `1|true|on|yes` → on, `0|false|off|no` → off, anything else → `default`.
@@ -29,11 +30,16 @@ pub fn leaf_avatars() -> bool {
 
 /// The `features` object on `GET /me` and `GET /secrets`. Key names are a contract with the
 /// shipped apps (Mac v0.6.104 / TestFlight read `vault_connect`); only add, never rename.
+pub fn dto() -> MeFeaturesDto {
+    MeFeaturesDto {
+        vault_connect: Some(crate::vaults::vault_connect()),
+        leaf_avatars: Some(leaf_avatars()),
+    }
+}
+
+/// `dto()` as JSON (for `GET /secrets`, whose body is hand-built).
 pub fn features() -> Value {
-    json!({
-        "vault_connect": crate::vaults::vault_connect(),
-        "leaf_avatars": leaf_avatars(),
-    })
+    serde_json::to_value(dto()).unwrap_or_else(|_| json!({}))
 }
 
 #[cfg(test)]

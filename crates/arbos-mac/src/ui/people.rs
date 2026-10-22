@@ -5,8 +5,8 @@
 use std::sync::Arc;
 
 use gpui::{
-    div, prelude::*, px, Context, Div, ElementId, Entity, Focusable as _, RenderImage,
-    SharedString, Stateful,
+    div, prelude::*, px, AnyElement, App, Context, Div, ElementId, Entity, Focusable as _,
+    RenderImage, SharedString, Stateful, Window,
 };
 
 use crate::app::AppState;
@@ -19,6 +19,12 @@ use crate::ui::groups::project_color;
 use crate::ui::icons::icon;
 use crate::ui::shell::Shell;
 use crate::ui::theme::{Theme, PANEL_RADIUS, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
+
+/// The New Message / New group search field: side inset equal to the row
+/// content below it (cards 16 + row padding 14), and Grok Mac's ~14 pt
+/// placeholder (ref 57: 21 px ascender band at 2 px/pt).
+pub const SEARCH_INSET: f32 = 30.0;
+pub const SEARCH_FONT_SIZE: f32 = 14.0;
 
 /// Members of a space with their decoded avatars (list rows, headers).
 pub type PeopleWithAvatars = Vec<(Person, Option<Arc<RenderImage>>)>;
@@ -232,21 +238,29 @@ pub fn new_chat_sheet(
         .map(|p| (p.id.clone(), p.name.clone()))
         .collect();
 
-    // The app's one search field (the left pane's, `sidebar.rs`): a flat
-    // tinted 32 pt row with 8 pt corners and no rim, flush with the cards'
-    // 16 pt inset below it. The ComposerInput's line is centred explicitly —
-    // without items_center on the flex_1 wrapper the caret sits high.
+    // Grok Mac's search field, measured on the real app (ref 57, 2 px/pt):
+    // 32 pt tall including a 0.5 pt rim, 8 pt corners, tinted fill, an
+    // 11.5 pt magnifier 9 pt in, 6.5 pt to the 14 pt placeholder. Its edges
+    // line up with the row content below (cards 16 + row padding 14), per
+    // Jacob. `flex_shrink_0`: inside the scrolling column the field used to
+    // be squeezed to ~21 pt once the people list was long. The
+    // ComposerInput's line is centred explicitly — without items_center on
+    // the flex_1 wrapper the caret sits high.
     let search = div()
-        .mx(px(16.0))
+        .mx(px(SEARCH_INSET))
         .h(px(32.0))
-        .px(px(10.0))
+        .flex_shrink_0()
+        .pl(px(8.5))
+        .pr(px(10.0))
         .flex()
         .items_center()
-        .gap(px(7.0))
+        .gap(px(6.5))
         .rounded(px(8.0))
         .bg(theme.surface_2)
+        .border(px(0.5))
+        .border_color(theme.field_border)
         .cursor_text()
-        .child(icon("search", 14.0, theme.text_muted))
+        .child(icon("search", 11.5, theme.text_muted))
         .child(
             div()
                 .flex_1()
@@ -687,6 +701,53 @@ pub fn new_chat_sheet(
     )
 }
 
+/// Avatar size inside a selected-member chip.
+const CHIP_AVATAR: f32 = 22.0;
+
+/// One selected member in a picker (New group, Add members): the member's
+/// picture, `@handle`, and an × that removes it. People and agents share it,
+/// so an agent chip carries the agent's avatar exactly like a person chip.
+pub fn member_chip(
+    id: String,
+    picture: AnyElement,
+    label: String,
+    theme: &Theme,
+    on_remove: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    let close_id = format!("{id}-x");
+    div()
+        .id(ElementId::Name(SharedString::from(id)))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .h(px(32.0))
+        .pl(px(4.0))
+        .pr(px(8.0))
+        .rounded_full()
+        .bg(theme.field)
+        .child(picture)
+        .child(
+            div()
+                .text_size(px(TEXT_TINY))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(theme.text)
+                .child(label),
+        )
+        .child(
+            div()
+                .id(ElementId::Name(SharedString::from(close_id)))
+                .size(px(16.0))
+                .rounded_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .child(icon("xmark", 8.0, theme.text_muted))
+                .on_click(on_remove),
+        )
+}
+
 /// New group picker body: chips, search, your agents, people with checkmarks.
 /// With `add_to` (the group pane's Add members) its members show a greyed
 /// check and take no click.
@@ -716,99 +777,44 @@ fn new_group_body(
             .items_center()
             .gap(px(8.0))
             .overflow_x_scroll();
+        let projects = state.read(cx).projects.clone();
         for pid in picked_agents {
             let id = pid.clone();
             let label = agent_names
                 .get(pid)
                 .map(|n| format!("@{}", Project::mention_slug(n)))
                 .unwrap_or_else(|| "@agent".into());
-            chips = chips.child(
-                div()
-                    .id(ElementId::Name(SharedString::from(format!(
-                        "group-chip-agent-{pid}"
-                    ))))
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .h(px(32.0))
-                    .pl(px(10.0))
-                    .pr(px(8.0))
-                    .rounded_full()
-                    .bg(theme.field)
-                    .child(
-                        div()
-                            .text_size(px(TEXT_TINY))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text)
-                            .child(label),
-                    )
-                    .child(
-                        div()
-                            .id(ElementId::Name(SharedString::from(format!(
-                                "group-chip-agent-x-{pid}"
-                            ))))
-                            .size(px(16.0))
-                            .rounded_full()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .cursor_pointer()
-                            .child(icon("xmark", 8.0, theme.text_muted))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.state
-                                    .update(cx, |s, cx| s.toggle_group_agent(id.clone(), cx));
-                            })),
-                    ),
-            );
+            // The agent's own picture (photo, else its D79 initial disc) —
+            // the same one its list row shows.
+            let picture = projects
+                .iter()
+                .find(|p| &p.id == pid)
+                .map(|p| avatars::project(p, CHIP_AVATAR, theme).into_any_element())
+                .unwrap_or_else(|| div().size(px(CHIP_AVATAR)).into_any_element());
+            chips = chips.child(member_chip(
+                format!("group-chip-agent-{pid}"),
+                picture,
+                label,
+                theme,
+                cx.listener(move |this, _, _, cx| {
+                    this.state
+                        .update(cx, |s, cx| s.toggle_group_agent(id.clone(), cx));
+                }),
+            ));
         }
         for person in picked {
             let image = state.read(cx).avatar(&person.avatar_url);
-            let handle = person.handle.clone();
             let person_clone = person.clone();
-            chips = chips.child(
-                div()
-                    .id(ElementId::Name(SharedString::from(format!(
-                        "group-chip-{}",
-                        person.id
-                    ))))
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .h(px(32.0))
-                    .pl(px(4.0))
-                    .pr(px(8.0))
-                    .rounded_full()
-                    .bg(theme.field)
-                    .child(avatar(image, person, 22.0, theme))
-                    .child(
-                        div()
-                            .text_size(px(TEXT_TINY))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text)
-                            .child(format!("@{handle}")),
-                    )
-                    .child(
-                        div()
-                            .id(ElementId::Name(SharedString::from(format!(
-                                "group-chip-x-{}",
-                                person.id
-                            ))))
-                            .size(px(16.0))
-                            .rounded_full()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .cursor_pointer()
-                            .child(icon("xmark", 8.0, theme.text_muted))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.state.update(cx, |s, cx| {
-                                    s.toggle_group_person(person_clone.clone(), cx)
-                                });
-                            })),
-                    ),
-            );
+            chips = chips.child(member_chip(
+                format!("group-chip-{}", person.id),
+                avatar(image, person, CHIP_AVATAR, theme).into_any_element(),
+                format!("@{}", person.handle),
+                theme,
+                cx.listener(move |this, _, _, cx| {
+                    this.state
+                        .update(cx, |s, cx| s.toggle_group_person(person_clone.clone(), cx));
+                }),
+            ));
         }
         body = body.child(chips);
     }

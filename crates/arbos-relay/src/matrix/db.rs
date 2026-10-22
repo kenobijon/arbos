@@ -328,15 +328,76 @@ impl Db {
         })
     }
 
-    /// Newest event the relay wrote into a chat (what a read receipt points at).
+    /// Newest event the relay wrote into a chat, in room stream order (insertion order: the
+    /// worker sends one chat's jobs in sequence). A receipt here reads everything, including a
+    /// live message that landed after an older row while history was still being replayed.
     pub fn matrix_latest_event(&self, chat_id: &str) -> Result<Option<String>> {
         self.with(|c| {
             c.query_row(
-                "SELECT event_id FROM matrix_events WHERE chat_id = ?1 ORDER BY ts DESC, rowid DESC LIMIT 1",
+                "SELECT event_id FROM matrix_events WHERE chat_id = ?1 ORDER BY rowid DESC LIMIT 1",
                 params![chat_id],
                 |r| r.get(0),
             )
             .optional()
+        })
+    }
+
+    /// The mirrored event of the newest announced message at or before a user's read mark in a
+    /// chat, and whether anything from someone else came after the mark. `None` when the user
+    /// has no mark there.
+    pub fn matrix_read_mark(
+        &self,
+        user_id: &str,
+        chat_id: &str,
+    ) -> Result<Option<(Option<String>, bool)>> {
+        self.with(|c| {
+            let mark: Option<i64> = c
+                .query_row(
+                    "SELECT event_id FROM chat_user_reads WHERE user_id = ?1 AND chat_id = ?2",
+                    params![user_id, chat_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let Some(mark) = mark else {
+                return Ok(None);
+            };
+            let event: Option<String> = c
+                .query_row(
+                    "SELECT m.event_id FROM matrix_events m
+                     JOIN chat_events e ON e.chat_id = m.chat_id AND e.message_id = m.message_id
+                     WHERE m.chat_id = ?1 AND e.id <= ?2
+                     ORDER BY e.id DESC LIMIT 1",
+                    params![chat_id, mark],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let caught_up: bool = c.query_row(
+                "SELECT NOT EXISTS (SELECT 1 FROM chat_events WHERE chat_id = ?1 AND id > ?2
+                                    AND (sender_user IS NULL OR sender_user != ?3))",
+                params![chat_id, mark, user_id],
+                |r| r.get(0),
+            )?;
+            Ok(Some((event, caught_up)))
+        })
+    }
+
+    /// Chats where a user has a read mark.
+    pub fn matrix_read_marked_chats(&self, user_id: &str) -> Result<Vec<String>> {
+        self.with(|c| {
+            let mut st = c.prepare("SELECT chat_id FROM chat_user_reads WHERE user_id = ?1")?;
+            let rows = st.query_map(params![user_id], |r| r.get(0))?;
+            rows.collect()
+        })
+    }
+
+    /// Open rooms of people/project chats (not Spaces or channels): `(chat_id, project_id)`.
+    pub fn matrix_open_chat_rooms(&self) -> Result<Vec<(String, Option<String>)>> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT chat_id, project_id FROM matrix_rooms WHERE closed_at IS NULL AND kind NOT IN ('space', 'channel')",
+            )?;
+            let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            rows.collect()
         })
     }
 

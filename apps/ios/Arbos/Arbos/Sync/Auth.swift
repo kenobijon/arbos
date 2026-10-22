@@ -6,6 +6,7 @@
 // shapes are a one-place change.
 
 import AuthenticationServices
+import ArbosFFI
 import Foundation
 import UIKit
 
@@ -182,19 +183,29 @@ extension RelayAPI {
     }
 
     /// `GET /me` → user, credits, machine summary.
-    func me() async throws -> (AuthUser, Credits?, [String: Any]) {
-        guard let m = try await json("GET", AuthEndpoints.me) as? [String: Any] else { throw AuthError(message: "Bad /me response") }
-        let user = RelayAPI.parseUser(m["user"] as? [String: Any]) ?? AuthUser(id: "", login: "github")
-        var credits: Credits? = nil
-        if let c = m["credits"] as? [String: Any] {
-            let n = { (k: String) -> Double in (c[k] as? NSNumber)?.doubleValue ?? 0 }
-            credits = Credits(balanceUsd: n("balance_usd"), grantedUsd: n("granted_usd"), spentUsd: n("spent_usd"),
-                              spentTodayUsd: n("spent_today_usd"), dailyCapUsd: (c["daily_cap_usd"] as? NSNumber)?.doubleValue)
+    func me() async throws -> (AuthUser, Credits?, MeMachineDto, MeFeaturesDto) {
+        let v = try await json("GET", AuthEndpoints.me)
+        guard JSONSerialization.isValidJSONObject(v),
+              let data = try? JSONSerialization.data(withJSONObject: v) else {
+            throw AuthError(message: "Bad /me response")
         }
-        var summary = m["machine"] as? [String: Any] ?? [:]
-        // Remote feature flags ride along with the machine summary (one tuple, no new callers).
-        if let features = m["features"] as? [String: Any] { summary["features"] = features }
-        return (user, credits, summary)
+        let dto: MeResponseDto
+        do {
+            dto = try JSONDecoder().decode(MeResponseDto.self, from: data)
+        } catch {
+            NSLog("MeResponseDto: \(error)")
+            throw AuthError(message: "Bad /me response")
+        }
+        let user = RelayAPI.parseUser(dto.user) ?? AuthUser(id: "", login: "github")
+        let c = dto.credits
+        let credits = Credits(
+            balanceUsd: c.balance_usd,
+            grantedUsd: c.granted_usd,
+            spentUsd: c.spent_usd,
+            spentTodayUsd: c.spent_today_usd,
+            dailyCapUsd: c.daily_cap_usd
+        )
+        return (user, credits, dto.machine, dto.features)
     }
 
     /// `PATCH /me {name?, login?}` → updated user (display name and/or handle).
@@ -202,17 +213,26 @@ extension RelayAPI {
         var body: [String: Any] = [:]
         if let name { body["name"] = name }
         if let login { body["login"] = login }
-        guard let m = try await json("PATCH", AuthEndpoints.me, body: body) as? [String: Any],
-              let user = RelayAPI.parseUser(m["user"] as? [String: Any]) else {
+        let v = try await json("PATCH", AuthEndpoints.me, body: body)
+        guard JSONSerialization.isValidJSONObject(v),
+              let data = try? JSONSerialization.data(withJSONObject: v),
+              let dto = try? JSONDecoder().decode(MeUserResponseDto.self, from: data),
+              let user = RelayAPI.parseUser(dto.user) else {
             throw AuthError(message: "Could not update profile")
         }
         return user
     }
 
-    /// `DELETE /me/avatar`: back to the GitHub picture; then `GET /me` for the fresh user.
+    /// `DELETE /me/avatar`: back to the GitHub picture (response carries the updated user).
     func deleteMeAvatar() async throws -> AuthUser {
-        _ = try await request("DELETE", "/me/avatar")
-        return try await me().0
+        let v = try await json("DELETE", "/me/avatar")
+        guard JSONSerialization.isValidJSONObject(v),
+              let data = try? JSONSerialization.data(withJSONObject: v),
+              let dto = try? JSONDecoder().decode(MeUserResponseDto.self, from: data),
+              let user = RelayAPI.parseUser(dto.user) else {
+            throw AuthError(message: "Could not remove picture")
+        }
+        return user
     }
 
     func approvals() async throws -> [PendingDevice] {
@@ -250,8 +270,20 @@ extension RelayAPI {
     }
 
     static func parseUser(_ u: [String: Any]?) -> AuthUser? {
-        guard let u, let login = u["login"] as? String else { return nil }
-        return AuthUser(id: u["id"] as? String ?? "", login: login, name: u["name"] as? String, avatarUrl: u["avatar_url"] as? String)
+        guard let u, JSONSerialization.isValidJSONObject(u),
+              let data = try? JSONSerialization.data(withJSONObject: u),
+              let dto = try? JSONDecoder().decode(AccountUserDto.self, from: data) else { return nil }
+        return parseUser(dto)
+    }
+
+    static func parseUser(_ dto: AccountUserDto) -> AuthUser? {
+        guard let login = dto.login.flatMap({ $0 }), !login.isEmpty else { return nil }
+        return AuthUser(
+            id: dto.id,
+            login: login,
+            name: dto.name.flatMap { $0 },
+            avatarUrl: dto.avatar_url.flatMap { $0 }
+        )
     }
 }
 

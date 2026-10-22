@@ -14,12 +14,15 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Context as _, Result};
 use arbos_client::room::{self, RoomAction, RoomSession};
 use arbos_core::api::{
-    CreateChatResponseDto, GetProjectResponseDto, GroupDto, PeopleChatDto, ProjectDto,
-    ProjectMembersDto,
+    CreateChatResponseDto, GetProjectResponseDto, GroupDto, MachineStateDto, MachineStatusDto,
+    MeResponseDto, MeUserResponseDto, PeopleChatDto, ProjectDto, ProjectMembersDto, UserCardDto,
+    UsersPageDto,
 };
 use arbos_core::doc::{UserAttachment, UserMessageOpts};
 use arbos_core::wire::{BoxState as WireBox, PROJECT_DOC_CHAT_ID};
-use arbos_matrix::{Listener as MatrixListener, MatrixClient, MessageRow, Session, Snapshot};
+use arbos_matrix::{
+    Error as MatrixError, Listener as MatrixListener, MatrixClient, MessageRow, Session, Snapshot,
+};
 use futures::future::BoxFuture;
 use futures::{SinkExt, StreamExt};
 use serde_json::{json, Value};
@@ -34,7 +37,8 @@ use super::credentials::{self, DeviceCredentials};
 use super::diagnostics;
 use super::doc::ChatDoc;
 use super::dto::{
-    chat_from_create, chat_from_dto, chat_from_group_dto, people_space_from, project_from_dto,
+    account_view_from_me, apply_machine_status, chat_from_create, chat_from_dto,
+    chat_from_group_dto, people_space_from, project_from_dto,
 };
 use super::store::{self, Store};
 use super::{ClientCommand, SyncEvent, SyncSource};
@@ -281,11 +285,8 @@ impl Shared {
             return;
         }
         if let Ok(v) = self.get_json("/me").await {
-            if let Some(user) = v
-                .get("user")
-                .and_then(|u| serde_json::from_value(u.clone()).ok())
-            {
-                *self.me.lock().unwrap() = Some(user);
+            if let Ok(dto) = serde_json::from_value::<MeResponseDto>(v) {
+                *self.me.lock().unwrap() = Some((&dto.user).into());
             }
         }
     }
@@ -726,79 +727,42 @@ async fn refresh_me(shared: &Arc<Shared>) {
         }
         return;
     };
-    let user = v.get("user").cloned().unwrap_or(Value::Null);
-    if let Ok(u) = serde_json::from_value::<credentials::AccountUser>(user.clone()) {
-        shared.with_store(|s| s.put_json(store::KEY_ACCOUNT, &u));
-        *shared.me.lock().unwrap() = Some(u);
-    }
-    let credits = v.get("credits").cloned().unwrap_or(Value::Null);
-    let str_of = |v: &Value, k: &str| {
-        v.get(k)
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string()
+    let Ok(dto) = serde_json::from_value::<MeResponseDto>(v) else {
+        return;
     };
-    let view = AccountView {
-        id: str_of(&user, "id"),
-        login: str_of(&user, "login"),
-        name: str_of(&user, "name"),
-        avatar_url: str_of(&user, "avatar_url"),
-        device_name: v
-            .pointer("/device/name")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-        balance_usd: credits
-            .get("balance_usd")
-            .and_then(Value::as_f64)
-            .unwrap_or(0.0),
-        spent_today_usd: credits
-            .get("spent_today_usd")
-            .and_then(Value::as_f64)
-            .unwrap_or(0.0),
-        daily_cap_usd: credits.get("daily_cap_usd").and_then(Value::as_f64),
-    };
+    let u: credentials::AccountUser = (&dto.user).into();
+    shared.with_store(|s| s.put_json(store::KEY_ACCOUNT, &u));
+    *shared.me.lock().unwrap() = Some(u);
+    let view = account_view_from_me(&dto);
     let _ = shared.events.send(SyncEvent::Account(Some(view)));
     // D92 remote flag: leaf avatars for agents (absent on older relays = on).
-    crate::ui::avatars::set_leaf_avatars(
-        v.pointer("/features/leaf_avatars")
-            .and_then(Value::as_bool)
-            .unwrap_or(true),
-    );
-    if let Some(m) = v.get("machine").and_then(Value::as_object) {
-        // D89: provider and waitlist place ride along with `always_on`.
-        let waitlisted = m
-            .get("waitlisted")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let position = waitlisted.then(|| {
-            m.get("waitlist_position")
-                .and_then(Value::as_u64)
-                .map(|p| p as u32)
-                .unwrap_or(1)
-        });
-        let provider = m.get("provider").and_then(Value::as_str).map(str::to_owned);
-        let always_on = m.get("always_on").and_then(Value::as_bool);
-        {
-            let snapshot = {
-                let mut machine = shared.machine.lock().unwrap();
-                if let Some(on) = always_on {
-                    machine.always_on = on;
-                }
-                if provider.is_some() {
-                    machine.provider = provider;
-                }
-                machine.waitlist_position = position;
-                machine.clone()
-            };
-            let _ = shared.events.send(SyncEvent::Machine(snapshot));
-        }
-        if m.get("exists").and_then(Value::as_bool) != Some(false) {
-            if let Some(word) = m.get("state").and_then(Value::as_str) {
-                let since = m.get("since").and_then(Value::as_u64).filter(|v| *v > 0);
-                set_machine(shared, machine_state_from_word(word), since, None);
+    crate::ui::avatars::set_leaf_avatars(dto.features.leaf_avatars.unwrap_or(true));
+    let m = &dto.machine;
+    // D89: provider and waitlist place ride along with `always_on`.
+    let position = m
+        .waitlisted
+        .then(|| m.waitlist_position.map(|p| p as u32).unwrap_or(1));
+    {
+        let snapshot = {
+            let mut machine = shared.machine.lock().unwrap();
+            machine.always_on = m.always_on;
+            if let Some(p) = m.provider.clone() {
+                machine.provider = Some(p);
             }
-        }
+            machine.waitlist_position = position;
+            machine.clone()
+        };
+        let _ = shared.events.send(SyncEvent::Machine(snapshot));
+    }
+    if m.exists {
+        let word = match m.state {
+            WireBox::Awake => "awake",
+            WireBox::Waking => "waking",
+            WireBox::Asleep => "asleep",
+            WireBox::Error => "error",
+        };
+        let since = (m.since > 0).then_some(m.since as u64);
+        set_machine(shared, machine_state_from_word(word), since, None);
     }
 }
 
@@ -1666,6 +1630,9 @@ fn handle_server_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                             .events
                             .send(SyncEvent::MatrixTimeline { room_id, rows });
                     }
+                    // Gone / not yet in the memory store after sync — wait for the next
+                    // snapshot; not a product bug.
+                    Err(MatrixError::NoRoom(_)) => {}
                     Err(err) => shared.diagnostic("channel-open", err.to_string()),
                 }
             });
@@ -1684,6 +1651,7 @@ fn handle_server_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                             .send(SyncEvent::MatrixTimeline { room_id, rows });
                     }
                     Ok(None) => {}
+                    Err(MatrixError::NoRoom(_)) => {}
                     Err(err) => shared.diagnostic("channel-history", err.to_string()),
                 }
             });
@@ -2479,95 +2447,22 @@ async fn refresh_machine(shared: &Arc<Shared>) {
         // Quiet: the registry poll already surfaces relay outages (S14).
         Err(_) => return,
     };
-    let word = value.get("state").and_then(Value::as_str).unwrap_or("");
-    let since = value
-        .get("since")
-        .and_then(Value::as_u64)
-        .filter(|v| *v > 0);
-    let detail = value
-        .get("error")
-        .or_else(|| value.get("detail"))
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let spec_obj = value.get("spec").and_then(Value::as_object);
-    let spec = spec_obj.map(|spec| {
-        let num = |k: &str| spec.get(k).and_then(Value::as_f64).unwrap_or(0.0);
-        format!(
-            "{} vCPU · {} GiB · {} GiB",
-            num("cpu"),
-            num("mem_gib"),
-            num("disk_gib")
-        )
-    });
-    let class = spec_obj
-        .and_then(|spec| spec.get("class"))
-        .and_then(Value::as_str)
-        .map(str::to_string);
+    let Ok(dto) = serde_json::from_value::<MachineStatusDto>(value) else {
+        return;
+    };
     let snapshot = {
         let mut m = shared.machine.lock().unwrap();
-        let state = machine_state_from_word(word);
-        if m.state != state {
-            m.since = since.or(Some(now_ms()));
-        } else if since.is_some() {
-            m.since = since;
-        }
-        m.state = state;
-        m.detail = detail;
-        m.progress = None;
-        if spec.is_some() {
-            m.spec = spec;
-        }
-        if class.is_some() {
-            m.class = class;
-        }
-        if let Some(spec) = spec_obj {
-            m.cpu = spec.get("cpu").and_then(Value::as_u64).map(|v| v as u32);
-            m.mem_gib = spec
-                .get("mem_gib")
-                .and_then(Value::as_u64)
-                .map(|v| v as u32);
-        }
-        if let Some(p) = value
-            .get("provider")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-        {
-            m.provider = Some(p.to_owned());
-        }
-        if let Some(img) = value
-            .pointer("/image/current")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-        {
-            m.image = Some(img.to_string());
-        }
-        if let Some(v) = value.get("spend_today_usd").and_then(Value::as_f64) {
-            m.spend_today_usd = v;
-        }
-        if let Some(v) = value.get("spend_cap_usd").and_then(Value::as_f64) {
-            m.spend_cap_usd = v;
-        }
-        if let Some(v) = value.get("always_on").and_then(Value::as_bool) {
-            m.always_on = v;
-        }
+        apply_machine_status(&mut m, &dto);
         m.clone()
     };
     let _ = shared.events.send(SyncEvent::Machine(snapshot));
-    if let Some(workspaces) = value.get("workspaces").and_then(Value::as_array) {
-        for ws in workspaces {
-            let (Some(id), Some(word)) = (
-                ws.get("project_id").and_then(Value::as_str),
-                ws.get("state").and_then(Value::as_str),
-            ) else {
-                continue;
-            };
-            let _ = shared.events.send(SyncEvent::Workspace {
-                project_id: id.to_string(),
-                running: word == "running",
-            });
-            if let Some(state) = box_state_from_word(word) {
-                set_project_state(shared, id, state, None);
-            }
+    for ws in &dto.workspaces {
+        let _ = shared.events.send(SyncEvent::Workspace {
+            project_id: ws.project_id.clone(),
+            running: ws.state == "running",
+        });
+        if let Some(state) = box_state_from_word(&ws.state) {
+            set_project_state(shared, &ws.project_id, state, None);
         }
     }
 }
@@ -3759,17 +3654,15 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 };
                 match shared.get_json(&path).await {
                     Ok(v) => {
-                        let results: Vec<Person> = v
-                            .as_array()
-                            .or_else(|| v.get("users").and_then(|u| u.as_array()))
-                            .map(|a| {
-                                a.iter()
-                                    .filter_map(|p| {
-                                        serde_json::from_value::<Person>(p.clone()).ok()
-                                    })
-                                    .collect()
-                            })
-                            .unwrap_or_default();
+                        let results: Vec<Person> = if let Ok(page) =
+                            serde_json::from_value::<UsersPageDto>(v.clone())
+                        {
+                            page.users.iter().map(Person::from).collect()
+                        } else if let Ok(cards) = serde_json::from_value::<Vec<UserCardDto>>(v) {
+                            cards.iter().map(Person::from).collect()
+                        } else {
+                            Vec::new()
+                        };
                         let _ = shared
                             .events
                             .send(SyncEvent::PeopleSearch { query, results });
@@ -4723,7 +4616,16 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .send()
                     .await;
                 match put {
-                    Ok(r) if r.status().is_success() => refresh_me(&shared).await,
+                    Ok(r) if r.status().is_success() => {
+                        if let Ok(body) = r.json::<Value>().await {
+                            if let Ok(dto) = serde_json::from_value::<MeUserResponseDto>(body) {
+                                let u: credentials::AccountUser = (&dto.user).into();
+                                shared.with_store(|s| s.put_json(store::KEY_ACCOUNT, &u));
+                                *shared.me.lock().unwrap() = Some(u);
+                            }
+                        }
+                        refresh_me(&shared).await;
+                    }
                     Ok(r) => shared.notice(format!("Picture not saved: HTTP {}", r.status())),
                     Err(err) => shared.notice(format!("Picture not saved: {err}")),
                 }
@@ -4732,11 +4634,25 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         ClientCommand::RemoveMyAvatar => {
             let shared = shared.clone();
             tokio::spawn(async move {
-                match shared.delete("/me/avatar").await {
-                    Ok(()) => refresh_me(&shared).await,
-                    Err(err) => {
-                        shared.notice(format!("Picture not removed: {}", people_error(&err)))
+                let resp = shared
+                    .http
+                    .delete(format!("{}/me/avatar", shared.http_url))
+                    .bearer_auth(shared.token())
+                    .send()
+                    .await;
+                match resp {
+                    Ok(r) if r.status().is_success() => {
+                        if let Ok(body) = r.json::<Value>().await {
+                            if let Ok(dto) = serde_json::from_value::<MeUserResponseDto>(body) {
+                                let u: credentials::AccountUser = (&dto.user).into();
+                                shared.with_store(|s| s.put_json(store::KEY_ACCOUNT, &u));
+                                *shared.me.lock().unwrap() = Some(u);
+                            }
+                        }
+                        refresh_me(&shared).await;
                     }
+                    Ok(r) => shared.notice(format!("Picture not removed: HTTP {}", r.status())),
+                    Err(err) => shared.notice(format!("Picture not removed: {err}")),
                 }
             });
         }
@@ -4747,7 +4663,14 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .patch_json("/me", json!({ "name": name, "login": handle }))
                     .await
                 {
-                    Ok(_) => refresh_me(&shared).await,
+                    Ok(v) => {
+                        if let Ok(dto) = serde_json::from_value::<MeUserResponseDto>(v) {
+                            let u: credentials::AccountUser = (&dto.user).into();
+                            shared.with_store(|s| s.put_json(store::KEY_ACCOUNT, &u));
+                            *shared.me.lock().unwrap() = Some(u);
+                        }
+                        refresh_me(&shared).await;
+                    }
                     Err(err) => {
                         let text = format!("{err:#}");
                         let human = if text.contains("handle_taken") {
@@ -5077,11 +5000,17 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .await
                 {
                     Ok(v) => {
-                        if let Some(word) = v.get("state").and_then(Value::as_str) {
+                        if let Ok(dto) = serde_json::from_value::<MachineStateDto>(v) {
+                            let word = match dto.state {
+                                WireBox::Awake => "awake",
+                                WireBox::Waking => "waking",
+                                WireBox::Asleep => "asleep",
+                                WireBox::Error => "error",
+                            };
                             set_machine(
                                 &shared,
                                 machine_state_from_word(word),
-                                v.get("since").and_then(Value::as_u64).filter(|v| *v > 0),
+                                (dto.since > 0).then_some(dto.since as u64),
                                 None,
                             );
                         }

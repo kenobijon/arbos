@@ -4892,6 +4892,20 @@ fn seed_people_docs(shared: &Arc<Shared>) {
             348_000,
         ),
         attachment(
+            "launch-day-team.jpg",
+            "image/jpeg",
+            AttachmentKind::Image,
+            "Launch day, the team",
+            1_204_000,
+        ),
+        attachment(
+            "signup-funnel.png",
+            "image/png",
+            AttachmentKind::Image,
+            "Signup funnel",
+            156_000,
+        ),
+        attachment(
             "press-kit-v3.pdf",
             "application/pdf",
             AttachmentKind::Pdf,

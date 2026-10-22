@@ -31,12 +31,19 @@ struct ProfilePerson: Identifiable, Equatable, Hashable {
 }
 
 /// What the root view presents.
-enum ProfileTarget: Identifiable, Equatable {
+enum ProfileTarget: Identifiable, Equatable, Hashable {
     case user(ProfilePerson)
     case group(chatId: String, projectId: String?)
     case agent(projectId: String)
     /// D88: a server's details (Channels | Members; admin rows for owner/admin).
     case server(serverId: String)
+
+    /// Pages whose member rows push a person over them (back chevron returns
+    /// here). The agent page runs its own NavigationStack, so it stays a root.
+    var pushesPeople: Bool {
+        if case .agent = self { return false }
+        return true
+    }
 
     var id: String {
         switch self {
@@ -782,15 +789,13 @@ struct GroupProfileView: View {
             } else {
                 // The New group picker aimed at this group: its members show as
                 // already in, Add puts the picks into it (not into a new group).
+                // A sheet over the profile sheet, like GroupEditSheet: no
+                // presentation / colour-scheme modifiers here — they unseat
+                // the presenting sheet.
                 NavigationStack {
                     NewGroupView(onDone: { showAdd = false }, addTo: chatId)
                 }
                 .tint(theme.text)
-                .presentationDetents([.large])
-                .presentationDragIndicator(.visible)
-                .presentationBackground(theme.bg)
-                .presentationCornerRadius(28)
-                .preferredColorScheme(theme.isDark ? .dark : .light)
                 .environmentObject(model)
                 .environment(\.theme, theme)
             }

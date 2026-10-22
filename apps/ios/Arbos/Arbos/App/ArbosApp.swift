@@ -74,22 +74,15 @@ struct RootView: View {
         .sheet(isPresented: $showPrimer) {
             NotificationsPrimerView().environment(\.theme, theme)
         }
-        .sheet(item: $model.profile) { target in
-            Group {
-                switch target {
-                case .user(let p): UserProfileView(person: p)
-                case .group(let chatId, let projectId): GroupProfileView(chatId: chatId, projectId: projectId)
-                case .agent(let pid): AgentProfileView(projectId: pid, fallback: model.foreignAgent(pid))
-                case .server(let sid): ServerProfileView(serverId: sid)
-                }
-            }
-            .environmentObject(model)
-            .environment(\.theme, theme)
-            .presentationDetents([.large])
-            .presentationDragIndicator(.hidden)
-            .presentationBackground(theme.bg)
-            .presentationCornerRadius(28)
-            .preferredColorScheme(theme.isDark ? .dark : .light)
+        .sheet(item: $model.profile, onDismiss: { model.profilePath = [] }) { target in
+            ProfileSheet(target: target)
+                .environmentObject(model)
+                .environment(\.theme, theme)
+                .presentationDetents([.large])
+                .presentationDragIndicator(.hidden)
+                .presentationBackground(theme.bg)
+                .presentationCornerRadius(28)
+                .preferredColorScheme(theme.isDark ? .dark : .light)
         }
         .overlay(alignment: .top) {
             // Collapsed call: the voice pill sits in the chat header while that chat is
@@ -167,6 +160,39 @@ struct RootView: View {
         case .system: return nil
         case .dark: return .dark
         case .light: return .light
+        }
+    }
+}
+
+/// The profile sheet: one page, or — for pages whose member rows open people —
+/// a NavigationStack rooted on it so a tapped member is pushed and its back
+/// chevron (the page's own `ProfileTopBar`) pops to the page as it was. The
+/// agent page brings its own NavigationStack and so stays a plain root.
+private struct ProfileSheet: View {
+    @EnvironmentObject private var model: AppModel
+    let target: ProfileTarget
+
+    var body: some View {
+        if target.pushesPeople {
+            NavigationStack(path: $model.profilePath) {
+                page(target)
+                    .toolbar(.hidden, for: .navigationBar)
+                    .navigationDestination(for: ProfileTarget.self) { pushed in
+                        page(pushed).toolbar(.hidden, for: .navigationBar)
+                    }
+            }
+        } else {
+            page(target)
+        }
+    }
+
+    @ViewBuilder
+    private func page(_ target: ProfileTarget) -> some View {
+        switch target {
+        case .user(let p): UserProfileView(person: p)
+        case .group(let chatId, let projectId): GroupProfileView(chatId: chatId, projectId: projectId)
+        case .agent(let pid): AgentProfileView(projectId: pid, fallback: model.foreignAgent(pid))
+        case .server(let sid): ServerProfileView(serverId: sid)
         }
     }
 }
