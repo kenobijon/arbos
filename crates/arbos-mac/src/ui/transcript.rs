@@ -221,6 +221,15 @@ pub enum RowKind {
         /// at the bubble's bottom-left (redesign mocks a/f). The sender seed.
         lane: Option<String>,
     },
+    /// A finished reply with no words, cards or attachments: one plain line in the
+    /// agent's bubble. `name` is the row's `senderName`; the agent id in `seed` resolves
+    /// the name when the row carries none (older boxes), like the sender header does.
+    NoAnswer {
+        seed: String,
+        name: Option<String>,
+        time: Option<String>,
+        lane: Option<String>,
+    },
     /// Centered muted time line ("Today 9:39 PM").
     Stamp {
         label: String,
@@ -863,6 +872,141 @@ impl Transcript {
         avatars::element(&disc_seed, &name, color_index, SENDER_DISC, &theme)
     }
 
+    /// One assistant bubble block (the Markdown row and the no-answer line share it).
+    #[allow(clippy::too_many_arguments)]
+    fn markdown_bubble(
+        &mut self,
+        row_id: &str,
+        message_id: &Id,
+        block: Block,
+        live: bool,
+        first: bool,
+        last: bool,
+        fill: bool,
+        time: Option<String>,
+        lane: Option<String>,
+        now: Instant,
+        theme: &Theme,
+        selectable: &Selectable,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let veil = if live {
+            self.veils.get(row_id).cloned()
+        } else {
+            None
+        };
+        let fading = veil.as_ref().map(|v| v.is_active(now)).unwrap_or(false);
+        if live || fading {
+            PulseClock::request(cx);
+        }
+        // One assistant bubble, drawn block by block: the first block
+        // rounds the top, the last the bottom, the rest run straight.
+        // People-chat agent bubbles get the same coloured left-edge
+        // sliver as person messages, from the agent's disc colour.
+        let agent_accent = lane.as_deref().map(|seed| {
+            let (_, disc_seed, color_index, _) = self.agent_identity(seed, "Agent", cx);
+            avatars::accent_fallback(&disc_seed, color_index, theme)
+        });
+        let r = px(BUBBLE_RADIUS);
+        let bubble = self
+            .react_target(
+                div().id(SharedString::from(format!("{}#bubble", row_id))),
+                message_id,
+                cx,
+            )
+            .max_w(px(ASSISTANT_MAX_WIDTH))
+            // A flex item's auto min-width is its content's; without
+            // this the bubble keeps 620 pt when the right pane opens
+            // and runs under it instead of re-wrapping.
+            .min_w_0()
+            .when(fill, |el| el.w_full())
+            .px(px(BUBBLE_PAD_X))
+            .when(first, |el| el.pt(px(BUBBLE_PAD_Y)).rounded_t(r))
+            .when(!first, |el| el.pt(px(3.0)))
+            .when(last, |el| el.pb(px(BUBBLE_PAD_Y)).rounded_b(r))
+            .when(!last, |el| el.pb(px(3.0)))
+            .bg(theme.bubble_assistant)
+            .when_some(agent_accent, |el, color| {
+                el.border_l_2().border_color(Theme::with_alpha(color, 0.7))
+            })
+            .child(render_block(
+                row_id,
+                &block,
+                veil.as_ref(),
+                now,
+                theme,
+                selectable,
+            ));
+        let (row_el, reveal) = self.hover_row(row_id, now, window, cx);
+        // Hover: reply + copy, then Grok Mac's muted react glyph (opens
+        // the same bar as a right-click).
+        let hover_actions = (last && !live).then(|| {
+            let actions = self.hover_reply_copy(row_id, message_id, reveal, theme, cx);
+            let chat_id = self.chat_id.clone();
+            let message_id = message_id.clone();
+            let react = div()
+                .id(SharedString::from(format!("{}#react", row_id)))
+                .size(px(24.0))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .cursor_pointer()
+                .opacity(reveal)
+                .hover(|s| s.bg(theme.surface_2))
+                .child(icon("face-smile", 16.0, theme.text_muted))
+                .on_click(cx.listener(move |_, event: &gpui::ClickEvent, _, cx| {
+                    if let Some(chat_id) = chat_id.clone() {
+                        cx.emit(TranscriptEvent::ReactMenu {
+                            chat_id,
+                            message_id: message_id.clone(),
+                            position: event.position(),
+                        });
+                    }
+                }));
+            div()
+                .ml(px(6.0))
+                .flex()
+                .items_center()
+                .gap(px(2.0))
+                .child(actions)
+                .child(react)
+        });
+        // Messages for Mac: the bubble's time shows beside the glyph on hover.
+        let hover_time = (last && !live)
+            .then(|| hover_time(time, reveal, theme).map(|t| t.ml(px(8.0))))
+            .flatten();
+        // People chats: the sender's disc at the bubble's bottom-left on
+        // the last block; earlier blocks keep the lane free (mocks a/f).
+        let disc = lane.as_deref().map(|seed| {
+            if last {
+                self.agent_disc(seed, cx)
+            } else {
+                div().w(px(SENDER_DISC)).flex_shrink_0()
+            }
+        });
+        row_el
+            .justify_start()
+            .items_end()
+            .when(first, |el| el.pt(px(ROW_GAP_HALF)))
+            .when(last, |el| el.pb(px(ROW_GAP_HALF)))
+            .when(lane.is_some(), |el| el.gap(px(SENDER_DISC_GAP)))
+            .children(disc)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .child(bubble)
+                    .children(hover_actions)
+                    .children(hover_time),
+            )
+            .into_any_element()
+    }
+
     fn render_row(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(row) = self.rows.get(ix).cloned() else {
             return div().into_any_element();
@@ -1037,122 +1181,52 @@ impl Transcript {
                 fill,
                 time,
                 lane,
+            } => self.markdown_bubble(
+                &row.id,
+                &row.message_id,
+                block,
+                live,
+                first,
+                last,
+                fill,
+                time,
+                lane,
+                now,
+                &theme,
+                &selectable,
+                window,
+                cx,
+            ),
+            RowKind::NoAnswer {
+                seed,
+                name,
+                time,
+                lane,
             } => {
-                let veil = if live {
-                    self.veils.get(&row.id).cloned()
+                let hint = name.as_deref().unwrap_or("Agent");
+                let (resolved, _, _, _) = self.agent_identity(&seed, hint, cx);
+                let who = if resolved == "Agent" || resolved.trim().is_empty() {
+                    "The agent".to_owned()
                 } else {
-                    None
+                    resolved
                 };
-                let fading = veil.as_ref().map(|v| v.is_active(now)).unwrap_or(false);
-                if live || fading {
-                    PulseClock::request(cx);
-                }
-                // One assistant bubble, drawn block by block: the first block
-                // rounds the top, the last the bottom, the rest run straight.
-                // People-chat agent bubbles get the same coloured left-edge
-                // sliver as person messages, from the agent's disc colour.
-                let agent_accent = lane.as_deref().map(|seed| {
-                    let (_, disc_seed, color_index, _) = self.agent_identity(seed, "Agent", cx);
-                    avatars::accent_fallback(&disc_seed, color_index, &theme)
-                });
-                let r = px(BUBBLE_RADIUS);
-                let bubble = self
-                    .react_target(
-                        div().id(SharedString::from(format!("{}#bubble", row.id))),
-                        &row.message_id,
-                        cx,
-                    )
-                    .max_w(px(ASSISTANT_MAX_WIDTH))
-                    // A flex item's auto min-width is its content's; without
-                    // this the bubble keeps 620 pt when the right pane opens
-                    // and runs under it instead of re-wrapping.
-                    .min_w_0()
-                    .when(fill, |el| el.w_full())
-                    .px(px(BUBBLE_PAD_X))
-                    .when(first, |el| el.pt(px(BUBBLE_PAD_Y)).rounded_t(r))
-                    .when(!first, |el| el.pt(px(3.0)))
-                    .when(last, |el| el.pb(px(BUBBLE_PAD_Y)).rounded_b(r))
-                    .when(!last, |el| el.pb(px(3.0)))
-                    .bg(theme.bubble_assistant)
-                    .when_some(agent_accent, |el, color| {
-                        el.border_l_2().border_color(Theme::with_alpha(color, 0.7))
-                    })
-                    .child(render_block(
-                        &row.id,
-                        &block,
-                        veil.as_ref(),
-                        now,
-                        &theme,
-                        &selectable,
-                    ));
-                let (row_el, reveal) = self.hover_row(&row.id, now, window, cx);
-                // Hover: reply + copy, then Grok Mac's muted react glyph (opens
-                // the same bar as a right-click).
-                let hover_actions = (last && !live).then(|| {
-                    let actions =
-                        self.hover_reply_copy(&row.id, &row.message_id, reveal, &theme, cx);
-                    let chat_id = self.chat_id.clone();
-                    let message_id = row.message_id.clone();
-                    let react = div()
-                        .id(SharedString::from(format!("{}#react", row.id)))
-                        .size(px(24.0))
-                        .flex_shrink_0()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded_full()
-                        .cursor_pointer()
-                        .opacity(reveal)
-                        .hover(|s| s.bg(theme.surface_2))
-                        .child(icon("face-smile", 16.0, theme.text_muted))
-                        .on_click(cx.listener(move |_, event: &gpui::ClickEvent, _, cx| {
-                            if let Some(chat_id) = chat_id.clone() {
-                                cx.emit(TranscriptEvent::ReactMenu {
-                                    chat_id,
-                                    message_id: message_id.clone(),
-                                    position: event.position(),
-                                });
-                            }
-                        }));
-                    div()
-                        .ml(px(6.0))
-                        .flex()
-                        .items_center()
-                        .gap(px(2.0))
-                        .child(actions)
-                        .child(react)
-                });
-                // Messages for Mac: the bubble's time shows beside the glyph on hover.
-                let hover_time = (last && !live)
-                    .then(|| hover_time(time, reveal, &theme).map(|t| t.ml(px(8.0))))
-                    .flatten();
-                // People chats: the sender's disc at the bubble's bottom-left on
-                // the last block; earlier blocks keep the lane free (mocks a/f).
-                let disc = lane.as_deref().map(|seed| {
-                    if last {
-                        self.agent_disc(seed, cx)
-                    } else {
-                        div().w(px(SENDER_DISC)).flex_shrink_0()
-                    }
-                });
-                row_el
-                    .justify_start()
-                    .items_end()
-                    .when(first, |el| el.pt(px(ROW_GAP_HALF)))
-                    .when(last, |el| el.pb(px(ROW_GAP_HALF)))
-                    .when(lane.is_some(), |el| el.gap(px(SENDER_DISC_GAP)))
-                    .children(disc)
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .items_center()
-                            .child(bubble)
-                            .children(hover_actions)
-                            .children(hover_time),
-                    )
-                    .into_any_element()
+                let block = Block::Paragraph(format!("{who} didn't answer. Ask again."));
+                self.markdown_bubble(
+                    &row.id,
+                    &row.message_id,
+                    block,
+                    false,
+                    true,
+                    true,
+                    false,
+                    time,
+                    lane,
+                    now,
+                    &theme,
+                    &selectable,
+                    window,
+                    cx,
+                )
             }
             RowKind::Stamp { label } => div()
                 .w_full()
@@ -2246,20 +2320,9 @@ pub fn build_rows(
                         .first()
                         .map(|(_, _, text)| text.trim())
                         .filter(|t| !t.is_empty())
-                        .map(str::to_owned)
-                        .unwrap_or_else(|| {
-                            let name = message
-                                .sender_name
-                                .clone()
-                                .filter(|n| !n.trim().is_empty())
-                                .unwrap_or_else(|| "The agent".to_owned());
-                            format!("{name} didn't answer. Ask again.")
-                        });
-                    rows.push(Row {
-                        version: hash_version(&line, false),
-                        id: format!("{}#failed", message.id),
-                        message_id: message.id.clone(),
-                        kind: RowKind::Markdown {
+                        .map(str::to_owned);
+                    let kind = match line {
+                        Some(line) => RowKind::Markdown {
                             block: Block::Paragraph(line),
                             live: false,
                             first: true,
@@ -2268,6 +2331,25 @@ pub fn build_rows(
                             time: clock_label(message.created_at),
                             lane: lane.clone(),
                         },
+                        None => RowKind::NoAnswer {
+                            seed: message.sender.clone(),
+                            name: message.sender_name.clone().filter(|n| !n.trim().is_empty()),
+                            time: clock_label(message.created_at),
+                            lane: lane.clone(),
+                        },
+                    };
+                    rows.push(Row {
+                        version: hash_version(
+                            &(
+                                &message.sender,
+                                &message.sender_name,
+                                errors.first().map(|(_, _, text)| text),
+                            ),
+                            false,
+                        ),
+                        id: format!("{}#failed", message.id),
+                        message_id: message.id.clone(),
+                        kind,
                     });
                 } else {
                     for (id, code, text) in &errors {

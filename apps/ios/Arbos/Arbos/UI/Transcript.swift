@@ -97,7 +97,9 @@ enum Transcript {
 
     /// `me` = my `user:<id>` in a people chat; nil in project chats (every user row is mine).
     /// `joins` = people-chat membership events (people/agents added mid-chat) merged by time.
-    static func rows(_ messages: [Message], projectId: Id, subagentNames: [String: String] = [:], me: String? = nil, people: Bool = false, joins: [Join] = []) -> [Row] {
+    /// `agentNames`: agent project id → display name from the chat's member list, the
+    /// fallback when a reply row carries no `senderName` (older boxes).
+    static func rows(_ messages: [Message], projectId: Id, subagentNames: [String: String] = [:], me: String? = nil, people: Bool = false, joins: [Join] = [], agentNames: [String: String] = [:]) -> [Row] {
         var rows: [Row] = []
         var lastAt: Int64 = 0
         var pendingJoins = joins.filter { $0.at > 0 && !$0.handle.isEmpty }.sorted { $0.at < $1.at }
@@ -255,7 +257,10 @@ enum Transcript {
                         if let first = errors.first?.text.trimmingCharacters(in: .whitespacesAndNewlines), !first.isEmpty {
                             return first
                         }
-                        let name = (message.senderName ?? "").trimmingCharacters(in: .whitespaces)
+                        let fromRow = (message.senderName ?? "").trimmingCharacters(in: .whitespaces)
+                        let agentId = message.sender.hasPrefix("agent:") ? String(message.sender.dropFirst(6)) : message.sender
+                        let fromMembers = (agentNames[agentId] ?? "").trimmingCharacters(in: .whitespaces)
+                        let name = !fromRow.isEmpty ? fromRow : fromMembers
                         return "\(name.isEmpty ? "The agent" : name) didn't answer. Ask again."
                     }()
                     let blocks: [Block] = [.paragraph(line)]
