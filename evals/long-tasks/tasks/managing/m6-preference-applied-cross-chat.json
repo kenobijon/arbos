@@ -1,0 +1,19 @@
+{
+  "id": "m6-preference-applied-cross-chat",
+  "lane": "a",
+  "category": "managing",
+  "title": "A stated preference is applied in a later chat",
+  "turns": [
+    {
+      "prompt": "A preference for all our future chats: whenever I ask you to summarise something, answer with exactly three bullet points, each starting with the • character, and nothing else.",
+      "timeout_s": 240
+    },
+    {
+      "prompt": "Summarise this: The Cedar Hollow community garden opens at 7:00 and closes at dusk. Odd-numbered plots water on Monday, Wednesday and Friday; even-numbered plots on Tuesday, Thursday and Saturday. Sunday is a shared workday from 9:00 to 11:00 with compost turning and path mulching. Garlic planting is on 1 November, leaf-mould day on 15 November, and the season closes on 30 November when the water is turned off.",
+      "new_chat": true,
+      "pre_wait_s": 40,
+      "reply_regex": "^\\s*•[^\\n]+\\n\\s*•[^\\n]+\\n\\s*•[^\\n]+\\s*$",
+      "timeout_s": 300
+    }
+  ]
+}

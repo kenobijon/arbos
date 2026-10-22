@@ -1,0 +1,28 @@
+{
+  "id": "l3-fetch-merge-report",
+  "lane": "d",
+  "category": "long",
+  "title": "Fetch three CSVs over the web, merge, dedupe, report",
+  "turns": [
+    {
+      "prompt": "Three regional order exports are online: {FIXTURES}/orders-north.csv, {FIXTURES}/orders-south.csv and {FIXTURES}/orders-west.csv (columns order_id, date, region, product, amount). Some orders appear in more than one file. Download all three, merge them, remove duplicate orders (same order_id), and write {D}/orders-report.md with: the number of unique orders, how many duplicates you removed, the total amount, and the amount per region (two decimals). Save the merged, deduplicated data as {D}/orders-merged.csv. Then tell me the unique count and the total.",
+      "seed": "mkdir -p {D}",
+      "verify": "f={D}/orders-report.md; test -f $f || { echo FAIL: no report; exit 0; }; m={D}/orders-merged.csv; rows=$(test -f $m && tail -n +2 $m | grep -c . || echo 0); sed 's/^/SHOW /' $f | head -30; echo \"SHOW merged_rows=$rows\"; echo PASS",
+      "truth": {
+        "kind": "fixture_json",
+        "file": "orders-truth.json",
+        "keys": [
+          "unique_orders",
+          "duplicates",
+          "total",
+          "per_region"
+        ]
+      },
+      "rubric": {
+        "criteria": "Report states unique orders, duplicates removed, total and per-region amounts with two decimals, clearly laid out; the merged CSV exists.",
+        "min": 3
+      },
+      "timeout_s": 900
+    }
+  ]
+}

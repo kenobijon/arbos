@@ -1,0 +1,15 @@
+{
+  "id": "w4-browser-screenshot",
+  "lane": "b",
+  "category": "browsing",
+  "title": "Open a page in the real browser and screenshot it",
+  "turns": [
+    {
+      "prompt": "Open https://example.com in a real browser, take a screenshot of the page and save it as {D}/shot.png. Then tell me the page's main heading text.",
+      "seed": "mkdir -p {D}",
+      "verify": "f={D}/shot.png; test -f $f || { echo FAIL: no shot.png; exit 0; }; sz=$(stat -c %s $f); magic=$(head -c 8 $f | od -An -tx1 | tr -d ' \\n'); echo \"SHOW size=$sz magic=$magic\"; if [ \"$magic\" = 89504e470d0a1a0a ] && [ $sz -gt 2000 ]; then echo PASS; else echo FAIL: not a PNG screenshot; fi",
+      "reply_regex": "Example Domain",
+      "timeout_s": 600
+    }
+  ]
+}

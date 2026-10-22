@@ -1,0 +1,15 @@
+{
+  "id": "w5-follow-links",
+  "lane": "a",
+  "category": "browsing",
+  "title": "Follow every link from a start page and list them",
+  "turns": [
+    {
+      "prompt": "Start at https://httpbin.org/links/5/0 and follow every link on that page (one level). Write the full URL of each page you reached, one per line, to {D}/links.txt, and tell me how many pages there were.",
+      "seed": "mkdir -p {D}",
+      "verify": "f={D}/links.txt; test -f $f || { echo FAIL: no links.txt; exit 0; }; u=$(grep -oE 'links/5/[0-4]' $f | sort -u | wc -l); sed 's/^/SHOW /' $f | head -8; if [ $u -ge 4 ]; then echo PASS; else echo FAIL: only $u distinct link pages; fi",
+      "reply_regex": "\\b[4-5]\\b",
+      "timeout_s": 420
+    }
+  ]
+}

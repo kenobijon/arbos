@@ -1,0 +1,24 @@
+{
+  "id": "m5-decisions-log",
+  "lane": "a",
+  "category": "managing",
+  "title": "Keep a decisions log file across turns (3 turns)",
+  "turns": [
+    {
+      "prompt": "Keep a decisions log for me in {D}/decisions.md (create it). First entry: we chose Postgres 16 for the new service; owner Lena.",
+      "seed": "mkdir -p {D}",
+      "verify": "f={D}/decisions.md; test -f $f && grep -qi postgres $f && grep -qi lena $f && echo PASS || echo FAIL: first entry missing",
+      "timeout_s": 240
+    },
+    {
+      "prompt": "Add another decision: the nightly ETL moves to 04:00 UTC; owner Mateo.",
+      "verify": "f={D}/decisions.md; grep -qi 'etl' $f && grep -q '04:00' $f && grep -qi mateo $f && grep -qi postgres $f && echo PASS || echo FAIL: second entry missing or first lost",
+      "timeout_s": 240
+    },
+    {
+      "prompt": "Show me the decisions log as it stands.",
+      "reply_regex": "Postgres[\\s\\S]*ETL|ETL[\\s\\S]*Postgres",
+      "timeout_s": 240
+    }
+  ]
+}

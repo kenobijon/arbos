@@ -1,0 +1,16 @@
+{
+  "id": "s4-one-time-reminder",
+  "lane": "c",
+  "category": "scheduling",
+  "title": "Schedule a one-time job two minutes ahead and see it fire",
+  "turns": [
+    {
+      "prompt": "Schedule a one-time job for 2 minutes from now that appends the line REMIND to {D}/remind.log. Confirm when it is scheduled, with the time it will run.",
+      "seed": "mkdir -p {D}",
+      "after_s": 200,
+      "verify": "f={D}/remind.log; n=$(test -f $f && grep -c REMIND $f || echo 0); echo \"SHOW reminds=$n\"; [ $n -ge 1 ] && echo PASS || echo FAIL: reminder did not fire within 200 s",
+      "timeout_s": 300
+    }
+  ],
+  "cleanup_routines": true
+}

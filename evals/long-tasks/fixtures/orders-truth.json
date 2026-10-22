@@ -1,0 +1,10 @@
+{
+ "unique_orders": 360,
+ "total": 90633.11,
+ "per_region": {
+  "north": 30681.48,
+  "west": 31735.5,
+  "south": 28216.13
+ },
+ "duplicates": 30
+}
