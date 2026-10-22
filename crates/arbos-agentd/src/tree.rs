@@ -745,22 +745,44 @@ impl Tree {
     }
 
     /// Threads with keyword evidence for the question: a leaf (`t3_fts`) or an index card
-    /// (`tree_cards_fts`) shares a stemmed content word with it. `None` = no filter: the question
-    /// has no content words, or the lookup failed (fail open — memory is never lost to a query
-    /// syntax error).
-    fn threads_with_evidence(&self, words: &[String]) -> Option<HashSet<String>> {
-        let q = fts_or(words)?;
+    /// (`tree_cards_fts`) shares a stemmed content word with it. A word that occurs in most
+    /// threads of the project (the agent's greetings, the user's name, "hello", "say") tells
+    /// nothing about *which* thread to read, so once a project has a few threads such words are
+    /// not evidence: only words found in at most half of the threads count. `None` = no filter:
+    /// the question has no content words, or the lookup failed (fail open — memory is never lost
+    /// to a query syntax error).
+    fn threads_with_evidence(
+        &self,
+        words: &[String],
+        thread_count: usize,
+    ) -> Option<HashSet<String>> {
+        fts_or(words)?;
+        let common_at = if thread_count >= 4 {
+            thread_count / 2
+        } else {
+            usize::MAX
+        };
         let found = self.store.with(|c| {
-            let mut set: HashSet<String> = HashSet::new();
-            let mut st = c.prepare("SELECT DISTINCT thread_id FROM t3_fts WHERE t3_fts MATCH ?1")?;
-            for r in st.query_map(params![q], |r| r.get::<_, String>(0))? {
-                set.insert(r?);
-            }
-            let mut st = c.prepare(
+            let mut leaves = c.prepare("SELECT DISTINCT thread_id FROM t3_fts WHERE t3_fts MATCH ?1")?;
+            let mut cards = c.prepare(
                 "SELECT DISTINCT thread_id FROM tree_cards_fts WHERE tree_cards_fts MATCH ?1 AND thread_id IS NOT NULL",
             )?;
-            for r in st.query_map(params![q], |r| r.get::<_, String>(0))? {
-                set.insert(r?);
+            let mut set: HashSet<String> = HashSet::new();
+            for w in words {
+                let Some(q) = fts_or(std::slice::from_ref(w)) else {
+                    continue;
+                };
+                let mut per_word: HashSet<String> = HashSet::new();
+                for r in leaves.query_map(params![q], |r| r.get::<_, String>(0))? {
+                    per_word.insert(r?);
+                }
+                for r in cards.query_map(params![q], |r| r.get::<_, String>(0))? {
+                    per_word.insert(r?);
+                }
+                if per_word.len() > common_at {
+                    continue;
+                }
+                set.extend(per_word);
             }
             Ok(set)
         });
@@ -1916,7 +1938,8 @@ impl Tree {
         let mut ride: Vec<Node> = Vec::new();
         pack.prefilter = if fast { "no-words" } else { "off" };
         if fast {
-            if let Some(found) = self.threads_with_evidence(&words) {
+            let thread_count = evidence.len();
+            if let Some(found) = self.threads_with_evidence(&words, thread_count) {
                 let (yes, no): (Vec<Node>, Vec<Node>) = evidence
                     .into_iter()
                     .partition(|n| n.thread_id.as_ref().is_some_and(|t| found.contains(t)));
