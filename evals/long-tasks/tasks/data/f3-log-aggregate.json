@@ -1,0 +1,21 @@
+{
+  "id": "f3-log-aggregate",
+  "lane": "a",
+  "category": "data",
+  "title": "Error counts per service from a JSON-lines log",
+  "turns": [
+    {
+      "prompt": "{D}/app.log is a JSON-lines log (fields ts, service, level, msg). Count the lines with level \"error\" per service and write {D}/errors.csv with header service,errors sorted by service name. Then tell me the counts.",
+      "generate": "service_log",
+      "verify": "f={D}/errors.csv; test -f $f || { echo FAIL: no errors.csv; exit 0; }; sed 's/^/SHOW /' $f; echo PASS",
+      "truth": {
+        "kind": "generated",
+        "keys": [
+          "errors"
+        ],
+        "tolerance": 0
+      },
+      "timeout_s": 420
+    }
+  ]
+}

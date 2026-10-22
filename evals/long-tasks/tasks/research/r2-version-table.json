@@ -1,0 +1,25 @@
+{
+  "id": "r2-version-table",
+  "lane": "a",
+  "category": "research",
+  "title": "Latest versions of three Python HTTP libraries",
+  "turns": [
+    {
+      "prompt": "Find the latest released versions of the Python packages requests, httpx and aiohttp. Write a markdown table to {D}/compare.md with columns package, latest version, source URL. Then tell me the three versions.",
+      "verify": "f={D}/compare.md; test -f $f || { echo FAIL: no compare.md; exit 0; }; sed 's/^/SHOW /' $f | head -30; grep -qi requests $f && grep -qi httpx $f && grep -qi aiohttp $f && echo PASS || echo FAIL: a package is missing",
+      "truth": {
+        "kind": "pypi_versions",
+        "packages": [
+          "requests",
+          "httpx",
+          "aiohttp"
+        ]
+      },
+      "rubric": {
+        "criteria": "Table has the three packages with plausible current version numbers and a real source URL per row.",
+        "min": 3
+      },
+      "timeout_s": 480
+    }
+  ]
+}

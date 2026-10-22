@@ -1,0 +1,19 @@
+{
+  "id": "s1-cron-create-fires",
+  "lane": "c",
+  "category": "scheduling",
+  "title": "Create a recurring job and see it fire",
+  "turns": [
+    {
+      "prompt": "Create a recurring scheduled job (a routine) that runs every minute and appends the current UTC time as one line to {D}/ticks.log. Confirm when the schedule exists.",
+      "seed": "mkdir -p {D}",
+      "after_s": 170,
+      "verify": "f={D}/ticks.log; n=$(test -f $f && grep -c . $f || echo 0); echo \"SHOW ticks=$n\"; test -f $f && sed 's/^/SHOW /' $f | tail -3; [ $n -ge 2 ] && echo PASS || echo FAIL: only $n tick lines after 170 s",
+      "routine": {
+        "cron": "* * * * *",
+        "min_runs": 2
+      },
+      "timeout_s": 300
+    }
+  ]
+}
