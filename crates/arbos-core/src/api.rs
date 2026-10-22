@@ -83,10 +83,11 @@ pub struct ProjectDto {
     pub avatar_leaf: Option<i64>,
     #[typeshare(serialized_as = "Option<I54>")]
     pub avatar_leaf_color: Option<i64>,
-    #[typeshare(serialized_as = "I54")]
-    pub avatar_leaf_effective: i64,
-    #[typeshare(serialized_as = "I54")]
-    pub avatar_leaf_color_effective: i64,
+    /// Always sent by relays with D91; optional so older relays still decode.
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub avatar_leaf_effective: Option<i64>,
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub avatar_leaf_color_effective: Option<i64>,
     pub primary_chat_id: Option<String>,
     pub owner: ProjectOwnerDto,
     pub model: Option<String>,
@@ -164,10 +165,11 @@ pub struct ChatMemberProjectDto {
     pub avatar_leaf: Option<i64>,
     #[typeshare(serialized_as = "Option<I54>")]
     pub avatar_leaf_color: Option<i64>,
-    #[typeshare(serialized_as = "I54")]
-    pub avatar_leaf_effective: i64,
-    #[typeshare(serialized_as = "I54")]
-    pub avatar_leaf_color_effective: i64,
+    /// Always sent by relays with D91; optional so older relays still decode.
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub avatar_leaf_effective: Option<i64>,
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub avatar_leaf_color_effective: Option<i64>,
     pub description: String,
     pub model: Option<String>,
     pub owner: ProjectOwnerDto,

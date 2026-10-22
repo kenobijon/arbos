@@ -97,11 +97,16 @@ public struct ChatMemberProjectDto: Codable {
 	public let avatar_color: String
 	public let avatar_color_index: Int64?
 	public let avatar_color_index_effective: Int64
+	public let avatar_leaf: Int64?
+	public let avatar_leaf_color: Int64?
+	/// Always sent by relays with D91; optional so older relays still decode.
+	public let avatar_leaf_effective: Int64?
+	public let avatar_leaf_color_effective: Int64?
 	public let description: String
 	public let model: String?
 	public let owner: ProjectOwnerDto
 
-	public init(id: String, name: String, icon: String, color: String, avatar: String, avatar_color: String, avatar_color_index: Int64?, avatar_color_index_effective: Int64, description: String, model: String?, owner: ProjectOwnerDto) {
+	public init(id: String, name: String, icon: String, color: String, avatar: String, avatar_color: String, avatar_color_index: Int64?, avatar_color_index_effective: Int64, avatar_leaf: Int64?, avatar_leaf_color: Int64?, avatar_leaf_effective: Int64?, avatar_leaf_color_effective: Int64?, description: String, model: String?, owner: ProjectOwnerDto) {
 		self.id = id
 		self.name = name
 		self.icon = icon
@@ -110,6 +115,10 @@ public struct ChatMemberProjectDto: Codable {
 		self.avatar_color = avatar_color
 		self.avatar_color_index = avatar_color_index
 		self.avatar_color_index_effective = avatar_color_index_effective
+		self.avatar_leaf = avatar_leaf
+		self.avatar_leaf_color = avatar_leaf_color
+		self.avatar_leaf_effective = avatar_leaf_effective
+		self.avatar_leaf_color_effective = avatar_leaf_color_effective
 		self.description = description
 		self.model = model
 		self.owner = owner
@@ -135,13 +144,18 @@ public struct ChatMemberDto: Codable {
 	public let avatar_color: String?
 	public let avatar_color_index: Int64??
 	public let avatar_color_index_effective: Int64?
+	/// Agent: D91 leaf picks and the pair in effect. Human: omitted.
+	public let avatar_leaf: Int64??
+	public let avatar_leaf_color: Int64??
+	public let avatar_leaf_effective: Int64?
+	public let avatar_leaf_color_effective: Int64?
 	public let project: ChatMemberProjectDto?
 	public let description: String?
 	/// Agent: owning user id string.
 	public let owner: String?
 	public let owner_handle: String??
 
-	public init(member: String, role: String, added_by: String, joined_at: Int64, handle: String?, avatar_url: String??, name: String??, status: String?, user_id: String?, last_seen_at: Int64??, online: Bool?, read_receipts: Bool?, avatar: String?, avatar_color: String?, avatar_color_index: Int64??, avatar_color_index_effective: Int64?, project: ChatMemberProjectDto?, description: String?, owner: String?, owner_handle: String??) {
+	public init(member: String, role: String, added_by: String, joined_at: Int64, handle: String?, avatar_url: String??, name: String??, status: String?, user_id: String?, last_seen_at: Int64??, online: Bool?, read_receipts: Bool?, avatar: String?, avatar_color: String?, avatar_color_index: Int64??, avatar_color_index_effective: Int64?, avatar_leaf: Int64??, avatar_leaf_color: Int64??, avatar_leaf_effective: Int64?, avatar_leaf_color_effective: Int64?, project: ChatMemberProjectDto?, description: String?, owner: String?, owner_handle: String??) {
 		self.member = member
 		self.role = role
 		self.added_by = added_by
@@ -158,6 +172,10 @@ public struct ChatMemberDto: Codable {
 		self.avatar_color = avatar_color
 		self.avatar_color_index = avatar_color_index
 		self.avatar_color_index_effective = avatar_color_index_effective
+		self.avatar_leaf = avatar_leaf
+		self.avatar_leaf_color = avatar_leaf_color
+		self.avatar_leaf_effective = avatar_leaf_effective
+		self.avatar_leaf_color_effective = avatar_leaf_color_effective
 		self.project = project
 		self.description = description
 		self.owner = owner
@@ -218,6 +236,12 @@ public struct ProjectDto: Codable {
 	public let vision_enabled: Bool
 	public let avatar_color_index: Int64?
 	public let avatar_color_index_effective: Int64
+	/// D91 leaf avatar: the owner's picks (`null` = automatic) and the pair in effect.
+	public let avatar_leaf: Int64?
+	public let avatar_leaf_color: Int64?
+	/// Always sent by relays with D91; optional so older relays still decode.
+	public let avatar_leaf_effective: Int64?
+	public let avatar_leaf_color_effective: Int64?
 	public let primary_chat_id: String?
 	public let owner: ProjectOwnerDto
 	public let model: String?
@@ -229,7 +253,7 @@ public struct ProjectDto: Codable {
 	/// `list_projects` shared rows only; `None` omits, `Some(None)` is JSON null.
 	public let owner_handle: String??
 
-	public init(id: String, name: String, icon: String, color: String, instructions: String, avatar: String, avatar_color: String, state: String, box: String, box_since: Int64, spend_today_usd: Double, spend_cap_usd: Double, created_at: Int64, last_active_at: Int64, description: String, voice: String?, vision_enabled: Bool, avatar_color_index: Int64?, avatar_color_index_effective: Int64, primary_chat_id: String?, owner: ProjectOwnerDto, model: String?, machine: MachineDto, shared: Bool?, my_role: String?, owner_handle: String??) {
+	public init(id: String, name: String, icon: String, color: String, instructions: String, avatar: String, avatar_color: String, state: String, box: String, box_since: Int64, spend_today_usd: Double, spend_cap_usd: Double, created_at: Int64, last_active_at: Int64, description: String, voice: String?, vision_enabled: Bool, avatar_color_index: Int64?, avatar_color_index_effective: Int64, avatar_leaf: Int64?, avatar_leaf_color: Int64?, avatar_leaf_effective: Int64?, avatar_leaf_color_effective: Int64?, primary_chat_id: String?, owner: ProjectOwnerDto, model: String?, machine: MachineDto, shared: Bool?, my_role: String?, owner_handle: String??) {
 		self.id = id
 		self.name = name
 		self.icon = icon
@@ -249,6 +273,10 @@ public struct ProjectDto: Codable {
 		self.vision_enabled = vision_enabled
 		self.avatar_color_index = avatar_color_index
 		self.avatar_color_index_effective = avatar_color_index_effective
+		self.avatar_leaf = avatar_leaf
+		self.avatar_leaf_color = avatar_leaf_color
+		self.avatar_leaf_effective = avatar_leaf_effective
+		self.avatar_leaf_color_effective = avatar_leaf_color_effective
 		self.primary_chat_id = primary_chat_id
 		self.owner = owner
 		self.model = model

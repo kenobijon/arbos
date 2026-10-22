@@ -304,8 +304,8 @@ pub(crate) fn member_dto(state: &AppState, m: &Membership) -> ChatMemberDto {
                 avatar_color_index_effective: effective,
                 avatar_leaf: p.avatar_leaf,
                 avatar_leaf_color: p.avatar_leaf_color,
-                avatar_leaf_effective: i64::from(leaf.leaf),
-                avatar_leaf_color_effective: i64::from(leaf.color),
+                avatar_leaf_effective: Some(i64::from(leaf.leaf)),
+                avatar_leaf_color_effective: Some(i64::from(leaf.color)),
                 description: p.description.clone(),
                 model: p
                     .models

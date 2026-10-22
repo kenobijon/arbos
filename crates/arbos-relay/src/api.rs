@@ -818,8 +818,8 @@ pub(crate) async fn project_dto(state: &AppState, p: &Project) -> ProjectDto {
         )),
         avatar_leaf: p.avatar_leaf,
         avatar_leaf_color: p.avatar_leaf_color,
-        avatar_leaf_effective: i64::from(leaf.leaf),
-        avatar_leaf_color_effective: i64::from(leaf.color),
+        avatar_leaf_effective: Some(i64::from(leaf.leaf)),
+        avatar_leaf_color_effective: Some(i64::from(leaf.color)),
         primary_chat_id: primary_chat_id(state, p),
         owner: project_owner_dto(state, &p.user_id),
         model: p
