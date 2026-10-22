@@ -13,9 +13,10 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use arbos_core::api::{GroupDto, GroupParticipantDto};
 use arbos_core::ids::{now_ms, ulid};
 
-use crate::api::{chat_json, internal, resolve_project_id, ApiResult};
+use crate::api::{chat_dto, internal, resolve_project_id, ApiResult};
 use crate::auth::Principal;
 use crate::boxes;
 use crate::db::{Chat, Project};
@@ -59,19 +60,40 @@ fn participant_details(state: &AppState, chat: &Chat) -> Vec<Value> {
         .collect()
 }
 
-async fn group_json(state: &AppState, chat: &Chat) -> Value {
-    let mut v = chat_json(chat);
+pub(crate) async fn group_json(state: &AppState, chat: &Chat) -> Value {
+    serde_json::to_value(group_dto(state, chat).await).expect("GroupDto")
+}
+
+pub(crate) async fn group_dto(state: &AppState, chat: &Chat) -> GroupDto {
+    let base = chat_dto(chat);
     let mut details = Vec::new();
     for id in &chat.participants {
         if let Ok(Some(p)) = state.db.project(id) {
             let (bs, _) = state.box_state(&p.user_id).await;
-            details.push(
-                json!({ "id": p.id, "name": p.name, "description": p.description, "icon": p.icon, "color": p.color, "box": bs }),
-            );
+            details.push(GroupParticipantDto {
+                id: p.id.clone(),
+                name: p.name.clone(),
+                description: p.description.clone(),
+                icon: p.icon.clone(),
+                color: p.color.clone(),
+                box_state: bs,
+            });
         }
     }
-    v["participants_detail"] = Value::Array(details);
-    v
+    GroupDto {
+        id: base.id,
+        project_id: base.project_id,
+        title: base.title,
+        is_pinned: base.is_pinned,
+        is_system: base.is_system,
+        kind: base.kind,
+        participants: base.participants,
+        position: base.position,
+        created_at: base.created_at,
+        doc_epoch: base.doc_epoch,
+        room: base.room,
+        participants_detail: details,
+    }
 }
 
 /// Resolve names or ids to project ids, dropping duplicates and the host.

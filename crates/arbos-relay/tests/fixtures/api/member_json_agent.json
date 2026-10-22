@@ -1,0 +1,43 @@
+{
+  "added_by": "gh_101",
+  "avatar": "oak",
+  "avatar_color": "teal",
+  "avatar_color_index": 3,
+  "avatar_color_index_effective": 3,
+  "description": "A fixture agent",
+  "handle": "fixture",
+  "joined_at": 1700000000000,
+  "member": "agent:proj_fixture",
+  "owner": "gh_101",
+  "owner_handle": "user101",
+  "project": {
+    "avatar": "oak",
+    "avatar_color": "teal",
+    "avatar_color_index": 3,
+    "avatar_color_index_effective": 3,
+    "color": "#8b7cf6",
+    "description": "A fixture agent",
+    "icon": "Ab",
+    "id": "proj_fixture",
+    "model": "anthropic/claude-haiku-5.5",
+    "name": "Fixture",
+    "owner": {
+      "avatar": null,
+      "avatar_color": null,
+      "avatar_color_index": null,
+      "avatar_color_index_effective": 0,
+      "avatar_url": null,
+      "handle": "user101",
+      "id": "gh_101",
+      "kind": "user",
+      "last_seen_at": null,
+      "name": "@user101",
+      "online": false
+    }
+  },
+  "role": "agent",
+  "settings": {
+    "reply_policy": "mention",
+    "restrict_guests": false
+  }
+}

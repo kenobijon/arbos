@@ -80,6 +80,7 @@ struct RootView: View {
                 case .user(let p): UserProfileView(person: p)
                 case .group(let chatId, let projectId): GroupProfileView(chatId: chatId, projectId: projectId)
                 case .agent(let pid): AgentProfileView(projectId: pid, fallback: model.foreignAgent(pid))
+                case .server(let sid): ServerProfileView(serverId: sid)
                 }
             }
             .environmentObject(model)

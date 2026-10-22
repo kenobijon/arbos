@@ -1,0 +1,143 @@
+// Servers and channels (D88): the relay is the control plane (`GET /servers`:
+// names, roles, channels, invite links, members); the shared Matrix client is
+// the data plane (what is in the rooms). Users never see the word "Matrix".
+
+import Foundation
+
+/// `Route.chat(projectId:)` slot for a server channel (like `peopleSlot` for people chats);
+/// the chat id is the relay channel id.
+let channelSlot = "channel"
+
+struct ServerChannel: Identifiable, Equatable {
+    var id: String
+    var serverId: String
+    var name: String
+    var topic: String?
+    /// Admins post; members read.
+    var restricted: Bool
+    var position: Int
+    /// nil for a few seconds after creation while the relay makes the room.
+    var roomId: String?
+    var createdAt: Int64
+
+    static func parse(_ raw: Any) -> ServerChannel? {
+        guard let d = raw as? [String: Any], let id = d["id"] as? String else { return nil }
+        return ServerChannel(
+            id: id,
+            serverId: d["server_id"] as? String ?? "",
+            name: d["name"] as? String ?? "general",
+            topic: (d["topic"] as? String).flatMap { $0.isEmpty ? nil : $0 },
+            restricted: (d["restricted"] as? NSNumber)?.boolValue ?? false,
+            position: (d["position"] as? NSNumber)?.intValue ?? 0,
+            roomId: (d["room_id"] as? String).flatMap { $0.isEmpty ? nil : $0 },
+            createdAt: (d["created_at"] as? NSNumber)?.int64Value ?? 0
+        )
+    }
+}
+
+/// The server's invite link (owner/admin only).
+struct ServerInvite: Equatable {
+    var code: String
+    var url: String
+
+    static func parse(_ raw: Any?) -> ServerInvite? {
+        guard let d = raw as? [String: Any], let code = d["code"] as? String, let url = d["url"] as? String else { return nil }
+        return ServerInvite(code: code, url: url)
+    }
+}
+
+struct ServerMember: Identifiable, Equatable {
+    var id: String
+    var handle: String
+    var name: String?
+    var avatarUrl: String?
+    /// owner | admin | member
+    var role: String
+    var joinedAt: Int64
+    var avatarColorIndex: Int? = nil
+    var online: Bool = false
+    var lastSeenAt: Int64? = nil
+
+    var displayName: String { name?.isEmpty == false ? name! : handle }
+
+    static func parse(_ raw: Any) -> ServerMember? {
+        guard let d = raw as? [String: Any], let id = (d["user_id"] as? String) ?? (d["id"] as? String) else { return nil }
+        return ServerMember(
+            id: id,
+            handle: d["handle"] as? String ?? "",
+            name: d["name"] as? String,
+            avatarUrl: d["avatar_url"] as? String,
+            role: d["role"] as? String ?? "member",
+            joinedAt: (d["joined_at"] as? NSNumber)?.int64Value ?? 0,
+            avatarColorIndex: (d["avatar_color_index_effective"] as? NSNumber)?.intValue,
+            online: (d["online"] as? NSNumber)?.boolValue ?? false,
+            lastSeenAt: (d["last_seen_at"] as? NSNumber)?.int64Value
+        )
+    }
+}
+
+struct Server: Identifiable, Equatable {
+    var id: String
+    var name: String
+    var imageKey: String?
+    var ownerUserId: String
+    var spaceRoomId: String?
+    var createdAt: Int64
+    /// owner | admin | member
+    var myRole: String
+    var memberCount: Int
+    var channels: [ServerChannel]
+    var generalChannelId: String?
+    /// D79 `avatar_color_index_effective` (nil → derived from `id`).
+    var avatarColorIndex: Int?
+    /// Only for owner/admin.
+    var invite: ServerInvite?
+    /// Only from `GET /servers/{id}` / `POST /servers`.
+    var members: [ServerMember]
+
+    var isOwner: Bool { myRole == "owner" }
+    var isAdmin: Bool { myRole == "owner" || myRole == "admin" }
+
+    /// Where opening the server lands (rule 3).
+    var general: ServerChannel? {
+        channels.first { $0.id == generalChannelId } ?? channels.first { $0.name == "general" } ?? channels.first
+    }
+
+    static func parse(_ raw: Any) -> Server? {
+        guard let d = raw as? [String: Any], let id = d["id"] as? String else { return nil }
+        let channels = ((d["channels"] as? [Any]) ?? []).compactMap(ServerChannel.parse)
+            .sorted { $0.position == $1.position ? $0.createdAt < $1.createdAt : $0.position < $1.position }
+        return Server(
+            id: id,
+            name: d["name"] as? String ?? "Server",
+            imageKey: (d["image_key"] as? String).flatMap { $0.isEmpty ? nil : $0 },
+            ownerUserId: d["owner_user_id"] as? String ?? "",
+            spaceRoomId: (d["space_room_id"] as? String).flatMap { $0.isEmpty ? nil : $0 },
+            createdAt: (d["created_at"] as? NSNumber)?.int64Value ?? 0,
+            myRole: d["my_role"] as? String ?? "member",
+            memberCount: (d["member_count"] as? NSNumber)?.intValue ?? 0,
+            channels: channels,
+            generalChannelId: (d["general_channel_id"] as? String).flatMap { $0.isEmpty ? nil : $0 },
+            avatarColorIndex: (d["avatar_color_index_effective"] as? NSNumber)?.intValue,
+            invite: ServerInvite.parse(d["invite"]),
+            members: ((d["members"] as? [Any]) ?? []).compactMap(ServerMember.parse)
+        )
+    }
+}
+
+/// `GET /me/matrix`: this device's session for the shared Matrix client.
+struct MatrixCredentials: Equatable {
+    var homeserver: String
+    var userId: String
+    var accessToken: String
+    var deviceId: String
+
+    static func parse(_ raw: Any) -> MatrixCredentials? {
+        guard let d = raw as? [String: Any],
+              let homeserver = d["homeserver"] as? String, !homeserver.isEmpty,
+              let userId = d["user_id"] as? String, !userId.isEmpty,
+              let token = d["access_token"] as? String, !token.isEmpty
+        else { return nil }
+        return MatrixCredentials(homeserver: homeserver, userId: userId, accessToken: token, deviceId: d["device_id"] as? String ?? "")
+    }
+}

@@ -21,7 +21,12 @@ This document is drawn from the code as it exists today:
 
 ### Core vs client crates
 
-- **`arbos-core`** — ids, `wire` (including `wire::room_name`), the Loro chat-doc schema, writers, `project_reactions`, and `touched`. Shared by the box, relay, and every client.
+- **`arbos-core`** — ids, `wire` (including `wire::room_name`), the Loro chat-doc schema, writers, `project_reactions`, `touched`, and the shared HTTP **projects/chats response DTOs** in `crates/arbos-core/src/api.rs` (`ProjectDto`, `ChatDto`, `PeopleChatDto`, …). Shared by the box, relay, and every client.
+
+### Projects and chats response shapes (`api.rs`)
+
+- **Source of truth:** `crates/arbos-core/src/api.rs` — serde structs marked `#[typeshare]`, each with a `Dto` suffix. The relay builds these and serializes them; the JSON on the wire is unchanged from the old `json!` helpers.
+- **Swift:** `./scripts/gen-swift-types.sh` runs `typeshare-cli` (pinned) on `crates/arbos-core` and writes `packages/ArbosFFI/Sources/ArbosFFI/RelayTypes.swift`. CI fails when that file is stale. Do not edit `RelayTypes.swift` by hand.
 - **`arbos-client`** — app-only sans-IO `RoomSession` (handshake, catch-up, pending PUSH, reconnect backoff, held wake/presence). Depends on `arbos-core`. No tokio, tungstenite, or HTTP.
 - **`arbos-matrix`** — the apps' Matrix client (D88 C1): one `matrix-sdk` client per device (no E2EE, memory store, injected HTTP client), sliding sync through `relay/_matrix/client/*`, servers (Spaces) and channels as list rows, channel timelines as the same message rows a chat doc projects, sending with `life.arbos.id` = the app's ULID, read receipts. Depends on tokio and `matrix-sdk`; like `arbos-client`, **only `arbos-mac` and `arbos-ffi` may depend on it** (CI checks). The relay never uses it (it has its own appservice client).
 - **`arbos-ffi`** — UniFFI layer over `arbos-client`, `arbos-matrix` and the core pieces Swift needs. The only crate that names Swift or `uniffi`. Builds an xcframework + generated Swift bindings (`scripts/build-xcframework.sh`).

@@ -1,0 +1,20 @@
+{
+  "members": [
+    {
+      "avatar_color_index_effective": 0,
+      "avatar_url": null,
+      "created_at": 1700000000000,
+      "handle": "user101",
+      "id": "gh_101",
+      "joined_at": 1700000000000,
+      "last_seen_at": null,
+      "name": null,
+      "online": false,
+      "role": "owner",
+      "status": "member",
+      "user_id": "gh_101"
+    }
+  ],
+  "owner": "gh_101",
+  "project_id": "proj_fixture"
+}

@@ -853,6 +853,32 @@ const RESEARCH_SECTION: &str = "## Unknown services, APIs and tools\n\nWhen the 
 /// (observed: `tools.arbos_submit_feedback` TypeErrors). Off: the prompt is unchanged byte for byte.
 pub const CODE_MODE_SECTION: &str = "## Code mode\n\n`codemode` runs a JavaScript program that calls your tools as async functions; only what the program prints or returns reaches you. Use one program instead of a chain of separate calls whenever the next step does not depend on your reading the previous result: read several files at once (`Promise.all`), run a search and the reads it points to, run the tests and keep only the failures, call several `arbos` tools together. Filter in code and return only what you need (counts, matching lines, the first rows, a short summary), never the raw output. Direct `read`/`bash`/`edit`/`write` calls remain right for a single step, and for an edit you must see first.\n\nNames inside a program: `tools.read({path})`, `tools.bash({command})` (resolves to `{output, exit_code}`), `tools.edit({path, edits: [{oldText, newText}]})`, `tools.write({path, content})`; every `arbos` project tool is `tools.mcp__arbos__<name>(args)`, for example `tools.mcp__arbos__web_search({query})`, `tools.mcp__arbos__web_fetch({url})`, `tools.mcp__arbos__context_search({query})`, `tools.mcp__arbos__history_search({query})`, `tools.mcp__arbos__secrets_list({})`, `tools.mcp__arbos__egress({url, method, headers, body})`, `tools.mcp__arbos__deliver_file({path, title})`, `tools.mcp__arbos__routines_create({...})`, `tools.mcp__arbos__remember({name, value})`, `tools.mcp__arbos__recall({name})`, `tools.mcp__arbos__submit_feedback({description})`. `await describeTool(\"mcp__arbos__<name>\")` shows a tool's arguments; `await searchTools(\"...\")` finds the rest. Never call `route`, `ask_user` or `send_message` from a program: those are direct calls only, and a program that tries is refused. A program has exactly your permissions: the deny-list, approval cards, secret placeholders and spending rules apply to every call it makes, and a refused call rejects with the reason. A program stops after 15 minutes; when one does, say so in one sentence and continue in smaller steps.\n";
 
+/// A memory walk running beside the turn's setup. Dropped without `block` (stop, preempt, an
+/// error before the prompt) it is aborted, so no Jev request is spent on a turn that never ran.
+pub struct PendingMemory(Option<tokio::task::JoinHandle<Option<String>>>);
+
+impl PendingMemory {
+    pub fn none() -> Self {
+        Self(None)
+    }
+
+    /// Wait for the walk; `None` when there was none, it failed, or it had nothing to inject.
+    pub async fn block(mut self) -> Option<String> {
+        match self.0.take() {
+            Some(h) => h.await.ok().flatten(),
+            None => None,
+        }
+    }
+}
+
+impl Drop for PendingMemory {
+    fn drop(&mut self) {
+        if let Some(h) = self.0.take() {
+            h.abort();
+        }
+    }
+}
+
 /// Why the main pi session is being prompted.
 #[derive(Debug, Clone)]
 pub enum TurnKind {
@@ -1521,8 +1547,8 @@ impl Agent {
     }
 
     /// Replace the chat's model window: a fresh pi session file, switched to at once. Used when
-    /// the current window will not answer (provider refusal, or a turn that settled with no
-    /// `route` and no words) — both are bound to the window, not to the user's message.
+    /// the current window is stuck — a provider refusal bound to its content, or a turn that
+    /// settled with no route and no prose (the same session keeps failing the same way).
     async fn rotate_chat_session(self: &Arc<Self>, chat_id: &str, reason: &str) -> Result<()> {
         let previous = self
             .store
@@ -1532,7 +1558,7 @@ impl Agent {
         let path = self.new_session_file(chat_id)?;
         *self.current_chat.lock().await = None;
         self.switch_session_to(chat_id, &path).await?;
-        tracing::warn!(chat_id, reason, previous = %previous, fresh = %path.display(), "fresh pi session after an empty answer");
+        tracing::warn!(chat_id, reason, previous = %previous, fresh = %path.display(), "fresh pi session after empty turn");
         self.append_audit(
             "session_rotated",
             json!({ "chat_id": chat_id, "reason": reason, "previous": previous, "fresh": path.display().to_string() }),
@@ -1988,6 +2014,13 @@ impl Agent {
                 user_text = rendered.clone();
             }
         }
+        // Memory tree (D77): the walk starts as soon as the words are known and runs beside the
+        // rest of the setup; `drive_turn` joins it before the prompt goes to pi.
+        let mut memory = if user_text.trim().is_empty() {
+            PendingMemory::none()
+        } else {
+            self.spawn_tree_pack(chat_id, &user_msg_id, "reply", &user_text)
+        };
         // Attachments (images, voice notes, files): fetched into the workspace; images ride
         // along as vision input, a voice note's transcript becomes the text when none was typed.
         let attachments = match &message_view {
@@ -2009,6 +2042,10 @@ impl Agent {
         if self.turn.lock().await.as_ref().is_some_and(|t| t.stopped) {
             let _ = self.turn.lock().await.take();
             return Ok(());
+        }
+        if memory.0.is_none() {
+            // the words came from a voice note or an attachment: start the walk now
+            memory = self.spawn_tree_pack(chat_id, &user_msg_id, "reply", &user_text);
         }
         let _ = self.store.touch_chat(chat_id);
         let _ = self.store.t3_append(
@@ -2116,15 +2153,6 @@ impl Agent {
         }
         *self.turn_images.lock().expect("turn images") = attachments.images;
 
-        // Memory tree (D77): the decision model walks this agent's history and the chosen raw
-        // records ride in front of the message. Falls back to today's behaviour (nothing added)
-        // when the tree is not built, the walk times out, or the daily cap is reached.
-        if let Some(memory_block) = self
-            .tree_pack(chat_id, Some(&user_msg_id), "reply", &user_text)
-            .await
-        {
-            prompt_text = format!("{memory_block}\n\n{prompt_text}");
-        }
         // Hang-up / typed preempt during setup: drop the claim and leave without opening a row.
         if self.turn.lock().await.as_ref().is_some_and(|t| t.stopped) {
             let _ = self.turn.lock().await.take();
@@ -2133,7 +2161,14 @@ impl Agent {
         }
 
         let outcome = self
-            .drive_turn(chat_id, host, &user_msg_id, &prompt_text, TurnKind::User)
+            .drive_turn(
+                chat_id,
+                host,
+                &user_msg_id,
+                &prompt_text,
+                TurnKind::User,
+                memory,
+            )
             .await;
         self.people.set_current(None);
         let outcome = outcome?;
@@ -2449,9 +2484,30 @@ impl Agent {
                 &asker,
                 &recent,
                 &prompt_memory,
-                self.cfg.memory_pack_compact(),
+                self.cfg.walk_options(),
             )
             .await
+    }
+
+    /// Start the reply's memory walk beside the rest of the turn's setup (attachments, preludes,
+    /// the assistant row, the pi session switch); `drive_turn` joins it right before the prompt
+    /// goes to pi. The block still rides in front of the user message — in the user turn, never
+    /// the system prompt, so the D87 prefix stays byte-stable.
+    pub fn spawn_tree_pack(
+        self: &Arc<Self>,
+        chat_id: &str,
+        message_id: &str,
+        purpose: &'static str,
+        query_text: &str,
+    ) -> PendingMemory {
+        let me = self.clone();
+        let chat_id = chat_id.to_owned();
+        let message_id = message_id.to_owned();
+        let query_text = query_text.to_owned();
+        PendingMemory(Some(tokio::spawn(async move {
+            me.tree_pack(&chat_id, Some(&message_id), purpose, &query_text)
+                .await
+        })))
     }
 
     /// Periodic builder: new leaves become episodes and cards even when no turn runs.
@@ -2489,6 +2545,7 @@ impl Agent {
         user_msg_id: &str,
         prompt_text: &str,
         kind: TurnKind,
+        memory: PendingMemory,
     ) -> Result<TurnOutcome> {
         // Early claim may already be stopped (hang-up during attachments / tree_pack).
         if self.turn.lock().await.as_ref().is_some_and(|t| t.stopped) {
@@ -2567,6 +2624,14 @@ impl Agent {
                 .as_ref()
                 .is_some_and(message_from_voice)
         };
+        // Memory tree (D77): the walk ran beside the setup above; the chosen raw records ride in
+        // front of the message. Nothing is added when the tree is not built, the walk timed out
+        // or found nothing, or the daily cap is reached.
+        let prompt_text = match memory.block().await {
+            Some(block) => format!("{block}\n\n{prompt_text}"),
+            None => prompt_text.to_owned(),
+        };
+        let prompt_text = prompt_text.as_str();
         *self.turn.lock().await = Some(TurnState {
             chat_id: chat_id.to_owned(),
             user_msg_id: user_msg_id.to_owned(),
@@ -2606,25 +2671,27 @@ impl Agent {
         self.turn_running.store(true, Ordering::SeqCst);
         let keepalive = self.spawn_keepalive();
         let mut result = self.run_main_turn(chat_id, host, prompt_text).await;
-        // An empty answer is bound to the model window, not the question: a provider refusal
-        // (Lium, 2026-10-21: six turns in a row, 208–242k tokens, zero output) or a settle with
-        // no `route` and no words (mr.agi, 2026-10-21: "turn without route; corrective
-        // continuation=false" — pi will not continue when the run ended on plain/empty text).
-        // The chat history lives in the memory tree, so rebuild the window and ask once more.
+        // An empty turn is usually the model window, not the question: a provider refusal on a
+        // bloated session (Lium, 2026-10-21: six turns, 208–242k tokens, zero output) or a settle
+        // with no `route` and no prose (mr.agi group + DM, feedback app-01M5GCK…: consecutive
+        // "didn't answer" until the session recovered). History lives in the memory tree, so
+        // rebuild the window and ask once more before failing visibly.
         if result.is_ok() {
-            if let Some(reason) = self.empty_answer_retry_reason().await {
+            if let Some(reason) = self.empty_turn_retry_reason().await {
                 match self.rotate_chat_session(chat_id, reason).await {
                     Ok(()) => {
                         if let Some(t) = self.turn.lock().await.as_mut() {
                             t.model_error = None;
                             t.session_rotated = true;
-                            t.metrics.route_missing = false;
-                            t.route = None;
+                            // Drop a synthetic reply from the miss so the retry can route for real.
+                            if t.metrics.route_missing {
+                                t.route = None;
+                            }
                         }
                         result = self.run_main_turn(chat_id, host, prompt_text).await;
                     }
                     Err(e) => {
-                        tracing::warn!(chat_id, reason, error = %e, "fresh session after empty answer")
+                        tracing::warn!(chat_id, reason, error = %e, "fresh session after empty turn")
                     }
                 }
             }
@@ -2640,18 +2707,10 @@ impl Agent {
                 self.flush_staged_text(host, t).await;
             }
         }
-        let Some(mut turn) = self.turn.lock().await.take() else {
+        let turn = self.turn.lock().await.take();
+        let Some(turn) = turn else {
             return Err(anyhow!("turn state vanished mid-turn"));
         };
-        // Model answered in prose without calling `route` (corrective continuation was not
-        // allowed): keep the words and record the turn as reply, as the route-guard comment
-        // promises. An empty miss stays `none` so the clients show the stock ask-again line.
-        if turn.route.is_none()
-            && turn.metrics.route_missing
-            && !turn.streamed_text.trim().is_empty()
-        {
-            turn.route = Some(ValidRoute::Reply { reply: None });
-        }
         // After an ack or progress bubble the live row is a later one than the row this turn
         // opened with; everything below finalizes the row the turn ended on.
         let assistant_msg_id = turn.assistant_msg_id.clone();
@@ -2866,7 +2925,14 @@ impl Agent {
             name: name.to_owned(),
         };
         let outcome = self
-            .drive_turn(chat_id, host, user_msg_id, &prompt, kind)
+            .drive_turn(
+                chat_id,
+                host,
+                user_msg_id,
+                &prompt,
+                kind,
+                PendingMemory::none(),
+            )
             .await?;
         // A result turn relays; it does not start further work. Any other route is logged only.
         if !matches!(outcome.turn.route, Some(ValidRoute::Reply { .. }) | None) {
@@ -2896,7 +2962,14 @@ impl Agent {
     ) -> Result<()> {
         let _guard = self.turn_lock.lock().await;
         let outcome = self
-            .drive_turn(chat_id, host, in_reply_to, prompt, kind)
+            .drive_turn(
+                chat_id,
+                host,
+                in_reply_to,
+                prompt,
+                kind,
+                PendingMemory::none(),
+            )
             .await?;
         self.spawn_memory_pass(
             chat_id,
@@ -3858,23 +3931,53 @@ impl Agent {
         t.model_error = Some(m);
     }
 
-    /// Why this empty turn should get one fresh-session retry, or `None` when it should not.
-    /// A provider refusal with nothing shown, or a settle with no `route` and no words (the
-    /// extension's corrective continuation only runs when pi sets `canContinue` — empty/plain
-    /// text ends leave `corrective continuation=false` and would otherwise drop the turn).
-    async fn empty_answer_retry_reason(&self) -> Option<&'static str> {
+    /// When the turn showed the user nothing, return why a fresh-session retry is warranted
+    /// (`model_refused` or `route_missing`). `None` when a retry would not help or already ran.
+    async fn empty_turn_retry_reason(&self) -> Option<&'static str> {
         let tl = self.turn.lock().await;
         let t = tl.as_ref()?;
-        if t.stopped || t.session_rotated || !t.streamed_text.trim().is_empty() {
+        if t.stopped || t.session_rotated {
+            return None;
+        }
+        if !t.streamed_text.trim().is_empty() || !t.ack_text.trim().is_empty() {
             return None;
         }
         if t.model_error.as_ref().is_some_and(|m| m.refusal) {
             return Some("model_refused");
         }
-        if t.route.is_none() && t.metrics.route_missing && t.ack_text.trim().is_empty() {
-            return Some("turn_without_route");
+        // Settled without `route` and without prose: pi cannot correct when `canContinue` is
+        // false (ended on plain text / empty), so agentd rebuilds the window once.
+        if t.metrics.route_missing {
+            return Some("route_missing");
         }
         None
+    }
+
+    /// `/hook/turn-without-route`: the main run settled without calling `route`. When pi could
+    /// not continue (`corrected=false`), record the turn as `reply` so any prose already
+    /// streamed is a normal answer (arbos-pi-ext route guard). An empty miss is retried once
+    /// via `empty_turn_retry_reason` after the run returns.
+    pub async fn hook_turn_without_route(&self, session_id: &str, corrected: bool) {
+        tracing::warn!(session = %session_id, corrected, "turn ended without a route call");
+        let _ = self.store.t3_append(
+            session_id,
+            None,
+            Some(session_id),
+            "route",
+            Some("system"),
+            &format!("turn without route; corrective continuation={corrected}"),
+            None,
+        );
+        let mut tl = self.turn.lock().await;
+        let Some(t) = tl.as_mut() else {
+            return;
+        };
+        t.metrics.route_missing = true;
+        // No further corrective prompt: treat the turn as a reply (harness contract).
+        if !corrected && t.route.is_none() {
+            t.route = Some(ValidRoute::Reply { reply: None });
+            tracing::info!(session = %session_id, "route missing without correction; recorded as reply");
+        }
     }
 
     /// Post a one- or two-sentence hard-limit notice into the live chat row (never silent).
