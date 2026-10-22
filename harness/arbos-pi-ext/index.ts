@@ -41,6 +41,8 @@ const CODE_MODE = (process.env.ARBOS_CODE_MODE ?? "off").trim().toLowerCase() ==
 const SCRIPT_TIMEOUT_MS = Number(process.env.ARBOS_SCRIPT_TIMEOUT_MS ?? 15 * 60 * 1000);
 // Tools that talk to the user or to agentd's turn state: direct calls only, never from a script.
 const DIRECT_ONLY_TOOLS = new Set(["route", "ask_user", "send_message", "mcp__arbos__ask_user"]);
+// pi's built-in tools inside a `codemode` script: these keep their plain `tools.<name>`.
+const PI_BUILTIN_TOOLS = new Set(["read", "bash", "edit", "write", "grep", "find", "ls", "codemode"]);
 // Stable prefix (D87): with it on, the working set, the per-turn skills and project memory are
 // not system-prompt sections (which rewrite the cached prefix whenever they change) but a block
 // inside the user turn, so the prefix — tools, system prompt, earlier turns — stays byte-stable.
@@ -219,6 +221,7 @@ export default function arbosPiExt(pi: ExtensionAPI) {
       };
     }
     if (event.toolName === "codemode" && parent === null) {
+      aliasArbosToolNames(event.input as { code?: unknown });
       ensureScriptDeadline(event.input as { code?: unknown });
     }
     // Risky shell commands wait for an approval card (feature `approve`); agentd's
@@ -229,6 +232,22 @@ export default function arbosPiExt(pi: ExtensionAPI) {
     }
     return undefined;
   });
+
+  /**
+   * The model's prior is `tools.web_fetch(...)`; pi exposes every arbos MCP tool as
+   * `tools.mcp__arbos__web_fetch`. Rewrite the plain names (and the `tools.mcp__arbos.name`
+   * guess) to the real ones before the script runs, so a turn does not burn one or two errored
+   * calls on "tools.web_fetch does not exist. Did you mean …" (#1358). pi's own tools keep their
+   * names; anything already prefixed is left alone.
+   */
+  function aliasArbosToolNames(input: { code?: unknown }): void {
+    if (typeof input.code !== "string") return;
+    input.code = input.code
+      .replace(/\btools\.mcp__arbos\.([A-Za-z_][A-Za-z0-9_]*)/g, "tools.mcp__arbos__$1")
+      .replace(/\btools\.([a-z][a-z0-9_]*)(?=\s*\()/g, (whole, name: string) =>
+        PI_BUILTIN_TOOLS.has(name) || name.startsWith("mcp__") ? whole : `tools.mcp__arbos__${name}`,
+      );
+  }
 
   /** Code mode on: a script without its own `// @options:` deadline gets the default one. */
   function ensureScriptDeadline(input: { code?: unknown }): void {
