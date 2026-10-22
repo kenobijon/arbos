@@ -477,7 +477,8 @@ struct NewAgentView: View {
         }
         .background(sheetBg.ignoresSafeArea())
         .toolbar(.hidden, for: .navigationBar)
-        .onAppear { focused = true }
+        // The rig shoots the sheet without the keyboard (`ARBOS_SHOW=newagent`); users get the caret.
+        .onAppear { if DebugHooks.show != "newagent" { focused = true } }
     }
 
     private var header: some View {
