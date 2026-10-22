@@ -89,6 +89,7 @@ pub(super) fn page(
         badge: None,
         subtitle: Some(format!("@{}", person.handle).into()),
         subtitle_color: theme.text_muted,
+        editor: None,
     };
 
     // ----- tabs: Links | Groups (the same set on the iPhone) ------------------------

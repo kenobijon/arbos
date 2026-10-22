@@ -21,7 +21,7 @@ use crate::ui::theme::{Theme, TEXT_SMALL, TEXT_TINY};
 
 use super::kit::{self, Leading};
 use super::pane::{self, Hero, Picture, ProfilePane, Section};
-use super::{card, editable_name, editable_picture, HeroClick, HERO_AVATAR};
+use super::{editable_name, editable_picture, HeroClick, HERO_AVATAR};
 
 /// The agent pane's tabs — the same two on the iPhone (`AgentProfileView`).
 /// Jacob (2026-10-22): Profile and Settings only; what the agent's chats hold
@@ -182,6 +182,7 @@ pub(super) fn page(
         badge: None,
         subtitle: Some(subtitle),
         subtitle_color: status_color,
+        editor: None,
     };
 
     // ----- appearance (avatar click) -------------------------------------------
@@ -191,44 +192,38 @@ pub(super) fn page(
     // permanent settings row.
     let leafy = avatars::leaf_avatars_on();
     let appearance: Option<Section> = (mine && picker_open).then(|| {
-        let card = card(&theme).child(
-            kit::row(
-                "profile-appearance",
-                Leading::None,
-                if leafy { "Avatar" } else { "Avatar colour" },
-                None,
-                Some("pick".into()),
-                None,
-                true,
-                &theme,
-            )
-            .cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.state.update(cx, |s, cx| s.toggle_profile_picker(cx));
-            })),
-        );
-        let card = if leafy {
-            card.child(leaf_picker(&project, &theme, cx).pt(px(14.0))).child(
-                div()
-                    .px(px(kit::INSET))
-                    .pb(px(12.0))
-                    .text_size(px(TEXT_TINY))
-                    .text_color(theme.text_muted)
-                    .child("Automatic picks the leaf and colour from the agent's id, the same on every device; choose your own to make it yours."),
+        let header = kit::row(
+            "profile-appearance",
+            Leading::None,
+            if leafy { "Avatar" } else { "Avatar colour" },
+            None,
+            Some("pick".into()),
+            None,
+            true,
+            &theme,
+        )
+        .cursor_pointer()
+        .hover(|s| s.bg(theme.surface_2))
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.state.update(cx, |s, cx| s.toggle_profile_picker(cx));
+        }))
+        .into_any_element();
+        let (swatches, note) = if leafy {
+            (
+                leaf_picker(&project, &theme, cx).into_any_element(),
+                "Automatic picks the leaf and colour from the agent's id, the same on every device; choose your own to make it yours.",
             )
         } else {
-            card.child(colour_row(&project, &theme, cx).pt(px(14.0))).child(
-                div()
-                    .px(px(kit::INSET))
-                    .pb(px(12.0))
-                    .text_size(px(TEXT_TINY))
-                    .text_color(theme.text_muted)
-                    .child("Automatic picks the colour from the agent's id, the same on every device; choose one to make it yours."),
+            (
+                colour_row(&project, &theme, cx).into_any_element(),
+                "Automatic picks the colour from the agent's id, the same on every device; choose one to make it yours.",
             )
         };
-        // Custom: the picker is a swatch grid, not rows (noted on #1330).
-        Section::Custom(card.into_any_element())
+        Section::Picker {
+            header,
+            swatches,
+            note: note.into(),
+        }
     });
 
     let description = project.description.clone().unwrap_or_default();
@@ -332,8 +327,8 @@ pub(super) fn page(
             if mine {
                 let model_open = pick == Some(AgentPick::Model);
                 let reasoning_open = pick == Some(AgentPick::Reasoning);
-                let mut info = card(&theme)
-                    .child(hoverpick::row(
+                let rows = vec![
+                    hoverpick::row(
                         "Model",
                         model_text,
                         AgentPick::Model,
@@ -341,8 +336,9 @@ pub(super) fn page(
                         model_open.then(|| hoverpick::model_panel(shell, &project, cx)),
                         &theme,
                         cx,
-                    ))
-                    .child(hoverpick::row(
+                    )
+                    .into_any_element(),
+                    hoverpick::row(
                         "Reasoning",
                         project.effort.label(),
                         AgentPick::Reasoning,
@@ -350,25 +346,20 @@ pub(super) fn page(
                         reasoning_open.then(|| hoverpick::reasoning_panel(&project, cx)),
                         &theme,
                         cx,
-                    ));
-                // Rows are the card's children 0 / 1; when one has just opened,
-                // scroll the sheet so its list is in view. Custom: the card needs
-                // the prepaint hook (noted on #1330).
-                if let Some(open_ix) = pick.and_then(|open| match open {
+                    )
+                    .into_any_element(),
+                ];
+                // When a row has just opened, the pane scrolls so its list is
+                // in view (Section::Reveal).
+                let open = pick.and_then(|open| match open {
                     AgentPick::Model => Some(0),
                     AgentPick::Reasoning => Some(1),
                     AgentPick::Voice => None,
-                }) {
-                    let reveal = cx.listener(
-                        move |this, bounds: &Vec<gpui::Bounds<gpui::Pixels>>, window, cx| {
-                            this.reveal_agent_pick(bounds.get(open_ix), window, cx);
-                        },
-                    );
-                    info = info.on_children_prepainted(move |bounds, window, cx| {
-                        reveal(&bounds, window, cx)
-                    });
-                }
-                body.push(Section::Custom(info.into_any_element()));
+                });
+                body.push(match open {
+                    Some(open) => Section::Reveal { rows, open },
+                    None => Section::Card(rows),
+                });
             } else {
                 body.push(Section::Card(vec![kit::value_row(
                     "agent-model-row",

@@ -105,7 +105,7 @@ impl Shell {
     /// row opened, scroll the sheet body just enough for its list to show
     /// (never pushing the row's own header off the top). Once, so a later
     /// manual scroll is left alone.
-    pub(crate) fn reveal_agent_pick(
+    pub(crate) fn reveal_pane_row(
         &mut self,
         row: Option<&Bounds<Pixels>>,
         window: &mut Window,
