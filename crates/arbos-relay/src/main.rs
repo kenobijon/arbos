@@ -21,6 +21,7 @@ mod db_people;
 mod db_push;
 mod db_secrets;
 mod db_voice;
+mod features;
 mod feedback;
 mod fleet;
 mod goals;
@@ -499,6 +500,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/users", get(people::users_directory))
         .route("/users/{id}", get(people::user_profile))
         .route("/avatar-colors", get(people::avatar_colors))
+        .route("/avatar-leaves", get(people::avatar_leaves))
         .route(
             "/chats",
             get(people::chats_list).post(people::chats_create_group),

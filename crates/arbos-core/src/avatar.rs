@@ -9,6 +9,10 @@
 //!   gradient, so the bar matches the initials disc beside it.
 //!
 //! Pure arithmetic on decoded RGBA pixels; the caller owns image decoding.
+//!
+//! Agents without a photo draw a leaf instead of initials (D91): see [`leaf`].
+
+pub mod leaf;
 
 /// One Telegram gradient: light and dark top/bottom pairs (dark = lightness
 /// −7 %, the relay's `GET /avatar-colors` table), and its name for the picker.

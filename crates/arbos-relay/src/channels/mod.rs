@@ -832,6 +832,8 @@ mod tests {
             description: String::new(),
             primary_chat_id: None,
             avatar_color_index: None,
+            avatar_leaf: None,
+            avatar_leaf_color: None,
         };
         state.db.insert_project(&project).unwrap();
         state

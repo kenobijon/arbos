@@ -1,0 +1,258 @@
+{
+  "version": "1.0.0",
+  "name": "arbos-leaf-avatars",
+  "leaf_color": "#F6F0E8",
+  "avatar": {
+    "viewBox": "0 0 100 100",
+    "leaf_fraction_of_circle": 0.62,
+    "circle_drawn_by_app": true
+  },
+  "lottie": {
+    "schema": "bodymovin 5.7",
+    "size": [
+      100,
+      100
+    ],
+    "fps": 60,
+    "fill_name": "leaf",
+    "recolor_keypath": "**.leaf.Color",
+    "idle": "seamless loop, starts and ends at rest pose",
+    "gust": "one-shot ~1 s hover gust, starts and ends at rest pose (frame 0 of idle)"
+  },
+  "on_circle_png_pattern": "png/leaf-{NN}-{name}-on-{palette-slug}-{HEX}-512.png",
+  "leaves": [
+    {
+      "id": 1,
+      "name": "maple",
+      "svg": "svg/leaf-01-maple.svg",
+      "lottie": {
+        "idle": "lottie/leaf-01-maple-idle.json",
+        "gust": "lottie/leaf-01-maple-gust.json"
+      },
+      "idle_frames": 150,
+      "gust_frames": 60,
+      "pivot": [
+        48.626,
+        80.443
+      ],
+      "png_cream_1024": "png/leaf-01-maple-cream-transparent-1024.png",
+      "default_color": {
+        "name": "Terracotta",
+        "hex": "#C17269"
+      }
+    },
+    {
+      "id": 2,
+      "name": "teardrop",
+      "svg": "svg/leaf-02-teardrop.svg",
+      "lottie": {
+        "idle": "lottie/leaf-02-teardrop-idle.json",
+        "gust": "lottie/leaf-02-teardrop-gust.json"
+      },
+      "idle_frames": 160,
+      "gust_frames": 60,
+      "pivot": [
+        32.663,
+        80.985
+      ],
+      "png_cream_1024": "png/leaf-02-teardrop-cream-transparent-1024.png",
+      "default_color": {
+        "name": "Sage",
+        "hex": "#608F80"
+      }
+    },
+    {
+      "id": 3,
+      "name": "poplar",
+      "svg": "svg/leaf-03-poplar.svg",
+      "lottie": {
+        "idle": "lottie/leaf-03-poplar-idle.json",
+        "gust": "lottie/leaf-03-poplar-gust.json"
+      },
+      "idle_frames": 140,
+      "gust_frames": 60,
+      "pivot": [
+        47.492,
+        80.993
+      ],
+      "png_cream_1024": "png/leaf-03-poplar-cream-transparent-1024.png",
+      "default_color": {
+        "name": "Mustard",
+        "hex": "#BCA368"
+      }
+    },
+    {
+      "id": 4,
+      "name": "split",
+      "svg": "svg/leaf-04-split.svg",
+      "lottie": {
+        "idle": "lottie/leaf-04-split-idle.json",
+        "gust": "lottie/leaf-04-split-gust.json"
+      },
+      "idle_frames": 170,
+      "gust_frames": 60,
+      "pivot": [
+        39.268,
+        81.005
+      ],
+      "png_cream_1024": "png/leaf-04-split-cream-transparent-1024.png",
+      "default_color": {
+        "name": "Pine",
+        "hex": "#416A5B"
+      }
+    },
+    {
+      "id": 5,
+      "name": "cloud-tree",
+      "svg": "svg/leaf-05-cloud-tree.svg",
+      "lottie": {
+        "idle": "lottie/leaf-05-cloud-tree-idle.json",
+        "gust": "lottie/leaf-05-cloud-tree-gust.json"
+      },
+      "idle_frames": 150,
+      "gust_frames": 60,
+      "pivot": [
+        49.156,
+        81.0
+      ],
+      "png_cream_1024": "png/leaf-05-cloud-tree-cream-transparent-1024.png",
+      "default_color": {
+        "name": "Olive",
+        "hex": "#8D9659"
+      }
+    },
+    {
+      "id": 6,
+      "name": "feather",
+      "svg": "svg/leaf-06-feather.svg",
+      "lottie": {
+        "idle": "lottie/leaf-06-feather-idle.json",
+        "gust": "lottie/leaf-06-feather-gust.json"
+      },
+      "idle_frames": 144,
+      "gust_frames": 60,
+      "pivot": [
+        42.027,
+        80.963
+      ],
+      "png_cream_1024": "png/leaf-06-feather-cream-transparent-1024.png",
+      "default_color": {
+        "name": "Mauve",
+        "hex": "#A56489"
+      }
+    },
+    {
+      "id": 7,
+      "name": "curl",
+      "svg": "svg/leaf-07-curl.svg",
+      "lottie": {
+        "idle": "lottie/leaf-07-curl-idle.json",
+        "gust": "lottie/leaf-07-curl-gust.json"
+      },
+      "idle_frames": 156,
+      "gust_frames": 60,
+      "pivot": [
+        42.141,
+        80.961
+      ],
+      "png_cream_1024": "png/leaf-07-curl-cream-transparent-1024.png",
+      "default_color": {
+        "name": "Dusty blue",
+        "hex": "#396788"
+      }
+    },
+    {
+      "id": 8,
+      "name": "sweetgum",
+      "svg": "svg/leaf-08-sweetgum.svg",
+      "lottie": {
+        "idle": "lottie/leaf-08-sweetgum-idle.json",
+        "gust": "lottie/leaf-08-sweetgum-gust.json"
+      },
+      "idle_frames": 166,
+      "gust_frames": 60,
+      "pivot": [
+        49.914,
+        79.021
+      ],
+      "png_cream_1024": "png/leaf-08-sweetgum-cream-transparent-1024.png",
+      "default_color": {
+        "name": "Rose",
+        "hex": "#B24E61"
+      }
+    },
+    {
+      "id": 9,
+      "name": "grass",
+      "svg": "svg/leaf-09-grass.svg",
+      "lottie": {
+        "idle": "lottie/leaf-09-grass-idle.json",
+        "gust": "lottie/leaf-09-grass-gust.json"
+      },
+      "idle_frames": 136,
+      "gust_frames": 60,
+      "pivot": [
+        48.196,
+        80.974
+      ],
+      "png_cream_1024": "png/leaf-09-grass-cream-transparent-1024.png",
+      "default_color": {
+        "name": "Moss",
+        "hex": "#606440"
+      }
+    }
+  ],
+  "palette": [
+    {
+      "name": "Mustard",
+      "slug": "mustard",
+      "hex": "#BCA368"
+    },
+    {
+      "name": "Olive",
+      "slug": "olive",
+      "hex": "#8D9659"
+    },
+    {
+      "name": "Moss",
+      "slug": "moss",
+      "hex": "#606440"
+    },
+    {
+      "name": "Sage",
+      "slug": "sage",
+      "hex": "#608F80"
+    },
+    {
+      "name": "Pine",
+      "slug": "pine",
+      "hex": "#416A5B"
+    },
+    {
+      "name": "Dusty blue",
+      "slug": "dusty-blue",
+      "hex": "#396788"
+    },
+    {
+      "name": "Mauve",
+      "slug": "mauve",
+      "hex": "#A56489"
+    },
+    {
+      "name": "Rose",
+      "slug": "rose",
+      "hex": "#B24E61"
+    },
+    {
+      "name": "Coral",
+      "slug": "coral",
+      "hex": "#CC6B6D"
+    },
+    {
+      "name": "Terracotta",
+      "slug": "terracotta",
+      "hex": "#C17269"
+    }
+  ],
+  "default_assignment": "deterministic from agent id on the app side (see README)"
+}

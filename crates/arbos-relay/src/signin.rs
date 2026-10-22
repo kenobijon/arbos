@@ -928,6 +928,7 @@ pub async fn me(State(state): State<AppState>, principal: Principal) -> Response
             "signup": signup,
             "auth_mode": state.cfg.auth_mode.as_str(),
         },
+        "features": crate::features::features(),
         "machine": {
             "exists": sb.is_some(),
             "state": bs,

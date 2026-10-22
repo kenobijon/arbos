@@ -7,7 +7,8 @@
 //! without either, the built-in list below is used; it equals the apps' manifest (2026-10-15),
 //! in manifest order.
 
-use serde_json::Value;
+use arbos_core::avatar::leaf;
+use serde_json::{json, Value};
 
 pub const DEFAULT_SLUGS: &[&str] = &[
     "oak", "pine", "lollipop", "fractal", "mushroom", "cypress", "willow", "palm", "bonsai",
@@ -87,6 +88,66 @@ pub fn effective_color_index(stable_id: &str, override_index: Option<i64>) -> u8
         Some(i) if (0..7).contains(&i) => i as u8,
         _ => color_index(stable_id),
     }
+}
+
+/// Leaf avatar (D91) in effect for a project: the owner's picks where valid, else the id's cell.
+pub fn effective_leaf(p: &crate::db::Project) -> leaf::LeafPick {
+    leaf::pick_for(
+        &p.id,
+        p.avatar_leaf.and_then(|v| u8::try_from(v).ok()),
+        p.avatar_leaf_color.and_then(|v| u8::try_from(v).ok()),
+    )
+}
+
+/// Validate `avatar_leaf` / `avatar_leaf_color` from a request body.
+pub fn check_leaf_pick(
+    leaf_idx: Option<i64>,
+    color_idx: Option<i64>,
+) -> Result<(), (axum::http::StatusCode, String)> {
+    if let Some(l) = leaf_idx {
+        if !(0..i64::from(leaf::LEAF_COUNT)).contains(&l) {
+            return Err((
+                axum::http::StatusCode::BAD_REQUEST,
+                format!("avatar_leaf must be 0–{} or null", leaf::LEAF_COUNT - 1),
+            ));
+        }
+    }
+    if let Some(c) = color_idx {
+        if !(0..i64::from(leaf::COLOR_COUNT)).contains(&c) {
+            return Err((
+                axum::http::StatusCode::BAD_REQUEST,
+                format!(
+                    "avatar_leaf_color must be 0–{} or null",
+                    leaf::COLOR_COUNT - 1
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// `GET /avatar-leaves` body: the D91 shapes, colours, ink and index rule, so a site or a
+/// third client can draw the same leaf.
+pub fn leaves_json() -> Value {
+    json!({
+        "rule": {
+            "version": leaf::LEAF_RULE_VERSION,
+            "hash": "fnv1a64(project_id)",
+            "leaf": "hash mod 9",
+            "color": "(hash div 9) mod 10",
+            "override": "avatar_leaf 0–8, avatar_leaf_color 0–9 on PATCH /projects/{id}; null = automatic",
+        },
+        "ink": leaf::LEAF_INK.hex(),
+        "scale": leaf::LEAF_SCALE,
+        "leaves": leaf::LEAVES.iter().enumerate().map(|(i, l)| json!({
+            "index": i, "slug": l.slug, "name": l.name, "path": leaf::path_data(i as u8),
+            "pivot": [l.pivot.0, l.pivot.1], "idle_secs": l.idle_secs,
+            "default_color": l.default_color,
+        })).collect::<Vec<_>>(),
+        "colors": leaf::COLORS.iter().enumerate().map(|(i, c)| json!({
+            "index": i, "name": c.name, "hex": c.rgb.hex(),
+        })).collect::<Vec<_>>(),
+    })
 }
 
 /// `GET /avatar-colors` body.

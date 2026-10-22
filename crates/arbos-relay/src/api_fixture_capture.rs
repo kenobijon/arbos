@@ -84,6 +84,8 @@ fn insert_project(
         description: "A fixture agent".into(),
         primary_chat_id: Some(chat_id.into()),
         avatar_color_index,
+        avatar_leaf: None,
+        avatar_leaf_color: None,
     };
     state.db.insert_project(&p).unwrap();
     state
@@ -341,6 +343,8 @@ async fn create_project_accepts_avatar_color_index() {
             avatar_color: None,
             description: None,
             avatar_color_index: Some(4),
+            avatar_leaf: None,
+            avatar_leaf_color: None,
             source_project_id: None,
         }),
     )
