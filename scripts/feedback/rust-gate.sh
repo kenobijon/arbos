@@ -18,6 +18,34 @@ repo=$HOME/arbos-rust-gate
 mkdir -p "$runs"
 cmd=${1:-}; shift || true
 
+webrtc_scratch_check() {
+  # webrtc-sys (livekit) downloads libwebrtc into a directory the `scratch` crate bakes in at ITS compile time.
+  # When the gate's target dir moved (in-tree ~/arbos-rust-gate/target → ~/arbos-rust-gate-target) the cached
+  # webrtc-sys build still pointed at the old, cleaned path, and every tree that recompiled webrtc-sys failed with
+  # "could not find native static library `webrtc`" (#1241, 00:45 and 00:51 Oct 22). Before the release build:
+  # if the baked link path is gone but the same libwebrtc build exists under the current target dir, point
+  # LK_CUSTOM_WEBRTC at it; otherwise rebuild scratch + webrtc-sys (one download, ~100 MB).
+  local out stale hash found
+  for out in "$CARGO_TARGET_DIR"/release/build/webrtc-sys-*/output; do
+    [ -f "$out" ] || continue
+    stale=$(sed -n 's/^cargo:rustc-link-search=native=\(.*\)$/\1/p' "$out" | grep -m1 'livekit_webrtc')
+    [ -n "$stale" ] || continue
+    case "$stale" in "$CARGO_TARGET_DIR"/*) continue ;; esac   # baked path is inside the gate target: fine
+    hash=$(printf '%s' "$stale" | sed -n 's/.*release-webrtc-\([0-9a-f]*\).*/\1/p')
+    found=$(ls -d "$CARGO_TARGET_DIR"/release/build/scratch-*/out/livekit_webrtc/livekit/mac-arm64-release-webrtc-"${hash:-none}"/mac-arm64-release 2>/dev/null | head -n 1)
+    if [ -n "$found" ] && [ -d "$found/lib" ]; then
+      export LK_CUSTOM_WEBRTC="$found"
+      echo "== webrtc-sys: baked libwebrtc path is outside the gate target; LK_CUSTOM_WEBRTC=$found"
+    elif [ -d "$stale" ]; then
+      echo "== webrtc-sys: baked libwebrtc path is outside the gate target but present ($stale); leaving it"
+    else
+      echo "== webrtc-sys: baked libwebrtc path is gone and no matching build found; rebuilding scratch + webrtc-sys"
+      cargo clean --release -p scratch -p webrtc-sys 2>/dev/null || true
+    fi
+    return 0
+  done
+}
+
 launch() {
   local id=$1; shift
   local log=$runs/$id.log rc=$runs/$id.rc
@@ -79,6 +107,7 @@ case "$cmd" in
       fi
     fi
     if [ "$status" -eq 0 ] && [ "$mac" = "1" ]; then
+      webrtc_scratch_check
       echo "== cargo build --release --locked -p arbos-mac"
       if cargo build --release --locked -p arbos-mac; then echo "== release build: passes"; else echo "== release build: FAILS"; status=1; fi
     fi
