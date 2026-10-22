@@ -15,8 +15,8 @@ use tokio::sync::mpsc;
 use crate::auth;
 use crate::calls::{self, CallCmd, CallEvent};
 use crate::model::{
-    call_ended_line, reachable_line, AccountView, Call, CallEnded, CallKind, CallMissed, Person,
-    Reachable, Sender, Voice,
+    add_members_plan, call_ended_line, reachable_line, AccountView, Call, CallEnded, CallKind,
+    CallMissed, Person, Reachable, Sender, Voice,
 };
 use crate::model::{
     new_id, now_ms, AttachmentKind, BoxState, ChannelSel, ChannelsView, Chat, ChatKind,
@@ -268,6 +268,9 @@ pub struct AppState {
     awaiting_group: Option<Vec<String>>,
     /// The sheet invites into this project instead of starting a DM (step 3).
     pub invite_target: Option<Id>,
+    /// The group picker adds to this people group instead of creating one
+    /// (the group pane's "Add members").
+    pub add_members_target: Option<Id>,
     /// Avatar reply reaction window per project (ms): plays once after a turn.
     pub avatar_reply_until: HashMap<Id, u64>,
     /// Avatar picker open for this project.
@@ -356,6 +359,9 @@ pub struct AppState {
     /// Telegram-style profile sheet (user / group / agent) and its tab.
     pub profile: Option<ProfilePage>,
     pub profile_tab: usize,
+    /// Pages under the open one (a sender's profile pushed from a group): `‹` pops back.
+    /// Minimal stack for the right pane; the pane-as-navigation-stack work extends it.
+    pub profile_stack: Vec<ProfilePage>,
     /// Agent page: the Appearance (tree + colour) section is unfolded.
     pub profile_picker_open: bool,
     /// Agent page: which settings row (model / reasoning / voice) is dropped down.
@@ -607,6 +613,7 @@ impl AppState {
             awaiting_dm: None,
             awaiting_group: None,
             invite_target: None,
+            add_members_target: None,
             avatar_reply_until: HashMap::new(),
             avatar_picker: None,
             profile_from_name: false,
@@ -652,6 +659,7 @@ impl AppState {
             window_active: true,
             notify_prompt: false,
             profile: None,
+            profile_stack: Vec::new(),
             profile_tab: 0,
             profile_picker_open: false,
             agent_pick: None,
@@ -1376,7 +1384,7 @@ impl AppState {
                     }
                     // select_project() keeps the tab within the visible chats.
                     self.select_project(project_id.clone(), cx);
-                    // Rig: `ARBOS_OPEN_PROFILE=agent[:model|reasoning|voice]|group[:library]|user|me`
+                    // Rig: `ARBOS_OPEN_PROFILE=agent[:model|reasoning|voice]|group[:library|:add-members]|user|me`
                     // opens the right pane for the restored chat (selecting it
                     // closed whatever the shell opened at launch), and
                     // `ARBOS_OPEN_SETTINGS=…` re-opens my pane on its Settings tab.
@@ -1390,12 +1398,15 @@ impl AppState {
                         } else if let Some(rest) = spec.strip_prefix("group") {
                             self.open_profile(
                                 ProfilePage::Group {
-                                    space_id: project_id,
+                                    space_id: project_id.clone(),
                                 },
                                 cx,
                             );
                             if rest == ":library" {
                                 self.set_profile_tab(1, cx);
+                            } else if rest == ":add-members" {
+                                // The pane's Add members sheet over the Members tab.
+                                self.open_add_members(project_id, cx);
                             }
                         } else if spec == "user" {
                             if let Some(handle) = self
@@ -3885,7 +3896,35 @@ impl AppState {
         }
     }
 
+    /// Open `page` on top of the current one (a sender tapped inside a group): the pane
+    /// gets a `‹` back to where it was. Same page again is a no-op.
+    pub fn push_profile(&mut self, page: ProfilePage, cx: &mut Context<Self>) {
+        if self.profile.as_ref() == Some(&page) {
+            return;
+        }
+        let under = self.profile.take();
+        let mut stack = std::mem::take(&mut self.profile_stack);
+        self.open_profile(page, cx);
+        stack.extend(under);
+        self.profile_stack = stack;
+    }
+
+    /// `‹` in the pane header: back to the page underneath (closes when none).
+    pub fn back_profile(&mut self, cx: &mut Context<Self>) {
+        match self.profile_stack.pop() {
+            Some(prev) => {
+                let stack = std::mem::take(&mut self.profile_stack);
+                self.open_profile(prev, cx);
+                self.profile_stack = stack;
+            }
+            None => {
+                self.close_profile(cx);
+            }
+        }
+    }
+
     pub fn open_profile(&mut self, page: ProfilePage, cx: &mut Context<Self>) {
+        self.profile_stack.clear();
         self.avatar_picker = match &page {
             ProfilePage::Agent { project_id } => Some(project_id.clone()),
             _ => None,
@@ -4038,6 +4077,7 @@ impl AppState {
     /// Closes the sheet; `true` when one was open. An edit in progress on the
     /// agent page (name, description) is dropped with it.
     pub fn close_profile(&mut self, cx: &mut Context<Self>) -> bool {
+        self.profile_stack.clear();
         self.avatar_picker = None;
         self.profile_from_name = false;
         self.agent_pick = None;
@@ -4740,6 +4780,7 @@ impl AppState {
         self.new_group_picked.clear();
         self.new_group_agents.clear();
         self.invite_target = None;
+        self.add_members_target = None;
         self.people_query.clear();
         self.people_results.clear();
         self.people_error = None;
@@ -4761,7 +4802,67 @@ impl AppState {
         self.awaiting_dm = None;
         self.awaiting_group = None;
         self.invite_target = None;
+        self.add_members_target = None;
         cx.notify();
+    }
+
+    /// Group pane → "Add members": the New group picker, titled for this
+    /// group, whose Add puts the picks into it (not into a new group).
+    pub fn open_add_members(&mut self, chat_id: Id, cx: &mut Context<Self>) {
+        if !self.project(&chat_id).is_some_and(|p| p.is_people()) {
+            return;
+        }
+        self.open_new_chat(cx);
+        self.new_group_open = true;
+        self.add_members_target = Some(chat_id);
+        cx.notify();
+    }
+
+    /// The group the picker adds to, when it was opened from a group pane.
+    pub fn add_members_group(&self) -> Option<&Project> {
+        self.add_members_target
+            .as_deref()
+            .and_then(|id| self.project(id))
+    }
+
+    /// "Add" in the Add members picker: one relay call per new person
+    /// (`POST /chats/{id}/members`) and per new agent (`POST /chats/{id}/agents`),
+    /// all on the group the picker was opened for. People already in the group
+    /// are skipped (the rows were disabled anyway). The pane shows them at once;
+    /// the relay's next list confirms. Returns whether the calls were sent (the
+    /// sheet closes then; an empty pick keeps it open with a line why).
+    pub fn add_members_to_group(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(space) = self.add_members_group().cloned() else {
+            return false;
+        };
+        let me_handle = self.me_handle();
+        let plan = add_members_plan(
+            &space,
+            &me_handle,
+            &self.new_group_picked,
+            &self.new_group_agents,
+        );
+        if plan.handles.is_empty() && plan.agent_ids.is_empty() {
+            self.people_error = Some("Pick someone who is not in the group yet".into());
+            cx.notify();
+            return false;
+        }
+        let picked: Vec<Person> = self
+            .new_group_picked
+            .iter()
+            .filter(|p| plan.handles.contains(&p.handle))
+            .cloned()
+            .collect();
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == plan.chat_id) {
+            p.people.extend(picked);
+        }
+        self.command(ClientCommand::AddMembers {
+            chat_id: plan.chat_id,
+            handles: plan.handles,
+            agent_ids: plan.agent_ids,
+        });
+        cx.notify();
+        true
     }
 
     /// New Message → New group: multi-select people and optional agents.
@@ -4788,6 +4889,14 @@ impl AppState {
     }
 
     pub fn toggle_group_person(&mut self, person: Person, cx: &mut Context<Self>) {
+        // Add members: someone already in the group is shown as added, not pickable.
+        let me_handle = self.me_handle();
+        if self
+            .add_members_group()
+            .is_some_and(|g| g.has_person(&me_handle, &person))
+        {
+            return;
+        }
         if let Some(i) = self
             .new_group_picked
             .iter()
@@ -4802,6 +4911,12 @@ impl AppState {
     }
 
     pub fn toggle_group_agent(&mut self, project_id: Id, cx: &mut Context<Self>) {
+        if self
+            .add_members_group()
+            .is_some_and(|g| g.has_agent(&project_id))
+        {
+            return;
+        }
         if let Some(i) = self
             .new_group_agents
             .iter()

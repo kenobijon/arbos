@@ -64,6 +64,7 @@
 
 		A15A00000000000000000004 /* CoreFixturesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000003 /* CoreFixturesTests.swift */; };
 		A15A00000000000000000013 /* ReactionToggleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000012 /* ReactionToggleTests.swift */; };
+		A15A00000000000000000021 /* AddMembersPlanTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000020 /* AddMembersPlanTests.swift */; };
 		A15C0000000000000000000B /* SessionRoomTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15C0000000000000000000A /* SessionRoomTests.swift */; };
 		A15C00000000000000000004 /* ArbosFFI in Frameworks */ = {isa = PBXBuildFile; productRef = A15C00000000000000000002 /* ArbosFFI */; };
 		A15C00000000000000000005 /* ArbosFFI in Frameworks */ = {isa = PBXBuildFile; productRef = A15C00000000000000000003 /* ArbosFFI */; };
@@ -173,6 +174,7 @@
 		A15A00000000000000000001 /* ArbosTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ArbosTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		A15A00000000000000000003 /* CoreFixturesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoreFixturesTests.swift; sourceTree = "<group>"; };
 		A15A00000000000000000012 /* ReactionToggleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReactionToggleTests.swift; sourceTree = "<group>"; };
+		A15A00000000000000000020 /* AddMembersPlanTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddMembersPlanTests.swift; sourceTree = "<group>"; };
 		A15C0000000000000000000A /* SessionRoomTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionRoomTests.swift; sourceTree = "<group>"; };
 		A15C00000000000000000001 /* ArbosFFI */ = {isa = PBXFileReference; lastKnownFileType = wrapper; name = ArbosFFI; path = ../../../packages/ArbosFFI; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
@@ -355,6 +357,7 @@
 			isa = PBXGroup;
 			children = (
 				A15A00000000000000000003 /* CoreFixturesTests.swift */,
+				A15A00000000000000000020 /* AddMembersPlanTests.swift */,
 				A15A00000000000000000012 /* ReactionToggleTests.swift */,
 				A15C0000000000000000000A /* SessionRoomTests.swift */,
 			);
@@ -572,6 +575,7 @@
 			files = (
 				A15A00000000000000000004 /* CoreFixturesTests.swift in Sources */,
 				A15A00000000000000000013 /* ReactionToggleTests.swift in Sources */,
+				A15A00000000000000000021 /* AddMembersPlanTests.swift in Sources */,
 				A15C0000000000000000000B /* SessionRoomTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

@@ -271,6 +271,9 @@ struct SecretsOverview: Equatable {
     var activity: [SecretActivity]
     /// Vault providers this relay can connect (`["onepassword"]` once Phase 2 is deployed).
     var providers: [String] = []
+    /// Remote flag `features.vault_connect`: the Connect 1Password flow is shown only when the
+    /// relay says so (default off since 2026-10-21; code kept).
+    var vaultConnect = false
     /// Cards the owner has not answered yet, for the Secrets root ("Waiting for you").
     var requests: [SecretRequestItem] = []
     var loaded = true
@@ -285,6 +288,7 @@ struct SecretsOverview: Equatable {
             requestsPending: Int(DocJSON.int(m["requests_pending"]) ?? 0),
             activity: (m["activity"] as? [Any])?.compactMap(SecretActivity.parse) ?? [],
             providers: (m["providers"] as? [Any])?.compactMap { $0 as? String } ?? [],
+            vaultConnect: DocJSON.bool((m["features"] as? [String: Any])?["vault_connect"]),
             requests: (m["requests"] as? [Any])?.compactMap(SecretRequestItem.parse) ?? []
         )
     }
