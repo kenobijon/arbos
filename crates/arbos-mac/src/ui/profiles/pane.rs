@@ -105,6 +105,16 @@ fn title_of(page: &ProfilePage, state: &AppState) -> String {
             .find(|s| &s.id == server_id)
             .map(|s| s.name.clone())
             .unwrap_or_default(),
+        ProfilePage::Channel {
+            server_id,
+            channel_id,
+        } => state
+            .servers
+            .iter()
+            .find(|s| &s.id == server_id)
+            .and_then(|s| s.channels.iter().find(|c| &c.id == channel_id))
+            .map(|c| format!("# {}", c.name))
+            .unwrap_or_default(),
     }
 }
 
