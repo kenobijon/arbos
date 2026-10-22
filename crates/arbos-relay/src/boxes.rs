@@ -96,6 +96,10 @@ pub(crate) fn box_env(
     if let Ok(m) = std::env::var("ARBOS_MEMORY_PACK_COMPACT") {
         env.insert("ARBOS_MEMORY_PACK_COMPACT".into(), m);
     }
+    // Fast memory walk (D77 follow-up): same shape; `off` restores the three-round walk fleet-wide.
+    if let Ok(m) = std::env::var("ARBOS_MEMORY_WALK_FAST") {
+        env.insert("ARBOS_MEMORY_WALK_FAST".into(), m);
+    }
     let _ = state;
     env
 }
