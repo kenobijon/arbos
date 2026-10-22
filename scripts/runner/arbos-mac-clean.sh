@@ -8,11 +8,21 @@
 #  - kills orphaned `rust-cache … save.js` processes (parent 1, older than 30 min: a cancelled release
 #    job's post step kept tar'ing at 43 % CPU for 1 h 23 min on 2026-10-21)
 #  - appends an ALERT line to the loop journal when the data volume has < 20 GB free
+#  - `--if-low`: runs only when < 10 GB free (launchd sh.arbos.mac-clean-low every 30 min; the Rust gate
+#    calls it when it refuses a release build under 6 GiB). The 20 GB alert threshold is unchanged.
 # Left alone on purpose: WirelessRadioManagerd (system daemon at ~140 % CPU on this Wi-Fi-less EC2 Mac;
 # shared machine, not ours to disable — see the feedback-loop runbook).
 # Log: /var/log/arbos-mac-clean.log. Journal: /Users/Shared/arbos-run/loop-journal.log (also `logger -t arbos-mac-clean`).
 set -u
 LOG=/var/log/arbos-mac-clean.log
+# `--if-low`: the opportunistic mode (launchd sh.arbos.mac-clean-low every 30 min, and the Rust gate when it
+# refuses a build): do nothing unless the data volume has less than LOW_FREE_GB free.
+LOW_FREE_GB=${LOW_FREE_GB:-10}
+if [ "${1:-}" = "--if-low" ]; then
+  f=$(df -g /System/Volumes/Data | awk 'NR==2 {print $4}')
+  [ "${f:-99}" -lt "$LOW_FREE_GB" ] || exit 0
+  printf '%s %s\n' "$(date -u +%FT%TZ)" "opportunistic run: ${f}G free (< ${LOW_FREE_GB}G)" >> "$LOG"
+fi
 JOURNAL=/Users/Shared/arbos-run/loop-journal.log
 MIN_FREE_GB=${MIN_FREE_GB:-20}
 TARGET_AGE_DAYS=${TARGET_AGE_DAYS:-2}

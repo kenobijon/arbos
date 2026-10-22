@@ -1,6 +1,6 @@
 // People-chat sheets (D72): New Message (Telegram-style: search, New agent,
-// New group, your agents, every Arbos user), members (people, add-person, agents, add-agent picker, block, leave/delete) and
-// project members (invite by handle).
+// New group, your agents, every Arbos user), the New group / Add members
+// picker (chips, search, checkmarks) and project members (invite by handle).
 
 import SwiftUI
 
@@ -409,11 +409,15 @@ struct NewAgentView: View {
     }
 }
 
-/// New group: pick people (and your own agents), then create.
+/// New group: pick people (and your own agents), then create. With `addTo`
+/// (the group pane's Add members) the same picker is titled for that group,
+/// shows its members as already in, and Add puts the picks into it.
 struct NewGroupView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
     let onDone: () -> Void
+    /// People-chat id to add to; nil creates a new group.
+    var addTo: String? = nil
     @State private var query = ""
     @State private var remote: [Person] = []
     @State private var picked: [Person] = []
@@ -441,6 +445,23 @@ struct NewGroupView: View {
         var seen = Set(out.map(\.id))
         for p in remote where !seen.contains(p.id) && p.id != model.user?.id { seen.insert(p.id); out.append(p) }
         return out
+    }
+
+    private var addToChat: PeopleChat? { addTo.flatMap { model.peopleChat($0) } }
+    private var adding: Bool { addTo != nil }
+    private var title: String { addToChat.map { "Add members to \($0.title)" } ?? (adding ? "Add members" : "New group") }
+    /// Create needs a person (a group of one is a DM); Add takes agents alone too.
+    private var canSubmit: Bool { adding ? !(picked.isEmpty && pickedAgents.isEmpty) : !picked.isEmpty }
+
+    private func isIn(_ p: Person) -> Bool { addToChat?.hasPerson(p, meId: model.user?.id) ?? false }
+    private func isIn(_ p: Project) -> Bool { addToChat?.hasAgent(p.id) ?? false }
+
+    private func pickMark(selected: Bool, already: Bool) -> AnyView {
+        AnyView(
+            Image(systemName: selected || already ? "checkmark.circle.fill" : "circle")
+                .font(theme.font(22))
+                .foregroundStyle(already ? theme.muted : (selected ? theme.text : theme.muted.opacity(0.5)))
+        )
     }
 
     var body: some View {
@@ -505,14 +526,13 @@ struct NewGroupView: View {
                             .padding(.bottom, 8)
                         VStack(spacing: 0) {
                             ForEach(Array(agentCandidates.enumerated()), id: \.element.id) { i, p in
+                                let already = isIn(p)
                                 Button { toggleAgent(p) } label: {
-                                    AgentPickRow(project: p, trailing: AnyView(
-                                        Image(systemName: pickedAgents.contains(where: { $0.id == p.id }) ? "checkmark.circle.fill" : "circle")
-                                            .font(theme.font(22))
-                                            .foregroundStyle(pickedAgents.contains(where: { $0.id == p.id }) ? theme.text : theme.muted.opacity(0.5))
-                                    ))
+                                    AgentPickRow(project: p, trailing: pickMark(selected: pickedAgents.contains(where: { $0.id == p.id }), already: already))
                                 }
                                 .buttonStyle(.plain)
+                                .disabled(already)
+                                .opacity(already ? 0.5 : 1)
                                 if i < agentCandidates.count - 1 { Rectangle().fill(theme.separator).frame(height: 0.5).padding(.leading, 72) }
                             }
                         }
@@ -532,14 +552,13 @@ struct NewGroupView: View {
                         }
                         VStack(spacing: 0) {
                             ForEach(Array(candidates.enumerated()), id: \.element.id) { i, p in
+                                let already = isIn(p)
                                 Button { toggle(p) } label: {
-                                    PersonRow(person: p, trailing: AnyView(
-                                        Image(systemName: picked.contains(p) ? "checkmark.circle.fill" : "circle")
-                                            .font(theme.font(22))
-                                            .foregroundStyle(picked.contains(p) ? theme.text : theme.muted.opacity(0.5))
-                                    ))
+                                    PersonRow(person: p, trailing: pickMark(selected: picked.contains(p), already: already))
                                 }
                                 .buttonStyle(.plain)
+                                .disabled(already)
+                                .opacity(already ? 0.5 : 1)
                                 if i < candidates.count - 1 { Rectangle().fill(theme.separator).frame(height: 0.5).padding(.leading, 72) }
                             }
                             if candidates.isEmpty {
@@ -556,14 +575,17 @@ struct NewGroupView: View {
             }
         }
         .background(theme.bg)
-        .navigationTitle("New group")
+        .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(theme.bg, for: .navigationBar)
         .toolbarBackground(.visible, for: .navigationBar)
         .toolbar {
+            if adding {
+                ToolbarItem(placement: .topBarLeading) { Button("Cancel") { onDone() }.foregroundStyle(theme.text) }
+            }
             ToolbarItem(placement: .topBarTrailing) {
-                Button { create() } label: {
-                    Text(creating ? "Creating…" : "Create")
+                Button { if adding { add() } else { create() } } label: {
+                    Text(adding ? (creating ? "Adding…" : "Add") : (creating ? "Creating…" : "Create"))
                         .font(theme.font(Theme.small, weight: .semibold))
                         .foregroundStyle(theme.onPrimary)
                         .padding(.horizontal, 12)
@@ -571,21 +593,41 @@ struct NewGroupView: View {
                         .background(Capsule().fill(theme.primary))
                 }
                 .buttonStyle(.plain)
-                .disabled(picked.isEmpty || creating)
-                .opacity(picked.isEmpty || creating ? 0.45 : 1)
+                .disabled(!canSubmit || creating)
+                .opacity(!canSubmit || creating ? 0.45 : 1)
             }
         }
         .task { await model.loadDirectory() }
     }
 
     private func toggle(_ p: Person) {
+        guard !isIn(p) else { return }
         if let i = picked.firstIndex(of: p) { picked.remove(at: i) } else { picked.append(p) }
         errorText = nil
     }
 
     private func toggleAgent(_ p: Project) {
+        guard !isIn(p) else { return }
         if let i = pickedAgents.firstIndex(where: { $0.id == p.id }) { pickedAgents.remove(at: i) } else { pickedAgents.append(p) }
         errorText = nil
+    }
+
+    /// Add members: every pick goes to the group this picker was opened for.
+    private func add() {
+        guard let chat = addToChat, canSubmit, !creating else { return }
+        let plan = AddMembersPlan.make(chat: chat, meId: model.user?.id, picked: picked, pickedAgents: pickedAgents)
+        guard !plan.isEmpty else { errorText = "Pick someone who is not in the group yet"; return }
+        creating = true
+        errorText = nil
+        Task {
+            if await model.addMembers(chatId: plan.chatId, handles: plan.handles, agentIds: plan.agentIds) {
+                onDone()
+            } else {
+                errorText = model.notice?.text ?? "Could not add them."
+                model.notice = nil
+            }
+            creating = false
+        }
     }
 
     private func search() {
@@ -613,260 +655,6 @@ struct NewGroupView: View {
             }
             creating = false
         }
-    }
-}
-
-/// Members of a people chat: people, shared agents (with owner), lock state,
-/// Add person / Add agent (own projects), reply policy, remove, block, leave, delete.
-struct MembersSheet: View {
-    @EnvironmentObject private var model: AppModel
-    @Environment(\.theme) private var theme
-    @Environment(\.dismiss) private var dismiss
-    let chatId: String
-    /// Rig: `ARBOS_SHOW=addperson` lands on the Add person picker.
-    @State private var showAddPerson = DebugHooks.show == "addperson"
-    @State private var showAddAgent = false
-    @State private var confirmDelete = false
-    @State private var confirmLeave = false
-    @State private var detent: PresentationDetent = .medium
-
-    private var chat: PeopleChat? { model.peopleChat(chatId) }
-    private var myProjects: [Project] { model.projects.filter { !$0.shared } }
-    private var memberIds: Set<String> { Set((chat?.humans ?? []).map(\.id)) }
-
-    var body: some View {
-        NavigationStack {
-            List {
-                if let chat {
-                    Section {
-                        // Push via navigationDestination (not NavigationLink / nested sheet):
-                        // List NavigationLinks are flaky in a medium detent sheet, and dismiss()
-                        // from a pushed picker can close Members instead of popping.
-                        Button {
-                            detent = .large
-                            showAddPerson = true
-                        } label: {
-                            Label("Add person", systemImage: "plus.circle").foregroundStyle(theme.text)
-                        }
-                        ForEach(chat.humans) { m in
-                            HStack(spacing: 12) {
-                                Button { model.showProfile(.user(ProfilePerson(m))) } label: { PersonAvatar(url: m.avatarUrl, handle: m.handle, size: 40, name: m.name, id: m.id, colorIndex: m.avatarColorIndex) }.buttonStyle(.plain)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(m.displayName).foregroundStyle(theme.text)
-                                    Text("@\(m.handle)\(m.status == "invited" ? " · invited" : "")").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
-                                }
-                                Spacer()
-                                if m.id == model.user?.id { Text("You").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted) }
-                            }
-                            .swipeActions {
-                                if m.id != model.user?.id {
-                                    if chat.myRole == "owner" || chat.myRole == "admin" {
-                                        Button("Remove", role: .destructive) {
-                                            model.removeMember(chatId: chatId, userId: m.id)
-                                        }
-                                    }
-                                    Button("Block") { model.block(m) }.tint(theme.danger)
-                                }
-                            }
-                        }
-                    } header: { Text("People") } footer: { Text(chat.lockLabel) }
-                    .listRowBackground(theme.card)
-
-                    Section {
-                        Button { showAddAgent = true } label: {
-                            Label("Add agent", systemImage: "plus.circle").foregroundStyle(theme.text)
-                        }
-                        .disabled(myProjects.isEmpty)
-                        ForEach(chat.agents) { a in
-                            HStack(spacing: 12) {
-                                if let p = a.project {
-                                    Button { model.showProfile(.agent(projectId: p.id)) } label: { AgentAvatar(project: p, theme: theme, size: 40) }.buttonStyle(.plain)
-                                }
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(a.displayName).foregroundStyle(theme.text)
-                                    Text("@\(mentionSlug(a.project?.name ?? a.handle)) · owned by @\(a.ownerHandle ?? "?")\(a.replyPolicy == "every_message" ? " · replies to everything" : "")")
-                                        .font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
-                                }
-                                Spacer()
-                                if a.ownerId == model.user?.id {
-                                    Menu {
-                                        Button("Reply when mentioned") { model.setReplyPolicy(chatId: chatId, projectId: a.id, policy: "mention") }
-                                        Button("Reply to every message") { model.setReplyPolicy(chatId: chatId, projectId: a.id, policy: "every_message") }
-                                        Divider()
-                                        Button("Remove agent", role: .destructive) { model.removeAgent(chatId: chatId, projectId: a.id) }
-                                    } label: {
-                                        Image(systemName: "ellipsis.circle").foregroundStyle(theme.muted)
-                                    }
-                                }
-                            }
-                        }
-                    } header: { Text("Agents") } footer: {
-                        Text(chat.agents.isEmpty ? "Add one of your agents so both of you can talk to it. Mention it with @ to get a reply." : "Guests can ask a shared agent to do anything its owner can. The owner pays and can remove it any time.")
-                    }
-                    .listRowBackground(theme.card)
-
-                    Section {
-                        Button("Leave chat", role: .destructive) { confirmLeave = true }
-                        if chat.myRole == "owner" {
-                            Button("Delete chat for everyone", role: .destructive) { confirmDelete = true }
-                        }
-                    }
-                    .listRowBackground(theme.card)
-                }
-            }
-            .scrollContentBackground(.hidden)
-            .background(theme.bg)
-            .navigationTitle("Members")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
-            .navigationDestination(isPresented: $showAddPerson) {
-                PersonPicker(excludeIds: memberIds) { person in
-                    model.addPerson(chatId: chatId, handle: person.handle)
-                    showAddPerson = false
-                }
-            }
-            .sheet(isPresented: $showAddAgent) {
-                AgentPicker(projects: myProjects) { p in
-                    model.addAgent(chatId: chatId, projectId: p.id)
-                }
-                .environment(\.theme, theme)
-            }
-            .confirmationDialog("Leave this chat?", isPresented: $confirmLeave, titleVisibility: .visible) {
-                Button("Leave", role: .destructive) { model.leavePeopleChat(chatId); dismiss() }
-            }
-            .confirmationDialog("Delete for everyone?", isPresented: $confirmDelete, titleVisibility: .visible) {
-                Button("Delete chat", role: .destructive) { model.deletePeopleChat(chatId); dismiss() }
-            } message: { Text("Messages, files and the sync log are removed for every member.") }
-        }
-        .presentationDetents([.medium, .large], selection: $detent)
-    }
-}
-
-/// Pick a person (directory + GitHub search) who is not already in the chat.
-/// Pushed onto Members via navigationDestination (same idea as New agent → look).
-struct PersonPicker: View {
-    @EnvironmentObject private var model: AppModel
-    @Environment(\.theme) private var theme
-    let excludeIds: Set<String>
-    let onPick: (Person) -> Void
-    @State private var query = ""
-    @State private var remote: [Person] = []
-    @State private var searching = false
-
-    private var trimmed: String {
-        query.trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "@"))
-    }
-
-    private var people: [Person] {
-        let q = trimmed.lowercased()
-        let local = (q.isEmpty ? model.directory : model.directory.filter {
-            $0.handle.lowercased().contains(q) || ($0.name ?? "").lowercased().contains(q)
-        }).filter { !excludeIds.contains($0.id) && $0.id != model.user?.id }
-        var seen = Set(local.map(\.id))
-        var out = local
-        for p in remote where !seen.contains(p.id) && !excludeIds.contains(p.id) && p.id != model.user?.id {
-            seen.insert(p.id)
-            out.append(p)
-        }
-        return out
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            // The same field as New Message / New group — not a bare list row,
-            // which drew a thin line hugging the card's left edge.
-            HStack(spacing: 8) {
-                Image(systemName: "magnifyingglass").font(.system(size: 15, weight: .medium)).foregroundStyle(theme.muted)
-                TextField("", text: $query, prompt: Text("Search people").foregroundStyle(theme.placeholder))
-                    .textInputAutocapitalization(.never).autocorrectionDisabled()
-                    .font(theme.font(Theme.body)).foregroundStyle(theme.text)
-                if searching { ProgressView().controlSize(.small).tint(theme.muted) }
-            }
-            .padding(.horizontal, 12).frame(height: 38)
-            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.field))
-            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
-            .padding(.horizontal, 16).padding(.vertical, 10)
-
-            List {
-                Section {
-                    ForEach(people) { p in
-                        Button {
-                            onPick(p)
-                        } label: {
-                            PersonRow(person: p)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                    if people.isEmpty {
-                        Text(trimmed.isEmpty
-                             ? "No one else on Arbos yet. Search a GitHub username."
-                             : "No one matches @\(trimmed).")
-                            .font(theme.font(Theme.small)).foregroundStyle(theme.muted)
-                        if trimmed.count >= 2, !searching {
-                            Button {
-                                onPick(Person(id: "github:\(trimmed.lowercased())", handle: trimmed, avatarUrl: nil, name: nil, status: "github"))
-                            } label: {
-                                Text("Invite @\(trimmed)")
-                                    .font(theme.font(Theme.small, weight: .semibold))
-                                    .foregroundStyle(theme.text)
-                            }
-                        }
-                    }
-                }
-                .listRowBackground(theme.card)
-            }
-            .scrollContentBackground(.hidden)
-        }
-        .background(theme.bg)
-        .navigationTitle("Add person")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbarBackground(theme.bg, for: .navigationBar)
-        .toolbarBackground(.visible, for: .navigationBar)
-        .task { await model.loadDirectory() }
-        .onChange(of: query) { _, _ in search() }
-    }
-
-    private func search() {
-        let q = trimmed
-        guard q.count >= 2 else { remote = []; searching = false; return }
-        searching = true
-        Task {
-            try? await Task.sleep(nanoseconds: 250_000_000)
-            guard q == trimmed else { return }
-            remote = await model.searchPeople(q)
-            if q == trimmed { searching = false }
-        }
-    }
-}
-
-/// Pick one of my projects to share into a chat.
-struct AgentPicker: View {
-    @Environment(\.theme) private var theme
-    @Environment(\.dismiss) private var dismiss
-    let projects: [Project]
-    let onPick: (Project) -> Void
-
-    var body: some View {
-        NavigationStack {
-            List(projects) { p in
-                Button { onPick(p); dismiss() } label: {
-                    HStack(spacing: 12) {
-                        AgentAvatar(project: p, theme: theme, size: 40)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(p.name).foregroundStyle(theme.text)
-                            Text("@\(mentionSlug(p.name))").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
-                        }
-                    }
-                }
-                .listRowBackground(theme.card)
-            }
-            .scrollContentBackground(.hidden)
-            .background(theme.bg)
-            .navigationTitle("Add agent")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .topBarLeading) { Button("Cancel") { dismiss() } } }
-        }
-        .presentationDetents([.medium])
     }
 }
 

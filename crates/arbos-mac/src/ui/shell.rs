@@ -13,7 +13,7 @@ use gpui::{
 };
 
 use crate::app::SignInMode;
-use crate::app::{AppState, DetailsTarget, ProfilePage};
+use crate::app::{AppState, DetailsTarget, ProfilePage, ServerSheet};
 use crate::model::{now_ms, CallKind, Link, MachineState};
 use crate::ui::attachments;
 use crate::ui::avatars;
@@ -34,6 +34,7 @@ use crate::ui::people;
 use crate::ui::profiles;
 use crate::ui::routines::{RoutinesEvent, RoutinesPanel};
 use crate::ui::secrets::{SecretsEvent, SecretsPanel};
+use crate::ui::servers;
 use crate::ui::sidebar;
 use crate::ui::skills::{self, SkillsPanel};
 use crate::ui::theme::{
@@ -56,6 +57,14 @@ const HEADER_DRAG_OVERHANG: f32 = 24.0;
 /// Left inset for the conversation header while the sidebar is hidden: the window's traffic lights.
 /// The sidebar's collapse control sits at the same inset, so it never moves when the pane folds.
 pub(crate) const TRAFFIC_LIGHTS_INSET: f32 = 72.0;
+
+/// What the shared name field (`agent_name_input`) renames when Return is pressed.
+#[derive(Clone, Copy)]
+enum RenameKind {
+    Agent,
+    Group,
+    Server,
+}
 
 /// How long a single click on the header name waits for a second one before
 /// it opens the profile (#1068). Shorter than the system double-click
@@ -193,10 +202,16 @@ pub struct Shell {
     /// The left pane's search field is shown (the magnifier in the top strip
     /// toggles it; it stays while a query is typed).
     pub(crate) search_open: bool,
-    /// The left pane slid over to a server's channel list (three-pane rule,
-    /// mockup h). Servers do not exist yet: this is the layout hook only, a
-    /// rig fills it (`ARBOS_SHOW_SERVER=1`).
-    pub(crate) server_pane: Option<crate::ui::sidebar::ServerPane>,
+    /// D88: the name/invite/channel field of the server sheets and the inline channel rename
+    /// on the server page; `channel_rename` is the channel being renamed there.
+    pub(crate) server_input: Entity<ComposerInput>,
+    pub(crate) channel_rename: Option<crate::model::Id>,
+    /// D88: the "Admins only post" toggle of the new-channel sheet.
+    pub(crate) new_channel_restricted: bool,
+    /// D88: a member row's ✕ was clicked on the server page: Cancel / Remove / Ban.
+    pub(crate) server_member_armed: Option<crate::model::Id>,
+    /// D88: "Leave server" / "Delete server" was clicked once; the row asks to confirm.
+    pub(crate) server_leave_armed: bool,
     /// Right-click menu on a sidebar row: the space and where the click landed.
     pub(crate) row_menu: Option<(crate::model::Id, gpui::Point<gpui::Pixels>)>,
     /// The row menu's Delete was clicked once: it now shows "Delete …?" with
@@ -307,7 +322,16 @@ impl Shell {
             })
             .detach();
         }
-        cx.observe(&state, |_, _, cx| cx.notify()).detach();
+        cx.observe(&state, |this, state, cx| {
+            // The Add members picker (from a group pane or the rig hook) searches
+            // agents too; Cancel / Add put "Search people" back.
+            if state.read(cx).add_members_target.is_some() {
+                this.people_input
+                    .update(cx, |input, _| input.set_placeholder("Add people or agents"));
+            }
+            cx.notify();
+        })
+        .detach();
         Self::follow_system_appearance(window);
         cx.observe(&voice, |_, _, cx| cx.notify()).detach();
         cx.observe(&composer, |_, _, cx| cx.notify()).detach();
@@ -431,6 +455,17 @@ impl Shell {
         }
         cx.observe(&tab_rename_input, |_, _, cx| cx.notify())
             .detach();
+        let server_input = cx.new(ComposerInput::new);
+        {
+            let weak = cx.weak_entity();
+            server_input.update(cx, |input, _| {
+                input.set_placeholder("Server name");
+                input.on_submit = Some(Rc::new(move |window, cx| {
+                    let _ = weak.update(cx, |this, cx| this.submit_server_input(window, cx));
+                }));
+            });
+        }
+        cx.observe(&server_input, |_, _, cx| cx.notify()).detach();
         let people_input = cx.new(ComposerInput::new);
         {
             let weak = cx.entity().downgrade();
@@ -591,10 +626,11 @@ impl Shell {
             signing_in: false,
             menu_open: false,
             search_open: false,
-            server_pane: std::env::var("ARBOS_SHOW_SERVER")
-                .ok()
-                .filter(|v| v == "1")
-                .map(|_| crate::ui::sidebar::ServerPane::demo()),
+            server_input,
+            channel_rename: None,
+            new_channel_restricted: false,
+            server_member_armed: None,
+            server_leave_armed: false,
             people_input,
             description_input,
             agent_name_input,
@@ -914,15 +950,18 @@ impl Shell {
 
     /// Enter in the name field: sidebar / header rename, or the agent page's.
     pub(crate) fn commit_rename_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (project_id, group) = {
+        let (project_id, kind) = {
             let state = self.state.read(cx);
             match (&state.renaming_project, &state.profile) {
-                (Some(id), _) => (id.clone(), false),
+                (Some(id), _) => (id.clone(), RenameKind::Agent),
                 (None, Some(ProfilePage::Agent { project_id })) if state.profile_editing_name => {
-                    (project_id.clone(), false)
+                    (project_id.clone(), RenameKind::Agent)
                 }
                 (None, Some(ProfilePage::Group { space_id })) if state.profile_editing_name => {
-                    (space_id.clone(), true)
+                    (space_id.clone(), RenameKind::Group)
+                }
+                (None, Some(ProfilePage::Server { server_id })) if state.profile_editing_name => {
+                    (server_id.clone(), RenameKind::Server)
                 }
                 _ => return,
             }
@@ -930,15 +969,140 @@ impl Shell {
         let name = self.agent_name_input.read(cx).text().to_string();
         self.agent_name_input
             .update(cx, |input, _| input.set_text_center(false));
-        self.state.update(cx, |s, cx| {
-            if group {
-                s.set_group_title(project_id, name, cx)
-            } else {
-                s.set_project_name(project_id, name, cx)
-            }
+        self.state.update(cx, |s, cx| match kind {
+            RenameKind::Agent => s.set_project_name(project_id, name, cx),
+            RenameKind::Group => s.set_group_title(project_id, name, cx),
+            RenameKind::Server => s.set_server_name(project_id, name, cx),
         });
         Composer::focus(&self.composer, window, cx);
         cx.notify();
+    }
+
+    /// The server page's name, clicked by an owner/admin: an inline field in its place
+    /// (Return commits, Escape cancels) — the group page's flow (D88 rule 5).
+    pub(crate) fn start_rename_server(
+        &mut self,
+        server_id: crate::model::Id,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(name) = self
+            .state
+            .read(cx)
+            .server(&server_id)
+            .filter(|s| s.can_admin())
+            .map(|s| s.name.clone())
+        else {
+            return;
+        };
+        self.agent_name_input.update(cx, |input, cx| {
+            input.set_text_center(true);
+            input.set_text(name, cx);
+        });
+        self.state.update(cx, |s, cx| {
+            s.profile_editing_name = true;
+            cx.notify();
+        });
+        let handle = self.agent_name_input.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
+    /// Open one of the server sheets (D88 rules 7 and 8) with its field focused.
+    pub(crate) fn open_server_sheet(
+        &mut self,
+        sheet: ServerSheet,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let placeholder = match &sheet {
+            ServerSheet::NewServer => "Server name",
+            ServerSheet::JoinServer => "Invite link or code",
+            ServerSheet::NewChannel { .. } => "channel-name",
+        };
+        self.menu_open = false;
+        self.row_menu = None;
+        self.channel_rename = None;
+        self.new_channel_restricted = false;
+        self.server_input.update(cx, |input, cx| {
+            input.clear(cx);
+            input.set_placeholder(placeholder);
+        });
+        self.people_input
+            .update(cx, |input, _| input.set_placeholder("Search people"));
+        self.state.update(cx, |s, cx| {
+            s.close_new_chat(cx);
+            s.open_server_sheet(sheet, cx);
+        });
+        let handle = self.server_input.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
+    /// Cancel / click outside / Escape on a server sheet.
+    pub(crate) fn close_server_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.server_input.update(cx, |input, cx| input.clear(cx));
+        self.state.update(cx, |s, cx| {
+            s.close_server_sheet(cx);
+        });
+        Composer::focus(&self.composer, window, cx);
+        cx.notify();
+    }
+
+    /// Return in the server field: the open sheet's primary action, or the inline channel
+    /// rename on the server page.
+    pub(crate) fn submit_server_input(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.server_input.read(cx).text().trim().to_string();
+        if let Some(channel_id) = self.channel_rename.take() {
+            let server_id = match self.state.read(cx).profile.clone() {
+                Some(ProfilePage::Server { server_id }) => server_id,
+                _ => return,
+            };
+            self.server_input.update(cx, |input, cx| input.clear(cx));
+            self.state.update(cx, |s, cx| {
+                s.set_channel_name(server_id, channel_id, text, cx);
+            });
+            cx.notify();
+            return;
+        }
+        let Some(sheet) = self.state.read(cx).server_sheet.clone() else {
+            return;
+        };
+        let restricted = self.new_channel_restricted;
+        self.state.update(cx, |s, cx| match sheet {
+            ServerSheet::NewServer => s.create_server(text, cx),
+            ServerSheet::JoinServer => s.join_server(text, cx),
+            ServerSheet::NewChannel { server_id } => {
+                s.create_channel(server_id, text, restricted, cx)
+            }
+        });
+    }
+
+    /// Server page, Channels tab: a channel name clicked by an owner/admin becomes a field.
+    pub(crate) fn start_rename_channel(
+        &mut self,
+        channel_id: crate::model::Id,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.channel_rename = Some(channel_id);
+        self.server_input.update(cx, |input, cx| {
+            input.set_placeholder("channel-name");
+            input.set_text(name, cx);
+            input.select_all_text(cx);
+        });
+        let handle = self.server_input.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
+    pub(crate) fn cancel_rename_channel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.channel_rename.take().is_some() {
+            self.server_input.update(cx, |input, cx| input.clear(cx));
+            Composer::focus(&self.composer, window, cx);
+            cx.notify();
+        }
     }
 
     pub(crate) fn cancel_rename_agent(&mut self, cx: &mut Context<Self>) {
@@ -1072,6 +1236,9 @@ impl Shell {
         self.hide_settings_page(cx);
         self.profile_edit_open = false;
         self.member_remove_armed = None;
+        self.server_member_armed = None;
+        self.server_leave_armed = false;
+        self.channel_rename = None;
         self.state.update(cx, |s, cx| {
             s.close_profile(cx);
         });
@@ -1222,6 +1389,20 @@ impl Shell {
             self.cancel_tab_rename(window, cx);
             return;
         }
+        if self.channel_rename.is_some() {
+            self.cancel_rename_channel(window, cx);
+            return;
+        }
+        if self.state.read(cx).server_sheet.is_some() {
+            self.close_server_sheet(window, cx);
+            return;
+        }
+        if self.server_member_armed.is_some() || self.server_leave_armed {
+            self.server_member_armed = None;
+            self.server_leave_armed = false;
+            cx.notify();
+            return;
+        }
         if self.search_open
             && self
                 .search_input
@@ -1305,19 +1486,22 @@ impl Shell {
         }
     }
 
-    pub(crate) fn set_theme(
-        &mut self,
-        pref: AppearancePref,
-        surface: Surface,
-        cx: &mut Context<Self>,
-    ) {
-        let current = Theme::of(cx);
-        if current.pref != pref {
-            pref.save();
-        }
-        if current.surface != surface {
-            surface.save();
-        }
+    /// Settings → Appearance → Theme. The pick is always written, even when it
+    /// equals the unsaved default, so it survives a later default change (D90).
+    pub(crate) fn pick_appearance(&mut self, pref: AppearancePref, cx: &mut Context<Self>) {
+        pref.save();
+        let surface = Theme::of(cx).surface;
+        self.set_theme(pref, surface, cx);
+    }
+
+    /// Settings → Appearance → Surface. Same persistence rule as the theme.
+    pub(crate) fn pick_surface(&mut self, surface: Surface, cx: &mut Context<Self>) {
+        surface.save();
+        let pref = Theme::of(cx).pref;
+        self.set_theme(pref, surface, cx);
+    }
+
+    fn set_theme(&mut self, pref: AppearancePref, surface: Surface, cx: &mut Context<Self>) {
         cx.set_global(Theme::for_pref(pref, surface, cx));
         reapply_window_background(cx);
         cx.notify();
@@ -1711,6 +1895,11 @@ impl Shell {
             )
         });
         let typing = chat_id.as_deref().and_then(|id| state.typing_in(id));
+        // D88: a channel in the centre — the same transcript, the unified pill with the
+        // server's disc and `# name`, and the composer (or rule 9's one quiet line).
+        let channel = state
+            .selected_channel_info()
+            .map(|(server, ch)| (server.clone(), ch.clone(), state.channel_can_post()));
         if animating || shake.is_some() {
             PulseClock::request(cx);
         }
@@ -1729,6 +1918,57 @@ impl Shell {
             .flex_1()
             .min_w_0()
             .h_full();
+
+        if let Some((server, ch, can_post)) = channel {
+            column = column.child(
+                div()
+                    .relative()
+                    .when(sidebar_hidden, |el| el.pl(px(TRAFFIC_LIGHTS_INSET)))
+                    .child(header::render_channel(
+                        self,
+                        &server,
+                        &ch,
+                        sidebar_hidden,
+                        cx,
+                    )),
+            );
+            if let Some(banner) = self.render_banner(cx) {
+                column = column.child(banner);
+            }
+            let body = div()
+                .flex_1()
+                .min_h_0()
+                .relative()
+                .child(self.transcript.clone());
+            let bottom = div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .items_center()
+                .px(px(COMPOSER_MARGIN))
+                .pb(px(COMPOSER_BOTTOM))
+                .pt(px(6.0));
+            let bottom = if can_post {
+                bottom.child(composer_block)
+            } else {
+                bottom.pb(px(COMPOSER_BOTTOM + 10.0)).child(
+                    div()
+                        .text_size(px(TEXT_SMALL))
+                        .text_color(theme.text_muted)
+                        .child("Only admins post here"),
+                )
+            };
+            return column
+                .child(body)
+                .child(bottom)
+                .group("chat-drop")
+                .can_drop(|dragged, _, _| dragged.is::<ExternalPaths>())
+                .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+                    this.composer.update(cx, |c, cx| {
+                        c.add_paths(paths.paths().iter().cloned(), cx);
+                    });
+                }));
+        }
 
         let Some(space) = project else {
             // Nothing selected: the window title strip stays draggable.
@@ -2701,6 +2941,12 @@ impl Render for Shell {
                         this.commit_tab_rename(window, cx);
                         return;
                     }
+                    // Likewise a click outside an inline channel rename (its row stops
+                    // propagation too) — that one cancels.
+                    if this.channel_rename.is_some() {
+                        this.cancel_rename_channel(window, cx);
+                        return;
+                    }
                     let pairing = this.pairing_input.read(cx).focus_handle(cx);
                     let project = this.project_input.read(cx).focus_handle(cx);
                     let search = this.search_input.read(cx).focus_handle(cx);
@@ -2858,6 +3104,9 @@ impl Render for Shell {
                 &self.people_input,
                 cx,
             ));
+        }
+        if let Some(sheet) = self.state.read(cx).server_sheet.clone() {
+            root = root.child(servers::sheet(self, &sheet, cx));
         }
         if self.feedback.read(cx).is_open() {
             root = root.child(self.feedback.clone());

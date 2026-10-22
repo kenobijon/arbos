@@ -22,7 +22,26 @@ CREATE TABLE IF NOT EXISTS fleet_events (
   user_id TEXT, detail TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS fleet_events_at ON fleet_events(at);
+-- One row per sandbox per sample (every 5 min): what the D89 capacity numbers were estimated from.
+CREATE TABLE IF NOT EXISTS fleet_samples (
+  at INTEGER NOT NULL, user_id TEXT NOT NULL, cpu_pct REAL NOT NULL, mem_mib REAL NOT NULL, pids INTEGER NOT NULL,
+  host_mem_available_gb REAL NOT NULL, host_load5 REAL NOT NULL, host_disk_free_gb REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS fleet_samples_at ON fleet_samples(at);
 "#;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FleetSampleSummary {
+    pub since: i64,
+    pub samples: i64,
+    pub sandboxes: i64,
+    pub cpu_pct_avg: f64,
+    pub cpu_pct_p95: f64,
+    pub mem_mib_avg: f64,
+    pub mem_mib_p95: f64,
+    pub mem_mib_max: f64,
+    pub pids_max: i64,
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WaitlistEntry {
@@ -148,6 +167,64 @@ impl Db {
             })?;
             rows.collect()
         })
+    }
+
+    pub fn fleet_sample(
+        &self,
+        user_id: &str,
+        cpu_pct: f64,
+        mem_mib: f64,
+        pids: i64,
+        host: (f64, f64, f64),
+    ) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO fleet_samples(at, user_id, cpu_pct, mem_mib, pids, host_mem_available_gb, host_load5, host_disk_free_gb)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                params![now_ms(), user_id, cpu_pct, mem_mib, pids, host.0, host.1, host.2],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// Per-sandbox averages and tails since `since` (ms): the real numbers behind §2.3 of the
+    /// fleet design.
+    pub fn fleet_sample_summary(&self, since: i64) -> Result<FleetSampleSummary> {
+        self.with(|c| {
+            let (samples, sandboxes, cpu_avg, mem_avg, mem_max, pids_max): (i64, i64, f64, f64, f64, i64) = c.query_row(
+                "SELECT COUNT(*), COUNT(DISTINCT user_id), COALESCE(AVG(cpu_pct),0), COALESCE(AVG(mem_mib),0), COALESCE(MAX(mem_mib),0), COALESCE(MAX(pids),0)
+                 FROM fleet_samples WHERE at >= ?1",
+                params![since],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+            )?;
+            let p95 = |col: &str| -> rusqlite::Result<f64> {
+                c.query_row(
+                    &format!(
+                        "SELECT COALESCE({col}, 0) FROM fleet_samples WHERE at >= ?1 ORDER BY {col}
+                         LIMIT 1 OFFSET (SELECT CAST(COUNT(*) * 0.95 AS INTEGER) FROM fleet_samples WHERE at >= ?1)"
+                    ),
+                    params![since],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map(|v| v.unwrap_or(0.0))
+            };
+            Ok(FleetSampleSummary {
+                since,
+                samples,
+                sandboxes,
+                cpu_pct_avg: cpu_avg,
+                cpu_pct_p95: p95("cpu_pct")?,
+                mem_mib_avg: mem_avg,
+                mem_mib_p95: p95("mem_mib")?,
+                mem_mib_max: mem_max,
+                pids_max,
+            })
+        })
+    }
+
+    pub fn prune_fleet_samples(&self, before: i64) -> Result<usize> {
+        self.with(|c| c.execute("DELETE FROM fleet_samples WHERE at < ?1", params![before]))
     }
 
     /// How many boxes a provider holds (resident count for the host gate).
