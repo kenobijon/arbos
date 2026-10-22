@@ -1318,8 +1318,10 @@ impl Render for Voice {
         if self.mock {
             sub.push("mock STT/TTS".into());
         }
-        if let Some(n) = &self.notice {
-            sub.push(n.clone());
+        // The call strip sits in the active chat: same scoping as the composer line.
+        let active_chat = self.state.read(cx).active_chat_id();
+        if let Some(n) = self.notice_for(active_chat.as_deref()) {
+            sub.push(n.to_owned());
         }
         let subline = sub.join(" · ");
 
