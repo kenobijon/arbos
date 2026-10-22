@@ -351,7 +351,10 @@ struct HomeView: View {
         }
         .task { await model.refreshGoals() }
         .onAppear {
-            if DebugHooks.show == "newchat" || DebugHooks.show == "newagent", DebugHooks.openProject == nil {
+            // Rig: the New Message sheet, which hosts the Create screens (`newagent`,
+            // `newgroup`, `newserver`) and the group member picker (`newgroup2`).
+            if ["newchat", "newagent", "newgroup", "newgroup2", "newserver"].contains(DebugHooks.show ?? ""),
+               DebugHooks.openProject == nil {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { showNewChat = true }
             }
             if DebugHooks.show == "hidden", DebugHooks.openProject == nil {
