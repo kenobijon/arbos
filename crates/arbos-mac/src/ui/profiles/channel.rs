@@ -18,7 +18,7 @@ use crate::ui::theme::{Theme, TEXT_BODY, TEXT_SMALL};
 use super::editable_name;
 use super::pane::{self, Hero, Picture, ProfilePane, Section};
 
-const TABS: [&str; 2] = ["Profile", "Settings"];
+pub(super) const TABS: [&str; 2] = ["Profile", "Settings"];
 
 pub(super) fn page(
     server_id: &str,

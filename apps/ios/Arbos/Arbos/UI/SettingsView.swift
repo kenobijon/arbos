@@ -64,7 +64,7 @@ struct SettingsView: View {
                                 name: model.user?.name ?? model.user?.login ?? "Arbos",
                                 subtitle: who
                             ),
-                            tabs: ["Profile", "Settings"],
+                            tabs: PaneKinds.ownProfile,
                             selected: $tab,
                             body: tab == "Profile" ? profileSections : settingsSections,
                             footer: tab == "Profile" ? [] : settingsFooter

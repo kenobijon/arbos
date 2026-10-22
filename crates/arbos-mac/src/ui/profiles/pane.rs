@@ -211,6 +211,34 @@ fn section(part: Section, shell: &Shell, theme: &Theme, cx: &mut Context<Shell>)
     }
 }
 
+/// The blocks of a pane, top to bottom — the structure every kind shares
+/// (Jacob, 2026-10-22 22:32 UTC: same structure, not the same tab count).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Block {
+    Hero,
+    /// Only when the kind has more than one tab.
+    TabPill,
+    /// The selected tab's sections.
+    Options,
+    /// Pinned after the options (Block user, Delete agent, Sign out…).
+    Footer,
+}
+
+/// What [`render`] lays out for `tabs` tabs with `footer_sections` pinned
+/// parts: hero first, then the pill (2+ tabs), then the options, then the
+/// footer when there is one.
+pub fn layout(tabs: usize, footer_sections: usize) -> Vec<Block> {
+    let mut out = vec![Block::Hero];
+    if tabs > 1 {
+        out.push(Block::TabPill);
+    }
+    out.push(Block::Options);
+    if footer_sections > 0 {
+        out.push(Block::Footer);
+    }
+    out
+}
+
 /// Hero + pill + sections inside the frame (×, ‹ when the stack is non-empty,
 /// Done, the shared scroll handle, the opaque top bar).
 pub fn render(pane: ProfilePane, shell: &Shell, cx: &mut Context<Shell>) -> Stateful<Div> {
@@ -243,7 +271,8 @@ pub fn render(pane: ProfilePane, shell: &Shell, cx: &mut Context<Shell>) -> Stat
         )
         .children(pane.hero.editor),
     );
-    if pane.tabs.len() > 1 {
+    let blocks = layout(pane.tabs.len(), pane.footer.len());
+    if blocks.contains(&Block::TabPill) {
         pinned = pinned.child(tab_bar(pane.tabs, pane.selected, &theme, cx));
     }
     // The body starts under the pinned block's bottom margin (pane_frame pulls
@@ -257,7 +286,7 @@ pub fn render(pane: ProfilePane, shell: &Shell, cx: &mut Context<Shell>) -> Stat
     for part in pane.body {
         body = body.child(section(part, shell, &theme, cx));
     }
-    if !pane.footer.is_empty() {
+    if blocks.contains(&Block::Footer) {
         body = body.child(div().h(px(14.0)));
         for part in pane.footer {
             body = body.child(section(part, shell, &theme, cx));
@@ -277,7 +306,62 @@ pub fn render(pane: ProfilePane, shell: &Shell, cx: &mut Context<Shell>) -> Stat
 
 #[cfg(test)]
 mod tests {
-    use super::child_index_of_row;
+    use super::{child_index_of_row, layout, Block};
+
+    /// Every kind's tab set (the same labels and order as the iPhone page of
+    /// that kind — `ArbosTests/ProfilePaneStructureTests.swift` holds the twin).
+    /// Kinds may differ in tab count (Jacob, 2026-10-22 22:32 UTC); what every
+    /// kind shares is the structure: hero, then the pill, then the options.
+    const KINDS: [(&str, &[&str]); 6] = [
+        ("person", &super::super::user::TABS),
+        ("own profile", &super::super::me::TABS),
+        ("agent", &super::super::agent::TABS),
+        ("group", &super::super::group::TABS),
+        ("server", &super::super::server::TABS),
+        ("channel", &super::super::channel::TABS),
+    ];
+
+    #[test]
+    fn every_kind_lays_out_hero_then_pill_then_options() {
+        for (kind, tabs) in KINDS {
+            assert!(tabs.len() >= 2, "{kind}: a pane has at least two tabs");
+            let blocks = layout(tabs.len(), 1);
+            assert_eq!(
+                blocks,
+                vec![Block::Hero, Block::TabPill, Block::Options, Block::Footer],
+                "{kind}"
+            );
+            let no_footer = layout(tabs.len(), 0);
+            assert_eq!(
+                no_footer,
+                vec![Block::Hero, Block::TabPill, Block::Options],
+                "{kind}"
+            );
+        }
+        // One tab: no pill, the options follow the hero directly.
+        assert_eq!(layout(1, 0), vec![Block::Hero, Block::Options]);
+    }
+
+    #[test]
+    fn kinds_keep_their_own_tab_sets() {
+        let agent: Vec<&str> = super::super::agent::TABS.to_vec();
+        assert_eq!(agent, ["Profile", "Settings", "Library"]);
+        assert_eq!(super::super::me::TABS, ["Profile", "Settings"]);
+        assert_eq!(super::super::user::TABS, ["Links", "Groups"]);
+        assert_eq!(super::super::group::TABS, ["Members", "Library"]);
+        assert_eq!(
+            super::super::server::TABS,
+            ["Channels", "Members", "Settings"]
+        );
+        assert_eq!(super::super::channel::TABS, ["Profile", "Settings"]);
+        for (kind, tabs) in KINDS {
+            let mut seen = std::collections::HashSet::new();
+            assert!(
+                tabs.iter().all(|t| seen.insert(*t)),
+                "{kind}: a tab label appears once"
+            );
+        }
+    }
 
     /// `kit::section` interleaves a separator between rows, so row `i` is
     /// child `2i`; a row past the end is no child at all.

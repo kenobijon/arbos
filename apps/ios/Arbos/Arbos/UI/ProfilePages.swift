@@ -595,7 +595,7 @@ struct UserProfileView: View {
                             name: person.displayName,
                             subtitle: "@\(person.handle)"
                         ),
-                        tabs: ["Links", "Groups"],
+                        tabs: PaneKinds.person,
                         selected: $tab,
                         body: tab == "Links"
                             ? [.custom(AnyView(ChatItemsList(items: items, kind: .link, empty: dm == nil ? "No chat with \(person.displayName) yet." : "No links shared yet.")))]
@@ -751,7 +751,7 @@ struct GroupProfileView: View {
                             name: title,
                             subtitle: "\(memberCount) member\(memberCount == 1 ? "" : "s")"
                         ),
-                        tabs: ["Members", "Library"],
+                        tabs: PaneKinds.group,
                         selected: $tab,
                         body: tab == "Members" ? membersSections : librarySections
                     )
@@ -981,7 +981,7 @@ struct ServerProfileView: View {
                     if let server {
                         ProfilePane(
                             hero: hero(server),
-                            tabs: ["Channels", "Members", "Settings"],
+                            tabs: PaneKinds.server,
                             selected: $tab,
                             body: tab == "Channels" ? channelSections(server)
                                 : tab == "Members" ? memberSections(server)
@@ -1643,6 +1643,33 @@ enum PaneSection {
     case custom(AnyView)
 }
 
+/// The blocks of a pane, top to bottom — the structure every kind shares
+/// (Jacob, 2026-10-22 22:32 UTC: same structure, not the same tab count).
+enum PaneBlock: Equatable {
+    case hero
+    /// Only when the kind has more than one tab.
+    case tabPill
+    /// The selected tab's sections.
+    case options
+    /// Pinned after the options (Block user, Delete agent, Sign out…).
+    case footer
+}
+
+/// The tab set of every kind, the same labels and order as the Mac page of
+/// that kind (`profiles/*.rs` `TABS`; the Mac's `pane::tests` holds the twin).
+enum PaneKinds {
+    static let person = ["Links", "Groups"]
+    static let ownProfile = ["Profile", "Settings"]
+    static let agent = ["Profile", "Settings", "Library"]
+    static let group = ["Members", "Library"]
+    static let server = ["Channels", "Members", "Settings"]
+    static let channel = ["Profile", "Settings"]
+    static let all: [(String, [String])] = [
+        ("person", person), ("own profile", ownProfile), ("agent", agent),
+        ("group", group), ("server", server), ("channel", channel),
+    ]
+}
+
 struct ProfilePane: View {
     @Environment(\.theme) private var theme
     let hero: PaneHero
@@ -1653,6 +1680,16 @@ struct ProfilePane: View {
     let sections: [PaneSection]
     /// Pinned after the body: Block user, Leave group, Sign out…
     var footer: [PaneSection] = []
+
+    /// What `body` lays out for `tabs` tabs with `footerSections` pinned parts:
+    /// hero first, then the pill (2+ tabs), then the options, then the footer.
+    static func layout(tabs: Int, footerSections: Int) -> [PaneBlock] {
+        var out: [PaneBlock] = [.hero]
+        if tabs > 1 { out.append(.tabPill) }
+        out.append(.options)
+        if footerSections > 0 { out.append(.footer) }
+        return out
+    }
 
     init(hero: PaneHero, tabs: [String], selected: Binding<String>, body: [PaneSection], footer: [PaneSection] = []) {
         self.hero = hero
@@ -1690,7 +1727,7 @@ struct ProfilePane: View {
                                 .overlay(Image(systemName: glyph).font(.system(size: PaneKit.heroAvatar * 0.42, weight: .medium)).foregroundStyle(theme.text))
                         }
                     }
-                    if tabs.count > 1 {
+                    if Self.layout(tabs: tabs.count, footerSections: footer.count).contains(.tabPill) {
                         ProfileTabs(tabs: tabs, selected: $selected)
                     }
                 }
@@ -1802,7 +1839,7 @@ struct ChannelProfileView: View {
                             hero: PaneHero(picture: .glyph("number"), name: channel.name,
                                            badge: restricted ? "lock.fill" : nil,
                                            subtitle: "\(count) member\(count == 1 ? "" : "s") · \(server.name)"),
-                            tabs: ["Profile", "Settings"],
+                            tabs: PaneKinds.channel,
                             selected: $tab,
                             body: tab == "Profile"
                                 ? profileSections(channel, server, restricted: restricted, count: count)
