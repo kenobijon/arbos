@@ -153,6 +153,13 @@ extension AppModel {
             path = [.server(serverId: server.id)]
         case "home"?:
             path = []
+        case "page"?, "page-settings"?:
+            // The channel page the header pill opens (the Settings tab with `page-settings`).
+            open(server: server)
+            if let g = server.general {
+                showProfile(.channel(channelId: g.id))
+                openServerHookTab = parts.dropFirst().first == "page-settings" ? "Settings" : nil
+            }
         case let name?:
             let wanted = name.hasPrefix("#") ? String(name.dropFirst()) : name
             if let c = server.channels.first(where: { $0.name == wanted }) { open(channel: c) } else { open(server: server) }

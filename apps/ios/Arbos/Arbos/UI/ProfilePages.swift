@@ -1724,6 +1724,7 @@ struct ChannelProfileView: View {
             ProfileTopBar { EmptyView() }
         }
         .task {
+            if let t = model.openServerHookTab { tab = t; model.openServerHookTab = nil }
             if let channel { await model.refreshServer(channel.serverId) }
         }
         .alert("Rename channel", isPresented: $showRename) {

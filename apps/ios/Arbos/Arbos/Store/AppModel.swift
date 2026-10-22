@@ -202,6 +202,8 @@ final class AppModel: ObservableObject {
     var firstLoginTask: Task<Void, Never>?
     /// Rig: `ARBOS_OPEN_SERVER` was applied (once, after the first login if there is one).
     var openServerHookDone = false
+    /// Rig: the tab the channel page opens on (`ARBOS_OPEN_SERVER=…:page-settings`).
+    var openServerHookTab: String?
     /// `machine.always_on` as last reported by `GET /me` (nil = field absent).
     private var meAlwaysOn: Bool?
     /// Navigation: home → chat. Shared so menus anywhere can open a chat.
