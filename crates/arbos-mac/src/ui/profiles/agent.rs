@@ -19,7 +19,7 @@ use crate::ui::sidebar::machine_dot;
 use crate::ui::theme::{Theme, TEXT_SMALL, TEXT_TINY};
 
 use super::kit::{self, Leading};
-use super::{card, editable_name, editable_picture, frame, hero, HeroClick, HERO_AVATAR};
+use super::{card, editable_name, editable_picture, hero, pushed_frame, HeroClick, HERO_AVATAR};
 
 /// An agent that is only known as a member of a people chat (someone else's
 /// project) is shown from that member entry.
@@ -218,6 +218,19 @@ pub(super) fn page(
             &theme,
         ));
     }
+    // Someone else's agent: who runs it (the "owned by" the transcript no longer carries).
+    if let Some(owner) = project
+        .owner_handle
+        .as_deref()
+        .filter(|o| !mine && !o.trim().is_empty())
+    {
+        info = info.child(kit::value_row(
+            "agent-owner-row",
+            "Owned by",
+            format!("@{}", owner.trim_start_matches('@')),
+            &theme,
+        ));
+    }
 
     // ----- appearance (avatar click): Automatic + the seven gradients ----------
     // Shown only while the picker is open so Avatar colour is not a permanent
@@ -265,7 +278,15 @@ pub(super) fn page(
         glass::sheet_button("profile-done", "Done", &theme)
             .on_click(cx.listener(|this, _, window, cx| this.finish_edit_agent(window, cx)))
     });
-    Some(frame(body, done, Some(&shell.profile_scroll), &theme, cx))
+    Some(pushed_frame(
+        &project.name,
+        body,
+        done,
+        Some(&shell.profile_scroll),
+        shell,
+        &theme,
+        cx,
+    ))
 }
 
 fn colour_row(project: &Project, theme: &Theme, cx: &mut Context<Shell>) -> Div {
