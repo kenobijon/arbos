@@ -66,6 +66,8 @@ pub const QUICK_MAX_TOKENS: u32 = 220;
 pub const QUICK_CALLS_PER_MINUTE: usize = 6;
 /// Characters of the user's message the quick call sees.
 const USER_TEXT_MAX: usize = 1200;
+/// How long a held lock is given to free before a message counts as arriving at a busy agent.
+const BUSY_GRACE: Duration = Duration::from_millis(1500);
 
 /// `ARBOS_QUICK_REPLY_TIMEOUT_MS` (default 8000): the call's budget before the canned line.
 pub fn quick_reply_timeout() -> Duration {
@@ -425,6 +427,12 @@ impl Agent {
         };
         if from_voice || user_text.trim().is_empty() {
             return QuickOutcome::NotBusy;
+        }
+        // A lock about to free (a short reply turn, the setup of the previous message) is not
+        // "busy": give it a moment, so two quick messages in a row do not earn a canned ack.
+        let t_wait = Instant::now();
+        while self.turn_lock_busy() && t_wait.elapsed() < BUSY_GRACE {
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
         let Some(snap) = self.busy_snapshot(chat_id, host).await else {
             return QuickOutcome::NotBusy;
@@ -858,6 +866,51 @@ mod tests {
             );
             assert_eq!(t.streamed_text.matches("smaller steps").count(), 1);
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #1355: an act turn that closes with a second `route reply {reply: …}` must show that text
+    /// in its result row; the streamed path only follows the first route of a turn.
+    #[tokio::test]
+    async fn act_turn_closing_with_route_reply_keeps_the_reply_text() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUICKREPLY000004";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            agent.test_open_row(&host, t).await;
+        }
+        agent
+            .hook_route(
+                &json!({ "action": "act", "ack": "Stopping the loop now.", "plan": "kill it" }),
+            )
+            .await
+            .unwrap();
+        let reply =
+            "Torn down. The logger (process 4555) is stopped and the scheduled job is gone.";
+        agent
+            .hook_route(&json!({ "action": "reply", "reply": reply }))
+            .await
+            .unwrap();
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            assert!(
+                t.act_buffer.contains("Torn down."),
+                "staged: {:?}",
+                t.act_buffer
+            );
+            // Pretend the same reply streamed already (first-route case): not staged twice.
+            t.route = None;
+        }
+        agent
+            .hook_route(&json!({ "action": "reply", "reply": reply }))
+            .await
+            .unwrap();
+        let staged = agent.turn.lock().await.as_ref().unwrap().act_buffer.clone();
+        assert_eq!(staged.matches("Torn down.").count(), 1, "{staged}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
