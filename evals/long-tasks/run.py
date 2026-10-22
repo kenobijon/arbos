@@ -188,6 +188,8 @@ class Lane(threading.Thread):
             while time.time() < deadline:
                 code, out = self.box.run_as_ws(self.project, verify, env=env, timeout=120)
                 if "PASS" in out:
+                    # the files are there; give the agent's own final note time to land
+                    time.sleep(vw.get("settle_s", 0))
                     break
                 time.sleep(20)
             doc = rl.chat_dump(self.project, first_chat)
