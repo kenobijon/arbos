@@ -128,23 +128,19 @@ extension AppModel {
 
     // MARK: Navigation
 
-    /// Rule 3: a server opens on `#general`, with its channel list underneath.
+    /// A server opens on its channel list; the user picks a channel (no skip to `#general`).
     func open(server: Server) {
-        if let g = server.general {
-            path = [.server(serverId: server.id), .chat(chatId: g.id, projectId: channelSlot)]
-        } else {
-            path = [.server(serverId: server.id)]
-        }
+        path = [.server(serverId: server.id)]
     }
 
     func open(channel: ServerChannel) {
         path = [.server(serverId: channel.serverId), .chat(chatId: channel.id, projectId: channelSlot)]
     }
 
-    /// Rig: `ARBOS_OPEN_SERVER=<name or id>[:list|:home|:#channel]` — the server on `#general`,
-    /// its channel list, the chat list with its row, or one channel, once the registry lists it
-    /// and a first login has ended (that one lands on its own chat). Debug builds only, like
-    /// every `DebugHooks` value.
+    /// Rig: `ARBOS_OPEN_SERVER=<name or id>[:list|:home|:#channel]` — the server's channel
+    /// list (default and `:list`), the chat list with its row (`:home`), or one channel
+    /// (`:#name`), once the registry lists it and a first login has ended (that one lands
+    /// on its own chat). Debug builds only, like every `DebugHooks` value.
     func applyOpenServerHook() {
         guard !openServerHookDone, firstLogin == nil, let spec = DebugHooks.openServer else { return }
         let parts = spec.split(separator: ":", maxSplits: 1).map(String.init)
@@ -207,7 +203,7 @@ extension AppModel {
         }
     }
 
-    /// Rule 8: "Server" in the `+` menu → `POST /servers {name}`, then land on `#general`.
+    /// Rule 8: "Server" in the `+` menu → `POST /servers {name}`, then its channel list.
     func createServer(name: String) async -> Bool {
         do {
             let s = try await relay.createServer(name: name)
