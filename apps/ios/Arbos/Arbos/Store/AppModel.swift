@@ -2416,6 +2416,11 @@ final class AppModel: ObservableObject {
     }
 
     func showProfile(_ target: ProfileTarget) {
+        if let root = profile, case .channel = root, case .server = target {
+            // The channel page's server row pushes the server's page (back returns).
+            if profilePath.last != target { profilePath.append(target) }
+            return
+        }
         if let root = profile, root.pushesPeople, case .user = target {
             // A person opened from a page that is already up is pushed, so
             // back returns to that page with its tab and scroll untouched.
