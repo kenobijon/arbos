@@ -733,7 +733,7 @@ pub async fn chats_create_group(
     }
     let leaf = match leaf_patch(b.avatar_leaf.map(Some), b.avatar_leaf_color.map(Some)) {
         Ok(l) => l.flatten(),
-        Err(r) => return r,
+        Err((st, msg)) => return api_error(st, "bad_leaf", msg),
     };
     let chat = PeopleChat {
         id: ulid(),
@@ -940,23 +940,23 @@ pub struct PatchChatBody {
     pub avatar_leaf_color: Option<Option<i64>>,
 }
 
-/// `avatar_leaf` + `avatar_leaf_color` from a body: `None` = untouched, `Some(None)` = clear,
-/// `Some(Some((leaf, colour)))` = set (validated).
+/// `None` = untouched, `Some(None)` = clear, `Some(Some((leaf, colour)))` = set.
+type LeafPatch = Option<Option<(i64, i64)>>;
+
+/// `avatar_leaf` + `avatar_leaf_color` from a body, validated.
 fn leaf_patch(
     leaf: Option<Option<i64>>,
     color: Option<Option<i64>>,
-) -> Result<Option<Option<(i64, i64)>>, Response> {
+) -> Result<LeafPatch, (StatusCode, String)> {
     match (leaf, color) {
         (None, None) => Ok(None),
         (Some(None), Some(None)) | (Some(None), None) | (None, Some(None)) => Ok(Some(None)),
         (Some(Some(l)), Some(Some(c))) => {
-            crate::avatar::check_leaf_pick(Some(l), Some(c))
-                .map_err(|(st, msg)| api_error(st, "bad_leaf", msg))?;
+            crate::avatar::check_leaf_pick(Some(l), Some(c))?;
             Ok(Some(Some((l, c))))
         }
-        _ => Err(api_error(
+        _ => Err((
             StatusCode::BAD_REQUEST,
-            "bad_leaf",
             "avatar_leaf and avatar_leaf_color go together".to_owned(),
         )),
     }
@@ -983,7 +983,7 @@ pub async fn chat_patch(
     };
     let leaf = match leaf_patch(b.avatar_leaf, b.avatar_leaf_color) {
         Ok(l) => l,
-        Err(r) => return r,
+        Err((st, msg)) => return api_error(st, "bad_leaf", msg),
     };
     if b.title.is_none() && b.image_key.is_none() && leaf.is_none() {
         return Json(chat_json(&state, &cm, &me, &device_of(&principal))).into_response();
