@@ -4921,6 +4921,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         ClientCommand::CreateProject {
             name,
             avatar_color_index,
+            leaf,
             source_project_id,
             description,
             color,
@@ -4934,6 +4935,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 }
                 if let Some(i) = avatar_color_index {
                     body["avatar_color_index"] = json!(i);
+                }
+                if let Some(l) = leaf {
+                    body["avatar_leaf"] = json!(l.leaf);
+                    body["avatar_leaf_color"] = json!(l.color);
                 }
                 if let Some(src) = source_project_id {
                     body["source_project_id"] = json!(src);

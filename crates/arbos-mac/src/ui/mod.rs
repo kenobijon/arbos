@@ -6,6 +6,7 @@ pub mod cards;
 pub mod channels;
 pub mod composer;
 pub mod connectors;
+pub mod create_agent;
 pub mod feedback;
 pub mod frost;
 pub mod glass;

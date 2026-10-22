@@ -2,6 +2,7 @@
 // New group, your agents, every Arbos user), the New group / Add members
 // picker (chips, search, checkmarks) and project members (invite by handle).
 
+import ArbosFFI
 import SwiftUI
 
 /// "+" on home — Telegram's "New Message" sheet in Grok's dark skin: rises
@@ -420,77 +421,164 @@ struct PersonRow: View {
 /// New agent: a name and an avatar colour, then `POST /projects`. The relay
 /// sets up its workspace. The preview is the Telegram-style initials circle
 /// (D79): Automatic until a swatch is picked.
+/// Create agent (D92, Jacob 2026-10-22): Grok Bot's "Create New Bot" layout — title + close ×,
+/// the swaying preview of the chosen leaf, a centred name field, the nine leaves in a 5 / 4 grid,
+/// the ten colours in two rows of five, Cancel + Create pinned above the home indicator. Grok's
+/// sizes in points (measured on the 2x reference) inside the shipped bottom-sheet frame; the 44 pt
+/// footer pills are the one deliberate deviation (touch minimum). Pushed from New Message with its
+/// own header; × and Cancel close the whole sheet.
 struct NewAgentView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
     /// Closes the whole sheet (a pushed view's own dismiss only pops).
     let onDone: () -> Void
-    @State private var name = ""
-    /// Explicit swatch pick; nil = Automatic (the relay derives the colour from the new id).
-    @State private var pickedColorIndex: Int? = nil
+    @State private var name = DebugHooks.newAgentName ?? ""
+    @State private var pickedLeaf: Int? = nil
+    @State private var pickedColor: Int? = nil
     @FocusState private var focused: Bool
 
     private var clean: String { name.trimmingCharacters(in: .whitespaces) }
-    /// Before the project exists there is no id: preview the name's hash.
-    private var previewIndex: Int { pickedColorIndex ?? AvatarPalette.index(for: clean.isEmpty ? "new" : clean) }
+    /// A stable default for this sheet (seeded by how many agents exist) so successive new agents
+    /// start on different leaves without the preview jumping while typing; clicks override it.
+    private var pick: LeafPick { LeafArt.pick(seed: "new-agent-\(model.projects.filter { !$0.shared }.count)", leaf: pickedLeaf, color: pickedColor) }
+
+    // Grok's palette, approved as is.
+    private let sheetBg = Color(red: 0x1F / 255, green: 0x1F / 255, blue: 0x1F / 255)
+    private let line = Color(red: 0x35 / 255, green: 0x35 / 255, blue: 0x35 / 255)
+    private let ring = Color(red: 0x50 / 255, green: 0x50 / 255, blue: 0x50 / 255)
+    private let placeholder = Color(red: 0x93 / 255, green: 0x93 / 255, blue: 0x93 / 255)
+    private let cancelBg = Color(red: 0x27 / 255, green: 0x27 / 255, blue: 0x27 / 255)
+    private let createBg = Color(red: 0x3B / 255, green: 0x3B / 255, blue: 0x3B / 255)
+    private let createText = Color(red: 0x73 / 255, green: 0x73 / 255, blue: 0x73 / 255)
 
     var body: some View {
-        VStack(spacing: 18) {
-            // D92: a leaf preview (seeded by the typed name until the id exists); the leaf and
-            // colour are picked on the agent's page once it is created.
-            if LeafAvatarsFlag.shared.on {
-                LeafAvatar(pick: LeafArt.pick(seed: clean.isEmpty ? "new" : clean), size: 92)
-                    .padding(.top, 28)
-                    .animation(.snappy, value: clean)
-            } else {
-                InitialsAvatar(initials: AvatarPalette.initials(name: clean.isEmpty ? "Agent" : clean, handle: nil), colorIndex: previewIndex, size: 92)
-                    .padding(.top, 28)
-                    .animation(.snappy, value: "\(clean)|\(pickedColorIndex ?? -1)")
+        VStack(spacing: 0) {
+            header
+            ZStack(alignment: .top) {
+                LeafAvatar(pick: pick, size: 114, idle: true)
+                    .padding(.top, 62 - 54.5)
+                    .animation(.snappy, value: "\(pick.leaf)-\(pick.color)")
+                // Grok's vertical rhythm from the sheet top (header 54.5): field 183…218, leaf row
+                // centres 264 / 320 (40 pt rings → 244…340), swatch row centres 386 / 426 (32 pt
+                // rings → 370…442).
+                VStack(spacing: 0) {
+                    field.padding(.top, 183 - 54.5)
+                    leafGrid.padding(.top, 244 - 218)
+                    colourGrid.padding(.top, 370 - 340)
+                }
             }
-            Text(clean.isEmpty ? "Name your agent" : "@\(mentionSlug(clean))")
-                .font(theme.font(Theme.small)).foregroundStyle(theme.muted)
-            TextField("", text: $name, prompt: Text("Agent name").foregroundStyle(theme.placeholder))
-                .font(theme.font(Theme.body)).foregroundStyle(theme.text)
-                .multilineTextAlignment(.center)
-                .autocorrectionDisabled()
-                .focused($focused)
-                .submitLabel(.done)
-                .onSubmit(create)
-                .padding(.horizontal, 16).frame(height: 50)
-                .background(RoundedRectangle(cornerRadius: 25, style: .continuous).fill(theme.field))
-                .overlay(RoundedRectangle(cornerRadius: 25, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
-                .padding(.horizontal, 24)
-            if !LeafAvatarsFlag.shared.on {
-                AvatarColorPicker(name: clean, id: clean.isEmpty ? "new" : clean, current: pickedColorIndex) { pickedColorIndex = $0 }
-                    .padding(.horizontal, 24)
+            Spacer(minLength: 0)
+            footer
+        }
+        .background(sheetBg.ignoresSafeArea())
+        .toolbar(.hidden, for: .navigationBar)
+        .onAppear { focused = true }
+    }
+
+    private var header: some View {
+        ZStack {
+            HStack {
+                Text("Create New Agent")
+                    .font(.system(size: 14.2, weight: .semibold))
+                    .foregroundStyle(Color(white: 0xF5 / 255))
+                    .padding(.leading, 17.5)
+                Spacer()
+                Button(action: onDone) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(Color(white: 0xD2 / 255))
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .padding(.trailing, 5.5)
+                .accessibilityLabel("Close")
             }
+        }
+        .frame(height: 54.5)
+        .overlay(alignment: .bottom) { Rectangle().fill(line).frame(height: 1) }
+    }
+
+    private var field: some View {
+        TextField("", text: $name, prompt: Text("Name your agent").foregroundStyle(placeholder))
+            .font(.system(size: 15.5))
+            .foregroundStyle(Color(white: 0xF5 / 255))
+            .multilineTextAlignment(.center)
+            .autocorrectionDisabled()
+            .focused($focused)
+            .submitLabel(.done)
+            .onSubmit(create)
+            .padding(.horizontal, 12)
+            .frame(height: 35)
+            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(line, lineWidth: 1))
+            .padding(.horizontal, 16.5)
+    }
+
+    /// Nine leaves, 5 / 4, on a 56 pt pitch: 33 pt discs on the chosen colour, a 40 pt ring on the pick.
+    private var leafGrid: some View {
+        VStack(spacing: 56 - 40) {
+            ForEach([Array(0..<5), Array(5..<9)], id: \.self) { row in
+                HStack(spacing: 56 - 40) {
+                    ForEach(row, id: \.self) { i in
+                        Button { pickedLeaf = i } label: {
+                            LeafAvatar(pick: LeafPick(leaf: UInt8(i), color: pick.color), size: 33)
+                                .frame(width: 40, height: 40)
+                                .overlay(Circle().strokeBorder(Int(pick.leaf) == i ? ring : .clear, lineWidth: 1))
+                                .contentShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(LeafArt.names[i] + (Int(pick.leaf) == i ? ", selected" : ""))
+                    }
+                }
+            }
+        }
+    }
+
+    /// Ten colours in two rows of five on a 40 pt pitch: 24 pt discs, a 32 pt ring on the pick.
+    private var colourGrid: some View {
+        VStack(spacing: 40 - 32) {
+            ForEach([Array(0..<5), Array(5..<10)], id: \.self) { row in
+                HStack(spacing: 40 - 32) {
+                    ForEach(row, id: \.self) { i in
+                        Button { pickedColor = i } label: {
+                            Circle().fill(LeafArt.colors[i]).frame(width: 24, height: 24)
+                                .frame(width: 32, height: 32)
+                                .overlay(Circle().strokeBorder(Int(pick.color) == i ? ring : .clear, lineWidth: 1))
+                                .contentShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(LeafArt.colorNames[i] + (Int(pick.color) == i ? ", selected" : ""))
+                    }
+                }
+            }
+        }
+    }
+
+    private var footer: some View {
+        HStack(spacing: 10) {
+            Spacer()
+            Button(action: onDone) {
+                Text("Cancel").font(.system(size: 15, weight: .semibold)).foregroundStyle(Color(white: 0xF5 / 255))
+                    .frame(width: 84, height: 44).background(Capsule().fill(cancelBg))
+            }
+            .buttonStyle(.plain)
             Button(action: create) {
-                Text("Create agent")
-                    .font(theme.font(Theme.body, weight: .semibold)).foregroundStyle(theme.onPrimary)
-                    .frame(maxWidth: .infinity).frame(height: 50)
-                    .background(Capsule().fill(theme.primary))
+                Text("Create").font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(clean.isEmpty ? createText : theme.onPrimary)
+                    .frame(width: 92, height: 44).background(Capsule().fill(clean.isEmpty ? createBg : theme.primary))
             }
             .buttonStyle(.plain)
             .disabled(clean.isEmpty)
-            .opacity(clean.isEmpty ? 0.45 : 1)
-            .padding(.horizontal, 24)
-            Text("A new agent with its own workspace on your machine. You can rename it and pick its model from its profile.")
-                .font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
-                .multilineTextAlignment(.center).padding(.horizontal, 36)
-                .fixedSize(horizontal: false, vertical: true)
-            Spacer()
         }
-        .background(theme.bg)
-        .navigationTitle("New agent")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbarBackground(theme.bg, for: .navigationBar)
-        .toolbarBackground(.visible, for: .navigationBar)
-        .onAppear { focused = true }
+        .padding(.trailing, 16)
+        .padding(.top, 25)
+        .padding(.bottom, 35)
+        .overlay(alignment: .top) { Rectangle().fill(line).frame(height: 1) }
     }
 
     private func create() {
         guard !clean.isEmpty else { return }
-        model.createProject(name: clean, avatarColorIndex: pickedColorIndex)
+        model.createProject(name: clean, leaf: pick)
         onDone()
     }
 }
