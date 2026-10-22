@@ -6,8 +6,8 @@ use serde_json::{json, Value};
 
 use arbos_core::api::{
     AccountUserDto, CreditsDto, MachineImageDto, MachineSpecDto, MachineStatusDto,
-    MachineWorkspaceDto, MeDeviceDto, MeLimitsDto, MeMachineDto, MeResponseDto, UnreadChatDto,
-    UnreadDto, UserCardDto,
+    MachineWorkspaceDto, MeDeviceDto, MeFeaturesDto, MeLimitsDto, MeMachineDto, MeResponseDto,
+    UnreadChatDto, UnreadDto, UserCardDto,
 };
 use arbos_core::wire::BoxState;
 
@@ -413,7 +413,10 @@ fn me_and_machine_unread_fixtures() {
             signup: "open".into(),
             auth_mode: "github".into(),
         },
-        features: json!({ "vault_connect": false }),
+        features: MeFeaturesDto {
+            vault_connect: Some(false),
+            leaf_avatars: Some(true),
+        },
         machine: MeMachineDto {
             exists: false,
             state: BoxState::Asleep,
