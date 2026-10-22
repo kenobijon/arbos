@@ -10,8 +10,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Result;
+use arbos_core::approval::{
+    ApprovalRequest, ApprovalState as CoreApprovalState, Risk, APPROVAL_TTL_MS,
+};
+use arbos_core::doc::{
+    ChatDoc as CoreDoc, MessageStatus as CoreStatus, UserAttachment, UserMessageOpts,
+};
 use futures::future::BoxFuture;
-use serde_json::json;
+use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 
@@ -154,8 +160,9 @@ impl SyncSource for FixtureSource {
                     image: Some("arbos-agent-0.1.7".into()),
                 }),
             });
-            seed_docs(&shared);
-            seed_people_docs(&shared);
+            for doc in seed_chat_docs().into_iter().chain(seed_people_chat_docs()) {
+                add_doc(&shared, doc);
+            }
             shared
                 .projects
                 .lock()
@@ -392,13 +399,11 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             text,
             call_id,
         } => {
-            let docs = shared.docs.lock().unwrap();
-            if let Some(doc) = docs.get(&chat_id) {
-                let mut msg = system_message(&chat_id, &text);
-                msg.call_id = call_id;
-                let _ = doc.insert_message(&msg);
-                doc.commit();
-            }
+            with_doc(shared, &chat_id, |doc| {
+                doc.core.transact(|d| {
+                    let _ = d.append_system_line(&new_id(), &text, DEVICE, call_id.as_deref());
+                });
+            });
         }
         ClientCommand::Greeting { chat_id, .. } => {
             let _ = shared.events.send(SyncEvent::GreetingWritten(chat_id));
@@ -411,25 +416,22 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             attachments,
             reply_to,
         } => {
-            let parts: Vec<Part> = attachments
+            let attachments: Vec<Attachment> = attachments
                 .iter()
-                .map(|path| Part::Attachment {
-                    id: new_id(),
-                    attachment: Attachment {
-                        name: path
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("attachment")
-                            .to_string(),
-                        mime: "application/octet-stream".into(),
-                        blob_ref: None,
-                        bytes: None,
-                        kind: None,
-                        title: None,
-                    },
+                .map(|path| Attachment {
+                    name: path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("attachment")
+                        .to_string(),
+                    mime: "application/octet-stream".into(),
+                    blob_ref: None,
+                    bytes: None,
+                    kind: None,
+                    title: None,
                 })
                 .collect();
-            send_user(shared, chat_id, message_id, text, parts, reply_to);
+            send_user(shared, chat_id, message_id, text, attachments, reply_to);
         }
         ClientCommand::Steer {
             chat_id,
@@ -449,18 +451,15 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             // The fixture has no blob store; the memo stays in memory under a seed key.
             let key = format!("blob/voice/{}", new_id().to_lowercase());
             shared.voice_blobs.lock().unwrap().insert(key.clone(), wav);
-            let parts = vec![Part::Attachment {
-                id: new_id(),
-                attachment: Attachment {
-                    name: "voice-memo.wav".into(),
-                    mime: "audio/wav".into(),
-                    blob_ref: Some(key),
-                    bytes: None,
-                    kind: Some(AttachmentKind::Audio),
-                    title: None,
-                },
+            let attachments = vec![Attachment {
+                name: "voice-memo.wav".into(),
+                mime: "audio/wav".into(),
+                blob_ref: Some(key),
+                bytes: None,
+                kind: Some(AttachmentKind::Audio),
+                title: None,
             }];
-            send_user(shared, chat_id, message_id, text, parts, None);
+            send_user(shared, chat_id, message_id, text, attachments, None);
         }
         ClientCommand::Transcribe {
             request_id, wav, ..
@@ -502,73 +501,41 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             value,
         } => {
             let project_id = project_of(shared, &chat_id);
-            {
-                let docs = shared.docs.lock().unwrap();
-                if let Some(doc) = docs.get(&chat_id) {
-                    if let Some(qid) = &question_id {
-                        let _ = doc.answer_question(qid, value.as_ref().unwrap_or(&json!(null)));
+            with_doc(shared, &chat_id, |doc| {
+                doc.core.transact(|d| {
+                    let value = value.clone().unwrap_or(Value::Null);
+                    match &question_id {
+                        Some(qid) => {
+                            d.answer_question_part(qid, &value);
+                            d.append_user_answer(&message_id, &text, qid, &value, DEVICE);
+                        }
+                        None => {
+                            let _ = d.append_user_message(
+                                &message_id,
+                                &text,
+                                DEVICE,
+                                &UserMessageOpts::default(),
+                            );
+                            d.push_command(
+                                "answer",
+                                json!({ "messageId": message_id, "text": text, "questionId": null, "value": value }),
+                                DEVICE,
+                            );
+                        }
                     }
-                    let msg = Message {
-                        id: message_id.clone(),
-                        chat_id: chat_id.clone(),
-                        role: Role::User,
-                        sender: "user".into(),
-                        status: MessageStatus::Done,
-                        turn: None,
-                        decision: None,
-                        subagent_id: None,
-                        subagent_name: None,
-                        handoff_messages: None,
-                        reactions: Default::default(),
-                        in_reply_to: None,
-                        routine_name: None,
-                        sender_name: None,
-                        sender_icon: None,
-                        sender_handle: None,
-                        sender_avatar: None,
-                        sender_avatar_color: None,
-                        mentions: Vec::new(),
-                        reply_to: None,
-                        asked_by_handle: None,
-                        owner_handle: None,
-                        usage: None,
-                        return_contract: None,
-                        waiting_user: false,
-                        waiting_approval: false,
-                        model: None,
-                        effort: None,
-                        created_at: now_ms(),
-                        completed_at: None,
-                        call_id: None,
-                        activity: None,
-                        pending: true,
-                        parts: vec![Part::Text {
-                            id: new_id(),
-                            text: text.clone(),
-                        }],
-                        hidden_parts: Vec::new(),
-                        greeting: false,
-                    };
-                    let _ = doc.insert_message(&msg);
-                    let _ = doc.push_command(
-                        "answer",
-                        json!({ "messageId": message_id, "text": text, "questionId": question_id, "value": value }),
-                        DEVICE,
-                    );
-                    doc.commit();
-                }
-            }
-            spawn_turn(shared, project_id, chat_id, message_id, text, true);
+                });
+            });
+            spawn_turn(shared, project_id, chat_id, text, true);
         }
         ClientCommand::Stop { chat_id } => {
             if let Some(flag) = shared.running.lock().unwrap().get(&chat_id) {
                 flag.store(true, Ordering::SeqCst);
             }
-            let docs = shared.docs.lock().unwrap();
-            if let Some(doc) = docs.get(&chat_id) {
-                let _ = doc.push_command("stop", json!({}), DEVICE);
-                doc.commit();
-            }
+            with_doc(shared, &chat_id, |doc| {
+                doc.core.transact(|d| {
+                    d.push_command("stop", json!({}), DEVICE);
+                });
+            });
         }
         ClientCommand::React {
             chat_id,
@@ -624,14 +591,15 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         .filter_map(|i| doc.read_message(i))
                         .find(|m| m.role == Role::User)
                         .map(|m| m.plain_text())?;
-                    let _ = doc.set_status(ix, MessageStatus::Cancelled);
-                    let _ = doc.push_command("retry", json!({ "messageId": message_id }), DEVICE);
-                    doc.commit();
+                    doc.core.transact(|d| {
+                        set_status(d, &message_id, MessageStatus::Cancelled);
+                        d.push_command("retry", json!({ "messageId": message_id }), DEVICE);
+                    });
                     Some(text)
                 })
             };
             if let Some(text) = prompt {
-                spawn_turn(shared, project_id, chat_id, new_id(), text, true);
+                spawn_turn(shared, project_id, chat_id, text, true);
             }
         }
         ClientCommand::Retitle { chat_id, title, .. } => {
@@ -1600,93 +1568,59 @@ fn seed_local() -> LocalView {
     }
 }
 
-/// The user row (`extra_parts` first, then the text), its `send` command, and the scripted turn.
+/// The user row (attachments first, then the text), its `send` command, and the scripted turn.
 fn send_user(
     shared: &Arc<Shared>,
     chat_id: Id,
     message_id: Id,
     text: String,
-    mut parts: Vec<Part>,
+    attachments: Vec<Attachment>,
     reply_to: Option<String>,
 ) {
     let project_id = project_of(shared, &chat_id);
     if let Some(space) = people_space_of(shared, &chat_id) {
         let mentions = mentions_in(&space, &text);
-        let mut msg = human_message(&chat_id, &me(), &text, now_ms());
-        msg.id = message_id.clone();
-        msg.mentions = mentions.clone();
-        msg.reply_to = reply_to;
-        msg.parts = parts;
-        msg.parts.push(text_part(&text));
+        let me = me();
+        let opts = UserMessageOpts {
+            attachments: user_attachments(&attachments),
+            mentions: mentions.clone(),
+            reply_to,
+            sender: Some(format!("user:{}", me.id)),
+            sender_handle: Some(me.handle.clone()),
+            sender_name: me.name.clone(),
+            sender_avatar: Some(me.avatar_url.clone()),
+            answers_question_id: None,
+        };
         with_doc(shared, &chat_id, |doc| {
-            let _ = doc.insert_message(&msg);
-            let _ = doc.push_command("send", json!({ "messageId": message_id }), DEVICE);
-            doc.commit();
+            doc.core.transact(|d| {
+                let _ = d.append_user_message(&message_id, &text, DEVICE, &opts);
+                d.push_command("send", json!({ "messageId": message_id }), DEVICE);
+            });
         });
         people_after_send(shared, space, chat_id, text, mentions);
         return;
     }
-    {
-        let docs = shared.docs.lock().unwrap();
-        if let Some(doc) = docs.get(&chat_id) {
-            let asleep = machine_down(shared);
-            parts.push(Part::Text {
-                id: new_id(),
-                text: text.clone(),
-            });
-            let msg = Message {
-                id: message_id.clone(),
-                chat_id: chat_id.clone(),
-                role: Role::User,
-                sender: "user".into(),
-                status: if asleep {
-                    MessageStatus::Queued
-                } else {
-                    MessageStatus::Done
-                },
-                turn: None,
-                decision: None,
-                subagent_id: None,
-                subagent_name: None,
-                handoff_messages: None,
-                reactions: Default::default(),
-                in_reply_to: None,
-                routine_name: None,
-                sender_name: None,
-                sender_icon: None,
-                sender_handle: None,
-                sender_avatar: None,
-                sender_avatar_color: None,
-                mentions: Vec::new(),
-                reply_to,
-                asked_by_handle: None,
-                owner_handle: None,
-                usage: None,
-                return_contract: None,
-                waiting_user: false,
-                waiting_approval: false,
-                model: None,
-                effort: None,
-                created_at: now_ms(),
-                completed_at: None,
-                call_id: None,
-                activity: None,
-                pending: true,
-                parts,
-                hidden_parts: Vec::new(),
-                greeting: false,
-            };
-            let _ = doc.insert_message(&msg);
-            let _ = doc.push_command(
+    let asleep = machine_down(shared);
+    let opts = UserMessageOpts {
+        attachments: user_attachments(&attachments),
+        reply_to,
+        ..UserMessageOpts::default()
+    };
+    with_doc(shared, &chat_id, |doc| {
+        doc.core.transact(|d| {
+            let _ = d.append_user_message(&message_id, &text, DEVICE, &opts);
+            if asleep {
+                set_status(d, &message_id, MessageStatus::Queued);
+            }
+            d.push_command(
                 "send",
                 json!({ "messageId": message_id, "text": text }),
                 DEVICE,
             );
-            doc.commit();
-        }
-    }
+        });
+    });
     maybe_retitle(shared, &chat_id, &text);
-    spawn_turn(shared, project_id, chat_id, message_id, text, false);
+    spawn_turn(shared, project_id, chat_id, text, false);
 }
 
 fn emit_connectors(shared: &Shared) {
@@ -2083,58 +2017,23 @@ fn run_routine_now(shared: &Arc<Shared>, project_id: &str, routine_id: &str) {
     if !shared.docs.lock().unwrap().contains_key(&chat_id) {
         return;
     }
-    {
-        let docs = shared.docs.lock().unwrap();
-        if let Some(doc) = docs.get(&chat_id) {
-            let _ = doc.insert_message(&Message {
-                id: message_id.clone(),
-                chat_id: chat_id.clone(),
-                role: Role::User,
-                sender: format!("routine:{routine_id}"),
-                status: MessageStatus::Done,
-                turn: None,
-                decision: None,
-                subagent_id: None,
-                subagent_name: None,
-                handoff_messages: None,
-                reactions: Default::default(),
-                in_reply_to: None,
-                routine_name: Some(routine.name.clone()),
-                sender_name: None,
-                sender_icon: None,
-                sender_handle: None,
-                sender_avatar: None,
-                sender_avatar_color: None,
-                mentions: Vec::new(),
-                reply_to: None,
-                asked_by_handle: None,
-                owner_handle: None,
-                usage: None,
-                return_contract: None,
-                waiting_user: false,
-                waiting_approval: false,
-                model: None,
-                effort: None,
-                created_at: now_ms(),
-                completed_at: None,
-                call_id: None,
-                activity: None,
-                pending: false,
-                parts: vec![Part::Text {
-                    id: new_id(),
-                    text: routine.prompt.clone(),
-                }],
-                hidden_parts: Vec::new(),
-                greeting: false,
-            });
-            doc.commit();
-        }
-    }
+    with_doc(shared, &chat_id, |doc| {
+        doc.core.transact(|d| {
+            let _ = d.begin_message(
+                &message_id,
+                "user",
+                &format!("routine:{routine_id}"),
+                DEVICE,
+                CoreStatus::Done,
+                &[("routineName", json!(routine.name))],
+            );
+            push_part(d, &message_id, &text_part(&routine.prompt));
+        });
+    });
     spawn_turn(
         shared,
         project_id.to_string(),
         chat_id.clone(),
-        message_id.clone(),
         routine.prompt.clone(),
         true,
     );
@@ -2294,20 +2193,7 @@ async fn wake_machine(shared: &Arc<Shared>) {
     set_machine(shared, MachineState::Awake, None, None);
     let docs = shared.docs.lock().unwrap();
     for doc in docs.values() {
-        let mut changed = false;
-        for ix in 0..doc.len() {
-            if doc
-                .read_message(ix)
-                .map(|m| m.status == MessageStatus::Queued)
-                .unwrap_or(false)
-            {
-                let _ = doc.set_status(ix, MessageStatus::Done);
-                changed = true;
-            }
-        }
-        if changed {
-            doc.commit();
-        }
+        release_queued(doc);
     }
 }
 
@@ -2429,28 +2315,12 @@ async fn wake_project(shared: &Arc<Shared>, project_id: &str) {
     let docs = shared.docs.lock().unwrap();
     for chat_id in chat_ids {
         if let Some(doc) = docs.get(&chat_id) {
-            for ix in 0..doc.len() {
-                if doc
-                    .read_message(ix)
-                    .map(|m| m.status == MessageStatus::Queued)
-                    .unwrap_or(false)
-                {
-                    let _ = doc.set_status(ix, MessageStatus::Done);
-                }
-            }
-            doc.commit();
+            release_queued(doc);
         }
     }
 }
 
-fn spawn_turn(
-    shared: &Arc<Shared>,
-    project_id: Id,
-    chat_id: Id,
-    user_message_id: Id,
-    text: String,
-    force_reply: bool,
-) {
+fn spawn_turn(shared: &Arc<Shared>, project_id: Id, chat_id: Id, text: String, force_reply: bool) {
     let stop = Arc::new(AtomicBool::new(false));
     shared
         .running
@@ -2459,16 +2329,7 @@ fn spawn_turn(
         .insert(chat_id.clone(), stop.clone());
     let shared = shared.clone();
     tokio::spawn(async move {
-        run_turn(
-            &shared,
-            &project_id,
-            &chat_id,
-            &user_message_id,
-            &text,
-            force_reply,
-            stop,
-        )
-        .await;
+        run_turn(&shared, &project_id, &chat_id, &text, force_reply, stop).await;
         shared.running.lock().unwrap().remove(&chat_id);
     });
 }
@@ -2654,18 +2515,11 @@ async fn run_turn(
     shared: &Arc<Shared>,
     project_id: &str,
     chat_id: &str,
-    user_message_id: &str,
     text: &str,
     force_reply: bool,
     stop: Arc<AtomicBool>,
 ) {
     sleep(Duration::from_millis(220)).await;
-    with_doc(shared, chat_id, |doc| {
-        if let Some(ix) = doc.index_of(user_message_id) {
-            let _ = doc.set_field(ix, "pending", json!(false));
-            doc.commit();
-        }
-    });
 
     if machine_down(shared) {
         wake_machine(shared).await;
@@ -2675,59 +2529,25 @@ async fn run_turn(
     }
 
     let (model, effort) = project_model(shared, project_id);
-    let assistant_id = new_id();
-    let ix = with_doc(shared, chat_id, |doc| {
-        let msg = Message {
-            id: assistant_id.clone(),
-            chat_id: chat_id.to_string(),
-            role: Role::Assistant,
-            sender: "agent".into(),
-            status: MessageStatus::Streaming,
-            turn: None,
-            decision: None,
-            subagent_id: None,
-            subagent_name: None,
-            handoff_messages: None,
-            reactions: Default::default(),
-            in_reply_to: None,
-            routine_name: None,
-            sender_name: None,
-            sender_icon: None,
-            sender_handle: None,
-            sender_avatar: None,
-            sender_avatar_color: None,
-            mentions: Vec::new(),
-            reply_to: None,
-            asked_by_handle: None,
-            owner_handle: None,
-            usage: None,
-            return_contract: None,
-            waiting_user: false,
-            waiting_approval: false,
-            model: Some(model.clone()),
-            effort: Some(effort),
-            created_at: now_ms(),
-            completed_at: None,
-            call_id: None,
-            activity: None,
-            pending: false,
-            parts: vec![Part::Status {
-                id: new_id(),
-                code: StatusKind::Deciding,
-                message: "Arbos is deciding…".into(),
-            }],
-            hidden_parts: Vec::new(),
-            greeting: false,
-        };
-        let ix = doc.insert_message(&msg).unwrap_or(0);
-        doc.commit();
-        ix
+    let id = new_id();
+    // The `deciding` status row; it becomes the reply, the first tool card, or the error.
+    let lead = with_doc(shared, chat_id, |doc| {
+        doc.core.transact(|d| {
+            begin_assistant_row(
+                d,
+                &id,
+                "agent",
+                &[("model", json!(model)), ("effort", json!(effort))],
+                StatusKind::Deciding,
+                "Arbos is deciding…",
+            )
+        })
     })
-    .unwrap_or(0);
+    .unwrap_or_default();
 
     sleep(Duration::from_millis(700)).await;
     if stop.load(Ordering::SeqCst) {
-        finish_cancelled(shared, chat_id, ix);
+        finish_cancelled(shared, chat_id, &id);
         return;
     }
 
@@ -2738,21 +2558,22 @@ async fn run_turn(
         Script::Browse { .. } => TurnKind::Spawn,
     };
     with_doc(shared, chat_id, |doc| {
-        let _ = doc.set_field(ix, "turn", serde_json::to_value(turn).unwrap_or_default());
-        doc.commit();
+        doc.core.set_message_fields(&id, &[("turn", json!(turn))]);
     });
 
     let finished = match script {
         Script::Flow => {
             // 1. The running row becomes the ack bubble at once.
             with_doc(shared, chat_id, |doc| {
-                let _ = doc.replace_part(ix, 0, &text_part(FLOW_ACK));
-                let _ = doc.set_status(ix, MessageStatus::Done);
-                doc.commit();
+                doc.core.transact(|d| {
+                    replace_part(d, &id, &lead, &text_part(FLOW_ACK));
+                    set_status(d, &id, MessageStatus::Done);
+                });
             });
             // 2. A new running row with no prose: only the working line shows,
             //    its text swapping through the activities.
-            let work_ix = insert_running_row(shared, chat_id, project_id, TurnKind::Act);
+            let (work_id, work_part) =
+                insert_running_row(shared, chat_id, project_id, TurnKind::Act);
             let mut cancelled = false;
             for (activity, ms) in FLOW_ACTIVITIES {
                 if stop.load(Ordering::SeqCst) {
@@ -2760,44 +2581,38 @@ async fn run_turn(
                     break;
                 }
                 with_doc(shared, chat_id, |doc| {
-                    let _ = doc.set_field(work_ix, "activity", json!(activity));
-                    doc.commit();
+                    doc.core.set_activity(&work_id, Some(activity));
                 });
                 sleep(Duration::from_millis(*ms)).await;
             }
             if cancelled {
-                finish_cancelled(shared, chat_id, work_ix);
+                finish_cancelled(shared, chat_id, &work_id);
                 return;
             }
             // 3. Same row becomes the short conversational result (no milestone bubble).
             with_doc(shared, chat_id, |doc| {
-                let _ = doc.set_field(work_ix, "activity", json!(null));
-                let _ = doc.set_field(
-                    work_ix,
-                    "turn",
-                    serde_json::to_value(TurnKind::Reply).unwrap_or_default(),
-                );
-                let _ = doc.replace_part(work_ix, 0, &empty_text());
-                doc.commit();
+                doc.core.transact(|d| {
+                    d.set_activity(&work_id, None);
+                    d.set_message_fields(&work_id, &[("turn", json!(TurnKind::Reply))]);
+                    replace_part(d, &work_id, &work_part, &empty_text());
+                });
             });
-            let ok = stream_blocks(shared, chat_id, work_ix, 0, FLOW_RESULT, &stop).await;
+            let ok = stream_blocks(shared, chat_id, &work_id, &work_part, FLOW_RESULT, &stop).await;
             if ok {
                 with_doc(shared, chat_id, |doc| {
-                    let _ = doc.set_status(work_ix, MessageStatus::Done);
-                    doc.commit();
+                    set_status(&doc.core, &work_id, MessageStatus::Done);
                 });
                 mark_unread_if_hidden(shared, chat_id);
             } else {
-                finish_cancelled(shared, chat_id, work_ix);
+                finish_cancelled(shared, chat_id, &work_id);
             }
             return;
         }
         Script::Reply(blocks) => {
             with_doc(shared, chat_id, |doc| {
-                let _ = doc.replace_part(ix, 0, &empty_text());
-                doc.commit();
+                replace_part(&doc.core, &id, &lead, &empty_text());
             });
-            stream_blocks(shared, chat_id, ix, 0, blocks, &stop).await
+            stream_blocks(shared, chat_id, &id, &lead, blocks, &stop).await
         }
         Script::Act {
             tools,
@@ -2816,46 +2631,48 @@ async fn run_turn(
                     name: name.to_string(),
                     input: json!(input),
                 };
-                let pix = with_doc(shared, chat_id, |doc| {
-                    let part = Part::Tool {
-                        id: new_id(),
-                        call: call.clone(),
-                        output_summary: String::new(),
-                        output_ref: None,
-                        is_error: false,
-                        status: Some(ToolStatus::Running),
-                        duration_ms: None,
-                        subagent_name: None,
-                    };
-                    let pix = if first {
-                        let _ = doc.replace_part(ix, 0, &part);
-                        0
+                let part = Part::Tool {
+                    id: new_id(),
+                    call: call.clone(),
+                    output_summary: String::new(),
+                    output_ref: None,
+                    is_error: false,
+                    status: Some(ToolStatus::Running),
+                    duration_ms: None,
+                    subagent_name: None,
+                };
+                let pid = with_doc(shared, chat_id, |doc| {
+                    if first {
+                        replace_part(&doc.core, &id, &lead, &part);
+                        lead.clone()
                     } else {
-                        doc.push_part(ix, &part).unwrap_or(0)
-                    };
-                    doc.commit();
-                    pix
+                        push_part(&doc.core, &id, &part)
+                    }
                 })
-                .unwrap_or(0);
+                .unwrap_or_default();
                 first = false;
                 sleep(Duration::from_millis(*ms)).await;
                 with_doc(shared, chat_id, |doc| {
-                    let _ = doc.set_part_field(ix, pix, "outputSummary", json!(out));
-                    let _ = doc.set_part_field(
-                        ix,
-                        pix,
-                        "outputRef",
-                        json!(format!("blob/{}/{}", project_id, call.id)),
+                    doc.core.set_part_fields(
+                        &id,
+                        &pid,
+                        &[
+                            ("outputSummary", json!(out)),
+                            (
+                                "outputRef",
+                                json!(format!("blob/{}/{}", project_id, call.id)),
+                            ),
+                            ("status", json!("ok")),
+                            ("durationMs", json!(ms)),
+                        ],
                     );
-                    let _ = doc.set_part_field(ix, pix, "status", json!("ok"));
-                    let _ = doc.set_part_field(ix, pix, "durationMs", json!(ms));
-                    doc.commit();
                 });
                 if *name == "edit_file" {
                     if let Some((path, added, removed)) = diff {
                         with_doc(shared, chat_id, |doc| {
-                            let _ = doc.push_part(
-                                ix,
+                            push_part(
+                                &doc.core,
+                                &id,
                                 &Part::Diff {
                                     id: new_id(),
                                     path: path.to_string(),
@@ -2864,19 +2681,16 @@ async fn run_turn(
                                     blob_ref: Some(format!("blob/{project_id}/diff-rail")),
                                 },
                             );
-                            doc.commit();
                         });
                     }
                 }
             }
             if ok {
-                let pix = with_doc(shared, chat_id, |doc| {
-                    let pix = doc.push_part(ix, &empty_text()).unwrap_or(0);
-                    doc.commit();
-                    pix
+                let pid = with_doc(shared, chat_id, |doc| {
+                    push_part(&doc.core, &id, &empty_text())
                 })
-                .unwrap_or(0);
-                stream_blocks(shared, chat_id, ix, pix, summary, &stop).await
+                .unwrap_or_default();
+                stream_blocks(shared, chat_id, &id, &pid, summary, &stop).await
             } else {
                 false
             }
@@ -2886,55 +2700,53 @@ async fn run_turn(
             url,
             summary,
         } => {
-            let status_pix = with_doc(shared, chat_id, |doc| {
-                let _ = doc.replace_part(
-                    ix,
-                    0,
-                    &Part::Status {
-                        id: new_id(),
-                        code: StatusKind::Working,
-                        message: "Working in sandbox · starting browser · 00:00".into(),
-                    },
-                );
-                let _ = doc.push_part(
-                    ix,
-                    &Part::Tool {
-                        id: new_id(),
-                        call: ToolCall {
+            with_doc(shared, chat_id, |doc| {
+                doc.core.transact(|d| {
+                    replace_part(
+                        d,
+                        &id,
+                        &lead,
+                        &Part::Status {
                             id: new_id(),
-                            name: "spawn_subagent".into(),
-                            input: json!("docs-lookup · prime"),
+                            code: StatusKind::Working,
+                            message: "Working in sandbox · starting browser · 00:00".into(),
                         },
-                        output_summary: "Subagent started".into(),
-                        output_ref: None,
-                        is_error: false,
-                        status: Some(ToolStatus::Ok),
-                        duration_ms: Some(300),
-                        subagent_name: Some("docs-lookup".into()),
-                    },
-                );
-                doc.commit();
-                0
-            })
-            .unwrap_or(0);
+                    );
+                    push_part(
+                        d,
+                        &id,
+                        &Part::Tool {
+                            id: new_id(),
+                            call: ToolCall {
+                                id: new_id(),
+                                name: "spawn_subagent".into(),
+                                input: json!("docs-lookup · prime"),
+                            },
+                            output_summary: "Subagent started".into(),
+                            output_ref: None,
+                            is_error: false,
+                            status: Some(ToolStatus::Ok),
+                            duration_ms: Some(300),
+                            subagent_name: Some("docs-lookup".into()),
+                        },
+                    );
+                });
+            });
             sleep(Duration::from_millis(900)).await;
-            let browser_pix = with_doc(shared, chat_id, |doc| {
-                let pix = doc
-                    .push_part(
-                        ix,
-                        &Part::Browser {
-                            id: new_id(),
-                            title: title.to_string(),
-                            url: url.to_string(),
-                            last_action: "navigate".into(),
-                            live: true,
-                        },
-                    )
-                    .unwrap_or(0);
-                doc.commit();
-                pix
+            let browser = with_doc(shared, chat_id, |doc| {
+                push_part(
+                    &doc.core,
+                    &id,
+                    &Part::Browser {
+                        id: new_id(),
+                        title: title.to_string(),
+                        url: url.to_string(),
+                        last_action: "navigate".into(),
+                        live: true,
+                    },
+                )
             })
-            .unwrap_or(0);
+            .unwrap_or_default();
             let actions = ["scroll", "click \"Variants\"", "read page", "save notes"];
             let mut cancelled = false;
             for (i, action) in actions.iter().enumerate() {
@@ -2945,108 +2757,90 @@ async fn run_turn(
                 sleep(Duration::from_millis(1000)).await;
                 let secs = i + 2;
                 with_doc(shared, chat_id, |doc| {
-                    let _ = doc.set_part_field(
-                        ix,
-                        status_pix,
-                        "message",
-                        json!(format!("Working in sandbox · {} · 00:{:02}", action, secs)),
-                    );
-                    let _ = doc.set_part_field(ix, browser_pix, "lastAction", json!(action));
-                    doc.commit();
+                    doc.core.transact(|d| {
+                        d.set_part_fields(
+                            &id,
+                            &lead,
+                            &[(
+                                "message",
+                                json!(format!("Working in sandbox · {} · 00:{:02}", action, secs)),
+                            )],
+                        );
+                        d.set_part_fields(&id, &browser, &[("lastAction", json!(action))]);
+                    });
                 });
             }
             if cancelled {
                 false
             } else {
                 with_doc(shared, chat_id, |doc| {
-                    let _ = doc.set_part_field(ix, browser_pix, "live", json!(false));
-                    let _ = doc.set_part_field(
-                        ix,
-                        status_pix,
-                        "message",
-                        json!("Worked in sandbox · 4 actions · 00:06"),
-                    );
-                    let _ = doc.push_part(
-                        ix,
-                        &Part::File {
-                            id: new_id(),
-                            path: "docs/research/gpui.md".into(),
-                            lines: 212,
-                            blob_ref: Some(format!("blob/{project_id}/gpui-notes")),
-                        },
-                    );
-                    doc.commit();
+                    doc.core.transact(|d| {
+                        d.set_part_fields(&id, &browser, &[("live", json!(false))]);
+                        d.set_part_fields(
+                            &id,
+                            &lead,
+                            &[("message", json!("Worked in sandbox · 4 actions · 00:06"))],
+                        );
+                        push_part(
+                            d,
+                            &id,
+                            &Part::File {
+                                id: new_id(),
+                                path: "docs/research/gpui.md".into(),
+                                lines: 212,
+                                blob_ref: Some(format!("blob/{project_id}/gpui-notes")),
+                            },
+                        );
+                    });
                 });
-                let pix = with_doc(shared, chat_id, |doc| {
-                    let pix = doc.push_part(ix, &empty_text()).unwrap_or(0);
-                    doc.commit();
-                    pix
+                let pid = with_doc(shared, chat_id, |doc| {
+                    push_part(&doc.core, &id, &empty_text())
                 })
-                .unwrap_or(0);
-                stream_blocks(shared, chat_id, ix, pix, summary, &stop).await
+                .unwrap_or_default();
+                stream_blocks(shared, chat_id, &id, &pid, summary, &stop).await
             }
         }
-        Script::Ask(lead, question, widget) => {
+        Script::Ask(lead_text, question, widget) => {
             with_doc(shared, chat_id, |doc| {
-                let _ = doc.replace_part(ix, 0, &empty_text());
-                doc.commit();
+                replace_part(&doc.core, &id, &lead, &empty_text());
             });
-            let done = stream_blocks(shared, chat_id, ix, 0, &[lead], &stop).await;
+            let done = stream_blocks(shared, chat_id, &id, &lead, &[lead_text], &stop).await;
             if done {
-                let widget = widget.clone();
+                let widget = widget.and_then(|w| serde_json::to_value(w).ok());
                 with_doc(shared, chat_id, |doc| {
-                    let _ = doc.push_part(ix, &question_part(question, widget, None));
-                    // Legacy status row, as agentd still writes it next to the question part.
-                    let _ = doc.push_part(
-                        ix,
-                        &Part::Status {
-                            id: new_id(),
-                            code: StatusKind::AskUser,
-                            message: question.to_string(),
-                        },
-                    );
-                    doc.commit();
+                    doc.core.transact(|d| {
+                        d.add_question_part(&id, &new_id(), question, widget.as_ref());
+                        // Legacy status row, as agentd still writes it next to the question part.
+                        d.add_status_part(&id, "ask_user", question);
+                    });
                 });
             }
             done
         }
         Script::Draft {
-            lead,
+            lead: lead_text,
             channel,
             to,
             subject,
             body,
         } => {
             with_doc(shared, chat_id, |doc| {
-                let _ = doc.replace_part(ix, 0, &empty_text());
-                doc.commit();
+                replace_part(&doc.core, &id, &lead, &empty_text());
             });
-            let done = stream_blocks(shared, chat_id, ix, 0, &[lead], &stop).await;
+            let done = stream_blocks(shared, chat_id, &id, &lead, &[lead_text], &stop).await;
             if done {
-                let approval_id = new_id();
+                let request = draft_request(channel, to, subject, body);
                 with_doc(shared, chat_id, |doc| {
-                    let _ = doc.push_part(
-                        ix,
-                        &approval_card(
-                            &approval_id,
-                            channel,
-                            to,
-                            subject,
-                            body,
-                            ApprovalState::Pending,
-                            None,
-                        ),
-                    );
-                    let _ = doc.push_part(
-                        ix,
-                        &Part::Status {
-                            id: new_id(),
-                            code: StatusKind::WaitingApproval,
-                            message: format!("Send {channel} to {to}: {subject}"),
-                        },
-                    );
-                    let _ = doc.set_field(ix, "waitingApproval", json!(true));
-                    doc.commit();
+                    doc.core.transact(|d| {
+                        d.add_approval_part(
+                            &id,
+                            &new_id(),
+                            &request,
+                            now_ms() as i64 + APPROVAL_TTL_MS,
+                        );
+                        d.add_status_part(&id, "waiting_approval", &request.title);
+                        d.set_message_fields(&id, &[("waitingApproval", json!(true))]);
+                    });
                 });
             }
             done
@@ -3054,17 +2848,19 @@ async fn run_turn(
         Script::Fail(code, message) => {
             sleep(Duration::from_millis(900)).await;
             with_doc(shared, chat_id, |doc| {
-                let _ = doc.replace_part(
-                    ix,
-                    0,
-                    &Part::Error {
-                        id: new_id(),
-                        code: code.to_string(),
-                        message: message.to_string(),
-                    },
-                );
-                let _ = doc.set_status(ix, MessageStatus::Error);
-                doc.commit();
+                doc.core.transact(|d| {
+                    replace_part(
+                        d,
+                        &id,
+                        &lead,
+                        &Part::Error {
+                            id: new_id(),
+                            code: code.to_string(),
+                            message: message.to_string(),
+                        },
+                    );
+                    set_status(d, &id, MessageStatus::Error);
+                });
             });
             mark_unread_if_hidden(shared, chat_id);
             return;
@@ -3073,13 +2869,12 @@ async fn run_turn(
 
     if finished {
         with_doc(shared, chat_id, |doc| {
-            let _ = doc.set_status(ix, MessageStatus::Done);
-            doc.commit();
+            set_status(&doc.core, &id, MessageStatus::Done);
         });
         mark_unread_if_hidden(shared, chat_id);
         group_replies(shared, chat_id, text, &stop).await;
     } else {
-        finish_cancelled(shared, chat_id, ix);
+        finish_cancelled(shared, chat_id, &id);
     }
 }
 
@@ -3200,69 +2995,41 @@ async fn group_replies(shared: &Arc<Shared>, chat_id: &str, _text: &str, stop: &
         }
         let line = GROUP_REPLIES[i % GROUP_REPLIES.len()];
         with_doc(shared, chat_id, |doc| {
-            let _ = doc.insert_message(&project_message(chat_id, p, line, now_ms()));
-            doc.commit();
+            doc.core
+                .transact(|d| write_project_line(d, p, line, now_ms()));
         });
         mark_unread_if_hidden(shared, chat_id);
     }
 }
 
 /// A fresh assistant row in `streaming`, no prose yet: only the working line shows.
+/// Returns `(message id, status part id)`.
 fn insert_running_row(
     shared: &Arc<Shared>,
     chat_id: &str,
     project_id: &str,
     turn: TurnKind,
-) -> usize {
+) -> (Id, String) {
     let (model, effort) = project_model(shared, project_id);
-    with_doc(shared, chat_id, |doc| {
-        let msg = Message {
-            id: new_id(),
-            chat_id: chat_id.to_string(),
-            role: Role::Assistant,
-            sender: "agent".into(),
-            status: MessageStatus::Streaming,
-            turn: Some(turn),
-            decision: None,
-            subagent_id: None,
-            subagent_name: None,
-            handoff_messages: None,
-            reactions: Default::default(),
-            in_reply_to: None,
-            routine_name: None,
-            sender_name: None,
-            sender_icon: None,
-            sender_handle: None,
-            sender_avatar: None,
-            sender_avatar_color: None,
-            mentions: Vec::new(),
-            reply_to: None,
-            asked_by_handle: None,
-            owner_handle: None,
-            usage: None,
-            return_contract: None,
-            waiting_user: false,
-            waiting_approval: false,
-            model: Some(model),
-            effort: Some(effort),
-            created_at: now_ms(),
-            completed_at: None,
-            call_id: None,
-            activity: None,
-            pending: false,
-            parts: vec![Part::Status {
-                id: new_id(),
-                code: StatusKind::Working,
-                message: String::new(),
-            }],
-            hidden_parts: Vec::new(),
-            greeting: false,
-        };
-        let ix = doc.insert_message(&msg).unwrap_or(0);
-        doc.commit();
-        ix
+    let id = new_id();
+    let part = with_doc(shared, chat_id, |doc| {
+        doc.core.transact(|d| {
+            begin_assistant_row(
+                d,
+                &id,
+                "agent",
+                &[
+                    ("turn", json!(turn)),
+                    ("model", json!(model)),
+                    ("effort", json!(effort)),
+                ],
+                StatusKind::Working,
+                "",
+            )
+        })
     })
-    .unwrap_or(0)
+    .unwrap_or_default();
+    (id, part)
 }
 
 fn empty_text() -> Part {
@@ -3272,7 +3039,23 @@ fn empty_text() -> Part {
     }
 }
 
-/// One `approval` part in the shape `arbos_core::approval` owns.
+/// The draft-and-approve request for one outgoing message (`arbos_core::approval`).
+fn draft_request(channel: &str, to: &str, subject: &str, body: &str) -> ApprovalRequest {
+    ApprovalRequest {
+        title: format!("Send {channel} to {to}: {subject}"),
+        summary: body
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(160)
+            .collect(),
+        risk: Risk::Send,
+        payload: json!({ "kind": "draft_message", "channel": channel, "to": to, "subject": subject, "body": body }),
+    }
+}
+
+/// One seeded `approval` part in the shape `arbos_core::approval` owns.
 fn approval_card(
     approval_id: &str,
     channel: &str,
@@ -3283,21 +3066,16 @@ fn approval_card(
     decided_at: Option<u64>,
 ) -> Part {
     let now = now_ms();
+    let request = draft_request(channel, to, subject, body);
     Part::Approval {
         id: new_id(),
         approval_id: approval_id.to_string(),
-        title: format!("Send {channel} to {to}: {subject}"),
-        summary: body
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-            .chars()
-            .take(160)
-            .collect(),
+        title: request.title,
+        summary: request.summary,
         risk: ApprovalRisk::Send,
-        payload: json!({ "kind": "draft_message", "channel": channel, "to": to, "subject": subject, "body": body }),
+        payload: request.payload,
         state,
-        expires_at: Some(decided_at.unwrap_or(now) + 24 * 60 * 60_000),
+        expires_at: Some(decided_at.unwrap_or(now) + APPROVAL_TTL_MS as u64),
         decided_at,
         decided_by: decided_at.map(|_| DEVICE.to_string()),
         reason: None,
@@ -3313,42 +3091,40 @@ fn decide_approval(
     state: ApprovalState,
     reason: Option<String>,
 ) {
-    let kind = match state {
-        ApprovalState::Approved => "approve",
-        ApprovalState::Rejected => "reject",
+    let (kind, core_state) = match state {
+        ApprovalState::Approved => ("approve", CoreApprovalState::Approved),
+        ApprovalState::Rejected => ("reject", CoreApprovalState::Rejected),
         ApprovalState::Pending | ApprovalState::Expired => return,
     };
+    let reason = reason.filter(|r| !r.trim().is_empty());
     let found = with_doc(shared, &chat_id, |doc| {
         let mut payload = json!({ "approvalId": approval_id });
-        if let Some(r) = reason.as_deref().filter(|r| !r.trim().is_empty()) {
+        if let Some(r) = reason.as_deref() {
             payload["reason"] = json!(r);
         }
-        let _ = doc.push_command(kind, payload, DEVICE);
-        let hit = (0..doc.len()).rev().find_map(|ix| {
-            let m = doc.read_message(ix)?;
-            let pix = m.parts.iter().position(|p| {
-                matches!(p, Part::Approval { approval_id: a, state: ApprovalState::Pending, .. } if *a == approval_id)
-            })?;
-            let title = match &m.parts[pix] {
-                Part::Approval { title, payload, .. } => (title.clone(), payload.clone()),
-                _ => return None,
-            };
-            Some((ix, pix, title))
+        let hit = doc.read_all().into_iter().rev().find_map(|m| {
+            m.parts.iter().find_map(|p| match p {
+                Part::Approval {
+                    approval_id: a,
+                    state: ApprovalState::Pending,
+                    title,
+                    payload,
+                    ..
+                } if *a == approval_id => Some((m.id.clone(), title.clone(), payload.clone())),
+                _ => None,
+            })
         });
-        if let Some((ix, pix, _)) = &hit {
-            let _ = doc.set_part_field(*ix, *pix, "state", json!(state));
-            let _ = doc.set_part_field(*ix, *pix, "decidedAt", json!(now_ms()));
-            let _ = doc.set_part_field(*ix, *pix, "decidedBy", json!(DEVICE));
-            if let Some(r) = reason.as_deref().filter(|r| !r.trim().is_empty()) {
-                let _ = doc.set_part_field(*ix, *pix, "reason", json!(r));
+        doc.core.transact(|d| {
+            d.push_command(kind, payload, DEVICE);
+            if let Some((msg_id, _, _)) = &hit {
+                d.set_approval_state(&approval_id, core_state, Some(DEVICE), reason.as_deref());
+                d.set_message_fields(msg_id, &[("waitingApproval", json!(false))]);
             }
-            let _ = doc.set_field(*ix, "waitingApproval", json!(false));
-        }
-        doc.commit();
+        });
         hit
     })
     .flatten();
-    let Some((_, _, (title, payload))) = found else {
+    let Some((_, title, payload)) = found else {
         return;
     };
     let to = payload
@@ -3369,7 +3145,6 @@ fn decide_approval(
             "Understood, nothing was sent{}. Tell me what to change in \"{title}\" and I will redraft it.",
             reason
                 .as_deref()
-                .filter(|r| !r.trim().is_empty())
                 .map(|r| format!(" ({r})"))
                 .unwrap_or_default()
         )],
@@ -3391,77 +3166,47 @@ async fn run_outcome_turn(
 ) {
     sleep(Duration::from_millis(400)).await;
     let (model, effort) = project_model(shared, project_id);
-    let ix = with_doc(shared, chat_id, |doc| {
-        let mut msg = Message {
-            id: new_id(),
-            chat_id: chat_id.to_string(),
-            role: Role::Assistant,
-            sender: "agent".into(),
-            status: MessageStatus::Streaming,
-            turn: Some(TurnKind::Reply),
-            decision: Some("reply".into()),
-            subagent_id: None,
-            subagent_name: None,
-            handoff_messages: None,
-            reactions: Default::default(),
-            in_reply_to: None,
-            usage: None,
-            return_contract: None,
-            waiting_user: false,
-            waiting_approval: false,
-            routine_name: None,
-            sender_name: None,
-            sender_icon: None,
-            sender_handle: None,
-            sender_avatar: None,
-            sender_avatar_color: None,
-            mentions: Vec::new(),
-            reply_to: None,
-            asked_by_handle: None,
-            owner_handle: None,
-            model: Some(model),
-            effort: Some(effort),
-            created_at: now_ms(),
-            completed_at: None,
-            call_id: None,
-            activity: None,
-            pending: false,
-            parts: vec![empty_text()],
-            hidden_parts: Vec::new(),
-            greeting: false,
-        };
-        msg.parts.push(Part::Status {
-            id: new_id(),
-            code: StatusKind::Working,
-            message: format!("Following up on approval {approval_id}"),
-        });
-        let ix = doc.insert_message(&msg).unwrap_or(0);
-        doc.commit();
-        ix
+    let id = new_id();
+    let text = with_doc(shared, chat_id, |doc| {
+        doc.core.transact(|d| {
+            let _ = d.begin_message(
+                &id,
+                "assistant",
+                "agent",
+                DEVICE,
+                CoreStatus::Streaming,
+                &[
+                    ("turn", json!(TurnKind::Reply)),
+                    ("decision", json!("reply")),
+                    ("model", json!(model)),
+                    ("effort", json!(effort)),
+                ],
+            );
+            let text = push_part(d, &id, &empty_text());
+            d.add_status_part(
+                &id,
+                "working",
+                &format!("Following up on approval {approval_id}"),
+            );
+            text
+        })
     })
-    .unwrap_or(0);
+    .unwrap_or_default();
     let refs: Vec<&str> = blocks.iter().map(String::as_str).collect();
     let stop = AtomicBool::new(false);
-    stream_blocks(shared, chat_id, ix, 0, &refs, &stop).await;
+    stream_blocks(shared, chat_id, &id, &text, &refs, &stop).await;
     with_doc(shared, chat_id, |doc| {
-        let _ = doc.set_status(ix, MessageStatus::Done);
-        doc.commit();
+        set_status(&doc.core, &id, MessageStatus::Done);
     });
     mark_unread_if_hidden(shared, chat_id);
 }
 
-fn finish_cancelled(shared: &Arc<Shared>, chat_id: &str, ix: usize) {
+fn finish_cancelled(shared: &Arc<Shared>, chat_id: &str, msg_id: &str) {
     with_doc(shared, chat_id, |doc| {
-        let _ = doc.push_part(
-            ix,
-            &Part::Status {
-                id: new_id(),
-                code: StatusKind::Note,
-                message: "Stopped by you".into(),
-            },
-        );
-        let _ = doc.set_status(ix, MessageStatus::Cancelled);
-        doc.commit();
+        doc.core.transact(|d| {
+            d.add_status_part(msg_id, "note", "Stopped by you");
+            set_status(d, msg_id, MessageStatus::Cancelled);
+        });
     });
 }
 
@@ -3485,8 +3230,8 @@ fn mark_unread_if_hidden(shared: &Arc<Shared>, chat_id: &str) {
 async fn stream_blocks(
     shared: &Arc<Shared>,
     chat_id: &str,
-    ix: usize,
-    pix: usize,
+    msg_id: &str,
+    part_id: &str,
     blocks: &[&str],
     stop: &AtomicBool,
 ) -> bool {
@@ -3516,8 +3261,8 @@ async fn stream_blocks(
             return false;
         }
         with_doc(shared, chat_id, |doc| {
-            let _ = doc.append_text(ix, pix, &chunk);
-            doc.commit();
+            doc.core
+                .transact(|d| d.append_text(msg_id, part_id, &chunk));
         });
         sleep(Duration::from_millis(STREAM_FRAME_MS)).await;
     }
@@ -3527,6 +3272,291 @@ async fn stream_blocks(
 fn with_doc<R>(shared: &Arc<Shared>, chat_id: &str, f: impl FnOnce(&ChatDoc) -> R) -> Option<R> {
     let docs = shared.docs.lock().unwrap();
     docs.get(chat_id).map(f)
+}
+
+// ---------------------------------------------------------------------------
+// Doc writes. Every chat-doc write goes through the `arbos_core::doc::ChatDoc`
+// writers inside `transact` (one commit per step), the same rows the box and the
+// relay client write. Rows and parts are addressed by id, never by list index.
+// ---------------------------------------------------------------------------
+
+fn core_status(status: MessageStatus) -> CoreStatus {
+    match status {
+        MessageStatus::Queued => CoreStatus::Queued,
+        MessageStatus::Streaming => CoreStatus::Streaming,
+        MessageStatus::Done => CoreStatus::Done,
+        MessageStatus::Error => CoreStatus::Error,
+        MessageStatus::Cancelled => CoreStatus::Cancelled,
+    }
+}
+
+fn role_str(role: Role) -> &'static str {
+    match role {
+        Role::User => "user",
+        Role::Assistant => "assistant",
+        Role::System => "system",
+        Role::Project => "project",
+    }
+}
+
+fn is_terminal(status: MessageStatus) -> bool {
+    match status {
+        MessageStatus::Done | MessageStatus::Error | MessageStatus::Cancelled => true,
+        MessageStatus::Queued | MessageStatus::Streaming => false,
+    }
+}
+
+fn field_refs(fields: &[(String, Value)]) -> Vec<(&str, Value)> {
+    fields
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.clone()))
+        .collect()
+}
+
+/// Top-level fields of `msg` the row writers do not set themselves, in wire
+/// (camelCase) form. Skips the client-only placeholders core never stores
+/// (`chatId`, `pending`, `hiddenParts`) and `null` / `false` / empty values. A
+/// finished row without `completedAt` gets its `createdAt`, so a seeded row never
+/// reads as finished "now".
+fn message_extra(msg: &Message) -> Vec<(String, Value)> {
+    let Ok(Value::Object(fields)) = serde_json::to_value(msg) else {
+        return Vec::new();
+    };
+    let mut out: Vec<(String, Value)> = fields
+        .into_iter()
+        .filter(|(k, v)| {
+            let placeholder = matches!(
+                k.as_str(),
+                "id" | "role"
+                    | "sender"
+                    | "status"
+                    | "parts"
+                    | "hiddenParts"
+                    | "reactions"
+                    | "chatId"
+                    | "pending"
+            );
+            let empty = v.is_null()
+                || *v == Value::Bool(false)
+                || v.as_array().is_some_and(|a| a.is_empty());
+            !placeholder && !empty
+        })
+        .collect();
+    if is_terminal(msg.status) && msg.completed_at.is_none() {
+        out.push(("completedAt".into(), json!(msg.created_at)));
+    }
+    out
+}
+
+/// Append `parts` to `msg_id`; `hidden` marks them drawer-only. Returns their ids.
+fn write_parts(core: &CoreDoc, msg_id: &str, parts: &[Part], hidden: bool) -> Vec<String> {
+    parts
+        .iter()
+        .filter_map(|part| {
+            let mut v = serde_json::to_value(part).unwrap_or(json!({}));
+            if let (true, Some(obj)) = (hidden, v.as_object_mut()) {
+                obj.insert("hidden".into(), Value::Bool(true));
+            }
+            core.add_part_from_json(msg_id, &v)
+        })
+        .collect()
+}
+
+/// One part, appended to `msg_id`. Returns its id (empty when the row is gone).
+fn push_part(core: &CoreDoc, msg_id: &str, part: &Part) -> String {
+    write_parts(core, msg_id, std::slice::from_ref(part), false)
+        .pop()
+        .unwrap_or_default()
+}
+
+/// Overwrite part `part_id` in place with `part`'s fields (the id stays), the way a
+/// `deciding` status row becomes the reply, a tool card, or an error.
+fn replace_part(core: &CoreDoc, msg_id: &str, part_id: &str, part: &Part) {
+    let Ok(Value::Object(fields)) = serde_json::to_value(part) else {
+        return;
+    };
+    let fields: Vec<(&str, Value)> = fields
+        .iter()
+        .filter(|(k, _)| k.as_str() != "id")
+        .map(|(k, v)| (k.as_str(), v.clone()))
+        .collect();
+    core.set_part_fields(msg_id, part_id, &fields);
+}
+
+/// `status`, plus `completedAt` when it is terminal.
+fn set_status(core: &CoreDoc, msg_id: &str, status: MessageStatus) {
+    if is_terminal(status) {
+        core.finish_message(msg_id, core_status(status));
+    } else {
+        core.set_message_fields(msg_id, &[("status", json!(core_status(status).as_str()))]);
+    }
+}
+
+fn user_attachments(attachments: &[Attachment]) -> Vec<UserAttachment> {
+    attachments
+        .iter()
+        .map(|a| UserAttachment {
+            name: a.name.clone(),
+            mime: a.mime.clone(),
+            kind: a
+                .kind
+                .and_then(|k| serde_json::to_value(k).ok())
+                .and_then(|v| v.as_str().map(str::to_owned)),
+            blob_ref: a.blob_ref.clone(),
+        })
+        .collect()
+}
+
+/// Size and caption the client user writer does not carry: rewrite those
+/// attachment parts (they lead the row, in order) with the full object.
+fn fill_attachment_details(core: &CoreDoc, msg_id: &str, attachments: &[Attachment]) {
+    for (pix, a) in attachments.iter().enumerate() {
+        if a.bytes.is_none() && a.title.is_none() {
+            continue;
+        }
+        let (Some(part_id), Ok(full)) = (core.part_id_at(msg_id, pix), serde_json::to_value(a))
+        else {
+            continue;
+        };
+        core.set_part_fields(msg_id, &part_id, &[("attachment", full)]);
+    }
+}
+
+/// A user row in the shape the clients write: attachments, then one text part.
+fn user_row_shape(msg: &Message) -> Option<(Vec<Attachment>, &str)> {
+    if msg.role != Role::User {
+        return None;
+    }
+    let (last, rest) = msg.parts.split_last()?;
+    let Part::Text { text, .. } = last else {
+        return None;
+    };
+    let attachments = rest
+        .iter()
+        .map(|p| match p {
+            Part::Attachment { attachment, .. } => Some(attachment.clone()),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some((attachments, text.as_str()))
+}
+
+/// Write a whole `Message` (seed rows, people-chat lines). User rows go through the
+/// client user writer; everything else is `begin_message` plus its parts. Call
+/// inside `transact`.
+fn write_message(core: &CoreDoc, msg: &Message) {
+    let extra = message_extra(msg);
+    if let Some((attachments, text)) = user_row_shape(msg) {
+        let opts = UserMessageOpts {
+            attachments: user_attachments(&attachments),
+            mentions: msg.mentions.clone(),
+            reply_to: msg.reply_to.clone(),
+            sender: Some(msg.sender.clone()),
+            sender_handle: msg.sender_handle.clone(),
+            sender_name: msg.sender_name.clone(),
+            sender_avatar: msg.sender_avatar.clone(),
+            answers_question_id: None,
+        };
+        let _ = core.append_user_message(&msg.id, text, DEVICE, &opts);
+        fill_attachment_details(core, &msg.id, &attachments);
+        let mut rest: Vec<(String, Value)> = extra
+            .into_iter()
+            .filter(|(k, _)| {
+                !matches!(
+                    k.as_str(),
+                    "mentions" | "replyTo" | "senderHandle" | "senderName" | "senderAvatar"
+                )
+            })
+            .collect();
+        if msg.status != MessageStatus::Done {
+            rest.push(("status".into(), json!(core_status(msg.status).as_str())));
+        }
+        core.set_message_fields(&msg.id, &field_refs(&rest));
+    } else {
+        let _ = core.begin_message(
+            &msg.id,
+            role_str(msg.role),
+            &msg.sender,
+            DEVICE,
+            core_status(msg.status),
+            &field_refs(&extra),
+        );
+        write_parts(core, &msg.id, &msg.parts, false);
+        write_parts(core, &msg.id, &msg.hidden_parts, true);
+    }
+    for (emoji, senders) in &msg.reactions {
+        for (sender, on) in senders {
+            if *on {
+                let _ = core.set_reaction(&msg.id, emoji, sender, true);
+            }
+        }
+    }
+}
+
+/// [`write_message`] as one commit.
+fn insert_message_via_core(doc: &ChatDoc, msg: &Message) {
+    doc.core.transact(|d| write_message(d, msg));
+}
+
+/// Another Project's finished line in a group (`role: project`, F6).
+fn write_project_line(core: &CoreDoc, project: &Project, text: &str, t: u64) {
+    core.append_project_message(
+        &new_id(),
+        text,
+        DEVICE,
+        &format!("project:{}", project.id),
+        &[
+            ("senderName", json!(project.name)),
+            ("senderIcon", json!(project.icon)),
+            ("createdAt", json!(t)),
+            ("completedAt", json!(t)),
+        ],
+        false,
+    );
+}
+
+/// Every `queued` row becomes `done` (the box picked them up after a wake).
+fn release_queued(doc: &ChatDoc) {
+    let queued: Vec<Id> = doc
+        .read_all()
+        .into_iter()
+        .filter(|m| m.status == MessageStatus::Queued)
+        .map(|m| m.id)
+        .collect();
+    if queued.is_empty() {
+        return;
+    }
+    doc.core.transact(|d| {
+        for id in &queued {
+            set_status(d, id, MessageStatus::Done);
+        }
+    });
+}
+
+/// A fresh assistant row in `streaming` with `fields` (turn, model, …) and one
+/// `status` part. Returns the status part's id.
+fn begin_assistant_row(
+    core: &CoreDoc,
+    msg_id: &str,
+    sender: &str,
+    fields: &[(&str, Value)],
+    status: StatusKind,
+    status_text: &str,
+) -> String {
+    let _ = core.begin_message(
+        msg_id,
+        "assistant",
+        sender,
+        DEVICE,
+        CoreStatus::Streaming,
+        fields,
+    );
+    let code = serde_json::to_value(status)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_default();
+    core.add_status_part(msg_id, &code, status_text)
+        .unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------
@@ -3936,12 +3966,12 @@ struct Seeder<'a> {
 
 impl Seeder<'_> {
     fn user(&mut self, text: &str) {
-        self.user_with_parts(text, Vec::new());
+        self.user_row(text, Vec::new(), None);
     }
 
-    /// `extra` parts (attachments) come before the text, as the clients write them.
-    fn user_with_parts(&mut self, text: &str, extra: Vec<Part>) {
-        self.user_row(text, extra, None);
+    /// Attachments come before the text, as the clients write them.
+    fn user_with_attachments(&mut self, text: &str, attachments: Vec<Attachment>) {
+        self.user_row(text, attachments, None);
     }
 
     /// A reply bubble: `reply_to` is the id of the message it quotes.
@@ -3949,49 +3979,21 @@ impl Seeder<'_> {
         self.user_row(text, Vec::new(), Some(reply_to.to_owned()));
     }
 
-    fn user_row(&mut self, text: &str, mut extra: Vec<Part>, reply_to: Option<String>) {
+    fn user_row(&mut self, text: &str, attachments: Vec<Attachment>, reply_to: Option<String>) {
         self.t += 45_000;
-        extra.push(Part::Text {
-            id: new_id(),
-            text: text.into(),
-        });
-        let _ = self.doc.insert_message(&Message {
-            id: new_id(),
-            chat_id: self.doc.chat_id.clone(),
-            role: Role::User,
-            sender: "user".into(),
-            status: MessageStatus::Done,
-            turn: None,
-            decision: None,
-            subagent_id: None,
-            subagent_name: None,
-            handoff_messages: None,
-            reactions: Default::default(),
-            in_reply_to: None,
-            routine_name: None,
-            sender_name: None,
-            sender_icon: None,
-            sender_handle: None,
-            sender_avatar: None,
-            sender_avatar_color: None,
-            mentions: Vec::new(),
+        let id = new_id();
+        let opts = UserMessageOpts {
+            attachments: user_attachments(&attachments),
             reply_to,
-            asked_by_handle: None,
-            owner_handle: None,
-            usage: None,
-            return_contract: None,
-            waiting_user: false,
-            waiting_approval: false,
-            model: None,
-            effort: None,
-            created_at: self.t,
-            completed_at: Some(self.t),
-            call_id: None,
-            activity: None,
-            pending: false,
-            parts: extra,
-            hidden_parts: Vec::new(),
-            greeting: false,
+            ..UserMessageOpts::default()
+        };
+        self.doc.core.transact(|d| {
+            let _ = d.append_user_message(&id, text, DEVICE, &opts);
+            fill_attachment_details(d, &id, &attachments);
+            d.set_message_fields(
+                &id,
+                &[("createdAt", json!(self.t)), ("completedAt", json!(self.t))],
+            );
         });
     }
 
@@ -3999,99 +4001,31 @@ impl Seeder<'_> {
     fn assistant(&mut self, turn: TurnKind, status: MessageStatus, parts: Vec<Part>) -> Id {
         self.t += 20_000;
         let id = new_id();
-        let _ = self.doc.insert_message(&Message {
-            id: id.clone(),
-            chat_id: self.doc.chat_id.clone(),
-            role: Role::Assistant,
-            sender: "agent".into(),
-            status,
-            turn: Some(turn),
-            decision: None,
-            subagent_id: None,
-            subagent_name: None,
-            handoff_messages: None,
-            reactions: Default::default(),
-            in_reply_to: None,
-            routine_name: None,
-            sender_name: None,
-            sender_icon: None,
-            sender_handle: None,
-            sender_avatar: None,
-            sender_avatar_color: None,
-            mentions: Vec::new(),
-            reply_to: None,
-            asked_by_handle: None,
-            owner_handle: None,
-            usage: None,
-            return_contract: None,
-            waiting_user: false,
-            waiting_approval: false,
-            model: Some(MODELS[0].into()),
-            effort: Some(Effort::High),
-            created_at: self.t,
-            completed_at: Some(self.t + 9_000),
-            call_id: None,
-            activity: None,
-            pending: false,
-            parts,
-            hidden_parts: Vec::new(),
-            greeting: false,
+        self.doc.core.transact(|d| {
+            let _ = d.begin_message(
+                &id,
+                "assistant",
+                "agent",
+                DEVICE,
+                core_status(status),
+                &[
+                    ("turn", json!(turn)),
+                    ("model", json!(MODELS[0])),
+                    ("effort", json!(Effort::High)),
+                    ("createdAt", json!(self.t)),
+                    ("completedAt", json!(self.t + 9_000)),
+                ],
+            );
+            write_parts(d, &id, &parts, false);
         });
         id
     }
-}
 
-/// Another Project's finished message in a group (`role: project`, F6).
-fn project_message(chat_id: &str, project: &Project, text: &str, t: u64) -> Message {
-    Message {
-        id: new_id(),
-        chat_id: chat_id.to_string(),
-        role: Role::Project,
-        sender: format!("project:{}", project.id),
-        status: MessageStatus::Done,
-        turn: None,
-        decision: None,
-        subagent_id: None,
-        subagent_name: None,
-        handoff_messages: None,
-        reactions: Default::default(),
-        in_reply_to: None,
-        routine_name: None,
-        sender_name: Some(project.name.clone()),
-        sender_icon: Some(project.icon.clone()),
-        sender_handle: None,
-        sender_avatar: None,
-        sender_avatar_color: None,
-        mentions: Vec::new(),
-        reply_to: None,
-        asked_by_handle: None,
-        owner_handle: None,
-        usage: None,
-        return_contract: None,
-        waiting_user: false,
-        waiting_approval: false,
-        model: None,
-        effort: None,
-        created_at: t,
-        completed_at: Some(t),
-        call_id: None,
-        activity: None,
-        pending: false,
-        parts: vec![Part::Text {
-            id: new_id(),
-            text: text.into(),
-        }],
-        hidden_parts: Vec::new(),
-        greeting: false,
-    }
-}
-
-impl Seeder<'_> {
     fn project(&mut self, project: &Project, text: &str) {
         self.t += 12_000;
-        let _ = self
-            .doc
-            .insert_message(&project_message(&self.doc.chat_id, project, text, self.t));
+        self.doc
+            .core
+            .transact(|d| write_project_line(d, project, text, self.t));
     }
 }
 
@@ -4157,7 +4091,9 @@ fn tool(name: &str, input: &str, out: &str, ms: u64) -> Part {
     }
 }
 
-fn seed_docs(shared: &Arc<Shared>) {
+/// The agent chats' seeded transcripts (one doc per demo chat).
+fn seed_chat_docs() -> Vec<ChatDoc> {
+    let mut out = Vec::new();
     let base = now_ms().saturating_sub(3 * 60 * 60_000);
 
     let main = ChatDoc::new(CHAT_ARBOS_MAIN, PROJECT_ARBOS);
@@ -4186,9 +4122,8 @@ fn seed_docs(shared: &Arc<Shared>) {
         if std::env::var("ARBOS_FIXTURE_REPLY").is_ok_and(|v| v == "1") {
             s.user_replying_to("Which tabs do you mean here?", &last);
         }
-        main.commit();
     }
-    add_doc(shared, main);
+    out.push(main);
 
     let research = ChatDoc::new(CHAT_ARBOS_RESEARCH, PROJECT_ARBOS);
     {
@@ -4255,9 +4190,8 @@ fn seed_docs(shared: &Arc<Shared>) {
                 text("Yes. `ListAlignment::Bottom` scrolls from the bottom up, like a chat log. Notes are in `docs/research/gpui.md`."),
             ],
         );
-        research.commit();
     }
-    add_doc(shared, research);
+    out.push(research);
 
     let launch = ChatDoc::new(CHAT_ARBOS_LAUNCH, PROJECT_ARBOS);
     {
@@ -4278,9 +4212,8 @@ fn seed_docs(shared: &Arc<Shared>) {
                 },
             ],
         );
-        launch.commit();
     }
-    add_doc(shared, launch);
+    out.push(launch);
 
     // Every widget type once (design §10): one answered choice, then five open cards.
     let widgets = ChatDoc::new(CHAT_ARBOS_WIDGETS, PROJECT_ARBOS);
@@ -4349,9 +4282,8 @@ fn seed_docs(shared: &Arc<Shared>) {
             MessageStatus::Done,
             vec![question_part("Release details", Some(widget_form()), None)],
         );
-        widgets.commit();
     }
-    add_doc(shared, widgets);
+    out.push(widgets);
     // S18: one approved card (already sent) and one pending card waiting on the user.
     let drafts = ChatDoc::new(CHAT_ARBOS_DRAFTS, PROJECT_ARBOS);
     {
@@ -4386,7 +4318,7 @@ fn seed_docs(shared: &Arc<Shared>) {
             )],
         );
         s.user("Now draft the October investor update for Priya.");
-        s.assistant(
+        let pending = s.assistant(
             TurnKind::Act,
             MessageStatus::Done,
             vec![
@@ -4407,10 +4339,11 @@ fn seed_docs(shared: &Arc<Shared>) {
                 },
             ],
         );
-        let _ = drafts.set_field(drafts.len() - 1, "waitingApproval", json!(true));
-        drafts.commit();
+        drafts
+            .core
+            .set_message_fields(&pending, &[("waitingApproval", json!(true))]);
     }
-    add_doc(shared, drafts);
+    out.push(drafts);
     let media = ChatDoc::new(CHAT_ARBOS_MEDIA, PROJECT_ARBOS);
     {
         let mut s = Seeder {
@@ -4434,9 +4367,8 @@ fn seed_docs(shared: &Arc<Shared>) {
                 text("The deck follows last quarter's structure; the budget sheet has a variance column and a chart on the second tab."),
             ],
         );
-        media.commit();
     }
-    add_doc(shared, media);
+    out.push(media);
 
     // Voice memo (F11): a spoken prompt keeps its audio as an attachment part.
     let voice = ChatDoc::new(CHAT_ARBOS_VOICE, PROJECT_ARBOS);
@@ -4445,18 +4377,15 @@ fn seed_docs(shared: &Arc<Shared>) {
             doc: &voice,
             t: base + 2_700_000,
         };
-        s.user_with_parts(
+        s.user_with_attachments(
             FIXTURE_TRANSCRIPT,
-            vec![Part::Attachment {
-                id: new_id(),
-                attachment: Attachment {
-                    name: "voice-memo.wav".into(),
-                    mime: "audio/wav".into(),
-                    blob_ref: Some(VOICE_SEED_BLOB.into()),
-                    bytes: None,
-                    kind: Some(AttachmentKind::Audio),
-                    title: None,
-                },
+            vec![Attachment {
+                name: "voice-memo.wav".into(),
+                mime: "audio/wav".into(),
+                blob_ref: Some(VOICE_SEED_BLOB.into()),
+                bytes: None,
+                kind: Some(AttachmentKind::Audio),
+                title: None,
             }],
         );
         s.assistant(
@@ -4466,9 +4395,8 @@ fn seed_docs(shared: &Arc<Shared>) {
                 "Three things today: the beta invite copy is due at noon, the pricing page review is at three, and two pull requests wait on you. Want me to start with the invite copy?",
             )],
         );
-        voice.commit();
     }
-    add_doc(shared, voice);
+    out.push(voice);
 
     let group = ChatDoc::new(CHAT_ARBOS_GROUP, PROJECT_ARBOS);
     {
@@ -4495,9 +4423,8 @@ fn seed_docs(shared: &Arc<Shared>) {
             comms,
             "Announcement draft is written. I need the final build number from Arbos before I schedule it.",
         );
-        group.commit();
     }
-    add_doc(shared, group);
+    out.push(group);
 
     let affine = ChatDoc::new(CHAT_AFFINE_MAIN, PROJECT_AFFINE);
     {
@@ -4513,9 +4440,8 @@ fn seed_docs(shared: &Arc<Shared>) {
                 "Three decisions: keep the canvas infinite, move export to the share sheet, and drop the legacy sidebar. Two open questions are in the thread.",
             )],
         );
-        affine.commit();
     }
-    add_doc(shared, affine);
+    out.push(affine);
 
     let comms = ChatDoc::new(CHAT_COMMS_MAIN, PROJECT_COMMS);
     {
@@ -4536,9 +4462,9 @@ fn seed_docs(shared: &Arc<Shared>) {
                 },
             ],
         );
-        comms.commit();
     }
-    add_doc(shared, comms);
+    out.push(comms);
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -4794,15 +4720,19 @@ fn text_part(text: &str) -> Part {
     }
 }
 
-fn seed_people_docs(shared: &Arc<Shared>) {
+fn seed_people_chat_docs() -> Vec<ChatDoc> {
+    let mut out = Vec::new();
     let base = now_ms().saturating_sub(40 * 60_000);
     let doc = ChatDoc::new(DM_SAM, "people");
-    let _ = doc.insert_message(&human_message(
-        DM_SAM,
-        &sam(),
-        "Hey — are you around? I want to go over the beta invite copy before it ships.",
-        base,
-    ));
+    insert_message_via_core(
+        &doc,
+        &human_message(
+            DM_SAM,
+            &sam(),
+            "Hey — are you around? I want to go over the beta invite copy before it ships.",
+            base,
+        ),
+    );
     // Sam reacted to my line (one chip); a seed for the reaction rows.
     let mut mine = human_message(
         DM_SAM,
@@ -4814,24 +4744,26 @@ fn seed_people_docs(shared: &Arc<Shared>) {
         .entry("👍".into())
         .or_default()
         .insert(format!("user:{}", sam().id), true);
-    let _ = doc.insert_message(&mine);
-    let _ = doc.insert_message(&human_message(
+    insert_message_via_core(&doc, &mine);
+    insert_message_via_core(&doc, &human_message(
         DM_SAM,
         &sam(),
         "Sending in a sec. Also: can we add your Arbos agent here so it can pull the numbers while we talk?",
         base + 150_000,
     ));
-    doc.commit();
-    add_doc(shared, doc);
+    out.push(doc);
 
     // Sam's shared project: Sam wrote first, the agent answered with attribution.
     let studio = ChatDoc::new(SHARED_STUDIO_CHAT, SHARED_STUDIO);
-    let _ = studio.insert_message(&human_message(
-        SHARED_STUDIO_CHAT,
-        &sam(),
-        "@jacob is in now. Studio: let's use this for the launch page work.",
-        base + 200_000,
-    ));
+    insert_message_via_core(
+        &studio,
+        &human_message(
+            SHARED_STUDIO_CHAT,
+            &sam(),
+            "@jacob is in now. Studio: let's use this for the launch page work.",
+            base + 200_000,
+        ),
+    );
     let mut reply = human_message(SHARED_STUDIO_CHAT, &sam(), "", base + 230_000);
     reply.role = Role::Assistant;
     reply.sender = format!("agent:{SHARED_STUDIO}");
@@ -4844,26 +4776,28 @@ fn seed_people_docs(shared: &Arc<Shared>) {
     reply.parts = vec![text_part(
         "@sam asked: let's use this for the launch page work.\n\nWelcome @jacob. The launch page draft lives in `site/launch/`; I will keep both of you posted here.",
     )];
-    let _ = studio.insert_message(&reply);
-    studio.commit();
-    add_doc(shared, studio);
+    insert_message_via_core(&studio, &reply);
+    out.push(studio);
 
     // The Launch week group: three people and my agent, as in the redesign mockups.
     let group = ChatDoc::new(GROUP_LAUNCH, GROUP_LAUNCH);
     let samir = person("gh_457", "samir", Some("Samir Haddad"), "member");
     let sara = person("gh_458", "sara", Some("Sara Lind"), "member");
-    let _ = group.insert_message(&human_message(
+    insert_message_via_core(&group, &human_message(
         GROUP_LAUNCH,
         &samir,
         "Deck v3 is in the shared folder. Sam, can you check the pricing slide before the run-through?",
         base + 300_000,
     ));
-    let _ = group.insert_message(&human_message(
-        GROUP_LAUNCH,
-        &sam(),
-        "On it. @arbos pull the latest signup numbers into slide 4 while I read.",
-        base + 330_000,
-    ));
+    insert_message_via_core(
+        &group,
+        &human_message(
+            GROUP_LAUNCH,
+            &sam(),
+            "On it. @arbos pull the latest signup numbers into slide 4 while I read.",
+            base + 330_000,
+        ),
+    );
     let mut agent = human_message(GROUP_LAUNCH, &sam(), "", base + 360_000);
     agent.role = Role::Assistant;
     agent.sender = format!("agent:{PROJECT_ARBOS}");
@@ -4875,7 +4809,7 @@ fn seed_people_docs(shared: &Arc<Shared>) {
     agent.parts = vec![text_part(
         "Done. Slide 4 now reads 1,284 signups this week (+18 %). The chart is in `deck/v3/slide-04.png`.",
     )];
-    let _ = group.insert_message(&agent);
+    insert_message_via_core(&group, &agent);
     // Two images and a file, so the group pane's Library and the attachment
     // composer have something to show (redesign mocks d / e).
     let mut shared_files = human_message(GROUP_LAUNCH, &samir, "", base + 380_000);
@@ -4917,22 +4851,28 @@ fn seed_people_docs(shared: &Arc<Shared>) {
         ),
         text_part("Deck, dashboard and the press kit for the run-through."),
     ];
-    let _ = group.insert_message(&shared_files);
-    let _ = group.insert_message(&human_message(
-        GROUP_LAUNCH,
-        &sara,
-        "Thanks both. I will do the run-through at 3 and post notes here.",
-        base + 400_000,
-    ));
+    insert_message_via_core(&group, &shared_files);
+    insert_message_via_core(
+        &group,
+        &human_message(
+            GROUP_LAUNCH,
+            &sara,
+            "Thanks both. I will do the run-through at 3 and post notes here.",
+            base + 400_000,
+        ),
+    );
     // A reply the model provider refused (feedback lium-empty-reply-2026-10-21): the box
     // writes an empty text part plus the `model_refused` line; the transcript shows the line
     // in the agent's bubble instead of a bare "answering @…" header.
-    let _ = group.insert_message(&human_message(
-        GROUP_LAUNCH,
-        &sara,
-        "@arbos can you also pull the churn numbers for slide 6?",
-        base + 420_000,
-    ));
+    insert_message_via_core(
+        &group,
+        &human_message(
+            GROUP_LAUNCH,
+            &sara,
+            "@arbos can you also pull the churn numbers for slide 6?",
+            base + 420_000,
+        ),
+    );
     let mut refused = human_message(GROUP_LAUNCH, &sara, "", base + 425_000);
     refused.role = Role::Assistant;
     refused.status = MessageStatus::Error;
@@ -4950,15 +4890,18 @@ fn seed_people_docs(shared: &Arc<Shared>) {
             message: "I couldn't answer that: the model provider declined the request. Ask me again in a moment.".into(),
         },
     ];
-    let _ = group.insert_message(&refused);
+    insert_message_via_core(&group, &refused);
     // The same failure from an older box: no error part, no `senderName` — the transcript
     // resolves the name from the agent id ("Arbos didn't answer. Ask again.").
-    let _ = group.insert_message(&human_message(
-        GROUP_LAUNCH,
-        &samir,
-        "@arbos and the press list for the embargo?",
-        base + 430_000,
-    ));
+    insert_message_via_core(
+        &group,
+        &human_message(
+            GROUP_LAUNCH,
+            &samir,
+            "@arbos and the press list for the embargo?",
+            base + 430_000,
+        ),
+    );
     let mut silent = human_message(GROUP_LAUNCH, &samir, "", base + 433_000);
     silent.role = Role::Assistant;
     silent.status = MessageStatus::Error;
@@ -4969,9 +4912,9 @@ fn seed_people_docs(shared: &Arc<Shared>) {
     silent.asked_by_handle = Some("samir".into());
     silent.owner_handle = Some(ME_HANDLE.into());
     silent.parts = vec![text_part("")];
-    let _ = group.insert_message(&silent);
-    group.commit();
-    add_doc(shared, group);
+    insert_message_via_core(&group, &silent);
+    out.push(group);
+    out
 }
 
 /// `@slug` / `@handle` tokens in the text, resolved to member ids.
@@ -5378,10 +5321,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                     sleep(Duration::from_millis(2200)).await;
                     let ask = "Thanks for the invite — what is the state of the beta invite copy?";
                     let msg = human_message(&chat_id, &other, ask, now_ms());
-                    with_doc(&shared, &chat_id, |doc| {
-                        let _ = doc.insert_message(&msg);
-                        doc.commit();
-                    });
+                    with_doc(&shared, &chat_id, |doc| insert_message_via_core(doc, &msg));
                     mark_unread_if_hidden(&shared, &chat_id);
                     let agent = {
                         let projects = shared.projects.lock().unwrap();
@@ -5529,10 +5469,7 @@ fn people_after_send(
         });
         let reply = sam_reply(&text, &space);
         let msg = human_message(&chat_id, &other, &reply, now_ms());
-        with_doc(&shared, &chat_id, |doc| {
-            let _ = doc.insert_message(&msg);
-            doc.commit();
-        });
+        with_doc(&shared, &chat_id, |doc| insert_message_via_core(doc, &msg));
         mark_unread_if_hidden(&shared, &chat_id);
         // Sam also asks the shared agent once it is in the chat.
         if let Some(agent) = space.agents.first().cloned() {
@@ -5543,10 +5480,7 @@ fn people_after_send(
                     agent.handle
                 );
                 let msg = human_message(&chat_id, &other, &ask, now_ms());
-                let _ = with_doc(&shared, &chat_id, |doc| {
-                    let _ = doc.insert_message(&msg);
-                    doc.commit();
-                });
+                with_doc(&shared, &chat_id, |doc| insert_message_via_core(doc, &msg));
                 agent_reply(&shared, &chat_id, &agent, &other, &ask).await;
             }
         }
@@ -5572,63 +5506,34 @@ async fn agent_reply(
     asker: &Person,
     ask: &str,
 ) {
-    let assistant_id = new_id();
-    let ix = with_doc(shared, chat_id, |doc| {
-        let msg = Message {
-            id: assistant_id.clone(),
-            chat_id: chat_id.to_string(),
-            role: Role::Assistant,
-            sender: format!("agent:{}", agent.project_id),
-            status: MessageStatus::Streaming,
-            turn: None,
-            decision: None,
-            subagent_id: None,
-            subagent_name: None,
-            handoff_messages: None,
-            reactions: Default::default(),
-            in_reply_to: None,
-            routine_name: None,
-            sender_name: Some(agent.name.clone()),
-            sender_icon: Some(agent.icon.clone()),
-            sender_handle: Some(agent.handle.clone()),
-            sender_avatar: None,
-            sender_avatar_color: None,
-            mentions: Vec::new(),
-            reply_to: None,
-            asked_by_handle: Some(asker.handle.clone()),
-            owner_handle: Some(agent.owner_handle.clone()),
-            usage: None,
-            return_contract: None,
-            waiting_user: false,
-            waiting_approval: false,
-            model: None,
-            effort: None,
-            created_at: now_ms(),
-            completed_at: None,
-            call_id: None,
-            activity: None,
-            pending: false,
-            parts: vec![Part::Status {
-                id: new_id(),
-                code: StatusKind::Deciding,
-                message: format!("{} is reading…", agent.name),
-            }],
-            hidden_parts: Vec::new(),
-            greeting: false,
-        };
-        let ix = doc.insert_message(&msg).unwrap_or(0);
-        doc.commit();
-        ix
+    let id = new_id();
+    let reading = with_doc(shared, chat_id, |doc| {
+        doc.core.transact(|d| {
+            begin_assistant_row(
+                d,
+                &id,
+                &format!("agent:{}", agent.project_id),
+                &[
+                    ("senderName", json!(agent.name)),
+                    ("senderIcon", json!(agent.icon)),
+                    ("senderHandle", json!(agent.handle)),
+                    ("askedByHandle", json!(asker.handle)),
+                    ("ownerHandle", json!(agent.owner_handle)),
+                ],
+                StatusKind::Deciding,
+                &format!("{} is reading…", agent.name),
+            )
+        })
     })
-    .unwrap_or(0);
+    .unwrap_or_default();
     sleep(Duration::from_millis(600)).await;
-    let pix = with_doc(shared, chat_id, |doc| {
-        let _ = doc.set_part_field(ix, 0, "hidden", json!(true));
-        let pix = doc.push_part(ix, &text_part("")).unwrap_or(1);
-        doc.commit();
-        pix
+    let text = with_doc(shared, chat_id, |doc| {
+        doc.core.transact(|d| {
+            d.set_part_fields(&id, &reading, &[("hidden", json!(true))]);
+            push_part(d, &id, &text_part(""))
+        })
     })
-    .unwrap_or(1);
+    .unwrap_or_default();
     let short = ask.trim().trim_end_matches('.');
     let quoted = format!(
         "@{} asked: {}",
@@ -5647,11 +5552,9 @@ async fn agent_reply(
         "On it. I checked the workspace and nothing blocks this on my side; say the word and I will draft it."
     };
     let stop = AtomicBool::new(false);
-    stream_blocks(shared, chat_id, ix, pix, &[&quoted, body], &stop).await;
+    stream_blocks(shared, chat_id, &id, &text, &[&quoted, body], &stop).await;
     with_doc(shared, chat_id, |doc| {
-        let _ = doc.set_status(ix, MessageStatus::Done);
-        let _ = doc.set_field(ix, "completedAt", json!(now_ms()));
-        doc.commit();
+        set_status(&doc.core, &id, MessageStatus::Done);
     });
     mark_unread_if_hidden(shared, chat_id);
 }
@@ -5713,50 +5616,6 @@ fn fixture_call(shared: &Arc<Shared>, chat_id: &str, kind: CallKind) -> Call {
     }
 }
 
-fn system_message(chat_id: &str, text: &str) -> Message {
-    Message {
-        id: new_id(),
-        chat_id: chat_id.to_string(),
-        role: Role::System,
-        sender: "system".into(),
-        sender_handle: None,
-        sender_name: None,
-        sender_avatar: None,
-        sender_avatar_color: None,
-        mentions: Vec::new(),
-        status: MessageStatus::Done,
-        turn: None,
-        decision: None,
-        subagent_id: None,
-        subagent_name: None,
-        handoff_messages: None,
-        reactions: Default::default(),
-        in_reply_to: None,
-        routine_name: None,
-        sender_icon: None,
-        reply_to: None,
-        asked_by_handle: None,
-        owner_handle: None,
-        usage: None,
-        return_contract: None,
-        waiting_user: false,
-        waiting_approval: false,
-        model: None,
-        effort: None,
-        created_at: now_ms(),
-        completed_at: Some(now_ms()),
-        call_id: None,
-        activity: None,
-        pending: false,
-        parts: vec![Part::Text {
-            id: new_id(),
-            text: text.to_string(),
-        }],
-        hidden_parts: Vec::new(),
-        greeting: false,
-    }
-}
-
 /// LiveKit access token for `livekit-server --dev` (API key `devkey`, secret
 /// `secret`): HS256 JWT with the video grant. Dev only.
 fn dev_token(room: &str, identity: &str, name: &str, metadata: &str) -> String {
@@ -5785,4 +5644,246 @@ fn dev_token(room: &str, identity: &str, name: &str, metadata: &str) -> String {
     let inner = Sha256::digest([ipad.as_slice(), signing.as_bytes()].concat());
     let mac = Sha256::digest([opad.as_slice(), inner.as_slice()].concat());
     format!("{signing}.{}", b64.encode(mac))
+}
+
+#[cfg(test)]
+mod seed_parity_tests {
+    use super::*;
+
+    fn part_sig(part: &Part) -> String {
+        let kind = serde_json::to_value(part)
+            .ok()
+            .and_then(|v| v.get("kind").and_then(|k| k.as_str()).map(str::to_owned))
+            .unwrap_or_else(|| "?".into());
+        match part {
+            Part::Question { state, .. } => format!("{kind}:{state:?}"),
+            Part::Approval { state, .. } => format!("{kind}:{state:?}"),
+            Part::Tool { status, .. } => format!("{kind}:{status:?}"),
+            Part::Status { code, .. } => format!("{kind}:{code:?}"),
+            Part::Attachment { attachment, .. } => format!(
+                "{kind}:{}:{:?}:{:?}",
+                attachment.title(),
+                attachment.bytes,
+                attachment.kind()
+            ),
+            _ => kind,
+        }
+    }
+
+    /// `t0`: the doc's first `createdAt`, so seeded times compare without `now`.
+    fn message_sig(m: &Message, t0: u64) -> String {
+        let kinds: Vec<String> = m.parts.iter().map(part_sig).collect();
+        let hidden: Vec<String> = m.hidden_parts.iter().map(part_sig).collect();
+        let reactions: usize = m.reactions.values().map(|b| b.len()).sum();
+        format!(
+            "{:?} {:?} {} name={:?} h={:?} asked={:?} turn={:?} wa={} [{}] hidden=[{}] text={} r={} dt={} ct={:?}",
+            m.role,
+            m.status,
+            m.sender,
+            m.sender_name,
+            m.sender_handle,
+            m.asked_by_handle,
+            m.turn,
+            m.waiting_approval,
+            kinds.join(","),
+            hidden.join(","),
+            m.plain_text().chars().count(),
+            reactions,
+            m.created_at.saturating_sub(t0),
+            m.completed_at.map(|c| c.saturating_sub(m.created_at)),
+        )
+    }
+
+    fn table() -> Vec<(String, Vec<String>)> {
+        seed_chat_docs()
+            .into_iter()
+            .chain(seed_people_chat_docs())
+            .map(|doc| {
+                let messages = doc.read_all();
+                let t0 = messages.first().map(|m| m.created_at).unwrap_or(0);
+                let rows = messages.iter().map(|m| message_sig(m, t0)).collect();
+                (doc.chat_id.clone(), rows)
+            })
+            .collect()
+    }
+
+    /// Recorded from the seed written by the Mac-side `insert_message` writer, before the
+    /// fixture moved to the `arbos_core` writers: same chats, rows, part kinds, statuses.
+    #[rustfmt::skip]
+    const EXPECTED: &[(&str, &[&str])] = &[
+        ("01J9CHAT0ARBOS000000000000", &[
+            "User Done user name=None h=None asked=None turn=None wa=false [text] hidden=[] text=33 r=0 dt=0 ct=Some(0)",
+            "Assistant Done agent name=None h=None asked=None turn=Some(Reply) wa=false [text] hidden=[] text=93 r=0 dt=20000 ct=Some(9000)",
+            "User Done user name=None h=None asked=None turn=None wa=false [text] hidden=[] text=15 r=0 dt=65000 ct=Some(0)",
+            "Assistant Done agent name=None h=None asked=None turn=Some(Reply) wa=false [text] hidden=[] text=72 r=0 dt=85000 ct=Some(9000)",
+        ]),
+        ("01J9CHAT0RESEARCH000000000", &[
+            "User Done user name=None h=None asked=None turn=None wa=false [text] hidden=[] text=63 r=0 dt=0 ct=Some(0)",
+            "Assistant Done agent name=None h=None asked=None turn=Some(Act) wa=false [tool:Some(Ok),tool:Some(Ok),tool:Some(Ok),diff,tool:Some(Ok),text] hidden=[] text=111 r=0 dt=20000 ct=Some(9000)",
+            "User Done user name=None h=None asked=None turn=None wa=false [text] hidden=[] text=63 r=0 dt=65000 ct=Some(0)",
+            "Assistant Done agent name=None h=None asked=None turn=Some(Spawn) wa=false [status:Working,tool:Some(Ok),browser,file,text] hidden=[] text=111 r=0 dt=85000 ct=Some(9000)",
+        ]),
+        ("01J9CHAT0LAUNCH00000000000", &[
+            "User Done user name=None h=None asked=None turn=None wa=false [text] hidden=[] text=37 r=0 dt=0 ct=Some(0)",
+            "Assistant Done agent name=None h=None asked=None turn=Some(Reply) wa=false [text,status:AskUser] hidden=[] text=31 r=0 dt=20000 ct=Some(9000)",
+        ]),
+        ("01J9CHAT0WIDGETS0000000000", &[
+            "User Done user name=None h=None asked=None turn=None wa=false [text] hidden=[] text=34 r=0 dt=0 ct=Some(0)",
+            "Assistant Done agent name=None h=None asked=None turn=Some(Reply) wa=false [text,question:Answered] hidden=[] text=26 r=0 dt=20000 ct=Some(9000)",
+            "User Done user name=None h=None asked=None turn=None wa=false [text] hidden=[] text=12 r=0 dt=65000 ct=Some(0)",
+            "Assistant Done agent name=None h=None asked=None turn=Some(Reply) wa=false [text,question:Open] hidden=[] text=57 r=0 dt=85000 ct=Some(9000)",
+            "Assistant Done agent name=None h=None asked=None turn=Some(Reply) wa=false [question:Open] hidden=[] text=0 r=0 dt=105000 ct=Some(9000)",
+            "Assistant Done agent name=None h=None asked=None turn=Some(Reply) wa=false [question:Open] hidden=[] text=0 r=0 dt=125000 ct=Some(9000)",
+            "Assistant Done agent name=None h=None asked=None turn=Some(Reply) wa=false [question:Open] hidden=[] text=0 r=0 dt=145000 ct=Some(9000)",
+            "Assistant Done agent name=None h=None asked=None turn=Some(Reply) wa=false [question:Open] hidden=[] text=0 r=0 dt=165000 ct=Some(9000)",
+        ]),
+        ("01J9CHAT0DRAFTS00000000000", &[
+            "User Done user name=None h=None asked=None turn=None wa=false [text] hidden=[] text=45 r=0 dt=0 ct=Some(0)",
+            "Assistant Done agent name=None h=None asked=None turn=Some(Act) wa=false [text,approval:Approved] hidden=[] text=54 r=0 dt=20000 ct=Some(9000)",
+            "Assistant Done agent name=None h=None asked=None turn=Some(Reply) wa=false [text] hidden=[] text=100 r=0 dt=40000 ct=Some(9000)",
+            "User Done user name=None h=None asked=None turn=None wa=false [text] hidden=[] text=48 r=0 dt=85000 ct=Some(0)",
+            "Assistant Done agent name=None h=None asked=None turn=Some(Act) wa=true [text,approval:Pending,status:WaitingApproval] hidden=[] text=69 r=0 dt=105000 ct=Some(9000)",
+        ]),
+        ("01J9CHAT0MEDIA000000000000", &[
+            "User Done user name=None h=None asked=None turn=None wa=false [text] hidden=[] text=126 r=0 dt=0 ct=Some(0)",
+            "Assistant Done agent name=None h=None asked=None turn=Some(Act) wa=false [text,attachment:Q3 cover image:Some(418000):Image,attachment:Q3 review deck · 12 slides:Some(2310000):Slides,attachment:Q3 budget vs. actuals:Some(61000):Sheet,attachment:One-pager for the board:Some(48500):Doc,attachment:Deck, exported as PDF:Some(1540000):Pdf,attachment:Teaser clip · 0:24:Some(9800000):Video,attachment:Voice-over · 1:12:Some(1120000):Audio,attachment:Source data and scripts:Some(3300000):File,text] hidden=[] text=172 r=0 dt=20000 ct=Some(9000)",
+        ]),
+        ("01J9CHAT0VOICE000000000000", &[
+            "User Done user name=None h=None asked=None turn=None wa=false [attachment:voice-memo.wav:None:Audio,text] hidden=[] text=39 r=0 dt=0 ct=Some(0)",
+            "Assistant Done agent name=None h=None asked=None turn=Some(Reply) wa=false [text] hidden=[] text=167 r=0 dt=20000 ct=Some(9000)",
+        ]),
+        ("01J9CHAT0GROUP000000000000", &[
+            "User Done user name=None h=None asked=None turn=None wa=false [text] hidden=[] text=70 r=0 dt=0 ct=Some(0)",
+            "Assistant Done agent name=None h=None asked=None turn=Some(Reply) wa=false [text] hidden=[] text=126 r=0 dt=20000 ct=Some(9000)",
+            "Project Done project:01J9AFFINE0000000000000000 name=Some(\"Affine\") h=None asked=None turn=None wa=false [text] hidden=[] text=85 r=0 dt=32000 ct=Some(0)",
+            "Project Done project:01J9COMMS00000000000000000 name=Some(\"Comms\") h=None asked=None turn=None wa=false [text] hidden=[] text=93 r=0 dt=44000 ct=Some(0)",
+        ]),
+        ("01J9CHAT0AFFINE00000000000", &[
+            "User Done user name=None h=None asked=None turn=None wa=false [text] hidden=[] text=36 r=0 dt=0 ct=Some(0)",
+            "Assistant Done agent name=None h=None asked=None turn=Some(Reply) wa=false [text] hidden=[] text=141 r=0 dt=20000 ct=Some(9000)",
+        ]),
+        ("01J9CHAT0COMMS000000000000", &[
+            "User Done user name=None h=None asked=None turn=None wa=false [text] hidden=[] text=35 r=0 dt=0 ct=Some(0)",
+            "Assistant Error agent name=None h=None asked=None turn=Some(Act) wa=false [tool:Some(Ok),error] hidden=[] text=0 r=0 dt=20000 ct=Some(9000)",
+        ]),
+        ("01J9DMSAM00000000000000000", &[
+            "User Done user:gh_456 name=Some(\"Sam Rivera\") h=Some(\"sam\") asked=None turn=None wa=false [text] hidden=[] text=77 r=0 dt=0 ct=Some(0)",
+            "User Done user:gh_1 name=Some(\"Jacob Steeves\") h=Some(\"jacob\") asked=None turn=None wa=false [text] hidden=[] text=47 r=1 dt=90000 ct=Some(0)",
+            "User Done user:gh_456 name=Some(\"Sam Rivera\") h=Some(\"sam\") asked=None turn=None wa=false [text] hidden=[] text=98 r=0 dt=150000 ct=Some(0)",
+        ]),
+        ("01J9STUDIOCHAT000000000000", &[
+            "User Done user:gh_456 name=Some(\"Sam Rivera\") h=Some(\"sam\") asked=None turn=None wa=false [text] hidden=[] text=66 r=0 dt=0 ct=Some(0)",
+            "Assistant Done agent:01J9STUDIO0000000000000000 name=Some(\"Studio\") h=Some(\"studio\") asked=Some(\"sam\") turn=None wa=false [text] hidden=[] text=153 r=0 dt=30000 ct=Some(0)",
+        ]),
+        ("01J9GROUPLAUNCH00000000000", &[
+            "User Done user:gh_457 name=Some(\"Samir Haddad\") h=Some(\"samir\") asked=None turn=None wa=false [text] hidden=[] text=93 r=0 dt=0 ct=Some(0)",
+            "User Done user:gh_456 name=Some(\"Sam Rivera\") h=Some(\"sam\") asked=None turn=None wa=false [text] hidden=[] text=71 r=0 dt=30000 ct=Some(0)",
+            "Assistant Done agent:01J9ARBOS00000000000000000 name=Some(\"Arbos\") h=Some(\"arbos\") asked=Some(\"sam\") turn=None wa=false [text] hidden=[] text=96 r=0 dt=60000 ct=Some(0)",
+            "User Done user:gh_457 name=Some(\"Samir Haddad\") h=Some(\"samir\") asked=None turn=None wa=false [attachment:Slide 4 · signups:Some(212000):Image,attachment:Launch dashboard:Some(348000):Image,attachment:Launch day, the team:Some(1204000):Image,attachment:Signup funnel:Some(156000):Image,attachment:Press kit v3:Some(1840000):Pdf,text] hidden=[] text=54 r=0 dt=80000 ct=Some(0)",
+            "User Done user:gh_458 name=Some(\"Sara Lind\") h=Some(\"sara\") asked=None turn=None wa=false [text] hidden=[] text=64 r=0 dt=100000 ct=Some(0)",
+            "User Done user:gh_458 name=Some(\"Sara Lind\") h=Some(\"sara\") asked=None turn=None wa=false [text] hidden=[] text=55 r=0 dt=120000 ct=Some(0)",
+            "Assistant Error agent:01J9ARBOS00000000000000000 name=Some(\"Arbos\") h=Some(\"arbos\") asked=Some(\"sara\") turn=None wa=false [text,error] hidden=[] text=0 r=0 dt=125000 ct=Some(0)",
+            "User Done user:gh_457 name=Some(\"Samir Haddad\") h=Some(\"samir\") asked=None turn=None wa=false [text] hidden=[] text=42 r=0 dt=130000 ct=Some(0)",
+            "Assistant Error agent:01J9ARBOS00000000000000000 name=None h=Some(\"arbos\") asked=Some(\"samir\") turn=None wa=false [text] hidden=[] text=0 r=0 dt=133000 ct=Some(0)",
+        ]),
+        
+    ];
+
+    #[test]
+    fn seeded_docs_match_recorded_parity_table() {
+        let got = table();
+        assert_eq!(got.len(), EXPECTED.len(), "doc count");
+        for ((chat, rows), (want_chat, want_rows)) in got.iter().zip(EXPECTED) {
+            assert_eq!(chat, want_chat);
+            let want: Vec<String> = want_rows.iter().map(|r| r.to_string()).collect();
+            assert_eq!(rows, &want, "chat {chat}");
+        }
+    }
+
+    #[test]
+    fn scripted_turn_writes_by_id_read_back_as_mac_message() {
+        let doc = ChatDoc::new("chat", PROJECT_ARBOS);
+        let id = new_id();
+        let lead = doc.core.transact(|d| {
+            begin_assistant_row(
+                d,
+                &id,
+                "agent",
+                &[("model", json!(MODELS[0]))],
+                StatusKind::Deciding,
+                "Arbos is deciding…",
+            )
+        });
+        let m = &doc.read_all()[0];
+        assert_eq!(m.status, MessageStatus::Streaming);
+        assert_eq!(
+            m.parts.iter().map(part_sig).collect::<Vec<_>>(),
+            ["status:Deciding"]
+        );
+
+        replace_part(&doc.core, &id, &lead, &empty_text());
+        for chunk in ["Here is ", "the draft."] {
+            doc.core.transact(|d| d.append_text(&id, &lead, chunk));
+        }
+        let tool = push_part(
+            &doc.core,
+            &id,
+            &Part::Tool {
+                id: new_id(),
+                call: ToolCall {
+                    id: new_id(),
+                    name: "grep".into(),
+                    input: json!("x"),
+                },
+                output_summary: String::new(),
+                output_ref: None,
+                is_error: false,
+                status: Some(ToolStatus::Running),
+                duration_ms: None,
+                subagent_name: None,
+            },
+        );
+        doc.core
+            .set_part_fields(&id, &tool, &[("status", json!("ok"))]);
+        let approval_id = new_id();
+        doc.core.transact(|d| {
+            d.add_approval_part(
+                &id,
+                &approval_id,
+                &draft_request("email", "a@b.c", "Hi", "Body"),
+                0,
+            );
+            d.set_approval_state(
+                &approval_id,
+                CoreApprovalState::Approved,
+                Some(DEVICE),
+                None,
+            );
+            set_status(d, &id, MessageStatus::Done);
+        });
+
+        let m = &doc.read_all()[0];
+        assert_eq!(m.status, MessageStatus::Done);
+        assert!(m.completed_at.is_some());
+        assert_eq!(m.model.as_deref(), Some(MODELS[0]));
+        assert_eq!(m.plain_text(), "Here is the draft.");
+        assert_eq!(
+            m.parts.iter().map(part_sig).collect::<Vec<_>>(),
+            ["text", "tool:Some(Ok)", "approval:Approved"]
+        );
+    }
+
+    #[test]
+    fn seeded_rows_carry_no_mac_placeholders() {
+        for doc in seed_chat_docs().into_iter().chain(seed_people_chat_docs()) {
+            let raw = doc.core.to_json();
+            for row in raw["messages"].as_array().into_iter().flatten() {
+                let row = row.as_object().expect("row object");
+                for key in ["chatId", "pending", "hiddenParts"] {
+                    assert!(!row.contains_key(key), "{}: {key}", doc.chat_id);
+                }
+                assert_eq!(row["deviceId"], DEVICE);
+            }
+        }
+    }
 }

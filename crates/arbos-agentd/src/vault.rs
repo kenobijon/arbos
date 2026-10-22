@@ -759,7 +759,7 @@ async fn scrub_secret(agent: &Arc<Agent>, secret_id: &str) -> Result<ScrubStats,
     };
     for host in hosts {
         let n = {
-            let mut h = host.lock().await;
+            let h = host.lock().await;
             h.doc.scrub_values(&values)
         };
         if n > 0 {

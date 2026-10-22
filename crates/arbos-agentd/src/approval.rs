@@ -174,7 +174,7 @@ impl Agent {
                 .map(|t| (t.assistant_msg_id.clone(), t.user_msg_id.clone()))
         };
         let (msg_id, in_reply_to) = {
-            let mut h = host.lock().await;
+            let h = host.lock().await;
             let (msg_id, in_reply_to, own) = match turn_msg {
                 Some((m, u)) => (m, u, false),
                 None => {
@@ -314,7 +314,7 @@ impl Agent {
             None => (row.chat_id.clone(), row.message_id.clone()),
         };
         if let Some(host) = self.sync.host(&chat_id).await {
-            let mut h = host.lock().await;
+            let h = host.lock().await;
             h.doc
                 .set_approval_state(approval_id, state, Some(decided_by), reason.as_deref());
             let still_pending = h

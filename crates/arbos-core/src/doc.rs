@@ -3,7 +3,7 @@
 //! is the client→box outbox. The relay never sees this module: it stores
 //! opaque bytes.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashMap};
 
 use loro::event::DiffEvent;
@@ -270,7 +270,7 @@ impl MessageView {
 /// A chat doc with handles cached for the streaming hot path.
 pub struct ChatDoc {
     pub doc: LoroDoc,
-    live_text: HashMap<(String, String), LoroText>,
+    live_text: RefCell<HashMap<(String, String), LoroText>>,
     /// Nesting depth for [`Self::transact`]. Only the outermost call commits.
     txn_depth: Cell<u32>,
 }
@@ -350,6 +350,23 @@ fn insert_json_map(map: &LoroMap, key: &str, value: Value) -> CoreResult<()> {
     Ok(())
 }
 
+/// Write one top-level part field. A `text` / `reasoning` string becomes a `LoroText`
+/// (returned so callers can cache it for streaming); everything else goes through
+/// [`insert_json_map`].
+fn insert_part_field(map: &LoroMap, key: &str, value: Value) -> CoreResult<Option<LoroText>> {
+    match value {
+        Value::String(s) if key == "text" || key == "reasoning" => {
+            let t = loro_err(map.insert_container(key, LoroText::new()))?;
+            loro_err(t.push_str(&s))?;
+            Ok(Some(t))
+        }
+        other => {
+            insert_json_map(map, key, other)?;
+            Ok(None)
+        }
+    }
+}
+
 fn insert_json_list(list: &LoroList, pos: usize, value: Value) -> CoreResult<()> {
     match value {
         Value::Null => {
@@ -394,7 +411,7 @@ impl ChatDoc {
         doc.set_record_timestamp(record_timestamps);
         Self {
             doc,
-            live_text: HashMap::new(),
+            live_text: RefCell::new(HashMap::new()),
             txn_depth: Cell::new(0),
         }
     }
@@ -871,6 +888,44 @@ impl ChatDoc {
         t.insert(0, text).ok();
     }
 
+    /// Box / fixture write: a message row with empty `parts` and an empty `reactions`
+    /// map. `completedAt` is set only for a terminal `status`. `extra` fields are
+    /// written last (before `parts`), so they can override defaults like `createdAt`.
+    /// Honors an open [`Self::transact`] (only the outermost commits).
+    pub fn begin_message(
+        &self,
+        msg_id: &str,
+        role: &str,
+        sender: &str,
+        device_id: &str,
+        status: MessageStatus,
+        extra: &[(&str, Value)],
+    ) -> CoreResult<()> {
+        let msgs = self.messages_list();
+        let m = loro_err(msgs.push_container(LoroMap::new()))?;
+        let now = now_ms();
+        loro_err(m.insert("id", msg_id))?;
+        loro_err(m.insert("role", role))?;
+        loro_err(m.insert("sender", sender))?;
+        loro_err(m.insert("createdAt", now))?;
+        let terminal = match status {
+            MessageStatus::Done | MessageStatus::Error | MessageStatus::Cancelled => true,
+            MessageStatus::Queued | MessageStatus::Streaming => false,
+        };
+        if terminal {
+            loro_err(m.insert("completedAt", now))?;
+        }
+        loro_err(m.insert("deviceId", device_id))?;
+        loro_err(m.insert("status", status.as_str()))?;
+        loro_err(m.insert_container("reactions", LoroMap::new()))?;
+        for (k, v) in extra {
+            loro_err(m.insert(k, json_to_lv(v)))?;
+        }
+        loro_err(m.insert_container("parts", LoroList::new()))?;
+        self.commit_now();
+        Ok(())
+    }
+
     /// Box write (Calls Phase 2): one finished line of a voice call — what a human said
     /// (`role: "user"`) or what the agent said (`role: "assistant"`) — with no `send` command, so
     /// it never drives a turn. `extra` carries `voice: true`, `callId`, speaker attribution.
@@ -996,7 +1051,7 @@ impl ChatDoc {
 
     /// Box write: a new assistant message with one empty streaming text part. Returns `(msg_id, part_id)`.
     pub fn start_assistant_message(
-        &mut self,
+        &self,
         msg_id: &str,
         in_reply_to: &str,
         device_id: &str,
@@ -1018,7 +1073,7 @@ impl ChatDoc {
         part_id
     }
 
-    fn add_text_part_inner(&mut self, parts: &LoroList, msg_id: &str, kind: &str) -> String {
+    fn add_text_part_inner(&self, parts: &LoroList, msg_id: &str, kind: &str) -> String {
         let part = parts.push_container(LoroMap::new()).expect("part");
         let part_id = ulid();
         part.insert("id", part_id.as_str()).ok();
@@ -1030,12 +1085,13 @@ impl ChatDoc {
         };
         let t = part.insert_container(field, LoroText::new()).expect("text");
         self.live_text
+            .borrow_mut()
             .insert((msg_id.to_owned(), part_id.clone()), t);
         part_id
     }
 
     /// Add a `text` or `reasoning` part to an existing message.
-    pub fn add_text_part(&mut self, msg_id: &str, kind: &str) -> Option<String> {
+    pub fn add_text_part(&self, msg_id: &str, kind: &str) -> Option<String> {
         let m = self.find_message(msg_id)?;
         let parts = match m.get("parts") {
             Some(ValueOrContainer::Container(Container::List(l))) => l,
@@ -1047,14 +1103,15 @@ impl ChatDoc {
     }
 
     /// Append a delta to a live text part. Caller batches commits on the 120 ms tick.
-    pub fn append_text(&mut self, msg_id: &str, part_id: &str, delta: &str) {
+    pub fn append_text(&self, msg_id: &str, part_id: &str, delta: &str) {
         let key = (msg_id.to_owned(), part_id.to_owned());
-        if !self.live_text.contains_key(&key) {
+        let mut live = self.live_text.borrow_mut();
+        if !live.contains_key(&key) {
             if let Some(t) = self.lookup_text(msg_id, part_id) {
-                self.live_text.insert(key.clone(), t);
+                live.insert(key.clone(), t);
             }
         }
-        if let Some(t) = self.live_text.get(&key) {
+        if let Some(t) = live.get(&key) {
             let len = t.len_unicode();
             t.insert(len, delta).ok();
         }
@@ -1075,10 +1132,103 @@ impl ChatDoc {
         None
     }
 
+    fn parts_of(&self, msg_id: &str) -> Option<LoroList> {
+        match self.find_message(msg_id)?.get("parts")? {
+            ValueOrContainer::Container(Container::List(l)) => Some(l),
+            _ => None,
+        }
+    }
+
+    /// Append a part from a JSON object (`kind` + fields). Uses the object's `id` when it
+    /// is a string, else mints one. Top-level `text` / `reasoning` strings become
+    /// `LoroText` (so [`Self::append_text`] can stream into them); a `text` / `reasoning`
+    /// kind without its body field gets an empty one. Other values follow the
+    /// command-payload shape (objects → `LoroMap`, arrays → `LoroList`).
+    /// Returns the part id; `None` when the message or its `parts` list is missing,
+    /// or `part` is not an object. Honors an open [`Self::transact`].
+    pub fn add_part_from_json(&self, msg_id: &str, part: &Value) -> Option<String> {
+        let fields = part.as_object()?;
+        let parts = self.parts_of(msg_id)?;
+        let map = parts.push_container(LoroMap::new()).ok()?;
+        let part_id = match fields.get("id") {
+            Some(Value::String(s)) => s.clone(),
+            _ => ulid(),
+        };
+        map.insert("id", part_id.as_str()).ok()?;
+        let kind = fields.get("kind").and_then(Value::as_str);
+        let body_field = match kind {
+            Some("text") => Some("text"),
+            Some("reasoning") => Some("reasoning"),
+            _ => None,
+        };
+        let mut body = None;
+        for (k, v) in fields {
+            if k == "id" {
+                continue;
+            }
+            let t = insert_part_field(&map, k, v.clone()).ok()?;
+            if body_field == Some(k.as_str()) {
+                body = t;
+            }
+        }
+        if let Some(field) = body_field {
+            let t = match body {
+                Some(t) => t,
+                None => map.insert_container(field, LoroText::new()).ok()?,
+            };
+            self.live_text
+                .borrow_mut()
+                .insert((msg_id.to_owned(), part_id.clone()), t);
+        }
+        self.commit_now();
+        Some(part_id)
+    }
+
+    /// Set fields on an existing part by id. Same value rules as
+    /// [`Self::add_part_from_json`]: a `text` / `reasoning` string replaces the body with a
+    /// fresh `LoroText`. Returns false when the message or part is missing.
+    /// Honors an open [`Self::transact`].
+    pub fn set_part_fields(&self, msg_id: &str, part_id: &str, fields: &[(&str, Value)]) -> bool {
+        let Some(parts) = self.parts_of(msg_id) else {
+            return false;
+        };
+        let Some(map) = Self::find_map(&parts, part_id) else {
+            return false;
+        };
+        let key = (msg_id.to_owned(), part_id.to_owned());
+        for (k, v) in fields {
+            match insert_part_field(&map, k, v.clone()) {
+                Ok(Some(t)) => {
+                    self.live_text.borrow_mut().insert(key.clone(), t);
+                }
+                Ok(None) => {
+                    if *k == "text" || *k == "reasoning" {
+                        self.live_text.borrow_mut().remove(&key);
+                    }
+                }
+                Err(_) => return false,
+            }
+        }
+        self.commit_now();
+        true
+    }
+
+    /// Id of the part at index `pix` in message `msg_id`.
+    pub fn part_id_at(&self, msg_id: &str, pix: usize) -> Option<String> {
+        let parts = self.parts_of(msg_id)?;
+        let Some(ValueOrContainer::Container(Container::Map(p))) = parts.get(pix) else {
+            return None;
+        };
+        match p.get("id")? {
+            ValueOrContainer::Value(LoroValue::String(s)) => Some(s.to_string()),
+            _ => None,
+        }
+    }
+
     /// Add a tool part: ≤160-char summary inline, the rest by `outputRef` (crdt-sync §6.2).
     #[allow(clippy::too_many_arguments)]
     pub fn add_tool_part(
-        &mut self,
+        &self,
         msg_id: &str,
         call_id: &str,
         name: &str,
@@ -1123,7 +1273,7 @@ impl ChatDoc {
     /// Add a part the transcript must not render (`hidden: true`): the raw subagent output
     /// (`kind = "subagent_result"`) or any other drawer-only text. Unknown kinds render empty anyway.
     pub fn add_hidden_part(
-        &mut self,
+        &self,
         msg_id: &str,
         kind: &str,
         text: &str,
@@ -1151,7 +1301,7 @@ impl ChatDoc {
 
     /// Add an `attachment` part (F10): a file the agent produced, blob-backed. `attachment` is
     /// `{ name, mime, ref, bytes, kind, title }`; the bytes live at `GET /blob/{project}/{ref}`.
-    pub fn add_attachment_part(&mut self, msg_id: &str, attachment: &Value) -> Option<String> {
+    pub fn add_attachment_part(&self, msg_id: &str, attachment: &Value) -> Option<String> {
         let m = self.find_message(msg_id)?;
         let parts = match m.get("parts")? {
             ValueOrContainer::Container(Container::List(l)) => l,
@@ -1169,7 +1319,7 @@ impl ChatDoc {
     /// Add a `status` part. Codes: `working`, `done`, `failed`, `stopped`, `waiting_user`,
     /// `waiting_approval` — one working indicator, nothing that narrates tools. Tool detail lives
     /// in `hidden` tool parts (Details drawer) and T3.
-    pub fn add_status_part(&mut self, msg_id: &str, kind: &str, text: &str) -> Option<String> {
+    pub fn add_status_part(&self, msg_id: &str, kind: &str, text: &str) -> Option<String> {
         let m = self.find_message(msg_id)?;
         let parts = match m.get("parts")? {
             ValueOrContainer::Container(Container::List(l)) => l,
@@ -1188,7 +1338,7 @@ impl ChatDoc {
     /// Add an `approval` part (design §10, feature `approve`): the card stays in the transcript
     /// with its final `state`. `payload` is rendered by the card (draft fields, command).
     pub fn add_approval_part(
-        &mut self,
+        &self,
         msg_id: &str,
         approval_id: &str,
         req: &ApprovalRequest,
@@ -1246,7 +1396,7 @@ impl ChatDoc {
 
     /// Final state of an approval card. Returns the id of the message holding it.
     pub fn set_approval_state(
-        &mut self,
+        &self,
         approval_id: &str,
         state: ApprovalState,
         decided_by: Option<&str>,
@@ -1302,7 +1452,7 @@ impl ChatDoc {
     /// Add a `question` part (design §10 widgets): `{ kind: "question", questionId, question,
     /// widget?, state: "open" }`. `widget` is `None` for a plain text question (S8 composer).
     pub fn add_question_part(
-        &mut self,
+        &self,
         msg_id: &str,
         question_id: &str,
         question: &str,
@@ -1329,7 +1479,7 @@ impl ChatDoc {
 
     /// Mark the `question` part with `questionId` answered and record the value. Returns false
     /// when no such part exists in this doc.
-    pub fn answer_question_part(&mut self, question_id: &str, value: &Value) -> bool {
+    pub fn answer_question_part(&self, question_id: &str, value: &Value) -> bool {
         let msgs = self.messages_list();
         for i in 0..msgs.len() {
             let Some(ValueOrContainer::Container(Container::Map(m))) = msgs.get(i) else {
@@ -1381,7 +1531,7 @@ impl ChatDoc {
         None
     }
 
-    pub fn add_error_part(&mut self, msg_id: &str, code: &str, text: &str) -> Option<String> {
+    pub fn add_error_part(&self, msg_id: &str, code: &str, text: &str) -> Option<String> {
         let m = self.find_message(msg_id)?;
         let parts = match m.get("parts")? {
             ValueOrContainer::Container(Container::List(l)) => l,
@@ -1398,7 +1548,7 @@ impl ChatDoc {
     }
 
     /// Set scalar fields on a message (status, decision, subagentId, model, usage, completedAt, …).
-    pub fn set_message_fields(&mut self, msg_id: &str, fields: &[(&str, Value)]) {
+    pub fn set_message_fields(&self, msg_id: &str, fields: &[(&str, Value)]) {
         if let Some(m) = self.find_message(msg_id) {
             for (k, v) in fields {
                 m.insert(k, json_to_lv(v)).ok();
@@ -1407,7 +1557,7 @@ impl ChatDoc {
         }
     }
 
-    pub fn finish_message(&mut self, msg_id: &str, status: MessageStatus) {
+    pub fn finish_message(&self, msg_id: &str, status: MessageStatus) {
         self.set_message_fields(
             msg_id,
             &[
@@ -1415,12 +1565,12 @@ impl ChatDoc {
                 ("completedAt", Value::from(now_ms())),
             ],
         );
-        self.live_text.retain(|(m, _), _| m != msg_id);
+        self.live_text.borrow_mut().retain(|(m, _), _| m != msg_id);
     }
 
     /// What the agent is doing right now, in plain words, on the streaming assistant row
     /// (agent-flow contract §2). `None` clears it: clients fall back to "<agent> is working".
-    pub fn set_activity(&mut self, msg_id: &str, activity: Option<&str>) {
+    pub fn set_activity(&self, msg_id: &str, activity: Option<&str>) {
         let v = activity
             .map(str::trim)
             .filter(|s| !s.is_empty())
@@ -1451,7 +1601,7 @@ impl ChatDoc {
     /// Replace every occurrence of `values` in message text (and a few string fields) with
     /// `[REDACTED:vault]`. Used when the owner scrubs a leaked secret from context. Returns
     /// how many replacements were made. Values shorter than 6 characters are ignored.
-    pub fn scrub_values(&mut self, values: &[String]) -> usize {
+    pub fn scrub_values(&self, values: &[String]) -> usize {
         let needles: Vec<&str> = values
             .iter()
             .map(String::as_str)
@@ -1588,7 +1738,7 @@ mod tests {
 
     #[test]
     fn scrub_values_redacts_leaked_secret_from_text() {
-        let mut doc = ChatDoc::new(Some(1), true);
+        let doc = ChatDoc::new(Some(1), true);
         doc.init_meta("chat1", "proj1", 1);
         doc.append_user_message_from(
             "m1",
@@ -2174,6 +2324,107 @@ mod tests {
         }
         assert_eq!(doc.commands()[0].payload["messageId"], "m1");
         assert_eq!(doc.commands()[0].payload["nested"]["ok"], true);
+    }
+
+    #[test]
+    fn json_part_writers_stream_and_commit_once_inside_transact() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let doc = ChatDoc::new(Some(9), false);
+        let commits = Arc::new(AtomicUsize::new(0));
+        let commits_cb = commits.clone();
+        let _sub = doc.doc.subscribe_local_update(Box::new(move |_| {
+            commits_cb.fetch_add(1, Ordering::SeqCst);
+            true
+        }));
+        let (text_id, tool_id) = doc.transact(|d| {
+            d.begin_message(
+                "m1",
+                "assistant",
+                "agent",
+                "fixture",
+                MessageStatus::Streaming,
+                &[("model", Value::from("demo"))],
+            )
+            .unwrap();
+            let text_id = d
+                .add_part_from_json("m1", &serde_json::json!({ "kind": "text", "text": "Hi" }))
+                .unwrap();
+            let tool_id = d
+                .add_part_from_json(
+                    "m1",
+                    &serde_json::json!({
+                        "id": "tool-1",
+                        "kind": "tool",
+                        "call": { "id": "c1", "name": "grep", "input": { "q": "x" } },
+                        "hidden": true,
+                    }),
+                )
+                .unwrap();
+            d.append_text("m1", &text_id, " there");
+            assert!(d.set_part_fields("m1", &tool_id, &[("outputSummary", Value::from("ok"))]));
+            let reasoning_id = d
+                .add_part_from_json("m1", &serde_json::json!({ "kind": "reasoning" }))
+                .unwrap();
+            d.append_text("m1", &reasoning_id, "thinking");
+            d.start_assistant_message("m2", "m1", "fixture");
+            d.finish_message("m1", MessageStatus::Done);
+            (text_id, tool_id)
+        });
+        assert_eq!(commits.load(Ordering::SeqCst), 1);
+        assert_eq!(tool_id, "tool-1");
+        assert_eq!(doc.part_id_at("m1", 0).as_deref(), Some(text_id.as_str()));
+        assert_eq!(doc.part_id_at("m1", 1).as_deref(), Some("tool-1"));
+        assert!(doc.part_id_at("m1", 3).is_none());
+        assert!(doc.part_id_at("missing", 0).is_none());
+
+        let raw = doc.to_json();
+        let m1 = &raw["messages"][0];
+        assert_eq!(m1["status"], "done");
+        assert_eq!(m1["model"], "demo");
+        assert!(m1.get("completedAt").is_some());
+        assert!(m1["reactions"].as_object().unwrap().is_empty());
+        assert_eq!(m1["parts"][0]["text"], "Hi there");
+        assert_eq!(m1["parts"][1]["call"]["input"]["q"], "x");
+        assert_eq!(m1["parts"][1]["outputSummary"], "ok");
+        assert_eq!(m1["parts"][2]["reasoning"], "thinking");
+        assert!(doc.lookup_text("m1", &text_id).is_some());
+        assert_eq!(raw["messages"][1]["status"], "streaming");
+    }
+
+    #[test]
+    fn begin_message_sets_completed_at_only_when_terminal() {
+        let doc = ChatDoc::new(None, false);
+        doc.begin_message("q", "user", "user", "dev", MessageStatus::Queued, &[])
+            .unwrap();
+        doc.begin_message("e", "assistant", "agent", "dev", MessageStatus::Error, &[])
+            .unwrap();
+        let raw = doc.to_json();
+        assert!(raw["messages"][0].get("completedAt").is_none());
+        assert_eq!(raw["messages"][0]["parts"], serde_json::json!([]));
+        assert!(raw["messages"][1].get("completedAt").is_some());
+    }
+
+    #[test]
+    fn set_part_fields_text_replaces_live_body() {
+        let doc = ChatDoc::new(None, false);
+        doc.begin_message(
+            "m",
+            "assistant",
+            "agent",
+            "dev",
+            MessageStatus::Streaming,
+            &[],
+        )
+        .unwrap();
+        let pid = doc
+            .add_part_from_json("m", &serde_json::json!({ "kind": "text", "text": "old" }))
+            .unwrap();
+        assert!(doc.set_part_fields("m", &pid, &[("text", Value::from("new"))]));
+        doc.append_text("m", &pid, "!");
+        assert_eq!(doc.message("m").unwrap().text(), "new!");
+        assert!(!doc.set_part_fields("m", "nope", &[("x", Value::from(1))]));
     }
 
     #[test]

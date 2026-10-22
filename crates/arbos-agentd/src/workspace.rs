@@ -612,7 +612,7 @@ fn fork_doc_snapshot(
     chat_id: &str,
     project_id: &str,
 ) -> Result<Vec<u8>> {
-    let mut doc = ChatDoc::from_snapshot(Some(peer), true, source_snapshot)?;
+    let doc = ChatDoc::from_snapshot(Some(peer), true, source_snapshot)?;
     doc.init_meta(chat_id, project_id, 1);
     for cmd in doc.commands() {
         if cmd.status != CommandStatus::Done.as_str() {

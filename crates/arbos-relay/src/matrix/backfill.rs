@@ -424,7 +424,7 @@ mod doc_tests {
         let project = project_of(&state, &owner, "Research");
         let chat_id = state.db.list_chats(&project).expect("chats")[0].id.clone();
 
-        let mut doc = ChatDoc::new(Some(7), false);
+        let doc = ChatDoc::new(Some(7), false);
         doc.init_meta(&chat_id, &project, 1);
         let user_msg = ulid();
         doc.append_user_message(

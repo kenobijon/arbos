@@ -1,0 +1,12 @@
+[
+  {
+    "id": "msg-mac-user",
+    "role": "user",
+    "text": "hello from an old mac"
+  },
+  {
+    "id": "msg-mac-assistant",
+    "role": "assistant",
+    "text": "legacy assistant reply"
+  }
+]
