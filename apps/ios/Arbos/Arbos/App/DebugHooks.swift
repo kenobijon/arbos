@@ -41,6 +41,11 @@ enum DebugHooks {
     static var settingsPage: String? { value("ARBOS_SETTINGS_PAGE") }
     /// Text Size factor for screenshot sweeps (one of TextScale.steps, e.g. 0.85 / 1.3).
     static var textScale: Double? { value("ARBOS_TEXT_SCALE").flatMap(Double.init) }
+    /// `system | light | dark`: the theme for one launch, over the saved choice and the
+    /// D90 Dark default (the rig shoots light + dark by toggling the simulator with `system`).
+    static var appearance: Appearance? { value("ARBOS_APPEARANCE").flatMap(Appearance.init(rawValue:)) }
+    /// `matte | glass`: the surface for one launch, same precedence.
+    static var surface: Surface? { value("ARBOS_SURFACE").flatMap(Surface.init(rawValue:)) }
     /// Scripted tour for the screen recording (fixture only).
     static var demo: Bool { value("ARBOS_DEMO") == "1" }
     /// Scripted tour against the live relay: sends ARBOS_AUTO_SEND, waits for the reply, tours the sheets.
