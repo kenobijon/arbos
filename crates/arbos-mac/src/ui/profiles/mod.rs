@@ -466,18 +466,24 @@ fn size_text(bytes: Option<u64>) -> Option<String> {
     })
 }
 
-/// Media tab: a 3-wide grid of thumbnails (photo glyph while loading).
+/// Gutter between media tiles.
+const MEDIA_GAP: f32 = 3.0;
+
+/// Media tab: three square tiles per row (aspect-fill crop), small even
+/// gutters; a photo / video glyph while a thumbnail loads. The cell is
+/// floored against the pane's inner width (the 1 pt left border counts) —
+/// at exactly a third the last tile used to wrap and leave two per row.
 pub(super) fn media_grid(items: &[Found], theme: &Theme) -> Div {
     if items.is_empty() {
         return empty("No photos or videos yet", theme);
     }
-    let cell = (SHEET_WIDTH - 32.0 - 2.0 * 4.0) / 3.0;
+    let cell = ((SHEET_WIDTH - 1.0 - 2.0 * kit::INSET - 2.0 * MEDIA_GAP) / 3.0).floor();
     let mut grid = div()
         .flex_shrink_0()
         .flex()
         .flex_wrap()
-        .gap(px(4.0))
-        .px(px(16.0))
+        .gap(px(MEDIA_GAP))
+        .px(px(kit::INSET))
         .pb(px(16.0));
     for (i, f) in items.iter().enumerate() {
         let tile = div()

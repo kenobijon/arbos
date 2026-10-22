@@ -433,6 +433,8 @@ impl Shell {
             let weak = cx.entity().downgrade();
             people_input.update(cx, |input, _| {
                 input.set_placeholder("Search people");
+                // Grok Mac's search placeholder is ~14 pt (ref 57).
+                input.set_font_size(people::SEARCH_FONT_SIZE);
                 input.on_submit = Some(Rc::new(move |_window, cx| {
                     let _ = weak.update(cx, |this, cx| {
                         let typed = this.people_input.read(cx).text().trim().to_string();

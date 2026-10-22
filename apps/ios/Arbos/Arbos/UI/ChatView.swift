@@ -1083,8 +1083,8 @@ struct ChatView: View {
                         .buttonStyle(.plain)
                 }
                 .padding(.horizontal, 14).padding(.vertical, 8)
+                // Full composer width: the same edges as the message field (Jacob, Oct 21).
                 .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(theme.bubbleAssistant))
-                .padding(.leading, Theme.plusButton + 12)
             }
             if !pending.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {

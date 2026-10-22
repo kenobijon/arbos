@@ -127,6 +127,8 @@ pub struct ComposerInput {
     masked: bool,
     /// Profile hero rename: paint and hit-test the name centered under the avatar.
     text_center: bool,
+    /// Type size; the composer's `TEXT_BODY` unless a smaller field asks otherwise.
+    font_size: f32,
 }
 
 impl ComposerInput {
@@ -148,7 +150,12 @@ impl ComposerInput {
             enter_inserts_newline: false,
             masked: false,
             text_center: false,
+            font_size: INPUT_FONT_SIZE,
         }
+    }
+
+    pub fn set_font_size(&mut self, size: f32) {
+        self.font_size = size;
     }
 
     pub fn set_masked(&mut self, masked: bool) {
@@ -230,7 +237,7 @@ impl ComposerInput {
                 .text_system()
                 .shape_text(
                     SharedString::from(para.to_string()),
-                    px(INPUT_FONT_SIZE),
+                    px(self.font_size),
                     &runs,
                     Some(width),
                     None,
@@ -1032,6 +1039,7 @@ impl Element for InputElement {
         let cursor = input.cursor_offset();
         let marked = input.marked_range.clone();
         let text_center = input.text_center;
+        let font_size = input.font_size;
         let style = window.text_style();
         let lh = px(INPUT_LINE_HEIGHT);
 
@@ -1066,7 +1074,7 @@ impl Element for InputElement {
                 .text_system()
                 .shape_text(
                     SharedString::from(para.to_string()),
-                    px(INPUT_FONT_SIZE),
+                    px(font_size),
                     &runs,
                     Some(bounds.size.width),
                     None,
@@ -1330,7 +1338,7 @@ impl Render for ComposerInput {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .line_height(px(INPUT_LINE_HEIGHT))
-            .text_size(px(INPUT_FONT_SIZE))
+            .text_size(px(self.font_size))
             .child(InputElement { input: cx.entity() })
     }
 }
@@ -2370,9 +2378,11 @@ impl Render for Composer {
                         .flex()
                         .items_center()
                         .gap(px(8.0))
+                        // Full composer width: the same left / right edges as the
+                        // message field (Jacob, Oct 21; Grok keeps bars flush).
+                        .w_full()
                         .px(px(14.0))
                         .py(px(8.0))
-                        .ml(px(PLUS_BUTTON + 12.0))
                         .rounded(px(14.0))
                         .bg(theme.bubble_assistant)
                         .child(icon("reply", 12.0, theme.text_muted))
