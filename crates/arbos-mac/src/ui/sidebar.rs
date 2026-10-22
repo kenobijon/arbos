@@ -1079,7 +1079,7 @@ fn render_row(
         .renaming_project
         .as_ref()
         .is_some_and(|p| p == &space.id);
-    if streaming || typing || avatar_state != avatars::AvatarState::Idle {
+    if typing || avatar_state != avatars::AvatarState::Idle {
         PulseClock::request(cx);
     }
     let phase = PulseClock::phase(cx, 900);
@@ -1314,13 +1314,18 @@ fn render_row(
                                 .text_color(theme.text_muted)
                                 .child(preview),
                         )
-                        .when(streaming || typing, |el| {
-                            el.child(div().size(px(7.0)).rounded_full().bg(Theme::with_alpha(
-                                if typing { theme.online } else { theme.warn },
-                                0.35 + 0.65 * phase,
-                            )))
+                        // No "agent is working" dot on rows (Jacob, 2026-10-22): the
+                        // working state lives in the header / activity line. A person
+                        // typing keeps its green pulse; unread keeps its accent dot.
+                        .when(typing, |el| {
+                            el.child(
+                                div()
+                                    .size(px(7.0))
+                                    .rounded_full()
+                                    .bg(Theme::with_alpha(theme.online, 0.35 + 0.65 * phase)),
+                            )
                         })
-                        .when(!streaming && !typing && unread, |el| {
+                        .when(!typing && unread, |el| {
                             el.child(div().size(px(8.0)).rounded_full().bg(theme.accent))
                         }),
                 ),
