@@ -68,7 +68,7 @@ CLI:  feedback_poller.py [run] | status | testers | set-cursor <ISO-8601>
       | leadtime [since-ISO] | memtree-cost [YYYY-MM-DD]   (audit numbers; memtree-cost asks GET /admin/usage/memory-tree, else relay.db as root)
       | gate-tree <sha-or-branch> <fid>…   (gate a hand-prepared integration tree as one run and land it whole)
       | gate-abort   (drop the active gate run without verdicts; every ready branch re-batches at its current head)
-      | gate-next <fid>… [--abort]   (the next gate batch is exactly these gating items; --abort drops the active run first)
+      | gate-next <fid>… [--then <fid>…] [--abort]   (the next gate batch is exactly these items, then the --then batch; --abort drops the active run first)
 """
 
 from __future__ import annotations
@@ -1730,13 +1730,17 @@ class Loop:
             if active and req.get("abort") and not active.get("warm"):
                 self.gate_abort(active, cur, by="operator (gate-next)")
                 active = None
-            heads = {fid: st["branch_head"] for fid, st in self.rust_gate_ready() if fid in (req.get("members") or [])}
-            if heads:
-                cur["rust_gate_plan"] = [heads] + [h for h in (cur.get("rust_gate_plan") or []) if not set(h) & set(heads)]
+            ready = dict(self.rust_gate_ready())
+            batches = [{fid: ready[fid]["branch_head"] for fid in (req.get(k) or []) if fid in ready} for k in ("members", "then")]
+            batches = [b for b in batches if b]
+            if batches:
+                pinned = {fid for b in batches for fid in b}
+                cur["rust_gate_plan"] = batches + [h for h in (cur.get("rust_gate_plan") or []) if not set(h) & pinned]
                 self.store.save_cursor(cur)
-                for fid in heads:
-                    self.store.event(fid, "gate_next", by="operator", members=list(heads))
-                log(f"Gate: next batch pinned to {', '.join(heads)} (operator gate-next)")
+                for b in batches:
+                    for fid in b:
+                        self.store.event(fid, "gate_next", by="operator", members=list(b))
+                log("Gate: next batches pinned: " + " → ".join(", ".join(b) for b in batches) + " (operator gate-next)")
         for marker in self.cfg.state_dir.glob("gate-abort.*"):
             if active and marker.name == f"gate-abort.{active['id']}":
                 # `gate-abort` arrived while a tick was in flight (that tick would have written its stale
@@ -3500,19 +3504,24 @@ def main(argv: list[str]) -> int:
         # `gate-next <fid>… [--abort]`: the next gate batch is exactly these gating items (owner priority, e.g.
         # Jacob's servers UI #1241/#1242 ahead of the queue). --abort drops the active run first so they start
         # on the next tick instead of after it settles. Other ready items follow in later batches.
-        ids = [a for a in argv[2:] if not a.startswith("--")]
+        args = argv[2:]
+        then_ids = args[args.index("--then") + 1:] if "--then" in args else []
+        ids = [a for a in (args[:args.index("--then")] if "--then" in args else args) if not a.startswith("--")]
+        then_ids = [a for a in then_ids if not a.startswith("--")]
         heads: dict[str, str] = {}
-        for fid in ids:
+        then_heads: dict[str, str] = {}
+        for fid, into in [(f, heads) for f in ids] + [(f, then_heads) for f in then_ids]:
             st = loop.store.state(fid)
             if not st or st.get("status") != "gating" or not st.get("branch_head"):
                 print(f"{fid}: not a gating item with a branch head")
                 return 2
-            heads[fid] = st["branch_head"]
+            into[fid] = st["branch_head"]
+        batches = [heads] + ([then_heads] if then_heads else [])
         with (cfg.state_dir / ".lock").open("w") as lock:
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
-                (cfg.state_dir / "gate-next.json").write_text(json.dumps({"members": list(heads), "abort": "--abort" in argv}))
+                (cfg.state_dir / "gate-next.json").write_text(json.dumps({"members": list(heads), "then": list(then_heads), "abort": "--abort" in argv}))
                 for fid in heads:
                     loop.store.event(fid, "gate_next_queued", by="operator", members=list(heads))
                 print(f"a tick is in flight; next gate batch {', '.join(heads)} is pinned at the start of the next tick")
@@ -3522,11 +3531,13 @@ def main(argv: list[str]) -> int:
             if active and "--abort" in argv and not active.get("warm"):
                 loop.gate_abort(active, cur, by="operator (gate-next)")
                 cur = loop.store.cursor()
-            cur["rust_gate_plan"] = [heads] + [h for h in (cur.get("rust_gate_plan") or []) if not set(h) & set(heads)]
+            pinned = set(heads) | set(then_heads)
+            cur["rust_gate_plan"] = batches + [h for h in (cur.get("rust_gate_plan") or []) if not set(h) & pinned]
             loop.store.save_cursor(cur)
-        for fid in heads:
-            loop.store.event(fid, "gate_next", by="operator", members=list(heads))
-        print(f"next gate batch: {', '.join(heads)}" + ("" if "--abort" in argv or not active else f" (after the active run {active['id']} settles)"))
+        for b in batches:
+            for fid in b:
+                loop.store.event(fid, "gate_next", by="operator", members=list(b))
+        print("next gate batches: " + " → ".join(", ".join(b) for b in batches) + ("" if "--abort" in argv or not active else f" (after the active run {active['id']} settles)"))
         return 0
     if cmd == "gate-abort":
         # Operator: drop the active gate run without verdicts (a member branch was repaired mid-run, the
