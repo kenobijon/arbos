@@ -28,7 +28,9 @@ age_s() {
 stale() {
   [ -f "$LOCK" ] || return 0
   local p; p=$(holder_pid)
-  if [ -n "$p" ] && ! kill -0 "$p" 2>/dev/null; then return 0; fi
+  # ps, not kill -0: kill -0 answers EPERM for another user's live pid (ec2-user vs arbosgui), which would
+  # make a live lock look stale and let it be taken over.
+  if [ -n "$p" ] && ! ps -p "$p" >/dev/null 2>&1; then return 0; fi
   [ "$(age_s)" -gt "$STALE_S" ]
 }
 take() {
