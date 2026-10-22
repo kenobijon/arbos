@@ -1,0 +1,15 @@
+{
+  "config": {},
+  "created_at": 1700000000000,
+  "id": "conn_fixture",
+  "label": "GitHub · token",
+  "last_error": null,
+  "last_used_at": 1700000000000,
+  "mock": true,
+  "provider": "github",
+  "scopes": [
+    "read",
+    "search"
+  ],
+  "status": "connected"
+}

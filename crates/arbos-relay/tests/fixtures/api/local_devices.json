@@ -1,0 +1,15 @@
+{
+  "items": [
+    {
+      "allow_reads": false,
+      "connected": false,
+      "device_id": "ldev_fixture",
+      "first_seen": 1700000000000,
+      "home": "/Users/fixture",
+      "hostname": "fixture-host",
+      "last_seen": 1700000000000,
+      "name": "fixture-host",
+      "os": "macos"
+    }
+  ]
+}

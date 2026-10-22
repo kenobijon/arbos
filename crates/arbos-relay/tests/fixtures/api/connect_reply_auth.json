@@ -1,0 +1,6 @@
+{
+  "authUrl": "http://127.0.0.1:7707/connectors/oauth/callback?state=oauth_state_fixture&code=mock",
+  "mock": true,
+  "redirectUri": "http://127.0.0.1:7707/connectors/oauth/callback",
+  "state": "oauth_state_fixture"
+}
