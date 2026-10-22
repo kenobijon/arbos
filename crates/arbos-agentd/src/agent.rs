@@ -837,6 +837,11 @@ impl ProseFilter {
         out
     }
 
+    /// Whether the held-back text already carries `head` (a `norm_head` key).
+    pub fn pending_contains(&self, head: &str) -> bool {
+        !head.is_empty() && norm_head(&self.pending, usize::MAX).contains(head)
+    }
+
     /// End of a text run (tool call or turn end): judge what is still held back.
     pub fn flush(&mut self) -> String {
         let rest = std::mem::take(&mut self.pending);
@@ -4173,7 +4178,30 @@ impl Agent {
                     &format!("route {action}: {args}"),
                     None,
                 );
+                let second_route = t.route.is_some();
                 t.route = Some(r);
+                // `route reply` with the text in the call (#1355): the streamed-argument path only
+                // follows the first `route` of a turn, so an act turn that closes with a second
+                // `route reply {reply: …}` — or a provider that sends no argument deltas — would
+                // leave the result row empty while the model is told "Reply delivered". Stage it
+                // like streamed prose; the end-of-turn flush writes it into the live row.
+                if let Some(ValidRoute::Reply { reply: Some(text) }) = &t.route {
+                    let text = text.trim().to_owned();
+                    if !text.is_empty() {
+                        let head = norm_head(&text, 40);
+                        let seen = !second_route
+                            && (norm_head(&t.act_buffer, usize::MAX).contains(&head)
+                                || norm_head(&t.streamed_text, usize::MAX).contains(&head)
+                                || t.prose.pending_contains(&head));
+                        if !seen {
+                            if let Some(host) = self.sync.host(&t.chat_id).await {
+                                tracing::info!(chat_id = %t.chat_id, second_route, chars = text.chars().count(), "route reply text taken from the call");
+                                t.act_buffer.clear();
+                                self.stage_text(&host, t, &text).await;
+                            }
+                        }
+                    }
+                }
                 if action != "reply" {
                     if let Some(host) = self.sync.host(&t.chat_id).await {
                         if t.ack_text.trim().is_empty() {
@@ -5394,6 +5422,16 @@ fn turn_deadline_secs() -> u64 {
         .and_then(|s| s.parse().ok())
         .filter(|&n| n > 0)
         .unwrap_or(TURN_DEADLINE_SECS)
+}
+
+/// Letters and digits only, lowercased, at most `n` of them: a loose "is this text already
+/// there" key that survives the prose filter's spacing and punctuation fixes.
+fn norm_head(s: &str, n: usize) -> String {
+    s.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .take(n)
+        .collect()
 }
 
 /// What the user reads when an act turn reaches its deadline and the rest is handed off (#1037

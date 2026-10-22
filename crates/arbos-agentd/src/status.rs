@@ -852,16 +852,65 @@ mod tests {
             agent.write_notice(&host, t, line).await;
             agent.write_notice(&host, t, line).await;
             agent
-                .write_notice(&host, t, crate::agent::TURN_LIMIT_NOTICE)
+                .write_notice(
+                    &host,
+                    t,
+                    "I hit the turn time limit; I'm handing the rest to a subagent.",
+                )
                 .await;
             assert_eq!(
                 t.streamed_text.matches("time limit").count(),
-                1,
+                2,
                 "{}",
                 t.streamed_text
             );
-            assert_eq!(t.streamed_text.matches("longer than one go").count(), 1);
+            assert_eq!(t.streamed_text.matches("smaller steps").count(), 1);
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #1355: an act turn that closes with a second `route reply {reply: …}` must show that text
+    /// in its result row; the streamed path only follows the first route of a turn.
+    #[tokio::test]
+    async fn act_turn_closing_with_route_reply_keeps_the_reply_text() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUICKREPLY000004";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            agent.test_open_row(&host, t).await;
+        }
+        agent
+            .hook_route(
+                &json!({ "action": "act", "ack": "Stopping the loop now.", "plan": "kill it" }),
+            )
+            .await
+            .unwrap();
+        let reply =
+            "Torn down. The logger (process 4555) is stopped and the scheduled job is gone.";
+        agent
+            .hook_route(&json!({ "action": "reply", "reply": reply }))
+            .await
+            .unwrap();
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            assert!(
+                t.act_buffer.contains("Torn down."),
+                "staged: {:?}",
+                t.act_buffer
+            );
+            // Pretend the same reply streamed already (first-route case): not staged twice.
+            t.route = None;
+        }
+        agent
+            .hook_route(&json!({ "action": "reply", "reply": reply }))
+            .await
+            .unwrap();
+        let staged = agent.turn.lock().await.as_ref().unwrap().act_buffer.clone();
+        assert_eq!(staged.matches("Torn down.").count(), 1, "{staged}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
