@@ -1,0 +1,23 @@
+{
+  "call_id": "call_fixture",
+  "chat_id": "people_call_fixture",
+  "duration_s": 60,
+  "ended_at": 1700000060000,
+  "from": {
+    "avatar": null,
+    "avatar_color": null,
+    "avatar_color_index": null,
+    "avatar_color_index_effective": 1,
+    "avatar_leaf_color_effective": null,
+    "avatar_leaf_effective": null,
+    "avatar_url": null,
+    "handle": "user201",
+    "id": "gh_201",
+    "kind": "user",
+    "name": "@user201"
+  },
+  "kind": "voice",
+  "project_id": "people",
+  "reason": "abandoned",
+  "started_at": 1700000000000
+}

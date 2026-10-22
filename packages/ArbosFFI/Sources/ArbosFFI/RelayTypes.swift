@@ -31,6 +31,229 @@ public struct AccountUserDto: Codable {
 	}
 }
 
+/// `sender{}` on calls, pushes, and LiveKit participant metadata (`Sender::json`).
+public struct SenderDto: Codable {
+	public let kind: String
+	public let id: String
+	public let name: String
+	public let handle: String
+	public let avatar: String?
+	public let avatar_color: String?
+	public let avatar_url: String?
+	public let avatar_color_index: Int64?
+	public let avatar_color_index_effective: Int64
+	/// D92: agents get the leaf pair in effect; people send JSON null.
+	public let avatar_leaf_effective: Int64?
+	public let avatar_leaf_color_effective: Int64?
+
+	public init(kind: String, id: String, name: String, handle: String, avatar: String?, avatar_color: String?, avatar_url: String?, avatar_color_index: Int64?, avatar_color_index_effective: Int64, avatar_leaf_effective: Int64?, avatar_leaf_color_effective: Int64?) {
+		self.kind = kind
+		self.id = id
+		self.name = name
+		self.handle = handle
+		self.avatar = avatar
+		self.avatar_color = avatar_color
+		self.avatar_url = avatar_url
+		self.avatar_color_index = avatar_color_index
+		self.avatar_color_index_effective = avatar_color_index_effective
+		self.avatar_leaf_effective = avatar_leaf_effective
+		self.avatar_leaf_color_effective = avatar_leaf_color_effective
+	}
+}
+
+/// Call object (`call_json`): token fields only when the relay mints a join token.
+public struct CallDto: Codable {
+	public let call_id: String
+	public let chat_id: String
+	public let project_id: String
+	public let kind: String
+	public let room: String
+	public let livekit_url: String?
+	public let max_participants: Int64
+	public let started_by: SenderDto
+	public let participants: [SenderDto]
+	public let agents: [SenderDto]
+	public let started_at: Int64
+	public let ended_at: Int64?
+	public let reason: String?
+	public let started_device: String?
+	public let platform: String?
+	public let app_version: String?
+	public let token: String?
+	public let token_expires_at: Int64?
+
+	public init(call_id: String, chat_id: String, project_id: String, kind: String, room: String, livekit_url: String?, max_participants: Int64, started_by: SenderDto, participants: [SenderDto], agents: [SenderDto], started_at: Int64, ended_at: Int64?, reason: String?, started_device: String?, platform: String?, app_version: String?, token: String?, token_expires_at: Int64?) {
+		self.call_id = call_id
+		self.chat_id = chat_id
+		self.project_id = project_id
+		self.kind = kind
+		self.room = room
+		self.livekit_url = livekit_url
+		self.max_participants = max_participants
+		self.started_by = started_by
+		self.participants = participants
+		self.agents = agents
+		self.started_at = started_at
+		self.ended_at = ended_at
+		self.reason = reason
+		self.started_device = started_device
+		self.platform = platform
+		self.app_version = app_version
+		self.token = token
+		self.token_expires_at = token_expires_at
+	}
+}
+
+/// APNs `ARBOS_CALL` alert body without `aps` (`sender` on started/missed only).
+public struct CallAlertDto: Codable {
+	public let event: String
+	public let chat_id: String
+	public let project_id: String
+	public let call: CallDto
+	public let sender: SenderDto?
+
+	public init(event: String, chat_id: String, project_id: String, call: CallDto, sender: SenderDto?) {
+		self.event = event
+		self.chat_id = chat_id
+		self.project_id = project_id
+		self.call = call
+		self.sender = sender
+	}
+}
+
+/// `/me/pushes` `call_ended` payload.
+public struct CallEndedPayloadDto: Codable {
+	public let call_id: String
+	public let chat_id: String
+	public let project_id: String
+	public let duration_s: Int64
+	public let reason: String
+	public let writer_device: String?
+
+	public init(call_id: String, chat_id: String, project_id: String, duration_s: Int64, reason: String, writer_device: String?) {
+		self.call_id = call_id
+		self.chat_id = chat_id
+		self.project_id = project_id
+		self.duration_s = duration_s
+		self.reason = reason
+		self.writer_device = writer_device
+	}
+}
+
+/// `{ "call": … }` envelope (`GET /calls/{id}`, join, active-call).
+public struct CallEnvelopeDto: Codable {
+	public let call: CallDto
+
+	public init(call: CallDto) {
+		self.call = call
+	}
+}
+
+/// `/me/pushes` `call_missed` payload (`from` is the starter).
+public struct CallMissedPayloadDto: Codable {
+	public let call_id: String
+	public let chat_id: String
+	public let project_id: String
+	public let kind: String
+	public let from: SenderDto
+	public let started_at: Int64
+	public let ended_at: Int64
+	public let duration_s: Int64
+	public let reason: String?
+
+	public init(call_id: String, chat_id: String, project_id: String, kind: String, from: SenderDto, started_at: Int64, ended_at: Int64, duration_s: Int64, reason: String?) {
+		self.call_id = call_id
+		self.chat_id = chat_id
+		self.project_id = project_id
+		self.kind = kind
+		self.from = from
+		self.started_at = started_at
+		self.ended_at = ended_at
+		self.duration_s = duration_s
+		self.reason = reason
+	}
+}
+
+/// One device under `reachable[].devices` on a start-call reply.
+public struct ReachableDeviceDto: Codable {
+	public let device_id: String
+	public let name: String
+	public let kind: String
+	public let platform: String?
+	public let app_version: String?
+	public let polled_within_30s: Bool
+	public let last_seen_at: Int64?
+	public let voip_token: Bool
+	public let push_token: Bool
+
+	public init(device_id: String, name: String, kind: String, platform: String?, app_version: String?, polled_within_30s: Bool, last_seen_at: Int64?, voip_token: Bool, push_token: Bool) {
+		self.device_id = device_id
+		self.name = name
+		self.kind = kind
+		self.platform = platform
+		self.app_version = app_version
+		self.polled_within_30s = polled_within_30s
+		self.last_seen_at = last_seen_at
+		self.voip_token = voip_token
+		self.push_token = push_token
+	}
+}
+
+/// One callee in `reachable[]` on a 201 start-call reply.
+public struct CallReachabilityDto: Codable {
+	public let user_id: String
+	public let handle: String
+	public let name: String
+	public let any_live: Bool
+	public let any_voip: Bool
+	public let any_push: Bool
+	public let devices: [ReachableDeviceDto]
+
+	public init(user_id: String, handle: String, name: String, any_live: Bool, any_voip: Bool, any_push: Bool, devices: [ReachableDeviceDto]) {
+		self.user_id = user_id
+		self.handle = handle
+		self.name = name
+		self.any_live = any_live
+		self.any_voip = any_voip
+		self.any_push = any_push
+		self.devices = devices
+	}
+}
+
+/// PushKit VoIP wake payload (`caller` is the starter).
+public struct CallRingPayloadDto: Codable {
+	public let call_id: String
+	public let chat_id: String
+	public let project_id: String
+	public let kind: String
+	public let room: String
+	public let livekit_url: String?
+	public let caller: SenderDto
+	public let started_at: Int64
+
+	public init(call_id: String, chat_id: String, project_id: String, kind: String, room: String, livekit_url: String?, caller: SenderDto, started_at: Int64) {
+		self.call_id = call_id
+		self.chat_id = chat_id
+		self.project_id = project_id
+		self.kind = kind
+		self.room = room
+		self.livekit_url = livekit_url
+		self.caller = caller
+		self.started_at = started_at
+	}
+}
+
+/// `/me/pushes` `call_started` payload.
+public struct CallStartedPayloadDto: Codable {
+	public let call: CallDto
+	public let sender: SenderDto
+
+	public init(call: CallDto, sender: SenderDto) {
+		self.call = call
+		self.sender = sender
+	}
+}
+
 /// `me` on a project chat or a people chat.
 public struct ChatMeDto: Codable {
 	/// People chats always send this (null when the viewer is not a member). Project chats omit it.
@@ -442,6 +665,19 @@ public struct GroupDto: Codable {
 	}
 }
 
+/// `POST /calls/{id}/leave`.
+public struct LeaveCallResponseDto: Codable {
+	public let ended: Bool
+	public let duration_s: Int64
+	public let already_ended: Bool?
+
+	public init(ended: Bool, duration_s: Int64, already_ended: Bool?) {
+		self.ended = ended
+		self.duration_s = duration_s
+		self.already_ended = already_ended
+	}
+}
+
 /// Image block on `GET /machine`.
 public struct MachineImageDto: Codable {
 	public let current: String?
@@ -721,6 +957,19 @@ public struct ProjectMembersDto: Codable {
 	}
 }
 
+/// `POST …/calls` success: new call (201) or join the live one (200).
+public struct StartCallResponseDto: Codable {
+	public let call: CallDto
+	public let joined: Bool
+	public let reachable: [CallReachabilityDto]?
+
+	public init(call: CallDto, joined: Bool, reachable: [CallReachabilityDto]?) {
+		self.call = call
+		self.joined = joined
+		self.reachable = reachable
+	}
+}
+
 /// One unread row on `GET /me/unread`.
 public struct UnreadChatDto: Codable {
 	public let chat_id: String
@@ -788,5 +1037,16 @@ public struct UsersPageDto: Codable {
 		self.total = total
 		self.offset = offset
 		self.next_offset = next_offset
+	}
+}
+
+/// `POST /devices/{id}/voip`.
+public struct VoipRegisterResponseDto: Codable {
+	public let device_id: String
+	public let push: Bool
+
+	public init(device_id: String, push: Bool) {
+		self.device_id = device_id
+		self.push = push
 	}
 }

@@ -14,8 +14,10 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Context as _, Result};
 use arbos_client::room::{self, RoomAction, RoomSession};
 use arbos_core::api::{
-    CreateChatResponseDto, GetProjectResponseDto, GroupDto, MachineStateDto, MachineStatusDto,
-    MeResponseDto, MeUserResponseDto, PeopleChatDto, ProjectMembersDto, UserCardDto, UsersPageDto,
+    CallDto, CallEndedPayloadDto, CallEnvelopeDto, CallMissedPayloadDto, CallStartedPayloadDto,
+    CreateChatResponseDto, GetProjectResponseDto, GroupDto, LeaveCallResponseDto, MachineStateDto,
+    MachineStatusDto, MeResponseDto, MeUserResponseDto, PeopleChatDto, ProjectMembersDto,
+    StartCallResponseDto, UserCardDto, UsersPageDto,
 };
 use arbos_core::doc::{UserAttachment, UserMessageOpts};
 use arbos_core::wire::{BoxState as WireBox, PROJECT_DOC_CHAT_ID};
@@ -1171,14 +1173,16 @@ async fn poll_me_pushes(shared: &Arc<Shared>) {
             | "people_project_shared" => refresh = true,
             "people_message" if !shared.is_people(chat_id) => refresh = true,
             "call_started" => {
-                let call = push.pointer("/payload/call").and_then(parse_call);
-                let sender: Sender = push
-                    .pointer("/payload/sender")
+                if let Some(payload) = push
+                    .get("payload")
                     .cloned()
-                    .and_then(|v| serde_json::from_value(v).ok())
-                    .unwrap_or_default();
-                if let Some(call) = call {
-                    let _ = shared.events.send(SyncEvent::CallStarted { call, sender });
+                    .and_then(|v| serde_json::from_value::<CallStartedPayloadDto>(v).ok())
+                {
+                    let call = Call::from(&payload.call);
+                    let sender = Sender::from(&payload.sender);
+                    if !call.call_id.is_empty() {
+                        let _ = shared.events.send(SyncEvent::CallStarted { call, sender });
+                    }
                 }
             }
             "chat_archived" => {
@@ -1246,23 +1250,45 @@ async fn poll_me_pushes(shared: &Arc<Shared>) {
                 }
             }
             "call_missed" => {
-                if let Some(missed) = push
+                if let Some(payload) = push
                     .get("payload")
                     .cloned()
-                    .and_then(|v| serde_json::from_value::<CallMissed>(v).ok())
+                    .and_then(|v| serde_json::from_value::<CallMissedPayloadDto>(v).ok())
                     .filter(|m| !m.call_id.is_empty())
                 {
+                    let missed = CallMissed {
+                        call_id: payload.call_id,
+                        chat_id: payload.chat_id,
+                        project_id: payload.project_id,
+                        kind: match payload.kind.as_str() {
+                            "video" => crate::model::CallKind::Video,
+                            _ => crate::model::CallKind::Voice,
+                        },
+                        from: Sender::from(&payload.from),
+                        started_at: payload.started_at.max(0) as u64,
+                        ended_at: (payload.ended_at > 0).then_some(payload.ended_at as u64),
+                        duration_s: payload.duration_s.max(0) as u64,
+                        reason: payload.reason.unwrap_or_default(),
+                    };
                     let _ = shared.events.send(SyncEvent::CallMissed(missed));
                 }
             }
             "call_ended" => {
-                if let Some(mut ended) = push
+                if let Some(payload) = push
                     .get("payload")
                     .cloned()
-                    .and_then(|v| serde_json::from_value::<CallEnded>(v).ok())
+                    .and_then(|v| serde_json::from_value::<CallEndedPayloadDto>(v).ok())
                 {
-                    ended.writer_is_me =
-                        ended.writer_device.as_deref() == Some(shared.device_id().as_str());
+                    let ended = CallEnded {
+                        call_id: payload.call_id,
+                        chat_id: payload.chat_id,
+                        project_id: payload.project_id,
+                        duration_s: payload.duration_s.max(0) as u64,
+                        reason: payload.reason,
+                        writer_device: payload.writer_device.clone(),
+                        writer_is_me: payload.writer_device.as_deref()
+                            == Some(shared.device_id().as_str()),
+                    };
                     let _ = shared.events.send(SyncEvent::CallEnded(ended));
                 }
             }
@@ -1807,9 +1833,13 @@ fn presence_now(shared: &Arc<Shared>, chat_id: &str) {
 
 /// `{ call }` or a bare call object.
 fn parse_call(v: &Value) -> Option<Call> {
-    let obj = v.get("call").unwrap_or(v);
-    serde_json::from_value::<Call>(obj.clone())
+    if let Ok(env) = serde_json::from_value::<CallEnvelopeDto>(v.clone()) {
+        let call = Call::from(&env.call);
+        return (!call.call_id.is_empty()).then_some(call);
+    }
+    serde_json::from_value::<CallDto>(v.clone())
         .ok()
+        .map(|dto| Call::from(&dto))
         .filter(|c| !c.call_id.is_empty())
 }
 
@@ -3885,32 +3915,37 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .post_json_status(&path, json!({ "kind": kind }), &client)
                     .await
                 {
-                    Ok((status, v)) => match parse_call(&v) {
-                        Some(call) => {
-                            // 201 `{call, joined: false, reachable}` = I started it
-                            // (and write the line).
-                            let joined = v.get("joined").and_then(Value::as_bool);
-                            let created = match joined {
-                                Some(j) => !j,
-                                None => status == reqwest::StatusCode::CREATED,
-                            };
-                            let reachable = if created {
-                                v.get("reachable")
-                                    .cloned()
-                                    .and_then(|r| serde_json::from_value::<Vec<Reachable>>(r).ok())
-                                    .unwrap_or_default()
+                    Ok((_status, v)) => match serde_json::from_value::<StartCallResponseDto>(v) {
+                        Ok(resp) => {
+                            let call = Call::from(&resp.call);
+                            if call.call_id.is_empty() {
+                                let _ = shared.events.send(SyncEvent::CallError {
+                                    chat_id,
+                                    message: "The relay answered without a call.".into(),
+                                });
                             } else {
-                                Vec::new()
-                            };
-                            *shared.in_call.lock().unwrap() = Some(call.call_id.clone());
-                            presence_now(&shared, &call.chat_id);
-                            let _ = shared.events.send(SyncEvent::CallReady {
-                                call,
-                                created,
-                                reachable,
-                            });
+                                // 201 `{call, joined: false, reachable}` = I started it
+                                // (and write the line).
+                                let created = !resp.joined;
+                                let reachable = if created {
+                                    resp.reachable
+                                        .unwrap_or_default()
+                                        .iter()
+                                        .map(Reachable::from)
+                                        .collect()
+                                } else {
+                                    Vec::new()
+                                };
+                                *shared.in_call.lock().unwrap() = Some(call.call_id.clone());
+                                presence_now(&shared, &call.chat_id);
+                                let _ = shared.events.send(SyncEvent::CallReady {
+                                    call,
+                                    created,
+                                    reachable,
+                                });
+                            }
                         }
-                        None => {
+                        Err(_) => {
                             let _ = shared.events.send(SyncEvent::CallError {
                                 chat_id,
                                 message: "The relay answered without a call.".into(),
@@ -3965,7 +4000,12 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .await
                 {
                     Ok(v) => {
-                        let left: CallLeft = serde_json::from_value(v).unwrap_or_default();
+                        let left = serde_json::from_value::<LeaveCallResponseDto>(v)
+                            .map(|r| CallLeft {
+                                ended: r.ended,
+                                duration_s: r.duration_s.max(0) as u64,
+                            })
+                            .unwrap_or_default();
                         if !left.ended {
                             // Others are still on it: refresh the list behind the Join bar.
                             if let Ok(v) = shared.get_json(&format!("/calls/{call_id}")).await {

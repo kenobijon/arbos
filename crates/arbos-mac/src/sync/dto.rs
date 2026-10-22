@@ -5,16 +5,17 @@
 //! effort, spend today, and reply policy are read from them.
 
 use arbos_core::api::{
-    AccountUserDto, ChatDto, ChatMemberDto, CreateChatResponseDto, GetProjectResponseDto, GroupDto,
-    MachineStatusDto, MeResponseDto, PeopleChatDto, ProjectMemberDto, ProjectMembersDto,
-    ProjectOwnerDto, UserCardDto,
+    AccountUserDto, CallDto, CallReachabilityDto, ChatDto, ChatMemberDto, CreateChatResponseDto,
+    GetProjectResponseDto, GroupDto, MachineStatusDto, MeResponseDto, PeopleChatDto,
+    ProjectMemberDto, ProjectMembersDto, ProjectOwnerDto, SenderDto, UserCardDto,
 };
 use arbos_core::wire::BoxState as WireBox;
 use serde_json::Value;
 
 use crate::model::{
-    AccountView, AgentMember, BoxState, Chat, ChatKind, Effort, Machine, MachineState, Person,
-    Project, ProjectMachine, ReplyPolicy, SpaceKind,
+    AccountView, AgentMember, BoxState, Call, CallKind, Chat, ChatKind, Effort, Machine,
+    MachineState, Person, Project, ProjectMachine, Reachable, ReachableDevice, ReplyPolicy, Sender,
+    SpaceKind,
 };
 use crate::sync::credentials::AccountUser;
 
@@ -113,6 +114,77 @@ impl From<&AccountUserDto> for AccountUser {
             login: u.login.clone().flatten().unwrap_or_default(),
             avatar_url: u.avatar_url.clone().flatten().unwrap_or_default(),
             name: u.name.clone().flatten().unwrap_or_default(),
+        }
+    }
+}
+
+impl From<&SenderDto> for Sender {
+    fn from(s: &SenderDto) -> Self {
+        Sender {
+            kind: s.kind.clone(),
+            id: s.id.clone(),
+            name: s.name.clone(),
+            handle: s.handle.clone(),
+            avatar: s.avatar.clone(),
+            avatar_color: s.avatar_color.clone(),
+            avatar_color_index: Some(color_index(s.avatar_color_index_effective)),
+            avatar_leaf: s.avatar_leaf_effective.and_then(leaf_index),
+            avatar_leaf_color: s.avatar_leaf_color_effective.and_then(leaf_index),
+            avatar_url: s.avatar_url.clone().unwrap_or_default(),
+        }
+    }
+}
+
+fn call_kind(s: &str) -> CallKind {
+    match s {
+        "video" => CallKind::Video,
+        _ => CallKind::Voice,
+    }
+}
+
+impl From<&CallDto> for Call {
+    fn from(c: &CallDto) -> Self {
+        Call {
+            call_id: c.call_id.clone(),
+            chat_id: c.chat_id.clone(),
+            project_id: c.project_id.clone(),
+            kind: call_kind(&c.kind),
+            room: c.room.clone(),
+            livekit_url: c.livekit_url.clone().unwrap_or_default(),
+            token: c.token.clone().filter(|t| !t.is_empty()),
+            token_expires_at: c.token_expires_at.filter(|t| *t > 0).map(|t| t as u64),
+            started_by: Sender::from(&c.started_by),
+            started_at: c.started_at.max(0) as u64,
+            ended_at: c.ended_at.filter(|t| *t > 0).map(|t| t as u64),
+            reason: c.reason.clone(),
+            participants: c.participants.iter().map(Sender::from).collect(),
+            agents: c.agents.iter().map(Sender::from).collect(),
+        }
+    }
+}
+
+impl From<&CallReachabilityDto> for Reachable {
+    fn from(r: &CallReachabilityDto) -> Self {
+        Reachable {
+            user_id: r.user_id.clone(),
+            handle: r.handle.clone(),
+            name: r.name.clone(),
+            any_live: r.any_live,
+            any_voip: r.any_voip,
+            any_push: r.any_push,
+            devices: r
+                .devices
+                .iter()
+                .map(|d| ReachableDevice {
+                    device_id: d.device_id.clone(),
+                    name: d.name.clone(),
+                    kind: d.kind.clone(),
+                    platform: d.platform.clone().unwrap_or_default(),
+                    app_version: d.app_version.clone().unwrap_or_default(),
+                    polled_within_30s: d.polled_within_30s,
+                    last_seen_at: d.last_seen_at.filter(|t| *t > 0).map(|t| t as u64),
+                })
+                .collect(),
         }
     }
 }
@@ -633,5 +705,40 @@ mod tests {
         let chat = chat_from_group_dto(&dto);
         assert_eq!(chat.id, "group_fixture");
         assert_eq!(chat.participants, vec!["proj_fixture", "proj_other"]);
+    }
+
+    #[test]
+    fn call_fixtures_into_model() {
+        use arbos_core::api::{CallDto, CallStartedPayloadDto, StartCallResponseDto};
+
+        let live: CallDto = load_json("call_live_with_token.json");
+        let call = Call::from(&live);
+        assert_eq!(call.call_id, "call_fixture");
+        assert_eq!(call.token.as_deref(), Some("fixture.join.token"));
+        assert_eq!(call.started_by.handle, "user201");
+        assert_eq!(call.participants.len(), 1);
+        assert!(call.agents.is_empty());
+
+        let ended: CallDto = load_json("call_ended.json");
+        let call = Call::from(&ended);
+        assert!(call.ended_at.is_some());
+        assert_eq!(call.reason.as_deref(), Some("last_left"));
+        assert!(call.token.is_none());
+
+        let start: StartCallResponseDto = load_json("start_call_response.json");
+        let reachable: Vec<Reachable> = start
+            .reachable
+            .unwrap_or_default()
+            .iter()
+            .map(Reachable::from)
+            .collect();
+        assert_eq!(reachable.len(), 1);
+        assert_eq!(reachable[0].user_id, "gh_202");
+        assert!(reachable[0].any_voip);
+
+        let started: CallStartedPayloadDto = load_json("call_started_payload.json");
+        let s = Sender::from(&started.sender);
+        assert_eq!(s.id, "gh_201");
+        assert_eq!(s.handle, "user201");
     }
 }

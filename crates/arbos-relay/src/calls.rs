@@ -21,6 +21,11 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use arbos_core::api::{
+    CallAlertDto, CallDto, CallEndedPayloadDto, CallEnvelopeDto, CallMissedPayloadDto,
+    CallReachabilityDto, CallRingPayloadDto, CallStartedPayloadDto, LeaveCallResponseDto,
+    ReachableDeviceDto, SenderDto, StartCallResponseDto, VoipRegisterResponseDto,
+};
 use arbos_core::ids::{now_ms, ulid};
 
 use crate::apns::{Delivery, Outgoing};
@@ -76,13 +81,13 @@ fn client_identity(
 }
 
 /// `reachable` in the start response: can each callee hear this call right now?
-async fn reachability(state: &AppState, callees: &[String]) -> Vec<Value> {
+async fn reachability(state: &AppState, callees: &[String]) -> Vec<CallReachabilityDto> {
     let now = now_ms();
     let presence = state.presence_seen.lock().await.clone();
     callees
         .iter()
         .map(|u| {
-            let devices: Vec<Value> = state
+            let devices: Vec<ReachableDeviceDto> = state
                 .db
                 .device_reach_rows(u)
                 .unwrap_or_default()
@@ -90,27 +95,32 @@ async fn reachability(state: &AppState, callees: &[String]) -> Vec<Value> {
                 .map(|(id, name, kind, seen, platform, app_version, voip)| {
                     let seen = seen.into_iter().chain(presence.get(&id).copied()).max();
                     let has_push = platform.as_ref().is_some_and(|p| !p.is_empty());
-                    json!({
-                        "device_id": id, "name": name, "kind": kind,
-                        "platform": platform, "app_version": app_version,
-                        "polled_within_30s": seen.is_some_and(|t| now - t < LIVE_WINDOW_MS),
-                        "last_seen_at": seen,
-                        "voip_token": voip,
-                        "push_token": has_push,
-                    })
+                    ReachableDeviceDto {
+                        device_id: id,
+                        name,
+                        kind,
+                        platform,
+                        app_version,
+                        polled_within_30s: seen.is_some_and(|t| now - t < LIVE_WINDOW_MS),
+                        last_seen_at: seen,
+                        voip_token: voip,
+                        push_token: has_push,
+                    }
                 })
                 .collect();
             let card = Sender::user(state, u);
-            json!({
-                "user_id": u, "handle": card.handle, "name": card.name,
-                "any_live": devices.iter().any(|d| d["polled_within_30s"] == true),
-                "any_voip": devices.iter().any(|d| d["voip_token"] == true),
+            CallReachabilityDto {
+                user_id: u.clone(),
+                handle: card.handle,
+                name: card.name,
+                any_live: devices.iter().any(|d| d.polled_within_30s),
+                any_voip: devices.iter().any(|d| d.voip_token),
                 // Regular APNs can still pop an Incoming-call banner (and wake
                 // a backgrounded iPhone via content-available) when PushKit is
                 // missing — do not tell the caller "they'll see a missed call".
-                "any_push": devices.iter().any(|d| d["push_token"] == true),
-                "devices": devices,
-            })
+                any_push: devices.iter().any(|d| d.push_token),
+                devices,
+            }
         })
         .collect()
 }
@@ -124,54 +134,66 @@ fn user_of_identity(identity: &str) -> Option<&str> {
 }
 
 /// Live participants as `sender{}` objects: humans first, then agents in the call (Phase 2).
-fn participants_json(state: &AppState, call: &CallRow) -> Vec<Value> {
-    let mut out: Vec<Value> = state
+fn participants_dto(state: &AppState, call: &CallRow) -> Vec<SenderDto> {
+    let mut out: Vec<SenderDto> = state
         .db
         .call_participants(&call.id)
         .unwrap_or_default()
         .iter()
         .filter(|p| p.left_at.is_none())
-        .map(|p| Sender::user(state, &p.user_id).json())
+        .map(|p| Sender::user(state, &p.user_id).dto())
         .collect();
-    out.extend(crate::voice::agent_participants_json(state, &call.id));
+    out.extend(
+        crate::voice::agent_participants_json(state, &call.id)
+            .into_iter()
+            .filter_map(|v| serde_json::from_value(v).ok()),
+    );
     out
 }
 
 /// The call object without a token (worker and admin views).
 pub fn call_json_public(state: &AppState, call: &CallRow) -> Value {
-    call_json(state, call, None, None)
+    serde_json::to_value(call_dto(state, call, None, None)).expect("CallDto")
 }
 
 /// The call object; with a fresh token for `for_user` when the call is live.
 /// `platform` (from `X-Arbos-Client`) is written into LiveKit participant metadata so the
 /// voice agent can say where each person is calling from.
-fn call_json(
+pub(crate) fn call_dto(
     state: &AppState,
     call: &CallRow,
     for_user: Option<&str>,
     platform: Option<&str>,
-) -> Value {
-    let mut v = json!({
-        "call_id": call.id,
-        "chat_id": call.chat_id,
-        "project_id": call.project_id.clone().unwrap_or_else(|| people::PEOPLE_PROJECT.to_owned()),
-        "kind": call.kind,
-        "room": call.room,
-        "livekit_url": state.livekit.as_ref().map(|l| l.url.clone()),
-        "started_by": Sender::user(state, &call.started_by).json(),
-        "started_at": call.started_at,
-        "ended_at": call.ended_at,
-        "reason": call.end_reason,
-        "participants": participants_json(state, call),
-        "agents": crate::voice::agents_in_chat(state, &chat_ref_of(call)).iter().map(|p| Sender::agent(state, p).json()).collect::<Vec<_>>(),
-        "max_participants": crate::livekit::MAX_PARTICIPANTS,
-        "started_device": call.started_device,
-        "platform": call.platform,
-        "app_version": call.app_version,
-    });
+) -> CallDto {
+    let mut dto = CallDto {
+        call_id: call.id.clone(),
+        chat_id: call.chat_id.clone(),
+        project_id: call
+            .project_id
+            .clone()
+            .unwrap_or_else(|| people::PEOPLE_PROJECT.to_owned()),
+        kind: call.kind.clone(),
+        room: call.room.clone(),
+        livekit_url: state.livekit.as_ref().map(|l| l.url.clone()),
+        max_participants: i64::from(crate::livekit::MAX_PARTICIPANTS),
+        started_by: Sender::user(state, &call.started_by).dto(),
+        participants: participants_dto(state, call),
+        agents: crate::voice::agents_in_chat(state, &chat_ref_of(call))
+            .iter()
+            .map(|p| Sender::agent(state, p).dto())
+            .collect(),
+        started_at: call.started_at,
+        ended_at: call.ended_at,
+        reason: call.end_reason.clone(),
+        started_device: call.started_device.clone(),
+        platform: call.platform.clone(),
+        app_version: call.app_version.clone(),
+        token: None,
+        token_expires_at: None,
+    };
     if let (Some(lk), Some(user), true) = (&state.livekit, for_user, call.active()) {
         let me = Sender::user(state, user);
-        let mut meta = me.json();
+        let mut meta = serde_json::to_value(me.dto()).expect("SenderDto");
         let plat = platform
             .map(str::trim)
             .filter(|p| !p.is_empty())
@@ -184,10 +206,23 @@ fn call_json(
             meta["platform"] = json!(p);
         }
         let (token, exp) = lk.join_token(&call.room, &identity_of(user), &me.name, &meta);
-        v["token"] = json!(token);
-        v["token_expires_at"] = json!(exp);
+        dto.token = Some(token);
+        dto.token_expires_at = Some(exp);
     }
-    v
+    dto
+}
+
+fn call_json(
+    state: &AppState,
+    call: &CallRow,
+    for_user: Option<&str>,
+    platform: Option<&str>,
+) -> Value {
+    serde_json::to_value(call_dto(state, call, for_user, platform)).expect("CallDto")
+}
+
+fn to_json<T: serde::Serialize>(dto: T) -> Value {
+    serde_json::to_value(dto).expect("call dto")
 }
 
 fn chat_ref_of(call: &CallRow) -> ChatRef {
@@ -276,7 +311,29 @@ async fn deliver_alert(
 /// every other member's devices.
 async fn announce_started(state: &AppState, call: &CallRow, starter: &Sender) {
     let chat = chat_ref_of(call);
-    let call_v = call_json(state, call, None, None);
+    let call_d = call_dto(state, call, None, None);
+    let starter_d = starter.dto();
+    let started = CallStartedPayloadDto {
+        call: call_d.clone(),
+        sender: starter_d.clone(),
+    };
+    let ring = CallRingPayloadDto {
+        call_id: call.id.clone(),
+        chat_id: call.chat_id.clone(),
+        project_id: call_d.project_id.clone(),
+        kind: call.kind.clone(),
+        room: call.room.clone(),
+        livekit_url: call_d.livekit_url.clone(),
+        caller: starter_d.clone(),
+        started_at: call.started_at,
+    };
+    let alert = CallAlertDto {
+        event: "started".into(),
+        chat_id: call.chat_id.clone(),
+        project_id: call_d.project_id.clone(),
+        call: call_d,
+        sender: Some(starter_d),
+    };
     let title = starter.title();
     let what = if call.kind == "video" {
         "video call"
@@ -287,45 +344,27 @@ async fn announce_started(state: &AppState, call: &CallRow, starter: &Sender) {
         if user == call.started_by {
             continue;
         }
-        let _ = state.db.push_user(
-            &user,
-            "call_started",
-            &json!({ "call": call_v, "sender": starter.json() }),
-            None,
-        );
+        let _ = state
+            .db
+            .push_user(&user, "call_started", &to_json(&started), None);
         if !state.push.is_on() {
             continue;
         }
         for t in state.db.voip_tokens_of_user(&user).unwrap_or_default() {
-            deliver_voip(
-                state,
-                &t,
-                json!({
-                    "call_id": call.id, "chat_id": call.chat_id, "project_id": call_v["project_id"],
-                    "kind": call.kind, "room": call.room, "livekit_url": call_v["livekit_url"],
-                    "caller": starter.json(), "started_at": call.started_at,
-                }),
-            )
-            .await;
+            deliver_voip(state, &t, to_json(&ring)).await;
         }
         for t in state.db.push_tokens_of_user(&user).unwrap_or_default() {
             // content-available wakes a backgrounded (not force-quit) iPhone so
             // it can report CallKit — WhatsApp-style ring without the app open.
-            let payload = json!({
-                "aps": {
-                    "alert": { "title": title, "body": format!("Incoming {what}") },
-                    "sound": "default",
-                    "thread-id": call.chat_id,
-                    "category": CATEGORY,
-                    "mutable-content": 1,
-                    "content-available": 1,
-                    "interruption-level": "time-sensitive",
-                },
-                "event": "started",
-                "chat_id": call.chat_id,
-                "project_id": call_v["project_id"],
-                "call": call_v,
-                "sender": starter.json(),
+            let mut payload = to_json(&alert);
+            payload["aps"] = json!({
+                "alert": { "title": title, "body": format!("Incoming {what}") },
+                "sound": "default",
+                "thread-id": call.chat_id,
+                "category": CATEGORY,
+                "mutable-content": 1,
+                "content-available": 1,
+                "interruption-level": "time-sensitive",
             });
             deliver_alert(state, &t, payload, format!("call:{}", call.id)).await;
         }
@@ -347,31 +386,35 @@ async fn announce_ended(
         .project_id
         .clone()
         .unwrap_or_else(|| people::PEOPLE_PROJECT.to_owned());
+    let ended = CallEndedPayloadDto {
+        call_id: call.id.clone(),
+        chat_id: call.chat_id.clone(),
+        project_id: project_label.clone(),
+        duration_s,
+        reason: reason.to_owned(),
+        writer_device: writer_device.map(str::to_owned),
+    };
+    let alert = CallAlertDto {
+        event: "ended".into(),
+        chat_id: call.chat_id.clone(),
+        project_id: project_label,
+        call: call_dto(state, call, None, None),
+        sender: None,
+    };
     for user in members(state, &chat) {
-        let _ = state.db.push_user(
-            &user,
-            "call_ended",
-            &json!({
-                "call_id": call.id, "chat_id": call.chat_id, "project_id": project_label,
-                "duration_s": duration_s, "reason": reason, "writer_device": writer_device,
-            }),
-            None,
-        );
+        let _ = state
+            .db
+            .push_user(&user, "call_ended", &to_json(&ended), None);
         if !state.push.is_on() {
             continue;
         }
         for t in state.db.push_tokens_of_user(&user).unwrap_or_default() {
-            let payload = json!({
-                "aps": {
-                    "alert": { "title": "Call ended", "body": format!("{} min", (duration_s + 30) / 60) },
-                    "thread-id": call.chat_id,
-                    "category": CATEGORY,
-                    "content-available": 1,
-                },
-                "event": "ended",
-                "chat_id": call.chat_id,
-                "project_id": project_label,
-                "call": call_json(state, call, None, None),
+            let mut payload = to_json(&alert);
+            payload["aps"] = json!({
+                "alert": { "title": "Call ended", "body": format!("{} min", (duration_s + 30) / 60) },
+                "thread-id": call.chat_id,
+                "category": CATEGORY,
+                "content-available": 1,
             });
             deliver_alert(state, &t, payload, format!("call:{}", call.id)).await;
         }
@@ -390,11 +433,31 @@ async fn announce_missed(state: &AppState, call: &CallRow) {
         .map(|p| p.user_id)
         .collect();
     let from = Sender::user(state, &call.started_by);
+    let from_d = from.dto();
     let ended_at = call.ended_at.unwrap_or_else(now_ms);
     let project_label = call
         .project_id
         .clone()
         .unwrap_or_else(|| people::PEOPLE_PROJECT.to_owned());
+    let call_d = call_dto(state, call, None, None);
+    let missed = CallMissedPayloadDto {
+        call_id: call.id.clone(),
+        chat_id: call.chat_id.clone(),
+        project_id: project_label.clone(),
+        kind: call.kind.clone(),
+        from: from_d.clone(),
+        started_at: call.started_at,
+        ended_at,
+        duration_s: ((ended_at - call.started_at) / 1000).max(0),
+        reason: call.end_reason.clone(),
+    };
+    let alert = CallAlertDto {
+        event: "missed".into(),
+        chat_id: call.chat_id.clone(),
+        project_id: project_label,
+        call: call_d,
+        sender: Some(from_d),
+    };
     let what = if call.kind == "video" {
         "video"
     } else {
@@ -404,33 +467,20 @@ async fn announce_missed(state: &AppState, call: &CallRow) {
         if user == call.started_by || joined.contains(&user) {
             continue;
         }
-        let _ = state.db.push_user(
-            &user,
-            "call_missed",
-            &json!({
-                "call_id": call.id, "chat_id": call.chat_id, "project_id": project_label, "kind": call.kind,
-                "from": from.json(), "started_at": call.started_at, "ended_at": ended_at,
-                "duration_s": ((ended_at - call.started_at) / 1000).max(0), "reason": call.end_reason,
-            }),
-            None,
-        );
+        let _ = state
+            .db
+            .push_user(&user, "call_missed", &to_json(&missed), None);
         if !state.push.is_on() {
             continue;
         }
         for t in state.db.push_tokens_of_user(&user).unwrap_or_default() {
-            let payload = json!({
-                "aps": {
-                    "alert": { "title": from.title(), "body": format!("Missed {what} call") },
-                    "sound": "default",
-                    "thread-id": call.chat_id,
-                    "category": CATEGORY,
-                    "mutable-content": 1,
-                },
-                "event": "missed",
-                "chat_id": call.chat_id,
-                "project_id": project_label,
-                "call": call_json(state, call, None, None),
-                "sender": from.json(),
+            let mut payload = to_json(&alert);
+            payload["aps"] = json!({
+                "alert": { "title": from.title(), "body": format!("Missed {what} call") },
+                "sound": "default",
+                "thread-id": call.chat_id,
+                "category": CATEGORY,
+                "mutable-content": 1,
             });
             deliver_alert(state, &t, payload, format!("call:{}", call.id)).await;
         }
@@ -529,9 +579,11 @@ async fn start_or_join(
     if let Ok(Some(existing)) = state.db.active_call_in_chat(&chat.chat_id) {
         let _ = state.db.call_join(&existing.id, &me);
         crate::voice::ensure_agents(state, &existing).await;
-        return Json(json!({
-            "call": call_json(state, &existing, Some(&me), platform.as_deref()),
-            "joined": true
+        return Json(to_json(StartCallResponseDto {
+            call: call_dto(state, &existing, Some(&me), platform.as_deref()),
+            joined: true,
+            reachable: None,
+            agents_dispatched: None,
         }))
         .into_response();
     }
@@ -569,11 +621,11 @@ async fn start_or_join(
     let dispatched = crate::voice::dispatch_agents(state, &call).await;
     (
         StatusCode::CREATED,
-        Json(json!({
-            "call": call_json(state, &call, Some(&me), platform.as_deref()),
-            "joined": false,
-            "reachable": reachable,
-            "agents_dispatched": dispatched
+        Json(to_json(StartCallResponseDto {
+            call: call_dto(state, &call, Some(&me), platform.as_deref()),
+            joined: false,
+            reachable: Some(reachable),
+            agents_dispatched: Some(Value::Array(dispatched)),
         })),
     )
         .into_response()
@@ -641,9 +693,10 @@ fn resolve_project_chat(
 
 fn active_call_response(state: &AppState, chat_id: &str, me: &str) -> Response {
     match state.db.active_call_in_chat(chat_id) {
-        Ok(Some(call)) => {
-            Json(json!({ "call": call_json(state, &call, Some(me), None) })).into_response()
-        }
+        Ok(Some(call)) => Json(to_json(CallEnvelopeDto {
+            call: call_dto(state, &call, Some(me), None),
+        }))
+        .into_response(),
         Ok(None) => api_error(StatusCode::NOT_FOUND, "no_call", "no call in this chat"),
         Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
     }
@@ -727,8 +780,10 @@ pub async fn get_call(
         Err(r) => return *r,
     };
     let (platform, _) = client_identity(&state, &headers, &device);
-    Json(json!({ "call": call_json(&state, &call, Some(&me), platform.as_deref()) }))
-        .into_response()
+    Json(to_json(CallEnvelopeDto {
+        call: call_dto(&state, &call, Some(&me), platform.as_deref()),
+    }))
+    .into_response()
 }
 
 /// `POST /calls/{id}/join` → `{call}` with a fresh token; 410 when the call ended.
@@ -761,8 +816,10 @@ pub async fn join_call(
     let _ = state.db.call_join(&call.id, &me);
     crate::voice::ensure_agents(&state, &call).await;
     let (platform, _) = client_identity(&state, &headers, &device);
-    Json(json!({ "call": call_json(&state, &call, Some(&me), platform.as_deref()) }))
-        .into_response()
+    Json(to_json(CallEnvelopeDto {
+        call: call_dto(&state, &call, Some(&me), platform.as_deref()),
+    }))
+    .into_response()
 }
 
 /// `POST /calls/{id}/leave` → `{ended, duration_s}`; the last one out ends the call.
@@ -777,13 +834,21 @@ pub async fn leave_call(
     };
     if !call.active() {
         let duration_s = (call.ended_at.unwrap_or(call.started_at) - call.started_at) / 1000;
-        return Json(json!({ "ended": false, "already_ended": true, "duration_s": duration_s }))
-            .into_response();
+        return Json(to_json(LeaveCallResponseDto {
+            ended: false,
+            duration_s,
+            already_ended: Some(true),
+        }))
+        .into_response();
     }
     let remaining = state.db.call_leave(&call.id, &me).unwrap_or(1);
     if remaining > 0 {
-        return Json(json!({ "ended": false, "duration_s": (now_ms() - call.started_at) / 1000 }))
-            .into_response();
+        return Json(to_json(LeaveCallResponseDto {
+            ended: false,
+            duration_s: (now_ms() - call.started_at) / 1000,
+            already_ended: None,
+        }))
+        .into_response();
     }
     // This client knows the call ended (it gets `ended: true`), so nobody else writes the line.
     end_call(&state, &call.id, "last_left", Some(device)).await;
@@ -795,7 +860,12 @@ pub async fn leave_call(
         .and_then(|c| c.ended_at)
         .map(|e| (e - call.started_at) / 1000)
         .unwrap_or(0);
-    Json(json!({ "ended": true, "duration_s": duration_s })).into_response()
+    Json(to_json(LeaveCallResponseDto {
+        ended: true,
+        duration_s,
+        already_ended: None,
+    }))
+    .into_response()
 }
 
 // ---- VoIP tokens ----------------------------------------------------------------------------------
@@ -857,9 +927,11 @@ pub async fn register_voip(
         updated_at: now_ms(),
     };
     match state.db.upsert_voip_token(&t) {
-        Ok(()) => {
-            Json(json!({ "device_id": t.device_id, "push": state.push.is_on() })).into_response()
-        }
+        Ok(()) => Json(to_json(VoipRegisterResponseDto {
+            device_id: t.device_id,
+            push: state.push.is_on(),
+        }))
+        .into_response(),
         Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
     }
 }
@@ -1264,7 +1336,7 @@ mod tests {
         // Webhooks: Bob joined, both left, the room closed.
         let ev = |event: &str, identity: &str| json!({ "event": event, "room": { "name": call.room }, "participant": { "identity": identity } });
         handle_webhook(&state, &ev("participant_joined", &format!("u_{bob}"))).await;
-        assert_eq!(participants_json(&state, &call).len(), 2);
+        assert_eq!(participants_dto(&state, &call).len(), 2);
         handle_webhook(&state, &ev("participant_left", &format!("u_{alice}"))).await;
         handle_webhook(&state, &ev("participant_left", &format!("u_{bob}"))).await;
         assert!(
@@ -1512,5 +1584,229 @@ mod tests {
         )
         .await;
         assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    // ---- wire fixtures (step 6b-2b) ------------------------------------------------------------
+
+    const FIXED_AT: i64 = 1_700_000_000_000;
+    const FIXED_TOKEN: &str = "fixture.join.token";
+    const FIXED_TOKEN_EXP: i64 = FIXED_AT + 3_600_000;
+
+    fn fixtures_dir() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/api")
+    }
+
+    fn load_fixture(name: &str) -> Value {
+        let path = fixtures_dir().join(name);
+        let raw =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        serde_json::from_str(&raw).expect("fixture json")
+    }
+
+    fn assert_builder(name: &str, got: Value) {
+        let path = fixtures_dir().join(name);
+        if !path.exists() || std::env::var_os("UPDATE_API_FIXTURES").is_some() {
+            let pretty = serde_json::to_string_pretty(&got).expect("pretty");
+            std::fs::write(&path, format!("{pretty}\n")).expect("write fixture");
+        }
+        let want = load_fixture(name);
+        assert_eq!(got, want, "fixture {name}");
+    }
+
+    fn stabilize_call_token(mut v: Value) -> Value {
+        if v.get("token").and_then(Value::as_str).is_some() {
+            v["token"] = json!(FIXED_TOKEN);
+            v["token_expires_at"] = json!(FIXED_TOKEN_EXP);
+        }
+        if let Some(call) = v.get_mut("call") {
+            if call.get("token").and_then(Value::as_str).is_some() {
+                call["token"] = json!(FIXED_TOKEN);
+                call["token_expires_at"] = json!(FIXED_TOKEN_EXP);
+            }
+        }
+        v
+    }
+
+    fn rename_device(state: &AppState, old: &str, new_id: &str, name: &str) {
+        state
+            .db
+            .with(|c| {
+                c.execute(
+                    "UPDATE devices SET id = ?2, name = ?3, kind = 'mac', created_at = ?4, last_seen_at = ?4 WHERE id = ?1",
+                    rusqlite::params![old, new_id, name, FIXED_AT],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    fn fixture_call_setup() -> (AppState, String, String, CallRow) {
+        let mut state = test_state(AuthMode::Github);
+        with_livekit(&mut state);
+        let (alice, alice_dev) = person(&state, 201);
+        let (bob, bob_dev) = person(&state, 202);
+        let Principal::Device { id: alice_old, .. } = &alice_dev else {
+            unreachable!()
+        };
+        let Principal::Device { id: bob_old, .. } = &bob_dev else {
+            unreachable!()
+        };
+        rename_device(&state, alice_old, "dev_alice_call", "Alice Mac");
+        rename_device(&state, bob_old, "dev_bob_call", "Bob iPhone");
+        state
+            .db
+            .upsert_voip_token(&VoipToken {
+                device_id: "dev_bob_call".into(),
+                user_id: bob.clone(),
+                token: "ab".repeat(32),
+                environment: "production".into(),
+                bundle_id: "com.unarbos.arbos.ios".into(),
+                updated_at: FIXED_AT,
+            })
+            .unwrap();
+        state
+            .db
+            .upsert_push_token(&crate::db_push::PushToken {
+                device_id: "dev_bob_call".into(),
+                user_id: bob.clone(),
+                platform: "ios".into(),
+                token: "cd".repeat(32),
+                environment: "production".into(),
+                bundle_id: "com.unarbos.arbos.ios".into(),
+                app_version: "1.0.0 (fixture)".into(),
+                updated_at: FIXED_AT,
+            })
+            .unwrap();
+        let chat = crate::db_people::PeopleChat {
+            id: "people_call_fixture".into(),
+            kind: "dm".into(),
+            created_by: alice.clone(),
+            created_at: FIXED_AT,
+            title: None,
+            image_key: None,
+        };
+        state.db.insert_people_chat(&chat).unwrap();
+        for u in [&alice, &bob] {
+            state
+                .db
+                .add_member(&chat.id, &format!("user:{u}"), "owner", &alice, &json!({}))
+                .unwrap();
+        }
+        let call = CallRow {
+            id: "call_fixture".into(),
+            chat_id: chat.id.clone(),
+            project_id: None,
+            kind: "voice".into(),
+            room: "call_room_fixture".into(),
+            started_by: alice.clone(),
+            started_at: FIXED_AT,
+            ended_at: None,
+            end_reason: None,
+            last_activity_at: FIXED_AT,
+            started_device: Some("dev_alice_call".into()),
+            platform: Some("mac".into()),
+            app_version: Some("0.6.24".into()),
+        };
+        state.db.insert_call(&call).unwrap();
+        let _ = state.db.call_join(&call.id, &alice);
+        (state, alice, bob, call)
+    }
+
+    #[tokio::test]
+    async fn call_wire_fixtures() {
+        let (state, alice, bob, call) = fixture_call_setup();
+
+        let live =
+            stabilize_call_token(to_json(call_dto(&state, &call, Some(&alice), Some("mac"))));
+        assert_builder("call_live_with_token.json", live);
+
+        let mut ended_row = call.clone();
+        ended_row.ended_at = Some(FIXED_AT + 60_000);
+        ended_row.end_reason = Some("last_left".into());
+        assert_builder(
+            "call_ended.json",
+            to_json(call_dto(&state, &ended_row, None, None)),
+        );
+
+        let reachable = reachability(&state, std::slice::from_ref(&bob)).await;
+        let start = stabilize_call_token(to_json(StartCallResponseDto {
+            call: call_dto(&state, &call, Some(&alice), Some("mac")),
+            joined: false,
+            reachable: Some(reachable),
+            agents_dispatched: Some(Value::Array(vec![])),
+        }));
+        assert_builder("start_call_response.json", start);
+
+        let join = stabilize_call_token(to_json(CallEnvelopeDto {
+            call: call_dto(&state, &call, Some(&bob), None),
+        }));
+        assert_builder("join_call_response.json", join);
+
+        assert_builder(
+            "leave_call_response.json",
+            to_json(LeaveCallResponseDto {
+                ended: true,
+                duration_s: 60,
+                already_ended: None,
+            }),
+        );
+
+        let call_d = call_dto(&state, &call, None, None);
+        let starter = Sender::user(&state, &alice).dto();
+        assert_builder(
+            "call_started_payload.json",
+            to_json(CallStartedPayloadDto {
+                call: call_d.clone(),
+                sender: starter.clone(),
+            }),
+        );
+        assert_builder(
+            "call_ended_payload.json",
+            to_json(CallEndedPayloadDto {
+                call_id: call.id.clone(),
+                chat_id: call.chat_id.clone(),
+                project_id: people::PEOPLE_PROJECT.to_owned(),
+                duration_s: 60,
+                reason: "last_left".into(),
+                writer_device: Some("dev_bob_call".into()),
+            }),
+        );
+        assert_builder(
+            "call_missed_payload.json",
+            to_json(CallMissedPayloadDto {
+                call_id: call.id.clone(),
+                chat_id: call.chat_id.clone(),
+                project_id: people::PEOPLE_PROJECT.to_owned(),
+                kind: call.kind.clone(),
+                from: starter.clone(),
+                started_at: call.started_at,
+                ended_at: FIXED_AT + 60_000,
+                duration_s: 60,
+                reason: Some("abandoned".into()),
+            }),
+        );
+        assert_builder(
+            "call_ring_payload.json",
+            to_json(CallRingPayloadDto {
+                call_id: call.id.clone(),
+                chat_id: call.chat_id.clone(),
+                project_id: people::PEOPLE_PROJECT.to_owned(),
+                kind: call.kind.clone(),
+                room: call.room.clone(),
+                livekit_url: call_d.livekit_url.clone(),
+                caller: starter.clone(),
+                started_at: call.started_at,
+            }),
+        );
+        assert_builder(
+            "call_alert.json",
+            to_json(CallAlertDto {
+                event: "started".into(),
+                chat_id: call.chat_id.clone(),
+                project_id: people::PEOPLE_PROJECT.to_owned(),
+                call: call_d,
+                sender: Some(starter),
+            }),
+        );
     }
 }

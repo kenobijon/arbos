@@ -23,7 +23,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
-use arbos_core::api::{UnreadChatDto, UnreadDto};
+use arbos_core::api::{SenderDto, UnreadChatDto, UnreadDto};
 use arbos_core::ids::now_ms;
 
 use crate::apns::{Delivery, Outgoing};
@@ -146,15 +146,27 @@ impl Sender {
         }
     }
 
+    pub fn dto(&self) -> SenderDto {
+        SenderDto {
+            kind: self.kind.to_owned(),
+            id: self.id.clone(),
+            name: self.name.clone(),
+            handle: self.handle.clone(),
+            avatar: self.avatar.clone(),
+            avatar_color: self.avatar_color.clone(),
+            avatar_url: self.avatar_url.clone(),
+            avatar_color_index: self.avatar_color_index,
+            avatar_color_index_effective: i64::from(crate::avatar::effective_color_index(
+                &self.id,
+                self.avatar_color_index,
+            )),
+            avatar_leaf_effective: self.leaf.map(|l| i64::from(l.leaf)),
+            avatar_leaf_color_effective: self.leaf.map(|l| i64::from(l.color)),
+        }
+    }
+
     pub fn json(&self) -> Value {
-        json!({
-            "kind": self.kind, "id": self.id, "name": self.name, "handle": self.handle,
-            "avatar": self.avatar, "avatar_color": self.avatar_color, "avatar_url": self.avatar_url,
-            "avatar_color_index": self.avatar_color_index,
-            "avatar_color_index_effective": crate::avatar::effective_color_index(&self.id, self.avatar_color_index),
-            "avatar_leaf_effective": self.leaf.map(|l| l.leaf),
-            "avatar_leaf_color_effective": self.leaf.map(|l| l.color),
-        })
+        serde_json::to_value(self.dto()).expect("SenderDto")
     }
 
     /// Alert title: the agent's name, or `@handle` for a person.

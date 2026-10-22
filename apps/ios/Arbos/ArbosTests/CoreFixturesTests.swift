@@ -234,4 +234,79 @@ final class CoreFixturesTests: XCTestCase {
         XCTAssertEqual(dto.chats[0].chat_id, "people_dm")
         XCTAssertEqual(dto.chats[0].unread, 2)
     }
+
+    // MARK: Calls (step 6b-2b)
+
+    func testCallParseFixtures() throws {
+        let live = try XCTUnwrap(Call.parse(try apiFixtureJSON("call_live_with_token.json")))
+        XCTAssertEqual(live.callId, "call_fixture")
+        XCTAssertEqual(live.chatId, "people_call_fixture")
+        XCTAssertEqual(live.token, "fixture.join.token")
+        XCTAssertEqual(live.startedBy?.handle, "user201")
+        XCTAssertEqual(live.participants.count, 1)
+
+        let ended = try XCTUnwrap(Call.parse(try apiFixtureJSON("call_ended.json")))
+        XCTAssertEqual(ended.callId, "call_fixture")
+        XCTAssertNotNil(ended.endedAt)
+        XCTAssertEqual(ended.reason, "last_left")
+        XCTAssertNil(ended.token)
+
+        let joinEnv = try apiFixtureData("join_call_response.json")
+        let join = try JSONDecoder().decode(CallEnvelopeDto.self, from: joinEnv)
+        let joined = Call(dto: join.call)
+        XCTAssertEqual(joined.callId, "call_fixture")
+        XCTAssertEqual(joined.token, "fixture.join.token")
+    }
+
+    func testStartCallResponseFixture() throws {
+        let data = try apiFixtureData("start_call_response.json")
+        let resp = try JSONDecoder().decode(StartCallResponseDto.self, from: data)
+        XCTAssertEqual(resp.joined, false)
+        XCTAssertEqual(resp.reachable?.count, 1)
+        let call = Call(dto: resp.call, reachable: (resp.reachable ?? []).map(CallReachability.init(dto:)))
+        XCTAssertEqual(call.callId, "call_fixture")
+        XCTAssertEqual(call.reachable.count, 1)
+        XCTAssertEqual(call.reachable[0].userId, "gh_202")
+        XCTAssertEqual(call.reachable[0].anyVoip, true)
+    }
+
+    func testLeaveAndVoipResponseFixtures() throws {
+        let leave = try JSONDecoder().decode(LeaveCallResponseDto.self, from: try apiFixtureData("leave_call_response.json"))
+        XCTAssertEqual(leave.ended, true)
+        XCTAssertEqual(leave.duration_s, 60)
+        XCTAssertNil(leave.already_ended)
+    }
+
+    func testCallPayloadFixtures() throws {
+        let started = try JSONDecoder().decode(CallStartedPayloadDto.self, from: try apiFixtureData("call_started_payload.json"))
+        XCTAssertEqual(started.call.call_id, "call_fixture")
+        XCTAssertEqual(started.sender.handle, "user201")
+        XCTAssertEqual(Call(dto: started.call).callId, "call_fixture")
+
+        let ended = try JSONDecoder().decode(CallEndedPayloadDto.self, from: try apiFixtureData("call_ended_payload.json"))
+        XCTAssertEqual(ended.call_id, "call_fixture")
+        XCTAssertEqual(ended.writer_device, "dev_bob_call")
+
+        let missed = try JSONDecoder().decode(CallMissedPayloadDto.self, from: try apiFixtureData("call_missed_payload.json"))
+        XCTAssertEqual(missed.from.handle, "user201")
+        XCTAssertEqual(CallPerson(dto: missed.from).handle, "user201")
+
+        let ring = try JSONDecoder().decode(CallRingPayloadDto.self, from: try apiFixtureData("call_ring_payload.json"))
+        XCTAssertEqual(ring.caller.handle, "user201")
+        XCTAssertEqual(ring.room, "call_room_fixture")
+
+        let alert = try JSONDecoder().decode(CallAlertDto.self, from: try apiFixtureData("call_alert.json"))
+        XCTAssertEqual(alert.event, "started")
+        XCTAssertEqual(alert.call.call_id, "call_fixture")
+        XCTAssertEqual(alert.sender?.handle, "user201")
+    }
+
+    func testCallPersonMetadataFixture() throws {
+        let data = try apiFixtureData("call_live_with_token.json")
+        let dto = try JSONDecoder().decode(CallDto.self, from: data)
+        let meta = try JSONEncoder().encode(dto.started_by)
+        let person = try XCTUnwrap(CallPerson.parse(metadata: String(data: meta, encoding: .utf8)))
+        XCTAssertEqual(person.id, "gh_201")
+        XCTAssertEqual(person.handle, "user201")
+    }
 }

@@ -18,6 +18,7 @@ import AudioToolbox
 import CallKit
 import PushKit
 import LiveKit
+import ArbosFFI
 import os
 
 private let log = Logger(subsystem: "com.unarbos.arbos.ios", category: "calls")
@@ -978,29 +979,39 @@ final class CallManager: NSObject, ObservableObject {
 
     /// An ARBOS_CALL alert (tap or foreground): `event` started → ring, ended → stop.
     func handleCallAlert(_ info: [AnyHashable: Any]) {
-        let event = (info["event"] as? String) ?? ""
-        if event == "missed" {
-            let c = Call.parse(info["call"])
-            if let cid = c?.callId ?? info["call_id"] as? String, let chat = c?.chatId ?? info["chat_id"] as? String {
-                missedCall(callId: cid, chatId: chat, projectId: c?.projectId ?? (info["project_id"] as? String) ?? peopleSlot,
-                           from: CallPerson.parse(info["sender"]) ?? c?.startedBy)
-            }
-            return
-        }
-        if event == "ended" {
-            if let cid = (info["call"] as? [String: Any])?["call_id"] as? String ?? info["call_id"] as? String,
-               let chat = info["chat_id"] as? String {
-                remoteEnded(callId: cid, chatId: chat, durationS: 0, writerDevice: nil)
-            }
-        } else if let c = Call.parse(info["call"]) {
-            ring(c, from: CallPerson.parse(info["sender"]) ?? c.startedBy, viaVoip: false)
+        var dict: [String: Any] = [:]
+        for (k, v) in info { if let key = k as? String { dict[key] = v } }
+        guard JSONSerialization.isValidJSONObject(dict),
+              let data = try? JSONSerialization.data(withJSONObject: dict),
+              let alert = try? JSONDecoder().decode(CallAlertDto.self, from: data) else { return }
+        let c = Call(dto: alert.call)
+        switch alert.event {
+        case "missed":
+            missedCall(
+                callId: c.callId,
+                chatId: c.chatId,
+                projectId: c.projectId.isEmpty ? peopleSlot : c.projectId,
+                from: alert.sender.map(CallPerson.init(dto:)) ?? c.startedBy
+            )
+        case "ended":
+            remoteEnded(callId: c.callId, chatId: c.chatId, durationS: 0, writerDevice: nil)
+        default:
+            ring(c, from: alert.sender.map(CallPerson.init(dto:)) ?? c.startedBy, viaVoip: false)
         }
     }
 
     /// Notification Decline on an `ARBOS_CALL` alert (no Accept).
     func handleCallDecline(_ info: [AnyHashable: Any]) {
-        let c = Call.parse(info["call"])
-        let callId = c?.callId ?? info["call_id"] as? String
+        var dict: [String: Any] = [:]
+        for (k, v) in info { if let key = k as? String { dict[key] = v } }
+        let callId: String?
+        if JSONSerialization.isValidJSONObject(dict),
+           let data = try? JSONSerialization.data(withJSONObject: dict),
+           let alert = try? JSONDecoder().decode(CallAlertDto.self, from: data) {
+            callId = alert.call.call_id
+        } else {
+            callId = nil
+        }
         if let callId, incoming?.call.callId == callId {
             decline()
         } else if incoming != nil, callId == nil {
@@ -1191,10 +1202,24 @@ extension CallManager: PKPushRegistryDelegate {
         let dict = payload.dictionaryPayload
         var d: [String: Any] = [:]
         for (k, v) in dict { if let key = k as? String { d[key] = v } }
-        let caller = CallPerson.parse(d["caller"] ?? d["sender"])
-        var callDict = d
-        callDict["started_by"] = d["caller"] ?? d["sender"]
-        let parsed = Call.parse(callDict)
+        let ring: CallRingPayloadDto? = {
+            guard JSONSerialization.isValidJSONObject(d),
+                  let data = try? JSONSerialization.data(withJSONObject: d) else { return nil }
+            return try? JSONDecoder().decode(CallRingPayloadDto.self, from: data)
+        }()
+        let caller = ring.map { CallPerson(dto: $0.caller) }
+        let parsed: Call? = ring.map { r in
+            Call(
+                callId: r.call_id,
+                chatId: r.chat_id,
+                projectId: r.project_id.isEmpty ? peopleSlot : r.project_id,
+                kind: CallKind(rawValue: r.kind) ?? .voice,
+                room: r.room,
+                livekitUrl: r.livekit_url ?? "",
+                startedBy: CallPerson(dto: r.caller),
+                startedAt: r.started_at
+            )
+        }
 
         let report: @MainActor () -> Void = {
             if let parsed {

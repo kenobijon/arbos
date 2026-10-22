@@ -2579,18 +2579,32 @@ final class AppModel: ObservableObject {
             case "people_agent_added", "people_agent_removed", "people_member_added", "people_member_removed":
                 needChats = true
             case "call_started":
-                if let c = Call.parse(p.raw["call"]), c.chatId != CallManager.shared.call?.chatId {
-                    CallManager.shared.ring(c, from: CallPerson.parse(p.raw["sender"]) ?? c.startedBy, viaVoip: false)
+                if let data = try? JSONSerialization.data(withJSONObject: p.raw),
+                   let started = try? JSONDecoder().decode(CallStartedPayloadDto.self, from: data) {
+                    let c = Call(dto: started.call)
+                    if c.chatId != CallManager.shared.call?.chatId {
+                        CallManager.shared.ring(c, from: CallPerson(dto: started.sender), viaVoip: false)
+                    }
                 }
             case "call_missed":
-                if let cid = p.payload["call_id"], let chat = p.payload["chat_id"] {
-                    CallManager.shared.missedCall(callId: cid, chatId: chat, projectId: p.payload["project_id"] ?? peopleSlot,
-                                                  from: CallPerson.parse(p.raw["from"]) ?? CallPerson.parse(p.raw["sender"]))
+                if let data = try? JSONSerialization.data(withJSONObject: p.raw),
+                   let missed = try? JSONDecoder().decode(CallMissedPayloadDto.self, from: data) {
+                    CallManager.shared.missedCall(
+                        callId: missed.call_id,
+                        chatId: missed.chat_id,
+                        projectId: missed.project_id.isEmpty ? peopleSlot : missed.project_id,
+                        from: CallPerson(dto: missed.from)
+                    )
                 }
             case "call_ended":
-                if let cid = p.payload["call_id"], let chat = p.payload["chat_id"] {
-                    CallManager.shared.remoteEnded(callId: cid, chatId: chat, durationS: Int(p.payload["duration_s"] ?? "") ?? 0,
-                                                   writerDevice: p.payload["writer_device"])
+                if let data = try? JSONSerialization.data(withJSONObject: p.raw),
+                   let ended = try? JSONDecoder().decode(CallEndedPayloadDto.self, from: data) {
+                    CallManager.shared.remoteEnded(
+                        callId: ended.call_id,
+                        chatId: ended.chat_id,
+                        durationS: Int(ended.duration_s),
+                        writerDevice: ended.writer_device
+                    )
                 }
             case "people_project_shared":
                 if let by = p.payload["by_handle"] { PushManager.post(id: p.id, title: "@\(by)", body: "Shared a project with you", chatId: "") }

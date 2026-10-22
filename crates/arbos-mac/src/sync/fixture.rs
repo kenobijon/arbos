@@ -5706,6 +5706,7 @@ fn fixture_call(shared: &Arc<Shared>, chat_id: &str, kind: CallKind) -> Call {
         ended_at: None,
         reason: None,
         participants: vec![sender_of(&me)],
+        agents: Vec::new(),
     }
 }
 
