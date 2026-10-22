@@ -196,6 +196,9 @@ pub enum RowKind {
         pending: bool,
         /// Caption for prompts not typed by the user (a routine, another project).
         sender_label: Option<String>,
+        /// Another person's bubble shows their name above it only when the sender
+        /// changed (Grok Bot's group style).
+        named: bool,
         /// Another person in a people chat (D72): left bubble with their
         /// avatar and handle instead of my right bubble.
         from: Option<Person>,
@@ -291,8 +294,6 @@ pub enum RowKind {
         icon: Option<String>,
         /// Stable seed for the chip colour (the sender id).
         seed: String,
-        /// "answering @sam · owned by @jacob" for a shared agent (D72).
-        note: Option<String>,
         /// Tree-character slug the relay put on the reply (`senderAvatar`).
         avatar: Option<String>,
         /// Its colour (`senderAvatarColor`); `None` = look it up / mono.
@@ -982,9 +983,27 @@ impl Transcript {
         // the last block; earlier blocks keep the lane free (mocks a/f).
         let disc = lane.as_deref().map(|seed| {
             if last {
-                self.agent_disc(seed, cx)
+                // The disc opens the agent's profile, pushed over the group's pane.
+                let (_, _, _, agent_pid) = self.agent_identity(seed, "Agent", cx);
+                let open_state = self.state.clone();
+                div()
+                    .id(SharedString::from(format!("{row_id}#disc")))
+                    .flex_shrink_0()
+                    .child(self.agent_disc(seed, cx))
+                    .when_some(agent_pid, |el, pid| {
+                        el.cursor_pointer().on_click(move |_, _, cx| {
+                            let pid = pid.clone();
+                            open_state.update(cx, |s, cx| {
+                                s.push_profile(
+                                    crate::app::ProfilePage::Agent { project_id: pid },
+                                    cx,
+                                )
+                            });
+                        })
+                    })
+                    .into_any_element()
             } else {
-                div().w(px(SENDER_DISC)).flex_shrink_0()
+                div().w(px(SENDER_DISC)).flex_shrink_0().into_any_element()
             }
         });
         row_el
@@ -1020,6 +1039,7 @@ impl Transcript {
                 pending,
                 sender_label,
                 from,
+                named,
                 time,
                 quote,
             } => {
@@ -1079,38 +1099,40 @@ impl Transcript {
                         .items_start()
                         .gap(px(6.0))
                         .py(px(ROW_GAP_HALF))
-                        .child({
-                            // Click the caption → the person's profile page.
-                            let open_state = self.state.clone();
-                            let handle = person.handle.clone();
-                            let sid = self.chat_id.as_ref().and_then(|c| {
-                                self.state.read(cx).chats.iter().find_map(|(pid, tabs)| {
-                                    tabs.iter().any(|t| &t.id == c).then(|| pid.clone())
-                                })
-                            });
-                            // The caption starts where the bubble's text does.
-                            div()
-                                .id(SharedString::from(format!("{}#who", row.id)))
-                                .pl(px(SENDER_LANE + BUBBLE_PAD_X))
-                                .cursor_pointer()
-                                .child(
-                                    div()
-                                        .text_size(px(TEXT_TINY))
-                                        .text_color(theme.text_muted)
-                                        .child(person.display_name()),
-                                )
-                                .on_click(move |_, _, cx| {
-                                    let (handle, sid) = (handle.clone(), sid.clone());
-                                    open_state.update(cx, |s, cx| {
-                                        s.open_profile(
-                                            crate::app::ProfilePage::User {
-                                                handle,
-                                                space_id: sid,
-                                            },
-                                            cx,
-                                        )
-                                    });
-                                })
+                        .when(named, |el| {
+                            el.child({
+                                // Click the caption → the person's profile page (pushed; ‹ returns).
+                                let open_state = self.state.clone();
+                                let handle = person.handle.clone();
+                                let sid = self.chat_id.as_ref().and_then(|c| {
+                                    self.state.read(cx).chats.iter().find_map(|(pid, tabs)| {
+                                        tabs.iter().any(|t| &t.id == c).then(|| pid.clone())
+                                    })
+                                });
+                                // The caption starts where the bubble's text does.
+                                div()
+                                    .id(SharedString::from(format!("{}#who", row.id)))
+                                    .pl(px(SENDER_LANE + BUBBLE_PAD_X))
+                                    .cursor_pointer()
+                                    .child(
+                                        div()
+                                            .text_size(px(TEXT_TINY))
+                                            .text_color(theme.text_muted)
+                                            .child(person.display_name()),
+                                    )
+                                    .on_click(move |_, _, cx| {
+                                        let (handle, sid) = (handle.clone(), sid.clone());
+                                        open_state.update(cx, |s, cx| {
+                                            s.push_profile(
+                                                crate::app::ProfilePage::User {
+                                                    handle,
+                                                    space_id: sid,
+                                                },
+                                                cx,
+                                            )
+                                        });
+                                    })
+                            })
                         })
                         .child({
                             let (row_el, reveal) = self.hover_row(&row.id, now, window, cx);
@@ -1120,7 +1142,33 @@ impl Transcript {
                                 .justify_start()
                                 .items_end()
                                 .gap(px(SENDER_DISC_GAP))
-                                .child(people::avatar(image, &person, SENDER_DISC, &theme))
+                                .child({
+                                    // The disc opens the same profile as the name.
+                                    let open_state = self.state.clone();
+                                    let handle = person.handle.clone();
+                                    let sid = self.chat_id.as_ref().and_then(|c| {
+                                        self.state.read(cx).chats.iter().find_map(|(pid, tabs)| {
+                                            tabs.iter().any(|t| &t.id == c).then(|| pid.clone())
+                                        })
+                                    });
+                                    div()
+                                        .id(SharedString::from(format!("{}#disc", row.id)))
+                                        .flex_shrink_0()
+                                        .cursor_pointer()
+                                        .child(people::avatar(image, &person, SENDER_DISC, &theme))
+                                        .on_click(move |_, _, cx| {
+                                            let (handle, sid) = (handle.clone(), sid.clone());
+                                            open_state.update(cx, |s, cx| {
+                                                s.push_profile(
+                                                    crate::app::ProfilePage::User {
+                                                        handle,
+                                                        space_id: sid,
+                                                    },
+                                                    cx,
+                                                )
+                                            });
+                                        })
+                                })
                                 .child(
                                     div()
                                         .flex_1()
@@ -1546,7 +1594,6 @@ impl Transcript {
                 name,
                 icon,
                 seed,
-                note,
                 avatar,
                 avatar_color,
             } => {
@@ -1577,7 +1624,7 @@ impl Transcript {
                         el.cursor_pointer().on_click(move |_, _, cx| {
                             if let Some(pid) = agent_pid.clone() {
                                 open_state.update(cx, |s, cx| {
-                                    s.open_profile(
+                                    s.push_profile(
                                         crate::app::ProfilePage::Agent { project_id: pid },
                                         cx,
                                     )
@@ -1585,17 +1632,7 @@ impl Transcript {
                             }
                         })
                     });
-                match note {
-                    Some(note) => caption
-                        .child(
-                            div()
-                                .text_size(px(10.5))
-                                .text_color(theme.text_faint)
-                                .child(format!("· {note}")),
-                        )
-                        .into_any_element(),
-                    None => caption.into_any_element(),
-                }
+                caption.into_any_element()
             }
             RowKind::Details => {
                 let state = self.state.clone();
@@ -1868,11 +1905,15 @@ pub fn build_rows(
         .iter()
         .rposition(|m| m.role == Role::Assistant && !m.is_streaming());
     let mut last_stamp_at: u64 = 0;
+    // Who spoke last in a people chat: a name sits above a bubble only when the sender
+    // changed or a date stamp broke the run (Grok Bot's group style).
+    let mut prev_sender: Option<String> = None;
     for (mix, message) in messages.iter().enumerate() {
         let streaming = message.is_streaming();
         if message.created_at > 0 && message.created_at.saturating_sub(last_stamp_at) > STAMP_GAP_MS
         {
             last_stamp_at = message.created_at;
+            prev_sender = None;
             let label = crate::ui::sidebar::stamp_label(message.created_at);
             rows.push(Row {
                 version: hash_version(&label, false),
@@ -1881,6 +1922,7 @@ pub fn build_rows(
                 kind: RowKind::Stamp { label },
             });
         }
+        let rows_before_message = rows.len();
         match message.role {
             Role::User => {
                 let text = message.plain_text();
@@ -1920,6 +1962,7 @@ pub fn build_rows(
                 } else {
                     sender_caption(message)
                 };
+                let named = prev_sender.as_deref() != Some(message.sender.as_str());
                 // Image preview / file card rows (same cards as agent attachments).
                 let is_mine = from.is_none();
                 for (part_id, attachment) in &attachment_parts {
@@ -1974,6 +2017,7 @@ pub fn build_rows(
                             pending: message.pending,
                             sender_label,
                             from,
+                            named,
                             time: clock_label(message.created_at),
                             quote,
                         },
@@ -2041,68 +2085,47 @@ pub fn build_rows(
                     }
                 }
                 let mut lane: Option<String> = None;
-                if message.role == Role::Project {
+                let in_people =
+                    message.sender.starts_with("agent:") && message.asked_by_handle.is_some();
+                if message.role == Role::Project || in_people {
+                    // A people-chat agent (or another Project, F6) speaks in its own lane. The
+                    // name sits above the bubble only when the sender changed (Grok Bot's group
+                    // style); the disc on the last block names it otherwise. No meta line —
+                    // "answering @x · owned by @y" moved to the profile pane (Jacob, 2026-10-22).
                     lane = Some(message.sender.clone());
-                    let name = message
-                        .sender_name
-                        .clone()
-                        .or_else(|| message.sender.strip_prefix("project:").map(str::to_owned))
-                        .unwrap_or_else(|| "Project".to_owned());
-                    rows.push(Row {
-                        version: hash_version(&(&name, &message.sender_icon), false),
-                        id: format!("{}#sender", message.id),
-                        message_id: message.id.clone(),
-                        kind: RowKind::Sender {
-                            name,
-                            icon: message.sender_icon.clone(),
-                            seed: message.sender.clone(),
-                            note: None,
-                            avatar: None,
-                            avatar_color: None,
-                        },
-                    });
-                } else if message.sender.starts_with("agent:") && message.asked_by_handle.is_some()
-                {
-                    // A shared agent in a people chat: name it and whom it answers.
-                    lane = Some(message.sender.clone());
-                    let name = message
-                        .sender_name
-                        .clone()
-                        .unwrap_or_else(|| "Agent".to_owned());
-                    let mut note = format!(
-                        "answering @{}",
-                        message.asked_by_handle.clone().unwrap_or_default()
-                    );
-                    if let Some(owner) = &message.owner_handle {
-                        note.push_str(&format!(" · owned by @{owner}"));
-                    }
-                    rows.push(Row {
-                        version: hash_version(
-                            &(
-                                &name,
-                                &message.sender_icon,
-                                &note,
-                                &message.sender_avatar_color,
+                    if prev_sender.as_deref() != Some(message.sender.as_str()) {
+                        let fallback = if message.role == Role::Project {
+                            message
+                                .sender
+                                .strip_prefix("project:")
+                                .map(str::to_owned)
+                                .unwrap_or_else(|| "Project".to_owned())
+                        } else {
+                            "Agent".to_owned()
+                        };
+                        let name = message.sender_name.clone().unwrap_or(fallback);
+                        rows.push(Row {
+                            version: hash_version(
+                                &(&name, &message.sender_icon, &message.sender_avatar_color),
+                                false,
                             ),
-                            false,
-                        ),
-                        id: format!("{}#sender", message.id),
-                        message_id: message.id.clone(),
-                        kind: RowKind::Sender {
-                            name,
-                            icon: message.sender_icon.clone(),
-                            seed: message.sender.clone(),
-                            note: Some(note),
-                            avatar: message
-                                .sender_avatar
-                                .clone()
-                                .filter(|a| !a.is_empty() && !a.contains("://")),
-                            avatar_color: message
-                                .sender_avatar_color
-                                .clone()
-                                .filter(|a| !a.is_empty()),
-                        },
-                    });
+                            id: format!("{}#sender", message.id),
+                            message_id: message.id.clone(),
+                            kind: RowKind::Sender {
+                                name,
+                                icon: message.sender_icon.clone(),
+                                seed: message.sender.clone(),
+                                avatar: message
+                                    .sender_avatar
+                                    .clone()
+                                    .filter(|a| !a.is_empty() && !a.contains("://")),
+                                avatar_color: message
+                                    .sender_avatar_color
+                                    .clone()
+                                    .filter(|a| !a.is_empty()),
+                            },
+                        });
+                    }
                 }
                 let last_text_part = message
                     .parts
@@ -2407,6 +2430,9 @@ pub fn build_rows(
                     });
                 }
             }
+        }
+        if rows.len() > rows_before_message {
+            prev_sender = Some(message.sender.clone());
         }
     }
     if running || queued {

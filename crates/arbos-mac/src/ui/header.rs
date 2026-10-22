@@ -15,7 +15,7 @@ use gpui::{
 };
 
 use crate::app::ProfilePage;
-use crate::model::{Chat, Project};
+use crate::model::{Chat, Project, ServerChannel, ServerInfo};
 use crate::ui::avatars;
 use crate::ui::composer::Composer;
 use crate::ui::glass::{self, WindowDrag};
@@ -24,8 +24,10 @@ use crate::ui::icons::icon;
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
 use crate::ui::shell::Shell;
-use crate::ui::sidebar::machine_dot;
-use crate::ui::theme::{Theme, AVATAR_HEADER, CONTROL, HEADER_HEIGHT, TEXT_SMALL, TEXT_TINY};
+use crate::ui::sidebar::{self, machine_dot};
+use crate::ui::theme::{
+    Theme, AVATAR_HEADER, CONTROL, HEADER_HEIGHT, TEXT_BODY, TEXT_SMALL, TEXT_TINY,
+};
 
 /// The pinned chat reads "Main" until it is renamed away from the agent's name.
 pub(crate) fn tab_title(chat: &Chat, space: &Project) -> String {
@@ -54,7 +56,7 @@ pub fn render(
         Some(ProfilePage::User { space_id, .. }) => space_id.as_deref() == Some(space.id.as_str()),
         Some(ProfilePage::Group { space_id }) => space_id == &space.id,
         Some(ProfilePage::Agent { project_id }) => project_id == &space.id,
-        Some(ProfilePage::Me) | None => false,
+        Some(ProfilePage::Me) | Some(ProfilePage::Server { .. }) | None => false,
     };
     // Agents with multi-chat keep a trailing "+" inside the pill, so the right
     // pad is tighter than the people/group pill's.
@@ -297,6 +299,147 @@ pub fn render(
         .pr(px(10.0))
         // No hard hairline under the pill — the transcript's top edge fade
         // (iPhone Settings glass fade) softens the join instead.
+        .window_drag()
+        .child(
+            div()
+                .w(side)
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .children(sidebar_toggle),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .justify_center()
+                .child(pill.flex_shrink_0().max_w(px(460.0))),
+        )
+        .child(div().w(side).flex_shrink_0())
+}
+
+/// The same bar for a channel (D88 rule 3): the pill carries the server's disc and
+/// `# general`; click → the server's page in the right pane (rule 5).
+pub fn render_channel(
+    shell: &Shell,
+    server: &ServerInfo,
+    channel: &ServerChannel,
+    sidebar_hidden: bool,
+    cx: &mut Context<Shell>,
+) -> Div {
+    let theme = Theme::of(cx).clone();
+    let state = shell.state.read(cx);
+    let page = ProfilePage::Server {
+        server_id: server.id.clone(),
+    };
+    let pane_open = state.profile.as_ref() == Some(&page);
+    let overlay = state.sidebar_overlay;
+    let locked = channel.restricted;
+
+    let name_part = div()
+        .id("header-name")
+        .flex()
+        .items_center()
+        .gap(px(9.0))
+        .h_full()
+        .min_w_0()
+        .cursor_pointer()
+        .rounded_full()
+        .hover(|s| s.bg(theme.surface_2))
+        .pr(px(4.0))
+        .child(sidebar::server_picture(server, AVATAR_HEADER, &theme))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .min_w_0()
+                .child(
+                    div()
+                        .text_size(px(TEXT_BODY))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.text)
+                        .truncate()
+                        .child(format!("# {}", channel.name)),
+                )
+                .when(locked, |el| el.child(icon("lock", 11.0, theme.text_faint))),
+        )
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.members_open = false;
+            this.add_agent_open = false;
+            let page = page.clone();
+            this.state.update(cx, |s, cx| s.toggle_profile(page, cx));
+        }));
+    let pill = div()
+        .id("header-title")
+        .flex()
+        .items_center()
+        .h(px(34.0))
+        .pl(px(4.0))
+        .pr(px(10.0))
+        .rounded_full()
+        .bg(theme.bubble_assistant)
+        .border_2()
+        .border_color(if pane_open {
+            theme.accent
+        } else {
+            gpui::transparent_black()
+        })
+        .min_w_0()
+        .on_mouse_down(
+            gpui::MouseButton::Left,
+            cx.listener(|this, _, _, cx| {
+                cx.stop_propagation();
+                this.close_popovers(cx);
+            }),
+        )
+        .child(name_part);
+
+    let sidebar_toggle = sidebar_hidden.then(|| {
+        div()
+            .id("header-sidebar")
+            .size(px(CONTROL))
+            .flex_shrink_0()
+            .rounded(px(8.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .bg(if overlay {
+                theme.surface_2
+            } else {
+                gpui::transparent_black()
+            })
+            .hover(|s| s.bg(theme.surface_2))
+            .child(icon(
+                "sidebar-left",
+                17.0,
+                if overlay {
+                    theme.text
+                } else {
+                    theme.text_muted
+                },
+            ))
+            .on_click(cx.listener(|this, _, window, cx| {
+                let width: f32 = window.viewport_size().width.into();
+                this.state.update(cx, |s, cx| {
+                    let narrow = s.window_is_narrow(width);
+                    s.toggle_rail(narrow, cx)
+                });
+            }))
+    });
+    let side = px(CONTROL + 8.0);
+    div()
+        .h(px(HEADER_HEIGHT))
+        .flex_shrink_0()
+        .w_full()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(10.0))
+        .pl(px(12.0))
+        .pr(px(10.0))
         .window_drag()
         .child(
             div()

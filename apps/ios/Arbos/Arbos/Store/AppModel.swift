@@ -9,11 +9,14 @@ import UIKit
 import os
 import ArbosFFI
 
-/// Theme choice (D81): System follows the device and is the default; the order
-/// is the Settings order (System first, then Light, then Dark).
+/// Theme choice: System follows the device; Dark is the default for anyone who
+/// never picked (D90, which replaced D81's System default). The order is the
+/// Settings order (System first, then Light, then Dark).
 enum Appearance: String, CaseIterable, Identifiable {
     case system, light, dark
     var id: String { rawValue }
+    /// What an unset preference means (D90).
+    static let `default`: Appearance = .dark
     var label: String {
         switch self {
         case .system: return "System"
@@ -26,6 +29,9 @@ enum Appearance: String, CaseIterable, Identifiable {
 enum Surface: String, CaseIterable, Identifiable {
     case matte, glass
     var id: String { rawValue }
+    /// What an unset preference means: Matte (D90; Glass under the D10 Q3
+    /// amendment before it).
+    static let `default`: Surface = .matte
     var label: String {
         switch self {
         case .matte: return "Matte"
@@ -62,10 +68,10 @@ final class AppModel: ObservableObject {
     /// The hosted relay; self-hosters change it under Advanced.
     static let defaultRelayUrl = "https://relay.arbos.life"
 
-    /// D81: System is the default; the key is only written when the user picks a
-    /// theme in Settings, so an absent key means "never chose" → System, and an
-    /// explicit "dark" or "light" stays.
-    @Published var appearanceSetting: String = UserDefaults.standard.string(forKey: "appearance") ?? Appearance.system.rawValue {
+    /// D90: Dark is the default; the key is only written when the user picks a
+    /// theme in Settings, so an absent key means "never chose" → Dark, and an
+    /// explicit "system", "dark" or "light" stays.
+    @Published var appearanceSetting: String = UserDefaults.standard.string(forKey: "appearance") ?? Appearance.default.rawValue {
         didSet { UserDefaults.standard.set(appearanceSetting, forKey: "appearance") }
     }
     /// Sum of SessionRoom reconnect / state_timeout counters (About page),
@@ -81,10 +87,6 @@ final class AppModel: ObservableObject {
         }
         return (reconnects, timeouts, lastError)
     }
-    /// Glass is the iPhone default (D10 amendment, 2026-10-17: Grok's header
-    /// blurs the transcript under it). The key is only written when the user
-    /// picks a surface in Settings, so an absent key means "never chose" → Glass,
-    /// and an explicit "matte" stays Matte.
     /// Q6 text size factor (`TextScale.steps`), on-device only.
     @Published var textScaleSetting: Double = {
         let v = UserDefaults.standard.double(forKey: TextScale.key)
@@ -94,7 +96,10 @@ final class AppModel: ObservableObject {
     }
     var textScale: CGFloat { CGFloat(textScaleSetting) }
 
-    @Published var surfaceSetting: String = UserDefaults.standard.string(forKey: "surface") ?? Surface.glass.rawValue {
+    /// Matte is the default (D90). The key is only written when the user picks a
+    /// surface in Settings, so an absent key means "never chose" → Matte, and an
+    /// explicit "glass" (the D10 Q3 era default, when saved) stays Glass.
+    @Published var surfaceSetting: String = UserDefaults.standard.string(forKey: "surface") ?? Surface.default.rawValue {
         didSet { UserDefaults.standard.set(surfaceSetting, forKey: "surface") }
     }
 
@@ -411,8 +416,8 @@ final class AppModel: ObservableObject {
     var showingSavedCopy: Bool { contentOrigin == "store" && link != .live }
     private static let flushDelayNs: UInt64 = 1_500_000_000
 
-    var appearance: Appearance { Appearance(rawValue: appearanceSetting) ?? .system }
-    var surface: Surface { Surface(rawValue: surfaceSetting) ?? .glass }
+    var appearance: Appearance { Appearance(rawValue: appearanceSetting) ?? .default }
+    var surface: Surface { Surface(rawValue: surfaceSetting) ?? .default }
     var isPaired: Bool { credentials != nil }
     var relayUrl: String { api.endpoint.httpUrl }
 
@@ -424,6 +429,9 @@ final class AppModel: ObservableObject {
         if let scale = DebugHooks.textScale, TextScale.steps.contains(where: { abs($0 - CGFloat(scale)) < 0.001 }) {
             textScaleSetting = scale
         }
+        // Set here, in init, so the observers do not write the one-launch override to disk.
+        if let a = DebugHooks.appearance { appearanceSetting = a.rawValue }
+        if let s = DebugHooks.surface { surfaceSetting = s.rawValue }
         #endif
         var saved = UserDefaults.standard.string(forKey: "relayUrl") ?? AppModel.defaultRelayUrl
         var creds: DeviceCredentials?
@@ -2190,6 +2198,35 @@ final class AppModel: ObservableObject {
                                  : "Add person failed: \(error.localizedDescription)")
             }
         }
+    }
+
+    /// The group pane's Add members: every pick goes to THIS chat — people by
+    /// `POST /chats/{id}/members`, agents by `POST /chats/{id}/agents`. All are
+    /// tried; the first failure is reported once and the call returns false.
+    func addMembers(chatId: String, handles: [String], agentIds: [Id]) async -> Bool {
+        var failure: String?
+        for handle in handles {
+            do {
+                let chat = try await api.addMember(chatId: chatId, handle: handle)
+                if let i = peopleChats.firstIndex(where: { $0.id == chatId }) { peopleChats[i] = chat }
+            } catch {
+                let e = error as? RelayError
+                failure = failure ?? (e?.type == "already_member" ? "@\(handle) is already in this chat."
+                                      : e?.type == "not_available" ? "You can't add @\(handle)."
+                                      : "Could not add @\(handle): \(error.localizedDescription)")
+            }
+        }
+        for projectId in agentIds {
+            do {
+                let chat = try await api.addAgent(chatId: chatId, projectId: projectId)
+                if let i = peopleChats.firstIndex(where: { $0.id == chatId }) { peopleChats[i] = chat }
+            } catch {
+                failure = failure ?? ((error as? RelayError)?.type == "own_project_only" ? "You can only add your own agents."
+                                      : "Could not add the agent: \(error.localizedDescription)")
+            }
+        }
+        if let failure { notice = Notice(text: failure); return false }
+        return true
     }
 
     /// Owner/admin removes a person from a people chat (`DELETE /chats/{id}/members/{userId}`).

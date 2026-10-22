@@ -33,13 +33,13 @@ fn main() {
         .with_assets(crate::ui::icons::Assets)
         .run(move |cx: &mut App| {
             gpui_tokio::init_from_handle(cx, handle);
-            // Matte is the default (D10); the saved Settings choice wins over it,
-            // `ARBOS_SURFACE=matte|glass` over both (demos).
+            // Matte is the default (D10, D90); the saved Settings choice wins over
+            // it, `ARBOS_SURFACE=matte|glass` over both (demos).
             let surface = std::env::var("ARBOS_SURFACE")
                 .ok()
                 .and_then(|v| Surface::parse(&v))
                 .unwrap_or_else(Surface::load);
-            // System is the default (D81); the saved Settings choice wins over it,
+            // Dark is the default (D90); the saved Settings choice wins over it,
             // `ARBOS_APPEARANCE=system|light|dark` over both (demos, screenshots).
             let pref = std::env::var("ARBOS_APPEARANCE")
                 .ok()

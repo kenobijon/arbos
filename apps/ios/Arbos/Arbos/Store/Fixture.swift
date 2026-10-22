@@ -186,14 +186,18 @@ extension AppModel {
             ["ref": "op://Arbos — Research/Stripe", "title": "Stripe", "category": "API_CREDENTIAL", "fields": ["credential", "username"], "env": "STRIPE", "inject_env": true],
             ["ref": "op://Arbos — Research/Postgres", "title": "Postgres", "category": "DATABASE", "fields": ["password", "hostname", "port", "database"], "env": "POSTGRES", "inject_env": false],
         ]
-        secrets = SecretsOverview.parse(["paused": false, "vaults": [vault], "secrets": [stripe, mailgun, github],
-                                         "requests_pending": 1, "requests": [request], "activity": activity, "providers": ["onepassword"]])
+        // The vault and the connect flow are seeded only with `ARBOS_FIXTURE_VAULT=1` (rig):
+        // the shipped default hides Connect 1Password (`features.vault_connect` off, D83 Phase 2).
+        let withVault = DebugHooks.fixtureVault
+        secrets = SecretsOverview.parse(["paused": false, "vaults": withVault ? [vault] : [], "secrets": [stripe, mailgun, github],
+                                         "requests_pending": 1, "requests": [request], "activity": activity,
+                                         "providers": withVault ? ["onepassword"] : [], "features": ["vault_connect": withVault]])
         var stripeAccess = stripeAgents[1]
         stripeAccess["secret"] = stripe
         var vaultAccess = agent("fx-comms", "Comms", true, "read the Stripe item")
         vaultAccess["vault"] = vault
         vaultAccess["target_kind"] = "vault"
-        projectSecrets["fx-comms"] = ProjectSecrets.parse(["paused": false, "owner": true, "items": [stripeAccess, vaultAccess],
+        projectSecrets["fx-comms"] = ProjectSecrets.parse(["paused": false, "owner": true, "items": withVault ? [stripeAccess, vaultAccess] : [stripeAccess],
                                                             "requests": [request], "activity": activity])
     }
 
