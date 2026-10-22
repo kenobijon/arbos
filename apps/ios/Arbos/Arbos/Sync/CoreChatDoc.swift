@@ -1,5 +1,5 @@
-// Chat doc on arbos-core via ArbosFFI.ChatDoc (crdt-sync step 7b-1).
-// Same surface as Sync/ChatDoc.swift for AppModel / SessionRoom; unused until 7b-2.
+// Chat doc on arbos-core via ArbosFFI.ChatDoc.
+// AppModel / SessionRoom use this as the live chat replica.
 
 import Foundation
 import ArbosFFI

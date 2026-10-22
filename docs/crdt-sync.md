@@ -11,9 +11,9 @@ This document is drawn from the code as it exists today:
 | Shared Matrix client (D88 C1: servers and channels) | `crates/arbos-matrix` (`MatrixClient`: sliding sync through the relay proxy, channel timelines as chat-doc message rows, send, read) |
 | UniFFI / Swift bindings | `crates/arbos-ffi` (wraps client + core + the Matrix client; produces xcframework) |
 | Golden doc / wire fixtures | `crates/arbos-core/fixtures/` |
-| Mac Loro replica | `crates/arbos-mac/src/sync/doc.rs` |
+| Mac chat doc (reader shim; writes via arbos-core) | `crates/arbos-mac/src/sync/doc.rs` |
 | iOS chat doc (arbos-core via ArbosFFI) | `apps/ios/Arbos/Arbos/Sync/CoreChatDoc.swift` |
-| Binary room frames | `crates/arbos-core/src/wire.rs`, `apps/ios/Arbos/Arbos/Sync/Frame.swift` |
+| Binary room frames | `crates/arbos-core/src/wire.rs` (Swift via ArbosFFI) |
 | Protocol version | `arbos_core::PROTO_VERSION`, iOS `protoVersion` |
 | Mac HTTP + room client | `crates/arbos-mac/src/sync/relay.rs` |
 | iOS HTTP + room client | `apps/ios/Arbos/Arbos/Sync/RelayAPI.swift`, `SessionRoom.swift` (drives arbos-client `RoomSession`) |
@@ -93,7 +93,7 @@ messages:  List<Map { id, role, sender, status, parts, … }>
 commands:  List<Map { id, kind, payload, issuedBy, issuedAt, status }>
 ```
 
-**`meta`** — written only by the box via `ChatDoc::init_meta` in `arbos-core`. Fields: `chatId`, `projectId`, `schemaVersion` (i64 `1`), `epoch` (i64). In relay mode Mac uses `ChatDoc::empty` and does not write `meta` locally (it arrives by sync); the fixture helper `ChatDoc::new` still seeds `meta` for offline demos. iOS never writes `meta` on the client.
+**`meta`** — written only by the box via `ChatDoc::init_meta` in `arbos-core`. Fields: `chatId`, `projectId`, `schemaVersion` (i64 `1`), `epoch` (i64). Clients open an empty doc and read `meta` from sync (Mac: `ChatDoc::empty`; iOS: `CoreChatDoc` / ArbosFFI).
 
 **`messages[]`** — each entry is a map. Common fields:
 
@@ -135,9 +135,9 @@ Nested emoji-bucket reactions (also pre-flat-key) are pinned on `msg-legacy-reac
 
 **Rollout (flat keys).** Builds before 0.6.64 do not understand flat `"emoji|sender"` keys. An older Mac drops the whole row: `Message.reactions` in `crates/arbos-mac/src/model.rs` is a strict nested map and `read_message` ends in `.ok()`. Older Swift client builds simply do not show those reactions.
 
-**`callId` on system lines.** Core and Mac write optional `callId` (never `call_id`) on system lines. The Swift client ignores `callId` and renders the text only. The Mac fixture constructor still seeds `meta` for offline demos; relay-mode Mac does not write `meta` locally.
+**`callId` on system lines.** Core and Mac write optional `callId` (never `call_id`) on system lines. The Swift client ignores `callId` and renders the text only.
 
-**Client write rule:** a user message and its `send` command land in **one commit** (core: `transact` around `append_user_message` + `push_command("send", …)`; Mac relay uses core writers and the same `transact` batching; iOS still commits message + `pushCommand("send", …)` together in the app until it migrates). Streaming text is `LoroText` append-only; the box batches commits on a ~120 ms tick (`STREAM_COMMIT_MS`).
+**Client write rule:** a user message and its `send` command land in **one commit** (core: `transact` around `append_user_message` + `push_command("send", …)`; Mac and iOS both use core writers through the same `transact` batching). Streaming text is `LoroText` append-only; the box batches commits on a ~120 ms tick (`STREAM_COMMIT_MS`).
 
 **`parts[]`** — each part has `id`, `kind`, and kind-specific fields. Known kinds written or decoded today:
 
@@ -170,15 +170,15 @@ Unknown `kind` values decode to “unknown” and render as nothing (additive ru
 
 #### Writer rules (canonical core path)
 
-`arbos-core::doc` is the single canonical chat-doc writer API. Mac relay already calls core writers for client message / reaction / command / model-settings paths. iPhone and remaining Mac fixture paths migrate over subsequent parts; until then some app-local writers remain.
+`arbos-core::doc` is the single canonical chat-doc writer API. Mac and iPhone call core writers for client message / reaction / command / model-settings paths (Mac directly; iPhone through ArbosFFI).
 
-1. **Hidden parts** are inline `hidden: true` on entries in `parts`. `hiddenParts` is a **reader projection** only (`project_hidden_parts` in core; Mac still splits when decoding for the UI). Writers never create a `hiddenParts` list.
+1. **Hidden parts** are inline `hidden: true` on entries in `parts`. `hiddenParts` is a **reader projection** only (`project_hidden_parts` in core). Writers never create a `hiddenParts` list.
 2. **Only the box writes `meta`.** Clients read it from sync (Mac relay mode and iOS). Additive schema changes never bump `schemaVersion`; readers ignore unknown fields and unknown part kinds.
 3. **Client writers** (`append_user_message`, `append_system_line`, `append_greeting`, `set_reaction`, `push_command`, `set_model_settings`) do not commit themselves — wrap them in `ChatDoc::transact` (one commit = one PUSH). `transact` is re-entrant: nested calls share one depth counter and only the outermost commits; a drop guard restores depth if `f` panics. `snapshot()` / `export_updates_since()` return empty and do not call Loro `export` while a `transact` is open (Loro treats export as a commit barrier). They write no null placeholders, `chatId`, `pending`, `hiddenParts`, or `call_id`. New message rows get an empty `reactions` map. System lines use a `text` part and optional `callId` only (Mac and iOS already decode that shape; Swift ignores `callId` when rendering).
 4. **`push_command` / `append_command`.** `push_command` is the non-committing writer; object payloads are nested `LoroMap` containers (arrays → `LoroList`), not a single JSON blob value. `append_command` is `push_command` then commit (honors an open `transact`). Box helpers that used to duplicate the command row now call through this path.
 5. **Box helpers** (`append_user_message_from`, `append_command`, `append_system_note`, streaming/tool/question/approval writers, …) still commit inside the helper when no `transact` is open; they honor an outer `transact` (only the outermost commits). `append_system_note` (`status` + `code: "note"`) is unchanged; neither app renders it in the transcript.
 6. **`has_greeting()`** is true when any message has `greeting: true` (D82 canned first line).
-7. **Mac facts.** Relay-mode Mac does not write `meta` (`ChatDoc::empty`). Mac already uses Loro's random peer, which satisfies R7. Mac system lines are text parts (same as iOS / core `append_system_line`). The Mac fixture constructor still seeds `meta` for offline demos.
+7. **Mac facts.** Relay-mode Mac does not write `meta` (`ChatDoc::empty`). Mac already uses Loro's random peer, which satisfies R7. Mac system lines are text parts (same as iOS / core `append_system_line`).
 
 ### 6.3 Project document
 
@@ -219,7 +219,7 @@ Endpoint: **`WS /room/{projectId}/{chatId}`** (query token auth, §10.2). One so
 
 ### 7.1 Frame layout
 
-Binary frame, identical in Rust (`arbos_core::wire`) and Swift (`Frame.swift`):
+Binary frame (`arbos_core::wire`; Swift uses the same bytes through ArbosFFI):
 
 ```text
 [type: u8][headerLen: u32 little-endian][header: UTF-8 JSON][payload: raw bytes]

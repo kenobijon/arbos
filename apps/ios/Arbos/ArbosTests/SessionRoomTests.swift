@@ -79,8 +79,8 @@ final class SessionRoomTests: XCTestCase {
         sock.fireOpen()
         try await waitUntil { !sock.sent.isEmpty }
 
-        let first = try XCTUnwrap(Frame.decode(sock.sent[0]))
-        XCTAssertEqual(first.type, .hello, "first frame after open must be HELLO")
+        let first = try decodeFrame(bytes: sock.sent[0])
+        XCTAssertEqual(first.ty, .hello, "first frame after open must be HELLO")
         room.stop()
     }
 
@@ -113,7 +113,7 @@ final class SessionRoomTests: XCTestCase {
         sock1.fireOpen()
         try await waitUntil { !sock1.sent.isEmpty }
 
-        let state5 = Frame(.state, header: stateHeader(checkpointSeq: 5, frontier: frontier), payload: frontier).encode()
+        let state5 = try encodeState(checkpointSeq: 5, frontier: frontier)
         sock1.deliver(state5)
         try await waitUntil { fetches.waiting != nil }
         let firstFetch = try XCTUnwrap(fetches.takeWaiting())
@@ -124,7 +124,7 @@ final class SessionRoomTests: XCTestCase {
         sock2.fireOpen()
         try await waitUntil { !sock2.sent.isEmpty }
 
-        let state9 = Frame(.state, header: stateHeader(checkpointSeq: 9, frontier: Data()), payload: Data()).encode()
+        let state9 = try encodeState(checkpointSeq: 9, frontier: Data())
         sock2.deliver(state9)
         try await waitUntil { fetches.waiting != nil }
 
@@ -192,16 +192,20 @@ final class SessionRoomTests: XCTestCase {
 
     // MARK: - Helpers
 
-    private func stateHeader(checkpointSeq: Int64, frontier: Data) -> [String: Any] {
-        [
-            "headSeq": Int64(10),
-            "seqFloor": Int64(0),
-            "checkpointSeq": checkpointSeq,
-            "checkpointSize": Int64(frontier.count),
-            "rowCount": Int64(0),
-            "rowBytes": Int64(0),
-            "box": "awake",
-        ]
+    private func encodeState(checkpointSeq: Int64, frontier: Data) throws -> Data {
+        let header = try JSONSerialization.data(
+            withJSONObject: [
+                "headSeq": Int64(10),
+                "seqFloor": Int64(0),
+                "checkpointSeq": checkpointSeq,
+                "checkpointSize": Int64(frontier.count),
+                "rowCount": Int64(0),
+                "rowBytes": Int64(0),
+                "box": "awake",
+            ] as [String: Any]
+        )
+        let headerJson = try XCTUnwrap(String(data: header, encoding: .utf8))
+        return try encodeFrame(ty: .state, headerJson: headerJson, payload: frontier)
     }
 
     private func waitUntil(

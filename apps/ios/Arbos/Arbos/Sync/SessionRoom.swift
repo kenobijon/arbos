@@ -4,6 +4,15 @@
 import Foundation
 import ArbosFFI
 
+let protoVersion = 1
+/// Row cap (crdt-sync §7.6).
+let rowMax = 1024 * 1024 - 4096
+let projectDocChatId = "project"
+
+func roomName(_ projectId: String, _ chatId: String) -> String {
+    "\(projectId)/\(chatId)"
+}
+
 /// Test seam for the WebSocket: production uses `URLSessionWebSocketTask`.
 protocol RoomSocket: AnyObject {
     var onOpen: (() -> Void)? { get set }

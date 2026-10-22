@@ -133,22 +133,19 @@ final class CoreFixturesTests: XCTestCase {
         XCTAssertEqual(assistantHidden, 1)
     }
 
-    func testLoroSwiftAndFfiDecodeFrameFixtures() throws {
-        let cases: [(String, Arbos.FrameType, ArbosFFI.FrameType)] = [
-            ("frame_hello.bin", .hello, .hello),
-            ("frame_state.bin", .state, .state),
-            ("frame_row.bin", .row, .row),
-            ("frame_rows_done.bin", .rowsDone, .rowsDone),
-            ("frame_push.bin", .push, .push),
-            ("frame_ack.bin", .ack, .ack),
+    func testFfiDecodesFrameFixtures() throws {
+        let cases: [(String, ArbosFFI.FrameType)] = [
+            ("frame_hello.bin", .hello),
+            ("frame_state.bin", .state),
+            ("frame_row.bin", .row),
+            ("frame_rows_done.bin", .rowsDone),
+            ("frame_push.bin", .push),
+            ("frame_ack.bin", .ack),
         ]
-        for (name, swiftTy, ffiTy) in cases {
+        for (name, ffiTy) in cases {
             let bytes = try fixtureData(name)
-            let swiftFrame = Arbos.Frame.decode(bytes)
-            XCTAssertEqual(swiftFrame?.type, swiftTy, name)
             let decoded = try ArbosFFI.decodeFrame(bytes: bytes)
             XCTAssertEqual(decoded.ty, ffiTy, name)
-            XCTAssertEqual(decoded.payload, swiftFrame?.payload ?? Data(), name)
         }
     }
 
@@ -160,7 +157,7 @@ final class CoreFixturesTests: XCTestCase {
             .joined()
     }
 
-    // MARK: Relay API DTO fixtures (step 6b-1)
+    // MARK: Relay API DTO fixtures
 
     func testProjectDtoFixture() throws {
         let data = try apiFixtureData("project_json.json")
@@ -218,7 +215,7 @@ final class CoreFixturesTests: XCTestCase {
         XCTAssertNil(RelayAPI.parseChat(["project_id": "proj_fixture", "title": "Nope"] as [String: Any]))
     }
 
-    // MARK: People / me / machine / unread (step 6b-2a)
+    // MARK: People / me / machine / unread
 
     func testUserCardParseFixtures() throws {
         let legacy = try XCTUnwrap(Person.parse(try apiFixtureJSON("user_card_legacy.json")))
@@ -256,7 +253,7 @@ final class CoreFixturesTests: XCTestCase {
         XCTAssertEqual(dto.chats[0].unread, 2)
     }
 
-    // MARK: Calls (step 6b-2b)
+    // MARK: Calls
 
     func testCallParseFixtures() throws {
         let live = try XCTUnwrap(Call.parse(try apiFixtureJSON("call_live_with_token.json")))
@@ -331,7 +328,7 @@ final class CoreFixturesTests: XCTestCase {
         XCTAssertEqual(person.handle, "user201")
     }
 
-    // MARK: Goals (step 6b-2c-1)
+    // MARK: Goals
 
     func testGoalParseFixtures() throws {
         let raw = try apiFixtureJSON("goal_json.json")
@@ -363,7 +360,7 @@ final class CoreFixturesTests: XCTestCase {
         XCTAssertEqual(listed.progressLog.count, 1)
     }
 
-    // MARK: Secrets / vaults (step 6b-2c-2)
+    // MARK: Secrets / vaults
 
     func testSecretsParseFixtures() throws {
         let secret = try XCTUnwrap(SecretItem.parse(try apiFixtureJSON("secret_json.json")))
@@ -428,7 +425,7 @@ final class CoreFixturesTests: XCTestCase {
         XCTAssertEqual(decide.access?.access_id, "acc_secret_fixture")
     }
 
-    // MARK: Sign-in / pairing / media (step 6b-2d-1)
+    // MARK: Sign-in / pairing / media
 
     func testPairTokenHealthVoicesFixtures() throws {
         let pair = try JSONDecoder().decode(PairResponseDto.self, from: try apiFixtureData("pair_response.json"))
@@ -468,7 +465,7 @@ final class CoreFixturesTests: XCTestCase {
         XCTAssertEqual(catalog.voices.count, 1)
     }
 
-    // MARK: Pushes / releases / push register (step 6b-2d-2)
+    // MARK: Pushes / releases / push register
 
     func testPushItemParseFixtures() throws {
         let names = [

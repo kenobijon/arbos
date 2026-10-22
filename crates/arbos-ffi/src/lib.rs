@@ -1,4 +1,4 @@
-//! UniFFI surface for the Swift client (crdt-sync shared-client step 4b / 5a).
+//! UniFFI surface for the Swift client (arbos-client + arbos-core + arbos-matrix).
 //!
 //! This is the only crate that names Swift or `uniffi`. It wraps
 //! [`arbos_client::RoomSession`] and the parts of `arbos-core` the Swift app
@@ -170,7 +170,7 @@ impl From<ClientAction> for RoomAction {
     }
 }
 
-/// Wire frame type for [`decode_frame`].
+/// Wire frame type for [`encode_frame`] / [`decode_frame`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum FrameType {
     Hello,
@@ -208,12 +208,47 @@ impl From<WireFrameType> for FrameType {
     }
 }
 
+impl From<FrameType> for WireFrameType {
+    fn from(t: FrameType) -> Self {
+        match t {
+            FrameType::Hello => Self::Hello,
+            FrameType::State => Self::State,
+            FrameType::RowsReq => Self::RowsReq,
+            FrameType::Row => Self::Row,
+            FrameType::RowsDone => Self::RowsDone,
+            FrameType::Push => Self::Push,
+            FrameType::Ack => Self::Ack,
+            FrameType::Presence => Self::Presence,
+            FrameType::Probe => Self::Probe,
+            FrameType::ProbeOk => Self::ProbeOk,
+            FrameType::Error => Self::Error,
+            FrameType::Status => Self::Status,
+            FrameType::Wake => Self::Wake,
+        }
+    }
+}
+
 /// One decoded room frame (header as JSON text).
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct DecodedFrame {
     pub ty: FrameType,
     pub header_json: String,
     pub payload: Vec<u8>,
+}
+
+/// Encode one binary room frame. `header_json` must be a JSON object.
+#[uniffi::export]
+pub fn encode_frame(
+    ty: FrameType,
+    header_json: String,
+    payload: Vec<u8>,
+) -> Result<Vec<u8>, FfiError> {
+    let header: Value =
+        serde_json::from_str(&header_json).map_err(|e| FfiError::Decode(e.to_string()))?;
+    if !header.is_object() {
+        return Err(FfiError::Decode("header must be a JSON object".into()));
+    }
+    Ok(Frame::new(ty.into(), header, payload).encode().to_vec())
 }
 
 /// Decode one binary room frame. Unknown type → [`FfiError::Decode`].
@@ -439,8 +474,8 @@ pub trait DocChangeListener: Send + Sync {
     fn on_change(&self, touched: Touched);
 }
 
-/// Foreign callback: local commit blobs (same role as Swift
-/// `ChatDoc.onLocalUpdate` / loro-swift `subscribeLocalUpdate`).
+/// Foreign callback: local commit blobs (same role as
+/// `CoreChatDoc.onLocalUpdate`).
 ///
 /// Delivered on the caller's thread after the doc lock is released, and
 /// before any [`DocChangeListener`] events from the same flush.
