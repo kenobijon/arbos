@@ -1272,41 +1272,23 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("arbos-store-{}", ulid()));
         std::fs::create_dir_all(&dir).unwrap();
         let store = Store::open(&dir.join("agentd.db")).unwrap();
+        // rows land milliseconds apart in real use; ULIDs minted in the same millisecond do not
+        // sort by insertion order, so give the clock a tick between rows
+        let append = |thread: &str, kind: &str, text: &str| {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            store
+                .t3_append(thread, None, None, kind, Some(kind), text, None)
+                .unwrap();
+        };
         for _ in 0..3 {
-            store
-                .t3_append("c1", None, None, "user", Some("user"), "hi", None)
-                .unwrap();
-            store
-                .t3_append(
-                    "c1",
-                    None,
-                    None,
-                    "assistant",
-                    Some("assistant"),
-                    "hello",
-                    None,
-                )
-                .unwrap();
+            append("c1", "user", "hi");
+            append("c1", "assistant", "hello");
         }
         assert_eq!(store.user_turns_since_compaction("c1").unwrap(), 3);
-        store
-            .t3_append(
-                "c1",
-                None,
-                None,
-                "compaction",
-                Some("system"),
-                "compacted",
-                None,
-            )
-            .unwrap();
+        append("c1", "compaction", "compacted");
         assert_eq!(store.user_turns_since_compaction("c1").unwrap(), 0);
-        store
-            .t3_append("c1", None, None, "user", Some("user"), "again", None)
-            .unwrap();
-        store
-            .t3_append("c2", None, None, "user", Some("user"), "other chat", None)
-            .unwrap();
+        append("c1", "user", "again");
+        append("c2", "user", "other chat");
         assert_eq!(store.user_turns_since_compaction("c1").unwrap(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
