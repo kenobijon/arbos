@@ -1579,6 +1579,8 @@ impl Agent {
         let path = self.new_session_file(chat_id)?;
         *self.current_chat.lock().await = None;
         self.switch_session_to(chat_id, &path).await?;
+        // A fresh window holds none of the chat: every earlier turn is now the tree's to offer (D90).
+        let _ = self.tree.note_session_cut(chat_id, 0);
         tracing::warn!(chat_id, reason, previous = %previous, fresh = %path.display(), "fresh pi session after empty turn");
         self.append_audit(
             "session_rotated",
