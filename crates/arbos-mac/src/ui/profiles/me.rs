@@ -621,8 +621,9 @@ impl Shell {
                 .child(group)
                 .child(footnote(
                     if auto_update {
-                        "New versions install in the background and Arbos restarts when you pause — \
-                         never during a call or while you type. The open chat comes back."
+                        "New versions install in the background and Arbos restarts when you pause \
+                         with the app in front — never while another app is frontmost, during a \
+                         call, or while you type. The open chat comes back."
                             .into()
                     } else {
                         "Arbos only tells you about new versions; press Update in the rail to install."

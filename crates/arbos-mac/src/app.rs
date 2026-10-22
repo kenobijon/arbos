@@ -815,8 +815,8 @@ impl AppState {
                     return;
                 }
                 self.push_notice(format!(
-                    "Arbos {version} is installed — it restarts in a minute or when you pause. \
-                     Press Restart now in the rail to do it at once."
+                    "Arbos {version} is installed — it restarts when you pause with the app \
+                     in front, or press Restart now in the rail."
                 ));
                 cx.spawn(async move |this, cx| loop {
                     cx.background_executor()
@@ -857,15 +857,20 @@ impl AppState {
         cx.notify();
     }
 
-    /// Is this a moment the app may restart itself? Never in a call or right after a keystroke;
-    /// otherwise when the window is not focused, when nothing was typed for a while, or when the
-    /// countdown is over.
+    /// Is this a moment the app may restart itself? Never in a call, right after a
+    /// keystroke, or while another app is frontmost (relaunch would steal focus).
+    /// Otherwise when Arbos is focused and idle, or when the countdown is over
+    /// while still focused.
     fn relaunch_is_safe(&self) -> bool {
         let now = now_ms();
         if self.my_call.is_some() || self.incoming_call.is_some() {
             return false;
         }
         if now.saturating_sub(self.last_input_at) < update::TYPING_GUARD_MS {
+            return false;
+        }
+        // Relaunching always brings Arbos forward; wait until the user is here.
+        if !self.window_active {
             return false;
         }
         let countdown_over = match &self.update.phase {
@@ -879,9 +884,7 @@ impl AppState {
             | UpdatePhase::Restarting(_)
             | UpdatePhase::Failed { .. } => true,
         };
-        !self.window_active
-            || now.saturating_sub(self.last_input_at) >= update::IDLE_RELAUNCH_MS
-            || countdown_over
+        now.saturating_sub(self.last_input_at) >= update::IDLE_RELAUNCH_MS || countdown_over
     }
 
     /// Relaunch into the pending install when it is safe; true when the relaunch was started.
