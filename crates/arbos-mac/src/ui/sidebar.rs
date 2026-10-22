@@ -201,7 +201,7 @@ struct ServerRowView {
 /// One entry of the left list, chats and servers interleaved.
 enum ListEntry {
     Chat(Box<RowView>),
-    Server(ServerRowView),
+    Server(Box<ServerRowView>),
 }
 
 /// "#general · Sam: hi" for a server row: its newest channel's last line.
@@ -263,13 +263,13 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         let at = state.server_last_activity(s);
         rows.push((
             at,
-            ListEntry::Server(ServerRowView {
+            ListEntry::Server(Box::new(ServerRowView {
                 selected,
                 unread: state.space_row(s).is_some_and(|r| r.unread > 0),
                 preview: server_preview(state, s),
                 time: time_label(at),
                 server: s.clone(),
-            }),
+            })),
         ));
     }
     for p in state.projects.iter() {
@@ -528,7 +528,7 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
     for (_, entry) in rows {
         list = match entry {
             ListEntry::Chat(row) => list.child(render_row(*row, shell, &theme, cx)),
-            ListEntry::Server(row) => list.child(render_server_row(row, &theme, cx)),
+            ListEntry::Server(row) => list.child(render_server_row(*row, &theme, cx)),
         };
     }
 
