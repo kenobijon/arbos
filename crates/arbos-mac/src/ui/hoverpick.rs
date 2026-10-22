@@ -346,8 +346,10 @@ pub fn reasoning_panel(project: &Project, cx: &mut Context<Shell>) -> AnyElement
 /// checkmark), inline. A pick folds the row.
 pub fn voice_panel(shell: &Shell, project: &Project, cx: &mut Context<Shell>) -> AnyElement {
     let theme = Theme::of(cx).clone();
+    // 6 pt under the row's hairline so the first voice is never tucked under it.
     div()
         .mx(px(10.0))
+        .mt(px(6.0))
         .mb(px(10.0))
         .child(voicepicker::list(
             shell,

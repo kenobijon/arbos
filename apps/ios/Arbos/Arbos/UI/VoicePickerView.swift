@@ -26,7 +26,8 @@ struct VoicePickerView: View {
                 Section {
                     if let catalog {
                         voiceRow(id: nil, name: "Default (\(defaultVoice?.name ?? catalog.defaultId.capitalized))",
-                                 description: defaultVoice?.description, sample: defaultVoice?.sampleURL, selected: current.voice == nil)
+                                 // The named voice's row carries its description; say what Default means instead of repeating it.
+                                 description: "What the relay uses when nothing is chosen", sample: defaultVoice?.sampleURL, selected: current.voice == nil)
                         ForEach(catalog.voices) { v in
                             voiceRow(id: v.id, name: v.name, description: v.description, sample: v.sampleURL, selected: current.voice == v.id)
                         }

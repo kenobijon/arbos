@@ -53,6 +53,10 @@ pub fn sheet(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
 /// prefixes the element ids so two lists may be on screen at once.
 /// `fold_agent_pick` closes the agent-page Voice row after a save (the sheet
 /// keeps itself open until Done).
+/// Row height: a body title over a tiny one-line description, 10 pt of air
+/// above and below (the pane kit's list rows).
+const ROW_HEIGHT: f32 = 56.0;
+
 pub fn list(
     shell: &Shell,
     space: &Project,
@@ -76,26 +80,28 @@ pub fn list(
         Some(v) => format!("Default ({})", v.name),
         None => "Default".to_string(),
     };
-    let default_desc = default_voice
-        .as_ref()
-        .and_then(|v| v.description.clone())
-        .filter(|d| !d.trim().is_empty())
-        .unwrap_or_else(|| "The relay's current default voice for calls".into());
+    // The named voice's own row carries its description; this row says what
+    // "Default" means instead of repeating it (#1316).
+    let default_desc = "What the relay uses when nothing is chosen";
     // White in light, near-black in dark (the question-card palette).
     let list_bg = match theme.appearance {
         Appearance::Light => palette.inner,
         Appearance::Dark => palette.outer,
     };
 
+    // One fixed-height row, title and a one-line description (truncated):
+    // GPUI measures a wrapping text at the row's full width before the play
+    // button and checkmark take theirs, so a two-line description used to
+    // paint over the next row (#1316). Fixed height keeps the play button
+    // and the checkmark centred on every row.
     let row_base = |id: ElementId, theme: &Theme| {
         div()
             .id(id)
             .flex()
             .items_center()
             .gap(px(12.0))
-            .min_h(px(56.0))
+            .h(px(ROW_HEIGHT))
             .px(px(14.0))
-            .py(px(8.0))
             .cursor_pointer()
             .hover(|s| s.bg(theme.surface_2))
     };
@@ -187,12 +193,14 @@ pub fn list(
                                 .text_size(px(TEXT_BODY))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(theme.text)
+                                .truncate()
                                 .child(default_label),
                         )
                         .child(
                             div()
                                 .text_size(px(TEXT_TINY))
                                 .text_color(theme.text_muted)
+                                .truncate()
                                 .child(default_desc),
                         ),
                 )
@@ -255,6 +263,7 @@ pub fn list(
                                 div()
                                     .text_size(px(TEXT_TINY))
                                     .text_color(theme.text_muted)
+                                    .truncate()
                                     .child(d),
                             )
                         },
