@@ -5,10 +5,18 @@
 use serde_json::{json, Value};
 
 use arbos_core::api::{
-    AccountUserDto, CreditsDto, MachineImageDto, MachineSpecDto, MachineStatusDto,
+    AccountUserDto, ChatArchivedPayloadDto, CreditsDto, FeedbackCapturePayloadDto,
+    MachineImageDto, MachineReadyPayloadDto, MachineSpecDto, MachineStatusDto,
     MachineWorkspaceDto, MeDeviceDto, MeFeaturesDto, MeLimitsDto, MeMachineDto, MeResponseDto,
-    PairResponseDto, TokenResponseDto, UnreadChatDto, UnreadDto, UserCardDto, VoiceCatalogDto,
-    VoiceDto,
+    PairResponseDto, PeopleAgentAddedPayloadDto, PeopleAgentRemovedPayloadDto,
+    PeopleChatCreatedPayloadDto, PeopleChatDeletedPayloadDto, PeopleChatUpdatedPayloadDto,
+    PeopleInviteAcceptedPayloadDto, PeopleMemberAddedPayloadDto, PeopleMemberRemovedPayloadDto,
+    PeopleMessagePayloadDto, PeopleProjectSharedPayloadDto, ProjectMemberRemovedPayloadDto,
+    PushEventDto, PushItemDto, PushRegisterResponseDto, ReleaseDto, ReleasePublishedPayloadDto,
+    ReleasesDto, SecretExpiringPayloadDto, SecretRequestPushPayloadDto, SecretsPausedPayloadDto,
+    SenderDto, ServerDeletedPayloadDto, ServerMemberJoinedPayloadDto,
+    ServerMemberRemovedPayloadDto, ServerUpdatedPayloadDto, TokenResponseDto, UnreadChatDto,
+    UnreadDto, UserCardDto, VoiceCatalogDto, VoiceDto,
 };
 use arbos_core::wire::BoxState;
 
@@ -578,6 +586,317 @@ fn pair_token_health_voices_transcription_fixtures() {
 
     let mock = crate::proxy::transcription_mock_json(1.5);
     assert_dto("transcription_mock.json", mock);
+}
+
+fn push_item(id: &str, event: PushEventDto) -> PushItemDto {
+    PushItemDto {
+        id: id.into(),
+        created_at: FIXED_AT,
+        event,
+    }
+}
+
+fn fixture_sender() -> SenderDto {
+    SenderDto {
+        kind: "user".into(),
+        id: "gh_201".into(),
+        name: "@user201".into(),
+        handle: "user201".into(),
+        avatar: None,
+        avatar_color: None,
+        avatar_url: None,
+        avatar_color_index: None,
+        avatar_color_index_effective: 1,
+        avatar_leaf_effective: None,
+        avatar_leaf_color_effective: None,
+    }
+}
+
+#[test]
+fn push_wire_fixtures() {
+    let sender = fixture_sender();
+
+    assert_dto(
+        "push_people_message.json",
+        push_item(
+            "push_people_message",
+            PushEventDto::PeopleMessage(PeopleMessagePayloadDto {
+                chat_id: "people_dm".into(),
+                from: "user:gh_201".into(),
+                from_handle: "user201".into(),
+                seq: 42,
+                sender: sender.clone(),
+            }),
+        ),
+    );
+    assert_dto(
+        "push_people_chat_updated.json",
+        push_item(
+            "push_people_chat_updated",
+            PushEventDto::PeopleChatUpdated(PeopleChatUpdatedPayloadDto {
+                chat_id: "people_dm".into(),
+            }),
+        ),
+    );
+    assert_dto(
+        "push_people_member_added.json",
+        push_item(
+            "push_people_member_added",
+            PushEventDto::PeopleMemberAdded(PeopleMemberAddedPayloadDto {
+                chat_id: "people_dm".into(),
+                user_id: "gh_202".into(),
+                handle: "user202".into(),
+                by_handle: "user201".into(),
+            }),
+        ),
+    );
+    assert_dto(
+        "push_people_member_removed.json",
+        push_item(
+            "push_people_member_removed",
+            PushEventDto::PeopleMemberRemoved(PeopleMemberRemovedPayloadDto {
+                chat_id: "people_dm".into(),
+                user_id: "gh_202".into(),
+                handle: "user202".into(),
+                by_handle: "user201".into(),
+            }),
+        ),
+    );
+    assert_dto(
+        "push_people_chat_created.json",
+        push_item(
+            "push_people_chat_created",
+            PushEventDto::PeopleChatCreated(PeopleChatCreatedPayloadDto {
+                chat_id: "people_dm".into(),
+                by: "user:gh_201".into(),
+                by_handle: "user201".into(),
+            }),
+        ),
+    );
+    assert_dto(
+        "push_people_chat_deleted.json",
+        push_item(
+            "push_people_chat_deleted",
+            PushEventDto::PeopleChatDeleted(PeopleChatDeletedPayloadDto {
+                chat_id: "people_dm".into(),
+                by_handle: "user201".into(),
+            }),
+        ),
+    );
+    assert_dto(
+        "push_people_agent_added.json",
+        push_item(
+            "push_people_agent_added",
+            PushEventDto::PeopleAgentAdded(PeopleAgentAddedPayloadDto {
+                chat_id: "people_dm".into(),
+                project_id: "proj_fixture".into(),
+                by_handle: "user201".into(),
+            }),
+        ),
+    );
+    assert_dto(
+        "push_people_agent_removed.json",
+        push_item(
+            "push_people_agent_removed",
+            PushEventDto::PeopleAgentRemoved(PeopleAgentRemovedPayloadDto {
+                chat_id: "people_dm".into(),
+                project_id: "proj_fixture".into(),
+                by_handle: "user201".into(),
+            }),
+        ),
+    );
+    assert_dto(
+        "push_people_project_shared.json",
+        push_item(
+            "push_people_project_shared",
+            PushEventDto::PeopleProjectShared(PeopleProjectSharedPayloadDto {
+                project_id: "proj_fixture".into(),
+                by_handle: "user201".into(),
+            }),
+        ),
+    );
+    assert_dto(
+        "push_project_member_removed.json",
+        push_item(
+            "push_project_member_removed",
+            PushEventDto::ProjectMemberRemoved(ProjectMemberRemovedPayloadDto {
+                project_id: "proj_fixture".into(),
+                by_handle: "user201".into(),
+            }),
+        ),
+    );
+    assert_dto(
+        "push_chat_archived.json",
+        push_item(
+            "push_chat_archived",
+            PushEventDto::ChatArchived(ChatArchivedPayloadDto {
+                chat_id: "chat_fixture".into(),
+                project_id: "proj_fixture".into(),
+                archived_at: Some(FIXED_AT),
+            }),
+        ),
+    );
+    assert_dto(
+        "push_people_invite_accepted.json",
+        push_item(
+            "push_people_invite_accepted",
+            PushEventDto::PeopleInviteAccepted(PeopleInviteAcceptedPayloadDto {
+                code: "invite_fixture".into(),
+                handle: "user202".into(),
+                user_id: "gh_202".into(),
+                target_kind: "project".into(),
+                target_id: "proj_fixture".into(),
+            }),
+        ),
+    );
+    assert_dto(
+        "push_feedback_capture.json",
+        push_item(
+            "push_feedback_capture",
+            PushEventDto::FeedbackCapture(FeedbackCapturePayloadDto {
+                request_id: "cap_fixture".into(),
+                project_id: "proj_fixture".into(),
+                project_name: "Fixture".into(),
+                chat_id: Some("chat_fixture".into()),
+                preferred_device_id: Some("dev_fixture".into()),
+                expires_at: FIXED_AT + 3_600_000,
+            }),
+        ),
+    );
+    assert_dto(
+        "push_server_member_removed.json",
+        push_item(
+            "push_server_member_removed",
+            PushEventDto::ServerMemberRemoved(ServerMemberRemovedPayloadDto {
+                server_id: "srv_fixture".into(),
+                user_id: "gh_202".into(),
+                banned: Some(false),
+                handle: Some("user202".into()),
+            }),
+        ),
+    );
+    assert_dto(
+        "push_server_member_joined.json",
+        push_item(
+            "push_server_member_joined",
+            PushEventDto::ServerMemberJoined(ServerMemberJoinedPayloadDto {
+                server_id: "srv_fixture".into(),
+                user_id: "gh_202".into(),
+                handle: "user202".into(),
+            }),
+        ),
+    );
+    assert_dto(
+        "push_server_updated.json",
+        push_item(
+            "push_server_updated",
+            PushEventDto::ServerUpdated(ServerUpdatedPayloadDto {
+                server_id: "srv_fixture".into(),
+                channel_id: Some("ch_fixture".into()),
+                deleted: None,
+                user_id: None,
+                role: None,
+            }),
+        ),
+    );
+    assert_dto(
+        "push_server_deleted.json",
+        push_item(
+            "push_server_deleted",
+            PushEventDto::ServerDeleted(ServerDeletedPayloadDto {
+                server_id: "srv_fixture".into(),
+            }),
+        ),
+    );
+    assert_dto(
+        "push_machine_ready.json",
+        push_item(
+            "push_machine_ready",
+            PushEventDto::MachineReady(MachineReadyPayloadDto {
+                message: "Machine is ready".into(),
+            }),
+        ),
+    );
+    assert_dto(
+        "push_release_published.json",
+        push_item(
+            "push_release_published",
+            PushEventDto::ReleasePublished(ReleasePublishedPayloadDto {
+                platform: "ios".into(),
+                channel: "testflight".into(),
+                version: "1.2.3".into(),
+                build: "456".into(),
+                url: "https://testflight.apple.com/join/fixture".into(),
+                published_at: FIXED_AT,
+            }),
+        ),
+    );
+    assert_dto(
+        "push_secret_request.json",
+        push_item(
+            "push_secret_request",
+            PushEventDto::SecretRequest(SecretRequestPushPayloadDto {
+                request_id: "req_secret_fixture".into(),
+                project_id: "proj_fixture".into(),
+                project_name: "Fixture".into(),
+                name: "STRIPE_KEY".into(),
+                host: Some("api.stripe.com".into()),
+                use_kind: "env".into(),
+                vault_id: Some("vault_fixture".into()),
+            }),
+        ),
+    );
+    assert_dto(
+        "push_secrets_paused.json",
+        push_item(
+            "push_secrets_paused",
+            PushEventDto::SecretsPaused(SecretsPausedPayloadDto { paused: true }),
+        ),
+    );
+    assert_dto(
+        "push_secret_expiring.json",
+        push_item(
+            "push_secret_expiring",
+            PushEventDto::SecretExpiring(SecretExpiringPayloadDto {
+                secret_id: "sec_fixture".into(),
+                name: "STRIPE_KEY".into(),
+                expires_at: Some(FIXED_AT),
+                expired: false,
+            }),
+        ),
+    );
+
+    assert_dto(
+        "releases_current.json",
+        ReleasesDto {
+            releases: vec![
+                ReleaseDto {
+                    platform: "ios".into(),
+                    channel: "testflight".into(),
+                    version: "1.2.3".into(),
+                    build: "456".into(),
+                    url: "https://testflight.apple.com/join/fixture".into(),
+                    published_at: FIXED_AT,
+                },
+                ReleaseDto {
+                    platform: "mac".into(),
+                    channel: "stable".into(),
+                    version: "1.2.3".into(),
+                    build: "456".into(),
+                    url: "https://example.com/arbos.dmg".into(),
+                    published_at: FIXED_AT,
+                },
+            ],
+        },
+    );
+    assert_dto(
+        "push_register_response.json",
+        PushRegisterResponseDto {
+            device_id: "dev_fixture".into(),
+            environment: "production".into(),
+            push: true,
+        },
+    );
 }
 
 #[tokio::test]

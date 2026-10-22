@@ -1,0 +1,10 @@
+{
+  "id": "push_people_chat_created",
+  "created_at": 1700000000000,
+  "kind": "people_chat_created",
+  "payload": {
+    "chat_id": "people_dm",
+    "by": "gh_201",
+    "by_handle": "user201"
+  }
+}

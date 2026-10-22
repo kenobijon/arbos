@@ -1,0 +1,24 @@
+{
+  "id": "push_people_message",
+  "created_at": 1700000000000,
+  "kind": "people_message",
+  "payload": {
+    "chat_id": "people_dm",
+    "from": "user:gh_201",
+    "from_handle": "user201",
+    "seq": 42,
+    "sender": {
+      "avatar": null,
+      "avatar_color": null,
+      "avatar_color_index": null,
+      "avatar_color_index_effective": 1,
+      "avatar_leaf_color_effective": null,
+      "avatar_leaf_effective": null,
+      "avatar_url": null,
+      "handle": "user201",
+      "id": "gh_201",
+      "kind": "user",
+      "name": "@user201"
+    }
+  }
+}

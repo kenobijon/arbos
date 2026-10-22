@@ -32,6 +32,7 @@ use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use arbos_core::api::{FeedbackCapturePayloadDto, PushEventDto};
 use arbos_core::ids::{now_ms, ulid};
 
 use crate::auth::Principal;
@@ -706,15 +707,15 @@ pub async fn box_capture_request(
     if let Err(e) = tokio::fs::write(dir.join("request.json"), request.to_string()).await {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "io", e.to_string());
     }
-    let payload = json!({
-        "request_id": id, "project_id": project.id, "project_name": project.name,
-        "chat_id": body.chat_id, "preferred_device_id": preferred,
-        "expires_at": created_at + 45_000,
+    let event = PushEventDto::FeedbackCapture(FeedbackCapturePayloadDto {
+        request_id: id.clone(),
+        project_id: project.id.clone(),
+        project_name: project.name.clone(),
+        chat_id: body.chat_id,
+        preferred_device_id: preferred,
+        expires_at: created_at + 45_000,
     });
-    if let Err(e) = state
-        .db
-        .push_user(user_id, "feedback_capture", &payload, None)
-    {
+    if let Err(e) = state.db.push_user_event(user_id, &event, None) {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
     }
     let devices = state

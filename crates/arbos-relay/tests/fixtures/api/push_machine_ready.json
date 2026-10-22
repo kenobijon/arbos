@@ -1,0 +1,8 @@
+{
+  "id": "push_machine_ready",
+  "created_at": 1700000000000,
+  "kind": "machine_ready",
+  "payload": {
+    "message": "Machine is ready"
+  }
+}

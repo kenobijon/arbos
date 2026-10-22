@@ -29,9 +29,9 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use arbos_core::api::{
-    ProjectSecretItemDto, ProjectVaultSummaryDto, SecretAccessDto, SecretAccessEnvelopeDto,
-    SecretAccessScopeDto, VaultDetailDto, VaultDto, VaultEnvelopeDto, VaultItemHostDto,
-    VaultItemsEnvelopeDto, VaultLimitsDto,
+    ProjectSecretItemDto, ProjectVaultSummaryDto, PushEventDto, SecretAccessDto,
+    SecretAccessEnvelopeDto, SecretAccessScopeDto, SecretRequestPushPayloadDto, VaultDetailDto,
+    VaultDto, VaultEnvelopeDto, VaultItemHostDto, VaultItemsEnvelopeDto, VaultLimitsDto,
 };
 use arbos_core::ids::{now_ms, ulid};
 
@@ -1667,10 +1667,17 @@ pub(crate) async fn box_request(
         .flatten()
         .map(|p| p.name)
         .unwrap_or_default();
-    let _ = state.db.push_user(
+    let _ = state.db.push_user_event(
         user_id,
-        "secret_request",
-        &json!({ "request_id": rq.id, "project_id": project_id, "project_name": agent, "name": short_ref(reference), "host": host, "use": use_kind, "vault_id": v.id }),
+        &PushEventDto::SecretRequest(SecretRequestPushPayloadDto {
+            request_id: rq.id.clone(),
+            project_id: project_id.to_owned(),
+            project_name: agent,
+            name: short_ref(reference),
+            host: host.clone(),
+            use_kind: use_kind.to_owned(),
+            vault_id: Some(v.id.clone()),
+        }),
         None,
     );
     Ok((

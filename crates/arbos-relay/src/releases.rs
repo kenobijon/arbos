@@ -28,6 +28,9 @@ use rusqlite::params;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use arbos_core::api::{
+    PushEventDto, ReleaseDto, ReleasePublishedPayloadDto, ReleasesDto,
+};
 use arbos_core::ids::now_ms;
 
 use crate::auth::Principal;
@@ -170,17 +173,20 @@ impl Db {
         })
     }
 
-    pub fn all_releases(&self) -> anyhow::Result<Vec<Value>> {
+    pub fn all_releases(&self) -> anyhow::Result<Vec<ReleaseDto>> {
         self.with(|c| {
             let mut st = c.prepare(
                 "SELECT platform, channel, version, build, url, published_at FROM releases ORDER BY platform, channel",
             )?;
             let rows = st.query_map([], |r| {
-                Ok(json!({
-                    "platform": r.get::<_, String>(0)?, "channel": r.get::<_, String>(1)?,
-                    "version": r.get::<_, String>(2)?, "build": r.get::<_, String>(3)?,
-                    "url": r.get::<_, String>(4)?, "published_at": r.get::<_, i64>(5)?,
-                }))
+                Ok(ReleaseDto {
+                    platform: r.get(0)?,
+                    channel: r.get(1)?,
+                    version: r.get(2)?,
+                    build: r.get(3)?,
+                    url: r.get(4)?,
+                    published_at: r.get(5)?,
+                })
             })?;
             rows.collect()
         })
@@ -259,11 +265,17 @@ pub async fn admin_release(
             tracing::warn!(error = %e, "release-published flag not written");
         }
     }
-    let payload = json!({
-        "platform": platform, "channel": channel, "version": version, "build": build,
-        "url": url, "published_at": now,
-    });
-    let pushed = match state.db.push_everyone("release_published", &payload) {
+    let release = ReleasePublishedPayloadDto {
+        platform: platform.clone(),
+        channel: channel.clone(),
+        version: version.clone(),
+        build: build.clone(),
+        url: url.clone(),
+        published_at: now,
+    };
+    let event = PushEventDto::ReleasePublished(release.clone());
+    let (kind, payload) = event.kind_and_payload();
+    let pushed = match state.db.push_everyone(&kind, &payload) {
         Ok(n) => n,
         Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
     };
@@ -275,7 +287,15 @@ pub async fn admin_release(
         pushed,
         "release published"
     );
-    Json(json!({ "ok": true, "pushed_devices": pushed, "release": payload })).into_response()
+    let release_row = ReleaseDto {
+        platform,
+        channel,
+        version,
+        build,
+        url,
+        published_at: now,
+    };
+    Json(json!({ "ok": true, "pushed_devices": pushed, "release": release_row })).into_response()
 }
 
 /// `GET /releases/current`: the current builds per platform/channel, for the apps' own check.
@@ -284,7 +304,7 @@ pub async fn current(State(state): State<AppState>, principal: Principal) -> Res
         return api_error(StatusCode::FORBIDDEN, "forbidden", "devices only");
     }
     match state.db.all_releases() {
-        Ok(list) => Json(json!({ "releases": list })).into_response(),
+        Ok(list) => Json(ReleasesDto { releases: list }).into_response(),
         Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
     }
 }

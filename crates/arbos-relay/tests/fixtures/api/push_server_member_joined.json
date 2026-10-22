@@ -1,0 +1,10 @@
+{
+  "id": "push_server_member_joined",
+  "created_at": 1700000000000,
+  "kind": "server_member_joined",
+  "payload": {
+    "server_id": "srv_fixture",
+    "user_id": "gh_202",
+    "handle": "user202"
+  }
+}

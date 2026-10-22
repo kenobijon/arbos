@@ -1,6 +1,6 @@
 //! Shared HTTP response shapes for projects, chats, people, me, machine,
-//! unread, calls, goals, routines, secrets, vaults, sign-in, pairing, and
-//! media (crdt-sync).
+//! unread, calls, goals, routines, secrets, vaults, sign-in, pairing, media,
+//! pushes, and releases (crdt-sync).
 //!
 //! No I/O. The relay builds these and serializes them; clients will decode the
 //! same JSON. Regenerate Swift with `./scripts/gen-swift-types.sh`.
@@ -1375,4 +1375,347 @@ pub struct ModelListDto {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TranscriptionDto {
     pub text: String,
+}
+
+// ---- Per-user pushes / releases / push registration (step 6b-2d-2) ------------------------------
+//
+// `PushEventDto` is the adjacently tagged `{ kind, payload }` the relay stores and `/me/pushes`
+// returns. `PushItemDto` adds `id` + `created_at` beside it (serde flatten; typeshare skips the
+// nested event so Swift decodes `PushEventDto` from the same object). Writers build a variant's
+// payload struct so a new kind cannot be added without a type. Wire JSON is unchanged.
+
+/// `people_message` payload on `/me/pushes`.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PeopleMessagePayloadDto {
+    pub chat_id: String,
+    pub from: String,
+    pub from_handle: String,
+    #[typeshare(serialized_as = "I54")]
+    pub seq: i64,
+    pub sender: SenderDto,
+}
+
+/// `people_chat_updated` payload.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PeopleChatUpdatedPayloadDto {
+    pub chat_id: String,
+}
+
+/// `people_member_added` payload.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PeopleMemberAddedPayloadDto {
+    pub chat_id: String,
+    pub user_id: String,
+    pub handle: String,
+    pub by_handle: String,
+}
+
+/// `people_member_removed` payload.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PeopleMemberRemovedPayloadDto {
+    pub chat_id: String,
+    pub user_id: String,
+    pub handle: String,
+    pub by_handle: String,
+}
+
+/// `people_chat_created` payload.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PeopleChatCreatedPayloadDto {
+    pub chat_id: String,
+    pub by: String,
+    pub by_handle: String,
+}
+
+/// `people_chat_deleted` payload.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PeopleChatDeletedPayloadDto {
+    pub chat_id: String,
+    pub by_handle: String,
+}
+
+/// `people_agent_added` payload (user devices).
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PeopleAgentAddedPayloadDto {
+    pub chat_id: String,
+    pub project_id: String,
+    pub by_handle: String,
+}
+
+/// `people_agent_removed` payload (user devices).
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PeopleAgentRemovedPayloadDto {
+    pub chat_id: String,
+    pub project_id: String,
+    pub by_handle: String,
+}
+
+/// `people_project_shared` payload.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PeopleProjectSharedPayloadDto {
+    pub project_id: String,
+    pub by_handle: String,
+}
+
+/// `project_member_removed` payload.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProjectMemberRemovedPayloadDto {
+    pub project_id: String,
+    pub by_handle: String,
+}
+
+/// `chat_archived` payload (`archived_at` is null when un-archiving).
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChatArchivedPayloadDto {
+    pub chat_id: String,
+    pub project_id: String,
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub archived_at: Option<i64>,
+}
+
+/// `people_invite_accepted` payload.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PeopleInviteAcceptedPayloadDto {
+    pub code: String,
+    pub handle: String,
+    pub user_id: String,
+    pub target_kind: String,
+    pub target_id: String,
+}
+
+/// `feedback_capture` payload.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FeedbackCapturePayloadDto {
+    pub request_id: String,
+    pub project_id: String,
+    pub project_name: String,
+    pub chat_id: Option<String>,
+    pub preferred_device_id: Option<String>,
+    #[typeshare(serialized_as = "I54")]
+    pub expires_at: i64,
+}
+
+/// `server_member_removed` payload.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ServerMemberRemovedPayloadDto {
+    pub server_id: String,
+    pub user_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub banned: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handle: Option<String>,
+}
+
+/// `server_member_joined` payload.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ServerMemberJoinedPayloadDto {
+    pub server_id: String,
+    pub user_id: String,
+    pub handle: String,
+}
+
+/// `server_updated` payload (optional keys only when the writer sets them).
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ServerUpdatedPayloadDto {
+    pub server_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+}
+
+/// `server_deleted` payload.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ServerDeletedPayloadDto {
+    pub server_id: String,
+}
+
+/// `machine_ready` payload.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MachineReadyPayloadDto {
+    pub message: String,
+}
+
+/// `release_published` payload (also the row shape under `releases[]`).
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReleasePublishedPayloadDto {
+    pub platform: String,
+    pub channel: String,
+    pub version: String,
+    pub build: String,
+    pub url: String,
+    #[typeshare(serialized_as = "I54")]
+    pub published_at: i64,
+}
+
+/// `secret_request` payload (`vault_id` only from the vaults writer).
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SecretRequestPushPayloadDto {
+    pub request_id: String,
+    pub project_id: String,
+    pub project_name: String,
+    pub name: String,
+    pub host: Option<String>,
+    #[serde(rename = "use")]
+    pub use_kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault_id: Option<String>,
+}
+
+/// `secrets_paused` payload.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SecretsPausedPayloadDto {
+    pub paused: bool,
+}
+
+/// `secret_expiring` payload.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SecretExpiringPayloadDto {
+    pub secret_id: String,
+    pub name: String,
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub expires_at: Option<i64>,
+    pub expired: bool,
+}
+
+/// One kind the relay queues on `/me/pushes` via `push_user` / `push_user_except` /
+/// `push_everyone`. Adjacent tagging matches the stored `{ kind, payload }` row.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "payload")]
+pub enum PushEventDto {
+    #[serde(rename = "people_message")]
+    PeopleMessage(PeopleMessagePayloadDto),
+    #[serde(rename = "people_chat_updated")]
+    PeopleChatUpdated(PeopleChatUpdatedPayloadDto),
+    #[serde(rename = "people_member_added")]
+    PeopleMemberAdded(PeopleMemberAddedPayloadDto),
+    #[serde(rename = "people_member_removed")]
+    PeopleMemberRemoved(PeopleMemberRemovedPayloadDto),
+    #[serde(rename = "people_chat_created")]
+    PeopleChatCreated(PeopleChatCreatedPayloadDto),
+    #[serde(rename = "people_chat_deleted")]
+    PeopleChatDeleted(PeopleChatDeletedPayloadDto),
+    #[serde(rename = "people_agent_added")]
+    PeopleAgentAdded(PeopleAgentAddedPayloadDto),
+    #[serde(rename = "people_agent_removed")]
+    PeopleAgentRemoved(PeopleAgentRemovedPayloadDto),
+    #[serde(rename = "people_project_shared")]
+    PeopleProjectShared(PeopleProjectSharedPayloadDto),
+    #[serde(rename = "project_member_removed")]
+    ProjectMemberRemoved(ProjectMemberRemovedPayloadDto),
+    #[serde(rename = "chat_archived")]
+    ChatArchived(ChatArchivedPayloadDto),
+    #[serde(rename = "people_invite_accepted")]
+    PeopleInviteAccepted(PeopleInviteAcceptedPayloadDto),
+    #[serde(rename = "feedback_capture")]
+    FeedbackCapture(FeedbackCapturePayloadDto),
+    #[serde(rename = "server_member_removed")]
+    ServerMemberRemoved(ServerMemberRemovedPayloadDto),
+    #[serde(rename = "server_member_joined")]
+    ServerMemberJoined(ServerMemberJoinedPayloadDto),
+    #[serde(rename = "server_updated")]
+    ServerUpdated(ServerUpdatedPayloadDto),
+    #[serde(rename = "server_deleted")]
+    ServerDeleted(ServerDeletedPayloadDto),
+    #[serde(rename = "call_started")]
+    CallStarted(CallStartedPayloadDto),
+    #[serde(rename = "call_ended")]
+    CallEnded(CallEndedPayloadDto),
+    #[serde(rename = "call_missed")]
+    CallMissed(CallMissedPayloadDto),
+    #[serde(rename = "machine_ready")]
+    MachineReady(MachineReadyPayloadDto),
+    #[serde(rename = "release_published")]
+    ReleasePublished(ReleasePublishedPayloadDto),
+    #[serde(rename = "secret_request")]
+    SecretRequest(SecretRequestPushPayloadDto),
+    #[serde(rename = "secrets_paused")]
+    SecretsPaused(SecretsPausedPayloadDto),
+    #[serde(rename = "secret_expiring")]
+    SecretExpiring(SecretExpiringPayloadDto),
+}
+
+impl PushEventDto {
+    /// Kind string and payload object as stored in `user_pushes` / returned by `/me/pushes`.
+    pub fn kind_and_payload(&self) -> (String, Value) {
+        let v = serde_json::to_value(self).expect("PushEventDto serializes");
+        let kind = v
+            .get("kind")
+            .and_then(Value::as_str)
+            .expect("PushEventDto kind")
+            .to_owned();
+        let payload = v.get("payload").cloned().unwrap_or(Value::Null);
+        (kind, payload)
+    }
+}
+
+/// One `/me/pushes` list row: `id`, `created_at`, plus flattened `{ kind, payload }`.
+///
+/// typeshare cannot emit serde flatten; Swift decodes `id`/`created_at` here and
+/// `PushEventDto` from the same JSON object.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PushItemDto {
+    pub id: String,
+    #[typeshare(serialized_as = "I54")]
+    pub created_at: i64,
+    #[serde(flatten)]
+    #[typeshare(skip)]
+    pub event: PushEventDto,
+}
+
+/// One row of `GET /releases/current` (`all_releases`).
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReleaseDto {
+    pub platform: String,
+    pub channel: String,
+    pub version: String,
+    pub build: String,
+    pub url: String,
+    #[typeshare(serialized_as = "I54")]
+    pub published_at: i64,
+}
+
+/// `GET /releases/current` body.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReleasesDto {
+    pub releases: Vec<ReleaseDto>,
+}
+
+/// `POST /devices/{id}/push` success body.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PushRegisterResponseDto {
+    pub device_id: String,
+    pub environment: String,
+    pub push: bool,
 }

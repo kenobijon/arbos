@@ -28,7 +28,7 @@ use sha2::Sha256;
 
 use arbos_core::api::{
     AccountUserDto, CreditsDto, MeDeviceDto, MeLimitsDto, MeMachineDto, MeResponseDto,
-    MeUserResponseDto, TokenResponseDto,
+    MeUserResponseDto, PeopleInviteAcceptedPayloadDto, PushEventDto, TokenResponseDto,
 };
 use arbos_core::auth::hash;
 use arbos_core::ids::{now_ms, ulid};
@@ -491,10 +491,15 @@ pub async fn github_callback(
     // inviters hear about it. The DM / project membership already exists for the placeholder.
     if let Ok(accepted) = state.db.accept_invites_for_login(&gh.login, &user.id) {
         for inv in accepted {
-            let _ = state.db.push_user(
+            let _ = state.db.push_user_event(
                 &inv.inviter_user_id,
-                "people_invite_accepted",
-                &json!({ "code": inv.code, "handle": gh.login, "user_id": user.id, "target_kind": inv.target_kind, "target_id": inv.target_id }),
+                &PushEventDto::PeopleInviteAccepted(PeopleInviteAcceptedPayloadDto {
+                    code: inv.code,
+                    handle: gh.login.clone(),
+                    user_id: user.id.clone(),
+                    target_kind: inv.target_kind,
+                    target_id: inv.target_id,
+                }),
                 None,
             );
         }

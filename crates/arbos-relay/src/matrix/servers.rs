@@ -21,6 +21,10 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
+use arbos_core::api::{
+    PushEventDto, ServerDeletedPayloadDto, ServerMemberJoinedPayloadDto,
+    ServerMemberRemovedPayloadDto, ServerUpdatedPayloadDto,
+};
 use arbos_core::ids::{now_ms, ulid};
 
 use super::client::Client;
@@ -198,19 +202,13 @@ fn admin_required(m: &ServerMember) -> Result<(), Box<Response>> {
     }
 }
 
-fn notify_server_members(
-    state: &AppState,
-    server_id: &str,
-    except: &str,
-    kind: &str,
-    payload: Value,
-) {
+fn notify_server_members(state: &AppState, server_id: &str, except: &str, event: &PushEventDto) {
     for m in state.db.server_members(server_id).unwrap_or_default() {
         if m.user_id != except {
-            let _ = state.db.push_user(&m.user_id, kind, &payload, None);
+            let _ = state.db.push_user_event(&m.user_id, event, None);
         }
     }
-    let _ = state.db.push_user(except, kind, &payload, None);
+    let _ = state.db.push_user_event(except, event, None);
 }
 
 // ---- servers --------------------------------------------------------------------------------------
@@ -414,8 +412,13 @@ pub async fn patch(
         &state,
         &id,
         &me,
-        "server_updated",
-        json!({ "server_id": id }),
+        &PushEventDto::ServerUpdated(ServerUpdatedPayloadDto {
+            server_id: id.clone(),
+            channel_id: None,
+            deleted: None,
+            user_id: None,
+            role: None,
+        }),
     );
     match load(&state, &me, &id) {
         Ok((s, m)) => Json(server_json(&state, &s, &m, true)).into_response(),
@@ -453,13 +456,11 @@ pub async fn delete(
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
     }
     state.matrix.close_chat(&state, &id);
+    let event = PushEventDto::ServerDeleted(ServerDeletedPayloadDto {
+        server_id: id.clone(),
+    });
     for m in members {
-        let _ = state.db.push_user(
-            &m.user_id,
-            "server_deleted",
-            &json!({ "server_id": id }),
-            None,
-        );
+        let _ = state.db.push_user_event(&m.user_id, &event, None);
     }
     StatusCode::NO_CONTENT.into_response()
 }
@@ -538,8 +539,13 @@ pub async fn channel_create(
         &state,
         &id,
         &me,
-        "server_updated",
-        json!({ "server_id": id, "channel_id": ch.id }),
+        &PushEventDto::ServerUpdated(ServerUpdatedPayloadDto {
+            server_id: id.clone(),
+            channel_id: Some(ch.id.clone()),
+            deleted: None,
+            user_id: None,
+            role: None,
+        }),
     );
     (StatusCode::CREATED, Json(channel_json(&ch))).into_response()
 }
@@ -594,8 +600,13 @@ pub async fn channel_patch(
         &state,
         &id,
         &me,
-        "server_updated",
-        json!({ "server_id": id, "channel_id": ch.id }),
+        &PushEventDto::ServerUpdated(ServerUpdatedPayloadDto {
+            server_id: id.clone(),
+            channel_id: Some(ch.id.clone()),
+            deleted: None,
+            user_id: None,
+            role: None,
+        }),
     );
     match state.db.channel(&ch.id) {
         Ok(Some(c)) => Json(channel_json(&c)).into_response(),
@@ -643,8 +654,13 @@ pub async fn channel_delete(
         &state,
         &id,
         &me,
-        "server_updated",
-        json!({ "server_id": id, "channel_id": ch.id, "deleted": true }),
+        &PushEventDto::ServerUpdated(ServerUpdatedPayloadDto {
+            server_id: id.clone(),
+            channel_id: Some(ch.id.clone()),
+            deleted: Some(true),
+            user_id: None,
+            role: None,
+        }),
     );
     StatusCode::NO_CONTENT.into_response()
 }
@@ -728,8 +744,11 @@ pub async fn join(
         &state,
         &s.id,
         &me,
-        "server_member_joined",
-        json!({ "server_id": s.id, "user_id": me, "handle": handle_of(&state, &me) }),
+        &PushEventDto::ServerMemberJoined(ServerMemberJoinedPayloadDto {
+            server_id: s.id.clone(),
+            user_id: me.clone(),
+            handle: handle_of(&state, &me),
+        }),
     );
     match load(&state, &me, &s.id) {
         Ok((s, m)) => Json(server_json(&state, &s, &m, true)).into_response(),
@@ -837,8 +856,13 @@ pub async fn member_role(
         &state,
         &id,
         &me,
-        "server_updated",
-        json!({ "server_id": id, "user_id": uid, "role": b.role }),
+        &PushEventDto::ServerUpdated(ServerUpdatedPayloadDto {
+            server_id: id.clone(),
+            channel_id: None,
+            deleted: None,
+            user_id: Some(uid),
+            role: Some(b.role),
+        }),
     );
     StatusCode::NO_CONTENT.into_response()
 }
@@ -894,11 +918,14 @@ pub async fn member_remove(
     for ch in state.db.channels_of_server(&id).unwrap_or_default() {
         state.matrix.touch_channel(&state, &ch.id);
     }
-    let payload = json!({ "server_id": id, "user_id": uid, "banned": ban, "handle": handle_of(&state, &uid) });
-    let _ = state
-        .db
-        .push_user(&uid, "server_member_removed", &payload, None);
-    notify_server_members(&state, &id, &me, "server_member_removed", payload);
+    let event = PushEventDto::ServerMemberRemoved(ServerMemberRemovedPayloadDto {
+        server_id: id.clone(),
+        user_id: uid.clone(),
+        banned: Some(ban),
+        handle: Some(handle_of(&state, &uid)),
+    });
+    let _ = state.db.push_user_event(&uid, &event, None);
+    notify_server_members(&state, &id, &me, &event);
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -932,8 +959,12 @@ pub async fn leave(
         &state,
         &id,
         &me,
-        "server_member_removed",
-        json!({ "server_id": id, "user_id": me, "handle": handle_of(&state, &me) }),
+        &PushEventDto::ServerMemberRemoved(ServerMemberRemovedPayloadDto {
+            server_id: id,
+            user_id: me.clone(),
+            banned: None,
+            handle: Some(handle_of(&state, &me)),
+        }),
     );
     StatusCode::NO_CONTENT.into_response()
 }
