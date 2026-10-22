@@ -189,7 +189,8 @@ class Lane(threading.Thread):
             doc = rl.chat_dump(self.project, first_chat)
             rows = [m for m in doc.get("messages", []) if m.get("role") == "assistant"]
             dm_all = dr.doc_metrics(rows)
-            vw_rec = {"verify_out": out[-600:], "waited_s": round(vw["wait_s"] - (deadline - time.time()), 1), "progress_rows": dm_all["progress_rows"]}
+            vw_rec = {"verify_out": out[-600:], "waited_s": round(vw["wait_s"] - (deadline - time.time()), 1), "progress_rows": dm_all["progress_rows"], "all_text": (dm_all["all_text"] or "")[:4000]}
+            (self.out / f"{tid}.final.doc.json").write_text(json.dumps(doc, indent=1))
             if "PASS" not in out:
                 reasons.append(f"background result: {out.strip().splitlines()[-1][:160] if out.strip() else 'no output'}")
             if vw.get("min_progress_rows") and dm_all["progress_rows"] < vw["min_progress_rows"]:

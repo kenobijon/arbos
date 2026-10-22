@@ -12,10 +12,23 @@
       "timeout_s": 180
     },
     {
+      "prompt": "Quick check before I decide anything: what exactly is running right now — is the loop still appending, and does the scheduled job exist?",
+      "pre_wait_s": 75,
+      "latency_max_s": 10,
+      "verify": "n=$(test -f {D}/loop.log && grep -c . {D}/loop.log || echo 0); p=$(pgrep -af 'lt-b4-teardown' | grep -vE 'prime-agent|rlm.repl|pgrep' | wc -l); echo \"SHOW loop_lines=$n loop_procs=$p\"; if [ $n -ge 2 ]; then echo PASS; else echo FAIL: loop never ran; fi",
+      "routine": {
+        "count": 1
+      },
+      "rubric": {
+        "criteria": "The reply gives a real status (loop running / how many lines, schedule exists) and does not stall or ask the user what to do.",
+        "min": 3
+      },
+      "timeout_s": 120
+    },
+    {
       "prompt": "Tear everything down now: stop the loop and kill any process behind it, delete the scheduled job, and confirm when nothing is running any more.",
-      "pre_wait_s": 90,
       "after_s": 45,
-      "verify": "m1=$(stat -c %Y {D}/loop.log 2>/dev/null || echo 0); sleep 35; m2=$(stat -c %Y {D}/loop.log 2>/dev/null || echo 0); p=$(pgrep -f 'loop.log' | wc -l); echo \"SHOW loop_mtime_moved=$([ $m1 != $m2 ] && echo yes || echo no) procs=$p\"; if [ $m1 = $m2 ] && [ $p -eq 0 ]; then echo PASS; else echo FAIL: loop still alive; fi",
+      "verify": "m1=$(stat -c %Y {D}/loop.log 2>/dev/null || echo 0); sleep 35; m2=$(stat -c %Y {D}/loop.log 2>/dev/null || echo 0); p=$(pgrep -af 'lt-b4-teardown' | grep -vE 'prime-agent|rlm.repl|pgrep' | wc -l); echo \"SHOW loop_mtime_moved=$([ $m1 != $m2 ] && echo yes || echo no) loop_procs=$p\"; if [ $m1 = $m2 ] && [ $p -eq 0 ]; then echo PASS; else echo FAIL: loop still alive; fi",
       "routine": {
         "count": 0
       },

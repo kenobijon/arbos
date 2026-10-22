@@ -188,10 +188,13 @@ def chat_open(project, title):
     return chat_id
 
 
-def chat_dump(project, chat_id):
-    # Fresh replica every time: a cursor that moved past rows during a catch-up race would hide
-    # the box's rows for the rest of the run.
-    ctl("chat", "reset", project, chat_id, timeout=60)
+def chat_dump(project, chat_id, reset=False):
+    # Keep the local replica between dumps. After `chat reset` the client asks the relay for rows
+    # with `excludeOwn`, so its own user rows are gone and the box's rows that causally depend on
+    # them stay pending until the relay checkpoints — the doc then looks empty for minutes. A
+    # reset is only a repair step when a replica looks stuck (#1103 catch-up race).
+    if reset:
+        ctl("chat", "reset", project, chat_id, timeout=60)
     code, out, err = ctl("chat", "dump", project, chat_id, timeout=120)
     i = out.find("{")
     if i < 0:

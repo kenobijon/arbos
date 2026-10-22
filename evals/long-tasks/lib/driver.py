@@ -110,9 +110,14 @@ def send_turn(project, chat_id, prompt, timeout_s, reject_approvals=True, on_row
     last_fp, last_change = None, time.time()
     first_row_at = None
     over = False
+    repaired = False
     time.sleep(2)
     while time.time() < deadline:
-        doc = rl.chat_dump(project, chat_id)
+        # repair once: the stream saw assistant text but the replica shows no assistant rows
+        stuck = watcher.first_text_at is not None and not rows and time.time() - t0 - watcher.first_text_at > 20
+        doc = rl.chat_dump(project, chat_id, reset=(stuck and not repaired))
+        if stuck and not repaired:
+            repaired = True
         if user_msg_id is None:
             users = [m for m in doc.get("messages", []) if m.get("role") == "user" and text_of(m) == prompt]
             if users:

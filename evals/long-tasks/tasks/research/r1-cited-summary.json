@@ -9,7 +9,8 @@
       "verify": "f={D}/gvisor.md; test -f $f || { echo FAIL: no gvisor.md; exit 0; }; w=$(wc -w < $f); u=$(grep -oE 'https?://[^ )>]+' $f | sort -u | wc -l); echo \"SHOW words=$w urls=$u\"; sed 's/^/SHOW /' $f | head -60; if [ $w -ge 120 ] && [ $w -le 400 ] && [ $u -ge 3 ]; then echo PASS; else echo \"FAIL: words=$w urls=$u\"; fi",
       "truth": {
         "kind": "urls_resolve",
-        "min": 3
+        "min": 3,
+        "file": "{D}/gvisor.md"
       },
       "rubric": {
         "criteria": "Accurate contrast (gVisor = user-space kernel/syscall interception, no KVM needed; Firecracker = microVM with KVM, stronger isolation, needs virtualization). Cites real sources. Clear prose.",

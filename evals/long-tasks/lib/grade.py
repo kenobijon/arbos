@@ -76,7 +76,10 @@ def truth_check(spec, ctx):
         elif produced and tags[0] not in produced and tags[1] not in produced:
             reasons.append("newest tag missing")
     elif kind == "urls_resolve":
-        urls = urls_in(produced or reply)
+        text = produced or reply
+        if spec.get("file") and ctx.get("read_file"):
+            text = ctx["read_file"](spec["file"]) or text
+        urls = urls_in(text)
         truth["urls"] = urls[:10]
         ok = [u for u in urls[:8] if url_ok(u)]
         truth["urls_ok"] = len(ok)
@@ -135,25 +138,38 @@ def judge(task_text, criteria, reply, produced, verify_out):
         f"FILES / OUTPUT PRODUCED:\n{(produced or '(none)')[:4000]}\n\n"
         f"PROGRAMMATIC CHECK OUTPUT:\n{(verify_out or '(none)')[-800:]}\n"
     )
-    body = {"model": JUDGE_MODEL, "max_tokens": 200, "temperature": 0, "messages": [{"role": "user", "content": prompt}]}
-    st, v = rl.http(
-        "POST",
-        "https://openrouter.ai/api/v1/chat/completions",
-        token=OPENROUTER_KEY,
-        body=body,
-        timeout=90,
-        headers={"HTTP-Referer": "https://arbos.life", "X-Title": "arbos long-task eval"},
-    )
-    if st != 200:
-        return {"score": None, "reason": f"judge http {st}", "skipped": True}
-    try:
-        txt = v["choices"][0]["message"]["content"]
-        m = re.search(r"\{.*\}", txt, re.S)
-        d = json.loads(m.group(0))
+    usd = 0.0
+    last_err = ""
+    for max_tokens in (400, 900):
+        # reasoning off: with it on, the model spends the token budget thinking and the JSON is cut
+        body = {
+            "model": JUDGE_MODEL,
+            "max_tokens": max_tokens,
+            "temperature": 0,
+            "reasoning": {"enabled": False},
+            "messages": [{"role": "user", "content": prompt + "\nReturn only the JSON object."}],
+        }
+        st, v = rl.http(
+            "POST",
+            "https://openrouter.ai/api/v1/chat/completions",
+            token=OPENROUTER_KEY,
+            body=body,
+            timeout=90,
+            headers={"HTTP-Referer": "https://arbos.life", "X-Title": "arbos long-task eval"},
+        )
+        if st != 200:
+            return {"score": None, "reason": f"judge http {st}", "skipped": True}
         usage = v.get("usage") or {}
-        return {"score": int(d.get("score")), "reason": str(d.get("reason", ""))[:300], "usd": float(usage.get("cost") or 0.0)}
-    except Exception as e:
-        return {"score": None, "reason": f"judge parse: {e}", "skipped": True}
+        usd += float(usage.get("cost") or 0.0)
+        try:
+            txt = v["choices"][0]["message"]["content"] or ""
+            m = re.search(r"\{.*?\}", txt, re.S)
+            d = json.loads(m.group(0))
+            score = max(0, min(5, int(d.get("score"))))
+            return {"score": score, "reason": str(d.get("reason", ""))[:300], "usd": round(usd, 6)}
+        except Exception as e:
+            last_err = f"{e} (finish {v['choices'][0].get('finish_reason') if v.get('choices') else '?'})"
+    return {"score": None, "reason": f"judge parse: {last_err}", "skipped": True, "usd": round(usd, 6)}
 
 
 # ---- the verdict for one turn -------------------------------------------------------------------
@@ -175,8 +191,10 @@ def grade_turn(turn, ctx, box, project, env):
     if turn.get("show"):
         code, shown = box.run_as_ws(project, turn["show"], env=env, timeout=120)
         produced = (produced + "\n" + shown).strip()
-    ctx = dict(ctx, produced=produced)
+    ctx = dict(ctx, produced=produced, read_file=lambda path: box.read_file(project, path.replace(f"/work/{project}/", ""), limit=60000))
     if turn.get("truth"):
+        if turn["truth"].get("file"):
+            turn["truth"] = dict(turn["truth"], file=turn["truth"]["file"].replace("{D}", env.get("D", "")))
         try:
             tr, truth = truth_check(turn["truth"], ctx)
         except Exception as e:

@@ -7,10 +7,11 @@
     {
       "prompt": "Write a report of 800-1200 words to {D}/sandboxing.md on open-source sandboxing options for running AI-agent code: cover gVisor, Firecracker, Kata Containers and at least two hosted sandbox services. Use sections, compare isolation strength, startup time and operational cost, and cite at least six source URLs inline. Tell me when it is done with a 3-sentence abstract.",
       "seed": "mkdir -p {D}",
-      "verify": "f={D}/sandboxing.md; test -f $f || { echo FAIL: no sandboxing.md; exit 0; }; w=$(wc -w < $f); u=$(grep -oE 'https?://[^ )>]+' $f | sort -u | wc -l); echo \"SHOW words=$w urls=$u\"; head -c 3000 $f | sed 's/^/SHOW /'; if [ $w -ge 650 ] && [ $w -le 1600 ] && [ $u -ge 6 ]; then echo PASS; else echo \"FAIL: words=$w urls=$u\"; fi",
+      "verify": "f={D}/sandboxing.md; test -f $f || { echo FAIL: no sandboxing.md; exit 0; }; w=$(wc -w < $f); u=$(grep -oE 'https?://[^ )>]+' $f | sort -u | wc -l); echo \"SHOW words=$w urls=$u\"; head -c 3000 $f | sed 's/^/SHOW /'; echo; if [ $w -ge 650 ] && [ $w -le 1600 ] && [ $u -ge 6 ]; then echo PASS; else echo \"FAIL: words=$w urls=$u\"; fi",
       "truth": {
         "kind": "urls_resolve",
-        "min": 5
+        "min": 5,
+        "file": "{D}/sandboxing.md"
       },
       "rubric": {
         "criteria": "Covers gVisor, Firecracker, Kata and two hosted services with correct basic facts; has sections and a comparison; cites real URLs; reads as a coherent report.",
