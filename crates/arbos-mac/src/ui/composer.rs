@@ -1883,8 +1883,6 @@ impl Render for Composer {
         let mode = self.mode(cx);
         let state = self.state.read(cx);
         let space = state.selected().cloned();
-        // A people chat has no model of its own: its agents run on their owners' settings.
-        let link_full = state.link == crate::model::Link::Reconnecting;
         let voice_mode = state.voice_mode;
         let running = state
             .active_chat_id()
@@ -2322,18 +2320,12 @@ impl Render for Composer {
         }
 
         // One muted line about the voice path while it is doing something (or
-        // when it had to fall back: no microphone, mock relay), or the link.
-        // Overlay just above the field so the pill does not jump when the note
-        // appears (a flow child above or below would shift the bottom-pinned
-        // composer).
-        let note = voice_notice
-            .filter(|_| recording || transcribing || voice_mode)
-            .or_else(|| {
-                link_full.then(|| {
-                    "Reconnecting… messages queue locally and sync when the relay is back."
-                        .to_string()
-                })
-            });
+        // when it had to fall back: no microphone, mock relay). The link has
+        // no line here: the header's connection pill is its one place
+        // ([feedback connection-pill]). Overlay just above the field so the
+        // pill does not jump when the note appears (a flow child above or
+        // below would shift the bottom-pinned composer).
+        let note = voice_notice.filter(|_| recording || transcribing || voice_mode);
         let mut field_wrap = div().relative().w_full();
         if let Some(note) = note {
             field_wrap = field_wrap.child(

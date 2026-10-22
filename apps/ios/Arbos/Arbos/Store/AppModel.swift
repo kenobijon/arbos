@@ -186,10 +186,19 @@ final class AppModel: ObservableObject {
     @Published var messages: [Id: [Message]] = [:]
     @Published var caughtUp: Set<Id> = []
     @Published var link: Link = .connecting
-    /// Per-room link. The chat banner must not use the global `link`: any other
-    /// room's brief reconnect was painting "Reconnecting…" on a live chat (an
-    /// agent that just messaged looked broken on an empty transcript).
-    @Published private(set) var roomLinks: [Id: Link] = [:]
+    /// Per-room link, for the chat header's connection pill. The pill must not
+    /// use the global `link`: any other room's brief reconnect was painting
+    /// "Reconnecting…" on a live chat (an agent that just messaged looked broken
+    /// on an empty transcript). `roomLinkSince` is when each state began.
+    @Published private(set) var roomLinks: [Id: LinkState] = [:]
+    private(set) var roomLinkSince: [Id: Date] = [:]
+    /// The relay's HTTP reachability (the registry refresh): `.offline` /
+    /// `.relayDown` while it fails, `.live` as soon as a call succeeds or any room is live.
+    @Published private(set) var relayLink: LinkState = .live
+    private(set) var relayLinkSince = Date.distantPast
+    /// A link state must hold this long before the pill shows it: a 250 ms redial
+    /// or a sub-second catch-up never flashes a pill.
+    static let linkPillGrace: TimeInterval = 1.2
     @Published private(set) var models: [String] = []
     @Published var machine: Machine = .unknown
     @Published private(set) var machineBusy = false
@@ -202,6 +211,8 @@ final class AppModel: ObservableObject {
     var firstLoginTask: Task<Void, Never>?
     /// Rig: `ARBOS_OPEN_SERVER` was applied (once, after the first login if there is one).
     var openServerHookDone = false
+    /// Rig: the tab the channel page opens on (`ARBOS_OPEN_SERVER=…:page-settings`).
+    var openServerHookTab: String?
     /// `machine.always_on` as last reported by `GET /me` (nil = field absent).
     private var meAlwaysOn: Bool?
     /// Navigation: home → chat. Shared so menus anywhere can open a chat.
@@ -234,14 +245,20 @@ final class AppModel: ObservableObject {
     /// The relay answers `GET /servers`: the `+` sheet offers "Server" / "Join a server".
     /// A relay with servers off (503 `servers_off`) shows nothing server-related.
     @Published var serversAvailable = false
+    /// Channels muted on this phone (channel page › Notifications); local, like the Mac's mute list.
+    @Published var mutedChannelIds: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "mutedChannelIds") ?? []) {
+        didSet { UserDefaults.standard.set(Array(mutedChannelIds), forKey: "mutedChannelIds") }
+    }
     /// The shared Matrix client (crates/arbos-matrix through ArbosFFI): the rooms' data plane.
     var matrixClient: ArbosFFI.MatrixClient?
     /// Retains the UniFFI foreign listener for the client's lifetime.
     var matrixListener: MatrixBridgeListener?
     /// Latest room list from the client: previews, unread and last activity per server/channel.
     @Published var matrixSnapshot = ArbosFFI.MatrixSnapshot(spaces: [], channels: [])
-    /// The client's link to the homeserver (`onConnection`); false paints "Reconnecting…" in a channel.
+    /// The client's link to the homeserver (`onConnection`); false shows "Reconnecting…" in a
+    /// channel's header pill, from `matrixDisconnectedSince` plus the pill's grace.
     @Published var matrixConnected = true
+    var matrixDisconnectedSince: Date?
     /// Decoded channel timelines by relay channel id — the rows ChatView renders for a channel.
     @Published var channelRows: [Id: [Message]] = [:]
     /// Channels whose room reached the beginning of its history (`loadOlder` → nil).
@@ -526,10 +543,53 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Link state for one chat's room (banner / empty-state). Unknown →
-    /// `.connecting` so a sibling room's reconnect does not paint this chat.
-    func roomLink(for chatId: Id) -> Link {
-        roomLinks[chatId] ?? .connecting
+    /// What the chat header's connection pill says for `chatId`, or nil when the
+    /// link is fine ([feedback connection-pill]). The room's own socket and the
+    /// relay's HTTP poll each vote; the highest-priority verdict wins (offline >
+    /// relay down > reconnecting > syncing). A state younger than `linkPillGrace`
+    /// does not show; `linkPillRepaint` ticks the view once the grace is over.
+    /// A channel's room is the Matrix client: its `onConnection` false is a reconnect.
+    func linkPill(for chatId: Id, channel: Bool = false, now: Date = Date()) -> LinkState? {
+        func settled(_ state: LinkState, _ since: Date) -> LinkState? {
+            state != .live && now.timeIntervalSince(since) >= Self.linkPillGrace ? state : nil
+        }
+        var verdict: LinkState? = settled(relayLink, relayLinkSince)
+        if channel {
+            if !matrixConnected, let since = matrixDisconnectedSince, let s = settled(.reconnecting, since) {
+                verdict = max(verdict ?? .live, s)
+            }
+        } else if let state = roomLinks[chatId], let since = roomLinkSince[chatId], let s = settled(state, since) {
+            verdict = max(verdict ?? .live, s)
+        }
+        return verdict
+    }
+
+    /// Bumped once the grace period after a link change is over, so the pill
+    /// appears (or stays away) without a user event.
+    @Published private(set) var linkPillRepaint = 0
+
+    func setRoomLink(_ key: Id, _ state: LinkState) {
+        guard roomLinks[key] != state else { return }
+        roomLinks[key] = state
+        roomLinkSince[key] = Date()
+        // A room that is live proves the relay is reachable: a verdict from an
+        // older HTTP poll must not keep "Relay down" up.
+        if state == .live, relayLink != .live { setRelayLink(.live) }
+        if state != .live { scheduleLinkPillRepaint() }
+    }
+
+    func setRelayLink(_ state: LinkState) {
+        guard relayLink != state else { return }
+        relayLink = state
+        relayLinkSince = Date()
+        if state != .live { scheduleLinkPillRepaint() }
+    }
+
+    func scheduleLinkPillRepaint() {
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(Int(Self.linkPillGrace * 1000) + 50))
+            self?.linkPillRepaint &+= 1
+        }
     }
 
     private func retryPendingOpen() {
@@ -963,6 +1023,8 @@ final class AppModel: ObservableObject {
         credentials = nil
         link = .connecting
         roomLinks = [:]
+        roomLinkSince = [:]
+        relayLink = .live
         connectors = ConnectorsView()
         connectorsBusy = false
         endFirstLogin()
@@ -971,6 +1033,8 @@ final class AppModel: ObservableObject {
     private func startAfterPairing() {
         link = .connecting
         roomLinks = [:]
+        roomLinkSince = [:]
+        relayLink = .live
         openStore()
         // Paint the last home list and every saved transcript before any network.
         if let store, projects.isEmpty, peopleChats.isEmpty {
@@ -1040,6 +1104,7 @@ final class AppModel: ObservableObject {
             projects = newProjects.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
             chats = newChats
             saveRegistryCache()
+            setRelayLink(.live)
             await refreshMachine()
             for p in newProjects {
                 ensureRoom(projectId: p.id, key: projectDocKey(p.id), roomChat: projectDocChatId)
@@ -1059,6 +1124,10 @@ final class AppModel: ObservableObject {
             }
             registryError = error.localizedDescription
             link = .reconnecting
+            // Only a verdict about reachability goes to the pill; an odd error
+            // (bad JSON, a 404) says nothing about the link.
+            let fault = LinkState.fault(error)
+            if fault == .offline || fault == .relayDown { setRelayLink(fault) }
         }
     }
 
@@ -1243,12 +1312,12 @@ final class AppModel: ObservableObject {
         room.onPendingChanged = { [weak self] batches in self?.store?.savePending(key: key, batches: batches) }
         room.onLink = { [weak self] l in
             guard let self else { return }
-            self.roomLinks[key] = l
             self.link = l
             // Backfill rows after a reconnect must not light unread; only live
             // rows after the next catch-up do (Loro is ahead of /me/unread).
             if l != .live { self.caughtUp.remove(key) }
         }
+        room.onLinkState = { [weak self] state in self?.setRoomLink(key, state) }
         room.presenceUser = { [weak self] in self?.user.map { ($0.id, $0.login) } }
         room.onBoxState = { [weak self] state, detail in
             self?.setProjectState(projectId, state, detail: detail)

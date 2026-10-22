@@ -400,16 +400,23 @@ impl HarnessAdapter for PrimeAdapter {
             req.system_prompt.clone(),
         ];
         let child = self.spawn(&req.session_id, &extra, &req.cwd).await?;
-        let state = child
+        // A child that never answers `get_state` (a thrashing box) is killed here, not left
+        // running: the reader task holds the Arc, so dropping it would not reap the process.
+        let state = match child
             .call_timeout(
                 RpcCommand::GetState {
                     id: child.next_id("st"),
                 },
                 std::time::Duration::from_secs(60),
             )
-            .await?
-            .data
-            .unwrap_or(Value::Null);
+            .await
+        {
+            Ok(r) => r.data.unwrap_or(Value::Null),
+            Err(e) => {
+                child.shutdown().await;
+                return Err(e);
+            }
+        };
         let path = state
             .get("sessionFile")
             .and_then(Value::as_str)

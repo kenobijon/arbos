@@ -37,6 +37,7 @@ mod notify;
 mod people;
 mod proxy;
 mod releases;
+mod restart;
 mod rooms;
 mod routines;
 mod secrets;
@@ -316,6 +317,7 @@ async fn main() -> anyhow::Result<()> {
         voice_conns: Arc::new(Mutex::new(HashMap::new())),
         default_snapshot: Arc::new(std::sync::RwLock::new(String::new())),
         started_at: std::time::Instant::now(),
+        restart: Arc::new(crate::state::RestartSignal::default()),
         voice_dispatched: Arc::new(Mutex::new(HashMap::new())),
         voice_worker: Arc::new(Mutex::new(None)),
         client_seen: Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -407,6 +409,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/admin/usage/{purpose}", get(admin::usage_by_purpose))
         .route("/admin/release", post(releases::admin_release))
         .route("/admin/snapshot/default", post(admin::set_default_snapshot))
+        .route("/admin/restart", post(restart::admin_restart))
         // Chats on Matrix (D88): the relay is Synapse's appservice, push gateway and operator.
         .route(
             "/_matrix/app/v1/transactions/{txn}",
@@ -833,10 +836,12 @@ async fn main() -> anyhow::Result<()> {
         .layer(axum::middleware::from_fn(
             api_error_layer::rewrite_plain_api_errors,
         ))
-        .with_state(state);
+        .with_state(state.clone());
+    let state_for_restart = state;
 
     let listener = tokio::net::TcpListener::bind(&args.listen).await?;
     tracing::info!(listen = %args.listen, data = %args.data.display(), "arbos-relay listening");
+    restart::install_sigterm_handler(state_for_restart);
     axum::serve(listener, app).await?;
     Ok(())
 }

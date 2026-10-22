@@ -153,6 +153,13 @@ extension AppModel {
             path = [.server(serverId: server.id)]
         case "home"?:
             path = []
+        case "page"?, "page-settings"?:
+            // The channel page the header pill opens (the Settings tab with `page-settings`).
+            open(server: server)
+            if let g = server.general {
+                showProfile(.channel(channelId: g.id))
+                openServerHookTab = parts.dropFirst().first == "page-settings" ? "Settings" : nil
+            }
         case let name?:
             let wanted = name.hasPrefix("#") ? String(name.dropFirst()) : name
             if let c = server.channels.first(where: { $0.name == wanted }) { open(channel: c) } else { open(server: server) }
@@ -353,6 +360,27 @@ extension AppModel {
         }
     }
 
+    /// Channel page › Settings: the topic (owner/admin; ≤ 200 chars, empty clears it).
+    func setChannelTopic(_ channel: ServerChannel, topic: String) async {
+        let topic = String(topic.trimmingCharacters(in: .whitespacesAndNewlines).prefix(200))
+        if let si = servers.firstIndex(where: { $0.id == channel.serverId }),
+           let ci = servers[si].channels.firstIndex(where: { $0.id == channel.id }) {
+            servers[si].channels[ci].topic = topic.isEmpty ? nil : topic
+        }
+        do {
+            try await relay.patchChannel(serverId: channel.serverId, channelId: channel.id, topic: topic)
+        } catch {
+            notice = Notice(text: "Could not change the topic: \(error.localizedDescription)")
+        }
+        await refreshServers()
+    }
+
+    func isChannelMuted(_ channel: ServerChannel) -> Bool { mutedChannelIds.contains(channel.id) }
+
+    func toggleChannelMute(_ channel: ServerChannel) {
+        if mutedChannelIds.contains(channel.id) { mutedChannelIds.remove(channel.id) } else { mutedChannelIds.insert(channel.id) }
+    }
+
     func setChannelRestricted(_ channel: ServerChannel, _ restricted: Bool) async {
         if let si = servers.firstIndex(where: { $0.id == channel.serverId }),
            let ci = servers[si].channels.firstIndex(where: { $0.id == channel.id }) {
@@ -473,6 +501,7 @@ extension AppModel {
         matrixListener = nil
         matrixSnapshot = ArbosFFI.MatrixSnapshot(spaces: [], channels: [])
         matrixConnected = true
+        matrixDisconnectedSince = nil
         for id in channelRows.keys { caughtUp.remove(id) }
         channelRows = [:]
         channelAtStart = []
@@ -489,6 +518,12 @@ extension AppModel {
     }
 
     func applyMatrixConnection(connected: Bool, error: String?) {
+        if connected {
+            matrixDisconnectedSince = nil
+        } else if matrixConnected || matrixDisconnectedSince == nil {
+            matrixDisconnectedSince = Date()
+            scheduleLinkPillRepaint()
+        }
         matrixConnected = connected
         if let error, !connected {
             matrixLog.notice("matrix link down: \(error, privacy: .public)")

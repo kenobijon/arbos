@@ -20,9 +20,9 @@ use crate::model::{
 };
 use crate::model::{
     new_id, now_ms, AttachmentKind, BoxState, ChannelSel, ChannelsView, Chat, ChatKind,
-    ConnectorsView, Effort, Id, Link, LocalView, Machine, Message, MessageStatus, NewSecret, Part,
-    Project, ProjectDocView, ProjectSecrets, QuestionState, Role, Routine, RoutineRun,
-    RoutineTrigger, SecretsView, ServerInfo, Skill, StatusKind,
+    ConnectorsView, Effort, Id, Link, LinkState, LocalView, Machine, Message, MessageStatus,
+    NewSecret, Part, Project, ProjectDocView, ProjectSecrets, QuestionState, Role, Routine,
+    RoutineRun, RoutineTrigger, SecretsView, ServerInfo, Skill, StatusKind,
 };
 use crate::sync::{ClientCommand, SyncEvent, SyncSource};
 use crate::ui::notify::{self, Gate, Notifier, NotifyEvent, NotifyKind};
@@ -30,6 +30,8 @@ use crate::ui::tones::{SamplePlayer, Tone, TonePlayer};
 
 /// How often held notification batches are re-checked.
 const NOTIFY_TICK_MS: u64 = 5_000;
+/// A link state must hold this long before the header pill shows it.
+pub const LINK_PILL_GRACE_MS: u64 = 1_200;
 /// The ring card and its sound give up after this long.
 const RING_TIMEOUT_MS: u64 = 45_000;
 /// An outgoing call nobody answers is hung up after this long.
@@ -356,6 +358,12 @@ pub struct AppState {
     /// Brief highlight on the message a home-search hit or a quote click opened.
     pub highlight_message: Option<Id>,
     pub link: Link,
+    /// Each room's socket state (keyed like the docs: chat id, or the project
+    /// id for the project doc) and when it last changed, for the header's
+    /// status pill ([feedback connection-pill]).
+    pub room_links: HashMap<Id, (LinkState, u64)>,
+    /// The relay's HTTP reachability (registry poll) and when it last changed.
+    pub relay_link: (LinkState, u64),
     pub rail_collapsed: bool,
     /// Below [`NARROW_WINDOW`](crate::ui::theme::NARROW_WINDOW) the sidebar
     /// auto-hides; the header toggle (or ⌘B) floats it over the chat instead.
@@ -690,6 +698,8 @@ impl AppState {
             reveal_nonce: 0,
             highlight_message: None,
             link: Link::Connecting,
+            room_links: HashMap::new(),
+            relay_link: (LinkState::Live, 0),
             rail_collapsed: false,
             sidebar_overlay: false,
             details_open: None,
@@ -1064,6 +1074,8 @@ impl AppState {
                     error: None,
                 });
                 self.device_id = None;
+                self.room_links.clear();
+                self.relay_link = (LinkState::Live, 0);
                 cx.notify();
             }
             SyncEvent::Paired { device_id } => {
@@ -1787,6 +1799,27 @@ impl AppState {
                 self.link = link;
                 cx.notify();
             }
+            SyncEvent::RoomLink { key, state } => {
+                let now = now_ms();
+                let changed = self.room_links.get(&key).map(|(s, _)| *s) != Some(state);
+                if changed {
+                    self.room_links.insert(key, (state, now));
+                }
+                // A room that is live proves the relay is reachable: a verdict
+                // from an older HTTP poll must not keep "Relay down" up.
+                if state == LinkState::Live && self.relay_link.0 != LinkState::Live {
+                    self.relay_link = (LinkState::Live, now);
+                }
+                if changed {
+                    self.link_changed(state, cx);
+                }
+            }
+            SyncEvent::RelayLink(state) => {
+                if self.relay_link.0 != state {
+                    self.relay_link = (state, now_ms());
+                    self.link_changed(state, cx);
+                }
+            }
             SyncEvent::Connectors(view) => {
                 self.connectors = view;
                 cx.notify();
@@ -2162,6 +2195,41 @@ impl AppState {
             .or_else(|| self.channel_rows.get(chat_id))
             .map(|v| v.as_slice())
             .unwrap_or(&[])
+    }
+
+    /// What the header's status pill says for `chat_id`, or `None` when the
+    /// link is fine. The room's own socket and the relay's HTTP poll each
+    /// vote; the highest-priority verdict wins (offline > relay down >
+    /// reconnecting > syncing). A state younger than [`LINK_PILL_GRACE_MS`]
+    /// does not show, so a 250 ms redial or a sub-second catch-up never
+    /// flashes a pill.
+    pub fn link_pill(&self, chat_id: Option<&str>) -> Option<LinkState> {
+        let now = now_ms();
+        let settled = |(state, since): (LinkState, u64)| {
+            (state != LinkState::Live && now.saturating_sub(since) >= LINK_PILL_GRACE_MS)
+                .then_some(state)
+        };
+        let room = chat_id
+            .and_then(|id| self.room_links.get(id).copied())
+            .and_then(settled);
+        let relay = settled(self.relay_link);
+        room.max(relay)
+    }
+
+    /// A link state changed: repaint, and repaint again once the grace period
+    /// is over so the pill appears (or stays away) without a user event.
+    fn link_changed(&mut self, state: LinkState, cx: &mut Context<Self>) {
+        cx.notify();
+        if state == LinkState::Live {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(LINK_PILL_GRACE_MS + 50))
+                .await;
+            let _ = this.update(cx, |_, cx| cx.notify());
+        })
+        .detach();
     }
 
     pub fn chat_is_streaming(&self, chat_id: &str) -> bool {
@@ -3100,6 +3168,39 @@ impl AppState {
             server_id,
             channel_id,
             name: Some(name),
+            topic: None,
+            restricted: None,
+        });
+        cx.notify();
+    }
+
+    /// Channel page, Settings: the topic (owner/admin; ≤ 200 chars, empty clears it).
+    pub fn set_channel_topic(
+        &mut self,
+        server_id: Id,
+        channel_id: Id,
+        topic: String,
+        cx: &mut Context<Self>,
+    ) {
+        let topic: String = topic.trim().chars().take(200).collect();
+        if let Some(c) = self
+            .servers
+            .iter_mut()
+            .find(|s| s.id == server_id)
+            .filter(|s| s.can_admin())
+            .and_then(|s| s.channels.iter_mut().find(|c| c.id == channel_id))
+        {
+            if c.topic == topic {
+                cx.notify();
+                return;
+            }
+            c.topic = topic.clone();
+        }
+        self.command(ClientCommand::ChannelPatch {
+            server_id,
+            channel_id,
+            name: None,
+            topic: Some(topic),
             restricted: None,
         });
         cx.notify();
@@ -3126,6 +3227,7 @@ impl AppState {
             server_id,
             channel_id,
             name: None,
+            topic: None,
             restricted: Some(restricted),
         });
         cx.notify();
@@ -3512,7 +3614,7 @@ impl AppState {
                 }
             } else if part == "add-members" {
                 self.open_add_server_members(server.id.clone(), cx);
-            } else if part == "channel" {
+            } else if part == "channel" || part == "channel-settings" {
                 if let Some(c) = self.selected_channel.clone() {
                     self.open_profile(
                         ProfilePage::Channel {
@@ -3521,6 +3623,9 @@ impl AppState {
                         },
                         cx,
                     );
+                    if part == "channel-settings" {
+                        self.set_profile_tab(1, cx);
+                    }
                 }
             } else if part == "menu" || part == "menu-delete" {
                 self.rig_channel_menu = Some(part == "menu-delete");

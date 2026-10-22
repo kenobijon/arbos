@@ -187,6 +187,17 @@ commit_age_s() {
 # relay / voice
 # ---------------------------------------------------------------------------------------------
 
+relay_planned_restart() {
+  # Before any restart of the running relay (#1347): POST /admin/restart sends every room socket a
+  # `restart_soon` notice, waits, closes them with 1012 Service Restart and drains, so the apps redial
+  # at once instead of backing off. Answers when the relay is ready; an old relay (404) is just restarted.
+  local code
+  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 60 -X POST \
+    -H "Authorization: Bearer $(secret_from "$RELAY_ENV" ARBOS_RELAY_ADMIN_TOKEN)" -H "Content-Type: application/json" \
+    -d "{\"notice_s\":${RELAY_RESTART_NOTICE_S:-10},\"drain_s\":5}" "$RELAY_URL/admin/restart" || echo 000)
+  log "relay: planned-restart handshake answered HTTP $code"
+}
+
 relay_connect_probe() {
   # Post-deploy connect probe: healthz alone said "ok" while clients sat on "Reconnecting…" (2026-10-22).
   # The room websocket endpoint must answer the upgrade handshake (401 without a token = the route and the
@@ -572,6 +583,17 @@ roll_image() {
     bash "$REPO/image/register-snapshot.sh" "$snapshot" "$image" 4 8 10 > "$STATE/runs/agentd-$version-register.log" 2>&1 \
     || { record_failure agentd "$sha" "snapshot registration failed: $(tail -2 "$STATE/runs/agentd-$version-register.log" | tr '\n' ' ')"; exit 1; }
   log "agentd: snapshot $snapshot active"
+  # Busy-reply gate on the canary box first (scripts/deploy/agentd-canary-smoke.sh, from the
+  # rolled commit): a failed gate stops here — default unchanged, no real box moves.
+  local smoke_rc=0
+  if [[ -x "$REPO/scripts/deploy/agentd-canary-smoke.sh" ]]; then
+    RELAY_URL="$RELAY_URL" RELAY_ENV="$RELAY_ENV" STATE="$STATE" EVENTS="$EVENTS" \
+      bash "$REPO/scripts/deploy/agentd-canary-smoke.sh" "$sha" "$version" "$snapshot" || smoke_rc=$?
+  fi
+  if (( smoke_rc == 1 )); then
+    record_failure agentd "$sha" "busy-reply smoke failed on the canary box (image $version); default not switched, nothing rolled"
+    exit 1
+  fi
   if grep -q '^ARBOS_DAYTONA_SNAPSHOT=' "$RELAY_ENV"; then
     sed -i "s|^ARBOS_DAYTONA_SNAPSHOT=.*|ARBOS_DAYTONA_SNAPSHOT=$snapshot|" "$RELAY_ENV"
   else
@@ -585,6 +607,7 @@ roll_image() {
     log "agentd: relay default switched to $snapshot without a restart"
   else
     log "agentd: hot snapshot switch answered HTTP $code; restarting the relay (old relay without the endpoint)"
+    relay_planned_restart
     systemctl restart arbos-relay.service
     sleep 3
     curl -fsS --max-time 10 "$RELAY_URL/healthz" >/dev/null || { record_failure agentd "$sha" "relay did not come back after the snapshot switch"; exit 1; }
@@ -666,14 +689,16 @@ auto_requests() {
   done
 }
 
-# A relay request is a hotfix when a commit it brings in (deployed..request) is a revert or
-# hotfix commit, the same subjects the auto-stable fast path releases immediately. Hotfixes
-# skip the coalescing window.
+# A relay request is a hotfix when anything on main above the deployed commit is a revert or
+# hotfix commit (subject or body), the same rule the auto-stable fast path uses. The marker is
+# often an empty `hotfix:` commit pushed on top of the merge (#1323, #1346), which sits above
+# the request's newest-green commit until its own CI runs, so the whole deployed..origin/main
+# range is scanned, not just deployed..request. Hotfixes skip the coalescing window.
 relay_request_is_hotfix() {
-  local full="$1" deployed
+  local deployed
   deployed="$(deployed_sha relay)"
   [[ -n "$deployed" ]] && git -C "$REPO" cat-file -e "$deployed^{commit}" 2>/dev/null || return 1
-  git -C "$REPO" log --format=%s "$deployed..$full" 2>/dev/null | grep -qiE '^(revert|hotfix)\b|\[hotfix\]'
+  git -C "$REPO" log --format='%s%n%b' "$deployed..origin/main" 2>/dev/null | grep -qiE '^(revert|hotfix)\b|\[hotfix\]'
 }
 
 # Four relay deploys in 95 minutes caused the 2026-10-22 "Reconnecting..." outage. Hold a relay

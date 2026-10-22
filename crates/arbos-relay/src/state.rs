@@ -138,6 +138,30 @@ pub struct Room {
     pub tx: broadcast::Sender<RoomBroadcast>,
 }
 
+/// How the relay tells its room sockets that it is about to go down on purpose (a deploy, an
+/// image-roll fallback restart, SIGTERM). `closing` flips to true once; every room socket then
+/// sends a 1012 Service Restart close and ends, and `open_sockets` counts down so the restart
+/// can drain before the process exits. A socket that arrives while closing is closed at once.
+pub struct RestartSignal {
+    pub closing: tokio::sync::watch::Sender<bool>,
+    pub open_sockets: std::sync::atomic::AtomicUsize,
+}
+
+impl Default for RestartSignal {
+    fn default() -> Self {
+        Self {
+            closing: tokio::sync::watch::Sender::new(false),
+            open_sockets: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+}
+
+impl RestartSignal {
+    pub fn is_closing(&self) -> bool {
+        *self.closing.borrow()
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub db: Db,
@@ -203,6 +227,8 @@ pub struct AppState {
     pub default_snapshot: Arc<std::sync::RwLock<String>>,
     /// Process start, for `healthz.uptime_s` (a restart storm shows as a short uptime).
     pub started_at: std::time::Instant,
+    /// Planned-restart signal: room sockets close with 1012 when it flips (`restart.rs`).
+    pub restart: Arc<RestartSignal>,
     /// `call:project` → when the voice worker was last dispatched for it (no double dispatch).
     pub voice_dispatched: Arc<Mutex<HashMap<String, i64>>>,
     /// What the voice worker last reported about itself (`POST /voice/worker/hello`).
@@ -397,7 +423,7 @@ pub(crate) mod test_support {
 
     use arbos_core::ids::ulid;
 
-    use super::{AppState, AuthMode, Config};
+    use super::{AppState, AuthMode, Config, RestartSignal};
     use crate::connectors::crypto::RelayKey;
     use crate::db::Db;
 
@@ -486,6 +512,7 @@ pub(crate) mod test_support {
             voice_conns: Arc::new(Mutex::new(HashMap::new())),
             default_snapshot: Arc::new(std::sync::RwLock::new(String::new())),
             started_at: std::time::Instant::now(),
+            restart: Arc::new(RestartSignal::default()),
             voice_dispatched: Arc::new(Mutex::new(HashMap::new())),
             voice_worker: Arc::new(Mutex::new(None)),
             client_seen: Arc::new(std::sync::Mutex::new(HashMap::new())),
