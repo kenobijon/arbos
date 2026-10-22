@@ -454,20 +454,25 @@ struct NewAgentView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            ZStack(alignment: .top) {
-                LeafAvatar(pick: pick, size: 114, idle: true)
-                    .padding(.top, 62 - 54.5)
-                    .animation(.snappy, value: "\(pick.leaf)-\(pick.color)")
-                // Grok's vertical rhythm from the sheet top (header 54.5): field 183…218, leaf row
-                // centres 264 / 320 (40 pt rings → 244…340), swatch row centres 386 / 426 (32 pt
-                // rings → 370…442).
-                VStack(spacing: 0) {
-                    field.padding(.top, 183 - 54.5)
-                    leafGrid.padding(.top, 244 - 218)
-                    colourGrid.padding(.top, 370 - 340)
+            // The middle scrolls when the keyboard is up (the footer stays above the keyboard,
+            // so Create is always reachable); at rest it is Grok's fixed layout.
+            ScrollView(showsIndicators: false) {
+                ZStack(alignment: .top) {
+                    LeafAvatar(pick: pick, size: 114, idle: true)
+                        .padding(.top, 62 - 54.5)
+                        .animation(.snappy, value: "\(pick.leaf)-\(pick.color)")
+                    // Grok's vertical rhythm from the sheet top (header 54.5): field 183…218, leaf
+                    // row centres 264 / 320 (40 pt rings → 244…340), swatch row centres 386 / 426
+                    // (32 pt rings → 370…442).
+                    VStack(spacing: 0) {
+                        field.padding(.top, 183 - 54.5)
+                        leafGrid.padding(.top, 244 - 218)
+                        colourGrid.padding(.top, 370 - 340)
+                    }
                 }
+                .padding(.bottom, 24)
             }
-            Spacer(minLength: 0)
+            .scrollDismissesKeyboard(.interactively)
             footer
         }
         .background(sheetBg.ignoresSafeArea())
