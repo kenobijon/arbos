@@ -141,9 +141,10 @@ extension AppModel {
         path = [.server(serverId: channel.serverId), .chat(chatId: channel.id, projectId: channelSlot)]
     }
 
-    /// Rig: `ARBOS_OPEN_SERVER=<name or id>[:list|:#channel]` — the server on `#general`, its
-    /// channel list, or one channel, once the registry lists it and a first login has ended
-    /// (that one lands on its own chat). Debug builds only, like every `DebugHooks` value.
+    /// Rig: `ARBOS_OPEN_SERVER=<name or id>[:list|:home|:#channel]` — the server on `#general`,
+    /// its channel list, the chat list with its row, or one channel, once the registry lists it
+    /// and a first login has ended (that one lands on its own chat). Debug builds only, like
+    /// every `DebugHooks` value.
     func applyOpenServerHook() {
         guard !openServerHookDone, firstLogin == nil, let spec = DebugHooks.openServer else { return }
         let parts = spec.split(separator: ":", maxSplits: 1).map(String.init)
@@ -154,6 +155,8 @@ extension AppModel {
         switch parts.dropFirst().first {
         case "list"?:
             path = [.server(serverId: server.id)]
+        case "home"?:
+            path = []
         case let name?:
             let wanted = name.hasPrefix("#") ? String(name.dropFirst()) : name
             if let c = server.channels.first(where: { $0.name == wanted }) { open(channel: c) } else { open(server: server) }
