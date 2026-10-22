@@ -19,7 +19,7 @@ use crate::ui::shell::Shell;
 use crate::ui::theme::{
     Theme, BUBBLE_RADIUS, COLUMN_MARGIN, HEADER_HEIGHT, SIDEBAR_WIDTH, TEXT_BODY, TEXT_SMALL,
 };
-use crate::ui::transcript::{ASSISTANT_MAX_WIDTH, COLUMN_MAX_WIDTH};
+use crate::ui::transcript::{ASSISTANT_RIGHT_GAP, COLUMN_MAX_WIDTH};
 
 const CARD_W: f32 = 256.0;
 const CARD_H: f32 = 172.0;
@@ -94,15 +94,17 @@ fn alpha(c: Hsla, a: f32) -> Hsla {
 
 /// The greeting bubble as the transcript lays it out: the transcript is
 /// bottom-anchored, so the only message sits just above the composer, left
-/// in the centred 820 px column (measured on a 1180×780 window: left 328,
-/// bottom 74.5 above the window edge, 42.5 tall for one line).
+/// in the chat column (the composer's own: 16 pt margins, 876 cap — on a
+/// 1180×780 window left 312; bottom 74.5 above the window edge, 42.5 tall
+/// for one line).
 fn bubble_target(viewport: gpui::Size<Pixels>, sidebar: bool, text_px: f32) -> Bounds<Pixels> {
     let left = if sidebar { SIDEBAR_WIDTH } else { 0.0 };
     let center_w = f32::from(viewport.width) - left;
     let column_w = (center_w - 2.0 * COLUMN_MARGIN).min(COLUMN_MAX_WIDTH);
     let column_x = left + (center_w - column_w) / 2.0;
-    let width = (text_px + 28.0).min(ASSISTANT_MAX_WIDTH);
-    let lines = (text_px / (ASSISTANT_MAX_WIDTH - 28.0)).ceil().max(1.0);
+    let bubble_cap = column_w - ASSISTANT_RIGHT_GAP;
+    let width = (text_px + 28.0).min(bubble_cap);
+    let lines = (text_px / (bubble_cap - 28.0)).ceil().max(1.0);
     let height = 22.0 + 21.0 * lines;
     let bottom = f32::from(viewport.height) - 74.5;
     Bounds {

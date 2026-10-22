@@ -89,8 +89,11 @@ struct Theme {
     static let bubbleVPad: CGFloat = 11
     /// 17 pt SF Pro renders a 20.3 pt line in SwiftUI; Grok shows UIKit's 22 pt body pitch.
     static let bodyLineSpacing: CGFloat = 1.7
-    /// Screen width minus 71 pt (16 pt own margin + 55 pt on the other side; Grok dark, 420 pt screen).
-    static let bubbleInset: CGFloat = 71
+    /// Screen width minus 76 pt: 16 pt own margin (the composer's `+` column
+    /// starts 15 pt further in) + 60 pt on the other side. Grok dark, 420 pt
+    /// screen, refs 01–03 at 3 px/pt: the assistant block runs x 16 → 360 in
+    /// every shot ([feedback agent-bubble-inset-2026-10-22]; was 71).
+    static let bubbleInset: CGFloat = 76
     static let body: CGFloat = 17
     /// Inline code sits a point under body so SF Mono matches the prose cap height.
     static let code: CGFloat = 16
