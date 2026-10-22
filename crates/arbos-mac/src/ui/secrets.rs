@@ -780,7 +780,10 @@ impl SecretsPanel {
             body = body.child(Self::section("Waiting for you", g, None, theme));
         }
 
-        if !view.vaults.is_empty() || !view.providers.is_empty() {
+        // The connect flow shows only when the relay's remote flag `features.vault_connect`
+        // is on and it advertises a provider (default off since 2026-10-21; D83 Phase 2 hidden).
+        let can_connect = view.vault_connect && !view.providers.is_empty();
+        if !view.vaults.is_empty() || can_connect {
             let mut g = Self::group(theme);
             for v in &view.vaults {
                 let vid = v.id.clone();
@@ -818,7 +821,7 @@ impl SecretsPanel {
                     ),
                 );
             }
-            if !view.providers.is_empty() {
+            if can_connect {
                 g = g.child(
                     Self::add_row("secrets-connect", "Connect a vault…", theme).on_click(
                         cx.listener(|this, _, window, cx| {

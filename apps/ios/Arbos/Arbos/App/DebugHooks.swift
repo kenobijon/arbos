@@ -11,6 +11,9 @@ enum DebugHooks {
     static var fixture: Bool { value("ARBOS_FIXTURE") == "1" }
     /// D89 waitlist card and Machine rows: the fixture account's place in line.
     static var fixtureWaitlist: Int? { value("ARBOS_FIXTURE_WAITLIST").flatMap { Int($0) } }
+    /// Seed the connected 1Password vault and the connect flow (`features.vault_connect` on).
+    /// Default off, like the shipped relay flag.
+    static var fixtureVault: Bool { value("ARBOS_FIXTURE_VAULT") == "1" }
     /// Join a call seen via presence automatically (two-simulator relay tests).
     static var autoJoinCall: Bool { value("ARBOS_AUTO_JOIN") == "1" }
     /// Accept an incoming call automatically (two-simulator relay tests).
@@ -41,6 +44,11 @@ enum DebugHooks {
     static var settingsPage: String? { value("ARBOS_SETTINGS_PAGE") }
     /// Text Size factor for screenshot sweeps (one of TextScale.steps, e.g. 0.85 / 1.3).
     static var textScale: Double? { value("ARBOS_TEXT_SCALE").flatMap(Double.init) }
+    /// `system | light | dark`: the theme for one launch, over the saved choice and the
+    /// D90 Dark default (the rig shoots light + dark by toggling the simulator with `system`).
+    static var appearance: Appearance? { value("ARBOS_APPEARANCE").flatMap(Appearance.init(rawValue:)) }
+    /// `matte | glass`: the surface for one launch, same precedence.
+    static var surface: Surface? { value("ARBOS_SURFACE").flatMap(Surface.init(rawValue:)) }
     /// Scripted tour for the screen recording (fixture only).
     static var demo: Bool { value("ARBOS_DEMO") == "1" }
     /// Scripted tour against the live relay: sends ARBOS_AUTO_SEND, waits for the reply, tours the sheets.
