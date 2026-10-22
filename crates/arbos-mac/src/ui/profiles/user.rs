@@ -15,8 +15,8 @@ use crate::ui::shell::Shell;
 use crate::ui::theme::{Theme, TEXT_SMALL};
 
 use super::{
-    card, chats_of, collect, editable_name, editable_picture, empty, frame, hero, kit, link_list,
-    list_row, tab_bar, HERO_AVATAR,
+    card, chats_of, collect, editable_name, editable_picture, empty, hero, kit, link_list,
+    list_row, pushed_frame, tab_bar, HERO_AVATAR,
 };
 
 const TABS: [&str; 2] = ["Links", "Groups"];
@@ -176,5 +176,13 @@ pub(super) fn page(
             )
         })
         .children(block);
-    Some(frame(body, None, None, &theme, cx))
+    Some(pushed_frame(
+        &person.display_name(),
+        body,
+        None,
+        None,
+        shell,
+        &theme,
+        cx,
+    ))
 }

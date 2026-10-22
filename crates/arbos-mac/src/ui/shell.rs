@@ -1483,19 +1483,22 @@ impl Shell {
         }
     }
 
-    pub(crate) fn set_theme(
-        &mut self,
-        pref: AppearancePref,
-        surface: Surface,
-        cx: &mut Context<Self>,
-    ) {
-        let current = Theme::of(cx);
-        if current.pref != pref {
-            pref.save();
-        }
-        if current.surface != surface {
-            surface.save();
-        }
+    /// Settings → Appearance → Theme. The pick is always written, even when it
+    /// equals the unsaved default, so it survives a later default change (D90).
+    pub(crate) fn pick_appearance(&mut self, pref: AppearancePref, cx: &mut Context<Self>) {
+        pref.save();
+        let surface = Theme::of(cx).surface;
+        self.set_theme(pref, surface, cx);
+    }
+
+    /// Settings → Appearance → Surface. Same persistence rule as the theme.
+    pub(crate) fn pick_surface(&mut self, surface: Surface, cx: &mut Context<Self>) {
+        surface.save();
+        let pref = Theme::of(cx).pref;
+        self.set_theme(pref, surface, cx);
+    }
+
+    fn set_theme(&mut self, pref: AppearancePref, surface: Surface, cx: &mut Context<Self>) {
         cx.set_global(Theme::for_pref(pref, surface, cx));
         reapply_window_background(cx);
         cx.notify();

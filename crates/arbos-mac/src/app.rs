@@ -359,6 +359,9 @@ pub struct AppState {
     /// Telegram-style profile sheet (user / group / agent) and its tab.
     pub profile: Option<ProfilePage>,
     pub profile_tab: usize,
+    /// Pages under the open one (a sender's profile pushed from a group): `‹` pops back.
+    /// Minimal stack for the right pane; the pane-as-navigation-stack work extends it.
+    pub profile_stack: Vec<ProfilePage>,
     /// Agent page: the Appearance (tree + colour) section is unfolded.
     pub profile_picker_open: bool,
     /// Agent page: which settings row (model / reasoning / voice) is dropped down.
@@ -656,6 +659,7 @@ impl AppState {
             window_active: true,
             notify_prompt: false,
             profile: None,
+            profile_stack: Vec::new(),
             profile_tab: 0,
             profile_picker_open: false,
             agent_pick: None,
@@ -3906,7 +3910,35 @@ impl AppState {
         }
     }
 
+    /// Open `page` on top of the current one (a sender tapped inside a group): the pane
+    /// gets a `‹` back to where it was. Same page again is a no-op.
+    pub fn push_profile(&mut self, page: ProfilePage, cx: &mut Context<Self>) {
+        if self.profile.as_ref() == Some(&page) {
+            return;
+        }
+        let under = self.profile.take();
+        let mut stack = std::mem::take(&mut self.profile_stack);
+        self.open_profile(page, cx);
+        stack.extend(under);
+        self.profile_stack = stack;
+    }
+
+    /// `‹` in the pane header: back to the page underneath (closes when none).
+    pub fn back_profile(&mut self, cx: &mut Context<Self>) {
+        match self.profile_stack.pop() {
+            Some(prev) => {
+                let stack = std::mem::take(&mut self.profile_stack);
+                self.open_profile(prev, cx);
+                self.profile_stack = stack;
+            }
+            None => {
+                self.close_profile(cx);
+            }
+        }
+    }
+
     pub fn open_profile(&mut self, page: ProfilePage, cx: &mut Context<Self>) {
+        self.profile_stack.clear();
         self.avatar_picker = match &page {
             ProfilePage::Agent { project_id } => Some(project_id.clone()),
             _ => None,
@@ -4059,6 +4091,7 @@ impl AppState {
     /// Closes the sheet; `true` when one was open. An edit in progress on the
     /// agent page (name, description) is dropped with it.
     pub fn close_profile(&mut self, cx: &mut Context<Self>) -> bool {
+        self.profile_stack.clear();
         self.avatar_picker = None;
         self.profile_from_name = false;
         self.agent_pick = None;

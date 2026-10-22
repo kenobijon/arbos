@@ -305,8 +305,7 @@ struct SettingsView: View {
     }
 
     private var appearanceSummary: String {
-        let a = Appearance(rawValue: model.appearanceSetting)?.label ?? "System"
-        return "\(a) · \(model.surface.label)"
+        return "\(model.appearance.label) · \(model.surface.label)"
     }
 
     /// "12.4 MB · 23 chats" from the on-device store (#929).

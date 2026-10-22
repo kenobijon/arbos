@@ -1988,6 +1988,9 @@ pub struct SecretsView {
     pub vaults: Vec<ConnectedVault>,
     /// Vault providers this relay can connect (`["onepassword"]` once Phase 2 is live).
     pub providers: Vec<String>,
+    /// Remote flag `features.vault_connect`: the Connect 1Password flow is shown only when the
+    /// relay says so (default off since 2026-10-21; code kept).
+    pub vault_connect: bool,
     pub requests: Vec<SecretRequest>,
     pub activity: Vec<SecretActivity>,
     pub loaded: bool,
