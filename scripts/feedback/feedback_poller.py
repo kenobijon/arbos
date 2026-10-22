@@ -1777,17 +1777,17 @@ class Loop:
             self.rust_gate_mac_start(cur)
             return
         plan = cur.get("rust_gate_plan") or []
-        members: dict[str, str] = {}
+        # Pinned items (operator gate-next, owner priority) always form the next batch, on their own, ahead of the
+        # pool AND ahead of bisect / conflict-retry plan halves — the pin survives a conflict → owner-merges-main
+        # → re-push cycle (00:58 Oct 22: #1241 was merged third behind a retry half and hit a sibling conflict).
+        members: dict[str, str] = {fid: st["branch_head"] for fid, st in ready if st.get("gate_pinned")}
         while plan and not members:
             half = plan.pop(0)
-            # Match by item, gate at its CURRENT head: a pinned (gate-next) or bisected item whose owner pushed a
-            # repair / merged main meanwhile keeps its place in the queue instead of dropping to the back.
+            # Match by item, gate at its CURRENT head: a bisected item whose owner pushed a repair meanwhile keeps
+            # its place in the queue instead of dropping to the back.
             members = {f: st["branch_head"] for f, st in ready if f in half}
         if not members:
-            # Pinned items (operator gate-next, owner priority) form their own batch ahead of the pool — the pin
-            # survives a conflict → owner-merges-main → re-push cycle, unlike a plan entry.
-            pinned = {fid: st["branch_head"] for fid, st in ready if st.get("gate_pinned")}
-            members = pinned or {fid: st["branch_head"] for fid, st in ready}
+            members = {fid: st["branch_head"] for fid, st in ready}
         cur["rust_gate_plan"] = plan
         self.store.save_cursor(cur)
         if members:
