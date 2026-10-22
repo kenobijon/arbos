@@ -1,5 +1,6 @@
 mod admin;
 mod api;
+mod api_error_layer;
 #[cfg(test)]
 mod api_fixture_capture;
 mod apns;
@@ -812,6 +813,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/admin/secrets/pause", post(secrets::admin_pause))
         .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024))
         .layer(tower_http::trace::TraceLayer::new_for_http())
+        .layer(axum::middleware::from_fn(
+            api_error_layer::rewrite_plain_api_errors,
+        ))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&args.listen).await?;

@@ -31,6 +31,35 @@ public struct AccountUserDto: Codable {
 	}
 }
 
+/// Inner `error` object on every relay error body.
+/// 
+/// `type` strings in use (from `signin::api_error` and `secrets::ApiErr` call sites):
+/// `already_exists`, `auth_mode`, `bad_grant`, `bad_handle`, `bad_host`, `bad_name`,
+/// `bad_redirect`, `bad_refresh`, `bad_request`, `bad_state`, `bad_user`, `conflict`, `db`,
+/// `forbidden`, `handle_taken`, `internal`, `invalid_token`, `io`, `missing_token`,
+/// `not_found`, `not_jpeg`, `not_owner`, `not_pending`, `oauth_unconfigured`, `paused`,
+/// `token_expired`, `too_large`, `window_closed`. Other routes add more (`no_call`,
+/// `call_ended`, …). Clients branch on `type`, never on `message` text. Unknown types stay
+/// decodable.
+public struct ApiErrorBodyDto: Codable {
+	public let type: String
+	public let message: String
+
+	public init(type: String, message: String) {
+		self.type = type
+		self.message = message
+	}
+}
+
+/// Relay error body: `{"error":{"type","message"}}`.
+public struct ApiErrorDto: Codable {
+	public let error: ApiErrorBodyDto
+
+	public init(error: ApiErrorBodyDto) {
+		self.error = error
+	}
+}
+
 /// `sender{}` on calls, pushes, and LiveKit participant metadata (`Sender::json`).
 public struct SenderDto: Codable {
 	public let kind: String

@@ -1951,3 +1951,28 @@ pub struct FeedbackSubmitReplyDto {
     #[typeshare(serialized_as = "Option<I54>")]
     pub occurrences: Option<i64>,
 }
+
+/// Inner `error` object on every relay error body.
+///
+/// `type` strings in use (from `signin::api_error` and `secrets::ApiErr` call sites):
+/// `already_exists`, `auth_mode`, `bad_grant`, `bad_handle`, `bad_host`, `bad_name`,
+/// `bad_redirect`, `bad_refresh`, `bad_request`, `bad_state`, `bad_user`, `conflict`, `db`,
+/// `forbidden`, `handle_taken`, `internal`, `invalid_token`, `io`, `missing_token`,
+/// `not_found`, `not_jpeg`, `not_owner`, `not_pending`, `oauth_unconfigured`, `paused`,
+/// `token_expired`, `too_large`, `window_closed`. Other routes add more (`no_call`,
+/// `call_ended`, …). Clients branch on `type`, never on `message` text. Unknown types stay
+/// decodable.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ApiErrorBodyDto {
+    #[serde(rename = "type")]
+    pub type_: String,
+    pub message: String,
+}
+
+/// Relay error body: `{"error":{"type","message"}}`.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ApiErrorDto {
+    pub error: ApiErrorBodyDto,
+}
