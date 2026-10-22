@@ -1195,4 +1195,96 @@ mod tests {
         let tx: TranscriptionDto = load_json("transcription_mock.json");
         assert!(transcript_text(&tx).contains("mock transcript"));
     }
+
+    fn parse_push_item(v: Value) -> Option<arbos_core::api::PushItemDto> {
+        serde_json::from_value(v).ok()
+    }
+
+    #[test]
+    fn push_item_fixtures() {
+        use arbos_core::api::{PushEventDto, PushItemDto, PushRegisterResponseDto, ReleasesDto};
+
+        let names = [
+            "push_people_message.json",
+            "push_people_chat_updated.json",
+            "push_people_member_added.json",
+            "push_people_member_removed.json",
+            "push_people_chat_created.json",
+            "push_people_chat_deleted.json",
+            "push_people_agent_added.json",
+            "push_people_agent_removed.json",
+            "push_people_project_shared.json",
+            "push_project_member_removed.json",
+            "push_chat_archived.json",
+            "push_people_invite_accepted.json",
+            "push_feedback_capture.json",
+            "push_server_member_removed.json",
+            "push_server_member_joined.json",
+            "push_server_updated.json",
+            "push_server_deleted.json",
+            "push_call_started.json",
+            "push_call_ended.json",
+            "push_call_missed.json",
+            "push_machine_ready.json",
+            "push_release_published.json",
+            "push_secret_request.json",
+            "push_secrets_paused.json",
+            "push_secret_expiring.json",
+        ];
+        for name in names {
+            let item: PushItemDto = load_json(name);
+            assert!(!item.id.is_empty(), "{name}");
+            assert!(item.created_at > 0, "{name}");
+        }
+
+        let people: PushItemDto = load_json("push_people_message.json");
+        match people.event {
+            PushEventDto::PeopleMessage(p) => {
+                assert_eq!(p.chat_id, "people_dm");
+                assert_eq!(p.sender.handle, "user201");
+            }
+            other => panic!("expected people_message, got {other:?}"),
+        }
+
+        let started: PushItemDto = load_json("push_call_started.json");
+        match started.event {
+            PushEventDto::CallStarted(p) => assert_eq!(p.call.call_id, "call_fixture"),
+            other => panic!("expected call_started, got {other:?}"),
+        }
+
+        let capture: PushItemDto = load_json("push_feedback_capture.json");
+        match capture.event {
+            PushEventDto::FeedbackCapture(p) => {
+                assert_eq!(p.request_id, "cap_fixture");
+                assert_eq!(p.expires_at, 1_700_003_600_000);
+            }
+            other => panic!("expected feedback_capture, got {other:?}"),
+        }
+
+        let unknown: Value = serde_json::from_str(&fixture("push_unknown_kind.json")).unwrap();
+        assert!(parse_push_item(unknown).is_none());
+        assert!(parse_push_item(serde_json::json!({
+            "id": "bad",
+            "created_at": 1,
+            "kind": "not_a_real_push_kind",
+            "payload": {"x": 1}
+        }))
+        .is_none());
+
+        let releases: ReleasesDto = load_json("releases_current.json");
+        assert_eq!(releases.releases.len(), 2);
+        assert_eq!(
+            releases
+                .releases
+                .iter()
+                .find(|r| r.platform == "ios")
+                .map(|r| r.build.as_str()),
+            Some("456")
+        );
+
+        let reg: PushRegisterResponseDto = load_json("push_register_response.json");
+        assert_eq!(reg.device_id, "dev_fixture");
+        assert_eq!(reg.environment, "production");
+        assert!(reg.push);
+    }
 }

@@ -1,0 +1,13 @@
+{
+  "created_at": 1700000000000,
+  "id": "push_release_published",
+  "kind": "release_published",
+  "payload": {
+    "build": "456",
+    "channel": "testflight",
+    "platform": "ios",
+    "published_at": 1700000000000,
+    "url": "https://testflight.apple.com/join/fixture",
+    "version": "1.2.3"
+  }
+}

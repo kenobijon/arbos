@@ -1,0 +1,9 @@
+{
+  "created_at": 1700000000000,
+  "id": "push_people_project_shared",
+  "kind": "people_project_shared",
+  "payload": {
+    "by_handle": "user201",
+    "project_id": "proj_fixture"
+  }
+}

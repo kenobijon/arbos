@@ -1,0 +1,20 @@
+{
+  "releases": [
+    {
+      "build": "456",
+      "channel": "testflight",
+      "platform": "ios",
+      "published_at": 1700000000000,
+      "url": "https://testflight.apple.com/join/fixture",
+      "version": "1.2.3"
+    },
+    {
+      "build": "456",
+      "channel": "stable",
+      "platform": "mac",
+      "published_at": 1700000000000,
+      "url": "https://example.com/arbos.dmg",
+      "version": "1.2.3"
+    }
+  ]
+}

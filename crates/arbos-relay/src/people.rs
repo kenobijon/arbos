@@ -15,8 +15,12 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use arbos_core::api::{
-    ChatMeDto, ChatMemberDto, ChatMemberProjectDto, PeopleChatDto, ProjectMemberDto,
-    ProjectMembersDto, UserCardDto, UsersPageDto,
+    ChatArchivedPayloadDto, ChatMeDto, ChatMemberDto, ChatMemberProjectDto,
+    PeopleAgentAddedPayloadDto, PeopleAgentRemovedPayloadDto, PeopleChatCreatedPayloadDto,
+    PeopleChatDeletedPayloadDto, PeopleChatDto, PeopleChatUpdatedPayloadDto,
+    PeopleMemberAddedPayloadDto, PeopleMemberRemovedPayloadDto, PeopleMessagePayloadDto,
+    PeopleProjectSharedPayloadDto, ProjectMemberDto, ProjectMemberRemovedPayloadDto,
+    ProjectMembersDto, PushEventDto, UserCardDto, UsersPageDto,
 };
 use arbos_core::ids::{now_ms, ulid};
 use arbos_core::wire;
@@ -733,10 +737,13 @@ pub async fn chats_create_group(
         {
             return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
         }
-        let _ = state.db.push_user(
+        let _ = state.db.push_user_event(
             uid,
-            "people_chat_created",
-            &json!({ "chat_id": chat.id, "by": format!("user:{me}"), "by_handle": handle_of(&state, &me) }),
+            &PushEventDto::PeopleChatCreated(PeopleChatCreatedPayloadDto {
+                chat_id: chat.id.clone(),
+                by: format!("user:{me}"),
+                by_handle: handle_of(&state, &me),
+            }),
             Some(&chat.id),
         );
     }
@@ -824,10 +831,13 @@ pub async fn dm_create(
             return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
         }
     }
-    let _ = state.db.push_user(
+    let _ = state.db.push_user_event(
         &other_id,
-        "people_chat_created",
-        &json!({ "chat_id": chat.id, "by": format!("user:{me}"), "by_handle": handle_of(&state, &me) }),
+        &PushEventDto::PeopleChatCreated(PeopleChatCreatedPayloadDto {
+            chat_id: chat.id.clone(),
+            by: format!("user:{me}"),
+            by_handle: handle_of(&state, &me),
+        }),
         Some(&chat.id),
     );
     tracing::info!(chat = %chat.id, %me, other = %other_id, "dm opened");
@@ -947,12 +957,14 @@ pub async fn chat_patch(
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
     }
     // Other members, and this user's other devices (e.g. Mac), refresh the list.
-    let payload = json!({ "chat_id": id });
-    notify_members(&state, &cm, &me, "people_chat_updated", payload.clone());
+    let event = PushEventDto::PeopleChatUpdated(PeopleChatUpdatedPayloadDto {
+        chat_id: id.clone(),
+    });
+    notify_members(&state, &cm, &me, &event);
     state.matrix.touch_chat(&state, &id, None);
     let _ = state
         .db
-        .push_user_except(&me, &device_of(&principal), "people_chat_updated", &payload);
+        .push_user_except_event(&me, &device_of(&principal), &event);
     match member_chat(&state, &principal, &id) {
         Ok((me, cm)) => Json(chat_json(&state, &cm, &me, &device_of(&principal))).into_response(),
         Err(r) => *r,
@@ -1036,8 +1048,12 @@ pub async fn chat_leave(
         &state,
         &cm,
         &me,
-        "people_member_removed",
-        json!({ "chat_id": id, "user_id": me, "handle": handle_of(&state, &me), "by_handle": handle_of(&state, &me) }),
+        &PushEventDto::PeopleMemberRemoved(PeopleMemberRemovedPayloadDto {
+            chat_id: id,
+            user_id: me.clone(),
+            handle: handle_of(&state, &me),
+            by_handle: handle_of(&state, &me),
+        }),
     );
     StatusCode::NO_CONTENT.into_response()
 }
@@ -1094,8 +1110,10 @@ pub async fn chat_delete(
         &state,
         &cm,
         &me,
-        "people_chat_deleted",
-        json!({ "chat_id": id, "by_handle": handle_of(&state, &me) }),
+        &PushEventDto::PeopleChatDeleted(PeopleChatDeletedPayloadDto {
+            chat_id: id,
+            by_handle: handle_of(&state, &me),
+        }),
     );
     StatusCode::NO_CONTENT.into_response()
 }
@@ -1292,8 +1310,11 @@ pub async fn agent_add(
         &state,
         &cm,
         &me,
-        "people_agent_added",
-        json!({ "chat_id": id, "project_id": project.id, "by_handle": handle_of(&state, &me) }),
+        &PushEventDto::PeopleAgentAdded(PeopleAgentAddedPayloadDto {
+            chat_id: id.clone(),
+            project_id: project.id.clone(),
+            by_handle: handle_of(&state, &me),
+        }),
     );
     tracing::info!(chat = %id, project = %project.id, %me, "agent added to a people chat");
     match load_chat(&state, &id) {
@@ -1393,11 +1414,10 @@ pub fn detach_agent_from_people_chats(state: &AppState, project_id: &str, by_use
             state,
             &cm,
             by_user,
-            "people_agent_removed",
-            json!({
-                "chat_id": cm.chat.id,
-                "project_id": project_id,
-                "by_handle": by_handle,
+            &PushEventDto::PeopleAgentRemoved(PeopleAgentRemovedPayloadDto {
+                chat_id: cm.chat.id.clone(),
+                project_id: project_id.to_owned(),
+                by_handle: by_handle.clone(),
             }),
         );
     }
@@ -1438,8 +1458,11 @@ pub async fn agent_remove(
         &state,
         &cm,
         &me,
-        "people_agent_removed",
-        json!({ "chat_id": id, "project_id": project_id, "by_handle": handle_of(&state, &me) }),
+        &PushEventDto::PeopleAgentRemoved(PeopleAgentRemovedPayloadDto {
+            chat_id: id,
+            project_id,
+            by_handle: handle_of(&state, &me),
+        }),
     );
     StatusCode::NO_CONTENT.into_response()
 }
@@ -1515,16 +1538,14 @@ pub async fn member_add(
         let _ = state.db.set_people_chat_kind(&id, "group");
     }
     state.matrix.touch_chat(&state, &id, None);
-    let payload = json!({
-        "chat_id": id,
-        "user_id": other_id,
-        "handle": handle_of(&state, &other_id),
-        "by_handle": handle_of(&state, &me),
+    let event = PushEventDto::PeopleMemberAdded(PeopleMemberAddedPayloadDto {
+        chat_id: id.clone(),
+        user_id: other_id.clone(),
+        handle: handle_of(&state, &other_id),
+        by_handle: handle_of(&state, &me),
     });
-    let _ = state
-        .db
-        .push_user(&other_id, "people_member_added", &payload, Some(&id));
-    notify_members(&state, &cm, &me, "people_member_added", payload);
+    let _ = state.db.push_user_event(&other_id, &event, Some(&id));
+    notify_members(&state, &cm, &me, &event);
     tracing::info!(chat = %id, user = %other_id, %me, "person added to a people chat");
     match load_chat(&state, &id) {
         Ok(cm) => Json(chat_json(&state, &cm, &me, &device_of(&principal))).into_response(),
@@ -1566,11 +1587,14 @@ pub async fn member_remove(
         Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
     }
     state.matrix.touch_chat(&state, &id, None);
-    let payload = json!({ "chat_id": id, "user_id": user_id, "handle": handle_of(&state, &user_id), "by_handle": handle_of(&state, &me) });
-    let _ = state
-        .db
-        .push_user(&user_id, "people_member_removed", &payload, None);
-    notify_members(&state, &cm, &me, "people_member_removed", payload);
+    let event = PushEventDto::PeopleMemberRemoved(PeopleMemberRemovedPayloadDto {
+        chat_id: id.clone(),
+        user_id: user_id.clone(),
+        handle: handle_of(&state, &user_id),
+        by_handle: handle_of(&state, &me),
+    });
+    let _ = state.db.push_user_event(&user_id, &event, None);
+    notify_members(&state, &cm, &me, &event);
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -1758,10 +1782,12 @@ pub async fn project_member_add(
         }
         Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
     }
-    let _ = state.db.push_user(
+    let _ = state.db.push_user_event(
         &other_id,
-        "people_project_shared",
-        &json!({ "project_id": project.id, "by_handle": handle_of(&state, &me) }),
+        &PushEventDto::PeopleProjectShared(PeopleProjectSharedPayloadDto {
+            project_id: project.id.clone(),
+            by_handle: handle_of(&state, &me),
+        }),
         None,
     );
     tracing::info!(project = %project.id, guest = %other_id, %me, "project shared");
@@ -1810,10 +1836,12 @@ pub async fn project_member_remove(
         Ok(false) => return api_error(StatusCode::NOT_FOUND, "not_found", "not a member"),
         Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
     }
-    let _ = state.db.push_user(
+    let _ = state.db.push_user_event(
         &user_id,
-        "project_member_removed",
-        &json!({ "project_id": project.id, "by_handle": handle_of(&state, &me) }),
+        &PushEventDto::ProjectMemberRemoved(ProjectMemberRemovedPayloadDto {
+            project_id: project.id.clone(),
+            by_handle: handle_of(&state, &me),
+        }),
         None,
     );
     StatusCode::NO_CONTENT.into_response()
@@ -1852,11 +1880,14 @@ fn apply_archive(
                 e.to_string(),
             ))
         })?;
-    let _ = state.db.push_user_except(
+    let _ = state.db.push_user_except_event(
         me,
         &device_of(principal),
-        "chat_archived",
-        &json!({ "chat_id": chat_id, "project_id": project_label, "archived_at": at }),
+        &PushEventDto::ChatArchived(ChatArchivedPayloadDto {
+            chat_id: chat_id.to_owned(),
+            project_id: project_label.to_owned(),
+            archived_at: at,
+        }),
     );
     state.matrix.archive(state, chat_id, me, archived);
     Ok(at)
@@ -2257,9 +2288,12 @@ pub fn on_room_push(
         return Err(PushRefused::NotAvailable);
     }
     let (head, _) = state.db.room_activity(&room_of(chat_id)).unwrap_or((0, 0));
-    let payload = json!({
-        "chat_id": chat_id, "from": format!("user:{user_id}"), "from_handle": handle_of(state, user_id), "seq": head + 1,
-        "sender": crate::notify::Sender::user(state, user_id).json(),
+    let event = PushEventDto::PeopleMessage(PeopleMessagePayloadDto {
+        chat_id: chat_id.to_owned(),
+        from: format!("user:{user_id}"),
+        from_handle: handle_of(state, user_id),
+        seq: head + 1,
+        sender: crate::notify::Sender::user(state, user_id).dto(),
     });
     for other in humans.iter().filter(|u| *u != user_id) {
         // Archived for them: hidden on purpose, no notification (D78).
@@ -2270,9 +2304,7 @@ pub fn on_room_push(
             .flatten()
             .is_none()
         {
-            let _ = state
-                .db
-                .push_user(other, "people_message", &payload, Some(chat_id));
+            let _ = state.db.push_user_event(other, &event, Some(chat_id));
         }
         // A message un-hides a chat that was "deleted for me" on any of their devices.
         if let Ok(devices) = state.db.devices_of_user(other) {
@@ -2296,16 +2328,10 @@ pub fn on_room_push(
 }
 
 /// Notify every human member except `skip`.
-pub fn notify_members(
-    state: &AppState,
-    cm: &ChatWithMembers,
-    skip: &str,
-    kind: &str,
-    payload: Value,
-) {
+pub fn notify_members(state: &AppState, cm: &ChatWithMembers, skip: &str, event: &PushEventDto) {
     for uid in human_user_ids(cm) {
         if uid != skip {
-            let _ = state.db.push_user(&uid, kind, &payload, None);
+            let _ = state.db.push_user_event(&uid, event, None);
         }
     }
 }

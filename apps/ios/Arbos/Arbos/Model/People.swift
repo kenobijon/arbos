@@ -291,33 +291,24 @@ extension ProjectMember {
     }
 }
 
-/// `GET /me/pushes` item.
+/// `GET /me/pushes` item: `id`/`created_at` from `PushItemDto`, event from the same JSON object.
 struct PushItem: Identifiable, Equatable {
     var id: String
-    var kind: String
-    var payload: [String: String]
-    /// `people_message` carries `sender {kind, id, name, handle, avatar, avatar_color, avatar_url}` (§7c).
-    var sender: [String: String] = [:]
-    /// The payload as received, for nested shapes (`call_started.call`).
-    var raw: [String: Any] = [:]
     var createdAt: Int64
+    var event: PushEventDto
 
-    static func == (a: PushItem, b: PushItem) -> Bool { a.id == b.id && a.kind == b.kind }
+    static func == (a: PushItem, b: PushItem) -> Bool { a.id == b.id && a.createdAt == b.createdAt }
 
     static func parse(_ raw: Any) -> PushItem? {
-        guard let d = raw as? [String: Any], let kind = d["kind"] as? String,
-              let id = (d["id"] as? String) ?? (d["id"] as? NSNumber).map({ $0.stringValue }) else { return nil }
-        var payload: [String: String] = [:]
-        var sender: [String: String] = [:]
-        let rawPayload = (d["payload"] as? [String: Any]) ?? [:]
-        for (k, v) in rawPayload {
-            if k == "sender", let s = v as? [String: Any] {
-                for (sk, sv) in s { if let str = sv as? String { sender[sk] = str } }
-            } else {
-                payload[k] = "\(v)"
-            }
+        guard JSONSerialization.isValidJSONObject(raw),
+              let data = try? JSONSerialization.data(withJSONObject: raw) else { return nil }
+        do {
+            let meta = try JSONDecoder().decode(PushItemDto.self, from: data)
+            let event = try JSONDecoder().decode(PushEventDto.self, from: data)
+            return PushItem(id: meta.id, createdAt: meta.created_at, event: event)
+        } catch {
+            return nil
         }
-        return PushItem(id: id, kind: kind, payload: payload, sender: sender, raw: rawPayload, createdAt: (d["created_at"] as? NSNumber)?.int64Value ?? 0)
     }
 }
 

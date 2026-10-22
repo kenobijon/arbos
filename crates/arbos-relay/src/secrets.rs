@@ -20,10 +20,11 @@ use serde_json::{json, Value};
 
 use arbos_core::api::{
     DecideSecretResponseDto, ProjectSecretItemDto, ProjectSecretSummaryDto, ProjectSecretsDto,
-    SecretAccessDto, SecretAccessEnvelopeDto, SecretAccessScopeDto, SecretActivityDto,
-    SecretActivityPageDto, SecretDetailDto, SecretDirectorDto, SecretDto, SecretEnvelopeDto,
-    SecretRequestDto, SecretRequestTargetDto, SecretRequestsDto, SecretsOverviewDto,
-    SecretsPausedDto,
+    PushEventDto, SecretAccessDto, SecretAccessEnvelopeDto, SecretAccessScopeDto,
+    SecretActivityDto, SecretActivityPageDto, SecretDetailDto, SecretDirectorDto, SecretDto,
+    SecretEnvelopeDto, SecretExpiringPayloadDto, SecretRequestDto, SecretRequestPushPayloadDto,
+    SecretRequestTargetDto, SecretRequestsDto, SecretsOverviewDto, SecretsPausedDto,
+    SecretsPausedPayloadDto,
 };
 use arbos_core::ids::{now_ms, ulid};
 
@@ -347,8 +348,8 @@ fn push_box(state: &AppState, project_id: &str, kind: &str, payload: Value) {
     let _ = state.db.enqueue_push(project_id, kind, &payload);
 }
 
-fn push_user(state: &AppState, user_id: &str, kind: &str, payload: Value) {
-    let _ = state.db.push_user(user_id, kind, &payload, None);
+fn push_user(state: &AppState, user_id: &str, event: PushEventDto) {
+    let _ = state.db.push_user_event(user_id, &event, None);
 }
 
 // ---- JSON shapes (Dto builders; wire JSON unchanged) ------------------------------------------
@@ -1875,8 +1876,7 @@ pub(crate) async fn set_paused(
     push_user(
         state,
         user_id,
-        "secrets_paused",
-        json!({ "paused": paused }),
+        PushEventDto::SecretsPaused(SecretsPausedPayloadDto { paused }),
     );
     remount_daytona(state, user_id).await;
     paused_dto(&settings)
@@ -2464,8 +2464,15 @@ pub async fn box_request(
     push_user(
         &state,
         &user_id,
-        "secret_request",
-        json!({ "request_id": rq.id, "project_id": project_id, "project_name": agent, "name": s.env, "host": host, "use": use_kind }),
+        PushEventDto::SecretRequest(SecretRequestPushPayloadDto {
+            request_id: rq.id.clone(),
+            project_id: project_id.clone(),
+            project_name: agent,
+            name: s.env.clone(),
+            host: host.clone(),
+            use_kind: use_kind.clone(),
+            vault_id: None,
+        }),
     );
     Ok((
         StatusCode::CREATED,
@@ -2941,8 +2948,12 @@ async fn sweep_once(state: &AppState) {
         push_user(
             state,
             &s.user_id,
-            "secret_expiring",
-            json!({ "secret_id": s.id, "name": s.env, "expires_at": s.expires_at, "expired": true }),
+            PushEventDto::SecretExpiring(SecretExpiringPayloadDto {
+                secret_id: s.id.clone(),
+                name: s.env.clone(),
+                expires_at: s.expires_at,
+                expired: true,
+            }),
         );
     }
     // Three-day notice, once per secret (the audit row is the marker).
@@ -2980,8 +2991,12 @@ async fn sweep_once(state: &AppState) {
             push_user(
                 state,
                 &user_id,
-                "secret_expiring",
-                json!({ "secret_id": s.id, "name": s.env, "expires_at": t, "expired": false }),
+                PushEventDto::SecretExpiring(SecretExpiringPayloadDto {
+                    secret_id: s.id.clone(),
+                    name: s.env.clone(),
+                    expires_at: Some(t),
+                    expired: false,
+                }),
             );
         }
     }

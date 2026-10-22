@@ -2528,95 +2528,89 @@ final class AppModel: ObservableObject {
         var needServers = false
         for p in items where !notifiedPushIds.contains(p.id) {
             notifiedPushIds.insert(p.id)
-            pushLog.notice("push kind=\(p.kind, privacy: .public) keys=\(Array(p.raw.keys).sorted().joined(separator: ","), privacy: .public)")
-            switch p.kind {
-            case "people_message":
-                if let cid = p.payload["chat_id"] {
-                    // Agent (or person) reached out in a chat we have not listed yet —
-                    // refresh so open-from-notification can dial the room.
-                    if peopleChat(cid) == nil { needChats = true }
-                    if !isWatching(cid) {
-                        peopleUnread.insert(cid)
-                        let from = p.sender["handle"] ?? p.payload["from_handle"] ?? "someone"
-                        // §7c sender{} first; the chat's member list fills any gap.
-                        let member = peopleChat(cid)?.members.first { $0.handle == from }
-                        let agent = member?.isAgent == true ? member?.project : nil
-                        let kind = p.sender["kind"] ?? (agent != nil ? "agent" : "user")
-                        let info = MessagePush.userInfo(
-                            chatId: cid, projectId: peopleSlot, title: p.sender["name"] ?? member?.displayName ?? "@\(from)",
-                            body: p.payload["preview"] ?? p.payload["text"] ?? "New message",
-                            senderKind: kind, senderId: p.sender["id"] ?? member?.id ?? from,
-                            senderName: p.sender["name"] ?? member?.displayName ?? from, senderHandle: from,
-                            avatar: p.sender["avatar"],
-                            avatarColor: p.sender["avatar_color"],
-                            avatarUrl: p.sender["avatar_url"] ?? member?.avatarUrl)
-                        Task { await PushManager.shared.postMessage(id: p.id, info: info) }
-                        applyBadge()
-                    }
+            pushLog.notice("push id=\(p.id, privacy: .public) event=\(String(describing: p.event), privacy: .public)")
+            switch p.event {
+            case .peopleMessage(let payload):
+                let cid = payload.chat_id
+                // Agent (or person) reached out in a chat we have not listed yet —
+                // refresh so open-from-notification can dial the room.
+                if peopleChat(cid) == nil { needChats = true }
+                if !isWatching(cid) {
+                    peopleUnread.insert(cid)
+                    let sender = payload.sender
+                    let from = sender.handle.isEmpty ? (payload.from_handle.isEmpty ? "someone" : payload.from_handle) : sender.handle
+                    // §7c sender{} first; the chat's member list fills any gap.
+                    let member = peopleChat(cid)?.members.first { $0.handle == from }
+                    let agent = member?.isAgent == true ? member?.project : nil
+                    let kind = sender.kind.isEmpty ? (agent != nil ? "agent" : "user") : sender.kind
+                    let info = MessagePush.userInfo(
+                        chatId: cid, projectId: peopleSlot, title: sender.name.isEmpty ? (member?.displayName ?? "@\(from)") : sender.name,
+                        body: "New message",
+                        senderKind: kind, senderId: sender.id.isEmpty ? (member?.id ?? from) : sender.id,
+                        senderName: sender.name.isEmpty ? (member?.displayName ?? from) : sender.name, senderHandle: from,
+                        avatar: sender.avatar,
+                        avatarColor: sender.avatar_color,
+                        avatarUrl: sender.avatar_url ?? member?.avatarUrl)
+                    Task { await PushManager.shared.postMessage(id: p.id, info: info) }
+                    applyBadge()
                 }
-            case "people_chat_created":
+            case .peopleChatCreated(let payload):
                 needChats = true
-                if let by = p.payload["by_handle"] { PushManager.post(id: p.id, title: "@\(by)", body: "Started a chat with you", chatId: p.payload["chat_id"] ?? "") }
-            case "people_chat_updated":
+                if !payload.by_handle.isEmpty {
+                    PushManager.post(id: p.id, title: "@\(payload.by_handle)", body: "Started a chat with you", chatId: payload.chat_id)
+                }
+            case .peopleChatUpdated, .peopleAgentAdded, .peopleAgentRemoved, .peopleMemberAdded, .peopleMemberRemoved:
                 needChats = true
-            case "people_agent_added", "people_agent_removed", "people_member_added", "people_member_removed":
-                needChats = true
-            case "call_started":
-                if let data = try? JSONSerialization.data(withJSONObject: p.raw),
-                   let started = try? JSONDecoder().decode(CallStartedPayloadDto.self, from: data) {
-                    let c = Call(dto: started.call)
-                    if c.chatId != CallManager.shared.call?.chatId {
-                        CallManager.shared.ring(c, from: CallPerson(dto: started.sender), viaVoip: false)
-                    }
+            case .callStarted(let started):
+                let c = Call(dto: started.call)
+                if c.chatId != CallManager.shared.call?.chatId {
+                    CallManager.shared.ring(c, from: CallPerson(dto: started.sender), viaVoip: false)
                 }
-            case "call_missed":
-                if let data = try? JSONSerialization.data(withJSONObject: p.raw),
-                   let missed = try? JSONDecoder().decode(CallMissedPayloadDto.self, from: data) {
-                    CallManager.shared.missedCall(
-                        callId: missed.call_id,
-                        chatId: missed.chat_id,
-                        projectId: missed.project_id.isEmpty ? peopleSlot : missed.project_id,
-                        from: CallPerson(dto: missed.from)
-                    )
+            case .callMissed(let missed):
+                CallManager.shared.missedCall(
+                    callId: missed.call_id,
+                    chatId: missed.chat_id,
+                    projectId: missed.project_id.isEmpty ? peopleSlot : missed.project_id,
+                    from: CallPerson(dto: missed.from)
+                )
+            case .callEnded(let ended):
+                CallManager.shared.remoteEnded(
+                    callId: ended.call_id,
+                    chatId: ended.chat_id,
+                    durationS: Int(ended.duration_s),
+                    writerDevice: ended.writer_device
+                )
+            case .peopleProjectShared(let payload):
+                if !payload.by_handle.isEmpty {
+                    PushManager.post(id: p.id, title: "@\(payload.by_handle)", body: "Shared a project with you", chatId: "")
                 }
-            case "call_ended":
-                if let data = try? JSONSerialization.data(withJSONObject: p.raw),
-                   let ended = try? JSONDecoder().decode(CallEndedPayloadDto.self, from: data) {
-                    CallManager.shared.remoteEnded(
-                        callId: ended.call_id,
-                        chatId: ended.chat_id,
-                        durationS: Int(ended.duration_s),
-                        writerDevice: ended.writer_device
-                    )
-                }
-            case "people_project_shared":
-                if let by = p.payload["by_handle"] { PushManager.post(id: p.id, title: "@\(by)", body: "Shared a project with you", chatId: "") }
                 await refreshRegistry()
-            case "project_member_removed":
+            case .projectMemberRemoved:
                 await refreshRegistry()
-            case "secret_request":
+            case .secretRequest(let payload):
                 // D83: an agent wants a secret; the card is in its chat, Settings badges too.
-                if let name = p.payload["name"] {
-                    let agent = p.payload["project_name"] ?? "An agent"
-                    let host = p.payload["host"].map { " at \($0)" } ?? ""
-                    PushManager.post(id: p.id, title: agent, body: "\(agent) wants to use \(name)\(host)", chatId: "")
-                }
+                let agent = payload.project_name.isEmpty ? "An agent" : payload.project_name
+                let host = payload.host.flatMap { $0.isEmpty ? nil : " at \($0)" } ?? ""
+                PushManager.post(id: p.id, title: agent, body: "\(agent) wants to use \(payload.name)\(host)", chatId: "")
                 await refreshSecrets()
-            case "secrets_paused", "secret_expiring":
-                if p.kind == "secret_expiring", let name = p.payload["name"] {
-                    let expired = p.payload["expired"] == "true" || p.payload["expired"] == "1"
-                    PushManager.post(id: p.id, title: "Secrets", body: expired ? "\(name) expired. Agents lost it." : "\(name) expires in 3 days.", chatId: "")
-                }
+            case .secretsPaused:
                 await refreshSecrets()
-            case "feedback_capture":
+            case .secretExpiring(let payload):
+                PushManager.post(
+                    id: p.id, title: "Secrets",
+                    body: payload.expired ? "\(payload.name) expired. Agents lost it." : "\(payload.name) expires in 3 days.",
+                    chatId: ""
+                )
+                await refreshSecrets()
+            case .feedbackCapture:
                 await answerFeedbackCapture(p)
-            case "release_published":
+            case .releasePublished(let payload):
                 // A build is installable (TestFlight processed it): refresh the Update card now.
-                if p.payload["platform"] == "ios" { await checkForUpdate() }
-            case "server_updated", "server_member_joined", "server_member_removed", "server_deleted":
+                if payload.platform == "ios" { await checkForUpdate() }
+            case .serverUpdated, .serverMemberJoined, .serverMemberRemoved, .serverDeleted:
                 // D88: the relay is the control plane for servers — re-read the list.
                 needServers = true
-            default:
+            case .peopleChatDeleted, .chatArchived, .peopleInviteAccepted, .machineReady:
                 break
             }
         }
@@ -2629,8 +2623,10 @@ final class AppModel: ObservableObject {
     /// of the screen they are looking at. Only the app in the foreground answers with an image
     /// (the same key-window capture as the shake sheet); a stale or background request is skipped.
     private func answerFeedbackCapture(_ p: PushItem) async {
-        guard let requestId = p.payload["request_id"], !requestId.isEmpty else { return }
-        let expires = Int64(p.payload["expires_at"] ?? "") ?? 0
+        guard case .feedbackCapture(let payload) = p.event else { return }
+        let requestId = payload.request_id
+        guard !requestId.isEmpty else { return }
+        let expires = payload.expires_at
         if expires > 0, Int64(Date().timeIntervalSince1970 * 1000) > expires { return }
         let screen = visibleChatId.map { "chat:\($0)" } ?? "home"
         var image: Data?
@@ -3459,15 +3455,15 @@ extension AppModel {
     /// the relay's `release_published` push.
     func checkForUpdate() async {
         guard credentials != nil, !isFixture else { return }
-        guard let obj = (try? await api.json("GET", "/releases/current")) as? [String: Any],
-              let list = obj["releases"] as? [[String: Any]] else { return }
-        let ios = list.first { ($0["platform"] as? String) == "ios" }
-        guard let ios, let build = ios["build"] as? String, !build.isEmpty else { return }
+        guard let v = try? await api.json("GET", "/releases/current"),
+              JSONSerialization.isValidJSONObject(v),
+              let data = try? JSONSerialization.data(withJSONObject: v),
+              let dto = try? JSONDecoder().decode(ReleasesDto.self, from: data) else { return }
+        guard let ios = dto.releases.first(where: { $0.platform == "ios" }),
+              !ios.build.isEmpty else { return }
         let dismissed = UserDefaults.standard.string(forKey: Self.dismissedBuildKey)
-        if Self.isNewerBuild(build, than: Self.runningBuild), dismissed != build {
-            let next = AvailableBuild(version: ios["version"] as? String ?? "",
-                                      build: build,
-                                      url: ios["url"] as? String ?? "")
+        if Self.isNewerBuild(ios.build, than: Self.runningBuild), dismissed != ios.build {
+            let next = AvailableBuild(version: ios.version, build: ios.build, url: ios.url)
             if availableUpdate != next { availableUpdate = next }
         } else if availableUpdate != nil {
             availableUpdate = nil

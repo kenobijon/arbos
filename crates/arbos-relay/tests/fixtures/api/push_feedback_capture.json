@@ -1,0 +1,13 @@
+{
+  "created_at": 1700000000000,
+  "id": "push_feedback_capture",
+  "kind": "feedback_capture",
+  "payload": {
+    "chat_id": "chat_fixture",
+    "expires_at": 1700003600000,
+    "preferred_device_id": "dev_fixture",
+    "project_id": "proj_fixture",
+    "project_name": "Fixture",
+    "request_id": "cap_fixture"
+  }
+}

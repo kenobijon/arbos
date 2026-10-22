@@ -24,7 +24,7 @@ use serde_json::{json, Value};
 use arbos_core::api::{
     CallAlertDto, CallDto, CallEndedPayloadDto, CallEnvelopeDto, CallMissedPayloadDto,
     CallReachabilityDto, CallRingPayloadDto, CallStartedPayloadDto, LeaveCallResponseDto,
-    ReachableDeviceDto, SenderDto, StartCallResponseDto, VoipRegisterResponseDto,
+    PushEventDto, ReachableDeviceDto, SenderDto, StartCallResponseDto, VoipRegisterResponseDto,
 };
 use arbos_core::ids::{now_ms, ulid};
 
@@ -346,7 +346,7 @@ async fn announce_started(state: &AppState, call: &CallRow, starter: &Sender) {
         }
         let _ = state
             .db
-            .push_user(&user, "call_started", &to_json(&started), None);
+            .push_user_event(&user, &PushEventDto::CallStarted(started.clone()), None);
         if !state.push.is_on() {
             continue;
         }
@@ -404,7 +404,7 @@ async fn announce_ended(
     for user in members(state, &chat) {
         let _ = state
             .db
-            .push_user(&user, "call_ended", &to_json(&ended), None);
+            .push_user_event(&user, &PushEventDto::CallEnded(ended.clone()), None);
         if !state.push.is_on() {
             continue;
         }
@@ -469,7 +469,7 @@ async fn announce_missed(state: &AppState, call: &CallRow) {
         }
         let _ = state
             .db
-            .push_user(&user, "call_missed", &to_json(&missed), None);
+            .push_user_event(&user, &PushEventDto::CallMissed(missed.clone()), None);
         if !state.push.is_on() {
             continue;
         }
@@ -1141,6 +1141,8 @@ mod tests {
     use base64::Engine;
     use sha2::Digest;
 
+    use arbos_core::api::PushItemDto;
+
     use super::*;
     use crate::people::tests_support::{dm, person};
     use crate::state::test_support::test_state;
@@ -1753,36 +1755,54 @@ mod tests {
 
         let call_d = call_dto(&state, &call, None, None);
         let starter = Sender::user(&state, &alice).dto();
+        let started = CallStartedPayloadDto {
+            call: call_d.clone(),
+            sender: starter.clone(),
+        };
+        let ended = CallEndedPayloadDto {
+            call_id: call.id.clone(),
+            chat_id: call.chat_id.clone(),
+            project_id: people::PEOPLE_PROJECT.to_owned(),
+            duration_s: 60,
+            reason: "last_left".into(),
+            writer_device: Some("dev_bob_call".into()),
+        };
+        let missed = CallMissedPayloadDto {
+            call_id: call.id.clone(),
+            chat_id: call.chat_id.clone(),
+            project_id: people::PEOPLE_PROJECT.to_owned(),
+            kind: call.kind.clone(),
+            from: starter.clone(),
+            started_at: call.started_at,
+            ended_at: FIXED_AT + 60_000,
+            duration_s: 60,
+            reason: Some("abandoned".into()),
+        };
+        assert_builder("call_started_payload.json", to_json(&started));
+        assert_builder("call_ended_payload.json", to_json(&ended));
+        assert_builder("call_missed_payload.json", to_json(&missed));
         assert_builder(
-            "call_started_payload.json",
-            to_json(CallStartedPayloadDto {
-                call: call_d.clone(),
-                sender: starter.clone(),
+            "push_call_started.json",
+            to_json(PushItemDto {
+                id: "push_call_started".into(),
+                created_at: FIXED_AT,
+                event: PushEventDto::CallStarted(started),
             }),
         );
         assert_builder(
-            "call_ended_payload.json",
-            to_json(CallEndedPayloadDto {
-                call_id: call.id.clone(),
-                chat_id: call.chat_id.clone(),
-                project_id: people::PEOPLE_PROJECT.to_owned(),
-                duration_s: 60,
-                reason: "last_left".into(),
-                writer_device: Some("dev_bob_call".into()),
+            "push_call_ended.json",
+            to_json(PushItemDto {
+                id: "push_call_ended".into(),
+                created_at: FIXED_AT,
+                event: PushEventDto::CallEnded(ended),
             }),
         );
         assert_builder(
-            "call_missed_payload.json",
-            to_json(CallMissedPayloadDto {
-                call_id: call.id.clone(),
-                chat_id: call.chat_id.clone(),
-                project_id: people::PEOPLE_PROJECT.to_owned(),
-                kind: call.kind.clone(),
-                from: starter.clone(),
-                started_at: call.started_at,
-                ended_at: FIXED_AT + 60_000,
-                duration_s: 60,
-                reason: Some("abandoned".into()),
+            "push_call_missed.json",
+            to_json(PushItemDto {
+                id: "push_call_missed".into(),
+                created_at: FIXED_AT,
+                event: PushEventDto::CallMissed(missed),
             }),
         );
         assert_builder(

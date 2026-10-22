@@ -446,4 +446,73 @@ final class CoreFixturesTests: XCTestCase {
         XCTAssertEqual(catalog.defaultId, "marin")
         XCTAssertEqual(catalog.voices.count, 1)
     }
+
+    // MARK: Pushes / releases / push register (step 6b-2d-2)
+
+    func testPushItemParseFixtures() throws {
+        let names = [
+            "push_people_message.json",
+            "push_people_chat_updated.json",
+            "push_people_member_added.json",
+            "push_people_member_removed.json",
+            "push_people_chat_created.json",
+            "push_people_chat_deleted.json",
+            "push_people_agent_added.json",
+            "push_people_agent_removed.json",
+            "push_people_project_shared.json",
+            "push_project_member_removed.json",
+            "push_chat_archived.json",
+            "push_people_invite_accepted.json",
+            "push_feedback_capture.json",
+            "push_server_member_removed.json",
+            "push_server_member_joined.json",
+            "push_server_updated.json",
+            "push_server_deleted.json",
+            "push_call_started.json",
+            "push_call_ended.json",
+            "push_call_missed.json",
+            "push_machine_ready.json",
+            "push_release_published.json",
+            "push_secret_request.json",
+            "push_secrets_paused.json",
+            "push_secret_expiring.json",
+        ]
+        for name in names {
+            let item = try XCTUnwrap(PushItem.parse(try apiFixtureJSON(name)), name)
+            XCTAssertFalse(item.id.isEmpty, name)
+            XCTAssertGreaterThan(item.createdAt, 0, name)
+        }
+
+        let people = try XCTUnwrap(PushItem.parse(try apiFixtureJSON("push_people_message.json")))
+        guard case .peopleMessage(let msg) = people.event else {
+            return XCTFail("people_message")
+        }
+        XCTAssertEqual(msg.chat_id, "people_dm")
+        XCTAssertEqual(msg.sender.handle, "user201")
+
+        let started = try XCTUnwrap(PushItem.parse(try apiFixtureJSON("push_call_started.json")))
+        guard case .callStarted(let s) = started.event else { return XCTFail("call_started") }
+        XCTAssertEqual(s.call.call_id, "call_fixture")
+
+        let capture = try XCTUnwrap(PushItem.parse(try apiFixtureJSON("push_feedback_capture.json")))
+        guard case .feedbackCapture(let f) = capture.event else { return XCTFail("feedback_capture") }
+        XCTAssertEqual(f.request_id, "cap_fixture")
+        XCTAssertEqual(f.expires_at, 1_700_003_600_000)
+
+        XCTAssertNil(PushItem.parse(try apiFixtureJSON("push_unknown_kind.json")))
+        XCTAssertNil(PushItem.parse([
+            "id": "bad", "created_at": 1, "kind": "not_a_real_push_kind", "payload": ["x": 1],
+        ] as [String: Any]))
+    }
+
+    func testReleasesAndPushRegisterFixtures() throws {
+        let releases = try JSONDecoder().decode(ReleasesDto.self, from: try apiFixtureData("releases_current.json"))
+        XCTAssertEqual(releases.releases.count, 2)
+        XCTAssertEqual(releases.releases.first { $0.platform == "ios" }?.build, "456")
+
+        let reg = try JSONDecoder().decode(PushRegisterResponseDto.self, from: try apiFixtureData("push_register_response.json"))
+        XCTAssertEqual(reg.device_id, "dev_fixture")
+        XCTAssertEqual(reg.environment, "production")
+        XCTAssertEqual(reg.push, true)
+    }
 }

@@ -25,6 +25,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use arbos_core::api::{MachineReadyPayloadDto, PushEventDto};
 use arbos_core::ids::now_ms;
 use arbos_core::wire::BoxState;
 
@@ -913,10 +914,11 @@ pub async fn spawn_fleet_tasks(state: AppState) {
                 .fleet_event("admitted", Some(&user_id), "slot free (tick)");
             tracing::info!(%user_id, "waitlist: admitting");
             boxes::ensure_awake(&state, &user_id, "waitlist admitted").await;
-            let _ = state.db.push_user(
+            let _ = state.db.push_user_event(
                 &user_id,
-                "machine_ready",
-                &json!({ "message": "Your Arbos computer is ready." }),
+                &PushEventDto::MachineReady(MachineReadyPayloadDto {
+                    message: "Your Arbos computer is ready.".into(),
+                }),
                 None,
             );
         }
@@ -1163,10 +1165,11 @@ pub async fn admin_waitlist_admit(
     let _ = state.db.waitlist_remove(&user_id);
     let _ = state.db.fleet_event("admitted", Some(&user_id), "by admin");
     boxes::ensure_awake(&state, &user_id, "waitlist admitted").await;
-    let _ = state.db.push_user(
+    let _ = state.db.push_user_event(
         &user_id,
-        "machine_ready",
-        &json!({ "message": "Your Arbos computer is ready." }),
+        &PushEventDto::MachineReady(MachineReadyPayloadDto {
+            message: "Your Arbos computer is ready.".into(),
+        }),
         None,
     );
     Json(json!({ "admitted": user_id, "capacity": capacity(&state).await })).into_response()

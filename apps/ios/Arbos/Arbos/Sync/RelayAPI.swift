@@ -575,10 +575,11 @@ final class RelayAPI {
     /// registers this device's APNs token (idempotent; re-sent on every launch).
     /// Returns the relay's `push` flag: false until it has an APNs key.
     func registerPush(deviceId: Id, token: String, environment: String, bundleId: String, appVersion: String) async throws -> Bool {
-        let v = try await json("POST", "/devices/\(deviceId)/push", body: [
+        let data = try await request("POST", "/devices/\(deviceId)/push", body: [
             "platform": "ios", "token": token, "environment": environment, "bundle_id": bundleId, "app_version": appVersion,
-        ])
-        return ((v as? [String: Any])?["push"] as? NSNumber)?.boolValue ?? true
+        ]).0
+        let resp = try? JSONDecoder().decode(PushRegisterResponseDto.self, from: data)
+        return resp?.push ?? true
     }
 
     /// `DELETE /devices/{id}/push` on sign-out so a stale token is not pushed to.
@@ -914,7 +915,17 @@ final class RelayAPI {
     }
 
     func pushes() async throws -> [PushItem] {
-        ((try await json("GET", "/me/pushes")) as? [Any] ?? []).compactMap(PushItem.parse)
+        let list = (try await json("GET", "/me/pushes")) as? [Any] ?? []
+        var out: [PushItem] = []
+        for raw in list {
+            if let item = PushItem.parse(raw) {
+                out.append(item)
+            } else {
+                let kind = (raw as? [String: Any])?["kind"] as? String ?? "?"
+                NSLog("PushItem: skipped unknown kind \(kind)")
+            }
+        }
+        return out
     }
 
     // MARK: Connectors (F1)

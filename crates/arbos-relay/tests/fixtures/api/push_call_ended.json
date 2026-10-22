@@ -1,0 +1,13 @@
+{
+  "created_at": 1700000000000,
+  "id": "push_call_ended",
+  "kind": "call_ended",
+  "payload": {
+    "call_id": "call_fixture",
+    "chat_id": "people_call_fixture",
+    "duration_s": 60,
+    "project_id": "people",
+    "reason": "last_left",
+    "writer_device": "dev_bob_call"
+  }
+}

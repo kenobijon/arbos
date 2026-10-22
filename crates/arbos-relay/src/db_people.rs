@@ -7,7 +7,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use arbos_core::api::UserCardDto;
+use arbos_core::api::{PushEventDto, UserCardDto};
 use arbos_core::ids::now_ms;
 
 use crate::db::Db;
@@ -474,6 +474,28 @@ impl Db {
     }
 
     // ---- per-user pushes (fan-out to every live device) ---------------------------------------
+
+    /// Queue a typed `/me/pushes` event for every live device of a user.
+    pub fn push_user_event(
+        &self,
+        user_id: &str,
+        event: &PushEventDto,
+        coalesce_chat: Option<&str>,
+    ) -> Result<()> {
+        let (kind, payload) = event.kind_and_payload();
+        self.push_user(user_id, &kind, &payload, coalesce_chat)
+    }
+
+    /// Queue a typed event for every live device except `except_device`.
+    pub fn push_user_except_event(
+        &self,
+        user_id: &str,
+        except_device: &str,
+        event: &PushEventDto,
+    ) -> Result<()> {
+        let (kind, payload) = event.kind_and_payload();
+        self.push_user_except(user_id, except_device, &kind, &payload)
+    }
 
     /// Queue a notification for every non-revoked device of a user. `coalesce_chat` keeps at
     /// most one undelivered push of this kind per chat per device.

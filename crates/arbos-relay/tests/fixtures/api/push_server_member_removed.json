@@ -1,0 +1,11 @@
+{
+  "created_at": 1700000000000,
+  "id": "push_server_member_removed",
+  "kind": "server_member_removed",
+  "payload": {
+    "banned": false,
+    "handle": "user202",
+    "server_id": "srv_fixture",
+    "user_id": "gh_202"
+  }
+}

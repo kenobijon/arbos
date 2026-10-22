@@ -23,7 +23,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
-use arbos_core::api::{SenderDto, UnreadChatDto, UnreadDto};
+use arbos_core::api::{PushRegisterResponseDto, SenderDto, UnreadChatDto, UnreadDto};
 use arbos_core::ids::now_ms;
 
 use crate::apns::{Delivery, Outgoing};
@@ -592,9 +592,11 @@ pub async fn register_push(
         updated_at: now_ms(),
     };
     match state.db.upsert_push_token(&t) {
-        Ok(()) => Json(json!({
-            "device_id": t.device_id, "environment": t.environment, "push": state.push.is_on(),
-        }))
+        Ok(()) => Json(PushRegisterResponseDto {
+            device_id: t.device_id,
+            environment: t.environment,
+            push: state.push.is_on(),
+        })
         .into_response(),
         Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
     }

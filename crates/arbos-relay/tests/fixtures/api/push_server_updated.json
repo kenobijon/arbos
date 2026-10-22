@@ -1,0 +1,9 @@
+{
+  "created_at": 1700000000000,
+  "id": "push_server_updated",
+  "kind": "server_updated",
+  "payload": {
+    "channel_id": "ch_fixture",
+    "server_id": "srv_fixture"
+  }
+}

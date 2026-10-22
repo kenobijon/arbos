@@ -1,0 +1,12 @@
+{
+  "created_at": 1700000000000,
+  "id": "push_people_invite_accepted",
+  "kind": "people_invite_accepted",
+  "payload": {
+    "code": "invite_fixture",
+    "handle": "user202",
+    "target_id": "proj_fixture",
+    "target_kind": "project",
+    "user_id": "gh_202"
+  }
+}
