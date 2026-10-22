@@ -584,7 +584,7 @@ impl Shell {
             skills,
             local,
             focus_handle: cx.focus_handle(),
-            // `ARBOS_OPEN_SETTINGS=1|bottom|connectors|secrets…` opens my pane's
+            // `ARBOS_OPEN_SETTINGS=1|bottom|appearance|connectors|secrets…` opens my pane's
             // Settings tab at launch (`bottom` scrolled to its end, the others on
             // that page) — rig; the pane itself is opened below.
             settings_page: match open_settings.as_deref() {
