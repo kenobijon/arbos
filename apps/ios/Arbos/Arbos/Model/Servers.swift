@@ -49,6 +49,41 @@ struct ServerInvite: Equatable {
     }
 }
 
+/// One of the owner's invite links (several per server since 2026-10-22): optional expiry and
+/// a use count; `usable` is the relay's verdict right now.
+struct ServerInviteLink: Identifiable, Equatable {
+    var id: String
+    var code: String
+    var url: String
+    var createdAt: Int64
+    var expiresAt: Int64?
+    var usesLeft: Int?
+    var usable: Bool
+
+    static func parse(_ raw: Any) -> ServerInviteLink? {
+        guard let d = raw as? [String: Any], let id = d["id"] as? String, let code = d["code"] as? String else { return nil }
+        return ServerInviteLink(
+            id: id, code: code, url: d["url"] as? String ?? "",
+            createdAt: (d["created_at"] as? NSNumber)?.int64Value ?? 0,
+            expiresAt: (d["expires_at"] as? NSNumber)?.int64Value,
+            usesLeft: (d["uses_left"] as? NSNumber)?.intValue,
+            usable: (d["usable"] as? NSNumber)?.boolValue ?? true
+        )
+    }
+
+    /// "7 days left · 3 uses left", "No limits", "Expired", "Used up".
+    func terms(now: Int64) -> String {
+        if !usable { return usesLeft == 0 ? "Used up" : "Expired" }
+        var parts: [String] = []
+        if let t = expiresAt {
+            let days = (max(t - now, 0) + 86_399_999) / 86_400_000
+            parts.append(days <= 1 ? "Expires today" : "\(days) days left")
+        }
+        if let n = usesLeft { parts.append("\(n) use\(n == 1 ? "" : "s") left") }
+        return parts.isEmpty ? "No limits" : parts.joined(separator: " · ")
+    }
+}
+
 struct ServerMember: Identifiable, Equatable {
     var id: String
     var handle: String
@@ -97,6 +132,8 @@ struct Server: Identifiable, Equatable {
     var isOpen: Bool
     /// Only for owner/admin.
     var invite: ServerInvite?
+    /// Owner only: every live link (expired / used-up ones included, so the owner sees why).
+    var invites: [ServerInviteLink] = []
     /// Only from `GET /servers/{id}` / `POST /servers`.
     var members: [ServerMember]
 
@@ -133,6 +170,7 @@ struct Server: Identifiable, Equatable {
             avatarColorIndex: (d["avatar_color_index_effective"] as? NSNumber)?.intValue,
             isOpen: (d["open"] as? Bool) ?? (d["open"] as? NSNumber)?.boolValue ?? false,
             invite: ServerInvite.parse(d["invite"]),
+            invites: ((d["invites"] as? [Any]) ?? []).compactMap(ServerInviteLink.parse),
             members: ((d["members"] as? [Any]) ?? []).compactMap(ServerMember.parse)
         )
     }

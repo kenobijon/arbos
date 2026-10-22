@@ -737,6 +737,23 @@ final class RelayAPI {
         _ = try await request("POST", "/servers/\(serverId)/channels/\(channelId)/archive", body: ["archived": archived])
     }
 
+    /// `POST /servers/{id}/members {user_id}` — owner/admin adds someone on Arbos by name.
+    func addServerMember(serverId: String, userId: String) async throws {
+        _ = try await request("POST", "/servers/\(serverId)/members", body: ["user_id": userId])
+    }
+
+    /// `POST /servers/{id}/invites {expires, max_uses}` (owner) → the new link.
+    func createServerInvite(_ id: String, expires: Bool, maxUses: Int?) async throws -> ServerInviteLink? {
+        var body: [String: Any] = ["expires": expires]
+        if let maxUses { body["max_uses"] = maxUses }
+        return ServerInviteLink.parse(try await json("POST", "/servers/\(id)/invites", body: body))
+    }
+
+    /// `DELETE /servers/{id}/invites/{iid}` (owner) — the link stops working at once.
+    func revokeServerInvite(_ id: String, inviteId: String) async throws {
+        _ = try await request("DELETE", "/servers/\(id)/invites/\(inviteId)")
+    }
+
     /// `POST /servers/{id}/invite/reset` (owner) → the new `{code, url}`.
     func resetServerInvite(_ id: String) async throws -> ServerInvite {
         guard let inv = ServerInvite.parse(try await json("POST", "/servers/\(id)/invite/reset", body: [String: Any]())) else {

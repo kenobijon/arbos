@@ -401,6 +401,47 @@ extension AppModel {
     }
 
     /// Rule 6: owner resets the invite link (the old one stops working).
+    /// Members tab → Add members (the main way in since 2026-10-22): one call per new person.
+    func addServerMembers(serverId: Id, userIds: [String]) async -> Bool {
+        var ok = true
+        for uid in userIds {
+            do { try await relay.addServerMember(serverId: serverId, userId: uid) } catch {
+                ok = false
+                notice = Notice(text: "Could not add them: \(error.localizedDescription)")
+            }
+        }
+        await refreshServer(serverId)
+        return ok
+    }
+
+    /// Settings › Invite links › New link (owner).
+    func createServerInvite(_ id: Id, expires: Bool, singleUse: Bool) async {
+        do {
+            _ = try await relay.createServerInvite(id, expires: expires, maxUses: singleUse ? 1 : nil)
+            await refreshServer(id)
+        } catch {
+            notice = Notice(text: "Could not make an invite link: \(error.localizedDescription)")
+        }
+    }
+
+    /// Settings › Invite links › revoke (owner): gone from the list at once.
+    func revokeServerInvite(_ id: Id, inviteId: String) async {
+        if let si = servers.firstIndex(where: { $0.id == id }) {
+            servers[si].invites.removeAll { $0.id == inviteId }
+        }
+        do { try await relay.revokeServerInvite(id, inviteId: inviteId) } catch {
+            notice = Notice(text: "Could not revoke the link: \(error.localizedDescription)")
+        }
+        await refreshServer(id)
+    }
+
+    /// `arbos://join/<code>` (the site's invite page): join right away and land in the server.
+    func joinFromLink(code: String) async {
+        let code = code.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
+        guard !code.isEmpty else { return }
+        _ = await joinServer(code: code)
+    }
+
     func resetServerInvite(_ id: Id) async -> ServerInvite? {
         do {
             let inv = try await relay.resetServerInvite(id)
