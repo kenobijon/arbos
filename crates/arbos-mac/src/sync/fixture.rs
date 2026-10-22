@@ -709,6 +709,18 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             }
             emit_projects(shared);
         }
+        ClientCommand::SetVision {
+            project_id,
+            enabled,
+        } => {
+            {
+                let mut projects = shared.projects.lock().unwrap();
+                if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
+                    p.vision_enabled = enabled;
+                }
+            }
+            emit_projects(shared);
+        }
         ClientCommand::SetModel {
             project_id,
             model,

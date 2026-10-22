@@ -61,18 +61,6 @@ struct AgentEditSheet: View {
                                 row(icon: "waveform", title: "Voice", value: voiceLabel(project))
                             }
                             .buttonStyle(.plain)
-                            PaneRow(
-                                leading: .tile("eye"),
-                                title: "Camera vision",
-                                subtitle: "On video calls \(project.name) can see your camera while it is on.",
-                                trailing: AnyView(
-                                    Toggle("", isOn: Binding(get: { project.visionEnabled }, set: { model.setVision(projectId, enabled: $0) }))
-                                        .labelsHidden()
-                                        .tint(theme.online)
-                                        .disabled(project.shared)
-                                        .accessibilityLabel("Camera vision")
-                                )
-                            )
                         }
                         .padding(.horizontal, 16)
                         .padding(.top, 14)
@@ -330,9 +318,9 @@ struct AgentProfileView: View {
         switch tab {
         case "Settings":
             // Identical to the Mac: Model · Reasoning. Per-agent secrets are reached
-            // like the Mac's — Settings → Secrets → the secret's Agents. Camera vision
-            // stays here until its new home is decided.
-            var rows: [AnyView] = [
+            // like the Mac's — Settings → Secrets → the secret's Agents; camera vision
+            // is the call screen's "Let <agent> see" switch.
+            let rows: [AnyView] = [
                 AnyView(
                     Button { if isMine { showModel = true } } label: {
                         PaneRow(title: "Model", value: project.shortModel, chevron: isMine)
@@ -348,9 +336,6 @@ struct AgentProfileView: View {
                     .disabled(!isMine)
                 ),
             ]
-            if isMine {
-                rows.append(AnyView(PaneToggleRow(title: "Camera vision", isOn: Binding(get: { project.visionEnabled }, set: { model.setVision(projectId, enabled: $0) }))))
-            }
             return [.card(rows)]
         default:
             // Profile: name, handle, description (the owner edits by tapping).

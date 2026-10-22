@@ -268,6 +268,13 @@ pub fn screen(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> Di
     }
     let waiting = n == 0 && active.status == CallStatus::Connected;
 
+    // "Let <agent> see" (#1353): beside the camera while it is on in a call
+    // with an agent — the one switch for the agent's `vision_enabled`.
+    let vision = active
+        .camera
+        .then(|| vision_agent(shell, active, cx))
+        .flatten();
+
     let controls = div()
         .flex()
         .items_start()
@@ -316,6 +323,7 @@ pub fn screen(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> Di
                 }),
             ),
         )
+        .children(vision.map(|(pid, name, on)| vision_switch(pid, &name, on, &theme, cx)))
         .child(
             round_button("call-hangup", "phone-down", "Hang up", false, true, &theme)
                 .on_mouse_down(
@@ -747,6 +755,59 @@ fn seeing_badge(agent: &str, theme: &Theme) -> Div {
 }
 
 /// The agent's name for the vision badge: the space the call is in.
+/// The agent this call is with and whether it may look through my camera —
+/// `None` for calls with people (the switch is an agent setting).
+fn vision_agent(
+    shell: &Shell,
+    active: &ActiveCall,
+    cx: &Context<Shell>,
+) -> Option<(crate::model::Id, String, bool)> {
+    let state = shell.state.read(cx);
+    state
+        .project(active.call.space_id())
+        .filter(|p| !p.is_people() && !p.is_guest())
+        .map(|p| (p.id.clone(), p.name.clone(), p.vision_enabled))
+}
+
+/// The switch beside the camera button: "Let <agent> see" over a macOS
+/// switch, laid out like the round buttons so the row stays level.
+fn vision_switch(
+    project_id: crate::model::Id,
+    agent: &str,
+    on: bool,
+    theme: &Theme,
+    cx: &mut Context<Shell>,
+) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap(px(8.0))
+        .child(
+            div()
+                .id("call-vision")
+                .h(px(60.0))
+                .flex()
+                .items_center()
+                .cursor_pointer()
+                .child(glass::switch(on, theme))
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        let id = project_id.clone();
+                        this.state.update(cx, |s, cx| s.set_vision(id, !on, cx));
+                    }),
+                ),
+        )
+        .child(
+            div()
+                .text_size(px(TEXT_SMALL))
+                .text_color(theme.text_muted)
+                .child(format!("Let {agent} see")),
+        )
+}
+
 fn agent_name(shell: &Shell, active: &ActiveCall, cx: &Context<Shell>) -> Option<String> {
     let state = shell.state.read(cx);
     state

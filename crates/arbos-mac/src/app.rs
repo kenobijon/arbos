@@ -3959,6 +3959,25 @@ impl AppState {
         cx.notify();
     }
 
+    /// Call screen, "Let <agent> see" (#1353): may this agent look through my
+    /// camera on calls. Persists to the agent's `vision_enabled`; the voice
+    /// worker reads it on the next sample.
+    pub fn set_vision(&mut self, project_id: Id, enabled: bool, cx: &mut Context<Self>) {
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == project_id) {
+            p.vision_enabled = enabled;
+        }
+        if !enabled {
+            if let Some(c) = self.my_call.as_mut() {
+                c.agent_seeing = false;
+            }
+        }
+        self.command(ClientCommand::SetVision {
+            project_id,
+            enabled,
+        });
+        cx.notify();
+    }
+
     /// Ask the relay for the voice list (the picker opening).
     pub fn fetch_voices(&mut self) {
         // No voice picker while the feature is off: nothing needs the list.
