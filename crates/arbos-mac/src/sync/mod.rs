@@ -799,6 +799,17 @@ pub enum ClientCommand {
         server_id: Id,
     },
     /// D88: `POST /servers/{id}/invite/reset` (owner).
+    /// D88: `POST /servers/{id}/invites {expires, max_uses}` — the owner mints a link.
+    ServerInviteCreate {
+        server_id: Id,
+        expires: bool,
+        max_uses: Option<i64>,
+    },
+    /// D88: `DELETE /servers/{id}/invites/{iid}` — the owner revokes a link.
+    ServerInviteRevoke {
+        server_id: Id,
+        invite_id: Id,
+    },
     ServerResetInvite {
         server_id: Id,
     },
@@ -831,6 +842,11 @@ pub enum ClientCommand {
     ChannelDelete {
         server_id: Id,
         channel_id: Id,
+    },
+    /// D88: `POST /servers/{id}/members {user_id}` per person — owner/admin adds people by name.
+    ServerAddMembers {
+        server_id: Id,
+        user_ids: Vec<Id>,
     },
     /// D88: `POST /servers/{id}/channels/{cid}/archive {archived}` — hide the channel from my
     /// list or bring it back (per user, mirrored as the room's `m.lowpriority` tag).

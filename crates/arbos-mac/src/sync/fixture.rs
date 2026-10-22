@@ -319,6 +319,9 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         | ClientCommand::ChannelCreate { .. }
         | ClientCommand::ChannelPatch { .. }
         | ClientCommand::ChannelDelete { .. }
+        | ClientCommand::ServerAddMembers { .. }
+        | ClientCommand::ServerInviteCreate { .. }
+        | ClientCommand::ServerInviteRevoke { .. }
         | ClientCommand::ChannelArchive { .. }
         | ClientCommand::ChannelOpen { .. }
         | ClientCommand::ChannelLoadOlder { .. }

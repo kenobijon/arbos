@@ -68,6 +68,23 @@ fn main() {
                 Some([x, y, w, h]) => Bounds::new(point(px(*x), px(*y)), size(px(*w), px(*h))),
                 _ => Bounds::centered(None, size(px(1320.0), px(880.0)), cx),
             };
+            // Invite links (D88): `arbos://join/<code>` — what arbos.life/s/<code> hands to the
+            // installed app — opens the Join sheet with the code filled in.
+            {
+                let state = state.clone();
+                let async_cx = cx.to_async();
+                cx.on_open_urls(move |urls| {
+                    for url in urls {
+                        if let Some(code) = url.strip_prefix("arbos://join/") {
+                            let code = code.trim_matches('/').to_string();
+                            let state = state.clone();
+                            let _ = async_cx.update(|cx| {
+                                state.update(cx, |s, cx| s.open_join_link(code, cx));
+                            });
+                        }
+                    }
+                });
+            }
             let theme = Theme::of(cx).clone();
             let window = cx
                 .open_window(

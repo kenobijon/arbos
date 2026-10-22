@@ -59,6 +59,17 @@ pub enum ProfilePage {
     Channel { server_id: Id, channel_id: Id },
 }
 
+/// Who the Add members picker adds to — a group or a server (D88) — and who is in already.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AddTarget {
+    pub name: String,
+    /// Handles already in (mine included): their rows show greyed and checked.
+    pub handles: Vec<String>,
+    /// Agents already in (groups only; servers have none).
+    pub agents: Vec<Id>,
+    pub is_server: bool,
+}
+
 /// Which server sheet is open over the shell (D88).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ServerSheet {
@@ -283,6 +294,10 @@ pub struct AppState {
     /// The group picker adds to this people group instead of creating one
     /// (the group pane's "Add members").
     pub add_members_target: Option<Id>,
+    /// Server pane › Members › Add members (D88): the server the picks go into.
+    pub add_members_server: Option<Id>,
+    /// An invite code handed over by `arbos://join/<code>`; the shell puts it in the Join sheet.
+    pub pending_join_code: Option<String>,
     /// Avatar reply reaction window per project (ms): plays once after a turn.
     pub avatar_reply_until: HashMap<Id, u64>,
     /// Avatar picker open for this project.
@@ -639,6 +654,8 @@ impl AppState {
             awaiting_group: None,
             invite_target: None,
             add_members_target: None,
+            add_members_server: None,
+            pending_join_code: None,
             avatar_reply_until: HashMap::new(),
             avatar_picker: None,
             profile_from_name: false,
@@ -3016,6 +3033,15 @@ impl AppState {
         cx.notify();
     }
 
+    /// `arbos://join/<code>` (the site's invite page): the Join sheet opens with the code.
+    pub fn open_join_link(&mut self, code: String, cx: &mut Context<Self>) {
+        if code.is_empty() {
+            return;
+        }
+        self.pending_join_code = Some(code);
+        self.open_server_sheet(ServerSheet::JoinServer, cx);
+    }
+
     /// Sheet "Join": `POST /servers/join` with the pasted link or code.
     pub fn join_server(&mut self, code: String, cx: &mut Context<Self>) {
         let code = code.trim().to_string();
@@ -3264,6 +3290,42 @@ impl AppState {
             server_id,
             user_id,
             ban,
+        });
+        cx.notify();
+    }
+
+    /// Settings › Invite links › "New link" (owner): with or without a 7-day expiry / use limit.
+    pub fn create_invite(
+        &mut self,
+        server_id: Id,
+        expires: bool,
+        max_uses: Option<i64>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.server(&server_id).is_some_and(ServerInfo::is_owner) {
+            return;
+        }
+        self.command(ClientCommand::ServerInviteCreate {
+            server_id,
+            expires,
+            max_uses,
+        });
+        cx.notify();
+    }
+
+    /// Settings › Invite links › ✕ (owner): the link stops working at once.
+    pub fn revoke_invite(&mut self, server_id: Id, invite_id: Id, cx: &mut Context<Self>) {
+        if let Some(s) = self
+            .servers
+            .iter_mut()
+            .find(|s| s.id == server_id)
+            .filter(|s| s.is_owner())
+        {
+            s.invites.retain(|i| i.id != invite_id);
+        }
+        self.command(ClientCommand::ServerInviteRevoke {
+            server_id,
+            invite_id,
         });
         cx.notify();
     }
@@ -5050,6 +5112,7 @@ impl AppState {
         self.new_group_agents.clear();
         self.invite_target = None;
         self.add_members_target = None;
+        self.add_members_server = None;
         self.people_query.clear();
         self.people_results.clear();
         self.people_error = None;
@@ -5072,7 +5135,48 @@ impl AppState {
         self.awaiting_group = None;
         self.invite_target = None;
         self.add_members_target = None;
+        self.add_members_server = None;
         cx.notify();
+    }
+
+    /// Server pane › Members → "Add members" (D88, the main way in since 2026-10-22): the same
+    /// picker as groups, people only, whose Add puts the picks into the server.
+    pub fn open_add_server_members(&mut self, server_id: Id, cx: &mut Context<Self>) {
+        if !self.server(&server_id).is_some_and(|s| s.can_admin()) {
+            return;
+        }
+        self.open_new_chat(cx);
+        self.new_group_open = true;
+        self.add_members_server = Some(server_id);
+        cx.notify();
+    }
+
+    /// Who the Add members picker adds to (a group or a server), with who is already in.
+    pub fn add_members_target_info(&self) -> Option<AddTarget> {
+        if let Some(server) = self
+            .add_members_server
+            .as_deref()
+            .and_then(|id| self.server(id))
+        {
+            let mut handles: Vec<String> =
+                server.members.iter().map(|m| m.handle.clone()).collect();
+            handles.push(self.me_handle());
+            return Some(AddTarget {
+                name: server.name.clone(),
+                handles,
+                agents: Vec::new(),
+                is_server: true,
+            });
+        }
+        let group = self.add_members_group()?;
+        let mut handles: Vec<String> = group.people.iter().map(|p| p.handle.clone()).collect();
+        handles.push(self.me_handle());
+        Some(AddTarget {
+            name: group.name.clone(),
+            handles,
+            agents: group.agents.iter().map(|a| a.project_id.clone()).collect(),
+            is_server: false,
+        })
     }
 
     /// Group pane → "Add members": the New group picker, titled for this
@@ -5101,6 +5205,9 @@ impl AppState {
     /// the relay's next list confirms. Returns whether the calls were sent (the
     /// sheet closes then; an empty pick keeps it open with a line why).
     pub fn add_members_to_group(&mut self, cx: &mut Context<Self>) -> bool {
+        if let Some(server_id) = self.add_members_server.clone() {
+            return self.add_members_to_server(server_id, cx);
+        }
         let Some(space) = self.add_members_group().cloned() else {
             return false;
         };
@@ -5129,6 +5236,44 @@ impl AppState {
             chat_id: plan.chat_id,
             handles: plan.handles,
             agent_ids: plan.agent_ids,
+        });
+        cx.notify();
+        true
+    }
+
+    /// "Add" in the picker opened from a server pane: `POST /servers/{id}/members` per new
+    /// person; people already in the server are skipped. The pane shows them at once.
+    fn add_members_to_server(&mut self, server_id: Id, cx: &mut Context<Self>) -> bool {
+        let Some(server) = self.server(&server_id).cloned() else {
+            return false;
+        };
+        let new: Vec<Person> = self
+            .new_group_picked
+            .iter()
+            .filter(|p| {
+                !server
+                    .members
+                    .iter()
+                    .any(|m| m.id == p.id || m.handle.eq_ignore_ascii_case(&p.handle))
+            })
+            .cloned()
+            .collect();
+        if new.is_empty() {
+            self.people_error = Some("Pick someone who is not in the server yet".into());
+            cx.notify();
+            return false;
+        }
+        let user_ids: Vec<Id> = new.iter().map(|p| p.id.clone()).collect();
+        if let Some(s) = self.servers.iter_mut().find(|s| s.id == server_id) {
+            s.members.extend(new.into_iter().map(|mut p| {
+                p.role = "member".into();
+                p
+            }));
+            s.member_count = s.members.len() as u64;
+        }
+        self.command(ClientCommand::ServerAddMembers {
+            server_id,
+            user_ids,
         });
         cx.notify();
         true
