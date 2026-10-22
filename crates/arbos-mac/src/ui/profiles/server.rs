@@ -132,7 +132,7 @@ pub(super) fn page(
         .child(hero)
         .child(tabs)
         .child(body_tab);
-    Some(frame(body, None, None, &theme, cx))
+    Some(frame(body, None, shell, &theme, cx))
 }
 
 /// Channels: "Add channel" for admins, then one row per channel — `#name`, a lock word when
@@ -456,15 +456,13 @@ fn members_tab(
             .hover(|s| s.bg(theme.surface_2))
             .on_click(cx.listener(move |this, _, _, cx| {
                 let handle = handle.clone();
-                this.state.update(cx, |s, cx| {
-                    s.open_profile(
-                        ProfilePage::User {
-                            handle,
-                            space_id: None,
-                        },
-                        cx,
-                    )
-                });
+                this.push_profile(
+                    ProfilePage::User {
+                        handle,
+                        space_id: None,
+                    },
+                    cx,
+                );
             })),
         );
     }
