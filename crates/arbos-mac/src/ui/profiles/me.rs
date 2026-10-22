@@ -206,6 +206,16 @@ impl Shell {
                 .unwrap_or_else(|| "—".into());
             let mut group = settings_group(&theme)
                 .child(
+                    glass::row("Where it runs", &theme)
+                        .child(value(machine.where_it_runs().to_string(), &theme)),
+                )
+                .when_some(machine.waitlist_position, |el, n| {
+                    el.child(
+                        glass::row("In line", &theme)
+                            .child(value(format!("Number {n} · we'll let you know"), &theme)),
+                    )
+                })
+                .child(
                     glass::row("State", &theme).child(
                         div()
                             .flex()
