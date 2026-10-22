@@ -14,8 +14,7 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Context as _, Result};
 use arbos_client::room::{self, RoomAction, RoomSession};
 use arbos_core::api::{
-    CreateChatResponseDto, GetProjectResponseDto, GroupDto, PeopleChatDto, ProjectDto,
-    ProjectMembersDto,
+    CreateChatResponseDto, GetProjectResponseDto, GroupDto, PeopleChatDto, ProjectMembersDto,
 };
 use arbos_core::doc::{UserAttachment, UserMessageOpts};
 use arbos_core::wire::{BoxState as WireBox, PROJECT_DOC_CHAT_ID};
@@ -1909,14 +1908,18 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
     let mut all_chats: Vec<Chat> = Vec::new();
     let me_id = shared.me_id();
     for item in items {
-        let list_dto: ProjectDto = match serde_json::from_value(item) {
-            Ok(d) => d,
-            Err(err) => {
-                log::warn!(target: "arbos_mac::relay", "ProjectDto: bad list item: {err}");
-                continue;
-            }
+        // `GET /projects` overwrites `owner` with the user-id string (not a
+        // ProjectOwnerDto object), so the list row is not a full ProjectDto.
+        // Only id + list extras are read here; detail fills the rest.
+        let Some(id) = item.get("id").and_then(Value::as_str).map(str::to_owned) else {
+            continue;
         };
-        let id = list_dto.id.clone();
+        let list_shared = item.get("shared").and_then(Value::as_bool);
+        let list_owner_handle = item
+            .get("owner_handle")
+            .and_then(Value::as_str)
+            .filter(|h| !h.is_empty())
+            .map(str::to_owned);
         let detail_val = shared.get_json(&format!("/projects/{id}")).await?;
         let detail: GetProjectResponseDto = match serde_json::from_value(detail_val) {
             Ok(d) => d,
@@ -1945,15 +1948,11 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
             .cloned();
         let mut project = project_from_dto(&detail, members.as_ref());
         // list_projects extras (shared / owner_handle) live on the list row.
-        if let Some(shared_flag) = list_dto.shared {
+        if let Some(shared_flag) = list_shared {
             project.shared = shared_flag;
         }
         if project.owner_handle.is_none() {
-            project.owner_handle = list_dto
-                .owner_handle
-                .clone()
-                .flatten()
-                .filter(|h| !h.is_empty());
+            project.owner_handle = list_owner_handle;
         }
         project.people.retain(|p| p.id != me_id);
         if let Some(prev) = &previous {
