@@ -31,7 +31,7 @@ use crate::ui::people;
 use crate::ui::select::{Selectable, TextSelection};
 use crate::ui::theme::{
     Theme, BUBBLE_PAD_X, BUBBLE_PAD_Y, BUBBLE_RADIUS, CHAT_BODY, CHAT_LINE_HEIGHT, COLUMN_MARGIN,
-    LINE_HEIGHT, TEXT_SMALL, TEXT_TINY,
+    COMPOSER_WIDTH, LINE_HEIGHT, PLUS_BUTTON, TEXT_SMALL, TEXT_TINY,
 };
 use crate::ui::veil::Veil;
 use crate::ui::widgets::QuestionCard;
@@ -40,9 +40,21 @@ use serde_json::Value;
 actions!(transcript, [Copy]);
 
 const OVERDRAW_PX: f32 = 320.0;
-pub const COLUMN_MAX_WIDTH: f32 = 820.0;
-/// Assistant bubble cap (Grok: the bubble never spans the whole pane).
-pub const ASSISTANT_MAX_WIDTH: f32 = 620.0;
+/// One column for every chat kind: the rows and the composer are centred
+/// in the pane with the same side margin ([`COLUMN_MARGIN`]) and the same
+/// width cap, so the agent bubble's left edge is the composer's left edge
+/// and my bubble's right edge is the composer's right edge, at any pane
+/// width. Grok Mac (refs 57/58, 2 px/pt): both at 16 pt from the pane. The
+/// cap is the composer pill at its widest as it has always shipped — the
+/// 820 pt input plus the two 28 pt circles — so the pill itself does not
+/// move; up to a 908 pt pane the margins bound both.
+pub const COLUMN_MAX_WIDTH: f32 = COMPOSER_WIDTH + 2.0 * PLUS_BUTTON;
+/// Agent bubble cap, measured from Grok Mac on two pane widths (ref 57:
+/// 728 pt pane, 612 pt bubble; ref 58: 424 pt pane, 310 pt bubble): the
+/// bubble ends a fixed 84 pt before the column's right edge (100 pt from
+/// the pane), not at a fixed width. The hover rail (reply · copy · react ·
+/// time) lives in that gap, so hovering never re-wraps the text.
+pub const ASSISTANT_RIGHT_GAP: f32 = 84.0;
 /// A new time stamp line whenever messages are this far apart.
 const STAMP_GAP_MS: u64 = 60 * 60 * 1000;
 /// Vertical rhythm measured from Grok Bot's Mac app (parity it.36, 2 px/pt):
@@ -955,11 +967,15 @@ impl Transcript {
                 message_id,
                 cx,
             )
-            .max_w(px(ASSISTANT_MAX_WIDTH))
+            .debug_selector(|| "chat-bubble-assistant".into())
+            // The cap is the slot's width (the column minus the 84 pt gap,
+            // see `ASSISTANT_RIGHT_GAP`), so it follows the pane.
+            .max_w_full()
             // A flex item's auto min-width is its content's; without
-            // this the bubble keeps 620 pt when the right pane opens
+            // this the bubble keeps its width when the right pane opens
             // and runs under it instead of re-wrapping.
             .min_w_0()
+            .relative()
             .when(fill, |el| el.w_full())
             .px(px(BUBBLE_PAD_X))
             .when(first, |el| el.pt(px(BUBBLE_PAD_Y)).rounded_t(r))
@@ -1007,7 +1023,6 @@ impl Transcript {
                     }
                 }));
             div()
-                .ml(px(6.0))
                 .flex()
                 .items_center()
                 .gap(px(2.0))
@@ -1018,6 +1033,21 @@ impl Transcript {
         let hover_time = (last && !live)
             .then(|| hover_time(time, reveal, theme).map(|t| t.ml(px(8.0))))
             .flatten();
+        // The rail hangs off the bubble's right edge, out of the flow: it
+        // lives in the column's 84 pt gap and never narrows the bubble.
+        let hover_rail = (hover_actions.is_some() || hover_time.is_some()).then(|| {
+            div()
+                .absolute()
+                .left(relative_width(1.0))
+                .top_0()
+                .bottom_0()
+                .pl(px(6.0))
+                .flex()
+                .items_center()
+                .children(hover_actions)
+                .children(hover_time)
+        });
+        let bubble = bubble.children(hover_rail);
         // People chats: the sender's disc at the bubble's bottom-left on
         // the last block; earlier blocks keep the lane free (mocks a/f).
         let disc = lane.as_deref().map(|seed| {
@@ -1052,16 +1082,7 @@ impl Transcript {
             .when(last, |el| el.pb(px(ROW_GAP_HALF)))
             .when(lane.is_some(), |el| el.gap(px(SENDER_DISC_GAP)))
             .children(disc)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .items_center()
-                    .child(bubble)
-                    .children(hover_actions)
-                    .children(hover_time),
-            )
+            .child(assistant_slot(bubble))
             .into_any_element()
     }
 
@@ -1516,11 +1537,11 @@ impl Transcript {
                         cx.new(|cx| QuestionCard::new(state, chat_id, question_id, &widget, cx))
                     })
                     .clone();
+                // Grok: the card is as wide as the assistant block.
                 div()
                     .w_full()
                     .flex()
-                    .justify_start()
-                    .child(card)
+                    .child(assistant_slot(card))
                     .into_any_element()
             }
             RowKind::Approval { view } => {
@@ -1531,7 +1552,7 @@ impl Transcript {
                 let (state_r, chat_r, id_r) =
                     (self.state.clone(), chat_id.clone(), approval_id.clone());
                 let (state_s, chat_s, id_s) = (self.state.clone(), chat_id, approval_id);
-                approval_card(
+                let card = approval_card(
                     &row.id,
                     &view,
                     &theme,
@@ -1547,8 +1568,12 @@ impl Transcript {
                             s.answer_approval(chat_s.clone(), id_s.clone(), choice, cx)
                         });
                     },
-                )
-                .into_any_element()
+                );
+                div()
+                    .w_full()
+                    .flex()
+                    .child(assistant_slot(card))
+                    .into_any_element()
             }
             RowKind::Error { code, message } => {
                 let state = self.state.clone();
@@ -1741,18 +1766,46 @@ impl Transcript {
                     && !matches!(prev.kind, RowKind::Stamp { .. } | RowKind::BottomInset)
                     && self.turn_starts.contains(&row.message_id)
             });
-        div()
-            .w_full()
-            .flex()
-            .justify_center()
-            .px(px(COLUMN_MARGIN))
+        column_row(inner)
             .when(turn_start, |el| el.pt(px(TURN_GAP_EXTRA)))
             .when(highlighted, |el| {
                 el.bg(Theme::with_alpha(theme.accent, 0.14))
             })
-            .child(div().w_full().max_w(px(COLUMN_MAX_WIDTH)).child(inner))
             .into_any_element()
     }
+}
+
+/// The one row frame every chat kind's transcript row sits in: the column's
+/// side margin, centred, capped at [`COLUMN_MAX_WIDTH`] — the composer's own
+/// geometry (`shell::render_center`), so bubbles, captions, the working line
+/// and the input share their left and right edges.
+pub fn column_row(inner: AnyElement) -> Div {
+    div()
+        .w_full()
+        .flex()
+        .justify_center()
+        .px(px(COLUMN_MARGIN))
+        .child(
+            div()
+                .w_full()
+                .max_w(px(COLUMN_MAX_WIDTH))
+                .debug_selector(|| "chat-column".into())
+                .child(inner),
+        )
+}
+
+/// Where an agent bubble goes in its row: the rest of the row after the
+/// sender lane, minus Grok's fixed [`ASSISTANT_RIGHT_GAP`]. The bubble's
+/// `max_w_full` is this slot's width.
+fn assistant_slot(bubble: impl IntoElement) -> Div {
+    div()
+        .flex_1()
+        .min_w_0()
+        .pr(px(ASSISTANT_RIGHT_GAP))
+        .flex()
+        .items_center()
+        .debug_selector(|| "chat-bubble-slot".into())
+        .child(bubble)
 }
 
 fn relative_width(fraction: f32) -> gpui::DefiniteLength {
@@ -3049,4 +3102,184 @@ fn code_fence_card(
             .child(selectable.text(format!("{row_id}.code"), code.to_string(), runs)),
     );
     card.into_any_element()
+}
+
+#[cfg(test)]
+mod layout_tests {
+    //! Pixel parity with Grok Bot's Mac chat (refs 57/58; Jacob's crops of
+    //! 2026-10-22): the agent bubble's left edge is the composer's left edge,
+    //! and the bubble ends 84 pt before the column's right edge. Rendered
+    //! headless through the same frames the shell and the transcript use.
+    use gpui::TestAppContext;
+
+    use super::*;
+    use crate::ui::theme::{COMPOSER_HEIGHT, COMPOSER_MARGIN, PLUS_BUTTON};
+
+    /// The reference window: 1180 pt wide with the 296 pt sidebar open.
+    const REFERENCE_PANE: f32 = 1180.0 - crate::ui::theme::SIDEBAR_WIDTH;
+    /// Grok's own pane width in ref 57 (the composer is bounded by its
+    /// margins, not the cap).
+    const GROK_REF_57_PANE: f32 = 728.0;
+
+    struct Column {
+        pane: f32,
+    }
+
+    impl gpui::Render for Column {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            // A long agent reply: the bubble wants more than any pane has.
+            let bubble = div()
+                .debug_selector(|| "test-bubble".into())
+                .max_w_full()
+                .min_w_0()
+                .px(px(BUBBLE_PAD_X))
+                .child(div().w(px(4000.0)).h(px(CHAT_LINE_HEIGHT)));
+            let row = div()
+                .w_full()
+                .flex()
+                .items_end()
+                .child(assistant_slot(bubble))
+                .into_any_element();
+            // The composer pill as the shell frames it: the `+` circle 8 pt
+            // inside the pill's left edge (7 pt pad + the 1 pt rim).
+            let pill = div()
+                .w_full()
+                .h(px(COMPOSER_HEIGHT))
+                .border_1()
+                .pl(px((COMPOSER_HEIGHT - 2.0 - PLUS_BUTTON) / 2.0))
+                .flex()
+                .items_center()
+                .debug_selector(|| "test-composer".into())
+                .child(
+                    div()
+                        .size(px(PLUS_BUTTON))
+                        .debug_selector(|| "test-plus".into()),
+                )
+                .into_any_element();
+            div()
+                .w(px(self.pane))
+                .h(px(400.0))
+                .flex()
+                .flex_col()
+                .child(column_row(row))
+                .child(column_row(pill))
+        }
+    }
+
+    struct Edges {
+        bubble_left: f32,
+        bubble_width: f32,
+        composer_left: f32,
+        composer_width: f32,
+        plus_left: f32,
+        column_left: f32,
+        column_width: f32,
+    }
+
+    fn measure(cx: &mut TestAppContext, pane: f32) -> Edges {
+        let (_view, vcx) = cx.add_window_view(|_, _| Column { pane });
+        vcx.run_until_parked();
+        let bubble = vcx.debug_bounds("test-bubble").expect("bubble drawn");
+        let composer = vcx.debug_bounds("test-composer").expect("composer drawn");
+        let plus = vcx.debug_bounds("test-plus").expect("plus drawn");
+        let column = vcx.debug_bounds("chat-column").expect("column drawn");
+        Edges {
+            bubble_left: bubble.origin.x.into(),
+            bubble_width: bubble.size.width.into(),
+            composer_left: composer.origin.x.into(),
+            composer_width: composer.size.width.into(),
+            plus_left: plus.origin.x.into(),
+            column_left: column.origin.x.into(),
+            column_width: column.size.width.into(),
+        }
+    }
+
+    #[gpui::test]
+    fn the_agent_bubble_starts_at_the_composers_left_edge(cx: &mut TestAppContext) {
+        for pane in [REFERENCE_PANE, GROK_REF_57_PANE, 1400.0] {
+            let e = measure(cx, pane);
+            assert!(
+                (e.bubble_left - e.composer_left).abs() <= 1.0,
+                "pane {pane}: bubble left {} vs composer left {}",
+                e.bubble_left,
+                e.composer_left
+            );
+            // Grok: the `+` circle is 8 pt inside the pill, so the bubble
+            // edge sits 8 pt left of the circle.
+            assert!(
+                (e.plus_left - e.bubble_left - 8.0).abs() <= 1.0,
+                "pane {pane}: plus left {} vs bubble left {}",
+                e.plus_left,
+                e.bubble_left
+            );
+            let expected_left = ((pane - COLUMN_MAX_WIDTH) / 2.0).max(COMPOSER_MARGIN);
+            assert!(
+                (e.bubble_left - expected_left).abs() <= 1.0,
+                "pane {pane}: bubble left {} (expected {expected_left})",
+                e.bubble_left
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn the_agent_bubble_cap_is_the_column_minus_the_grok_gap(cx: &mut TestAppContext) {
+        // Reference window (884 pt pane): the margins bound the column, so
+        // the composer is 852 wide at 16 and the bubble 768 wide at 16 —
+        // Grok's 16 pt left inset and 100 pt right inset.
+        let e = measure(cx, REFERENCE_PANE);
+        let column = REFERENCE_PANE - 2.0 * COMPOSER_MARGIN;
+        assert!((e.column_width - column).abs() <= 1.0, "{}", e.column_width);
+        assert!(
+            (e.composer_width - column).abs() <= 1.0,
+            "{}",
+            e.composer_width
+        );
+        assert!((e.composer_left - 16.0).abs() <= 1.0, "{}", e.composer_left);
+        assert!((e.bubble_left - 16.0).abs() <= 1.0, "{}", e.bubble_left);
+        assert!(
+            (e.bubble_width - (column - ASSISTANT_RIGHT_GAP)).abs() <= 1.0,
+            "bubble width {}",
+            e.bubble_width
+        );
+        assert!((e.bubble_left - e.column_left).abs() <= 1.0);
+        // A wide pane: the cap holds both, centred together.
+        let e = measure(cx, 1400.0);
+        assert_eq!(e.column_width, COLUMN_MAX_WIDTH);
+        assert_eq!(e.composer_width, COLUMN_MAX_WIDTH);
+        assert!(
+            (e.bubble_width - (COLUMN_MAX_WIDTH - ASSISTANT_RIGHT_GAP)).abs() <= 1.0,
+            "bubble width {}",
+            e.bubble_width
+        );
+        // Grok's own pane (ref 57, 2 px/pt): composer 696 pt wide at 16 from
+        // the pane, bubble 612 pt wide at 16 — the measured reference.
+        let e = measure(cx, GROK_REF_57_PANE);
+        assert!((e.composer_left - 16.0).abs() <= 1.0, "{}", e.composer_left);
+        assert!(
+            (e.composer_width - 696.0).abs() <= 1.0,
+            "{}",
+            e.composer_width
+        );
+        assert!((e.bubble_left - 16.0).abs() <= 1.0, "{}", e.bubble_left);
+        assert!((e.bubble_width - 612.0).abs() <= 1.0, "{}", e.bubble_width);
+    }
+
+    #[test]
+    fn the_column_is_the_composers_geometry() {
+        let m = [
+            COLUMN_MARGIN,
+            COMPOSER_MARGIN,
+            COLUMN_MAX_WIDTH,
+            COMPOSER_WIDTH,
+            PLUS_BUTTON,
+        ];
+        let [margin, composer_margin, cap, input, circle] = std::hint::black_box(m);
+        assert_eq!(margin, composer_margin, "one side margin");
+        assert_eq!(margin, 16.0, "Grok: 16 pt from the pane");
+        assert_eq!(cap, input + 2.0 * circle, "the pill at its widest");
+    }
 }

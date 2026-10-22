@@ -40,11 +40,11 @@ use crate::ui::sidebar;
 use crate::ui::skills::{self, SkillsPanel};
 use crate::ui::theme::{
     reapply_window_background, AppearancePref, GlassOpacity, Surface, Theme, COLUMN_MARGIN,
-    COMPOSER_BOTTOM, COMPOSER_MARGIN, COMPOSER_WIDTH, DRAWER_WIDTH, GLASS_OPACITY_MAX,
-    GLASS_OPACITY_MIN, HEADER_HEIGHT, LINE_HEIGHT, PANEL_RADIUS, PLUS_BUTTON, SIDEBAR_WIDTH,
-    TAB_BAR_HEIGHT, TEXT_BODY, TEXT_SMALL, TEXT_TINY,
+    COMPOSER_BOTTOM, COMPOSER_WIDTH, DRAWER_WIDTH, GLASS_OPACITY_MAX, GLASS_OPACITY_MIN,
+    HEADER_HEIGHT, LINE_HEIGHT, PANEL_RADIUS, SIDEBAR_WIDTH, TAB_BAR_HEIGHT, TEXT_BODY, TEXT_SMALL,
+    TEXT_TINY,
 };
-use crate::ui::transcript::{Transcript, TranscriptEvent, COLUMN_MAX_WIDTH};
+use crate::ui::transcript::{column_row, Transcript, TranscriptEvent};
 use crate::ui::voice::Voice;
 use crate::ui::voicepicker;
 
@@ -2200,10 +2200,20 @@ impl Shell {
             PulseClock::request(cx);
         }
 
-        let composer_block = div()
-            .w_full()
-            .max_w(px(COMPOSER_WIDTH.max(COLUMN_MAX_WIDTH + 2.0 * PLUS_BUTTON)))
-            .child(self.composer.clone());
+        // The composer and the transcript rows share one column (margin and
+        // cap, `transcript::column_row`): Grok's agent bubble starts exactly
+        // at the composer's left edge. Before this the rows sat in their own
+        // narrower column (21 pt margin, 820 cap) while the pill had 16 and
+        // 876, which put the bubble 21–28 pt right of the pill's edge
+        // ([feedback agent-bubble-inset-2026-10-22]). The pill itself has
+        // not moved.
+        let composer_block = column_row(
+            div()
+                .w_full()
+                .debug_selector(|| "chat-composer-block".into())
+                .child(self.composer.clone())
+                .into_any_element(),
+        );
 
         // Stateful so the pane can own the file-drop hitbox (anywhere over the chat).
         let mut column = div()
@@ -2239,7 +2249,6 @@ impl Shell {
                 .flex()
                 .flex_col()
                 .items_center()
-                .px(px(COMPOSER_MARGIN))
                 .pb(px(COMPOSER_BOTTOM))
                 .pt(px(6.0));
             let bottom = if can_post {
@@ -2435,11 +2444,12 @@ impl Shell {
                 .flex()
                 .flex_col()
                 .items_center()
-                .px(px(COMPOSER_MARGIN))
                 .pb(px(COMPOSER_BOTTOM))
                 .pt(px(6.0))
                 .when_some(typing, |el, handle| {
-                    el.child(people::typing_line(&handle, &theme))
+                    el.child(column_row(
+                        people::typing_line(&handle, &theme).into_any_element(),
+                    ))
                 })
                 .child(composer_block);
             let composer_row = if animating {

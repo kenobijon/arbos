@@ -27,7 +27,6 @@ use crate::model::{ChoiceOption, FieldKind, FormField, Id, Part, QuestionState, 
 use crate::ui::composer::ComposerInput;
 use crate::ui::icons::icon;
 use crate::ui::theme::{Appearance, Theme, TEXT_SMALL, TEXT_TINY};
-use crate::ui::transcript::ASSISTANT_MAX_WIDTH;
 
 actions!(
     widgets,
@@ -794,11 +793,13 @@ pub enum RowState {
 pub type CloseHandler = Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static>;
 
 /// The outer card: bubble grey, generous radius; the header row goes in first.
+/// Grok: a card is as wide as the assistant block — it fills the agent
+/// bubble's slot (`transcript::assistant_slot`), which carries the cap.
 pub fn card_frame(id: impl Into<SharedString>, palette: &CardPalette) -> Stateful<Div> {
     div()
         .id(id.into())
         .w_full()
-        .max_w(px(ASSISTANT_MAX_WIDTH))
+        .max_w_full()
         .my(px(4.0))
         .flex()
         .flex_col()

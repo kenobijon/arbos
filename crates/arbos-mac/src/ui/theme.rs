@@ -27,11 +27,16 @@ pub const TAB_BAR_HEIGHT: f32 = HEADER_HEIGHT;
 /// Composer: one pill with the "+" circle inside left and mic / send inside right.
 pub const COMPOSER_WIDTH: f32 = 820.0;
 /// Grok Mac, measured on the real app (refs 57/58, 2 px/pt): a 44 pt pill with
-/// 28 pt circles inset 8, 16 pt side margins and 16 pt below; bubbles inset 21.
+/// 28 pt circles inset 8, 16 pt side margins and 16 pt below.
 pub const COMPOSER_HEIGHT: f32 = 44.0;
 pub const COMPOSER_MARGIN: f32 = 16.0;
 pub const COMPOSER_BOTTOM: f32 = 16.0;
-pub const COLUMN_MARGIN: f32 = 21.0;
+/// The transcript rows share the composer's side margin and width cap: in
+/// Grok the agent bubble's left edge *is* the composer's left edge (refs
+/// 57/58: both 16 pt from the pane; the `+` circle sits 8 pt inside the
+/// pill). The earlier 21 came from a misread of the same shot
+/// ([feedback agent-bubble-inset-2026-10-22]).
+pub const COLUMN_MARGIN: f32 = COMPOSER_MARGIN;
 pub const PLUS_BUTTON: f32 = 28.0;
 pub const SEND_BUTTON: f32 = 28.0;
 /// Icon buttons in the header and sheet corners.
