@@ -16,6 +16,9 @@ use gpui::{
     WindowBounds, WindowDecorations, WindowOptions,
 };
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use crate::app::AppState;
 use crate::ui::composer;
 use crate::ui::feedback;
@@ -30,81 +33,115 @@ fn main() {
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     let handle = runtime.handle().clone();
 
-    gpui_platform::application()
-        .with_assets(crate::ui::icons::Assets)
-        .run(move |cx: &mut App| {
-            gpui_tokio::init_from_handle(cx, handle);
-            // Matte is the default (D10, D90); the saved Settings choice wins over
-            // it, `ARBOS_SURFACE=matte|glass` over both (demos).
-            let surface = std::env::var("ARBOS_SURFACE")
-                .ok()
-                .and_then(|v| Surface::parse(&v))
-                .unwrap_or_else(Surface::load);
-            // Dark is the default (D90); the saved Settings choice wins over it,
-            // `ARBOS_APPEARANCE=system|light|dark` over both (demos, screenshots).
-            let pref = std::env::var("ARBOS_APPEARANCE")
-                .ok()
-                .and_then(|v| AppearancePref::parse(&v))
-                .unwrap_or_else(AppearancePref::load);
-            cx.set_global(Theme::for_pref(pref, surface, cx));
-            cx.set_reduce_motion(motion::system_reduce_motion());
-            PulseClock::init(cx);
-            bind_keys(cx);
-            set_menus(cx);
-
-            let source = app::init_source(cx);
-            let state = cx.new(|cx| AppState::new(source, cx));
-
-            // `ARBOS_WINDOW=x,y,w,h` places the window (demos, two instances side by side).
-            let bounds = match std::env::var("ARBOS_WINDOW")
-                .ok()
-                .map(|v| {
-                    v.split(',')
-                        .filter_map(|n| n.trim().parse::<f32>().ok())
-                        .collect::<Vec<_>>()
-                })
-                .as_deref()
-            {
-                Some([x, y, w, h]) => Bounds::new(point(px(*x), px(*y)), size(px(*w), px(*h))),
-                _ => Bounds::centered(None, size(px(1320.0), px(880.0)), cx),
-            };
-            let theme = Theme::of(cx).clone();
-            let window = cx
-                .open_window(
-                    WindowOptions {
-                        window_bounds: Some(WindowBounds::Windowed(bounds)),
-                        window_min_size: Some(size(px(900.0), px(600.0))),
-                        titlebar: Some(TitlebarOptions {
-                            title: Some("Arbos".into()),
-                            appears_transparent: cfg!(target_os = "macos"),
-                            traffic_light_position: Some(point(px(14.0), px(14.0))),
-                        }),
-                        app_owns_titlebar_drag: cfg!(target_os = "macos"),
-                        window_background: theme.window_background_appearance(),
-                        window_decorations: Some(WindowDecorations::Server),
-                        app_id: Some("sh.arbos.mac".into()),
-                        ..Default::default()
-                    },
-                    move |window, cx| cx.new(|cx| Shell::new(state.clone(), window, cx)),
-                )
-                .expect("open main window");
-            reapply_window_background(cx);
-            // Notification clicks and foreground banners (macOS); no-op elsewhere.
-            crate::ui::notify::init();
-            let _ = window.update(cx, |_, _, cx| cx.activate(true));
-            // Some X servers (Xvfb, no compositor) do not present the first frame
-            // until an event arrives; nudge a second frame shortly after launch.
-            cx.spawn(async move |cx| {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(400))
-                    .await;
-                cx.update(|cx| {
-                    let _ = window.update(cx, |_, window, _| window.refresh());
-                });
-            })
-            .detach();
-            cx.on_action(|_: &shell::Quit, cx| cx.quit());
+    // Invite links (D88): `arbos://join/<code>` — what arbos.life/s/<code> hands to the
+    // installed app — opens the Join sheet with the code. The platform delivers URLs before
+    // the app exists (cold start) or any time after; the hook fills in once the state is up.
+    type JoinHook = Rc<RefCell<Option<(gpui::AsyncApp, gpui::Entity<AppState>)>>>;
+    let join_hook: JoinHook = Rc::new(RefCell::new(None));
+    let pending_joins: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let app = gpui_platform::application().with_assets(crate::ui::icons::Assets);
+    {
+        let (hook, pending) = (join_hook.clone(), pending_joins.clone());
+        app.on_open_urls(move |urls| {
+            let codes: Vec<String> = urls
+                .iter()
+                .filter_map(|u| u.strip_prefix("arbos://join/"))
+                .map(|c| c.trim_matches('/').to_string())
+                .filter(|c| !c.is_empty())
+                .collect();
+            if codes.is_empty() {
+                return;
+            }
+            match hook.borrow().as_ref() {
+                Some((async_cx, state)) => {
+                    for code in codes {
+                        let state = state.clone();
+                        async_cx.update(|cx| {
+                            state.update(cx, |s, cx| s.open_join_link(code, cx));
+                        });
+                    }
+                }
+                None => pending.borrow_mut().extend(codes),
+            }
         });
+    }
+    app.run(move |cx: &mut App| {
+        gpui_tokio::init_from_handle(cx, handle);
+        // Matte is the default (D10, D90); the saved Settings choice wins over
+        // it, `ARBOS_SURFACE=matte|glass` over both (demos).
+        let surface = std::env::var("ARBOS_SURFACE")
+            .ok()
+            .and_then(|v| Surface::parse(&v))
+            .unwrap_or_else(Surface::load);
+        // Dark is the default (D90); the saved Settings choice wins over it,
+        // `ARBOS_APPEARANCE=system|light|dark` over both (demos, screenshots).
+        let pref = std::env::var("ARBOS_APPEARANCE")
+            .ok()
+            .and_then(|v| AppearancePref::parse(&v))
+            .unwrap_or_else(AppearancePref::load);
+        cx.set_global(Theme::for_pref(pref, surface, cx));
+        cx.set_reduce_motion(motion::system_reduce_motion());
+        PulseClock::init(cx);
+        bind_keys(cx);
+        set_menus(cx);
+
+        let source = app::init_source(cx);
+        let state = cx.new(|cx| AppState::new(source, cx));
+
+        // `ARBOS_WINDOW=x,y,w,h` places the window (demos, two instances side by side).
+        let bounds = match std::env::var("ARBOS_WINDOW")
+            .ok()
+            .map(|v| {
+                v.split(',')
+                    .filter_map(|n| n.trim().parse::<f32>().ok())
+                    .collect::<Vec<_>>()
+            })
+            .as_deref()
+        {
+            Some([x, y, w, h]) => Bounds::new(point(px(*x), px(*y)), size(px(*w), px(*h))),
+            _ => Bounds::centered(None, size(px(1320.0), px(880.0)), cx),
+        };
+        *join_hook.borrow_mut() = Some((cx.to_async(), state.clone()));
+        for code in pending_joins.borrow_mut().drain(..) {
+            state.update(cx, |s, cx| s.open_join_link(code, cx));
+        }
+        let theme = Theme::of(cx).clone();
+        let window = cx
+            .open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    window_min_size: Some(size(px(900.0), px(600.0))),
+                    titlebar: Some(TitlebarOptions {
+                        title: Some("Arbos".into()),
+                        appears_transparent: cfg!(target_os = "macos"),
+                        traffic_light_position: Some(point(px(14.0), px(14.0))),
+                    }),
+                    app_owns_titlebar_drag: cfg!(target_os = "macos"),
+                    window_background: theme.window_background_appearance(),
+                    window_decorations: Some(WindowDecorations::Server),
+                    app_id: Some("sh.arbos.mac".into()),
+                    ..Default::default()
+                },
+                move |window, cx| cx.new(|cx| Shell::new(state.clone(), window, cx)),
+            )
+            .expect("open main window");
+        reapply_window_background(cx);
+        // Notification clicks and foreground banners (macOS); no-op elsewhere.
+        crate::ui::notify::init();
+        let _ = window.update(cx, |_, _, cx| cx.activate(true));
+        // Some X servers (Xvfb, no compositor) do not present the first frame
+        // until an event arrives; nudge a second frame shortly after launch.
+        cx.spawn(async move |cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(400))
+                .await;
+            cx.update(|cx| {
+                let _ = window.update(cx, |_, window, _| window.refresh());
+            });
+        })
+        .detach();
+        cx.on_action(|_: &shell::Quit, cx| cx.quit());
+    });
 }
 
 /// The menu bar: the app menu and Help → Send Feedback… (⌘⇧F), the Mac twin of

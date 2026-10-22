@@ -1549,12 +1549,32 @@ fn handle_server_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                 }
             });
         }
-        ClientCommand::ServerResetInvite { server_id } => {
+        ClientCommand::ServerInviteCreate {
+            server_id,
+            expires,
+            max_uses,
+        } => {
             let shared = shared.clone();
             let server_id = server_id.clone();
+            let body = json!({ "expires": expires, "max_uses": max_uses });
             tokio::spawn(async move {
-                let path = format!("/servers/{server_id}/invite/reset");
-                if let Err(err) = shared.post_json(&path, json!({})).await {
+                let path = format!("/servers/{server_id}/invites");
+                if let Err(err) = shared.post_json(&path, body).await {
+                    server_error(&shared, &err);
+                    return;
+                }
+                fetch_server_detail(&shared, &server_id).await;
+            });
+        }
+        ClientCommand::ServerInviteRevoke {
+            server_id,
+            invite_id,
+        } => {
+            let shared = shared.clone();
+            let server_id = server_id.clone();
+            let path = format!("/servers/{server_id}/invites/{invite_id}");
+            tokio::spawn(async move {
+                if let Err(err) = shared.delete(&path).await {
                     server_error(&shared, &err);
                     return;
                 }
@@ -1654,6 +1674,23 @@ fn handle_server_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                 if let Err(err) = shared.delete(&path).await {
                     server_error(&shared, &err);
                     return;
+                }
+                fetch_server_detail(&shared, &server_id).await;
+            });
+        }
+        ClientCommand::ServerAddMembers {
+            server_id,
+            user_ids,
+        } => {
+            let shared = shared.clone();
+            let server_id = server_id.clone();
+            let user_ids = user_ids.clone();
+            tokio::spawn(async move {
+                let path = format!("/servers/{server_id}/members");
+                for uid in user_ids {
+                    if let Err(err) = shared.post_json(&path, json!({ "user_id": uid })).await {
+                        server_error(&shared, &err);
+                    }
                 }
                 fetch_server_detail(&shared, &server_id).await;
             });
@@ -5861,12 +5898,14 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         | ClientCommand::ServerRename { .. }
         | ClientCommand::ServerDelete { .. }
         | ClientCommand::ServerLeave { .. }
-        | ClientCommand::ServerResetInvite { .. }
+        | ClientCommand::ServerInviteCreate { .. }
+        | ClientCommand::ServerInviteRevoke { .. }
         | ClientCommand::ServerSetRole { .. }
         | ClientCommand::ServerRemoveMember { .. }
         | ClientCommand::ChannelCreate { .. }
         | ClientCommand::ChannelPatch { .. }
         | ClientCommand::ChannelDelete { .. }
+        | ClientCommand::ServerAddMembers { .. }
         | ClientCommand::ChannelArchive { .. }
         | ClientCommand::ChannelOpen { .. }
         | ClientCommand::ChannelLoadOlder { .. }

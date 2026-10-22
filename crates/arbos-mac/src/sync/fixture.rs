@@ -360,12 +360,14 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         | ClientCommand::ServerRename { .. }
         | ClientCommand::ServerDelete { .. }
         | ClientCommand::ServerLeave { .. }
-        | ClientCommand::ServerResetInvite { .. }
         | ClientCommand::ServerSetRole { .. }
         | ClientCommand::ServerRemoveMember { .. }
         | ClientCommand::ChannelCreate { .. }
         | ClientCommand::ChannelPatch { .. }
         | ClientCommand::ChannelDelete { .. }
+        | ClientCommand::ServerAddMembers { .. }
+        | ClientCommand::ServerInviteCreate { .. }
+        | ClientCommand::ServerInviteRevoke { .. }
         | ClientCommand::ChannelArchive { .. }
         | ClientCommand::ChannelOpen { .. }
         | ClientCommand::ChannelLoadOlder { .. }

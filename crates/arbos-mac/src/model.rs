@@ -2590,6 +2590,56 @@ pub struct ServerInvite {
     pub url: String,
 }
 
+/// One of the owner's invite links (several per server since 2026-10-22): optional expiry and
+/// a use count; `usable` is the relay's verdict right now.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ServerInviteLink {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub code: String,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub created_at: i64,
+    #[serde(default)]
+    pub expires_at: Option<i64>,
+    #[serde(default)]
+    pub uses_left: Option<i64>,
+    #[serde(default = "default_true")]
+    pub usable: bool,
+}
+
+impl ServerInviteLink {
+    /// "7 days left · 3 uses", "No limits", "Expired", "Used up".
+    pub fn terms(&self, now_ms: i64) -> String {
+        if !self.usable {
+            return if self.uses_left == Some(0) {
+                "Used up".into()
+            } else {
+                "Expired".into()
+            };
+        }
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(t) = self.expires_at {
+            let days = ((t - now_ms).max(0) + 86_399_999) / 86_400_000;
+            parts.push(if days <= 1 {
+                "Expires today".into()
+            } else {
+                format!("{days} days left")
+            });
+        }
+        if let Some(n) = self.uses_left {
+            parts.push(format!("{n} use{} left", if n == 1 { "" } else { "s" }));
+        }
+        if parts.is_empty() {
+            "No limits".into()
+        } else {
+            parts.join(" · ")
+        }
+    }
+}
+
 /// A server (D88 C1) as the relay returns it; `members` only on the detail route and on create.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ServerInfo {
@@ -2623,6 +2673,9 @@ pub struct ServerInfo {
     pub avatar_color_index_effective: Option<u8>,
     #[serde(default)]
     pub invite: Option<ServerInvite>,
+    /// Owner only: every live link (expired / used-up ones included, so the owner sees why).
+    #[serde(default)]
+    pub invites: Vec<ServerInviteLink>,
     /// Members with `role` set to `owner`/`admin`/`member`; empty until the detail is fetched.
     #[serde(default)]
     pub members: Vec<Person>,
