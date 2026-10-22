@@ -12,6 +12,7 @@ mod agent;
 mod group;
 pub(crate) mod kit;
 mod me;
+mod server;
 mod user;
 
 use std::sync::Arc;
@@ -42,6 +43,7 @@ pub fn pane(page: &ProfilePage, shell: &Shell, cx: &mut Context<Shell>) -> Optio
         ProfilePage::Group { space_id } => group::page(space_id, shell, cx),
         ProfilePage::Agent { project_id } => agent::page(project_id, shell, cx),
         ProfilePage::Me => Some(me::page(shell, cx)),
+        ProfilePage::Server { server_id } => server::page(server_id, shell, cx),
     }
 }
 
@@ -59,6 +61,36 @@ pub(super) fn frame(
     cx: &mut Context<Shell>,
 ) -> Stateful<Div> {
     pane_frame(SHEET_WIDTH, None, body, right, scroll, theme, cx)
+}
+
+/// A page pushed from another (a sender tapped in a group): the header leads with `‹`
+/// back to the page underneath and `title`.
+pub(super) fn pushed_frame(
+    title: &str,
+    body: Div,
+    right: Option<Stateful<Div>>,
+    scroll: Option<&ScrollHandle>,
+    shell: &Shell,
+    theme: &Theme,
+    cx: &mut Context<Shell>,
+) -> Stateful<Div> {
+    if shell.state.read(cx).profile_stack.is_empty() {
+        return pane_frame(SHEET_WIDTH, None, body, right, scroll, theme, cx);
+    }
+    let back = glass::circle("profile-back", 30.0, theme)
+        .child(icon("chevron-left", 14.0, theme.text))
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.state.update(cx, |s, cx| s.back_profile(cx));
+        }));
+    pane_frame(
+        SHEET_WIDTH,
+        Some((title, back)),
+        body,
+        right,
+        scroll,
+        theme,
+        cx,
+    )
 }
 
 /// The pane with a pushed page: `‹` back and the page title lead the header.

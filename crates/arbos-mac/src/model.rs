@@ -179,6 +179,54 @@ impl Project {
             .collect::<Vec<_>>()
             .join("-")
     }
+
+    /// Is this person already in the space? Me (`me_handle`) counts as in:
+    /// the relay lists the other members only, not the caller.
+    pub fn has_person(&self, me_handle: &str, person: &Person) -> bool {
+        (!me_handle.is_empty() && person.handle == me_handle)
+            || self
+                .people
+                .iter()
+                .any(|p| p.id == person.id || p.handle == person.handle)
+    }
+
+    /// Is this agent (by its project id) already in the space?
+    pub fn has_agent(&self, project_id: &str) -> bool {
+        self.agents.iter().any(|a| a.project_id == project_id)
+    }
+}
+
+/// The relay calls "Add" makes for one group: new people by handle, new
+/// agents by project id, both on `chat_id`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AddMembersPlan {
+    pub chat_id: Id,
+    pub handles: Vec<String>,
+    pub agent_ids: Vec<Id>,
+}
+
+/// Turn the picker's selection into the calls for `space`: whoever is already
+/// in (people, me, agents) is dropped, so a stale pick never hits the relay's
+/// `already_member` error; the target is always the group the picker opened for.
+pub fn add_members_plan(
+    space: &Project,
+    me_handle: &str,
+    picked: &[Person],
+    picked_agents: &[Id],
+) -> AddMembersPlan {
+    AddMembersPlan {
+        chat_id: space.id.clone(),
+        handles: picked
+            .iter()
+            .filter(|p| !space.has_person(me_handle, p))
+            .map(|p| p.handle.clone())
+            .collect(),
+        agent_ids: picked_agents
+            .iter()
+            .filter(|id| !space.has_agent(id))
+            .cloned()
+            .collect(),
+    }
 }
 
 /// What a rail tile is.
@@ -1940,6 +1988,9 @@ pub struct SecretsView {
     pub vaults: Vec<ConnectedVault>,
     /// Vault providers this relay can connect (`["onepassword"]` once Phase 2 is live).
     pub providers: Vec<String>,
+    /// Remote flag `features.vault_connect`: the Connect 1Password flow is shown only when the
+    /// relay says so (default off since 2026-10-21; code kept).
+    pub vault_connect: bool,
     pub requests: Vec<SecretRequest>,
     pub activity: Vec<SecretActivity>,
     pub loaded: bool,
@@ -2391,6 +2442,114 @@ pub enum Link {
     Reconnecting,
 }
 
+/// One channel of a server as the relay registry lists it (`GET /servers`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ServerChannel {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub server_id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default, deserialize_with = "null_to_empty")]
+    pub topic: String,
+    /// Admins-only posting.
+    #[serde(default)]
+    pub restricted: bool,
+    #[serde(default)]
+    pub position: i64,
+    /// `None` for a few seconds after creation while the room is being made.
+    #[serde(default)]
+    pub room_id: Option<String>,
+    #[serde(default)]
+    pub created_at: i64,
+}
+
+/// Invite link of a server; the relay only sends it to owners and admins.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ServerInvite {
+    #[serde(default)]
+    pub code: String,
+    #[serde(default)]
+    pub url: String,
+}
+
+/// A server (D88 C1) as the relay returns it; `members` only on the detail route and on create.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ServerInfo {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub image_key: Option<String>,
+    #[serde(default)]
+    pub owner_user_id: String,
+    #[serde(default)]
+    pub space_room_id: Option<String>,
+    #[serde(default)]
+    pub created_at: i64,
+    /// `owner`, `admin` or `member`.
+    #[serde(default)]
+    pub my_role: String,
+    #[serde(default)]
+    pub member_count: u64,
+    #[serde(default)]
+    pub channels: Vec<ServerChannel>,
+    #[serde(default)]
+    pub general_channel_id: Option<String>,
+    #[serde(default)]
+    pub avatar_color_index_effective: Option<u8>,
+    #[serde(default)]
+    pub invite: Option<ServerInvite>,
+    /// Members with `role` set to `owner`/`admin`/`member`; empty until the detail is fetched.
+    #[serde(default)]
+    pub members: Vec<Person>,
+}
+
+impl ServerInfo {
+    pub fn is_owner(&self) -> bool {
+        self.my_role == "owner"
+    }
+
+    pub fn can_admin(&self) -> bool {
+        self.my_role == "owner" || self.my_role == "admin"
+    }
+
+    pub fn channel(&self, channel_id: &str) -> Option<&ServerChannel> {
+        self.channels.iter().find(|c| c.id == channel_id)
+    }
+
+    /// `#general` (the relay names it), else the first channel.
+    pub fn general(&self) -> Option<&ServerChannel> {
+        self.general_channel_id
+            .as_deref()
+            .and_then(|id| self.channel(id))
+            .or_else(|| self.channels.iter().find(|c| c.name == "general"))
+            .or_else(|| self.channels.first())
+    }
+
+    /// Channels in registry order (`position`, then name).
+    pub fn ordered_channels(&self) -> Vec<&ServerChannel> {
+        let mut out: Vec<&ServerChannel> = self.channels.iter().collect();
+        out.sort_by(|a, b| {
+            a.position
+                .cmp(&b.position)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        out
+    }
+}
+
+/// Which channel of which server is open in the centre.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ChannelSel {
+    pub server_id: Id,
+    pub channel_id: Id,
+    /// Known once the registry (or the room list) has the room.
+    pub room_id: Option<String>,
+}
+
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2400,6 +2559,85 @@ pub fn now_ms() -> u64 {
 
 pub fn new_id() -> Id {
     ulid::Ulid::new().to_string()
+}
+
+#[cfg(test)]
+mod add_members_tests {
+    use super::*;
+
+    fn person(id: &str, handle: &str) -> Person {
+        Person {
+            id: id.into(),
+            handle: handle.into(),
+            status: "member".into(),
+            ..Person::default()
+        }
+    }
+
+    fn agent(project_id: &str) -> AgentMember {
+        AgentMember {
+            project_id: project_id.into(),
+            name: project_id.into(),
+            handle: project_id.into(),
+            ..AgentMember::default()
+        }
+    }
+
+    /// The group "Testing": me (unarbos), allan and const, plus one agent.
+    fn testing_group() -> Project {
+        Project {
+            id: "chat_testing".into(),
+            name: "Testing".into(),
+            kind: SpaceKind::Group,
+            people: vec![person("gh_1", "allan"), person("gh_2", "const")],
+            agents: vec![agent("proj_lium")],
+            ..Project::default()
+        }
+    }
+
+    #[test]
+    fn existing_members_count_as_already_in_the_group() {
+        let g = testing_group();
+        // The picker disables these rows: both humans, me, and the agent.
+        assert!(g.has_person("unarbos", &person("gh_1", "allan")));
+        assert!(g.has_person("unarbos", &person("gh_2", "const")));
+        assert!(g.has_person("unarbos", &person("gh_me", "unarbos")));
+        assert!(g.has_agent("proj_lium"));
+        // A match by handle alone is enough (search results carry no stable id).
+        assert!(g.has_person("unarbos", &person("", "allan")));
+        // Someone new stays pickable.
+        assert!(!g.has_person("unarbos", &person("gh_3", "alice")));
+        assert!(!g.has_agent("proj_other"));
+    }
+
+    #[test]
+    fn add_targets_this_group_and_skips_who_is_in_it() {
+        let g = testing_group();
+        let plan = add_members_plan(
+            &g,
+            "unarbos",
+            &[
+                person("gh_3", "alice"),
+                person("gh_1", "allan"),
+                person("gh_me", "unarbos"),
+            ],
+            &["proj_other".to_string(), "proj_lium".to_string()],
+        );
+        assert_eq!(
+            plan.chat_id, "chat_testing",
+            "adds to THIS group, not a new one"
+        );
+        assert_eq!(plan.handles, vec!["alice".to_string()]);
+        assert_eq!(plan.agent_ids, vec!["proj_other".to_string()]);
+    }
+
+    #[test]
+    fn nothing_new_makes_an_empty_plan() {
+        let g = testing_group();
+        let plan = add_members_plan(&g, "unarbos", &[person("gh_1", "allan")], &[]);
+        assert_eq!(plan.chat_id, "chat_testing");
+        assert!(plan.handles.is_empty() && plan.agent_ids.is_empty());
+    }
 }
 
 #[cfg(test)]

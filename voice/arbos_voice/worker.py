@@ -1114,7 +1114,16 @@ class VoiceCall:
             return "Cancelled."
         except ToolPending:
             self.state.open_work -= 1
-            return "The agent is still working on it and will post the result in the chat when it is done."
+            # Relay already timed out; chat may still get the answer. Say so out loud —
+            # returning only a tool string often leaves the call silent.
+            label = label_of(speaker) if speaker else "them"
+            self.spawn(
+                self._speak_callback(
+                    f"Tell {label} in one short sentence that the answer will show up in the chat when it is ready. "
+                    f"You must speak that line out loud."
+                )
+            )
+            return "Stay silent — that update is being spoken to the person."
         except RelayError as e:
             self.state.open_work -= 1
             self.event("tool", name="ask_agent", status="failed", request_id=request_id, error=str(e.body)[:300], ms=int((time.monotonic() - t0) * 1000))
@@ -1133,7 +1142,15 @@ class VoiceCall:
             return f"The agent could not do it: {result.get('error') or 'unknown error'}. Say so briefly."
         text = (result.get("text") or "").strip()
         log.info("ask_agent[%s] done in %d ms: %s", request_id, ms, text[:120])
-        return f"Result from the agent (summarise it in one or two spoken sentences; the full text is already in the chat):\n{text[:3000]}"
+        # Do not hand the result to the realtime model and hope it speaks: after a multi-second
+        # tool it often stays silent while the prose only appears in the chat. Speak it ourselves
+        # the same way as the deferred path (generate_reply call-back).
+        label = label_of(speaker) if speaker else "them"
+        self.spawn(self._speak_tool_result(label, text))
+        return (
+            "The answer is ready and will be spoken to the person next. "
+            "Say nothing else — do not summarise or read the result."
+        )
 
     async def wait_for_agent_idle(self, max_wait: float = 15.0) -> None:
         """Do not start a new spoken reply while we are still talking (a second
@@ -1154,25 +1171,33 @@ class VoiceCall:
             # previously we returned silently and the call-back never happened.
             log.warning("deferred tool %s still pending after relay wait; prompting chat fallback", request_id)
             await self._speak_callback(
-                f"Your earlier task for {label} is still running. Tell {label} in one short sentence "
-                f"that the answer will show up in the chat when it is ready."
+                f"Tell {label} in one short sentence that the answer will show up in the chat when it is ready. "
+                f"You must speak that line out loud."
             )
             return
         except Exception as e:
             self.state.open_work -= 1
             log.warning("deferred tool %s failed: %s", request_id, e)
+            await self._speak_callback(
+                f"Tell {label} in one short sentence that the earlier task failed. You must speak that line out loud."
+            )
             return
         self.state.open_work -= 1
         text = (result.get("text") or "").strip() if result.get("ok") else f"it failed: {result.get('error')}"
         self.event("tool", name="ask_agent", status="done" if result.get("ok") else "failed", request_id=request_id, message_id=result.get("message_id"), deferred=True)
         log.info("deferred tool %s done; speaking call-back", request_id)
+        await self._speak_tool_result(label, text)
+
+    async def _speak_tool_result(self, label: str, text: str) -> None:
+        """Read ask_agent's answer out loud on the call (chat already has the full prose)."""
         await self._speak_callback(
-            f"Your earlier task for {label} finished. Tell {label} what matters in one or two spoken sentences "
-            f"(the full text is in the chat). Result:\n{text[:3000]}"
+            f"Speak out loud to {label} now. Summarise what matters in one or two short spoken sentences. "
+            f"They are on a voice call and cannot hear the chat. You must speak — do not stay silent. "
+            f"Result:\n{text[:3000]}"
         )
 
     async def _speak_callback(self, instructions: str) -> None:
-        """Speak a deferred call-back: wait out our own 'I'll report back' line, then play the answer."""
+        """Speak a call-back: wait out any in-flight line, then play the answer on the call."""
         if self.state.leaving or not self.session or self.state.muted:
             return
         async with self._speak_lock:
