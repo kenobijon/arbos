@@ -19,6 +19,7 @@ use crate::ui::theme::{Theme, TEXT_TINY};
 
 use super::{
     file_list, hero, kit, link_list, media_grid, pushed_frame, tab_bar, Found, Link, HERO_AVATAR,
+    PANE_FADE_BAND,
 };
 
 /// Everything a page declares. The component renders it.
@@ -245,7 +246,14 @@ pub fn render(pane: ProfilePane, shell: &Shell, cx: &mut Context<Shell>) -> Stat
     if pane.tabs.len() > 1 {
         pinned = pinned.child(tab_bar(pane.tabs, pane.selected, &theme, cx));
     }
-    let mut body = div().flex().flex_col().pb(px(16.0));
+    // The body starts under the pinned block's bottom margin (pane_frame pulls
+    // it up by PANE_FADE_BAND); this spacer puts the first card back where
+    // the margin had it, so only scrolled rows cross the fade.
+    let mut body = div()
+        .flex()
+        .flex_col()
+        .pb(px(16.0))
+        .child(div().h(px(PANE_FADE_BAND)).flex_shrink_0());
     for part in pane.body {
         body = body.child(section(part, shell, &theme, cx));
     }

@@ -1664,7 +1664,9 @@ struct ProfilePane: View {
 
     /// How far the content fades out under the pinned hero + tabs (the chat
     /// header's treatment, #1336; Jacob Oct 22: sticky header, no hard cut).
-    static let fadeBand: CGFloat = 24
+    /// = the stack spacing, so the fade ends exactly where the first card
+    /// starts at rest and only scrolled rows pass through it.
+    static let fadeBand: CGFloat = 18
 
     var body: some View {
         // Hero + tab pill pin at the top of the scroll view (a pinned section
