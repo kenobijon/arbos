@@ -588,7 +588,6 @@ impl Shell {
             // Settings tab at launch (`bottom` scrolled to its end, the others on
             // that page) — rig; the pane itself is opened below.
             settings_page: match open_settings.as_deref() {
-                Some("appearance") => SettingsPage::Appearance,
                 Some("connectors") => SettingsPage::Connectors,
                 Some(v) if v.starts_with("secrets") => SettingsPage::Secrets,
                 _ => SettingsPage::Root,
