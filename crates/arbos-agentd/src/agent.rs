@@ -1710,7 +1710,7 @@ impl Agent {
             (Ok(()), Some(msg_id)) => self.people_shared_send_open(chat_id, &host, msg_id).await,
             _ => false,
         };
-        let mut h = host.lock().await;
+        let h = host.lock().await;
         match &res {
             Ok(()) => {
                 if !leave_taken {
@@ -1806,7 +1806,7 @@ impl Agent {
             return Err(anyhow!("retry: missing messageId"));
         }
         let user_msg_id = {
-            let mut h = host.lock().await;
+            let h = host.lock().await;
             let msgs = h.doc.messages();
             let failed = msgs.iter().find(|m| m.id == failed_id);
             let user_id = failed
@@ -1866,7 +1866,7 @@ impl Agent {
                 .await;
         }
         if let Some(host) = self.sync.host(chat_id).await {
-            let mut h = host.lock().await;
+            let h = host.lock().await;
             h.doc
                 .add_status_part(&msg_id, "stopped", "Stopped by the user");
         }
@@ -1987,7 +1987,7 @@ impl Agent {
         };
         let _ = self.store.answer_ask(question_id);
         {
-            let mut h = host.lock().await;
+            let h = host.lock().await;
             h.doc.answer_question_part(question_id, &value);
         }
         Some((question, rendered))
@@ -2214,7 +2214,7 @@ impl Agent {
         ) && turn.streamed_text.trim().is_empty()
             && turn.ack_text.trim().is_empty()
         {
-            let mut h = host.lock().await;
+            let h = host.lock().await;
             if let Some(p) = h.doc.add_text_part(&assistant_msg_id, "text") {
                 h.doc.append_text(
                     &assistant_msg_id,
@@ -2231,7 +2231,7 @@ impl Agent {
             && !turn.stopped
             && turn.streamed_text.trim().is_empty()
         {
-            let mut h = host.lock().await;
+            let h = host.lock().await;
             if let Some(p) = h.doc.add_text_part(&assistant_msg_id, "text") {
                 h.doc.append_text(
                     &assistant_msg_id,
@@ -2369,7 +2369,7 @@ impl Agent {
                     let _ = me.store.set_subagent_status(&sub_id, "idle");
                     let _ = me.store.set_subagent_last_status(&sub_id, "failed");
                     {
-                        let mut h = host2.lock().await;
+                        let h = host2.lock().await;
                         let stale: Vec<String> = h
                             .doc
                             .messages()
@@ -2393,7 +2393,7 @@ impl Agent {
                     me.write_threads_index().await;
                 }
                 {
-                    let mut h = host2.lock().await;
+                    let h = host2.lock().await;
                     let id = ulid();
                     h.doc
                         .start_assistant_message(&id, &user_msg, &me.cfg.device_id);
@@ -2684,7 +2684,7 @@ impl Agent {
         }
         let assistant_msg_id = ulid();
         let text_part_id = {
-            let mut h = host.lock().await;
+            let h = host.lock().await;
             let pid =
                 h.doc
                     .start_assistant_message(&assistant_msg_id, user_msg_id, &self.cfg.device_id);
@@ -2724,7 +2724,7 @@ impl Agent {
 
         if let Err(e) = self.ensure_chat_session(chat_id).await {
             {
-                let mut h = host.lock().await;
+                let h = host.lock().await;
                 h.doc.add_status_part(&assistant_msg_id, "failed", "Failed");
                 h.doc
                     .add_error_part(&assistant_msg_id, "session", &e.to_string());
@@ -2738,7 +2738,7 @@ impl Agent {
         // Stop raced with session switch: settle the Working row and leave.
         if self.turn.lock().await.as_ref().is_some_and(|t| t.stopped) {
             {
-                let mut h = host.lock().await;
+                let h = host.lock().await;
                 h.doc
                     .add_status_part(&assistant_msg_id, "stopped", "Stopped by the user");
                 h.doc
@@ -2881,7 +2881,7 @@ impl Agent {
         let (talking_model, _) = self.live_models().await;
         let room_name;
         {
-            let mut h = host.lock().await;
+            let h = host.lock().await;
             if let Some(e) = &err_text {
                 h.doc.add_error_part(&assistant_msg_id, "turn_failed", e);
             }
@@ -3586,7 +3586,7 @@ impl Agent {
                 };
                 let input = t.tool_inputs.remove(tool_call_id).unwrap_or(json!({}));
                 {
-                    let mut h = host.lock().await;
+                    let h = host.lock().await;
                     h.doc.add_tool_part(
                         &t.assistant_msg_id,
                         tool_call_id,
@@ -3717,7 +3717,7 @@ impl Agent {
             self.open_row(host, t, "ack").await;
         }
         {
-            let mut h = host.lock().await;
+            let h = host.lock().await;
             h.doc
                 .append_text(&t.assistant_msg_id, &t.text_part_id, &t.ack_text);
         }
@@ -3736,7 +3736,7 @@ impl Agent {
     /// Open a fresh streaming assistant row for this turn (after an ack or a progress bubble).
     async fn open_row(&self, host: &SharedHost, t: &mut TurnState, role: &str) {
         let id = ulid();
-        let mut h = host.lock().await;
+        let h = host.lock().await;
         let pid = h
             .doc
             .start_assistant_message(&id, &t.user_msg_id, &self.cfg.device_id);
@@ -3756,7 +3756,7 @@ impl Agent {
 
     /// Close the live row as a finished prose bubble (ack or progress).
     async fn close_row(&self, host: &SharedHost, t: &mut TurnState, role: &str) {
-        let mut h = host.lock().await;
+        let h = host.lock().await;
         if t.activity.is_some() {
             h.doc.set_activity(&t.assistant_msg_id, None);
         }
@@ -3774,7 +3774,7 @@ impl Agent {
         }
         t.activity = activity.clone();
         if !t.row_closed {
-            let mut h = host.lock().await;
+            let h = host.lock().await;
             h.doc.set_activity(&t.assistant_msg_id, activity.as_deref());
         }
         self.post_activity(&t.chat_id, activity);
@@ -3843,7 +3843,7 @@ impl Agent {
                 self.open_row(&host, t, "progress").await;
             }
             {
-                let mut h = host.lock().await;
+                let h = host.lock().await;
                 if t.text_part_dirty {
                     if let Some(p) = h.doc.add_text_part(&t.assistant_msg_id, "text") {
                         t.text_part_id = p;
@@ -3899,7 +3899,7 @@ impl Agent {
             // The turn said it was over (ack only) but the model kept talking: give it a row.
             self.open_row(host, t, "result").await;
         }
-        let mut h = host.lock().await;
+        let h = host.lock().await;
         if t.text_part_dirty {
             // A tool part landed since the last text: open a new text part so order is kept.
             if let Some(p) = h.doc.add_text_part(&t.assistant_msg_id, "text") {
@@ -4039,7 +4039,7 @@ impl Agent {
             t.asked = Some(question.to_owned());
             if chat_id == t.chat_id {
                 if let Some(host) = self.sync.host(&t.chat_id).await {
-                    let mut h = host.lock().await;
+                    let h = host.lock().await;
                     h.doc.add_question_part(
                         &t.assistant_msg_id,
                         &id,
@@ -4053,7 +4053,7 @@ impl Agent {
                 }
             } else if let Some(host) = self.sync.host(&chat_id).await {
                 // Standalone ask on the main chat; the side-thread turn just stops.
-                let mut h = host.lock().await;
+                let h = host.lock().await;
                 let last_user = h
                     .doc
                     .messages()
@@ -4222,7 +4222,7 @@ impl Agent {
             let Some(host) = self.sync.host(chat_id).await else {
                 continue;
             };
-            let mut h = host.lock().await;
+            let h = host.lock().await;
             let stale: Vec<String> = h
                 .doc
                 .messages()
@@ -4369,7 +4369,7 @@ impl Agent {
                 t.skills_used = slugs.clone();
             }
             if let Some(host) = self.sync.host(&chat_id).await {
-                let mut h = host.lock().await;
+                let h = host.lock().await;
                 h.doc.add_hidden_part(
                     &msg_id,
                     "skills",
@@ -4498,7 +4498,7 @@ impl Agent {
         // the prose ack before this and the prose result after (demo review items 1–2).
         let msg_id = ulid();
         {
-            let mut h = host.lock().await;
+            let h = host.lock().await;
             h.doc
                 .start_assistant_message(&msg_id, in_reply_to, &self.cfg.device_id);
             h.doc.set_message_fields(
@@ -4531,7 +4531,7 @@ impl Agent {
             let _ = self
                 .store
                 .set_subagent_last_status(&subagent_id, &format!("queued ({waiting} ahead)"));
-            let mut h = host.lock().await;
+            let h = host.lock().await;
             h.doc
                 .add_status_part(&msg_id, "working", "Waiting for a free slot…");
         }
@@ -4555,7 +4555,7 @@ impl Agent {
                 .await;
         }
         {
-            let mut h = host.lock().await;
+            let h = host.lock().await;
             h.doc.add_status_part(&msg_id, "working", "Working…");
         }
         self.subagent_msgs
@@ -4771,7 +4771,7 @@ impl Agent {
                         None
                     };
                     let input = sub_tool_inputs.remove(&id).unwrap_or(json!({}));
-                    let mut h = host.lock().await;
+                    let h = host.lock().await;
                     h.doc.add_tool_part(
                         &msg_id,
                         &id,
@@ -4801,7 +4801,7 @@ impl Agent {
                         &question,
                         None,
                     );
-                    let mut h = host.lock().await;
+                    let h = host.lock().await;
                     h.doc.add_question_part(&msg_id, &qid, &question, None);
                     h.doc.add_status_part(&msg_id, "waiting_user", &question);
                 }
@@ -4848,7 +4848,7 @@ impl Agent {
             .to_owned();
         let failed = done_err.is_some() || status == "blocked";
         {
-            let mut h = host.lock().await;
+            let h = host.lock().await;
             if let Some(e) = &done_err {
                 h.doc.add_error_part(&msg_id, "subagent_error", e);
             }
@@ -4967,7 +4967,7 @@ impl Agent {
         drop(_slot);
         // The user hears about it from the main agent, in prose, in this chat.
         {
-            let mut h = host.lock().await;
+            let h = host.lock().await;
             h.doc
                 .set_message_fields(&msg_id, &[("handoffMessages", json!(2))]);
         }
@@ -5062,7 +5062,7 @@ impl Agent {
             .ok_or_else(|| anyhow!("chat room not open"))?;
         if let Some(t) = self.turn.lock().await.as_mut() {
             t.escalate = false;
-            let mut h = host.lock().await;
+            let h = host.lock().await;
             h.doc
                 .add_status_part(&t.assistant_msg_id, "working", "Working…");
         }

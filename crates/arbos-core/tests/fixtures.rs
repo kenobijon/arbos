@@ -58,6 +58,50 @@ fn fixtures_chat_doc_and_frames() {
     assert_eq!(expected[4]["answersQuestionId"], "q-1");
     assert_eq!(expected[5]["reactions"]["🎉"]["user:legacy"], true);
 
+    assert_frames();
+}
+
+/// Rows written by the Mac fixture's old `insert_message` (full serde `Message`, with
+/// `chatId` / `pending` / `hiddenParts` placeholders) must still read through core.
+#[test]
+fn fixtures_mac_placeholder_rows_still_read() {
+    let mut doc = ChatDoc::new(Some(98), false);
+    doc.import(&load("mac_placeholder_rows.bin")).unwrap();
+
+    let expected: Vec<Value> =
+        serde_json::from_slice(&load("mac_placeholder_rows_expected.json")).unwrap();
+    assert_eq!(expected.len(), 2);
+    let rows = doc.projected_rows();
+    assert_eq!(rows.len(), expected.len());
+    let views = doc.messages();
+    assert_eq!(views.len(), expected.len());
+
+    let raw = doc.to_json();
+    let raw_rows = raw["messages"].as_array().expect("messages list");
+    for (i, exp) in expected.iter().enumerate() {
+        assert_eq!(rows[i]["id"], exp["id"], "row {i} id");
+        assert_eq!(rows[i]["role"], exp["role"], "row {i} role");
+        assert_eq!(message_text(&rows[i]), exp["text"], "row {i} text");
+        assert_eq!(views[i].id, exp["id"].as_str().unwrap(), "row {i} view id");
+        assert_eq!(
+            views[i].text(),
+            exp["text"].as_str().unwrap(),
+            "row {i} view text"
+        );
+
+        let obj = raw_rows[i].as_object().expect("row object");
+        assert_eq!(obj["chatId"], "chat-mac-legacy", "row {i} chatId");
+        assert_eq!(obj["pending"], false, "row {i} pending");
+        assert_eq!(
+            obj["hiddenParts"],
+            Value::Array(Vec::new()),
+            "row {i} hiddenParts"
+        );
+    }
+    assert_eq!(doc.meta()["chatId"], "chat-mac-legacy");
+}
+
+fn assert_frames() {
     let hello = Frame::decode(load("frame_hello.bin").into())
         .unwrap()
         .expect("hello");

@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use arbos_core::doc::{message_text, ChatDoc, MessageStatus, UserMessageOpts};
 use arbos_core::wire::{Ack, BoxState, Frame, FrameType, Hello, PushHeader, RowHeader, State};
 use arbos_core::PROTO_VERSION;
-use loro::{LoroList, LoroMap, LoroText};
+use loro::{LoroList, LoroMap, LoroText, LoroValue};
 use serde_json::json;
 
 fn fixtures_dir() -> PathBuf {
@@ -87,7 +87,7 @@ fn write_frames(dir: &std::path::Path) {
 
 fn write_chat_doc(dir: &std::path::Path) {
     // Fixed peer so regenerations of the same logical content stay closer.
-    let mut doc = ChatDoc::new(Some(42), false);
+    let doc = ChatDoc::new(Some(42), false);
     doc.init_meta("chat-fixture", "proj-fixture", 1);
 
     doc.transact(|d| {
@@ -203,10 +203,103 @@ fn write_chat_doc(dir: &std::path::Path) {
     .expect("expected json");
 }
 
+/// Rows as the Mac fixture's old `insert_message` / `insert_json` wrote them: every
+/// serde field of the Mac `Message`, including the client-only placeholders core never
+/// writes (`chatId`, `pending`, `hiddenParts`, `false` flags, null options, empty
+/// `mentions`). Docs synced from older Macs still carry this shape.
+fn write_mac_placeholder_rows(dir: &std::path::Path) {
+    let doc = ChatDoc::new(Some(43), false);
+    doc.init_meta("chat-mac-legacy", "proj-mac-legacy", 1);
+
+    let rows = [
+        (
+            "msg-mac-user",
+            "user",
+            "user",
+            None,
+            "hello from an old mac",
+        ),
+        (
+            "msg-mac-assistant",
+            "assistant",
+            "agent",
+            Some("reply"),
+            "legacy assistant reply",
+        ),
+    ];
+    let msgs = doc.messages_list();
+    for (i, (id, role, sender, turn, text)) in rows.iter().enumerate() {
+        let created = 1_700_000_000_000i64 + i as i64 * 1_000;
+        let m = msgs.push_container(LoroMap::new()).expect("row");
+        m.insert("id", *id).ok();
+        m.insert("chatId", "chat-mac-legacy").ok();
+        m.insert("role", *role).ok();
+        m.insert("sender", *sender).ok();
+        m.insert("status", "done").ok();
+        match turn {
+            Some(t) => m.insert("turn", *t).ok(),
+            None => m.insert("turn", LoroValue::Null).ok(),
+        };
+        for key in [
+            "decision",
+            "subagentId",
+            "subagentName",
+            "handoffMessages",
+            "inReplyTo",
+            "routineName",
+            "senderName",
+            "senderIcon",
+            "senderHandle",
+            "senderAvatar",
+            "senderAvatarColor",
+            "replyTo",
+            "askedByHandle",
+            "ownerHandle",
+            "usage",
+            "returnContract",
+            "model",
+            "effort",
+        ] {
+            m.insert(key, LoroValue::Null).ok();
+        }
+        m.insert_container("mentions", LoroList::new())
+            .expect("mentions");
+        m.insert("waitingUser", false).ok();
+        m.insert("waitingApproval", false).ok();
+        m.insert("createdAt", created).ok();
+        m.insert("completedAt", created).ok();
+        m.insert("pending", false).ok();
+        m.insert("greeting", false).ok();
+        let parts = m.insert_container("parts", LoroList::new()).expect("parts");
+        let part = parts.push_container(LoroMap::new()).expect("part");
+        part.insert("kind", "text").ok();
+        part.insert("id", format!("part-{id}")).ok();
+        let t = part
+            .insert_container("text", LoroText::new())
+            .expect("text");
+        t.insert(0, text).ok();
+        m.insert_container("hiddenParts", LoroList::new())
+            .expect("hiddenParts");
+    }
+    doc.doc.commit();
+
+    fs::write(dir.join("mac_placeholder_rows.bin"), doc.snapshot()).expect("mac rows bin");
+    let expected: Vec<_> = rows
+        .iter()
+        .map(|(id, role, _, _, text)| json!({ "id": id, "role": role, "text": text }))
+        .collect();
+    fs::write(
+        dir.join("mac_placeholder_rows_expected.json"),
+        serde_json::to_vec_pretty(&expected).unwrap(),
+    )
+    .expect("mac rows expected json");
+}
+
 fn main() {
     let dir = fixtures_dir();
     fs::create_dir_all(&dir).expect("fixtures dir");
     write_frames(&dir);
     write_chat_doc(&dir);
+    write_mac_placeholder_rows(&dir);
     eprintln!("wrote fixtures to {}", dir.display());
 }

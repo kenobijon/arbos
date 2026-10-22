@@ -255,7 +255,7 @@ pub async fn deliver(
         anyhow::bail!("chat {chat_id} is not open on this box");
     };
     {
-        let mut h = host.lock().await;
+        let h = host.lock().await;
         if h.doc.add_attachment_part(&msg_id, &attachment).is_none() {
             anyhow::bail!("message {msg_id} not found in chat {chat_id}");
         }
