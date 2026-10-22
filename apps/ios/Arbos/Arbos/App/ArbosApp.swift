@@ -193,6 +193,7 @@ private struct ProfileSheet: View {
         case .group(let chatId, let projectId): GroupProfileView(chatId: chatId, projectId: projectId)
         case .agent(let pid): AgentProfileView(projectId: pid, fallback: model.foreignAgent(pid))
         case .server(let sid): ServerProfileView(serverId: sid)
+        case .channel(let cid): ChannelProfileView(channelId: cid)
         }
     }
 }

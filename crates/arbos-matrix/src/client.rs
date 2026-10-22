@@ -350,7 +350,7 @@ impl MatrixClient {
                 space.unread += ch.unread;
                 if ch.last_ts > space.last_ts {
                     space.last_ts = ch.last_ts;
-                    space.last_text = format!("#{} · {}", ch.name, ch.last_text);
+                    space.last_text = format!("{} · {}", ch.name, ch.last_text);
                     space.last_sender_name = ch.last_sender_name.clone();
                 }
             }

@@ -22,6 +22,7 @@ use crate::ui::callview;
 use crate::ui::channels::{ChannelsEvent, ChannelsPanel};
 use crate::ui::composer::{Composer, ComposerEvent, ComposerInput};
 use crate::ui::connectors::{ConnectorsEvent, ConnectorsPanel};
+use crate::ui::create_agent;
 use crate::ui::feedback::{FeedbackSheet, SendFeedback};
 use crate::ui::frost::{frosted, MENU_BLUR, PANEL_BLUR};
 use crate::ui::glass::{self, WindowDrag};
@@ -171,6 +172,9 @@ pub struct Shell {
     pub(crate) project_input: Entity<ComposerInput>,
     /// D79: the swatch picked for the agent being created; `None` = automatic.
     pub(crate) new_agent_color: Option<u8>,
+    /// D92 Create agent sheet: the leaf and colour clicked; `None` = the sheet's default pick.
+    pub(crate) new_agent_leaf: Option<u8>,
+    pub(crate) new_agent_leaf_color: Option<u8>,
     /// Sidebar search field.
     pub(crate) search_input: Entity<ComposerInput>,
     pub(crate) connectors: Entity<ConnectorsPanel>,
@@ -215,6 +219,15 @@ pub struct Shell {
     pub(crate) server_leave_armed: bool,
     /// Right-click menu on a sidebar row: the space and where the click landed.
     pub(crate) row_menu: Option<(crate::model::Id, gpui::Point<gpui::Pixels>)>,
+    /// Right-click menu on a channel row of the server's channel list (D88): server, channel,
+    /// and where the click landed. Archive for everyone, Delete for owners/admins.
+    pub(crate) channel_menu: Option<(
+        crate::model::Id,
+        crate::model::Id,
+        gpui::Point<gpui::Pixels>,
+    )>,
+    /// The channel menu's Delete was clicked once: it shows "Delete #name?" with Cancel / Delete.
+    pub(crate) channel_delete_armed: bool,
     /// The row menu's Delete was clicked once: it now shows "Delete …?" with
     /// Cancel / Delete instead of the action list (iPhone confirmationDialog).
     pub(crate) row_delete_armed: bool,
@@ -397,7 +410,8 @@ impl Shell {
         {
             let weak = cx.weak_entity();
             project_input.update(cx, |input, _| {
-                input.set_placeholder("Agent name");
+                input.set_placeholder("Name your agent");
+                input.set_text_center(true);
                 input.on_submit = Some(Rc::new(move |window, cx| {
                     let _ = weak.update(cx, |this, cx| this.submit_project(window, cx));
                 }));
@@ -528,6 +542,10 @@ impl Shell {
                 s.new_project_open = true;
                 cx.notify();
             });
+            // `ARBOS_NEW_AGENT_NAME=…` prefills the name (the "named" state on the rig).
+            if let Ok(name) = std::env::var("ARBOS_NEW_AGENT_NAME") {
+                project_input.update(cx, |input, cx| input.set_text(name, cx));
+            }
         }
         let connectors = cx.new(|cx| ConnectorsPanel::new(state.clone(), cx));
         // Rig: `ARBOS_OPEN_SETTINGS=connectors` — the Connectors page inside the sheet.
@@ -615,6 +633,8 @@ impl Shell {
             pairing_input,
             project_input,
             new_agent_color: None,
+            new_agent_leaf: None,
+            new_agent_leaf_color: None,
             search_input,
             connectors,
             skills,
@@ -633,6 +653,8 @@ impl Shell {
             },
             settings_scroll,
             row_menu: None,
+            channel_menu: None,
+            channel_delete_armed: false,
             row_delete_armed: false,
             agent_delete_armed: false,
             member_remove_armed: None,
@@ -890,10 +912,15 @@ impl Shell {
         }
         self.project_input.update(cx, |input, cx| input.clear(cx));
         let color = self.new_agent_color.take();
+        // D92: the Create sheet always shows a definite leaf + colour; send that pair so the
+        // new agent looks exactly like its preview.
+        let pick = crate::ui::create_agent::current_pick(self, cx);
+        self.new_agent_leaf = None;
+        self.new_agent_leaf_color = None;
         self.state.update(cx, |s, cx| {
             s.new_project_open = false;
             s.close_new_chat(cx);
-            s.create_project(name, color, cx);
+            s.create_project(name, color, Some(pick), cx);
         });
         Composer::focus(&self.composer, window, cx);
     }
@@ -917,6 +944,7 @@ impl Shell {
         };
         self.menu_open = false;
         self.row_menu = None;
+        self.channel_menu = None;
         // A pending single-click open of the header name must not land on
         // top of the rename.
         self.name_click_serial = self.name_click_serial.wrapping_add(1);
@@ -1052,6 +1080,7 @@ impl Shell {
         };
         self.menu_open = false;
         self.row_menu = None;
+        self.channel_menu = None;
         self.channel_rename = None;
         self.new_channel_restricted = false;
         self.server_input.update(cx, |input, cx| {
@@ -1164,6 +1193,7 @@ impl Shell {
         };
         self.menu_open = false;
         self.row_menu = None;
+        self.channel_menu = None;
         self.agent_name_input.update(cx, |input, cx| {
             input.set_text_center(true);
             input.set_text(name, cx);
@@ -1303,6 +1333,9 @@ impl Shell {
     pub(crate) fn close_new_chat_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.people_input
             .update(cx, |input, _| input.set_placeholder("Search people"));
+        self.new_agent_leaf = None;
+        self.new_agent_leaf_color = None;
+        self.project_input.update(cx, |input, cx| input.clear(cx));
         self.state.update(cx, |s, cx| {
             s.new_project_open = false;
             s.close_new_chat(cx);
@@ -1621,10 +1654,28 @@ impl Shell {
     pub(crate) fn open_chat_menu(&mut self, chat_id: crate::model::Id, cx: &mut Context<Self>) {
         self.menu_open = false;
         self.row_menu = None;
+        self.channel_menu = None;
         self.row_delete_armed = false;
         self.tab_menu_open = true;
         self.chat_menu = Some(chat_id);
         self.chat_delete_armed = false;
+        cx.notify();
+    }
+
+    /// Right-click / control-click on a channel row (D88): its menu, anchored at the click.
+    pub(crate) fn open_channel_menu(
+        &mut self,
+        server_id: crate::model::Id,
+        channel_id: crate::model::Id,
+        at: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.menu_open = false;
+        self.row_menu = None;
+        self.row_delete_armed = false;
+        self.chat_menu = None;
+        self.channel_menu = Some((server_id, channel_id, at));
+        self.channel_delete_armed = false;
         cx.notify();
     }
 
@@ -1637,6 +1688,7 @@ impl Shell {
             || self.group_picker_open
             || self.tab_menu_open
             || self.row_menu.is_some()
+            || self.channel_menu.is_some()
             || self.chat_menu.is_some()
             || self.react_menu.is_some()
         {
@@ -1646,8 +1698,11 @@ impl Shell {
             self.group_picker_open = false;
             self.tab_menu_open = false;
             self.row_menu = None;
+            self.channel_menu = None;
             self.row_delete_armed = false;
             self.agent_delete_armed = false;
+            self.channel_menu = None;
+            self.channel_delete_armed = false;
             self.chat_menu = None;
             self.chat_delete_armed = false;
             self.react_menu = None;
@@ -3109,6 +3164,17 @@ impl Render for Shell {
         if let Some(menu) = sidebar::row_menu(self, cx) {
             root = root.child(menu);
         }
+        // Rig: the hook asked for the selected channel's row menu.
+        if let Some(armed) = self.state.update(cx, |s, _| s.rig_channel_menu.take()) {
+            if let Some(c) = self.state.read(cx).selected_channel.clone() {
+                self.channel_menu =
+                    Some((c.server_id, c.channel_id, gpui::point(px(150.0), px(135.0))));
+                self.channel_delete_armed = armed;
+            }
+        }
+        if let Some(menu) = sidebar::channel_menu(self, cx) {
+            root = root.child(menu);
+        }
         if let Some(menu) = self.react_menu(cx) {
             root = root.child(menu);
         }
@@ -3175,12 +3241,12 @@ impl Render for Shell {
             }
         }
         if new_chat_open {
-            root = root.child(people::new_chat_sheet(
-                self,
-                &self.state,
-                &self.people_input,
-                cx,
-            ));
+            // D92: "New agent" opens its own Create sheet over the same backdrop.
+            if self.state.read(cx).new_project_open {
+                root = root.child(create_agent::sheet(self, cx));
+            } else {
+                root = root.child(people::new_chat_sheet(&self.state, &self.people_input, cx));
+            }
         }
         if let Some(sheet) = self.state.read(cx).server_sheet.clone() {
             root = root.child(servers::sheet(self, &sheet, cx));

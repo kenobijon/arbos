@@ -175,7 +175,7 @@ fn channels_tab(
         );
     }
     let channels: Vec<ServerChannel> = server.ordered_channels().into_iter().cloned().collect();
-    if channels.is_empty() {
+    if channels.is_empty() && server.archived_channels().is_empty() {
         return div()
             .flex()
             .flex_col()
@@ -183,6 +183,7 @@ fn channels_tab(
             .child(empty("No channels yet", theme));
     }
     let general_id = server.general().map(|c| c.id.clone());
+    let has_live = !channels.is_empty();
     let mut list = card(theme);
     for ch in channels {
         let key = ch.id.clone();
@@ -290,7 +291,7 @@ fn channels_tab(
             kit::row(
                 ElementId::Name(SharedString::from(format!("profile-channel-{key}"))),
                 kit::Leading::Glyph("hash"),
-                format!("#{}", ch.name),
+                ch.name.clone(),
                 subtitle,
                 None,
                 trailing,
@@ -321,17 +322,65 @@ fn channels_tab(
             )),
         );
     }
+    // Channels I archived (row menu → Archive): listed under the live ones; the row's
+    // "Unarchive" brings one back to my list.
+    let archived: Vec<ServerChannel> = server.archived_channels().into_iter().cloned().collect();
+    let archived_section = (!archived.is_empty()).then(|| {
+        let mut rows = card(theme);
+        for ch in archived {
+            let (sid, cid) = (server.id.clone(), ch.id.clone());
+            let restore = div()
+                .id(ElementId::Name(SharedString::from(format!(
+                    "channel-unarchive-{}",
+                    ch.id
+                ))))
+                .flex_shrink_0()
+                .px(px(10.0))
+                .h(px(26.0))
+                .flex()
+                .items_center()
+                .rounded_full()
+                .bg(theme.field)
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.surface_2))
+                .text_size(px(TEXT_SMALL))
+                .text_color(theme.text)
+                .child("Unarchive")
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let (sid, cid) = (sid.clone(), cid.clone());
+                    this.state
+                        .update(cx, |s, cx| s.archive_channel(sid, cid, false, cx));
+                }))
+                .into_any_element();
+            rows = rows.child(kit::row(
+                ElementId::Name(SharedString::from(format!("channel-archived-{}", ch.id))),
+                kit::Leading::Glyph("archive"),
+                ch.name.clone(),
+                ch.restricted.then(|| "Admins only post".into()),
+                None,
+                Some(restore),
+                false,
+                theme,
+            ));
+        }
+        div()
+            .flex()
+            .flex_col()
+            .child(kit::section_title("Archived", theme))
+            .child(rows)
+    });
     div()
         .flex()
         .flex_col()
         .children(add.map(|row| card(theme).child(row)))
-        .child(list)
+        .when(has_live, |el| el.child(list))
         .when(can_admin, |el| {
             el.child(kit::footnote(
                 "Double-click a channel to rename it. The switch makes it admins-only.",
                 theme,
             ))
         })
+        .children(archived_section)
 }
 
 /// Members: owner first. The owner flips admin ↔ member with the crown and removes or bans
