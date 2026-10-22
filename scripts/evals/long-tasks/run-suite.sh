@@ -78,3 +78,35 @@ if [ -d "$STORE/docs" ]; then
   echo "report: $STORE/docs/agent-eval-runs/$DATE-$RUN_ID.md"
 fi
 echo "scoreboard: $EVAL/scoreboard/$RUN_ID.json  summary: $EVAL/scoreboard/SUMMARY.md"
+
+# Version the scoreboard: a fresh feedback/<id> branch off origin/main with only the scoreboard
+# files, pushed and registered with the loop (which gates and merges it). LT_COMMIT=0 skips it.
+if [ "${LT_COMMIT:-1}" = 1 ] && [ -n "${ARBOS_GITHUB:-}" ]; then
+  FID="long-task-eval-run-$RUN_ID"
+  REMOTE="https://x-access-token:${ARBOS_GITHUB}@github.com/unarbos/arbos.git"
+  (
+    cd "$ROOT"
+    git fetch -q "$REMOTE" main
+    git checkout -q -B "feedback/$FID" FETCH_HEAD
+    git add evals/long-tasks/scoreboard
+    if git -c user.name="Cursor agent (bc-dcc557ae)" -c user.email="agents@arbos.life" commit -qm "evals(long-tasks): run $RUN_ID scoreboard [feedback $FID]"; then
+      git push -q "$REMOTE" "feedback/$FID"
+      PASS_LINE="$(python3 -c "import json; s=json.load(open('$EVAL/scoreboard/$RUN_ID.json'))['summary']; print(f\"{s['passed']}/{s['run']} passed ({s['pass_pct']} %), first reply p50 {s['ttfr_p50_s']} s, tool errors {s['tool_errors']}, cost \\${s.get('run_cost_usd') or s['cost_usd']:.2f}\")")"
+      python3 - "$EVAL" "$FID" "$RUN_ID" "$PASS_LINE" <<'PY2'
+import sys
+sys.path.insert(0, sys.argv[1])
+from lib import issues as iss
+fid, run_id, line = sys.argv[2], sys.argv[3], sys.argv[4]
+st, v = iss.gh("POST", f"/repos/{iss.REPO}/issues", {"title": f"[feedback {fid}] Long-task eval run {run_id}: {line}", "body": f"Scoreboard commit for run `{run_id}` (`evals/long-tasks/scoreboard/{run_id}.json`, `SUMMARY.md`): {line}. Report: project store `docs/agent-eval-runs/`. Failures have their own root-cause issues (label `long-task-eval`).", "labels": ["long-task-eval", "feedback"]})
+if st == 201:
+    iss.gh("POST", f"/repos/{iss.REPO}/issues/{v['number']}/comments", {"body": f"track {fid} {iss.OWNER_AGENT}"})
+    print("scoreboard issue:", v["html_url"])
+else:
+    print("scoreboard issue failed:", st, v)
+PY2
+    else
+      echo "nothing new to commit"
+    fi
+    git checkout -q --detach FETCH_HEAD
+  )
+fi
