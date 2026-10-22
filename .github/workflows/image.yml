@@ -79,6 +79,8 @@ jobs:
             /opt/chrome/chrome --version
             uv --version && doppler --version && gh --version | head -1
             python3 --version && pip --version
+            [ "$(git config --system --get user.email)" = agent@arbos.life ]
+            d=$(mktemp -d) && git -C "$d" init -q && touch "$d/a" && git -C "$d" add a && git -C "$d" commit -qm smoke
             test -x /opt/prime-venv/bin/python
             test -f /etc/arbos/pi-seed/extensions/arbos-pi-ext/index.ts
             arbos-agentd --version

@@ -769,8 +769,9 @@ async fn refresh_me(shared: &Arc<Shared>) {
     *shared.me.lock().unwrap() = Some(u);
     let view = account_view_from_me(&dto);
     let _ = shared.events.send(SyncEvent::Account(Some(view)));
-    // D92 remote flag: leaf avatars for agents (absent on older relays = on).
+    // D92 remote flags: leaf avatars for agents, and their Lottie playback (absent = on).
     crate::ui::avatars::set_leaf_avatars(dto.features.leaf_avatars.unwrap_or(true));
+    crate::ui::avatars::set_leaf_lottie(dto.features.leaf_lottie.unwrap_or(true));
     // Voice mode is a relay-side kill switch; absent = off.
     let _ = shared.events.send(SyncEvent::Features {
         voice_mode: dto.features.voice_mode.unwrap_or(false),
@@ -1548,12 +1549,32 @@ fn handle_server_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                 }
             });
         }
-        ClientCommand::ServerResetInvite { server_id } => {
+        ClientCommand::ServerInviteCreate {
+            server_id,
+            expires,
+            max_uses,
+        } => {
             let shared = shared.clone();
             let server_id = server_id.clone();
+            let body = json!({ "expires": expires, "max_uses": max_uses });
             tokio::spawn(async move {
-                let path = format!("/servers/{server_id}/invite/reset");
-                if let Err(err) = shared.post_json(&path, json!({})).await {
+                let path = format!("/servers/{server_id}/invites");
+                if let Err(err) = shared.post_json(&path, body).await {
+                    server_error(&shared, &err);
+                    return;
+                }
+                fetch_server_detail(&shared, &server_id).await;
+            });
+        }
+        ClientCommand::ServerInviteRevoke {
+            server_id,
+            invite_id,
+        } => {
+            let shared = shared.clone();
+            let server_id = server_id.clone();
+            let path = format!("/servers/{server_id}/invites/{invite_id}");
+            tokio::spawn(async move {
+                if let Err(err) = shared.delete(&path).await {
                     server_error(&shared, &err);
                     return;
                 }
@@ -1653,6 +1674,23 @@ fn handle_server_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                 if let Err(err) = shared.delete(&path).await {
                     server_error(&shared, &err);
                     return;
+                }
+                fetch_server_detail(&shared, &server_id).await;
+            });
+        }
+        ClientCommand::ServerAddMembers {
+            server_id,
+            user_ids,
+        } => {
+            let shared = shared.clone();
+            let server_id = server_id.clone();
+            let user_ids = user_ids.clone();
+            tokio::spawn(async move {
+                let path = format!("/servers/{server_id}/members");
+                for uid in user_ids {
+                    if let Err(err) = shared.post_json(&path, json!({ "user_id": uid })).await {
+                        server_error(&shared, &err);
+                    }
                 }
                 fetch_server_detail(&shared, &server_id).await;
             });
@@ -4970,6 +5008,33 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 }
             });
         }
+        ClientCommand::SetVision {
+            project_id,
+            enabled,
+        } => {
+            {
+                let mut projects = shared.projects.lock().unwrap();
+                if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
+                    p.vision_enabled = enabled;
+                }
+                let snapshot = projects.clone();
+                drop(projects);
+                let _ = shared.events.send(SyncEvent::Projects(snapshot));
+            }
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let body = json!({ "vision_enabled": enabled });
+                match shared
+                    .patch_json(&format!("/projects/{project_id}"), body)
+                    .await
+                {
+                    Ok(_) => {}
+                    Err(err) => {
+                        shared.notice(format!("Camera vision not saved: {}", people_error(&err)))
+                    }
+                }
+            });
+        }
         ClientCommand::SetModel {
             project_id,
             model,
@@ -5833,12 +5898,14 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         | ClientCommand::ServerRename { .. }
         | ClientCommand::ServerDelete { .. }
         | ClientCommand::ServerLeave { .. }
-        | ClientCommand::ServerResetInvite { .. }
+        | ClientCommand::ServerInviteCreate { .. }
+        | ClientCommand::ServerInviteRevoke { .. }
         | ClientCommand::ServerSetRole { .. }
         | ClientCommand::ServerRemoveMember { .. }
         | ClientCommand::ChannelCreate { .. }
         | ClientCommand::ChannelPatch { .. }
         | ClientCommand::ChannelDelete { .. }
+        | ClientCommand::ServerAddMembers { .. }
         | ClientCommand::ChannelArchive { .. }
         | ClientCommand::ChannelOpen { .. }
         | ClientCommand::ChannelLoadOlder { .. }

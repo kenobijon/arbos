@@ -71,9 +71,9 @@ pub fn new_chat_sheet(
     let busy = s.people_busy;
     let error = s.people_error.clone();
     let group_mode = s.new_group_open;
-    // Opened from a group pane's "Add members": same picker, members of that
-    // group shown as added, and Add puts the picks into it.
-    let add_to: Option<Project> = s.add_members_group().cloned();
+    // Opened from a group or server pane's "Add members": same picker, members of
+    // that group / server shown as added, and Add puts the picks into it.
+    let add_to: Option<crate::app::AddTarget> = s.add_members_target_info();
     let me_handle = s.me_handle();
     let picked = s.new_group_picked.clone();
     let picked_agents = s.new_group_agents.clone();
@@ -89,7 +89,8 @@ pub fn new_chat_sheet(
         .and_then(|id| s.projects.iter().find(|p| &p.id == id))
         .map(|p| p.name.clone());
     let servers_available = s.servers_available;
-    let my_agents: Vec<Project> = if group_mode {
+    // Servers hold people only: no agent rows in their picker.
+    let my_agents: Vec<Project> = if group_mode && !add_to.as_ref().is_some_and(|t| t.is_server) {
         let q = typed.to_lowercase();
         s.my_projects()
             .filter(|p| {
@@ -313,15 +314,9 @@ pub fn new_chat_sheet(
                         "New server",
                         "Channels for a crowd, with an invite link",
                         crate::app::ServerSheet::NewServer,
-                    ))
-                    .child(div().h(px(0.5)).ml(px(66.0)).bg(theme.border))
-                    .child(server_row(
-                        "join-server",
-                        "link",
-                        "Join a server",
-                        "Paste an invite link",
-                        crate::app::ServerSheet::JoinServer,
                     ));
+                // "Join a server" (paste a link) is gone (Jacob 2026-10-22): invite links
+                // open the app through arbos.life/s/<code>; people are added by name.
             }
             body = body.child(group);
         }
@@ -450,7 +445,7 @@ pub fn new_chat_sheet(
     }
 
     let title = match (&add_to, group_mode, &invite_into) {
-        (Some(group), _, _) => format!("Add members to {}", group.name),
+        (Some(target), _, _) => format!("Add members to {}", target.name),
         (None, true, _) => "New group".to_string(),
         (None, false, Some(name)) => format!("Invite to {name}"),
         (None, false, None) => "New Message".to_string(),
@@ -583,8 +578,8 @@ fn new_group_body(
     typed: &str,
     busy: bool,
     error: Option<String>,
-    add_to: Option<&Project>,
-    me_handle: &str,
+    add_to: Option<&crate::app::AddTarget>,
+    _me_handle: &str,
     state: &Entity<AppState>,
     cx: &mut Context<Shell>,
 ) -> Stateful<Div> {
@@ -654,7 +649,7 @@ fn new_group_body(
         let mut list = glass::group(theme).mx(px(16.0));
         for (i, project) in my_agents.iter().enumerate() {
             let pid = project.id.clone();
-            let already = add_to.is_some_and(|g| g.has_agent(&project.id));
+            let already = add_to.is_some_and(|g| g.agents.iter().any(|a| a == &project.id));
             let selected = already || picked_agents.iter().any(|id| id == &project.id);
             list = list.child(
                 div()
@@ -744,7 +739,11 @@ fn new_group_body(
     let count = results.len();
     for (i, (person, image)) in results.iter().enumerate() {
         any = true;
-        let already = add_to.is_some_and(|g| g.has_person(me_handle, person));
+        let already = add_to.is_some_and(|g| {
+            g.handles
+                .iter()
+                .any(|h| !h.is_empty() && h.eq_ignore_ascii_case(&person.handle))
+        });
         let selected = already
             || picked
                 .iter()

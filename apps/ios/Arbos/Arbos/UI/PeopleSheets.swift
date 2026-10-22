@@ -106,11 +106,9 @@ struct NewChatSheet: View {
                                     actionRow(icon: "number", title: "New server", subtitle: "Channels for a group of people")
                                 }
                                 .buttonStyle(.plain)
-                                rowDivider
-                                NavigationLink { JoinServerView(onDone: { dismiss() }) } label: {
-                                    actionRow(icon: "link", title: "Join a server", subtitle: "Invite link or open server")
-                                }
-                                .buttonStyle(.plain)
+                                // "Join a server" (paste a link) is gone (Jacob 2026-10-22): invite
+                                // links open the app through arbos.life/s/<code>; people are added
+                                // by name from the server's Members tab.
                             }
                         }
                         .padding(.horizontal, 16)
@@ -705,6 +703,8 @@ struct NewGroupView: View {
     let onDone: () -> Void
     /// People-chat id to add to; nil creates a new group.
     var addTo: String? = nil
+    /// Server id to add to (D88 Members › Add members): people only, members greyed.
+    var addToServer: String? = nil
     /// D93 step 1's name + leaf picture (nil when opened as Add members).
     var draft: GroupDraft? = nil
     @State private var query = ""
@@ -721,6 +721,7 @@ struct NewGroupView: View {
     /// Empty query hides archived agents; a search finds them again — archived agents still
     /// exist and can join groups unless deleted (home archive is hide-only).
     private var agentCandidates: [Project] {
+        if addToServer != nil { return [] }
         let q = trimmed.lowercased()
         let base = model.projects.filter { !$0.shared && (q.isEmpty ? !model.isArchived($0.id) : true) }
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
@@ -737,14 +738,23 @@ struct NewGroupView: View {
     }
 
     private var addToChat: PeopleChat? { addTo.flatMap { model.peopleChat($0) } }
-    private var adding: Bool { addTo != nil }
-    private var title: String { addToChat.map { "Add members to \($0.title)" } ?? (adding ? "Add members" : "New group") }
+    private var server: Server? { addToServer.flatMap { model.server($0) } }
+    private var adding: Bool { addTo != nil || addToServer != nil }
+    private var title: String {
+        if let s = server { return "Add members to \(s.name)" }
+        return addToChat.map { "Add members to \($0.title)" } ?? (adding ? "Add members" : "New group")
+    }
     /// Create needs a person (a group of one is a DM); Add takes agents alone too.
     /// People, agents, or both — a group of your agents is a group (Create
     /// greyed out with only agents picked read as broken, 2026-10-22).
     private var canSubmit: Bool { !(picked.isEmpty && pickedAgents.isEmpty) }
 
-    private func isIn(_ p: Person) -> Bool { addToChat?.hasPerson(p, meId: model.user?.id) ?? false }
+    private func isIn(_ p: Person) -> Bool {
+        if let s = server {
+            return p.id == model.user?.id || s.members.contains { $0.id == p.id || $0.handle.caseInsensitiveCompare(p.handle) == .orderedSame }
+        }
+        return addToChat?.hasPerson(p, meId: model.user?.id) ?? false
+    }
     private func isIn(_ p: Project) -> Bool { addToChat?.hasAgent(p.id) ?? false }
 
     private func pickMark(selected: Bool, already: Bool) -> AnyView {
@@ -891,8 +901,24 @@ struct NewGroupView: View {
         errorText = nil
     }
 
-    /// Add members: every pick goes to the group this picker was opened for.
+    /// Add members: every pick goes to the group — or server — this picker was opened for.
     private func add() {
+        if let s = server {
+            let new = picked.filter { !isIn($0) }
+            guard !new.isEmpty else { errorText = "Pick someone who is not in the server yet"; return }
+            creating = true
+            errorText = nil
+            Task {
+                if await model.addServerMembers(serverId: s.id, userIds: new.map(\.id)) {
+                    onDone()
+                } else {
+                    errorText = model.notice?.text ?? "Could not add them."
+                    model.notice = nil
+                }
+                creating = false
+            }
+            return
+        }
         guard let chat = addToChat, canSubmit, !creating else { return }
         let plan = AddMembersPlan.make(chat: chat, meId: model.user?.id, picked: picked, pickedAgents: pickedAgents)
         guard !plan.isEmpty else { errorText = "Pick someone who is not in the group yet"; return }

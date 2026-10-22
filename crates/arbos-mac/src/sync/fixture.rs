@@ -360,12 +360,14 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         | ClientCommand::ServerRename { .. }
         | ClientCommand::ServerDelete { .. }
         | ClientCommand::ServerLeave { .. }
-        | ClientCommand::ServerResetInvite { .. }
         | ClientCommand::ServerSetRole { .. }
         | ClientCommand::ServerRemoveMember { .. }
         | ClientCommand::ChannelCreate { .. }
         | ClientCommand::ChannelPatch { .. }
         | ClientCommand::ChannelDelete { .. }
+        | ClientCommand::ServerAddMembers { .. }
+        | ClientCommand::ServerInviteCreate { .. }
+        | ClientCommand::ServerInviteRevoke { .. }
         | ClientCommand::ChannelArchive { .. }
         | ClientCommand::ChannelOpen { .. }
         | ClientCommand::ChannelLoadOlder { .. }
@@ -747,6 +749,18 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 let mut projects = shared.projects.lock().unwrap();
                 if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
                     p.voice = voice;
+                }
+            }
+            emit_projects(shared);
+        }
+        ClientCommand::SetVision {
+            project_id,
+            enabled,
+        } => {
+            {
+                let mut projects = shared.projects.lock().unwrap();
+                if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
+                    p.vision_enabled = enabled;
                 }
             }
             emit_projects(shared);

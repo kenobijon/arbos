@@ -6,6 +6,7 @@
 // People keep their D79 initials.
 
 import ArbosFFI
+import Lottie
 import SwiftUI
 
 /// Remote flag `features.leaf_avatars` from `GET /me` (default on; the relay's
@@ -13,11 +14,79 @@ import SwiftUI
 final class LeafAvatarsFlag: ObservableObject {
     static let shared = LeafAvatarsFlag()
     @Published private(set) var on: Bool = UserDefaults.standard.object(forKey: "features.leaf_avatars") as? Bool ?? true
+    /// `features.leaf_lottie` (default on): the leaves play their committed Lottie idle / gust
+    /// files; off = the native sway.
+    @Published private(set) var lottie: Bool = UserDefaults.standard.object(forKey: "features.leaf_lottie") as? Bool ?? true
 
     func set(_ value: Bool) {
         guard value != on else { return }
         on = value
         UserDefaults.standard.set(value, forKey: "features.leaf_avatars")
+    }
+
+    func setLottie(_ value: Bool) {
+        guard value != lottie else { return }
+        lottie = value
+        UserDefaults.standard.set(value, forKey: "features.leaf_lottie")
+    }
+}
+
+/// One of a leaf's two committed Lottie files.
+enum LeafClip {
+    case idle, gust
+}
+
+/// Jacob's Lottie files, parsed once per leaf and clip (through ArbosFFI's `leafLottieJson`).
+enum LeafLottie {
+    private static var cache: [String: LottieAnimation] = [:]
+
+    static func animation(leaf: Int, clip: LeafClip) -> LottieAnimation? {
+        let key = "\(leaf)-\(clip)"
+        if let a = cache[key] { return a }
+        let json = leafLottieJson(index: UInt8(leaf), gust: clip == .gust)
+        guard let data = json.data(using: .utf8), let a = try? LottieAnimation.from(data: data) else { return nil }
+        cache[key] = a
+        return a
+    }
+}
+
+/// A `LottieAnimationView` playing one clip: the idle file loops, the gust plays once and
+/// settles on its rest pose. Core Animation drives it (no per-frame SwiftUI work); it pauses
+/// when the app goes to the background and when the view leaves the window. The fill is
+/// recoloured through the keypath `**.leaf.Color` (cream, like the static leaf).
+struct LeafLottieView: UIViewRepresentable {
+    let leaf: Int
+    let clip: LeafClip
+    var color: UIColor = UIColor(hexString: leafInkHex()) ?? .white
+
+    func makeUIView(context: Context) -> LottieAnimationView {
+        let view = LottieAnimationView()
+        view.contentMode = .scaleAspectFit
+        view.backgroundBehavior = .pauseAndRestore
+        view.respectAnimationFrameRate = true
+        view.isUserInteractionEnabled = false
+        configure(view)
+        return view
+    }
+
+    func updateUIView(_ view: LottieAnimationView, context: Context) {
+        if context.coordinator.key != key { configure(view) }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    final class Coordinator { var key = "" }
+
+    private var key: String { "\(leaf)-\(clip)" }
+
+    private func configure(_ view: LottieAnimationView) {
+        view.animation = LeafLottie.animation(leaf: leaf, clip: clip)
+        var r: CGFloat = 1, g: CGFloat = 1, b: CGFloat = 1, a: CGFloat = 1
+        color.getRed(&r, green: &g, blue: &b, alpha: &a)
+        view.setValueProvider(ColorValueProvider(LottieColor(r: r, g: g, b: b, a: a)), keypath: AnimationKeypath(keypath: "**.leaf.Color"))
+        view.loopMode = clip == .idle ? .loop : .playOnce
+        view.currentProgress = 0
+        view.play()
     }
 }
 
@@ -120,7 +189,14 @@ struct LeafAvatar: View {
     var body: some View {
         ZStack {
             Circle().fill(LeafArt.colors[Int(pick.color) % max(LeafArt.colorCount, 1)])
-            if animated {
+            if animated, LeafAvatarsFlag.shared.lottie {
+                // The committed Lottie: the gust while one runs (one play, back to rest), else
+                // the idle loop; the view is keyed so a new gust restarts the clip.
+                LeafLottieView(leaf: leaf, clip: gustStart != nil ? .gust : .idle)
+                    .id("\(leaf)-\(gustStart?.timeIntervalSinceReferenceDate ?? 0)")
+                    .frame(width: size * LeafArt.scale, height: size * LeafArt.scale)
+                    .accessibilityHidden(true)
+            } else if animated {
                 TimelineView(.animation(minimumInterval: 1.0 / 60.0)) { context in
                     glyph.rotationEffect(.radians(Double(angle(at: context.date))), anchor: LeafArt.pivot(leaf))
                 }

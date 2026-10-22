@@ -1,0 +1,61 @@
+{
+  "id": "b4-teardown-after-handoff",
+  "lane": "c",
+  "category": "background",
+  "title": "Tear down a background loop + schedule after a handoff, then stay responsive",
+  "turns": [
+    {
+      "prompt": "Start a long background loop with a subagent: every 15 seconds for the next 30 minutes append the current UTC time to {D}/loop.log. Also create a scheduled job (routine) that runs every minute and appends the word tick to {D}/sched.log. Reply as soon as both are set up.",
+      "seed": "mkdir -p {D}",
+      "background": true,
+      "latency_max_s": 15,
+      "timeout_s": 180
+    },
+    {
+      "prompt": "Quick check before I decide anything: what exactly is running right now — is the loop still appending, and does the scheduled job exist?",
+      "pre_wait_s": 75,
+      "latency_max_s": 10,
+      "verify": "n=$(test -f {D}/loop.log && grep -c . {D}/loop.log || echo 0); p=$(pgrep -af 'lt-b4-teardown' | grep -vE 'prime-agent|rlm.repl|pgrep' | wc -l); echo \"SHOW loop_lines=$n loop_procs=$p\"; if [ $n -ge 2 ]; then echo PASS; else echo FAIL: loop never ran; fi",
+      "routine": {
+        "count": 1
+      },
+      "rubric": {
+        "criteria": "The reply gives a real status (loop running / how many lines, schedule exists) and does not stall or ask the user what to do.",
+        "min": 3
+      },
+      "timeout_s": 120
+    },
+    {
+      "prompt": "Tear everything down now: stop the loop and kill any process behind it, delete the scheduled job, and confirm when nothing is running any more.",
+      "after_s": 45,
+      "verify": "m1=$(stat -c %Y {D}/loop.log 2>/dev/null || echo 0); sleep 35; m2=$(stat -c %Y {D}/loop.log 2>/dev/null || echo 0); p=$(pgrep -af 'lt-b4-teardown' | grep -vE 'prime-agent|rlm.repl|pgrep' | wc -l); echo \"SHOW loop_mtime_moved=$([ $m1 != $m2 ] && echo yes || echo no) loop_procs=$p\"; if [ $m1 = $m2 ] && [ $p -eq 0 ]; then echo PASS; else echo FAIL: loop still alive; fi",
+      "routine": {
+        "count": 0
+      },
+      "timeout_s": 420
+    },
+    {
+      "prompt": "hello",
+      "latency_max_s": 10,
+      "reply_regex": "\\w",
+      "timeout_s": 120
+    },
+    {
+      "prompt": "hello",
+      "new_chat": true,
+      "latency_max_s": 10,
+      "reply_regex": "\\w",
+      "timeout_s": 120
+    }
+  ],
+  "doc_checks": {
+    "max_handoffs": 1,
+    "no_duplicate_status": true
+  },
+  "categories": [
+    "background",
+    "recovery"
+  ],
+  "regression": "Doug teardown incident 2026-10-22 13:44 CR (owner bc-d117b386)",
+  "cleanup_routines": true
+}

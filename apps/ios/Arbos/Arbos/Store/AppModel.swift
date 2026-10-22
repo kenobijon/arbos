@@ -893,6 +893,7 @@ final class AppModel: ObservableObject {
             saveAccountCache()
             // D92 remote flag `features.leaf_avatars` (absent on an older relay = on).
             LeafAvatarsFlag.shared.set(features?.leaf_avatars ?? true)
+            LeafAvatarsFlag.shared.setLottie(features?.leaf_lottie ?? true)
             // Voice mode kill switch (absent on an older relay = off).
             VoiceModeFlag.shared.set(features?.voice_mode ?? false)
             let position = summary.waitlisted ? Int(summary.waitlist_position ?? 1) : nil

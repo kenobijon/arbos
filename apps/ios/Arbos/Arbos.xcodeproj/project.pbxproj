@@ -48,6 +48,7 @@
 		A1D79A0000000000000000B1 /* AvatarPalette.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D79A0000000000000000A1 /* AvatarPalette.swift */; };
 		A1C634E69BCD2C37B7F27346 /* MessageNotification.swift in Sources */ = {isa = PBXBuildFile; fileRef = A189C676F775E104AF2116C8 /* MessageNotification.swift */; };
 		A142325F91336BDF2882011F /* LiveKit in Frameworks */ = {isa = PBXBuildFile; productRef = A192208521894CF66C53FA38 /* LiveKit */; };
+		A1D8800000000000000000E3 /* Lottie in Frameworks */ = {isa = PBXBuildFile; productRef = A1D8800000000000000000E2 /* Lottie */; };
 		A1B67B3F74BDAB239C56AED6 /* NotificationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10999EDEF21B6240657C678 /* NotificationService.swift */; };
 		A190E060B710273750619338 /* AvatarImage.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B6A97F3E4CCA36512BE56F /* AvatarImage.swift */; };
 		A1D79A0000000000000000B2 /* AvatarPalette.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D79A0000000000000000A1 /* AvatarPalette.swift */; };
@@ -185,6 +186,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A142325F91336BDF2882011F /* LiveKit in Frameworks */,
+				A1D8800000000000000000E3 /* Lottie in Frameworks */,
 				A15C00000000000000000004 /* ArbosFFI in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -385,6 +387,7 @@
 			name = Arbos;
 			packageProductDependencies = (
 				A192208521894CF66C53FA38 /* LiveKit */,
+				A1D8800000000000000000E2 /* Lottie */,
 				A15C00000000000000000002 /* ArbosFFI */,
 			);
 			productName = Arbos;
@@ -464,6 +467,7 @@
 			mainGroup = A19BA62AACF9AABB98774F6F;
 			packageReferences = (
 				A15BB86C523299D91321EF64 /* XCRemoteSwiftPackageReference "client-sdk-swift" */,
+				A1D8800000000000000000E1 /* XCRemoteSwiftPackageReference "lottie-spm" */,
 			);
 			productRefGroup = A1CA9DEF8434A85687602C88 /* Products */;
 			projectDirPath = "";
@@ -843,6 +847,14 @@
 				version = 2.17.0;
 			};
 		};
+		A1D8800000000000000000E1 /* XCRemoteSwiftPackageReference "lottie-spm" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/airbnb/lottie-spm";
+			requirement = {
+				kind = exactVersion;
+				version = 4.6.1;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -850,6 +862,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = A15BB86C523299D91321EF64 /* XCRemoteSwiftPackageReference "client-sdk-swift" */;
 			productName = LiveKit;
+		};
+		A1D8800000000000000000E2 /* Lottie */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A1D8800000000000000000E1 /* XCRemoteSwiftPackageReference "lottie-spm" */;
+			productName = Lottie;
 		};
 		A15C00000000000000000002 /* ArbosFFI */ = {
 			isa = XCSwiftPackageProductDependency;

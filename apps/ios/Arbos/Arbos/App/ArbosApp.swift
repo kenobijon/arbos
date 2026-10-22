@@ -130,6 +130,12 @@ struct RootView: View {
         }
         // Safari / Mac-style connector OAuth: relay redirects to arbos://connectors/callback.
         .onOpenURL { url in
+            // Invite links (D88): arbos://join/<code> — what arbos.life/s/<code> hands to the app.
+            if url.scheme == "arbos", url.host == "join" {
+                let code = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                Task { await model.joinFromLink(code: code) }
+                return
+            }
             guard AuthEndpoints.isConnectorCallback(url) else { return }
             model.refreshConnectors()
         }

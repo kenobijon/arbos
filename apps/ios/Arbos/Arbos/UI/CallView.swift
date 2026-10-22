@@ -300,6 +300,13 @@ struct CallScreen: View {
 
     // MARK: Controls
 
+    /// The agent this call is with (my own, not a person's): the one that may look
+    /// through my camera. `nil` for calls with people.
+    private var visionAgent: Project? {
+        guard let c = calls.call, !c.isPeople, let p = model.project(c.projectId), !p.shared else { return nil }
+        return p
+    }
+
     private var controls: some View {
         HStack(spacing: 24) {
             control(icon: calls.muted ? "mic.slash.fill" : "mic.fill", label: calls.muted ? "Unmute" : "Mute", on: calls.muted) {
@@ -308,7 +315,18 @@ struct CallScreen: View {
             control(icon: calls.cameraOn ? "video.fill" : "video.slash.fill", label: calls.cameraOn ? "Camera off" : "Camera on", on: !calls.cameraOn) {
                 Task { await calls.toggleCamera() }
             }
-            if calls.cameraOn {
+            if calls.cameraOn, let agent = visionAgent {
+                // "Let <agent> see" (#1353): the one switch for the agent's vision_enabled,
+                // beside the camera while it is on (the Mac's call screen has the same).
+                VStack(spacing: 8) {
+                    Toggle("", isOn: Binding(get: { agent.visionEnabled }, set: { model.setVision(agent.id, enabled: $0) }))
+                        .labelsHidden()
+                        .tint(theme.online)
+                        .frame(height: 64)
+                    Text("Let \(agent.name) see").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted).lineLimit(1)
+                }
+                .accessibilityLabel("Let \(agent.name) see your camera")
+            } else if calls.cameraOn {
                 control(icon: "arrow.triangle.2.circlepath.camera", label: "Flip", on: false) { Task { await calls.flipCamera() } }
             } else {
                 control(icon: calls.speakerOn ? "speaker.wave.3.fill" : "speaker.fill", label: "Speaker", on: calls.speakerOn) { calls.toggleSpeaker() }

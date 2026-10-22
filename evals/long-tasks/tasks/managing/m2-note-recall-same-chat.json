@@ -1,0 +1,26 @@
+{
+  "id": "m2-note-recall-same-chat",
+  "lane": "a",
+  "category": "managing",
+  "title": "Remember two facts, chat about other things, recall both",
+  "turns": [
+    {
+      "prompt": "Please remember two things for me: our staging database password is rotated every 45 days, and the owner of that rotation is Priya.",
+      "timeout_s": 240
+    },
+    {
+      "prompt": "Unrelated: what is the capital of Costa Rica?",
+      "reply_regex": "San Jos",
+      "timeout_s": 240
+    },
+    {
+      "prompt": "Write a two-line poem about autumn.",
+      "timeout_s": 240
+    },
+    {
+      "prompt": "How often is the staging database password rotated, and who owns the rotation?",
+      "reply_regex": "45[\\s\\S]*Priya|Priya[\\s\\S]*45",
+      "timeout_s": 240
+    }
+  ]
+}

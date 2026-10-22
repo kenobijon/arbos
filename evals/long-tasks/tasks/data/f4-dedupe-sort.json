@@ -1,0 +1,21 @@
+{
+  "id": "f4-dedupe-sort",
+  "lane": "a",
+  "category": "data",
+  "title": "Deduplicate and sort a 50k-line file",
+  "turns": [
+    {
+      "prompt": "{D}/words.txt has 50,000 lines with many duplicates. Write the unique lines, sorted, one per line, to {D}/unique.txt and tell me how many unique lines there are.",
+      "generate": "dedupe_file",
+      "verify": "f={D}/unique.txt; test -f $f || { echo FAIL: no unique.txt; exit 0; }; n=$(wc -l < $f); s=$(sha256sum $f | cut -d' ' -f1); echo \"SHOW lines=$n sha=$s\"; echo PASS",
+      "truth": {
+        "kind": "generated",
+        "keys": [
+          "unique_lines",
+          "sha256"
+        ]
+      },
+      "timeout_s": 420
+    }
+  ]
+}
