@@ -832,17 +832,16 @@ final class AppModel: ObservableObject {
             user = who
             credits = cr
             saveAccountCache()
-            let waitlisted = (summary["waitlisted"] as? NSNumber)?.boolValue ?? false
-            let position = waitlisted ? ((summary["waitlist_position"] as? NSNumber)?.intValue ?? 1) : nil
+            let position = summary.waitlisted ? Int(summary.waitlist_position ?? 1) : nil
             if position != waitlistPosition { waitlistPosition = position }
-            if let on = (summary["always_on"] as? NSNumber)?.boolValue {
-                meAlwaysOn = on
-                if let held = (summary["held"] as? NSNumber)?.boolValue { machine.held = held }
-                if on, !machine.alwaysOn {
-                    machine.alwaysOn = true
-                    machine.state = machine.coerced(machine.state)
-                }
+            meAlwaysOn = summary.always_on
+            var m = machine
+            m.held = summary.held
+            if summary.always_on, !m.alwaysOn {
+                m.alwaysOn = true
+                m.state = m.coerced(m.state)
             }
+            machine = m
         }
         if let list = try? await api.approvals() { approvals = list }
     }

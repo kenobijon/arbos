@@ -154,7 +154,8 @@ fn group_name(state: &AppState, members: &[crate::db_people::Membership]) -> Str
         .iter()
         .filter_map(|m| m.user_id())
         .filter_map(|u| state.db.user_card(u).ok().flatten())
-        .filter_map(|c| c["handle"].as_str().map(|h| format!("@{h}")))
+        .filter(|c| !c.handle.is_empty())
+        .map(|c| format!("@{}", c.handle))
         .collect();
     names.sort();
     names.join(", ")
@@ -164,11 +165,9 @@ fn group_name(state: &AppState, members: &[crate::db_people::Membership]) -> Str
 fn display_name(state: &AppState, member: &str) -> Option<String> {
     if let Some(u) = member.strip_prefix("user:") {
         let card = state.db.user_card(u).ok().flatten()?;
-        return card["handle"]
-            .as_str()
-            .filter(|h| !h.is_empty())
-            .map(str::to_owned)
-            .or_else(|| card["name"].as_str().map(str::to_owned));
+        return (!card.handle.is_empty())
+            .then_some(card.handle)
+            .or(card.name);
     }
     let p = member.strip_prefix("agent:")?;
     state.db.project(p).ok().flatten().map(|p| p.name)

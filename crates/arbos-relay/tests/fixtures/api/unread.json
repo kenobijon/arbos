@@ -1,0 +1,10 @@
+{
+  "chats": [
+    {
+      "chat_id": "people_dm",
+      "project_id": "people",
+      "unread": 2
+    }
+  ],
+  "total": 2
+}
