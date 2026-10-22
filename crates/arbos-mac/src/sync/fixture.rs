@@ -683,62 +683,6 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 .events
                 .send(SyncEvent::ChatSnapshot { chat_id, messages });
         }
-        ClientCommand::GroupCreate {
-            project_id,
-            chat_id,
-            participants,
-            title,
-        } => {
-            add_doc(shared, ChatDoc::new(&chat_id, &project_id));
-            let mut all = vec![project_id.clone()];
-            all.extend(participants.into_iter().filter(|p| *p != project_id));
-            let names: Vec<String> = {
-                let projects = shared.projects.lock().unwrap();
-                all.iter()
-                    .skip(1)
-                    .filter_map(|id| projects.iter().find(|p| &p.id == id))
-                    .map(|p| p.name.clone())
-                    .collect()
-            };
-            let chat = Chat {
-                id: chat_id.clone(),
-                project_id: project_id.clone(),
-                title: title.unwrap_or_else(|| format!("Group · {}", names.join(", "))),
-                is_pinned: false,
-                is_system: false,
-                kind: ChatKind::Group,
-                participants: all,
-                unread: false,
-                last_message_at: now_ms(),
-                archived_at: None,
-            };
-            shared.chats.lock().unwrap().push(chat.clone());
-            emit_chats(shared);
-            let _ = shared.events.send(SyncEvent::ChatCreated {
-                project_id,
-                local_id: chat_id.clone(),
-                chat,
-            });
-            let _ = shared.events.send(SyncEvent::ChatSnapshot {
-                chat_id,
-                messages: Vec::new(),
-            });
-        }
-        ClientCommand::GroupAddParticipant {
-            chat_id,
-            participant,
-            ..
-        } => {
-            {
-                let mut chats = shared.chats.lock().unwrap();
-                if let Some(c) = chats.iter_mut().find(|c| c.id == chat_id) {
-                    if !c.participants.contains(&participant) {
-                        c.participants.push(participant);
-                    }
-                }
-            }
-            emit_chats(shared);
-        }
         ClientCommand::MarkRead { chat_id } => mark_read(shared, &chat_id),
         ClientCommand::FetchVoices => {
             let _ = shared.events.send(SyncEvent::Voices {

@@ -470,19 +470,6 @@ pub enum ClientCommand {
         chat_id: Id,
         title: String,
     },
-    /// F6: a group chat hosted by `project_id` with the other `participants`; `chat_id` is the
-    /// client's placeholder until `ChatCreated` brings the relay's.
-    GroupCreate {
-        project_id: Id,
-        chat_id: Id,
-        participants: Vec<Id>,
-        title: Option<String>,
-    },
-    GroupAddParticipant {
-        project_id: Id,
-        chat_id: Id,
-        participant: Id,
-    },
     /// Archive (hide from the tab strip) or unarchive a chat for me on every
     /// device (§9c `PUT /chats/{id}/settings {archived}`); the relay keeps it
     /// open, history stays in context, memory and search.

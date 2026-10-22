@@ -3,13 +3,11 @@
 //! header with its picker. Everything here is pure rendering over `AppState`; the shell owns
 //! the open/closed state of the picker.
 
-use gpui::{div, prelude::*, px, Context, Div, ElementId, Entity, Hsla, SharedString};
+use gpui::{div, prelude::*, px, Div, Hsla};
 
 use crate::app::AppState;
 use crate::model::{Chat, ChatKind, Project};
-use crate::ui::frost::{frosted, MENU_BLUR};
-use crate::ui::shell::Shell;
-use crate::ui::theme::{Theme, PANEL_RADIUS};
+use crate::ui::theme::Theme;
 
 const MAX_GLYPHS: usize = 4;
 const GLYPH: f32 = 16.0;
@@ -57,22 +55,6 @@ pub fn sender_color(seed: &str, theme: &Theme) -> Hsla {
     c.h = (h % 360) as f32 / 360.0;
     c.s = c.s.max(0.45);
     c
-}
-
-fn glyph(icon: &str, color: Hsla, size: f32, theme: &Theme) -> Div {
-    div()
-        .size(px(size))
-        .flex_shrink_0()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded_full()
-        .bg(Theme::with_alpha(color, 0.18))
-        .border_1()
-        .border_color(Theme::with_alpha(color, 0.8))
-        .text_size(px(size * 0.58))
-        .text_color(theme.text)
-        .child(icon.to_owned())
 }
 
 /// Group tab: the participants' glyphs stacked, host first. The "Projects ⇄" tab shows `⇄`.
@@ -131,93 +113,4 @@ pub fn tab_glyphs(chat: &Chat, projects: &[Project], theme: &Theme) -> Option<Di
         ),
         ChatKind::Chat | ChatKind::Other => None,
     }
-}
-
-pub fn picker(state: &Entity<AppState>, top: f32, right: f32, cx: &mut Context<Shell>) -> Div {
-    let theme = Theme::of(cx).clone();
-    let s = state.read(cx);
-    let selected = s.selected_project.clone().unwrap_or_default();
-    let group = s.active_chat().filter(|c| c.is_group()).cloned();
-    let candidates: Vec<Project> = s
-        .projects
-        .iter()
-        .filter(|p| p.id != selected)
-        .filter(|p| !p.is_people() && !p.is_guest())
-        .filter(|p| {
-            group
-                .as_ref()
-                .map(|g| !g.participants.contains(&p.id))
-                .unwrap_or(true)
-        })
-        .cloned()
-        .collect();
-    let heading = match &group {
-        Some(g) => format!("ADD TO “{}”", g.title.to_uppercase()),
-        None => "NEW GROUP WITH".to_owned(),
-    };
-    let mut card = div()
-        .id("add-project-picker")
-        .w(px(232.0))
-        .flex()
-        .flex_col()
-        .gap(px(4.0))
-        .p(px(8.0))
-        .rounded(px(PANEL_RADIUS))
-        .bg(theme.card())
-        .border_1()
-        .border_color(theme.border_strong)
-        .shadow_lg()
-        .child(
-            div()
-                .px(px(4.0))
-                .pb(px(2.0))
-                .text_size(px(10.5))
-                .text_color(theme.text_faint)
-                .overflow_hidden()
-                .text_ellipsis()
-                .child(heading),
-        );
-    if candidates.is_empty() {
-        card = card.child(
-            div()
-                .px(px(4.0))
-                .py(px(4.0))
-                .text_size(px(12.0))
-                .text_color(theme.text_muted)
-                .child("Every other Project is already here."),
-        );
-    }
-    for p in candidates {
-        let id = p.id.clone();
-        let color = project_color(&p.color, theme.accent);
-        card = card.child(
-            div()
-                .id(ElementId::Name(SharedString::from(format!(
-                    "pick-{}",
-                    p.id
-                ))))
-                .flex()
-                .items_center()
-                .gap(px(8.0))
-                .px(px(6.0))
-                .py(px(5.0))
-                .rounded(px(6.0))
-                .text_size(px(12.5))
-                .text_color(theme.text)
-                .cursor_pointer()
-                .hover(|s| s.bg(theme.surface_2))
-                .child(glyph(&p.icon, color, 18.0, &theme))
-                .child(div().flex_1().child(p.name.clone()))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.app_state()
-                        .update(cx, |s, cx| s.add_project_to_chat(id.clone(), cx));
-                    this.set_group_picker(false, cx);
-                })),
-        );
-    }
-    div()
-        .absolute()
-        .top(px(top))
-        .right(px(right))
-        .child(frosted(PANEL_RADIUS, MENU_BLUR, card))
 }

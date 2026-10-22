@@ -16,12 +16,12 @@ use arbos_client::room::{self, RoomAction, RoomSession};
 use arbos_core::api::{
     ApiErrorDto, CallDto, CallEnvelopeDto, ChannelBindingDto, ChannelPairingDto,
     ChannelPlatformDto, ChatDto, ConnectConnectorReplyDto, ConnectorsCatalogDto, ConnectorsListDto,
-    CreateChatResponseDto, DecideSecretResponseDto, GetProjectResponseDto, GroupDto,
-    LeaveCallResponseDto, LocalDevicesDto, MachineStateDto, MachineStatusDto, MeResponseDto,
-    MeUserResponseDto, ModelListDto, PairResponseDto, PeopleChatDto, ProjectMembersDto,
-    ProjectSecretsDto, PushEventDto, PushItemDto, RoutineDto, RoutineRunDto, SecretEnvelopeDto,
-    SecretRequestsDto, SecretsOverviewDto, SkillDto, StartCallResponseDto, TokenResponseDto,
-    TranscriptionDto, UserCardDto, UsersPageDto, VaultEnvelopeDto, VoiceCatalogDto,
+    CreateChatResponseDto, DecideSecretResponseDto, GetProjectResponseDto, LeaveCallResponseDto,
+    LocalDevicesDto, MachineStateDto, MachineStatusDto, MeResponseDto, MeUserResponseDto,
+    ModelListDto, PairResponseDto, PeopleChatDto, ProjectMembersDto, ProjectSecretsDto,
+    PushEventDto, PushItemDto, RoutineDto, RoutineRunDto, SecretEnvelopeDto, SecretRequestsDto,
+    SecretsOverviewDto, SkillDto, StartCallResponseDto, TokenResponseDto, TranscriptionDto,
+    UserCardDto, UsersPageDto, VaultEnvelopeDto, VoiceCatalogDto,
 };
 use arbos_core::doc::{UserAttachment, UserMessageOpts};
 use arbos_core::wire::{BoxState as WireBox, PROJECT_DOC_CHAT_ID};
@@ -43,9 +43,9 @@ use super::diagnostics;
 use super::doc::ChatDoc;
 use super::dto::{
     account_view_from_me, apply_machine_status, chat_from_create, chat_from_dto,
-    chat_from_group_dto, connectors_view_from_dto, credentials_from_token, local_view_from_dto,
-    model_ids_from_dto, people_space_from, project_from_dto, routine_from_dto,
-    secrets_view_from_dto, skill_from_dto, transcript_text, voices_from_dto,
+    connectors_view_from_dto, credentials_from_token, local_view_from_dto, model_ids_from_dto,
+    people_space_from, project_from_dto, routine_from_dto, secrets_view_from_dto, skill_from_dto,
+    transcript_text, voices_from_dto,
 };
 use super::store::{self, Store};
 use super::{ClientCommand, SyncEvent, SyncSource};
@@ -4475,74 +4475,6 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         });
                     }
                     Err(err) => shared.notice(format!("Fork failed: {err:#}")),
-                }
-            });
-        }
-        ClientCommand::GroupCreate {
-            project_id,
-            chat_id: local_id,
-            participants,
-            title,
-        } => {
-            let shared = shared.clone();
-            tokio::spawn(async move {
-                match shared
-                    .post_json(
-                        &format!("/projects/{project_id}/groups"),
-                        json!({ "title": title, "participants": participants }),
-                    )
-                    .await
-                {
-                    Ok(v) => {
-                        let chat = match serde_json::from_value::<GroupDto>(v) {
-                            Ok(dto) => chat_from_group_dto(&dto),
-                            Err(err) => {
-                                log::warn!(target: "arbos_mac::relay", "GroupDto: {err}");
-                                shared.notice("Relay returned no group");
-                                return;
-                            }
-                        };
-                        shared.chats.lock().unwrap().push(chat.clone());
-                        ensure_room(&shared, &project_id, &chat.id, &chat.id);
-                        let _ = shared.events.send(SyncEvent::ChatCreated {
-                            project_id: project_id.clone(),
-                            local_id,
-                            chat,
-                        });
-                    }
-                    Err(err) => shared.notice(format!("New group failed: {err:#}")),
-                }
-            });
-        }
-        ClientCommand::GroupAddParticipant {
-            project_id,
-            chat_id,
-            participant,
-        } => {
-            let shared = shared.clone();
-            tokio::spawn(async move {
-                match shared
-                    .patch_json(
-                        &format!("/projects/{project_id}/groups/{chat_id}"),
-                        json!({ "add": [participant] }),
-                    )
-                    .await
-                {
-                    Ok(v) => {
-                        if let Ok(dto) = serde_json::from_value::<GroupDto>(v) {
-                            let chat = chat_from_group_dto(&dto);
-                            let mut chats = shared.chats.lock().unwrap();
-                            match chats.iter_mut().find(|c| c.id == chat.id) {
-                                Some(slot) => {
-                                    slot.participants = chat.participants;
-                                    slot.title = chat.title;
-                                }
-                                None => chats.push(chat),
-                            }
-                        }
-                        emit_chats(&shared);
-                    }
-                    Err(err) => shared.notice(format!("Add to group failed: {err:#}")),
                 }
             });
         }

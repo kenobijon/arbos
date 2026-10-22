@@ -26,7 +26,6 @@ use crate::ui::create_agent;
 use crate::ui::feedback::{FeedbackSheet, SendFeedback};
 use crate::ui::frost::{frosted, MENU_BLUR, PANEL_BLUR};
 use crate::ui::glass::{self, WindowDrag};
-use crate::ui::groups;
 use crate::ui::header;
 use crate::ui::icons::icon;
 use crate::ui::local::{LocalEvent, LocalPanel};
@@ -194,8 +193,6 @@ pub struct Shell {
     pub(crate) routines: Entity<RoutinesPanel>,
     pub(crate) routines_open: bool,
     pub(crate) channels: Entity<ChannelsPanel>,
-    /// F6: the "add a project to this chat" picker (sidebar row menu).
-    group_picker_open: bool,
     pub(crate) secrets: Entity<SecretsPanel>,
     shake_started_at: Option<u64>,
     /// True while the sign-in screen is up; its clearing focuses the composer.
@@ -288,15 +285,6 @@ pub struct Shell {
 }
 
 impl Shell {
-    pub(crate) fn app_state(&self) -> &Entity<AppState> {
-        &self.state
-    }
-
-    pub(crate) fn set_group_picker(&mut self, open: bool, cx: &mut Context<Self>) {
-        self.group_picker_open = open;
-        cx.notify();
-    }
-
     pub fn new(state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let open_settings = std::env::var("ARBOS_OPEN_SETTINGS").ok().filter(|v| {
             v == "1"
@@ -661,7 +649,6 @@ impl Shell {
             chat_menu: None,
             chat_delete_armed: false,
             react_menu: None,
-            group_picker_open: false,
             renaming_tab: None,
             tab_rename_input,
             tab_menu_open: false,
@@ -1532,7 +1519,6 @@ impl Shell {
         let floating = self.menu_open
             || self.members_open
             || self.add_agent_open
-            || self.group_picker_open
             || self.tab_menu_open
             || self.row_menu.is_some()
             || self.chat_menu.is_some()
@@ -1685,7 +1671,6 @@ impl Shell {
         if self.menu_open
             || self.members_open
             || self.add_agent_open
-            || self.group_picker_open
             || self.tab_menu_open
             || self.row_menu.is_some()
             || self.channel_menu.is_some()
@@ -1695,7 +1680,6 @@ impl Shell {
             self.menu_open = false;
             self.members_open = false;
             self.add_agent_open = false;
-            self.group_picker_open = false;
             self.tab_menu_open = false;
             self.row_menu = None;
             self.channel_menu = None;
@@ -3210,14 +3194,6 @@ impl Render for Shell {
         }
         if let Some(menu) = self.react_menu(cx) {
             root = root.child(menu);
-        }
-        if self.group_picker_open {
-            root = root.child(glass::popover(groups::picker(
-                &self.state,
-                TAB_BAR_HEIGHT - 4.0,
-                16.0,
-                cx,
-            )));
         }
         if let Some(space) = people_space {
             let right = 16.0;
