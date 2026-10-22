@@ -166,6 +166,7 @@ pub async fn create_group(
         doc_epoch: 1,
         kind: "group".into(),
         participants,
+        forked_from: None,
     };
     state.db.insert_chat(&chat).map_err(internal)?;
     Ok(Json(group_json(&state, &chat).await).into_response())
