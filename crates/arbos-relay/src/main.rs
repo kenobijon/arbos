@@ -1,5 +1,7 @@
 mod admin;
 mod api;
+#[cfg(test)]
+mod api_fixture_capture;
 mod apns;
 mod auth;
 mod avatar;
