@@ -3547,13 +3547,20 @@ impl AppState {
         self.open_server_hook_done = true;
         self.enter_server(server.id.clone(), cx);
         for part in parts {
-            if part == "panel" {
+            if part == "panel" || part == "panel-members" || part == "panel-settings" {
                 self.open_profile(
                     ProfilePage::Server {
                         server_id: server.id.clone(),
                     },
                     cx,
                 );
+                match part {
+                    "panel-members" => self.set_profile_tab(1, cx),
+                    "panel-settings" => self.set_profile_tab(2, cx),
+                    _ => {}
+                }
+            } else if part == "add-members" {
+                self.open_add_server_members(server.id.clone(), cx);
             } else if part == "channel" {
                 if let Some(c) = self.selected_channel.clone() {
                     self.open_profile(
