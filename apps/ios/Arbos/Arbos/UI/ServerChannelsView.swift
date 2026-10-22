@@ -397,13 +397,16 @@ struct NewServerView: View {
     }
 }
 
-/// Rule 8: "Join a server" — paste the invite link (or just its code), then `POST /servers/join`.
+/// Rule 8: "Join a server" — paste an invite link (or its code), or search an
+/// open server by name and join without a link (`POST /servers/join`).
 struct JoinServerView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
     let onDone: () -> Void
     @State private var link = ""
     @State private var joining = false
+    @State private var searching = false
+    @State private var openHits: [Server] = []
     @State private var errorText: String?
     @FocusState private var focused: Bool
 
@@ -417,15 +420,27 @@ struct JoinServerView: View {
         return raw
     }
 
+    /// Looks like a pasted invite (URL or the relay's 10-char code), not a server name to search.
+    private var looksLikeInvite: Bool {
+        let raw = link.trimmingCharacters(in: .whitespacesAndNewlines)
+        if raw.contains("/") || raw.contains("://") { return true }
+        // Bare invite codes are 10 lowercase alphanumerics (see relay `invite_code`).
+        return raw.count == 10
+            && raw == raw.lowercased()
+            && raw.unicodeScalars.allSatisfy { CharacterSet.alphanumerics.contains($0) }
+    }
+
     var body: some View {
         VStack(spacing: 18) {
             GlassCircle(size: 92) {
                 Image(systemName: "link").font(.system(size: 34, weight: .medium)).foregroundStyle(theme.text)
             }
             .padding(.top, 28)
-            Text("Paste the invite link you were sent")
+            Text("Paste an invite link, or search an open server")
                 .font(theme.font(Theme.small)).foregroundStyle(theme.muted)
-            TextField("", text: $link, prompt: Text("Invite link").foregroundStyle(theme.placeholder))
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 24)
+            TextField("", text: $link, prompt: Text("Invite link or server name").foregroundStyle(theme.placeholder))
                 .font(theme.font(Theme.body)).foregroundStyle(theme.text)
                 .multilineTextAlignment(.center)
                 .textInputAutocapitalization(.never)
@@ -434,6 +449,7 @@ struct JoinServerView: View {
                 .focused($focused)
                 .submitLabel(.join)
                 .onSubmit(join)
+                .onChange(of: link) { _, _ in searchOpen() }
                 .padding(.horizontal, 16).frame(height: 50)
                 .background(RoundedRectangle(cornerRadius: 25, style: .continuous).fill(theme.field))
                 .overlay(RoundedRectangle(cornerRadius: 25, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
@@ -445,13 +461,28 @@ struct JoinServerView: View {
                     .background(Capsule().fill(theme.primary))
             }
             .buttonStyle(.plain)
-            .disabled(code.isEmpty || joining)
-            .opacity(code.isEmpty || joining ? 0.45 : 1)
+            .disabled(code.isEmpty || joining || (!looksLikeInvite && openHits.isEmpty))
+            .opacity(code.isEmpty || joining || (!looksLikeInvite && openHits.isEmpty) ? 0.45 : 1)
             .padding(.horizontal, 24)
             if let errorText {
                 Text(errorText)
                     .font(theme.font(Theme.small)).foregroundStyle(theme.danger)
                     .multilineTextAlignment(.center).padding(.horizontal, 36)
+            }
+            if !openHits.isEmpty {
+                VStack(spacing: 0) {
+                    ForEach(Array(openHits.enumerated()), id: \.element.id) { i, s in
+                        Button { joinOpen(s) } label: { ServerPickRow(server: s) }
+                            .buttonStyle(.plain)
+                        if i < openHits.count - 1 {
+                            Rectangle().fill(theme.separator).frame(height: 0.5).padding(.leading, 72)
+                        }
+                    }
+                }
+                .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(theme.card))
+                .padding(.horizontal, 24)
+            } else if searching {
+                ProgressView().tint(theme.muted)
             }
             Spacer()
         }
@@ -463,12 +494,44 @@ struct JoinServerView: View {
         .onAppear { focused = true }
     }
 
+    private func searchOpen() {
+        let q = link.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard q.count >= 2, !looksLikeInvite else { openHits = []; searching = false; return }
+        searching = true
+        Task {
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard q == link.trimmingCharacters(in: .whitespacesAndNewlines) else { return }
+            openHits = await model.searchOpenServers(q)
+            if q == link.trimmingCharacters(in: .whitespacesAndNewlines) { searching = false }
+        }
+    }
+
     private func join() {
-        guard !code.isEmpty, !joining else { return }
+        guard !joining else { return }
+        if looksLikeInvite {
+            guard !code.isEmpty else { return }
+            joining = true
+            errorText = nil
+            Task {
+                if await model.joinServer(code: code) {
+                    onDone()
+                } else {
+                    errorText = model.notice?.text ?? "Could not join the server."
+                    model.notice = nil
+                }
+                joining = false
+            }
+            return
+        }
+        if let first = openHits.first { joinOpen(first) }
+    }
+
+    private func joinOpen(_ s: Server) {
+        guard !joining else { return }
         joining = true
         errorText = nil
         Task {
-            if await model.joinServer(code: code) {
+            if await model.joinOpenServer(s.id) {
                 onDone()
             } else {
                 errorText = model.notice?.text ?? "Could not join the server."

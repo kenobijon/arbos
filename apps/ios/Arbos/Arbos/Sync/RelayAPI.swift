@@ -683,13 +683,20 @@ final class RelayAPI {
         return s
     }
 
-    /// `PATCH /servers/{id} {name?, image_key?}` (owner/admin).
-    func patchServer(_ id: String, name: String? = nil, imageKey: String? = nil) async throws {
+    /// `PATCH /servers/{id} {name?, image_key?, open?}` (owner/admin).
+    func patchServer(_ id: String, name: String? = nil, imageKey: String? = nil, open: Bool? = nil) async throws {
         var body: [String: Any] = [:]
         if let name { body["name"] = name }
         if let imageKey { body["image_key"] = imageKey }
+        if let open { body["open"] = open }
         guard !body.isEmpty else { return }
         _ = try await request("PATCH", "/servers/\(id)", body: body)
+    }
+
+    /// `GET /servers/search?q=` → open servers by name (join without an invite).
+    func searchOpenServers(_ q: String) async throws -> [Server] {
+        let enc = q.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? q
+        return ((try await json("GET", "/servers/search?q=\(enc)")) as? [Any] ?? []).compactMap(Server.parse)
     }
 
     /// `DELETE /servers/{id}` (owner).
@@ -732,6 +739,13 @@ final class RelayAPI {
     /// `POST /servers/join {code}` (the code or the whole link) → the server.
     func joinServer(code: String) async throws -> Server {
         let v = try await json("POST", "/servers/join", body: ["code": code.trimmingCharacters(in: .whitespacesAndNewlines)])
+        guard let s = Server.parse(v) else { throw RelayError(status: 0, message: "The relay returned no server") }
+        return s
+    }
+
+    /// `POST /servers/join {server_id}` — open server, no invite link needed.
+    func joinOpenServer(id: String) async throws -> Server {
+        let v = try await json("POST", "/servers/join", body: ["server_id": id])
         guard let s = Server.parse(v) else { throw RelayError(status: 0, message: "The relay returned no server") }
         return s
     }
