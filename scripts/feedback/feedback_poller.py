@@ -2264,6 +2264,11 @@ class Loop:
         runs = [r for r in runs if (r.get("head_branch") or "") in own or (r.get("head_branch") or "").startswith("v")]
         by_name: dict[str, dict] = {}
         for r in runs:
+            # ios.yml runs on feedback/** too (#1295) but only archives there — `fastlane archive`, no upload — so a
+            # green branch run is not a TestFlight build (21:24 Oct 22: #1318/#1332/#1344 were "shipped" with build
+            # numbers Apple never saw). Only main / tag runs upload; the merge's run is found by later_ios_build.
+            if r["name"] == "iOS" and (r.get("head_branch") or "") != "main" and not (r.get("head_branch") or "").startswith("v"):
+                continue
             if r["name"] in ("iOS", "CI", "Release") and (r["name"] not in by_name or r["run_number"] > by_name[r["name"]]["run_number"]):
                 by_name[r["name"]] = r
         ios, ci, rel = by_name.get("iOS"), by_name.get("CI"), by_name.get("Release")
@@ -2483,7 +2488,10 @@ class Loop:
                     self.ship(fid, st)
                     return
             if st.get("ios_done") or st.get("release_done"):
-                self.ship(fid, st, partial=True)
+                # Once per item: the partial ship leaves the item `pushed` so later ticks keep looking for the
+                # processed build, and must not repeat the "Shipped (partially)" comment every two minutes.
+                if not st.get("partial_shipped_at"):
+                    self.ship(fid, st, partial=True)
             else:
                 self.fail(fid, st, f"nothing shipped within {self.cfg.ship_timeout_min} min of the push",
                           extra=json.dumps(st.get("runs", {}), indent=1))
@@ -2600,6 +2608,8 @@ class Loop:
         end = st.get("testflight_ready_at") or st.get("ios_uploaded_at") or st.get("release_at") or iso()
         elapsed = minutes_between(info["created"], end)
         st.update(status="shipped", shipped_at=iso(), elapsed_min=elapsed, partial=partial)
+        if partial:
+            st["partial_shipped_at"] = iso()
         self.store.save_state(fid, st)
         self.store.event(fid, "shipped", testflight_build=st.get("testflight_build"), edge=st.get("edge_release"),
                          elapsed_min=elapsed, commit=st.get("commit"), issue=st.get("issue_url"))
