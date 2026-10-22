@@ -782,15 +782,13 @@ struct GroupProfileView: View {
             } else {
                 // The New group picker aimed at this group: its members show as
                 // already in, Add puts the picks into it (not into a new group).
+                // A sheet over the profile sheet, like GroupEditSheet: no
+                // presentation / colour-scheme modifiers here — they unseat
+                // the presenting sheet.
                 NavigationStack {
                     NewGroupView(onDone: { showAdd = false }, addTo: chatId)
                 }
                 .tint(theme.text)
-                .presentationDetents([.large])
-                .presentationDragIndicator(.visible)
-                .presentationBackground(theme.bg)
-                .presentationCornerRadius(28)
-                .preferredColorScheme(theme.isDark ? .dark : .light)
                 .environmentObject(model)
                 .environment(\.theme, theme)
             }
