@@ -48,7 +48,7 @@ pub const ACTIVITY_WINDOW_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 const EXPIRING_NOTICE_MS: i64 = 3 * 24 * 60 * 60 * 1000;
 pub const ARBOS_VAULT_NAME: &str = "Arbos";
 
-/// A refused call: `{"error":{"type","message"}}` with its status. Small, so `Result` stays
+/// A refused call: [`arbos_core::api::ApiErrorDto`] with its status. Small, so `Result` stays
 /// cheap to pass around (clippy `result_large_err`).
 #[derive(Debug)]
 pub struct ApiErr(pub StatusCode, pub String, pub String);

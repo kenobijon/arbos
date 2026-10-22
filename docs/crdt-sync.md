@@ -335,7 +335,8 @@ Auth: `Authorization: Bearer <device_token>` unless noted. Apps column: **Mac** 
 - After you change a `Dto`, run `./scripts/gen-swift-types.sh` to regenerate `packages/ArbosFFI/Sources/ArbosFFI/RelayTypes.swift`.
 - The fixtures in `crates/arbos-relay/tests/fixtures/api` come from the relay's real handlers and builders (`api_fixture_capture.rs`). Both clients decode them in tests: `sync/dto.rs` on the Mac and `CoreFixturesTests.swift` on iOS.
 - Change a `Dto` only by addition, so older app builds keep decoding. A new field is optional. Never rename a field or change its type. Keep `null` and an absent key distinct where the relay already does.
-- Free-form JSON stays untyped on purpose: Matrix, error bodies, request bodies, connector `config`, action `args`, and goal plan and log.
+- Every relay error body is `ApiErrorDto` (`{"error":{"type","message"}}`); clients branch on `type`, never on message text.
+- Free-form JSON stays untyped on purpose: Matrix, request bodies, connector `config`, action `args`, and goal plan and log.
 
 ### 9.1 Pairing and session
 

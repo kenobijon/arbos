@@ -27,8 +27,9 @@ use serde_json::{json, Value};
 use sha2::Sha256;
 
 use arbos_core::api::{
-    AccountUserDto, CreditsDto, MeDeviceDto, MeLimitsDto, MeMachineDto, MeResponseDto,
-    MeUserResponseDto, PeopleInviteAcceptedPayloadDto, PushEventDto, TokenResponseDto,
+    AccountUserDto, ApiErrorBodyDto, ApiErrorDto, CreditsDto, MeDeviceDto, MeLimitsDto,
+    MeMachineDto, MeResponseDto, MeUserResponseDto, PeopleInviteAcceptedPayloadDto, PushEventDto,
+    TokenResponseDto,
 };
 use arbos_core::auth::hash;
 use arbos_core::ids::{now_ms, ulid};
@@ -52,7 +53,12 @@ type HmacSha256 = Hmac<Sha256>;
 pub(crate) fn api_error(status: StatusCode, kind: &str, message: impl Into<String>) -> Response {
     (
         status,
-        Json(json!({ "error": { "type": kind, "message": message.into() } })),
+        Json(ApiErrorDto {
+            error: ApiErrorBodyDto {
+                type_: kind.to_owned(),
+                message: message.into(),
+            },
+        }),
     )
         .into_response()
 }
