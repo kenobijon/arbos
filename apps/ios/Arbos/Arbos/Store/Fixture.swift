@@ -8,6 +8,7 @@ import Foundation
 extension AppModel {
     func loadFixture() {
         isFixture = true
+        waitlistPosition = DebugHooks.fixtureWaitlist
         // The signed-in user (D79 initials at home and in Settings; reactions need `myUserId`).
         setFixtureUser(AuthUser(id: "fx-me", login: "jacob", name: "Jacob Steeves"))
         let now = nowMs()

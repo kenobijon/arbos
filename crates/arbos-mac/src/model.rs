@@ -2341,9 +2341,24 @@ pub struct Machine {
     pub cpu: Option<u32>,
     pub mem_gib: Option<u32>,
     pub image: Option<String>,
+    /// `machine.provider` (`gvisor` = a sandbox on the arbos.life host, D89; `daytona`; …).
+    pub provider: Option<String>,
+    /// D89: the host is full and this account is in line for a machine (`/me` →
+    /// `machine.waitlisted` / `machine.waitlist_position`). None = not waitlisted.
+    pub waitlist_position: Option<u32>,
 }
 
 impl Machine {
+    /// Settings › Machine › "Where it runs" (D89). "Change machine" comes with the next runner.
+    pub fn where_it_runs(&self) -> &'static str {
+        match self.provider.as_deref() {
+            Some("daytona") => "Hosted · Daytona",
+            Some("process") | Some("docker") => "Relay host",
+            Some("gvisor") | None | Some("") => "Hosted on arbos.life",
+            Some(_) => "Hosted",
+        }
+    }
+
     /// What the UI shows: an always-on machine is awake unless unreachable.
     pub fn shown_state(&self) -> MachineState {
         if self.always_on && self.state != MachineState::Error {

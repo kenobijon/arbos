@@ -58,6 +58,10 @@ const ICONS: &[(&str, &str)] = &[
         "<path d=\"M4 10v4M8 7v10M12 4v16M16 8v8M20 10v4\" stroke-width=\"2.4\"/>"
     ),
     icon!("arrow-up", "<path d=\"M12 19V5M5 12l7-7 7 7\" stroke-width=\"2.6\"/>"),
+    icon!(
+        "hourglass",
+        "<path d=\"M7 3h10M7 21h10M8 3c0 5 4 6 4 9s-4 4-4 9M16 3c0 5-4 6-4 9s4 4 4 9\"/>"
+    ),
     icon!("xmark", "<path d=\"M6 6l12 12M18 6L6 18\"/>"),
     icon!(
         "archivebox",

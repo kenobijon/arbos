@@ -753,10 +753,29 @@ async fn refresh_me(shared: &Arc<Shared>) {
     };
     let _ = shared.events.send(SyncEvent::Account(Some(view)));
     if let Some(m) = v.get("machine").and_then(Value::as_object) {
-        if let Some(always_on) = m.get("always_on").and_then(Value::as_bool) {
+        // D89: provider and waitlist place ride along with `always_on`.
+        let waitlisted = m
+            .get("waitlisted")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let position = waitlisted.then(|| {
+            m.get("waitlist_position")
+                .and_then(Value::as_u64)
+                .map(|p| p as u32)
+                .unwrap_or(1)
+        });
+        let provider = m.get("provider").and_then(Value::as_str).map(str::to_owned);
+        let always_on = m.get("always_on").and_then(Value::as_bool);
+        {
             let snapshot = {
                 let mut machine = shared.machine.lock().unwrap();
-                machine.always_on = always_on;
+                if let Some(on) = always_on {
+                    machine.always_on = on;
+                }
+                if provider.is_some() {
+                    machine.provider = provider;
+                }
+                machine.waitlist_position = position;
                 machine.clone()
             };
             let _ = shared.events.send(SyncEvent::Machine(snapshot));
@@ -2895,6 +2914,13 @@ async fn refresh_machine(shared: &Arc<Shared>) {
                 .get("mem_gib")
                 .and_then(Value::as_u64)
                 .map(|v| v as u32);
+        }
+        if let Some(p) = value
+            .get("provider")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            m.provider = Some(p.to_owned());
         }
         if let Some(img) = value
             .pointer("/image/current")

@@ -30,6 +30,9 @@ pub struct ChatDiff {
     pub members_equal: bool,
     pub ok: bool,
     pub note: Option<String>,
+    /// Newest event differs from the relay's newest row (stream order vs timestamp); not a
+    /// divergence.
+    pub order_note: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, Serialize)]
@@ -71,6 +74,10 @@ pub async fn run(state: &AppState, only_chat: Option<&str>, with_unread: bool) -
     let mut room_of_chat: HashMap<String, String> = HashMap::new();
     for room in rooms.iter().filter(|r| r.closed_at.is_none()) {
         if only_chat.is_some_and(|c| c != room.chat_id) {
+            continue;
+        }
+        // Servers and channels live only on the homeserver: nothing on the relay to compare.
+        if matches!(room.kind.as_str(), "space" | "channel") {
             continue;
         }
         rep.chats += 1;
@@ -120,10 +127,13 @@ pub async fn run(state: &AppState, only_chat: Option<&str>, with_unread: bool) -
                                 .find_map(|e| {
                                     e["content"]["life.arbos.id"].as_str().map(str::to_owned)
                                 });
+                            // Room order is stream order: a live message that landed while
+                            // history was still being replayed sits after older rows. Content
+                            // parity is what `missing` measures; this stays informational.
                             if newest_room.as_deref() != ids.last().map(String::as_str)
                                 && d.missing.is_empty()
                             {
-                                d.note = Some(format!(
+                                d.order_note = Some(format!(
                                     "newest in room {:?} vs relay {:?}",
                                     newest_room,
                                     ids.last()

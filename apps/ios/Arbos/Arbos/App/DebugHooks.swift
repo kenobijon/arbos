@@ -9,6 +9,8 @@ enum DebugHooks {
     static var autoSend: String? { value("ARBOS_AUTO_SEND") }
     static var pairCode: String? { value("ARBOS_PAIR_CODE") }
     static var fixture: Bool { value("ARBOS_FIXTURE") == "1" }
+    /// D89 waitlist card and Machine rows: the fixture account's place in line.
+    static var fixtureWaitlist: Int? { value("ARBOS_FIXTURE_WAITLIST").flatMap { Int($0) } }
     /// Join a call seen via presence automatically (two-simulator relay tests).
     static var autoJoinCall: Bool { value("ARBOS_AUTO_JOIN") == "1" }
     /// Accept an incoming call automatically (two-simulator relay tests).
