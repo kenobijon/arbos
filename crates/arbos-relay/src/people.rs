@@ -1544,9 +1544,7 @@ pub async fn member_add(
         handle: handle_of(&state, &other_id),
         by_handle: handle_of(&state, &me),
     });
-    let _ = state
-        .db
-        .push_user_event(&other_id, &event, Some(&id));
+    let _ = state.db.push_user_event(&other_id, &event, Some(&id));
     notify_members(&state, &cm, &me, &event);
     tracing::info!(chat = %id, user = %other_id, %me, "person added to a people chat");
     match load_chat(&state, &id) {
@@ -2306,9 +2304,7 @@ pub fn on_room_push(
             .flatten()
             .is_none()
         {
-            let _ = state
-                .db
-                .push_user_event(other, &event, Some(chat_id));
+            let _ = state.db.push_user_event(other, &event, Some(chat_id));
         }
         // A message un-hides a chat that was "deleted for me" on any of their devices.
         if let Ok(devices) = state.db.devices_of_user(other) {

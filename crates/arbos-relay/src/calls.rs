@@ -24,8 +24,7 @@ use serde_json::{json, Value};
 use arbos_core::api::{
     CallAlertDto, CallDto, CallEndedPayloadDto, CallEnvelopeDto, CallMissedPayloadDto,
     CallReachabilityDto, CallRingPayloadDto, CallStartedPayloadDto, LeaveCallResponseDto,
-    PushEventDto, PushItemDto, ReachableDeviceDto, SenderDto, StartCallResponseDto,
-    VoipRegisterResponseDto,
+    PushEventDto, ReachableDeviceDto, SenderDto, StartCallResponseDto, VoipRegisterResponseDto,
 };
 use arbos_core::ids::{now_ms, ulid};
 
@@ -345,11 +344,9 @@ async fn announce_started(state: &AppState, call: &CallRow, starter: &Sender) {
         if user == call.started_by {
             continue;
         }
-        let _ = state.db.push_user_event(
-            &user,
-            &PushEventDto::CallStarted(started.clone()),
-            None,
-        );
+        let _ = state
+            .db
+            .push_user_event(&user, &PushEventDto::CallStarted(started.clone()), None);
         if !state.push.is_on() {
             continue;
         }
@@ -1143,6 +1140,8 @@ mod tests {
     use axum::Json;
     use base64::Engine;
     use sha2::Digest;
+
+    use arbos_core::api::PushItemDto;
 
     use super::*;
     use crate::people::tests_support::{dm, person};

@@ -5,18 +5,18 @@
 use serde_json::{json, Value};
 
 use arbos_core::api::{
-    AccountUserDto, ChatArchivedPayloadDto, CreditsDto, FeedbackCapturePayloadDto,
-    MachineImageDto, MachineReadyPayloadDto, MachineSpecDto, MachineStatusDto,
-    MachineWorkspaceDto, MeDeviceDto, MeFeaturesDto, MeLimitsDto, MeMachineDto, MeResponseDto,
-    PairResponseDto, PeopleAgentAddedPayloadDto, PeopleAgentRemovedPayloadDto,
-    PeopleChatCreatedPayloadDto, PeopleChatDeletedPayloadDto, PeopleChatUpdatedPayloadDto,
-    PeopleInviteAcceptedPayloadDto, PeopleMemberAddedPayloadDto, PeopleMemberRemovedPayloadDto,
-    PeopleMessagePayloadDto, PeopleProjectSharedPayloadDto, ProjectMemberRemovedPayloadDto,
-    PushEventDto, PushItemDto, PushRegisterResponseDto, ReleaseDto, ReleasePublishedPayloadDto,
-    ReleasesDto, SecretExpiringPayloadDto, SecretRequestPushPayloadDto, SecretsPausedPayloadDto,
-    SenderDto, ServerDeletedPayloadDto, ServerMemberJoinedPayloadDto,
-    ServerMemberRemovedPayloadDto, ServerUpdatedPayloadDto, TokenResponseDto, UnreadChatDto,
-    UnreadDto, UserCardDto, VoiceCatalogDto, VoiceDto,
+    AccountUserDto, ChatArchivedPayloadDto, CreditsDto, FeedbackCapturePayloadDto, MachineImageDto,
+    MachineReadyPayloadDto, MachineSpecDto, MachineStatusDto, MachineWorkspaceDto, MeDeviceDto,
+    MeFeaturesDto, MeLimitsDto, MeMachineDto, MeResponseDto, PairResponseDto,
+    PeopleAgentAddedPayloadDto, PeopleAgentRemovedPayloadDto, PeopleChatCreatedPayloadDto,
+    PeopleChatDeletedPayloadDto, PeopleChatUpdatedPayloadDto, PeopleInviteAcceptedPayloadDto,
+    PeopleMemberAddedPayloadDto, PeopleMemberRemovedPayloadDto, PeopleMessagePayloadDto,
+    PeopleProjectSharedPayloadDto, ProjectMemberRemovedPayloadDto, PushEventDto, PushItemDto,
+    PushRegisterResponseDto, ReleaseDto, ReleasePublishedPayloadDto, ReleasesDto,
+    SecretExpiringPayloadDto, SecretRequestPushPayloadDto, SecretsPausedPayloadDto, SenderDto,
+    ServerDeletedPayloadDto, ServerMemberJoinedPayloadDto, ServerMemberRemovedPayloadDto,
+    ServerUpdatedPayloadDto, TokenResponseDto, UnreadChatDto, UnreadDto, UserCardDto,
+    VoiceCatalogDto, VoiceDto,
 };
 use arbos_core::wire::BoxState;
 

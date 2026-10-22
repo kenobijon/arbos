@@ -1606,9 +1606,13 @@ pub struct SecretExpiringPayloadDto {
 
 /// One kind the relay queues on `/me/pushes` via `push_user` / `push_user_except` /
 /// `push_everyone`. Adjacent tagging matches the stored `{ kind, payload }` row.
+///
+/// `call_started` embeds a full `CallDto`; clippy's large-enum lint would want a `Box`, but
+/// boxing breaks the typeshare / Swift shape and the wire JSON is unchanged either way.
 #[typeshare]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "payload")]
+#[allow(clippy::large_enum_variant)]
 pub enum PushEventDto {
     #[serde(rename = "people_message")]
     PeopleMessage(PeopleMessagePayloadDto),

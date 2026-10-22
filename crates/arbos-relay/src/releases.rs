@@ -28,9 +28,7 @@ use rusqlite::params;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use arbos_core::api::{
-    PushEventDto, ReleaseDto, ReleasePublishedPayloadDto, ReleasesDto,
-};
+use arbos_core::api::{PushEventDto, ReleaseDto, ReleasePublishedPayloadDto, ReleasesDto};
 use arbos_core::ids::now_ms;
 
 use crate::auth::Principal;

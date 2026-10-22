@@ -254,6 +254,19 @@ public struct CallStartedPayloadDto: Codable {
 	}
 }
 
+/// `chat_archived` payload (`archived_at` is null when un-archiving).
+public struct ChatArchivedPayloadDto: Codable {
+	public let chat_id: String
+	public let project_id: String
+	public let archived_at: Int64?
+
+	public init(chat_id: String, project_id: String, archived_at: Int64?) {
+		self.chat_id = chat_id
+		self.project_id = project_id
+		self.archived_at = archived_at
+	}
+}
+
 /// `me` on a project chat or a people chat.
 public struct ChatMeDto: Codable {
 	/// People chats always send this (null when the viewer is not a member). Project chats omit it.
@@ -711,6 +724,25 @@ public struct DecideSecretResponseDto: Codable {
 	}
 }
 
+/// `feedback_capture` payload.
+public struct FeedbackCapturePayloadDto: Codable {
+	public let request_id: String
+	public let project_id: String
+	public let project_name: String
+	public let chat_id: String?
+	public let preferred_device_id: String?
+	public let expires_at: Int64
+
+	public init(request_id: String, project_id: String, project_name: String, chat_id: String?, preferred_device_id: String?, expires_at: Int64) {
+		self.request_id = request_id
+		self.project_id = project_id
+		self.project_name = project_name
+		self.chat_id = chat_id
+		self.preferred_device_id = preferred_device_id
+		self.expires_at = expires_at
+	}
+}
+
 /// `POST /routines/{rid}/fire` reply.
 public struct FireRoutineResponseDto: Codable {
 	public let run_id: String
@@ -893,6 +925,15 @@ public struct MachineImageDto: Codable {
 	public init(current: String?, default: String) {
 		self.current = current
 		self.default = `default`
+	}
+}
+
+/// `machine_ready` payload.
+public struct MachineReadyPayloadDto: Codable {
+	public let message: String
+
+	public init(message: String) {
+		self.message = message
 	}
 }
 
@@ -1108,6 +1149,56 @@ public struct PairResponseDto: Codable {
 	}
 }
 
+/// `people_agent_added` payload (user devices).
+public struct PeopleAgentAddedPayloadDto: Codable {
+	public let chat_id: String
+	public let project_id: String
+	public let by_handle: String
+
+	public init(chat_id: String, project_id: String, by_handle: String) {
+		self.chat_id = chat_id
+		self.project_id = project_id
+		self.by_handle = by_handle
+	}
+}
+
+/// `people_agent_removed` payload (user devices).
+public struct PeopleAgentRemovedPayloadDto: Codable {
+	public let chat_id: String
+	public let project_id: String
+	public let by_handle: String
+
+	public init(chat_id: String, project_id: String, by_handle: String) {
+		self.chat_id = chat_id
+		self.project_id = project_id
+		self.by_handle = by_handle
+	}
+}
+
+/// `people_chat_created` payload.
+public struct PeopleChatCreatedPayloadDto: Codable {
+	public let chat_id: String
+	public let by: String
+	public let by_handle: String
+
+	public init(chat_id: String, by: String, by_handle: String) {
+		self.chat_id = chat_id
+		self.by = by
+		self.by_handle = by_handle
+	}
+}
+
+/// `people_chat_deleted` payload.
+public struct PeopleChatDeletedPayloadDto: Codable {
+	public let chat_id: String
+	public let by_handle: String
+
+	public init(chat_id: String, by_handle: String) {
+		self.chat_id = chat_id
+		self.by_handle = by_handle
+	}
+}
+
 /// People chat (`people::chat_json`).
 public struct PeopleChatDto: Codable {
 	public let id: String
@@ -1147,6 +1238,90 @@ public struct PeopleChatDto: Codable {
 	}
 }
 
+/// `people_chat_updated` payload.
+public struct PeopleChatUpdatedPayloadDto: Codable {
+	public let chat_id: String
+
+	public init(chat_id: String) {
+		self.chat_id = chat_id
+	}
+}
+
+/// `people_invite_accepted` payload.
+public struct PeopleInviteAcceptedPayloadDto: Codable {
+	public let code: String
+	public let handle: String
+	public let user_id: String
+	public let target_kind: String
+	public let target_id: String
+
+	public init(code: String, handle: String, user_id: String, target_kind: String, target_id: String) {
+		self.code = code
+		self.handle = handle
+		self.user_id = user_id
+		self.target_kind = target_kind
+		self.target_id = target_id
+	}
+}
+
+/// `people_member_added` payload.
+public struct PeopleMemberAddedPayloadDto: Codable {
+	public let chat_id: String
+	public let user_id: String
+	public let handle: String
+	public let by_handle: String
+
+	public init(chat_id: String, user_id: String, handle: String, by_handle: String) {
+		self.chat_id = chat_id
+		self.user_id = user_id
+		self.handle = handle
+		self.by_handle = by_handle
+	}
+}
+
+/// `people_member_removed` payload.
+public struct PeopleMemberRemovedPayloadDto: Codable {
+	public let chat_id: String
+	public let user_id: String
+	public let handle: String
+	public let by_handle: String
+
+	public init(chat_id: String, user_id: String, handle: String, by_handle: String) {
+		self.chat_id = chat_id
+		self.user_id = user_id
+		self.handle = handle
+		self.by_handle = by_handle
+	}
+}
+
+/// `people_message` payload on `/me/pushes`.
+public struct PeopleMessagePayloadDto: Codable {
+	public let chat_id: String
+	public let from: String
+	public let from_handle: String
+	public let seq: Int64
+	public let sender: SenderDto
+
+	public init(chat_id: String, from: String, from_handle: String, seq: Int64, sender: SenderDto) {
+		self.chat_id = chat_id
+		self.from = from
+		self.from_handle = from_handle
+		self.seq = seq
+		self.sender = sender
+	}
+}
+
+/// `people_project_shared` payload.
+public struct PeopleProjectSharedPayloadDto: Codable {
+	public let project_id: String
+	public let by_handle: String
+
+	public init(project_id: String, by_handle: String) {
+		self.project_id = project_id
+		self.by_handle = by_handle
+	}
+}
+
 /// One row in `project_members_json` → `members`.
 public struct ProjectMemberDto: Codable {
 	public let id: String
@@ -1177,6 +1352,17 @@ public struct ProjectMemberDto: Codable {
 		self.last_seen_at = last_seen_at
 		self.online = online
 		self.avatar_color_index_effective = avatar_color_index_effective
+	}
+}
+
+/// `project_member_removed` payload.
+public struct ProjectMemberRemovedPayloadDto: Codable {
+	public let project_id: String
+	public let by_handle: String
+
+	public init(project_id: String, by_handle: String) {
+		self.project_id = project_id
+		self.by_handle = by_handle
 	}
 }
 
@@ -1328,6 +1514,80 @@ public struct ProjectSecretsDto: Codable {
 		self.items = items
 		self.requests = requests
 		self.activity = activity
+	}
+}
+
+/// One `/me/pushes` list row: `id`, `created_at`, plus flattened `{ kind, payload }`.
+/// 
+/// typeshare cannot emit serde flatten; Swift decodes `id`/`created_at` here and
+/// `PushEventDto` from the same JSON object.
+public struct PushItemDto: Codable {
+	public let id: String
+	public let created_at: Int64
+
+	public init(id: String, created_at: Int64) {
+		self.id = id
+		self.created_at = created_at
+	}
+}
+
+/// `POST /devices/{id}/push` success body.
+public struct PushRegisterResponseDto: Codable {
+	public let device_id: String
+	public let environment: String
+	public let push: Bool
+
+	public init(device_id: String, environment: String, push: Bool) {
+		self.device_id = device_id
+		self.environment = environment
+		self.push = push
+	}
+}
+
+/// One row of `GET /releases/current` (`all_releases`).
+public struct ReleaseDto: Codable {
+	public let platform: String
+	public let channel: String
+	public let version: String
+	public let build: String
+	public let url: String
+	public let published_at: Int64
+
+	public init(platform: String, channel: String, version: String, build: String, url: String, published_at: Int64) {
+		self.platform = platform
+		self.channel = channel
+		self.version = version
+		self.build = build
+		self.url = url
+		self.published_at = published_at
+	}
+}
+
+/// `release_published` payload (also the row shape under `releases[]`).
+public struct ReleasePublishedPayloadDto: Codable {
+	public let platform: String
+	public let channel: String
+	public let version: String
+	public let build: String
+	public let url: String
+	public let published_at: Int64
+
+	public init(platform: String, channel: String, version: String, build: String, url: String, published_at: Int64) {
+		self.platform = platform
+		self.channel = channel
+		self.version = version
+		self.build = build
+		self.url = url
+		self.published_at = published_at
+	}
+}
+
+/// `GET /releases/current` body.
+public struct ReleasesDto: Codable {
+	public let releases: [ReleaseDto]
+
+	public init(releases: [ReleaseDto]) {
+		self.releases = releases
 	}
 }
 
@@ -1485,6 +1745,42 @@ public struct SecretEnvelopeDto: Codable {
 	}
 }
 
+/// `secret_expiring` payload.
+public struct SecretExpiringPayloadDto: Codable {
+	public let secret_id: String
+	public let name: String
+	public let expires_at: Int64?
+	public let expired: Bool
+
+	public init(secret_id: String, name: String, expires_at: Int64?, expired: Bool) {
+		self.secret_id = secret_id
+		self.name = name
+		self.expires_at = expires_at
+		self.expired = expired
+	}
+}
+
+/// `secret_request` payload (`vault_id` only from the vaults writer).
+public struct SecretRequestPushPayloadDto: Codable {
+	public let request_id: String
+	public let project_id: String
+	public let project_name: String
+	public let name: String
+	public let host: String?
+	public let use: String
+	public let vault_id: String?
+
+	public init(request_id: String, project_id: String, project_name: String, name: String, host: String?, use: String, vault_id: String?) {
+		self.request_id = request_id
+		self.project_id = project_id
+		self.project_name = project_name
+		self.name = name
+		self.host = host
+		self.use = use
+		self.vault_id = vault_id
+	}
+}
+
 /// `GET /secrets/requests` → `{ items }`.
 public struct SecretRequestsDto: Codable {
 	public let items: [SecretRequestDto]
@@ -1581,6 +1877,69 @@ public struct SecretsPausedDto: Codable {
 		self.paused = paused
 		self.paused_at = paused_at
 		self.paused_by = paused_by
+	}
+}
+
+/// `secrets_paused` payload.
+public struct SecretsPausedPayloadDto: Codable {
+	public let paused: Bool
+
+	public init(paused: Bool) {
+		self.paused = paused
+	}
+}
+
+/// `server_deleted` payload.
+public struct ServerDeletedPayloadDto: Codable {
+	public let server_id: String
+
+	public init(server_id: String) {
+		self.server_id = server_id
+	}
+}
+
+/// `server_member_joined` payload.
+public struct ServerMemberJoinedPayloadDto: Codable {
+	public let server_id: String
+	public let user_id: String
+	public let handle: String
+
+	public init(server_id: String, user_id: String, handle: String) {
+		self.server_id = server_id
+		self.user_id = user_id
+		self.handle = handle
+	}
+}
+
+/// `server_member_removed` payload.
+public struct ServerMemberRemovedPayloadDto: Codable {
+	public let server_id: String
+	public let user_id: String
+	public let banned: Bool?
+	public let handle: String?
+
+	public init(server_id: String, user_id: String, banned: Bool?, handle: String?) {
+		self.server_id = server_id
+		self.user_id = user_id
+		self.banned = banned
+		self.handle = handle
+	}
+}
+
+/// `server_updated` payload (optional keys only when the writer sets them).
+public struct ServerUpdatedPayloadDto: Codable {
+	public let server_id: String
+	public let channel_id: String?
+	public let deleted: Bool?
+	public let user_id: String?
+	public let role: String?
+
+	public init(server_id: String, channel_id: String?, deleted: Bool?, user_id: String?, role: String?) {
+		self.server_id = server_id
+		self.channel_id = channel_id
+		self.deleted = deleted
+		self.user_id = user_id
+		self.role = role
 	}
 }
 
@@ -1760,5 +2119,285 @@ public struct VoipRegisterResponseDto: Codable {
 	public init(device_id: String, push: Bool) {
 		self.device_id = device_id
 		self.push = push
+	}
+}
+
+/// One kind the relay queues on `/me/pushes` via `push_user` / `push_user_except` /
+/// `push_everyone`. Adjacent tagging matches the stored `{ kind, payload }` row.
+/// 
+/// `call_started` embeds a full `CallDto`; clippy's large-enum lint would want a `Box`, but
+/// boxing breaks the typeshare / Swift shape and the wire JSON is unchanged either way.
+public enum PushEventDto: Codable {
+	case peopleMessage(PeopleMessagePayloadDto)
+	case peopleChatUpdated(PeopleChatUpdatedPayloadDto)
+	case peopleMemberAdded(PeopleMemberAddedPayloadDto)
+	case peopleMemberRemoved(PeopleMemberRemovedPayloadDto)
+	case peopleChatCreated(PeopleChatCreatedPayloadDto)
+	case peopleChatDeleted(PeopleChatDeletedPayloadDto)
+	case peopleAgentAdded(PeopleAgentAddedPayloadDto)
+	case peopleAgentRemoved(PeopleAgentRemovedPayloadDto)
+	case peopleProjectShared(PeopleProjectSharedPayloadDto)
+	case projectMemberRemoved(ProjectMemberRemovedPayloadDto)
+	case chatArchived(ChatArchivedPayloadDto)
+	case peopleInviteAccepted(PeopleInviteAcceptedPayloadDto)
+	case feedbackCapture(FeedbackCapturePayloadDto)
+	case serverMemberRemoved(ServerMemberRemovedPayloadDto)
+	case serverMemberJoined(ServerMemberJoinedPayloadDto)
+	case serverUpdated(ServerUpdatedPayloadDto)
+	case serverDeleted(ServerDeletedPayloadDto)
+	case callStarted(CallStartedPayloadDto)
+	case callEnded(CallEndedPayloadDto)
+	case callMissed(CallMissedPayloadDto)
+	case machineReady(MachineReadyPayloadDto)
+	case releasePublished(ReleasePublishedPayloadDto)
+	case secretRequest(SecretRequestPushPayloadDto)
+	case secretsPaused(SecretsPausedPayloadDto)
+	case secretExpiring(SecretExpiringPayloadDto)
+
+	enum CodingKeys: String, CodingKey, Codable {
+		case peopleMessage = "people_message",
+			peopleChatUpdated = "people_chat_updated",
+			peopleMemberAdded = "people_member_added",
+			peopleMemberRemoved = "people_member_removed",
+			peopleChatCreated = "people_chat_created",
+			peopleChatDeleted = "people_chat_deleted",
+			peopleAgentAdded = "people_agent_added",
+			peopleAgentRemoved = "people_agent_removed",
+			peopleProjectShared = "people_project_shared",
+			projectMemberRemoved = "project_member_removed",
+			chatArchived = "chat_archived",
+			peopleInviteAccepted = "people_invite_accepted",
+			feedbackCapture = "feedback_capture",
+			serverMemberRemoved = "server_member_removed",
+			serverMemberJoined = "server_member_joined",
+			serverUpdated = "server_updated",
+			serverDeleted = "server_deleted",
+			callStarted = "call_started",
+			callEnded = "call_ended",
+			callMissed = "call_missed",
+			machineReady = "machine_ready",
+			releasePublished = "release_published",
+			secretRequest = "secret_request",
+			secretsPaused = "secrets_paused",
+			secretExpiring = "secret_expiring"
+	}
+
+	private enum ContainerCodingKeys: String, CodingKey {
+		case kind, payload
+	}
+
+	public init(from decoder: Decoder) throws {
+		let container = try decoder.container(keyedBy: ContainerCodingKeys.self)
+		if let type = try? container.decode(CodingKeys.self, forKey: .kind) {
+			switch type {
+			case .peopleMessage:
+				if let content = try? container.decode(PeopleMessagePayloadDto.self, forKey: .payload) {
+					self = .peopleMessage(content)
+					return
+				}
+			case .peopleChatUpdated:
+				if let content = try? container.decode(PeopleChatUpdatedPayloadDto.self, forKey: .payload) {
+					self = .peopleChatUpdated(content)
+					return
+				}
+			case .peopleMemberAdded:
+				if let content = try? container.decode(PeopleMemberAddedPayloadDto.self, forKey: .payload) {
+					self = .peopleMemberAdded(content)
+					return
+				}
+			case .peopleMemberRemoved:
+				if let content = try? container.decode(PeopleMemberRemovedPayloadDto.self, forKey: .payload) {
+					self = .peopleMemberRemoved(content)
+					return
+				}
+			case .peopleChatCreated:
+				if let content = try? container.decode(PeopleChatCreatedPayloadDto.self, forKey: .payload) {
+					self = .peopleChatCreated(content)
+					return
+				}
+			case .peopleChatDeleted:
+				if let content = try? container.decode(PeopleChatDeletedPayloadDto.self, forKey: .payload) {
+					self = .peopleChatDeleted(content)
+					return
+				}
+			case .peopleAgentAdded:
+				if let content = try? container.decode(PeopleAgentAddedPayloadDto.self, forKey: .payload) {
+					self = .peopleAgentAdded(content)
+					return
+				}
+			case .peopleAgentRemoved:
+				if let content = try? container.decode(PeopleAgentRemovedPayloadDto.self, forKey: .payload) {
+					self = .peopleAgentRemoved(content)
+					return
+				}
+			case .peopleProjectShared:
+				if let content = try? container.decode(PeopleProjectSharedPayloadDto.self, forKey: .payload) {
+					self = .peopleProjectShared(content)
+					return
+				}
+			case .projectMemberRemoved:
+				if let content = try? container.decode(ProjectMemberRemovedPayloadDto.self, forKey: .payload) {
+					self = .projectMemberRemoved(content)
+					return
+				}
+			case .chatArchived:
+				if let content = try? container.decode(ChatArchivedPayloadDto.self, forKey: .payload) {
+					self = .chatArchived(content)
+					return
+				}
+			case .peopleInviteAccepted:
+				if let content = try? container.decode(PeopleInviteAcceptedPayloadDto.self, forKey: .payload) {
+					self = .peopleInviteAccepted(content)
+					return
+				}
+			case .feedbackCapture:
+				if let content = try? container.decode(FeedbackCapturePayloadDto.self, forKey: .payload) {
+					self = .feedbackCapture(content)
+					return
+				}
+			case .serverMemberRemoved:
+				if let content = try? container.decode(ServerMemberRemovedPayloadDto.self, forKey: .payload) {
+					self = .serverMemberRemoved(content)
+					return
+				}
+			case .serverMemberJoined:
+				if let content = try? container.decode(ServerMemberJoinedPayloadDto.self, forKey: .payload) {
+					self = .serverMemberJoined(content)
+					return
+				}
+			case .serverUpdated:
+				if let content = try? container.decode(ServerUpdatedPayloadDto.self, forKey: .payload) {
+					self = .serverUpdated(content)
+					return
+				}
+			case .serverDeleted:
+				if let content = try? container.decode(ServerDeletedPayloadDto.self, forKey: .payload) {
+					self = .serverDeleted(content)
+					return
+				}
+			case .callStarted:
+				if let content = try? container.decode(CallStartedPayloadDto.self, forKey: .payload) {
+					self = .callStarted(content)
+					return
+				}
+			case .callEnded:
+				if let content = try? container.decode(CallEndedPayloadDto.self, forKey: .payload) {
+					self = .callEnded(content)
+					return
+				}
+			case .callMissed:
+				if let content = try? container.decode(CallMissedPayloadDto.self, forKey: .payload) {
+					self = .callMissed(content)
+					return
+				}
+			case .machineReady:
+				if let content = try? container.decode(MachineReadyPayloadDto.self, forKey: .payload) {
+					self = .machineReady(content)
+					return
+				}
+			case .releasePublished:
+				if let content = try? container.decode(ReleasePublishedPayloadDto.self, forKey: .payload) {
+					self = .releasePublished(content)
+					return
+				}
+			case .secretRequest:
+				if let content = try? container.decode(SecretRequestPushPayloadDto.self, forKey: .payload) {
+					self = .secretRequest(content)
+					return
+				}
+			case .secretsPaused:
+				if let content = try? container.decode(SecretsPausedPayloadDto.self, forKey: .payload) {
+					self = .secretsPaused(content)
+					return
+				}
+			case .secretExpiring:
+				if let content = try? container.decode(SecretExpiringPayloadDto.self, forKey: .payload) {
+					self = .secretExpiring(content)
+					return
+				}
+			}
+		}
+		throw DecodingError.typeMismatch(PushEventDto.self, DecodingError.Context(codingPath: decoder.codingPath, debugDescription: "Wrong type for PushEventDto"))
+	}
+
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: ContainerCodingKeys.self)
+		switch self {
+		case .peopleMessage(let content):
+			try container.encode(CodingKeys.peopleMessage, forKey: .kind)
+			try container.encode(content, forKey: .payload)
+		case .peopleChatUpdated(let content):
+			try container.encode(CodingKeys.peopleChatUpdated, forKey: .kind)
+			try container.encode(content, forKey: .payload)
+		case .peopleMemberAdded(let content):
+			try container.encode(CodingKeys.peopleMemberAdded, forKey: .kind)
+			try container.encode(content, forKey: .payload)
+		case .peopleMemberRemoved(let content):
+			try container.encode(CodingKeys.peopleMemberRemoved, forKey: .kind)
+			try container.encode(content, forKey: .payload)
+		case .peopleChatCreated(let content):
+			try container.encode(CodingKeys.peopleChatCreated, forKey: .kind)
+			try container.encode(content, forKey: .payload)
+		case .peopleChatDeleted(let content):
+			try container.encode(CodingKeys.peopleChatDeleted, forKey: .kind)
+			try container.encode(content, forKey: .payload)
+		case .peopleAgentAdded(let content):
+			try container.encode(CodingKeys.peopleAgentAdded, forKey: .kind)
+			try container.encode(content, forKey: .payload)
+		case .peopleAgentRemoved(let content):
+			try container.encode(CodingKeys.peopleAgentRemoved, forKey: .kind)
+			try container.encode(content, forKey: .payload)
+		case .peopleProjectShared(let content):
+			try container.encode(CodingKeys.peopleProjectShared, forKey: .kind)
+			try container.encode(content, forKey: .payload)
+		case .projectMemberRemoved(let content):
+			try container.encode(CodingKeys.projectMemberRemoved, forKey: .kind)
+			try container.encode(content, forKey: .payload)
+		case .chatArchived(let content):
+			try container.encode(CodingKeys.chatArchived, forKey: .kind)
+			try container.encode(content, forKey: .payload)
+		case .peopleInviteAccepted(let content):
+			try container.encode(CodingKeys.peopleInviteAccepted, forKey: .kind)
+			try container.encode(content, forKey: .payload)
+		case .feedbackCapture(let content):
+			try container.encode(CodingKeys.feedbackCapture, forKey: .kind)
+			try container.encode(content, forKey: .payload)
+		case .serverMemberRemoved(let content):
+			try container.encode(CodingKeys.serverMemberRemoved, forKey: .kind)
+			try container.encode(content, forKey: .payload)
+		case .serverMemberJoined(let content):
+			try container.encode(CodingKeys.serverMemberJoined, forKey: .kind)
+			try container.encode(content, forKey: .payload)
+		case .serverUpdated(let content):
+			try container.encode(CodingKeys.serverUpdated, forKey: .kind)
+			try container.encode(content, forKey: .payload)
+		case .serverDeleted(let content):
+			try container.encode(CodingKeys.serverDeleted, forKey: .kind)
+			try container.encode(content, forKey: .payload)
+		case .callStarted(let content):
+			try container.encode(CodingKeys.callStarted, forKey: .kind)
+			try container.encode(content, forKey: .payload)
+		case .callEnded(let content):
+			try container.encode(CodingKeys.callEnded, forKey: .kind)
+			try container.encode(content, forKey: .payload)
+		case .callMissed(let content):
+			try container.encode(CodingKeys.callMissed, forKey: .kind)
+			try container.encode(content, forKey: .payload)
+		case .machineReady(let content):
+			try container.encode(CodingKeys.machineReady, forKey: .kind)
+			try container.encode(content, forKey: .payload)
+		case .releasePublished(let content):
+			try container.encode(CodingKeys.releasePublished, forKey: .kind)
+			try container.encode(content, forKey: .payload)
+		case .secretRequest(let content):
+			try container.encode(CodingKeys.secretRequest, forKey: .kind)
+			try container.encode(content, forKey: .payload)
+		case .secretsPaused(let content):
+			try container.encode(CodingKeys.secretsPaused, forKey: .kind)
+			try container.encode(content, forKey: .payload)
+		case .secretExpiring(let content):
+			try container.encode(CodingKeys.secretExpiring, forKey: .kind)
+			try container.encode(content, forKey: .payload)
+		}
 	}
 }

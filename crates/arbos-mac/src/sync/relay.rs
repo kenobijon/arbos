@@ -14,11 +14,11 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Context as _, Result};
 use arbos_client::room::{self, RoomAction, RoomSession};
 use arbos_core::api::{
-    CallDto, CallEndedPayloadDto, CallEnvelopeDto, CallMissedPayloadDto, CallStartedPayloadDto,
-    CreateChatResponseDto, DecideSecretResponseDto, GetProjectResponseDto, GroupDto,
-    LeaveCallResponseDto, MachineStateDto, MachineStatusDto, MeResponseDto, MeUserResponseDto,
-    ModelListDto, PairResponseDto, PeopleChatDto, ProjectMembersDto, ProjectSecretsDto, RoutineDto,
-    RoutineRunDto, SecretEnvelopeDto, SecretRequestsDto, SecretsOverviewDto, StartCallResponseDto,
+    CallDto, CallEnvelopeDto, CreateChatResponseDto, DecideSecretResponseDto,
+    GetProjectResponseDto, GroupDto, LeaveCallResponseDto, MachineStateDto, MachineStatusDto,
+    MeResponseDto, MeUserResponseDto, ModelListDto, PairResponseDto, PeopleChatDto,
+    ProjectMembersDto, ProjectSecretsDto, PushEventDto, PushItemDto, RoutineDto, RoutineRunDto,
+    SecretEnvelopeDto, SecretRequestsDto, SecretsOverviewDto, StartCallResponseDto,
     TokenResponseDto, TranscriptionDto, UserCardDto, UsersPageDto, VaultEnvelopeDto,
     VoiceCatalogDto,
 };
@@ -1124,48 +1124,38 @@ async fn poll_me_pushes(shared: &Arc<Shared>) {
     let mut refresh = false;
     let mut refresh_servers = false;
     for push in list.as_array().cloned().unwrap_or_default() {
-        let kind = push.get("kind").and_then(Value::as_str).unwrap_or("");
-        let chat_id = push
-            .pointer("/payload/chat_id")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        match kind {
-            "people_chat_created"
-            | "people_chat_updated"
-            | "people_member_added"
-            | "people_member_removed"
-            | "people_agent_added"
-            | "people_agent_removed"
-            | "people_project_shared" => refresh = true,
-            "people_message" if !shared.is_people(chat_id) => refresh = true,
-            "call_started" => {
-                if let Some(payload) = push
-                    .get("payload")
-                    .cloned()
-                    .and_then(|v| serde_json::from_value::<CallStartedPayloadDto>(v).ok())
-                {
-                    let call = Call::from(&payload.call);
-                    let sender = Sender::from(&payload.sender);
-                    if !call.call_id.is_empty() {
-                        let _ = shared.events.send(SyncEvent::CallStarted { call, sender });
-                    }
+        let item: PushItemDto = match serde_json::from_value(push.clone()) {
+            Ok(item) => item,
+            Err(err) => {
+                let kind = push.get("kind").and_then(Value::as_str).unwrap_or("?");
+                eprintln!("relay: skip unknown push kind={kind}: {err}");
+                continue;
+            }
+        };
+        match &item.event {
+            PushEventDto::PeopleChatCreated(_)
+            | PushEventDto::PeopleChatUpdated(_)
+            | PushEventDto::PeopleMemberAdded(_)
+            | PushEventDto::PeopleMemberRemoved(_)
+            | PushEventDto::PeopleAgentAdded(_)
+            | PushEventDto::PeopleAgentRemoved(_)
+            | PushEventDto::PeopleProjectShared(_) => refresh = true,
+            PushEventDto::PeopleMessage(payload) if !shared.is_people(&payload.chat_id) => {
+                refresh = true
+            }
+            PushEventDto::CallStarted(payload) => {
+                let call = Call::from(&payload.call);
+                let sender = Sender::from(&payload.sender);
+                if !call.call_id.is_empty() {
+                    let _ = shared.events.send(SyncEvent::CallStarted { call, sender });
                 }
             }
-            "chat_archived" => {
-                let payload = push.get("payload").cloned().unwrap_or(Value::Null);
-                let chat_id = payload
-                    .get("chat_id")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
+            PushEventDto::ChatArchived(payload) => {
+                let chat_id = payload.chat_id.clone();
                 if chat_id.is_empty() {
                     continue;
                 }
-                let archived_at = payload
-                    .get("archived_at")
-                    .and_then(Value::as_i64)
-                    .filter(|t| *t > 0)
-                    .map(|t| t as u64);
+                let archived_at = payload.archived_at.filter(|t| *t > 0).map(|t| t as u64);
                 if let Some(c) = shared
                     .chats
                     .lock()
@@ -1185,84 +1175,65 @@ async fn poll_me_pushes(shared: &Arc<Shared>) {
                     archived_at,
                 });
             }
-            "release_published" => {
-                let platform = push
-                    .pointer("/payload/platform")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-                let version = push
-                    .pointer("/payload/version")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-                if !platform.is_empty() {
-                    let _ = shared
-                        .events
-                        .send(SyncEvent::ReleasePublished { platform, version });
-                }
-            }
-            "feedback_capture" => {
-                let request_id = push
-                    .pointer("/payload/request_id")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-                if !request_id.is_empty() {
-                    let _ = shared.events.send(SyncEvent::FeedbackCapture {
-                        request_id,
-                        expires_at: push.pointer("/payload/expires_at").and_then(Value::as_i64),
+            PushEventDto::ReleasePublished(payload) => {
+                if !payload.platform.is_empty() {
+                    let _ = shared.events.send(SyncEvent::ReleasePublished {
+                        platform: payload.platform.clone(),
+                        version: payload.version.clone(),
                     });
                 }
             }
-            "call_missed" => {
-                if let Some(payload) = push
-                    .get("payload")
-                    .cloned()
-                    .and_then(|v| serde_json::from_value::<CallMissedPayloadDto>(v).ok())
-                    .filter(|m| !m.call_id.is_empty())
-                {
-                    let missed = CallMissed {
-                        call_id: payload.call_id,
-                        chat_id: payload.chat_id,
-                        project_id: payload.project_id,
-                        kind: match payload.kind.as_str() {
-                            "video" => crate::model::CallKind::Video,
-                            _ => crate::model::CallKind::Voice,
-                        },
-                        from: Sender::from(&payload.from),
-                        started_at: payload.started_at.max(0) as u64,
-                        ended_at: (payload.ended_at > 0).then_some(payload.ended_at as u64),
-                        duration_s: payload.duration_s.max(0) as u64,
-                        reason: payload.reason.unwrap_or_default(),
-                    };
-                    let _ = shared.events.send(SyncEvent::CallMissed(missed));
+            PushEventDto::FeedbackCapture(payload) => {
+                if !payload.request_id.is_empty() {
+                    let _ = shared.events.send(SyncEvent::FeedbackCapture {
+                        request_id: payload.request_id.clone(),
+                        expires_at: (payload.expires_at > 0).then_some(payload.expires_at),
+                    });
                 }
             }
-            "call_ended" => {
-                if let Some(payload) = push
-                    .get("payload")
-                    .cloned()
-                    .and_then(|v| serde_json::from_value::<CallEndedPayloadDto>(v).ok())
-                {
-                    let ended = CallEnded {
-                        call_id: payload.call_id,
-                        chat_id: payload.chat_id,
-                        project_id: payload.project_id,
-                        duration_s: payload.duration_s.max(0) as u64,
-                        reason: payload.reason,
-                        writer_device: payload.writer_device.clone(),
-                        writer_is_me: payload.writer_device.as_deref()
-                            == Some(shared.device_id().as_str()),
-                    };
-                    let _ = shared.events.send(SyncEvent::CallEnded(ended));
-                }
+            PushEventDto::CallMissed(payload) if !payload.call_id.is_empty() => {
+                let missed = CallMissed {
+                    call_id: payload.call_id.clone(),
+                    chat_id: payload.chat_id.clone(),
+                    project_id: payload.project_id.clone(),
+                    kind: match payload.kind.as_str() {
+                        "video" => crate::model::CallKind::Video,
+                        _ => crate::model::CallKind::Voice,
+                    },
+                    from: Sender::from(&payload.from),
+                    started_at: payload.started_at.max(0) as u64,
+                    ended_at: (payload.ended_at > 0).then_some(payload.ended_at as u64),
+                    duration_s: payload.duration_s.max(0) as u64,
+                    reason: payload.reason.clone().unwrap_or_default(),
+                };
+                let _ = shared.events.send(SyncEvent::CallMissed(missed));
             }
-            "server_updated"
-            | "server_member_joined"
-            | "server_member_removed"
-            | "server_deleted" => refresh_servers = true,
-            _ => {}
+            PushEventDto::CallEnded(payload) => {
+                let ended = CallEnded {
+                    call_id: payload.call_id.clone(),
+                    chat_id: payload.chat_id.clone(),
+                    project_id: payload.project_id.clone(),
+                    duration_s: payload.duration_s.max(0) as u64,
+                    reason: payload.reason.clone(),
+                    writer_device: payload.writer_device.clone(),
+                    writer_is_me: payload.writer_device.as_deref()
+                        == Some(shared.device_id().as_str()),
+                };
+                let _ = shared.events.send(SyncEvent::CallEnded(ended));
+            }
+            PushEventDto::ServerUpdated(_)
+            | PushEventDto::ServerMemberJoined(_)
+            | PushEventDto::ServerMemberRemoved(_)
+            | PushEventDto::ServerDeleted(_) => refresh_servers = true,
+            PushEventDto::PeopleMessage(_)
+            | PushEventDto::PeopleChatDeleted(_)
+            | PushEventDto::ProjectMemberRemoved(_)
+            | PushEventDto::PeopleInviteAccepted(_)
+            | PushEventDto::MachineReady(_)
+            | PushEventDto::SecretRequest(_)
+            | PushEventDto::SecretsPaused(_)
+            | PushEventDto::SecretExpiring(_)
+            | PushEventDto::CallMissed(_) => {}
         }
     }
     if refresh {
