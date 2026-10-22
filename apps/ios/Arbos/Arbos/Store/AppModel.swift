@@ -202,6 +202,8 @@ final class AppModel: ObservableObject {
     var firstLoginTask: Task<Void, Never>?
     /// Rig: `ARBOS_OPEN_SERVER` was applied (once, after the first login if there is one).
     var openServerHookDone = false
+    /// Rig: the tab the channel page opens on (`ARBOS_OPEN_SERVER=…:page-settings`).
+    var openServerHookTab: String?
     /// `machine.always_on` as last reported by `GET /me` (nil = field absent).
     private var meAlwaysOn: Bool?
     /// Navigation: home → chat. Shared so menus anywhere can open a chat.
@@ -234,6 +236,10 @@ final class AppModel: ObservableObject {
     /// The relay answers `GET /servers`: the `+` sheet offers "Server" / "Join a server".
     /// A relay with servers off (503 `servers_off`) shows nothing server-related.
     @Published var serversAvailable = false
+    /// Channels muted on this phone (channel page › Notifications); local, like the Mac's mute list.
+    @Published var mutedChannelIds: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "mutedChannelIds") ?? []) {
+        didSet { UserDefaults.standard.set(Array(mutedChannelIds), forKey: "mutedChannelIds") }
+    }
     /// The shared Matrix client (crates/arbos-matrix through ArbosFFI): the rooms' data plane.
     var matrixClient: ArbosFFI.MatrixClient?
     /// Retains the UniFFI foreign listener for the client's lifetime.

@@ -1605,6 +1605,7 @@ fn handle_server_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             server_id,
             channel_id,
             name,
+            topic,
             restricted,
         } => {
             let shared = shared.clone();
@@ -1613,6 +1614,9 @@ fn handle_server_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             let mut body = serde_json::Map::new();
             if let Some(name) = name {
                 body.insert("name".into(), json!(name));
+            }
+            if let Some(topic) = topic {
+                body.insert("topic".into(), json!(topic));
             }
             if let Some(restricted) = restricted {
                 body.insert("restricted".into(), json!(restricted));
