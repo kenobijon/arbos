@@ -153,6 +153,10 @@ extension AppModel {
             path = [.server(serverId: server.id)]
         case "home"?:
             path = []
+        case "panel"?:
+            // The server page (the channel list's header pill), on `ARBOS_PANEL_TAB`.
+            path = [.server(serverId: server.id)]
+            showProfile(.server(serverId: server.id))
         case let name?:
             let wanted = name.hasPrefix("#") ? String(name.dropFirst()) : name
             if let c = server.channels.first(where: { $0.name == wanted }) { open(channel: c) } else { open(server: server) }

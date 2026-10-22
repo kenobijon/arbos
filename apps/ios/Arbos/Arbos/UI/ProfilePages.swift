@@ -972,6 +972,7 @@ struct ServerProfileView: View {
                 .environment(\.theme, theme)
             }
             .task {
+                if let t = DebugHooks.panelTab { tab = t }
                 await model.refreshServer(serverId)
                 loadedMembers = true
             }
