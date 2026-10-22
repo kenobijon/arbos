@@ -6,6 +6,8 @@ import Foundation
 enum DebugHooks {
     static var openProject: Id? { value("ARBOS_OPEN_PROJECT") }
     static var openChat: Id? { value("ARBOS_OPEN_CHAT") }
+    /// D88: `<name or id>[:list|:home|:#channel]` — land in a server (screenshot rig).
+    static var openServer: String? { value("ARBOS_OPEN_SERVER") }
     static var autoSend: String? { value("ARBOS_AUTO_SEND") }
     static var pairCode: String? { value("ARBOS_PAIR_CODE") }
     static var fixture: Bool { value("ARBOS_FIXTURE") == "1" }
@@ -33,7 +35,8 @@ enum DebugHooks {
     static var autoFeedback: String? { value("ARBOS_AUTO_FEEDBACK") }
     /// Fixture machine reports `always_on` (D73 policy screens).
     static var alwaysOn: Bool { value("ARBOS_ALWAYS_ON") == "1" }
-    /// keyboard | settings | voice | threads | model | profile — opened on the chat screen.
+    /// keyboard | settings | voice | threads | model | profile | member — opened on the chat screen
+    /// (`member` = the group page with its first other member pushed over it).
     /// `onboarding` shows the D82 first-login screen frozen on `ARBOS_ONBOARDING_STAGE` (1|2|3|fail).
     static var show: String? { value("ARBOS_SHOW") }
     static var onboardingStage: String? { value("ARBOS_ONBOARDING_STAGE") }

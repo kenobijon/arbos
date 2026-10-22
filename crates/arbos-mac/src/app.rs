@@ -68,6 +68,16 @@ pub enum ServerSheet {
     NewChannel { server_id: Id },
 }
 
+/// A page under the open one in the right pane's stack (a group under the
+/// member opened from it), kept with what `‹` needs to bring it back as it
+/// was: its tab and how far its body was scrolled (px from the top).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProfileFrame {
+    pub page: ProfilePage,
+    pub tab: usize,
+    pub scroll: f32,
+}
+
 /// Which agent-settings row on the agent's profile page is expanded into its
 /// choice list (click to open; see `ui::hoverpick`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -359,9 +369,13 @@ pub struct AppState {
     /// Telegram-style profile sheet (user / group / agent) and its tab.
     pub profile: Option<ProfilePage>,
     pub profile_tab: usize,
-    /// Pages under the open one (a sender's profile pushed from a group): `‹` pops back.
-    /// Minimal stack for the right pane; the pane-as-navigation-stack work extends it.
-    pub profile_stack: Vec<ProfilePage>,
+    /// Pages under the open one, outermost first (a sender's profile pushed
+    /// from a group, a member from its pane): `‹` pops back to the page with
+    /// its tab and scroll.
+    pub profile_stack: Vec<ProfileFrame>,
+    /// Bumped whenever a different page fills the pane, so the shell starts
+    /// its body at the top (a popped page keeps its saved scroll instead).
+    pub profile_opened: u64,
     /// Agent page: the Appearance (tree + colour) section is unfolded.
     pub profile_picker_open: bool,
     /// Agent page: which settings row (model / reasoning / voice) is dropped down.
@@ -661,8 +675,9 @@ impl AppState {
             window_active: true,
             notify_prompt: false,
             profile: None,
-            profile_stack: Vec::new(),
             profile_tab: 0,
+            profile_stack: Vec::new(),
+            profile_opened: 0,
             profile_picker_open: false,
             agent_pick: None,
             profile_editing_description: false,
@@ -818,8 +833,8 @@ impl AppState {
                     return;
                 }
                 self.push_notice(format!(
-                    "Arbos {version} is installed — it restarts in a minute or when you pause. \
-                     Press Restart now in the rail to do it at once."
+                    "Arbos {version} is installed — it restarts in a minute while you are in Arbos, \
+                     or when you pause. Press Restart now in the rail to do it at once."
                 ));
                 cx.spawn(async move |this, cx| loop {
                     cx.background_executor()
@@ -860,12 +875,15 @@ impl AppState {
         cx.notify();
     }
 
-    /// Is this a moment the app may restart itself? Never in a call or right after a keystroke;
-    /// otherwise when the window is not focused, when nothing was typed for a while, or when the
-    /// countdown is over.
+    /// Is this a moment the app may restart itself? Never in a call, right after a keystroke, or
+    /// while another app has focus (relaunch would steal it). When Arbos is focused: after a pause
+    /// with no typing, or when the countdown is over.
     fn relaunch_is_safe(&self) -> bool {
         let now = now_ms();
         if self.my_call.is_some() || self.incoming_call.is_some() {
+            return false;
+        }
+        if !self.window_active {
             return false;
         }
         if now.saturating_sub(self.last_input_at) < update::TYPING_GUARD_MS {
@@ -882,9 +900,7 @@ impl AppState {
             | UpdatePhase::Restarting(_)
             | UpdatePhase::Failed { .. } => true,
         };
-        !self.window_active
-            || now.saturating_sub(self.last_input_at) >= update::IDLE_RELAUNCH_MS
-            || countdown_over
+        now.saturating_sub(self.last_input_at) >= update::IDLE_RELAUNCH_MS || countdown_over
     }
 
     /// Relaunch into the pending install when it is safe; true when the relaunch was started.
@@ -1387,7 +1403,32 @@ impl AppState {
                     }
                     // select_project() keeps the tab within the visible chats.
                     self.select_project(project_id.clone(), cx);
-                    // Rig: `ARBOS_OPEN_PROFILE=agent[:model|reasoning|voice]|group[:library|:add-members]|user|me`
+                    // Rig: `ARBOS_OPEN_NEW_GROUP=1` opens the New group picker with one
+                    // agent and one person already picked (member chips) — here,
+                    // after the fixture's projects exist.
+                    if std::env::var("ARBOS_OPEN_NEW_GROUP").is_ok_and(|v| v == "1") {
+                        self.open_new_chat(cx);
+                        self.open_new_group(cx);
+                        let agent = self.my_projects().next().map(|p| p.id.clone());
+                        let person = self.projects.iter().find_map(|p| p.person().cloned());
+                        if let Some(id) = agent {
+                            self.toggle_group_agent(id, cx);
+                        }
+                        if let Some(person) = person {
+                            self.toggle_group_person(person, cx);
+                        }
+                    }
+                    // Rig: `ARBOS_REPLY_TO=1` arms a reply to the restored chat's
+                    // last message (the composer's reply preview bar).
+                    if std::env::var("ARBOS_REPLY_TO").is_ok_and(|v| v == "1") {
+                        if let Some(chat) = self.active_chat_id() {
+                            if let Some(last) = self.messages_of(&chat).last().map(|m| m.id.clone())
+                            {
+                                self.set_reply_to(chat, last, cx);
+                            }
+                        }
+                    }
+                    // Rig: `ARBOS_OPEN_PROFILE=agent[:model|reasoning|voice]|group[:library|:add-members|:member]|user|me`
                     // opens the right pane for the restored chat (selecting it
                     // closed whatever the shell opened at launch), and
                     // `ARBOS_OPEN_SETTINGS=…` re-opens my pane on its Settings tab.
@@ -1410,6 +1451,25 @@ impl AppState {
                             } else if rest == ":add-members" {
                                 // The pane's Add members sheet over the Members tab.
                                 self.open_add_members(project_id, cx);
+                            } else if rest == ":member" {
+                                // `:member` lands on the first other member, pushed
+                                // over the group as a click on its row would.
+                                let me = self.me_handle();
+                                if let Some(handle) = self
+                                    .projects
+                                    .iter()
+                                    .find(|p| p.id == project_id)
+                                    .and_then(|p| p.people.iter().find(|x| x.handle != me))
+                                    .map(|x| x.handle.clone())
+                                {
+                                    self.push_profile(
+                                        ProfilePage::User {
+                                            handle,
+                                            space_id: Some(project_id),
+                                        },
+                                        cx,
+                                    );
+                                }
                             }
                         } else if spec == "user" {
                             if let Some(handle) = self
@@ -2846,16 +2906,25 @@ impl AppState {
             channel_id: channel_id.clone(),
             room_id: room_id.clone(),
         });
+        // Open only when Matrix already lists the room. A registry room_id alone can
+        // race sliding sync (memory store empty until the next snapshot) or point at a
+        // gone room — both yield "no such room", which is not a product bug.
+        let synced = room_id.as_ref().is_some_and(|rid| {
+            self.matrix_snapshot
+                .channels
+                .iter()
+                .any(|c| c.room_id == *rid)
+        });
         match room_id {
-            Some(room_id) => {
+            Some(room_id) if synced => {
                 self.channel_pending_room = None;
                 self.command(ClientCommand::ChannelOpen {
                     room_id: room_id.clone(),
                 });
                 self.command(ClientCommand::ChannelMarkRead { room_id });
             }
-            // Just created: the room shows up in the next snapshot or registry refresh.
-            None => self.channel_pending_room = Some((server_id, channel_id)),
+            // Just created, or Matrix has not listed the room yet: wait for a snapshot.
+            _ => self.channel_pending_room = Some((server_id, channel_id)),
         }
         self.sync_focus();
         cx.notify();
@@ -2878,7 +2947,13 @@ impl AppState {
             .server(&server_id)
             .and_then(|s| s.channel(&channel_id))
             .and_then(|c| self.room_of_channel(c));
-        if room.is_some() {
+        let synced = room.as_ref().is_some_and(|rid| {
+            self.matrix_snapshot
+                .channels
+                .iter()
+                .any(|c| c.room_id == *rid)
+        });
+        if synced {
             self.select_channel(server_id, channel_id, cx);
         }
     }
@@ -3779,13 +3854,6 @@ impl AppState {
             })
     }
 
-    pub fn set_model(&mut self, model: String, cx: &mut Context<Self>) {
-        let Some(project_id) = self.selected_project.clone() else {
-            return;
-        };
-        self.set_project_model(project_id, model, cx);
-    }
-
     /// The agent's model (profile page picker) — optimistic, then `SetModel`
     /// with its current effort.
     pub fn set_project_model(&mut self, project_id: Id, model: String, cx: &mut Context<Self>) {
@@ -3853,13 +3921,6 @@ impl AppState {
         self.sample_playing.as_deref() == Some(url)
             && (self.sample_wanted.is_some()
                 || self.sample_player.as_ref().is_some_and(|p| p.is_playing()))
-    }
-
-    pub fn set_effort(&mut self, effort: Effort, cx: &mut Context<Self>) {
-        let Some(project_id) = self.selected_project.clone() else {
-            return;
-        };
-        self.set_project_effort(project_id, effort, cx);
     }
 
     /// The agent's reasoning effort (profile page picker) — optimistic, then
@@ -3955,35 +4016,51 @@ impl AppState {
         }
     }
 
-    /// Open `page` on top of the current one (a sender tapped inside a group): the pane
-    /// gets a `‹` back to where it was. Same page again is a no-op.
-    pub fn push_profile(&mut self, page: ProfilePage, cx: &mut Context<Self>) {
-        if self.profile.as_ref() == Some(&page) {
-            return;
-        }
-        let under = self.profile.take();
-        let mut stack = std::mem::take(&mut self.profile_stack);
-        self.open_profile(page, cx);
-        stack.extend(under);
-        self.profile_stack = stack;
+    /// Fill the pane with `page`, forgetting whatever was under it.
+    pub fn open_profile(&mut self, page: ProfilePage, cx: &mut Context<Self>) {
+        self.profile_stack.clear();
+        self.show_profile(page, cx);
     }
 
-    /// `‹` in the pane header: back to the page underneath (closes when none).
-    pub fn back_profile(&mut self, cx: &mut Context<Self>) {
+    /// Open `page` on top of the current one (a sender tapped inside a group,
+    /// a member from a group's pane, an agent's owner): the page underneath
+    /// is kept with its tab so `‹` brings it back as it was. Callers that
+    /// know the body's scroll set it on the pushed frame (`Shell::push_profile`).
+    /// Same page again is a no-op; nothing open is a plain open.
+    pub fn push_profile(&mut self, page: ProfilePage, cx: &mut Context<Self>) {
+        let Some(under) = self.profile.clone() else {
+            self.open_profile(page, cx);
+            return;
+        };
+        if under == page {
+            return;
+        }
+        let tab = self.profile_tab;
+        self.profile_stack.push(ProfileFrame {
+            page: under,
+            tab,
+            scroll: 0.0,
+        });
+        self.show_profile(page, cx);
+    }
+
+    /// `‹` in the pane header: back to the page underneath on its tab, returning
+    /// the body scroll it had for the shell to restore; closes when none.
+    pub fn back_profile(&mut self, cx: &mut Context<Self>) -> Option<f32> {
         match self.profile_stack.pop() {
-            Some(prev) => {
-                let stack = std::mem::take(&mut self.profile_stack);
-                self.open_profile(prev, cx);
-                self.profile_stack = stack;
+            Some(frame) => {
+                self.show_profile(frame.page, cx);
+                self.profile_tab = frame.tab;
+                Some(frame.scroll)
             }
             None => {
                 self.close_profile(cx);
+                None
             }
         }
     }
 
-    pub fn open_profile(&mut self, page: ProfilePage, cx: &mut Context<Self>) {
-        self.profile_stack.clear();
+    fn show_profile(&mut self, page: ProfilePage, cx: &mut Context<Self>) {
         self.avatar_picker = match &page {
             ProfilePage::Agent { project_id } => Some(project_id.clone()),
             _ => None,
@@ -3995,6 +4072,7 @@ impl AppState {
             });
         }
         self.profile = Some(page);
+        self.profile_opened = self.profile_opened.wrapping_add(1);
         self.profile_from_name = false;
         self.profile_tab = 0;
         self.profile_picker_open = false;
@@ -5273,6 +5351,47 @@ impl AppState {
             color,
         });
         self.push_notice("Forking…");
+        cx.notify();
+    }
+
+    /// Session fork (#1257): a new chat of the **same** agent carrying this
+    /// chat's transcript — never a new project (that is `duplicate_project`,
+    /// reached only from the sidebar's agent row). The copy shows at once
+    /// under a local id and opens; `ChatCreated` swaps the relay's id in and
+    /// the box fills the room with the real history and the model's context.
+    pub fn fork_chat(&mut self, chat_id: Id, cx: &mut Context<Self>) {
+        if !self.multi_chat {
+            return;
+        }
+        let Some(project) = self.project_of_chat(&chat_id).cloned() else {
+            return;
+        };
+        let Some(source) = self
+            .tabs(&project.id)
+            .iter()
+            .find(|c| c.id == chat_id)
+            .cloned()
+        else {
+            return;
+        };
+        let Some(chat) = forked_chat(&source, &project, new_id()) else {
+            return;
+        };
+        let local_id = chat.id.clone();
+        let title = chat.title.clone();
+        let messages = self.messages_of(&chat_id).to_vec();
+        self.chats.entry(project.id.clone()).or_default().push(chat);
+        self.messages.insert(local_id.clone(), messages);
+        self.chat_ui.insert(local_id.clone(), ChatUi::default());
+        self.active_tab.insert(project.id.clone(), local_id.clone());
+        self.last_chats.insert(project.id.clone(), local_id.clone());
+        self.command(ClientCommand::ForkChat {
+            project_id: project.id,
+            source_chat_id: chat_id,
+            chat_id: local_id.clone(),
+            title,
+        });
+        self.command(ClientCommand::OpenChat { chat_id: local_id });
         cx.notify();
     }
 
@@ -6688,5 +6807,108 @@ fn device_name() -> String {
         format!("{host} (Mac)")
     } else {
         host.to_string()
+    }
+}
+
+/// The local row of a session fork (#1257): the same project, a plain chat
+/// titled `<title> (fork)`, nothing pinned or shared. `None` when `source`
+/// cannot be forked (groups, system tabs, chats of shared or people spaces).
+pub(crate) fn forked_chat(source: &Chat, project: &Project, id: Id) -> Option<Chat> {
+    if project.shared || project.is_people() {
+        return None;
+    }
+    if source.is_group() || source.is_system || source.kind != ChatKind::Chat {
+        return None;
+    }
+    if source.project_id != project.id {
+        return None;
+    }
+    Some(Chat {
+        id,
+        project_id: project.id.clone(),
+        title: fork_title(&crate::ui::header::tab_title(source, project)),
+        is_pinned: false,
+        is_system: false,
+        kind: ChatKind::Chat,
+        participants: Vec::new(),
+        unread: false,
+        last_message_at: now_ms(),
+        archived_at: None,
+    })
+}
+
+/// `"unicorns"` → `"unicorns (fork)"`; a fork of a fork stays `"… (fork)"`.
+/// Mirrors the relay's default so the row the Mac shows first is the one the
+/// relay returns.
+pub(crate) fn fork_title(source: &str) -> String {
+    let base = source.trim();
+    if base.is_empty() {
+        return "New chat (fork)".into();
+    }
+    if base.ends_with("(fork)") {
+        return base.to_owned();
+    }
+    format!("{base} (fork)")
+}
+
+#[cfg(test)]
+mod fork_tests {
+    //! #1257: a session fork stays inside its agent. It never becomes a project.
+    use super::*;
+
+    fn agent(id: &str, name: &str) -> Project {
+        Project {
+            id: id.into(),
+            name: name.into(),
+            ..Default::default()
+        }
+    }
+
+    fn chat(id: &str, project: &str, title: &str, pinned: bool) -> Chat {
+        Chat {
+            id: id.into(),
+            project_id: project.into(),
+            title: title.into(),
+            is_pinned: pinned,
+            is_system: false,
+            kind: ChatKind::Chat,
+            participants: Vec::new(),
+            unread: false,
+            last_message_at: 0,
+            archived_at: None,
+        }
+    }
+
+    #[test]
+    fn fork_is_a_sibling_chat_not_a_project() {
+        let bob = agent("p-bob", "Bob");
+        let unicorns = chat("c-unicorns", "p-bob", "unicorns", false);
+        let fork = forked_chat(&unicorns, &bob, "c-local".into()).expect("forkable");
+        assert_eq!(fork.project_id, bob.id, "same agent");
+        assert_eq!(fork.title, "unicorns (fork)");
+        assert_eq!(fork.kind, ChatKind::Chat);
+        assert!(!fork.is_pinned);
+        assert_eq!(fork_title(&fork.title), "unicorns (fork)");
+        // The pinned "Main" chat forks under its display name, not the agent's.
+        let main = chat("c-main", "p-bob", "Bob", true);
+        let fork = forked_chat(&main, &bob, "c-local-2".into()).expect("forkable");
+        assert_eq!(fork.title, "Main (fork)");
+    }
+
+    #[test]
+    fn groups_system_tabs_and_shared_spaces_do_not_fork() {
+        let bob = agent("p-bob", "Bob");
+        let mut group = chat("c-g", "p-bob", "Group · Mira", false);
+        group.kind = ChatKind::Group;
+        assert!(forked_chat(&group, &bob, "x".into()).is_none());
+        let mut system = chat("c-s", "p-bob", "Projects ⇄", false);
+        system.is_system = true;
+        assert!(forked_chat(&system, &bob, "x".into()).is_none());
+        let mut shared = agent("p-shared", "Team");
+        shared.shared = true;
+        let c = chat("c-t", "p-shared", "Plan", false);
+        assert!(forked_chat(&c, &shared, "x".into()).is_none());
+        let other = chat("c-o", "p-other", "Elsewhere", false);
+        assert!(forked_chat(&other, &bob, "x".into()).is_none());
     }
 }

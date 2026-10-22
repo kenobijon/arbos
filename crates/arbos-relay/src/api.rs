@@ -9,7 +9,8 @@ use serde_json::{json, Value};
 
 use arbos_core::api::{
     ChatDto, ChatMeDto, CreateChatResponseDto, CreateProjectResponseDto, CreateProjectRoomsDto,
-    CreateProjectSandboxDto, GetProjectResponseDto, MachineDto, ProjectDto, ProjectOwnerDto,
+    CreateProjectSandboxDto, GetProjectResponseDto, MachineDto, MachineImageDto, MachineSpecDto,
+    MachineStateDto, MachineStatusDto, MachineWorkspaceDto, ProjectDto, ProjectOwnerDto,
 };
 use arbos_core::auth::{hash, mint, pairing_code, TokenKind};
 use arbos_core::ids::{now_ms, ulid};
@@ -317,6 +318,7 @@ pub async fn create_project(
         doc_epoch: 1,
         kind: "chat".into(),
         participants: Vec::new(),
+        forked_from: None,
     };
     state.db.insert_chat(&pinned).map_err(internal)?;
     let _ = state.db.set_primary_chat(&project.id, Some(&pinned.id));
@@ -395,7 +397,7 @@ pub async fn list_projects(State(state): State<AppState>, principal: Principal) 
                                 .user_card(&p.user_id)
                                 .ok()
                                 .flatten()
-                                .and_then(|c| c["handle"].as_str().map(str::to_owned)),
+                                .map(|c| c.handle),
                         );
                         let mut v = serde_json::to_value(dto).expect("ProjectDto");
                         v["owner"] = json!(p.user_id);
@@ -690,7 +692,10 @@ pub async fn delete_chat(
             StatusCode::CONFLICT,
             "the pinned chat cannot be closed".into(),
         )),
-        Some(true) => Ok(StatusCode::NO_CONTENT.into_response()),
+        Some(true) => {
+            state.matrix.close_chat(&state, &chat);
+            Ok(StatusCode::NO_CONTENT.into_response())
+        }
     }
 }
 
@@ -999,44 +1004,65 @@ pub async fn machine(State(state): State<AppState>, principal: Principal) -> Api
         }
     }
     let projects = state.db.projects_of_user(&user_id).map_err(internal)?;
-    let workspaces: Vec<Value> = projects
+    let workspaces: Vec<MachineWorkspaceDto> = projects
         .iter()
-        .map(|p| {
-            json!({
-                "project_id": p.id,
-                "state": if bs == arbos_core::wire::BoxState::Awake { p.workspace_state.as_str() } else { "stopped" },
-            })
+        .map(|p| MachineWorkspaceDto {
+            project_id: p.id.clone(),
+            state: if bs == arbos_core::wire::BoxState::Awake {
+                p.workspace_state.clone()
+            } else {
+                "stopped".into()
+            },
         })
         .collect();
     let spend_today = state
         .db
         .user_usage_since(&user_id, start_of_day())
         .map_err(internal)?;
-    Ok(Json(json!({
-        "user_id": user_id,
-        "state": bs,
-        "since": since,
-        "provider": sb.as_ref().map(|s| s.provider.clone()),
-        "sandbox_id": sb.as_ref().and_then(|s| s.sandbox_id.clone()),
-        "spec": { "cpu": cpu, "mem_gib": mem, "disk_gib": disk, "class": snapshot_name },
-        "spend_today_usd": spend_today,
-        "spend_cap_usd": state.db.user_spend_cap(&user_id).map_err(internal)?,
-        "workspaces": workspaces,
-        "migrated_from": sb.as_ref().map(|s| s.migrated_from.clone()).unwrap_or_default(),
+    let spend_cap_usd = state.db.user_spend_cap(&user_id).map_err(internal)?;
+    let image_outdated = sb
+        .as_ref()
+        .is_some_and(|s| crate::upgrade::image_outdated(&state, s));
+    let upgrade = crate::upgrade::status_json(&state, &user_id).await;
+    let held = state.db.box_held(&user_id).unwrap_or(false);
+    let machine_today_usd = state
+        .db
+        .credits(&user_id, start_of_day())
+        .map(|c| c.machine_today_usd)
+        .unwrap_or(0.0);
+    Ok(Json(MachineStatusDto {
+        user_id,
+        state: bs,
+        since,
+        provider: sb.as_ref().map(|s| s.provider.clone()),
+        sandbox_id: sb.as_ref().and_then(|s| s.sandbox_id.clone()),
+        spec: MachineSpecDto {
+            cpu,
+            mem_gib: mem,
+            disk_gib: disk,
+            class: snapshot_name,
+        },
+        spend_today_usd: spend_today,
+        spend_cap_usd,
+        workspaces,
+        migrated_from: sb
+            .as_ref()
+            .map(|s| s.migrated_from.clone())
+            .unwrap_or_default(),
         // Image: the snapshot this box was made from vs the relay's current default. An outdated
         // box lacks newer agent features until `POST /machine/upgrade` recreates it.
-        "image": {
-            "current": sb.as_ref().and_then(|s| s.snapshot.clone()),
-            "default": state.cfg.daytona_snapshot,
+        image: MachineImageDto {
+            current: sb.as_ref().and_then(|s| s.snapshot.clone()),
+            default: state.cfg.daytona_snapshot.clone(),
         },
-        "image_outdated": sb.as_ref().is_some_and(|s| crate::upgrade::image_outdated(&state, s)),
-        "upgrade": crate::upgrade::status_json(&state, &user_id).await,
+        image_outdated,
+        upgrade,
         // Always-on: the machine runs all the time (no idle stop, no waking to show); `held`
         // is a manual Stop that the next Start or message lifts.
-        "always_on": state.cfg.always_on,
-        "held": state.db.box_held(&user_id).unwrap_or(false),
-        "machine_today_usd": state.db.credits(&user_id, start_of_day()).map(|c| c.machine_today_usd).unwrap_or(0.0),
-    }))
+        always_on: state.cfg.always_on,
+        held,
+        machine_today_usd,
+    })
     .into_response())
 }
 
@@ -1068,7 +1094,12 @@ pub async fn machine_start(State(state): State<AppState>, principal: Principal) 
     }
     boxes::ensure_awake(&state, &user_id, "api").await;
     let (bs, since) = state.box_state(&user_id).await;
-    Ok(Json(json!({ "state": bs, "since": since })).into_response())
+    Ok(Json(MachineStateDto {
+        state: bs,
+        since,
+        held: None,
+    })
+    .into_response())
 }
 
 /// `POST /machine/stop`: hibernate the caller's box; every workspace stops with it.
@@ -1092,7 +1123,12 @@ pub async fn machine_stop(
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
     let (bs, since) = state.box_state(&user_id).await;
-    Ok(Json(json!({ "state": bs, "since": since, "held": true })).into_response())
+    Ok(Json(MachineStateDto {
+        state: bs,
+        since,
+        held: Some(true),
+    })
+    .into_response())
 }
 
 /// `DELETE /projects/{id}` — owner only. Soft delete: the project leaves every list and the box
@@ -1213,7 +1249,11 @@ pub async fn machine_restart(State(state): State<AppState>, principal: Principal
     let (bs, since) = state.box_state(&user_id).await;
     Ok((
         StatusCode::ACCEPTED,
-        Json(json!({ "state": bs, "since": since, "held": false })),
+        Json(MachineStateDto {
+            state: bs,
+            since,
+            held: Some(false),
+        }),
     )
         .into_response())
 }
@@ -1278,6 +1318,11 @@ pub struct CreateChatBody {
     /// cross-project message). Group chats go through `POST /projects/{id}/groups`.
     #[serde(default)]
     pub kind: Option<String>,
+    /// Session fork (#1257): a plain chat of this same project to fork. The new chat is a
+    /// sibling tab named `<title> (fork)` by default; the box copies the transcript and the
+    /// model's context over. Never a new project.
+    #[serde(default)]
+    pub fork_from: Option<String>,
 }
 
 pub async fn create_chat(
@@ -1305,6 +1350,27 @@ pub async fn create_chat(
         }
     };
     let existing = state.db.list_chats(&p.id).map_err(internal)?;
+    // A fork names a plain chat of this project (archived ones included — the row still
+    // exists); groups and system tabs cannot be forked.
+    let fork_from = match b.fork_from.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(src) => {
+            if kind != "chat" {
+                return Err((StatusCode::BAD_REQUEST, "only a chat can be forked".into()));
+            }
+            let source = existing
+                .iter()
+                .find(|c| c.id == src)
+                .ok_or((StatusCode::NOT_FOUND, "no such chat to fork".to_owned()))?;
+            if source.kind != "chat" {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "only a plain chat can be forked".into(),
+                ));
+            }
+            Some(source.clone())
+        }
+    };
     // Single-chat product (ARBOS_MULTI_CHAT off): an agent's box never opens another plain chat;
     // it is handed the primary chat instead. The "Projects ⇄" system tab (one per project, where
     // a participant box collects agent-hosted group traffic) and group chats
@@ -1342,12 +1408,10 @@ pub async fn create_chat(
     let chat = Chat {
         id: ulid(),
         project_id: p.id.clone(),
-        title: b.title.unwrap_or_else(|| {
-            if kind == "projects" {
-                "Projects ⇄".into()
-            } else {
-                "New chat".into()
-            }
+        title: b.title.unwrap_or_else(|| match &fork_from {
+            Some(src) => fork_title(&src.title),
+            None if kind == "projects" => "Projects ⇄".into(),
+            None => "New chat".into(),
         }),
         is_pinned: false,
         position: existing.len() as i64,
@@ -1355,6 +1419,7 @@ pub async fn create_chat(
         doc_epoch: 1,
         kind: kind.into(),
         participants: Vec::new(),
+        forked_from: fork_from.map(|c| c.id),
     };
     state.db.insert_chat(&chat).map_err(internal)?;
     Ok(Json(
@@ -1366,6 +1431,18 @@ pub async fn create_chat(
         .expect("CreateChatResponseDto"),
     )
     .into_response())
+}
+
+/// `"unicorns"` → `"unicorns (fork)"`; a fork of a fork stays `"… (fork)"`.
+pub(crate) fn fork_title(source: &str) -> String {
+    let base = source.trim();
+    if base.is_empty() {
+        return "New chat (fork)".into();
+    }
+    if base.ends_with("(fork)") {
+        return base.to_owned();
+    }
+    format!("{base} (fork)")
 }
 
 pub async fn list_chats(
@@ -1862,6 +1939,7 @@ mod primary_chat_tests {
             doc_epoch: 1,
             kind: kind.into(),
             participants: Vec::new(),
+            forked_from: None,
         };
         state.db.insert_chat(&c).expect("chat");
         c.id
@@ -1875,6 +1953,78 @@ mod primary_chat_tests {
                 .append_row(&room, "dev", &format!("b{i}"), b"x")
                 .expect("row");
         }
+    }
+
+    /// #1257: a session fork is a sibling chat of the same project — never a new project.
+    #[tokio::test]
+    async fn fork_chat_stays_inside_the_project() {
+        let state = test_state(AuthMode::Github);
+        let (alice, dev) = person(&state, 1);
+        let project = project_of(&state, &alice, "Bob");
+        let t = now_ms();
+        let unicorns = chat(&state, &project, "unicorns", t - 3000, "chat");
+        let group = chat(&state, &project, "Group · Mira", t - 2000, "group");
+        let projects_before = state.db.projects_of_user(&alice).unwrap().len();
+        let chats_before = state.db.list_chats(&project).unwrap().len();
+
+        let r = create_chat(
+            State(state.clone()),
+            dev.clone(),
+            Path(project.clone()),
+            Json(CreateChatBody {
+                title: None,
+                kind: None,
+                fork_from: Some(unicorns.clone()),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["chat"]["title"], "unicorns (fork)");
+        assert_eq!(v["chat"]["project_id"], json!(project));
+        let fork_id = v["chat"]["id"].as_str().unwrap().to_owned();
+        assert_ne!(fork_id, unicorns);
+        let stored = state.db.chat(&project, &fork_id).unwrap().unwrap();
+        assert_eq!(stored.forked_from.as_deref(), Some(unicorns.as_str()));
+        assert_eq!(stored.kind, "chat");
+        // Same project, one more chat; the user owns exactly as many projects as before.
+        assert_eq!(
+            state.db.list_chats(&project).unwrap().len(),
+            chats_before + 1
+        );
+        assert_eq!(
+            state.db.projects_of_user(&alice).unwrap().len(),
+            projects_before
+        );
+        assert_eq!(fork_title("unicorns (fork)"), "unicorns (fork)");
+
+        // Groups cannot be forked; an unknown source is 404.
+        let bad = create_chat(
+            State(state.clone()),
+            dev.clone(),
+            Path(project.clone()),
+            Json(CreateChatBody {
+                title: None,
+                kind: None,
+                fork_from: Some(group),
+            }),
+        )
+        .await;
+        assert_eq!(bad.err().map(|(s, _)| s), Some(StatusCode::BAD_REQUEST));
+        let missing = create_chat(
+            State(state.clone()),
+            dev,
+            Path(project.clone()),
+            Json(CreateChatBody {
+                title: None,
+                kind: None,
+                fork_from: Some("nope".into()),
+            }),
+        )
+        .await;
+        assert_eq!(missing.err().map(|(s, _)| s), Some(StatusCode::NOT_FOUND));
     }
 
     #[tokio::test]
@@ -1914,6 +2064,7 @@ mod primary_chat_tests {
             Json(CreateChatBody {
                 title: None,
                 kind: None,
+                fork_from: None,
             }),
         )
         .await
@@ -1932,6 +2083,7 @@ mod primary_chat_tests {
             Json(CreateChatBody {
                 title: None,
                 kind: Some("projects".into()),
+                fork_from: None,
             }),
         )
         .await
@@ -1952,6 +2104,7 @@ mod primary_chat_tests {
             Json(CreateChatBody {
                 title: None,
                 kind: Some("projects".into()),
+                fork_from: None,
             }),
         )
         .await

@@ -240,8 +240,8 @@ impl Shell {
                         .gap(px(2.0))
                         .px(px(16.0))
                         .py(px(10.0))
-                        .border_b_1()
-                        .border_color(theme.border)
+                        .relative()
+                        .child(kit::hairline_below(16.0, &theme))
                         .child(
                             div()
                                 .text_size(px(TEXT_BODY))
@@ -305,32 +305,39 @@ impl Shell {
                 group = group.child(footnote(detail, &theme).pb(px(8.0)));
             }
             let mut body = div().flex().flex_col().gap(px(22.0)).child(group);
-            let mut actions = settings_group(&theme);
-            if machine.always_on {
-                actions = actions.child(glass::row("", &theme).child(
-                    link_button("machine-restart", "Restart machine", false, &theme).on_click(
-                        cx.listener(|this, _, _, cx| {
-                            this.state.update(cx, |s, cx| s.machine_restart(cx));
-                        }),
-                    ),
-                ));
+            // One action row in its own card: a plain row through kit::section,
+            // which places separators only between rows (none here).
+            let action = if machine.always_on {
+                link_button("machine-restart", "Restart machine", false, &theme).on_click(
+                    cx.listener(|this, _, _, cx| {
+                        this.state.update(cx, |s, cx| s.machine_restart(cx));
+                    }),
+                )
             } else if machine.state.is_down() {
-                actions = actions.child(glass::row("", &theme).child(
-                    link_button("machine-start", "Start machine", false, &theme).on_click(
-                        cx.listener(|this, _, _, cx| {
-                            this.state.update(cx, |s, cx| s.machine_start(cx));
-                        }),
-                    ),
-                ));
+                link_button("machine-start", "Start machine", false, &theme).on_click(cx.listener(
+                    |this, _, _, cx| {
+                        this.state.update(cx, |s, cx| s.machine_start(cx));
+                    },
+                ))
             } else {
-                actions = actions.child(glass::row("", &theme).child(
-                    link_button("machine-stop", "Stop machine", true, &theme).on_click(
-                        cx.listener(|this, _, _, cx| {
-                            this.state.update(cx, |s, cx| s.machine_stop(cx));
-                        }),
-                    ),
-                ));
-            }
+                link_button("machine-stop", "Stop machine", true, &theme).on_click(cx.listener(
+                    |this, _, _, cx| {
+                        this.state.update(cx, |s, cx| s.machine_stop(cx));
+                    },
+                ))
+            };
+            let action_row = div()
+                .flex()
+                .items_center()
+                .justify_end()
+                .min_h(px(kit::ROW_MIN_H))
+                .px(px(kit::INSET))
+                .py(px(6.0))
+                .child(action)
+                .into_any_element();
+            let actions = kit::section(vec![action_row], kit::INSET, &theme)
+                .mx(px(0.0))
+                .mb(px(0.0));
             body = body.child(actions).child(footnote(
                 if machine.always_on {
                     "Your one cloud computer, always on. Agents are workspaces on it. Machine time \
@@ -621,8 +628,9 @@ impl Shell {
                 .child(group)
                 .child(footnote(
                     if auto_update {
-                        "New versions install in the background and Arbos restarts when you pause — \
-                         never during a call or while you type. The open chat comes back."
+                        "New versions install in the background and Arbos restarts when you pause \
+                         in the app — never while another app is focused, during a call, or while \
+                         you type. The open chat comes back."
                             .into()
                     } else {
                         "Arbos only tells you about new versions; press Update in the rail to install."

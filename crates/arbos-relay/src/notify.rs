@@ -23,6 +23,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
+use arbos_core::api::{UnreadChatDto, UnreadDto};
 use arbos_core::ids::now_ms;
 
 use crate::apns::{Delivery, Outgoing};
@@ -99,11 +100,14 @@ impl Sender {
             .ok()
             .flatten()
             .unwrap_or_default();
-        let handle = card["handle"].as_str().unwrap_or(user_id).to_owned();
-        let name = card["name"]
-            .as_str()
+        let handle = if card.handle.is_empty() {
+            user_id.to_owned()
+        } else {
+            card.handle
+        };
+        let name = card
+            .name
             .filter(|n| !n.is_empty())
-            .map(str::to_owned)
             .unwrap_or_else(|| format!("@{handle}"));
         Self {
             kind: "user",
@@ -112,7 +116,7 @@ impl Sender {
             handle,
             avatar: None,
             avatar_color: None,
-            avatar_url: card["avatar_url"].as_str().map(str::to_owned),
+            avatar_url: card.avatar_url,
             user_id: Some(user_id.to_owned()),
             avatar_color_index: None,
         }
@@ -338,6 +342,8 @@ pub async fn announce(
         }
         if user_focused_on_chat(state, &user, &chat.chat_id).await {
             let _ = state.db.mark_chat_read(&user, &chat.chat_id);
+            // Queued after the message job for this chat, so the receipt lands on it.
+            state.matrix.read(state, &chat.chat_id, &user);
         }
         if !state.push.is_on() {
             continue;
@@ -608,14 +614,20 @@ pub async fn me_unread(State(state): State<AppState>, principal: Principal) -> R
     {
         Ok(chats) => {
             let total: i64 = chats.iter().map(|c| c.unread).sum();
-            Json(json!({
-                "chats": chats.iter().map(|c| json!({
-                    "chat_id": c.chat_id,
-                    "project_id": c.project_id.clone().unwrap_or_else(|| people::PEOPLE_PROJECT.to_owned()),
-                    "unread": c.unread,
-                })).collect::<Vec<_>>(),
-                "total": total,
-            }))
+            Json(UnreadDto {
+                chats: chats
+                    .iter()
+                    .map(|c| UnreadChatDto {
+                        chat_id: c.chat_id.clone(),
+                        project_id: c
+                            .project_id
+                            .clone()
+                            .unwrap_or_else(|| people::PEOPLE_PROJECT.to_owned()),
+                        unread: c.unread,
+                    })
+                    .collect(),
+                total,
+            })
             .into_response()
         }
         Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
@@ -865,6 +877,7 @@ mod tests {
                 doc_epoch: 1,
                 kind: "chat".into(),
                 participants: Vec::new(),
+                forked_from: None,
             })
             .expect("chat");
         let bob_tok = register(&state, &bob_dev, &bob);
@@ -1001,6 +1014,7 @@ mod archive_tests {
                 doc_epoch: 1,
                 kind: "chat".into(),
                 participants: Vec::new(),
+                forked_from: None,
             })
             .unwrap();
         for (p, u) in [(&bob_dev, &bob), (&bob_dev2, &bob)] {

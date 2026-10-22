@@ -154,7 +154,8 @@ fn group_name(state: &AppState, members: &[crate::db_people::Membership]) -> Str
         .iter()
         .filter_map(|m| m.user_id())
         .filter_map(|u| state.db.user_card(u).ok().flatten())
-        .filter_map(|c| c["handle"].as_str().map(|h| format!("@{h}")))
+        .filter(|c| !c.handle.is_empty())
+        .map(|c| format!("@{}", c.handle))
         .collect();
     names.sort();
     names.join(", ")
@@ -164,11 +165,9 @@ fn group_name(state: &AppState, members: &[crate::db_people::Membership]) -> Str
 fn display_name(state: &AppState, member: &str) -> Option<String> {
     if let Some(u) = member.strip_prefix("user:") {
         let card = state.db.user_card(u).ok().flatten()?;
-        return card["handle"]
-            .as_str()
-            .filter(|h| !h.is_empty())
-            .map(str::to_owned)
-            .or_else(|| card["name"].as_str().map(str::to_owned));
+        return (!card.handle.is_empty())
+            .then_some(card.handle)
+            .or(card.name);
     }
     let p = member.strip_prefix("agent:")?;
     state.db.project(p).ok().flatten().map(|p| p.name)
@@ -634,11 +633,25 @@ impl Worker {
         Ok(())
     }
 
+    /// The receipt goes where the relay's read mark is: on the mirrored event of the message
+    /// at the mark while something is still unread, on the stream-newest event once caught up
+    /// (a live read is always "everything up to now").
     async fn read(&self, chat_id: &str, user_id: &str) -> MxResult<()> {
-        let (Some(room), Some(event)) = (
-            self.state.db.matrix_room(chat_id).ok().flatten(),
-            self.state.db.matrix_latest_event(chat_id).ok().flatten(),
-        ) else {
+        let Some(room) = self.state.db.matrix_room(chat_id).ok().flatten() else {
+            return Ok(());
+        };
+        let newest = self.state.db.matrix_latest_event(chat_id).ok().flatten();
+        let event = match self
+            .state
+            .db
+            .matrix_read_mark(user_id, chat_id)
+            .ok()
+            .flatten()
+        {
+            Some((at_mark, false)) => at_mark,
+            Some((_, true)) | None => newest,
+        };
+        let Some(event) = event else {
             return Ok(());
         };
         let who = self.state.matrix.cfg.user_mxid(user_id);

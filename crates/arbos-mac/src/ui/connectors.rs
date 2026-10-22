@@ -15,6 +15,7 @@ use crate::ui::composer::ComposerInput;
 use crate::ui::frost::{frosted, MENU_BLUR};
 use crate::ui::glass;
 use crate::ui::icons::icon;
+use crate::ui::profiles::kit;
 use crate::ui::theme::{Theme, PANEL_RADIUS, RAIL_WIDTH};
 
 pub enum ConnectorsEvent {
@@ -284,8 +285,8 @@ impl ConnectorsPanel {
             .flex_col()
             .gap(px(8.0))
             .py(px(9.0))
-            .border_b_1()
-            .border_color(theme.border)
+            .relative()
+            .child(kit::hairline_below(16.0, theme))
             .child(
                 div()
                     .flex()

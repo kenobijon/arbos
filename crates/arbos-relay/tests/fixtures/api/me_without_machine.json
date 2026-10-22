@@ -1,0 +1,50 @@
+{
+  "credits": {
+    "allow_negative": false,
+    "balance_usd": 20.0,
+    "daily_cap_usd": null,
+    "granted_usd": 20.0,
+    "machine_today_usd": 0.0,
+    "machine_total_usd": 0.0,
+    "spent_today_usd": 0.0,
+    "spent_usd": 0.0
+  },
+  "device": {
+    "created_at": 1700000000000,
+    "id": "dev_fixture",
+    "kind": "github",
+    "last_seen_at": 1700000000000,
+    "name": "Test Mac",
+    "revoked_at": null
+  },
+  "features": {
+    "vault_connect": false
+  },
+  "limits": {
+    "auth_mode": "github",
+    "read_only": false,
+    "read_only_reason": null,
+    "signup": "open"
+  },
+  "machine": {
+    "always_on": false,
+    "evicted": false,
+    "exists": false,
+    "held": false,
+    "provider": null,
+    "sandbox_id": null,
+    "since": 0,
+    "state": "asleep",
+    "waitlist_position": null,
+    "waitlisted": false
+  },
+  "user": {
+    "avatar_url": null,
+    "created_at": 1700000000000,
+    "github_id": 301,
+    "id": "gh_301",
+    "last_login_at": 1700000000000,
+    "login": "user301",
+    "name": null
+  }
+}

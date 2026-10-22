@@ -112,6 +112,75 @@ struct Machine: Equatable {
 
     static let unknown = Machine(state: .hibernatedLight, since: nil, spec: "")
 
+    /// Memberwise init (kept explicit because `init(dto:)` would suppress synthesis).
+    init(
+        state: BoxState,
+        since: Int64?,
+        spec: String,
+        provider: String = "",
+        sandboxId: String? = nil,
+        spendTodayUsd: Double = 0,
+        spendCapUsd: Double = 0,
+        workspaces: [Id: WorkspaceState] = [:],
+        alwaysOn: Bool = false,
+        held: Bool = false,
+        machineTodayUsd: Double = 0,
+        reported: Bool = false,
+        rawState: BoxState = .hibernatedLight,
+        cpu: Int? = nil,
+        memGib: Int? = nil,
+        image: String? = nil
+    ) {
+        self.state = state
+        self.since = since
+        self.spec = spec
+        self.provider = provider
+        self.sandboxId = sandboxId
+        self.spendTodayUsd = spendTodayUsd
+        self.spendCapUsd = spendCapUsd
+        self.workspaces = workspaces
+        self.alwaysOn = alwaysOn
+        self.held = held
+        self.machineTodayUsd = machineTodayUsd
+        self.reported = reported
+        self.rawState = rawState
+        self.cpu = cpu
+        self.memGib = memGib
+        self.image = image
+    }
+
+    init(dto: MachineStatusDto) {
+        var workspaces: [Id: WorkspaceState] = [:]
+        for w in dto.workspaces {
+            workspaces[w.project_id] = WorkspaceState.from(w.state)
+        }
+        let wire = BoxState.fromWire(dto.state) ?? .hibernatedLight
+        self.init(
+            state: dto.always_on && !dto.held && wire != .error ? .awake : wire,
+            since: dto.since,
+            spec: Machine.specLine(
+                cpu: Int(dto.spec.cpu),
+                memGib: Int(dto.spec.mem_gib),
+                diskGib: Int(dto.spec.disk_gib),
+                klass: dto.spec.`class`,
+                provider: dto.provider
+            ),
+            provider: dto.provider ?? "",
+            sandboxId: dto.sandbox_id,
+            spendTodayUsd: dto.spend_today_usd,
+            spendCapUsd: dto.spend_cap_usd,
+            workspaces: workspaces,
+            alwaysOn: dto.always_on,
+            held: dto.held,
+            machineTodayUsd: dto.machine_today_usd,
+            reported: true,
+            rawState: wire,
+            cpu: Int(dto.spec.cpu),
+            memGib: Int(dto.spec.mem_gib),
+            image: dto.image.current ?? (dto.spec.`class`.isEmpty ? nil : dto.spec.`class`)
+        )
+    }
+
     /// The state the UI may show: always-on boxes collapse everything but
     /// error onto awake (unless a manual Stop holds the box down).
     func coerced(_ s: BoxState) -> BoxState {

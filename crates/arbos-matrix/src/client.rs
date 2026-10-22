@@ -382,7 +382,13 @@ impl MatrixClient {
             let Ok(uid) = UserId::parse(mxid) else {
                 continue;
             };
-            if let Ok(Some(m)) = room.get_member_no_sync(&uid).await {
+            // Sliding sync only carries our own membership; the first miss in a room fetches
+            // its member list once (`/members`), after that the store answers.
+            let member = match room.get_member_no_sync(&uid).await {
+                Ok(Some(m)) => Some(m),
+                _ => room.get_member(&uid).await.ok().flatten(),
+            };
+            if let Some(m) = member {
                 names.insert(mxid.to_owned(), m.name().to_owned());
             }
         }

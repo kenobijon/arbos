@@ -49,10 +49,17 @@ pub const PANEL_RADIUS: f32 = 14.0;
 pub const DRAWER_WIDTH: f32 = 320.0;
 pub const NARROW_WINDOW: f32 = 1000.0;
 pub const GLASS_ALPHA: f32 = 0.80;
+/// Light + Glass tints the blur with pure white at the same default wash as
+/// dark; the chat column adds [`CHAT_WASH_ALPHA_LIGHT`] of white on top so the
+/// conversation stays a white surface while the sidebar and pane show the glass.
+pub const GLASS_ALPHA_LIGHT: f32 = 0.80;
+pub const CHAT_WASH_ALPHA_LIGHT: f32 = 0.85;
 pub const FROST_TINT_ALPHA: f32 = 0.50;
+pub const FROST_TINT_ALPHA_LIGHT: f32 = 0.72;
 /// Glass shell tint: how opaque the window wash is over the blur (Settings →
-/// Appearance → Opacity). Default matches [`GLASS_ALPHA`]; range keeps text
-/// readable at the low end and still looks like glass at the high end.
+/// Appearance → Opacity). Default is [`GLASS_ALPHA`] / [`GLASS_ALPHA_LIGHT`];
+/// range keeps text readable at the low end and still looks like glass at
+/// the high end.
 pub const GLASS_OPACITY_MIN: f32 = 0.30;
 pub const GLASS_OPACITY_MAX: f32 = 1.00;
 const GLASS_OPACITY_FILE: &str = "glass_opacity";
@@ -110,7 +117,8 @@ impl Surface {
 
 /// The user's glass opacity (0.30–1.00). Saved as a float string in
 /// `<config>/glass_opacity` when moved in Settings; a missing file keeps the
-/// default ([`GLASS_ALPHA`]). Only applied while Surface is Glass.
+/// default for the appearance ([`GLASS_ALPHA`] dark, [`GLASS_ALPHA_LIGHT`]
+/// light). Only applied while Surface is Glass.
 pub struct GlassOpacity;
 
 impl GlassOpacity {
@@ -118,13 +126,21 @@ impl GlassOpacity {
         v.clamp(GLASS_OPACITY_MIN, GLASS_OPACITY_MAX)
     }
 
-    /// The saved choice, or [`GLASS_ALPHA`].
-    pub fn load() -> f32 {
+    /// The default wash for an appearance when nothing is saved.
+    pub fn default_for(appearance: Appearance) -> f32 {
+        match appearance {
+            Appearance::Dark => GLASS_ALPHA,
+            Appearance::Light => GLASS_ALPHA_LIGHT,
+        }
+    }
+
+    /// The saved choice, or the appearance's default.
+    pub fn load(appearance: Appearance) -> f32 {
         std::fs::read_to_string(config_dir().join(GLASS_OPACITY_FILE))
             .ok()
             .and_then(|s| s.trim().parse::<f32>().ok())
             .map(Self::clamp)
-            .unwrap_or(GLASS_ALPHA)
+            .unwrap_or_else(|| Self::default_for(appearance))
     }
 
     pub fn save(v: f32) {
@@ -244,8 +260,13 @@ pub struct Theme {
     /// Shell tint alpha while Glass is on ([`GlassOpacity`]; default [`GLASS_ALPHA`]).
     pub glass_opacity: f32,
     pub bg: Hsla,
-    /// The chat-list column (a shade lighter than the conversation, as on Grok Mac).
+    /// The chat-list column (a shade off the conversation, as on Grok Mac).
     pub sidebar: Hsla,
+    /// The right pane (details, members, settings — the three-pane rule) and
+    /// the grouped cards on it. Light: a grey pane with white cards, Apple's
+    /// Account-screen grouping (D80); dark: the card tones the pane had before.
+    pub pane: Hsla,
+    pub pane_card: Hsla,
     /// Cards, sheets, rows that lift off the background (iPhone `card`).
     pub surface_1: Hsla,
     /// Hover / selected fills and chips (the assistant-bubble grey).
@@ -303,6 +324,8 @@ impl Theme {
             glass_opacity: GLASS_ALPHA,
             bg: hex(0x141414),
             sidebar: hex(0x1a1a1a),
+            pane: hex(0x1e1e1e),
+            pane_card: hex(0x232323),
             surface_1: hex(0x1e1e1e),
             surface_2: hex(0x262626),
             border: hex_a(0xffffff, 0.08),
@@ -333,24 +356,32 @@ impl Theme {
             surface,
             appearance: Appearance::Light,
             pref: AppearancePref::Light,
-            glass_opacity: GLASS_ALPHA,
-            // Grok Mac light (ref 16/30): chat #FCFCFC, sidebar #F6F6F6,
-            // selected row #EFEFEF, assistant bubble #F2F2F2.
+            glass_opacity: GLASS_ALPHA_LIGHT,
+            // Grok Mac light (ref 16/30): chat #FCFCFC, assistant bubble
+            // #F2F2F2, white field with a hairline. Jacob (2026-10-22, "strict
+            // Grok"): sidebar and right pane both Grok's #F6F6F6, chat #FCFCFC,
+            // white cards on the pane; the assistant bubble sits two steps
+            // under Grok's so it still reads on the white glass chat.
+            // Greys meet WCAG AA on every surface they sit on: muted 5.3:1 on
+            // white / 4.7:1 on a bubble, faint 4.6:1 on white, accent 4.8:1 on
+            // white (#1084FE was 3.7:1).
             bg: hex(0xfcfcfc),
             sidebar: hex(0xf6f6f6),
+            pane: hex(0xf6f6f6),
+            pane_card: grey(1.0),
             surface_1: grey(1.0),
-            surface_2: hex(0xefefef),
-            border: hex_a(0x000000, 0.08),
-            border_strong: hex_a(0x000000, 0.16),
+            surface_2: hex(0xe8e8e8),
+            border: hex_a(0x000000, 0.10),
+            border_strong: hex_a(0x000000, 0.18),
             text: hex(0x111111),
-            text_muted: hex(0x8a8a8e),
-            text_faint: hex(0xa0a0a5),
-            accent: hex(0x1084fe),
-            accent_soft: hex_a(0x1084fe, 0.14),
+            text_muted: hex(0x6b6b70),
+            text_faint: hex(0x757579),
+            accent: hex(0x0a6fe0),
+            accent_soft: hex_a(0x0a6fe0, 0.14),
             bubble: hex(0x111111),
-            bubble_assistant: hex(0xf2f2f2),
+            bubble_assistant: hex(0xededed),
             field: grey(1.0),
-            field_border: hex(0xe3e3e3),
+            field_border: hex(0xdedede),
             primary: hex(0x111111),
             on_primary: grey(1.0),
             online: hex(0x34c759),
@@ -380,7 +411,7 @@ impl Theme {
         note_system_appearance(system);
         let mut theme = Self::with(pref.resolve(system), surface);
         theme.pref = pref;
-        theme.glass_opacity = GlassOpacity::load();
+        theme.glass_opacity = GlassOpacity::load(theme.appearance);
         theme
     }
 
@@ -421,14 +452,30 @@ impl Theme {
         self.surface == Surface::Glass
     }
 
-    /// The shell tint painted on the root (zeron-study §3.1 step 2).
-    pub fn shell(&self) -> Hsla {
-        let mut c = self.bg;
-        c.a = if self.is_glass() {
-            GlassOpacity::clamp(self.glass_opacity)
+    fn is_light(&self) -> bool {
+        self.appearance == Appearance::Light
+    }
+
+    /// Per-appearance alpha for a translucent layer: light glass needs more
+    /// tint than dark to stay white over a dark desktop.
+    fn frost_alpha(&self, dark: f32, light: f32) -> f32 {
+        if self.is_light() {
+            light
         } else {
-            1.0
-        };
+            dark
+        }
+    }
+
+    /// The shell tint painted on the root (zeron-study §3.1 step 2). Light
+    /// glass tints with pure white, not the off-white page colour: the blur
+    /// underneath is already grey, and a grey-on-grey wash is what made Light
+    /// + Glass look muddy (Jacob's shot, 2026-10-21).
+    pub fn shell(&self) -> Hsla {
+        if !self.is_glass() {
+            return self.bg;
+        }
+        let mut c = if self.is_light() { grey(1.0) } else { self.bg };
+        c.a = GlassOpacity::clamp(self.glass_opacity);
         c
     }
 
@@ -436,7 +483,34 @@ impl Theme {
     pub fn card(&self) -> Hsla {
         let mut c = self.surface_1;
         c.a = if self.is_frost() {
-            FROST_TINT_ALPHA
+            self.frost_alpha(FROST_TINT_ALPHA, FROST_TINT_ALPHA_LIGHT)
+        } else {
+            1.0
+        };
+        c
+    }
+
+    /// The chat column over light glass: an extra white wash so the
+    /// conversation is a white surface and bubbles stay legible while the
+    /// sidebar and pane beside it show the blur (Finder's model: translucent
+    /// chrome, opaque content). Transparent everywhere else — the column
+    /// inherits the shell.
+    pub fn chat_wash(&self) -> Hsla {
+        if self.is_glass() && self.is_light() {
+            let mut c = grey(1.0);
+            c.a = CHAT_WASH_ALPHA_LIGHT;
+            c
+        } else {
+            gpui::transparent_black()
+        }
+    }
+
+    /// The right pane (three-pane rule): its own tone, so it reads apart from
+    /// the chat beside it; translucent like a card on frost.
+    pub fn pane(&self) -> Hsla {
+        let mut c = self.pane;
+        c.a = if self.is_frost() {
+            self.frost_alpha(FROST_TINT_ALPHA, FROST_TINT_ALPHA_LIGHT)
         } else {
             1.0
         };
@@ -446,7 +520,11 @@ impl Theme {
     /// Chrome strips (sidebar, side panels) over frost: thinner than cards.
     pub fn chrome(&self) -> Hsla {
         let mut c = self.sidebar;
-        c.a = if self.is_frost() { 0.35 } else { 1.0 };
+        c.a = if self.is_frost() {
+            self.frost_alpha(0.35, 0.60)
+        } else {
+            1.0
+        };
         c
     }
 

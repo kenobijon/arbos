@@ -16,12 +16,13 @@ use serde_json::{json, Value};
 
 use arbos_core::api::{
     ChatMeDto, ChatMemberDto, ChatMemberProjectDto, PeopleChatDto, ProjectMemberDto,
-    ProjectMembersDto,
+    ProjectMembersDto, UserCardDto, UsersPageDto,
 };
 use arbos_core::ids::{now_ms, ulid};
 use arbos_core::wire;
 
 use crate::auth::Principal;
+use crate::blobs::{no_such_image, not_an_image, stored_image, StoredImage};
 use crate::db_people::{ChatWithMembers, Invite, Membership, PeopleChat};
 use crate::signin::api_error;
 use crate::state::AppState;
@@ -128,7 +129,7 @@ fn normalize_handle(h: &str) -> Option<String> {
 /// becomes an `invited` placeholder keyed by the GitHub id (a DM is about to open); without it
 /// the card is returned as `status: "github"` and nothing is stored. Misses are remembered for
 /// an hour in `meta`.
-async fn resolve_via_github(state: &AppState, login: &str, create: bool) -> Option<Value> {
+async fn resolve_via_github(state: &AppState, login: &str, create: bool) -> Option<UserCardDto> {
     let miss_key = format!("gh_miss:{}", login.to_lowercase());
     if let Ok(Some(at)) = state.db.meta_get(&miss_key) {
         if at
@@ -175,9 +176,18 @@ async fn resolve_via_github(state: &AppState, login: &str, create: bool) -> Opti
     let avatar = v.get("avatar_url").and_then(Value::as_str);
     let name = v.get("name").and_then(Value::as_str);
     if !create {
-        return Some(json!({
-            "id": format!("gh_{id}"), "handle": gh_login, "avatar_url": avatar, "name": name, "status": "github",
-        }));
+        return Some(UserCardDto {
+            id: format!("gh_{id}"),
+            handle: gh_login,
+            avatar_url: avatar.map(str::to_owned),
+            name: name.map(str::to_owned),
+            status: "github".into(),
+            created_at: None,
+            test: None,
+            last_seen_at: None,
+            online: None,
+            avatar_color_index_effective: None,
+        });
     }
     let user_id = state
         .db
@@ -187,7 +197,7 @@ async fn resolve_via_github(state: &AppState, login: &str, create: bool) -> Opti
 }
 
 /// A person by handle for a DM or a block: local first, GitHub second (stored as `invited`).
-async fn find_person(state: &AppState, handle: &str) -> Option<Value> {
+async fn find_person(state: &AppState, handle: &str) -> Option<UserCardDto> {
     if let Ok(Some(u)) = state.db.user_by_handle(handle) {
         return Some(u);
     }
@@ -200,21 +210,15 @@ async fn find_person(state: &AppState, handle: &str) -> Option<Value> {
 /// (presence frames come every 15 s; HTTP polls every 30 s).
 pub const ONLINE_MS: i64 = 90_000;
 
-/// Add `last_seen_at` (floored to the minute) and `online` to a user JSON that has an `id`.
-pub fn with_presence(state: &AppState, mut v: Value) -> Value {
-    let Some(uid) = v["id"]
-        .as_str()
-        .or_else(|| v["user_id"].as_str())
-        .map(str::to_owned)
-    else {
-        return v;
-    };
+/// Add `last_seen_at` (floored to the minute) and `online` to a user card.
+pub fn with_presence(state: &AppState, mut card: UserCardDto) -> UserCardDto {
+    let uid = card.id.clone();
     let seen = state.db.user_last_seen(&uid).ok().flatten();
-    v["last_seen_at"] = json!(seen.map(|t| t - t % 60_000));
-    v["online"] = json!(seen.is_some_and(|t| now_ms() - t < ONLINE_MS));
+    card.last_seen_at = Some(seen.map(|t| t - t % 60_000));
+    card.online = Some(seen.is_some_and(|t| now_ms() - t < ONLINE_MS));
     // D79: people's initials colour derives from the user id; no override for people.
-    v["avatar_color_index_effective"] = json!(crate::avatar::color_index(&uid));
-    v
+    card.avatar_color_index_effective = Some(i64::from(crate::avatar::color_index(&uid)));
+    card
 }
 
 #[allow(dead_code)] // helper kept for wire/fixture tests; people_chat_dto uses member_dto
@@ -248,11 +252,11 @@ pub(crate) fn member_dto(state: &AppState, m: &Membership) -> ChatMemberDto {
     };
     if let Some(uid) = m.user_id() {
         if let Ok(Some(card)) = state.db.user_card(uid) {
-            dto.handle = card["handle"].as_str().map(str::to_owned);
-            // Always present for humans (null or string), matching card["avatar_url"] / name.
-            dto.avatar_url = Some(card["avatar_url"].as_str().map(str::to_owned));
-            dto.name = Some(card["name"].as_str().map(str::to_owned));
-            dto.status = card["status"].as_str().map(str::to_owned);
+            dto.handle = Some(card.handle);
+            // Always present for humans (null or string).
+            dto.avatar_url = Some(card.avatar_url);
+            dto.name = Some(card.name);
+            dto.status = Some(card.status);
         }
         dto.user_id = Some(uid.to_owned());
         let seen = state.db.user_last_seen(uid).ok().flatten();
@@ -310,7 +314,7 @@ pub(crate) fn member_dto(state: &AppState, m: &Membership) -> ChatMemberDto {
                     .user_card(&p.user_id)
                     .ok()
                     .flatten()
-                    .and_then(|c| c["handle"].as_str().map(str::to_owned)),
+                    .map(|c| c.handle),
             );
         }
         dto.settings = Some(if m.settings.is_object() {
@@ -481,7 +485,8 @@ fn handle_of(state: &AppState, user_id: &str) -> String {
         .user_card(user_id)
         .ok()
         .flatten()
-        .and_then(|c| c["handle"].as_str().map(str::to_owned))
+        .map(|c| c.handle)
+        .filter(|h| !h.is_empty())
         .unwrap_or_else(|| user_id.to_owned())
 }
 
@@ -521,21 +526,17 @@ pub async fn users_search(
         .db
         .search_users(&prefix, SEARCH_LIMIT)
         .unwrap_or_default();
-    found.retain(|u| u["id"].as_str() != Some(me.as_str()));
-    let exact = found.iter().any(|u| {
-        u["handle"]
-            .as_str()
-            .is_some_and(|h| h.eq_ignore_ascii_case(&prefix))
-    });
+    found.retain(|u| u.id != me);
+    let exact = found.iter().any(|u| u.handle.eq_ignore_ascii_case(&prefix));
     if !exact {
         if let Some(card) = resolve_via_github(&state, &prefix, false).await {
-            if card["id"].as_str() != Some(me.as_str()) {
+            if card.id != me {
                 found.insert(0, card);
                 found.truncate(SEARCH_LIMIT as usize);
             }
         }
     }
-    let found: Vec<Value> = found
+    let found: Vec<UserCardDto> = found
         .into_iter()
         .map(|u| with_presence(&state, u))
         .collect();
@@ -587,17 +588,17 @@ pub async fn users_directory(
     let limit = q.limit.unwrap_or(100).clamp(1, 500);
     match state.db.list_directory(&me, offset, limit) {
         Ok((users, total)) => {
-            let users: Vec<Value> = users
+            let users: Vec<UserCardDto> = users
                 .into_iter()
                 .map(|u| with_presence(&state, u))
                 .collect();
             let next = offset + users.len() as i64;
-            Json(json!({
-                "users": users,
-                "total": total,
-                "offset": offset,
-                "next_offset": if next < total { Some(next) } else { None },
-            }))
+            Json(UsersPageDto {
+                users,
+                total,
+                offset,
+                next_offset: if next < total { Some(next) } else { None },
+            })
             .into_response()
         }
         Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
@@ -646,7 +647,7 @@ pub async fn chats_create_group(
                 "no GitHub account with that login",
             );
         };
-        let other_id = other["id"].as_str().unwrap_or_default().to_owned();
+        let other_id = other.id.clone();
         if other_id.is_empty() || other_id == me {
             continue;
         }
@@ -758,7 +759,7 @@ pub async fn dm_create(
             "no GitHub account with that login",
         );
     };
-    let other_id = other["id"].as_str().unwrap_or_default().to_owned();
+    let other_id = other.id.clone();
     if other_id == me {
         return api_error(StatusCode::BAD_REQUEST, "bad_handle", "that is you");
     }
@@ -909,6 +910,16 @@ pub async fn chat_patch(
             );
         }
     };
+    // The picture is judged on what was uploaded (Content-Type and bytes), not its name.
+    if let Some(Some(key)) = &image_key {
+        match stored_image(&state, &format!("{PEOPLE_ACL_PREFIX}{id}"), key).await {
+            StoredImage::Image(kind) => {
+                tracing::info!(chat = %id, %key, %kind, "group picture set");
+            }
+            StoredImage::Missing => return no_such_image(),
+            StoredImage::NotAnImage(why) => return not_an_image(&why),
+        }
+    }
     let title_ref = title.as_ref().map(|o| o.as_ref().map(|s| s.as_str()));
     let image_ref = image_key.as_ref().map(|o| o.as_ref().map(|s| s.as_str()));
     if let Err(e) = state
@@ -1117,7 +1128,7 @@ pub async fn block_create(
             "no GitHub account with that login",
         );
     };
-    let other_id = other["id"].as_str().unwrap_or_default();
+    let other_id = other.id.as_str();
     if other_id == me {
         return api_error(StatusCode::BAD_REQUEST, "bad_handle", "that is you");
     }
@@ -1154,12 +1165,16 @@ pub async fn blocks_list(State(state): State<AppState>, principal: Principal) ->
     let out: Vec<Value> = rows
         .into_iter()
         .map(|(uid, at)| {
-            let mut v = state
+            let card = state
                 .db
                 .user_card(&uid)
                 .ok()
                 .flatten()
-                .unwrap_or_else(|| json!({ "id": uid }));
+                .unwrap_or(UserCardDto {
+                    id: uid,
+                    ..Default::default()
+                });
+            let mut v = serde_json::to_value(card).unwrap_or(Value::Null);
             v["created_at"] = json!(at);
             v
         })
@@ -1442,7 +1457,7 @@ pub async fn member_add(
             "no GitHub account with that login",
         );
     };
-    let other_id = other["id"].as_str().unwrap_or_default().to_owned();
+    let other_id = other.id.clone();
     if other_id == me {
         return api_error(StatusCode::BAD_REQUEST, "bad_handle", "that is you");
     }
@@ -1592,23 +1607,22 @@ fn project_member_dto(
         .user_card(user_id)
         .ok()
         .flatten()
-        .unwrap_or_else(|| json!({ "id": user_id }));
+        .unwrap_or(UserCardDto {
+            id: user_id.to_owned(),
+            ..Default::default()
+        });
     let seen = state.db.user_last_seen(user_id).ok().flatten();
     ProjectMemberDto {
-        id: card["id"].as_str().unwrap_or(user_id).to_owned(),
-        handle: card["handle"].as_str().map(str::to_owned),
-        avatar_url: match &card["avatar_url"] {
-            Value::Null => None,
-            Value::String(s) => Some(s.clone()),
-            _ => card["avatar_url"].as_str().map(str::to_owned),
+        id: if card.id.is_empty() {
+            user_id.to_owned()
+        } else {
+            card.id
         },
-        name: match &card["name"] {
-            Value::Null => None,
-            Value::String(s) => Some(s.clone()),
-            _ => card["name"].as_str().map(str::to_owned),
-        },
-        status: card["status"].as_str().unwrap_or("").to_owned(),
-        created_at: card["created_at"].as_i64().unwrap_or(0),
+        handle: (!card.handle.is_empty()).then_some(card.handle),
+        avatar_url: card.avatar_url,
+        name: card.name,
+        status: card.status,
+        created_at: card.created_at.unwrap_or(0),
         user_id: user_id.to_owned(),
         role: role.to_owned(),
         joined_at,
@@ -1704,7 +1718,7 @@ pub async fn project_member_add(
             "no GitHub account with that login",
         );
     };
-    let other_id = other["id"].as_str().unwrap_or_default().to_owned();
+    let other_id = other.id.clone();
     if other_id == project.user_id {
         return api_error(StatusCode::BAD_REQUEST, "bad_handle", "that is the owner");
     }
@@ -1972,8 +1986,12 @@ pub async fn invite_create(
             "no GitHub account with that login",
         );
     };
-    let other_id = other["id"].as_str().unwrap_or_default().to_owned();
-    let login = other["handle"].as_str().unwrap_or(&handle).to_owned();
+    let other_id = other.id.clone();
+    let login = if other.handle.is_empty() {
+        handle.clone()
+    } else {
+        other.handle.clone()
+    };
     if other_id == me {
         return api_error(StatusCode::BAD_REQUEST, "bad_handle", "that is you");
     }
@@ -2824,8 +2842,180 @@ pub(crate) mod tests_support {
                 doc_epoch: 1,
                 kind: "chat".into(),
                 participants: Vec::new(),
+                forked_from: None,
             })
             .expect("pinned chat");
         project.id
+    }
+}
+
+#[cfg(test)]
+mod picture_tests {
+    //! A group picture is whatever was uploaded, judged on Content-Type and bytes: a model
+    //! file, a renamed model file, or an upload without a type never becomes the picture.
+
+    use axum::extract::{Path, State};
+    use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+    use axum::Json;
+    use bytes::Bytes;
+
+    use super::tests_support::{dm, person};
+    use super::*;
+    use crate::blobs;
+    use crate::image_sniff::samples;
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    async fn upload(
+        state: &AppState,
+        who: &Principal,
+        chat: &str,
+        key: &str,
+        mime: Option<&str>,
+        bytes: &[u8],
+    ) {
+        let mut headers = HeaderMap::new();
+        if let Some(m) = mime {
+            headers.insert(header::CONTENT_TYPE, HeaderValue::from_str(m).unwrap());
+        }
+        let r = blobs::put(
+            State(state.clone()),
+            who.clone(),
+            Path((format!("{PEOPLE_ACL_PREFIX}{chat}"), key.to_owned())),
+            headers,
+            Bytes::copy_from_slice(bytes),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::NO_CONTENT, "upload of {key}");
+    }
+
+    async fn set_picture(state: &AppState, who: &Principal, chat: &str, key: &str) -> StatusCode {
+        chat_patch(
+            State(state.clone()),
+            who.clone(),
+            Path(chat.to_owned()),
+            Json(PatchChatBody {
+                title: None,
+                image_key: Some(key.to_owned()),
+            }),
+        )
+        .await
+        .status()
+    }
+
+    fn picture_of(state: &AppState, chat: &str) -> Option<String> {
+        state.db.people_chat(chat).unwrap().unwrap().image_key
+    }
+
+    #[tokio::test]
+    async fn group_picture_must_be_an_image_by_type_and_bytes() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 31);
+        let (bob, _) = person(&state, 32);
+        let chat = dm(&state, &alice, &bob);
+
+        // The report: a model file picked in the Mac panel.
+        upload(
+            &state,
+            &alice_dev,
+            &chat,
+            "code_submission_v1.onnx",
+            Some("application/octet-stream"),
+            samples::ONNX,
+        )
+        .await;
+        assert_eq!(
+            set_picture(&state, &alice_dev, &chat, "code_submission_v1.onnx").await,
+            StatusCode::UNSUPPORTED_MEDIA_TYPE
+        );
+        assert_eq!(picture_of(&state, &chat), None);
+
+        // The same bytes renamed and sent as image/png: the bytes decide.
+        upload(
+            &state,
+            &alice_dev,
+            &chat,
+            "group-fake.png",
+            Some("image/png"),
+            samples::ONNX,
+        )
+        .await;
+        assert_eq!(
+            set_picture(&state, &alice_dev, &chat, "group-fake.png").await,
+            StatusCode::UNSUPPORTED_MEDIA_TYPE
+        );
+
+        // Real image bytes sent without a Content-Type: the type is required too.
+        upload(
+            &state,
+            &alice_dev,
+            &chat,
+            "group-untyped.jpg",
+            None,
+            samples::JPEG,
+        )
+        .await;
+        assert_eq!(
+            set_picture(&state, &alice_dev, &chat, "group-untyped.jpg").await,
+            StatusCode::UNSUPPORTED_MEDIA_TYPE
+        );
+
+        // A key nothing was uploaded under.
+        assert_eq!(
+            set_picture(&state, &alice_dev, &chat, "group-missing.png").await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(picture_of(&state, &chat), None);
+
+        // A real picture, typed and shaped like one: accepted.
+        upload(
+            &state,
+            &alice_dev,
+            &chat,
+            "group-real.png",
+            Some("image/png"),
+            samples::PNG,
+        )
+        .await;
+        assert_eq!(
+            set_picture(&state, &alice_dev, &chat, "group-real.png").await,
+            StatusCode::OK
+        );
+        assert_eq!(picture_of(&state, &chat).as_deref(), Some("group-real.png"));
+
+        // HEIC from an iPhone, and a WebP, pass the same gate.
+        upload(
+            &state,
+            &alice_dev,
+            &chat,
+            "group-phone.heic",
+            Some("image/heic"),
+            samples::HEIC,
+        )
+        .await;
+        assert_eq!(
+            set_picture(&state, &alice_dev, &chat, "group-phone.heic").await,
+            StatusCode::OK
+        );
+        upload(
+            &state,
+            &alice_dev,
+            &chat,
+            "group-web.webp",
+            Some("image/webp"),
+            samples::WEBP,
+        )
+        .await;
+        assert_eq!(
+            set_picture(&state, &alice_dev, &chat, "group-web.webp").await,
+            StatusCode::OK
+        );
+
+        // Clearing still works and needs no blob.
+        assert_eq!(
+            set_picture(&state, &alice_dev, &chat, "").await,
+            StatusCode::OK
+        );
+        assert_eq!(picture_of(&state, &chat), None);
     }
 }

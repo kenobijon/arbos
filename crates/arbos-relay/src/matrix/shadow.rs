@@ -2,7 +2,7 @@
 //! Message ids and count, member set, and per-user unread counts. Pure read; the report is the
 //! gate for the read flip and for every ring (zero divergence for 7 days on ring 0).
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use serde::Serialize;
 use serde_json::Value;
@@ -51,6 +51,9 @@ pub struct Report {
     pub diffs: Vec<ChatDiff>,
     pub unread_diffs: Vec<UnreadDiff>,
     pub unread_checked: usize,
+    /// Pairs where the user never read the chat on the relay: the relay counts only announced
+    /// events, the homeserver the whole backfilled history — both mean "never opened".
+    pub unread_never_read: usize,
 }
 
 fn relay_message_ids(state: &AppState, chat_id: &str, project_id: Option<&str>) -> Vec<String> {
@@ -179,6 +182,12 @@ pub async fn run(state: &AppState, only_chat: Option<&str>, with_unread: bool) -
                 .into_iter()
                 .map(|c| (c.chat_id, c.unread))
                 .collect();
+            let marked: HashSet<String> = state
+                .db
+                .matrix_read_marked_chats(&u.id)
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
             let Ok(hs) = client.unread_counts(&cfg.user_mxid(&u.id)).await else {
                 continue;
             };
@@ -191,6 +200,10 @@ pub async fn run(state: &AppState, only_chat: Option<&str>, with_unread: bool) -
                 }
                 rep.unread_checked += 1;
                 let r = relay.get(&chat.chat_id).copied().unwrap_or(0);
+                if r > 0 && notif >= r && !marked.contains(&chat.chat_id) {
+                    rep.unread_never_read += 1;
+                    continue;
+                }
                 // Synapse may lag by one during a write (design §4 stage B table).
                 if !(r == notif || notif + 1 == r && notif > 0) {
                     rep.unread_diffs.push(UnreadDiff {

@@ -7,6 +7,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use arbos_core::api::UserCardDto;
 use arbos_core::ids::now_ms;
 
 use crate::db::Db;
@@ -768,7 +769,7 @@ impl Db {
         exclude: &str,
         offset: i64,
         limit: i64,
-    ) -> Result<(Vec<Value>, i64)> {
+    ) -> Result<(Vec<UserCardDto>, i64)> {
         self.with(|c| {
             let total: i64 = c.query_row(
                 "SELECT COUNT(*) FROM users WHERE login IS NOT NULL AND status IN ('member', 'invited') AND id != ?1",
@@ -782,11 +783,18 @@ impl Db {
             )?;
             let rows = st
                 .query_map(params![exclude, limit, offset], |r| {
-                    Ok(serde_json::json!({
-                        "id": r.get::<_, String>(0)?, "handle": r.get::<_, String>(1)?,
-                        "avatar_url": r.get::<_, Option<String>>(2)?, "name": r.get::<_, Option<String>>(3)?,
-                        "status": r.get::<_, String>(4)?, "test": r.get::<_, i64>(5)? != 0,
-                    }))
+                    Ok(UserCardDto {
+                        id: r.get::<_, String>(0)?,
+                        handle: r.get::<_, String>(1)?,
+                        avatar_url: r.get::<_, Option<String>>(2)?,
+                        name: r.get::<_, Option<String>>(3)?,
+                        status: r.get::<_, String>(4)?,
+                        test: Some(r.get::<_, i64>(5)? != 0),
+                        created_at: None,
+                        last_seen_at: None,
+                        online: None,
+                        avatar_color_index_effective: None,
+                    })
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             Ok((rows, total))
@@ -794,7 +802,7 @@ impl Db {
     }
 
     /// Prefix search on GitHub logins (members and invited placeholders).
-    pub fn search_users(&self, prefix: &str, limit: i64) -> Result<Vec<Value>> {
+    pub fn search_users(&self, prefix: &str, limit: i64) -> Result<Vec<UserCardDto>> {
         let like = format!(
             "{}%",
             prefix.replace('%', "").replace('_', "\\_").to_lowercase()
@@ -804,11 +812,18 @@ impl Db {
                 "SELECT id, login, avatar_url, name, status, test FROM users WHERE login IS NOT NULL AND status IN ('member', 'invited') AND lower(login) LIKE ?1 ESCAPE '\\' ORDER BY (status = 'member') DESC, lower(login) LIMIT ?2",
             )?;
             let rows = st.query_map(params![like, limit], |r| {
-                Ok(serde_json::json!({
-                    "id": r.get::<_, String>(0)?, "handle": r.get::<_, String>(1)?,
-                    "avatar_url": r.get::<_, Option<String>>(2)?, "name": r.get::<_, Option<String>>(3)?,
-                    "status": r.get::<_, String>(4)?, "test": r.get::<_, i64>(5)? != 0,
-                }))
+                Ok(UserCardDto {
+                    id: r.get::<_, String>(0)?,
+                    handle: r.get::<_, String>(1)?,
+                    avatar_url: r.get::<_, Option<String>>(2)?,
+                    name: r.get::<_, Option<String>>(3)?,
+                    status: r.get::<_, String>(4)?,
+                    test: Some(r.get::<_, i64>(5)? != 0),
+                    created_at: None,
+                    last_seen_at: None,
+                    online: None,
+                    avatar_color_index_effective: None,
+                })
             })?;
             rows.collect()
         })
@@ -838,17 +853,24 @@ impl Db {
     }
 
     /// `(id, login, avatar_url, name, status)` for a handle, case-insensitive.
-    pub fn user_by_handle(&self, handle: &str) -> Result<Option<Value>> {
+    pub fn user_by_handle(&self, handle: &str) -> Result<Option<UserCardDto>> {
         self.with(|c| {
             c.query_row(
                 "SELECT id, login, avatar_url, name, status FROM users WHERE lower(login) = lower(?1)",
                 params![handle],
                 |r| {
-                    Ok(serde_json::json!({
-                        "id": r.get::<_, String>(0)?, "handle": r.get::<_, String>(1)?,
-                        "avatar_url": r.get::<_, Option<String>>(2)?, "name": r.get::<_, Option<String>>(3)?,
-                        "status": r.get::<_, String>(4)?,
-                    }))
+                    Ok(UserCardDto {
+                        id: r.get::<_, String>(0)?,
+                        handle: r.get::<_, String>(1)?,
+                        avatar_url: r.get::<_, Option<String>>(2)?,
+                        name: r.get::<_, Option<String>>(3)?,
+                        status: r.get::<_, String>(4)?,
+                        created_at: None,
+                        test: None,
+                        last_seen_at: None,
+                        online: None,
+                        avatar_color_index_effective: None,
+                    })
                 },
             )
             .optional()
@@ -856,18 +878,25 @@ impl Db {
     }
 
     /// Public profile fields for a user id (for member lists).
-    pub fn user_card(&self, user_id: &str) -> Result<Option<Value>> {
+    pub fn user_card(&self, user_id: &str) -> Result<Option<UserCardDto>> {
         self.with(|c| {
             let card = c
                 .query_row(
                     "SELECT id, login, avatar_url, name, status, created_at FROM users WHERE id = ?1",
                     params![user_id],
                     |r| {
-                        Ok(serde_json::json!({
-                            "id": r.get::<_, String>(0)?, "handle": r.get::<_, Option<String>>(1)?,
-                            "avatar_url": r.get::<_, Option<String>>(2)?, "name": r.get::<_, Option<String>>(3)?,
-                            "status": r.get::<_, String>(4)?, "created_at": r.get::<_, i64>(5)?,
-                        }))
+                        Ok(UserCardDto {
+                            id: r.get::<_, String>(0)?,
+                            handle: r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                            avatar_url: r.get::<_, Option<String>>(2)?,
+                            name: r.get::<_, Option<String>>(3)?,
+                            status: r.get::<_, String>(4)?,
+                            created_at: Some(r.get::<_, i64>(5)?),
+                            test: None,
+                            last_seen_at: None,
+                            online: None,
+                            avatar_color_index_effective: None,
+                        })
                     },
                 )
                 .optional()?;
@@ -876,7 +905,7 @@ impl Db {
             };
             // Legacy device-token accounts have no GitHub login: show them by the name of the
             // device they used most recently (stable, and what their owner recognises).
-            if card["handle"].as_str().is_none_or(str::is_empty) {
+            if card.handle.is_empty() {
                 let device_name: Option<String> = c
                     .query_row(
                         "SELECT name FROM devices WHERE user_id = ?1 AND revoked_at IS NULL
@@ -888,9 +917,9 @@ impl Db {
                     .filter(|n: &String| !n.trim().is_empty());
                 let fallback_name = device_name
                     .unwrap_or_else(|| user_id.trim_start_matches("u_").to_owned());
-                card["handle"] = Value::String(legacy_handle(&fallback_name));
-                if card["name"].as_str().is_none_or(str::is_empty) {
-                    card["name"] = Value::String(fallback_name);
+                card.handle = legacy_handle(&fallback_name);
+                if card.name.as_deref().is_none_or(str::is_empty) {
+                    card.name = Some(fallback_name);
                 }
             }
             Ok(Some(card))
@@ -948,8 +977,8 @@ mod tests {
             .insert_device("dev-mac", "Jacob's Mac", "tok", "u_mac", "paircode")
             .expect("device");
         let card = state.db.user_card("u_mac").unwrap().unwrap();
-        assert_eq!(card["handle"], "jacobs-mac");
-        assert_eq!(card["name"], "Jacob's Mac");
+        assert_eq!(card.handle, "jacobs-mac");
+        assert_eq!(card.name.as_deref(), Some("Jacob's Mac"));
         let sender = crate::notify::Sender::user(&state, "u_mac");
         assert_eq!(sender.title(), "@jacobs-mac");
     }
