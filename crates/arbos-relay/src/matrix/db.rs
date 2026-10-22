@@ -100,6 +100,32 @@ impl Db {
         })
     }
 
+    /// Like `matrix_enqueue`, due `delay_ms` from now.
+    pub fn matrix_enqueue_after(&self, job: &Job, delay_ms: i64) -> Result<i64> {
+        let v = serde_json::to_value(job)?;
+        let kind = v["kind"].as_str().unwrap_or("?").to_owned();
+        let payload = serde_json::to_string(&v)?;
+        let now = now_ms();
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO matrix_outbox(chat_key, kind, payload, next_at, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![job.chat_key(), kind, payload, now + delay_ms, now],
+            )?;
+            Ok(c.last_insert_rowid())
+        })
+    }
+
+    /// Whether a job of `kind` for `chat_key` is still unfinished.
+    pub fn matrix_pending_kind(&self, chat_key: &str, kind: &str) -> Result<bool> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT EXISTS (SELECT 1 FROM matrix_outbox WHERE chat_key = ?1 AND kind = ?2 AND done_at IS NULL)",
+                params![chat_key, kind],
+                |r| r.get(0),
+            )
+        })
+    }
+
     /// Due jobs whose chat has no earlier unfinished job (order per chat is kept), oldest first.
     pub fn matrix_outbox_due(&self, limit: i64) -> Result<Vec<OutboxRow>> {
         let now = now_ms();
