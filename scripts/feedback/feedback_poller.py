@@ -68,6 +68,7 @@ CLI:  feedback_poller.py [run] | status | testers | set-cursor <ISO-8601>
       | leadtime [since-ISO] | memtree-cost [YYYY-MM-DD]   (audit numbers; memtree-cost asks GET /admin/usage/memory-tree, else relay.db as root)
       | gate-tree <sha-or-branch> <fid>…   (gate a hand-prepared integration tree as one run and land it whole)
       | gate-abort   (drop the active gate run without verdicts; every ready branch re-batches at its current head)
+      | gate-next <fid>… [--abort]   (the next gate batch is exactly these gating items; --abort drops the active run first)
 """
 
 from __future__ import annotations
@@ -3474,6 +3475,35 @@ def main(argv: list[str]) -> int:
         loop.status()
         print()
         print_testers(loop.store)
+        return 0
+    if cmd == "gate-next":
+        # `gate-next <fid>… [--abort]`: the next gate batch is exactly these gating items (owner priority, e.g.
+        # Jacob's servers UI #1241/#1242 ahead of the queue). --abort drops the active run first so they start
+        # on the next tick instead of after it settles. Other ready items follow in later batches.
+        ids = [a for a in argv[2:] if not a.startswith("--")]
+        heads: dict[str, str] = {}
+        for fid in ids:
+            st = loop.store.state(fid)
+            if not st or st.get("status") != "gating" or not st.get("branch_head"):
+                print(f"{fid}: not a gating item with a branch head")
+                return 2
+            heads[fid] = st["branch_head"]
+        with (cfg.state_dir / ".lock").open("w") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                print("a tick is in flight; retry in a minute")
+                return 1
+            cur = loop.store.cursor()
+            active = cur.get("rust_gate")
+            if active and "--abort" in argv and not active.get("warm"):
+                loop.gate_abort(active, cur, by="operator (gate-next)")
+                cur = loop.store.cursor()
+            cur["rust_gate_plan"] = [heads] + [h for h in (cur.get("rust_gate_plan") or []) if not set(h) & set(heads)]
+            loop.store.save_cursor(cur)
+        for fid in heads:
+            loop.store.event(fid, "gate_next", by="operator", members=list(heads))
+        print(f"next gate batch: {', '.join(heads)}" + ("" if "--abort" in argv or not active else f" (after the active run {active['id']} settles)"))
         return 0
     if cmd == "gate-abort":
         # Operator: drop the active gate run without verdicts (a member branch was repaired mid-run, the
