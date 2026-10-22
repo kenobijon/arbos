@@ -217,8 +217,13 @@ pub struct Shell {
     /// Group pane › Members: the row whose ✕ was clicked (`user:<id>` or
     /// `agent:<project>`); it shows "Remove … ?" with Cancel / Remove.
     pub(crate) member_remove_armed: Option<String>,
-    /// Right-click menu on a chat tab or archived chat: the chat and click point.
-    pub(crate) chat_menu: Option<(crate::model::Id, gpui::Point<gpui::Pixels>)>,
+    /// Right-click menu on a session row of the header's tab dropdown: the
+    /// chat whose row carries it (#1256: anchored to the row, the dropdown
+    /// stays open with the row highlighted).
+    pub(crate) chat_menu: Option<crate::model::Id>,
+    /// The session menu's Delete was clicked once: it shows `Delete "title"?`
+    /// with Cancel / Delete instead of the action list.
+    pub(crate) chat_delete_armed: bool,
     /// People chats (D72): the @search field, the header pickers.
     pub people_input: Entity<ComposerInput>,
     /// Agent profile page: inline description editor.
@@ -606,6 +611,7 @@ impl Shell {
             row_delete_armed: false,
             member_remove_armed: None,
             chat_menu: None,
+            chat_delete_armed: false,
             react_menu: None,
             group_picker_open: false,
             renaming_tab: None,
@@ -1432,6 +1438,14 @@ impl Shell {
         if self.close_agent_pick(Some(window), cx) {
             return;
         }
+        // A session row's context menu closes alone; the dropdown under it
+        // stays (standard menu behaviour).
+        if self.chat_menu.is_some() {
+            self.chat_menu = None;
+            self.chat_delete_armed = false;
+            cx.notify();
+            return;
+        }
         let floating = self.menu_open
             || self.members_open
             || self.add_agent_open
@@ -1551,6 +1565,19 @@ impl Shell {
             .detach();
     }
 
+    /// Right-click / control-click on a session row of the tab dropdown
+    /// (#1256): its menu opens anchored to that row; the dropdown stays open
+    /// and the row stays highlighted until the menu closes.
+    pub(crate) fn open_chat_menu(&mut self, chat_id: crate::model::Id, cx: &mut Context<Self>) {
+        self.menu_open = false;
+        self.row_menu = None;
+        self.row_delete_armed = false;
+        self.tab_menu_open = true;
+        self.chat_menu = Some(chat_id);
+        self.chat_delete_armed = false;
+        cx.notify();
+    }
+
     /// Everything that floats closes on a click elsewhere.
     pub(crate) fn close_popovers(&mut self, cx: &mut Context<Self>) {
         self.close_agent_pick(None, cx);
@@ -1571,6 +1598,7 @@ impl Shell {
             self.row_menu = None;
             self.row_delete_armed = false;
             self.chat_menu = None;
+            self.chat_delete_armed = false;
             self.react_menu = None;
             cx.notify();
         }
@@ -3010,9 +3038,6 @@ impl Render for Shell {
             }
         }
         if let Some(menu) = sidebar::row_menu(self, cx) {
-            root = root.child(menu);
-        }
-        if let Some(menu) = sidebar::chat_menu(self, cx) {
             root = root.child(menu);
         }
         if let Some(menu) = self.react_menu(cx) {
