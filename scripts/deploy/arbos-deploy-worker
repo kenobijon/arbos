@@ -666,14 +666,16 @@ auto_requests() {
   done
 }
 
-# A relay request is a hotfix when a commit it brings in (deployed..request) is a revert or
-# hotfix commit, the same subjects the auto-stable fast path releases immediately. Hotfixes
-# skip the coalescing window.
+# A relay request is a hotfix when anything on main above the deployed commit is a revert or
+# hotfix commit (subject or body), the same rule the auto-stable fast path uses. The marker is
+# often an empty `hotfix:` commit pushed on top of the merge (#1323, #1346), which sits above
+# the request's newest-green commit until its own CI runs, so the whole deployed..origin/main
+# range is scanned, not just deployed..request. Hotfixes skip the coalescing window.
 relay_request_is_hotfix() {
-  local full="$1" deployed
+  local deployed
   deployed="$(deployed_sha relay)"
   [[ -n "$deployed" ]] && git -C "$REPO" cat-file -e "$deployed^{commit}" 2>/dev/null || return 1
-  git -C "$REPO" log --format=%s "$deployed..$full" 2>/dev/null | grep -qiE '^(revert|hotfix)\b|\[hotfix\]'
+  git -C "$REPO" log --format='%s%n%b' "$deployed..origin/main" 2>/dev/null | grep -qiE '^(revert|hotfix)\b|\[hotfix\]'
 }
 
 # Four relay deploys in 95 minutes caused the 2026-10-22 "Reconnecting..." outage. Hold a relay
