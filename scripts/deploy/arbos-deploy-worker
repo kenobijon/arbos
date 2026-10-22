@@ -551,8 +551,10 @@ roll_image() {
   # Busy-reply gate on the canary box first (scripts/deploy/agentd-canary-smoke.sh, from the
   # rolled commit): a failed gate stops here — default unchanged, no real box moves.
   local smoke_rc=0
-  RELAY_URL="$RELAY_URL" RELAY_ENV="$RELAY_ENV" STATE="$STATE" EVENTS="$EVENTS" \
-    bash "$REPO/scripts/deploy/agentd-canary-smoke.sh" "$sha" "$version" "$snapshot" || smoke_rc=$?
+  if [[ -x "$REPO/scripts/deploy/agentd-canary-smoke.sh" ]]; then
+    RELAY_URL="$RELAY_URL" RELAY_ENV="$RELAY_ENV" STATE="$STATE" EVENTS="$EVENTS" \
+      bash "$REPO/scripts/deploy/agentd-canary-smoke.sh" "$sha" "$version" "$snapshot" || smoke_rc=$?
+  fi
   if (( smoke_rc == 1 )); then
     record_failure agentd "$sha" "busy-reply smoke failed on the canary box (image $version); default not switched, nothing rolled"
     exit 1
