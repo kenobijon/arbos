@@ -128,7 +128,7 @@ fn new_agent_preview(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         }
         Some(i) => format!("{}, chosen by you.", avatars::GRADIENTS[i as usize].name),
     };
-    // D91: a leaf preview (seeded by the typed name until the id exists); the
+    // D92: a leaf preview (seeded by the typed name until the id exists); the
     // leaf and colour are picked on the agent's page once it is created.
     if avatars::leaf_avatars_on() {
         return div()
@@ -195,6 +195,10 @@ pub fn new_chat_sheet(
     let busy = s.people_busy;
     let error = s.people_error.clone();
     let group_mode = s.new_group_open;
+    // Opened from a group pane's "Add members": same picker, members of that
+    // group shown as added, and Add puts the picks into it.
+    let add_to: Option<Project> = s.add_members_group().cloned();
+    let me_handle = s.me_handle();
     let picked = s.new_group_picked.clone();
     let picked_agents = s.new_group_agents.clone();
     let results: Vec<(Person, Option<Arc<RenderImage>>)> = s
@@ -275,6 +279,8 @@ pub fn new_chat_sheet(
             &typed,
             busy,
             error,
+            add_to.as_ref(),
+            &me_handle,
             state,
             cx,
         );
@@ -611,16 +617,20 @@ pub fn new_chat_sheet(
         }
     }
 
-    let title = if group_mode {
-        "New group".to_string()
-    } else {
-        match &invite_into {
-            Some(name) => format!("Invite to {name}"),
-            None => "New Message".to_string(),
-        }
+    let title = match (&add_to, group_mode, &invite_into) {
+        (Some(group), _, _) => format!("Add members to {}", group.name),
+        (None, true, _) => "New group".to_string(),
+        (None, false, Some(name)) => format!("Invite to {name}"),
+        (None, false, None) => "New Message".to_string(),
     };
+    // Create needs a person (a group of one is a DM); Add takes agents alone too.
     let can_create = !picked.is_empty() && !busy;
-    let left = if group_mode {
+    let can_add = (!picked.is_empty() || !picked_agents.is_empty()) && !busy;
+    let left = if add_to.is_some() {
+        // No New Message sheet behind this one: Cancel closes it.
+        glass::sheet_button("add-members-cancel", "Cancel", &theme)
+            .on_click(cx.listener(|this, _, window, cx| this.close_new_chat_sheet(window, cx)))
+    } else if group_mode {
         glass::sheet_button("new-group-back", "Cancel", &theme).on_click(cx.listener(
             |this, _, window, cx| {
                 this.people_input
@@ -634,7 +644,22 @@ pub fn new_chat_sheet(
         glass::sheet_button("new-chat-close", "Cancel", &theme)
             .on_click(cx.listener(|this, _, window, cx| this.close_new_chat_sheet(window, cx)))
     };
-    let right = if group_mode {
+    let right = if add_to.is_some() {
+        Some(
+            glass::primary_button("add-members-go", "Add", &theme)
+                .h(px(34.0))
+                .when(!can_add, |el| el.opacity(0.45))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    if !can_add {
+                        return;
+                    }
+                    let sent = this.state.update(cx, |s, cx| s.add_members_to_group(cx));
+                    if sent {
+                        this.close_new_chat_sheet(window, cx);
+                    }
+                })),
+        )
+    } else if group_mode {
         Some(
             glass::primary_button(
                 "new-group-create",
@@ -663,6 +688,8 @@ pub fn new_chat_sheet(
 }
 
 /// New group picker body: chips, search, your agents, people with checkmarks.
+/// With `add_to` (the group pane's Add members) its members show a greyed
+/// check and take no click.
 #[allow(clippy::too_many_arguments)]
 fn new_group_body(
     mut body: Stateful<Div>,
@@ -676,6 +703,8 @@ fn new_group_body(
     typed: &str,
     busy: bool,
     error: Option<String>,
+    add_to: Option<&Project>,
+    me_handle: &str,
     state: &Entity<AppState>,
     cx: &mut Context<Shell>,
 ) -> Stateful<Div> {
@@ -800,7 +829,8 @@ fn new_group_body(
         let mut list = glass::group(theme).mx(px(16.0));
         for (i, project) in my_agents.iter().enumerate() {
             let pid = project.id.clone();
-            let selected = picked_agents.iter().any(|id| id == &project.id);
+            let already = add_to.is_some_and(|g| g.has_agent(&project.id));
+            let selected = already || picked_agents.iter().any(|id| id == &project.id);
             list = list.child(
                 div()
                     .id(ElementId::Name(SharedString::from(format!(
@@ -815,8 +845,10 @@ fn new_group_body(
                     .when(i + 1 < count, |el| {
                         el.border_b_1().border_color(theme.border)
                     })
-                    .cursor_pointer()
-                    .hover(|st| st.bg(theme.surface_2))
+                    .when(already, |el| el.opacity(0.5))
+                    .when(!already, |el| {
+                        el.cursor_pointer().hover(|st| st.bg(theme.surface_2))
+                    })
                     .child(avatars::project(project, 40.0, theme))
                     .child(
                         div()
@@ -839,10 +871,12 @@ fn new_group_body(
                             ),
                     )
                     .child(pick_mark(selected, theme))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.state
-                            .update(cx, |s, cx| s.toggle_group_agent(pid.clone(), cx));
-                    })),
+                    .when(!already, |el| {
+                        el.on_click(cx.listener(move |this, _, _, cx| {
+                            this.state
+                                .update(cx, |s, cx| s.toggle_group_agent(pid.clone(), cx));
+                        }))
+                    }),
             );
         }
         body = body.child(
@@ -885,9 +919,11 @@ fn new_group_body(
     let count = results.len();
     for (i, (person, image)) in results.iter().enumerate() {
         any = true;
-        let selected = picked
-            .iter()
-            .any(|p| p.id == person.id || p.handle == person.handle);
+        let already = add_to.is_some_and(|g| g.has_person(me_handle, person));
+        let selected = already
+            || picked
+                .iter()
+                .any(|p| p.id == person.id || p.handle == person.handle);
         let person_clone = person.clone();
         list = list.child(
             div()
@@ -903,8 +939,10 @@ fn new_group_body(
                 .when(i + 1 < count, |el| {
                     el.border_b_1().border_color(theme.border)
                 })
-                .cursor_pointer()
-                .hover(|st| st.bg(theme.surface_2))
+                .when(already, |el| el.opacity(0.5))
+                .when(!already, |el| {
+                    el.cursor_pointer().hover(|st| st.bg(theme.surface_2))
+                })
                 .child(avatar(image.clone(), person, 40.0, theme))
                 .child(
                     div()
@@ -927,10 +965,12 @@ fn new_group_body(
                         ),
                 )
                 .child(pick_mark(selected, theme))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.state
-                        .update(cx, |s, cx| s.toggle_group_person(person_clone.clone(), cx));
-                })),
+                .when(!already, |el| {
+                    el.on_click(cx.listener(move |this, _, _, cx| {
+                        this.state
+                            .update(cx, |s, cx| s.toggle_group_person(person_clone.clone(), cx));
+                    }))
+                }),
         );
     }
     if any {

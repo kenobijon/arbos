@@ -31,7 +31,7 @@ struct AgentEditSheet: View {
                         card {
                             VStack(alignment: .leading, spacing: 12) {
                                 if LeafAvatarsFlag.shared.on {
-                                    // D91: leaf + colour; the hero above is the live preview.
+                                    // D92: leaf + colour; the hero above is the live preview.
                                     Text("Avatar").font(theme.font(Theme.body, weight: .medium)).foregroundStyle(theme.text)
                                     LeafPicker(project: project) { leaf, color in
                                         guard !project.shared else { return }

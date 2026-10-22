@@ -286,6 +286,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         | ClientCommand::SetTyping { .. }
         | ClientCommand::AddAgent { .. }
         | ClientCommand::RemoveAgent { .. }
+        | ClientCommand::AddMembers { .. }
         | ClientCommand::RemoveMember { .. }
         | ClientCommand::LeaveChat { .. }
         | ClientCommand::BlockUser { .. }
@@ -670,6 +671,43 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 chat_id,
                 messages: Vec::new(),
             });
+        }
+        ClientCommand::ForkChat {
+            project_id,
+            source_chat_id,
+            chat_id,
+            title,
+        } => {
+            // The box's job in production: the new room starts as a copy of the
+            // source transcript under the new chat id.
+            let copy = shared
+                .docs
+                .lock()
+                .unwrap()
+                .get(&source_chat_id)
+                .map(|src| src.core.snapshot());
+            let doc = match copy {
+                Some(snap) => ChatDoc::forked_from_snapshot(&chat_id, &project_id, &snap),
+                None => ChatDoc::new(&chat_id, &project_id),
+            };
+            let messages = doc.read_all();
+            add_doc(shared, doc);
+            shared.chats.lock().unwrap().push(Chat {
+                id: chat_id.clone(),
+                project_id,
+                title,
+                is_pinned: false,
+                is_system: false,
+                kind: ChatKind::Chat,
+                participants: Vec::new(),
+                unread: false,
+                last_message_at: now_ms(),
+                archived_at: None,
+            });
+            emit_chats(shared);
+            let _ = shared
+                .events
+                .send(SyncEvent::ChatSnapshot { chat_id, messages });
         }
         ClientCommand::GroupCreate {
             project_id,
@@ -1818,8 +1856,11 @@ fn seed_secrets() -> SecretsView {
             4_320,
         ),
     ];
-    // One connected 1Password vault (Phase 2), names only — the iPhone fixture's twin.
-    let vaults = vec![crate::model::ConnectedVault {
+    // One connected 1Password vault (Phase 2), names only — the iPhone fixture's twin. Seeded only
+    // with `ARBOS_FIXTURE_VAULT=1` (screenshot rig): the shipped default hides the connect flow
+    // (`features.vault_connect` off) and no user has a vault, so the page shows secrets only.
+    let fixture_vault = std::env::var("ARBOS_FIXTURE_VAULT").is_ok_and(|v| v == "1");
+    let mut vaults = vec![crate::model::ConnectedVault {
         id: "fx-vault-1p".into(),
         provider: "onepassword".into(),
         name: "Arbos — Research".into(),
@@ -1842,11 +1883,19 @@ fn seed_secrets() -> SecretsView {
         ],
         env_items: 1,
     }];
+    if !fixture_vault {
+        vaults.clear();
+    }
     SecretsView {
         paused: false,
         secrets,
         vaults,
-        providers: vec!["onepassword".into()],
+        providers: if fixture_vault {
+            vec!["onepassword".into()]
+        } else {
+            Vec::new()
+        },
+        vault_connect: fixture_vault,
         requests,
         activity,
         loaded: true,
@@ -5198,6 +5247,58 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                     space.agents.retain(|a| a.project_id != *project_id);
                 }
             }
+            emit_projects(shared);
+            true
+        }
+        ClientCommand::AddMembers {
+            chat_id,
+            handles,
+            agent_ids,
+        } => {
+            let mut projects = shared.projects.lock().unwrap();
+            let agents: Vec<AgentMember> = agent_ids
+                .iter()
+                .filter_map(|pid| {
+                    projects
+                        .iter()
+                        .find(|p| p.id == *pid && !p.is_people())
+                        .map(|p| AgentMember {
+                            project_id: p.id.clone(),
+                            name: p.name.clone(),
+                            icon: p.icon.clone(),
+                            color: p.color.clone(),
+                            handle: Project::mention_slug(&p.name),
+                            owner_id: ME_ID.into(),
+                            owner_handle: ME_HANDLE.into(),
+                            reply_policy: ReplyPolicy::Mention,
+                            avatar: p.avatar.clone(),
+                            avatar_color: p.avatar_color.clone(),
+                            avatar_color_index: p.avatar_color_index,
+                            avatar_leaf: p.avatar_leaf,
+                            avatar_leaf_color: p.avatar_leaf_color,
+                            description: None,
+                            model: None,
+                            owner: None,
+                        })
+                })
+                .collect();
+            if let Some(space) = projects.iter_mut().find(|p| p.id == *chat_id) {
+                for raw in handles {
+                    let handle = raw.trim().trim_start_matches('@').to_lowercase();
+                    let Some(other) = directory().into_iter().find(|p| p.handle == handle) else {
+                        continue;
+                    };
+                    if !space.people.iter().any(|x| x.id == other.id) {
+                        space.people.push(other);
+                    }
+                }
+                for agent in agents {
+                    if !space.has_agent(&agent.project_id) {
+                        space.agents.push(agent);
+                    }
+                }
+            }
+            drop(projects);
             emit_projects(shared);
             true
         }

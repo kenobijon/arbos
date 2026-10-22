@@ -18,8 +18,13 @@ extension AppModel {
         return secrets?.rowValue ?? "No secrets yet"
     }
 
-    /// The relay can connect a 1Password vault (Phase 2 deployed).
-    var vaultProvidersAvailable: Bool { !(secrets?.providers.isEmpty ?? true) }
+    /// The relay can connect a 1Password vault (Phase 2 deployed) **and** the remote flag
+    /// `features.vault_connect` is on (default off since 2026-10-21). Gates every entry point
+    /// to the Connect 1Password flow; connected vaults still show and work.
+    var vaultProvidersAvailable: Bool {
+        guard let s = secrets else { return false }
+        return s.vaultConnect && !s.providers.isEmpty
+    }
 
     func refreshSecrets() async {
         guard credentials != nil, !isFixture else { return }

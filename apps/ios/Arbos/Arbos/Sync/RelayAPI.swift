@@ -759,7 +759,7 @@ final class RelayAPI {
         return ((p?["avatar_color_index_effective"] as? NSNumber) ?? (p?["avatar_color_index"] as? NSNumber))?.intValue
     }
 
-    /// D91 `PATCH /projects/{id} {"avatar_leaf": 0–8|null, "avatar_leaf_color": 0–9|null}` (null = automatic).
+    /// D92 `PATCH /projects/{id} {"avatar_leaf": 0–8|null, "avatar_leaf_color": 0–9|null}` (null = automatic).
     func setProjectAvatarLeaf(_ projectId: Id, leaf: Int?, color: Int?) async throws {
         let body: [String: Any] = [
             "avatar_leaf": leaf.map { $0 as Any } ?? NSNull(),

@@ -4,7 +4,8 @@
 //! measured from Grok Bot: background #141414, assistant bubble #202020, user
 //! bubble #5C5C5C, field #181818 with a #242424 rim, system text #95959B.
 //! The Mac is that UI scaled up: a chat-list sidebar, one conversation pane.
-//! Matte is the default; Glass is a macOS-only toggle (D10, §3.11).
+//! Dark + Matte is the default for anyone who never picked (D90); Glass is a
+//! macOS-only toggle (D10, §3.11).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -88,13 +89,16 @@ impl Surface {
         }
     }
 
-    /// The saved choice, or Matte (D10). Saved as one word in `<config>/surface`
-    /// only when picked in Settings, like the appearance.
+    /// The default for anyone who never picked a surface (D10, D90).
+    pub const DEFAULT: Self = Self::Matte;
+
+    /// The saved choice, or [`Self::DEFAULT`]. Saved as one word in
+    /// `<config>/surface` only when picked in Settings, like the appearance.
     pub fn load() -> Self {
         std::fs::read_to_string(config_dir().join(SURFACE_FILE))
             .ok()
             .and_then(|s| Self::parse(&s))
-            .unwrap_or(Self::Matte)
+            .unwrap_or(Self::DEFAULT)
     }
 
     pub fn save(self) {
@@ -140,10 +144,11 @@ pub enum Appearance {
     Light,
 }
 
-/// What the user chose (D81): System follows macOS and is the default; the
-/// order is the Settings order. Saved as one word in `<config>/appearance`
-/// only when the user picks in Settings, so a missing file means "never
-/// chose" → System, and an explicit `dark` or `light` stays.
+/// What the user chose; the order is the Settings order. System follows
+/// macOS. Saved as one word in `<config>/appearance` only when the user picks
+/// in Settings, so a missing file means "never chose" → [`Self::DEFAULT`]
+/// (Dark since D90; System under D81 before it), and an explicit `system`,
+/// `dark` or `light` always stays.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AppearancePref {
     System,
@@ -183,12 +188,15 @@ impl AppearancePref {
         }
     }
 
-    /// The saved choice, or System.
+    /// The default for anyone who never picked a theme (D90).
+    pub const DEFAULT: Self = Self::Dark;
+
+    /// The saved choice, or [`Self::DEFAULT`].
     pub fn load() -> Self {
         std::fs::read_to_string(config_dir().join(APPEARANCE_FILE))
             .ok()
             .and_then(|s| Self::parse(&s))
-            .unwrap_or(Self::System)
+            .unwrap_or(Self::DEFAULT)
     }
 
     pub fn save(self) {
@@ -197,7 +205,7 @@ impl AppearancePref {
         let _ = std::fs::write(dir.join(APPEARANCE_FILE), self.as_str());
     }
 
-    /// The appearance to draw: System takes macOS's; anything unknown is Light.
+    /// The appearance to draw: System takes macOS's.
     pub fn resolve(self, system: WindowAppearance) -> Appearance {
         match self {
             Self::Light => Appearance::Light,

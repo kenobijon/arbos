@@ -35,7 +35,7 @@ pub use arbos_core::avatar::leaf::{self, LeafPick};
 pub use arbos_core::avatar::{color_index, index_for, GRADIENTS, INITIALS_SCALE};
 use arbos_core::avatar::{Accent, Rgb};
 
-// ----- D91 leaf avatars ---------------------------------------------------------
+// ----- D92 leaf avatars ---------------------------------------------------------
 
 /// Remote flag `features.leaf_avatars` from `GET /me` (default on; the relay's
 /// `ARBOS_FEATURE_LEAF_AVATARS=0` is the kill switch). Process-wide so every
@@ -256,7 +256,7 @@ pub fn leaf_hero(pick: LeafPick, size: f32, key: u64) -> Div {
     )
 }
 
-/// An agent's avatar: the leaf (D91) while the flag is on, else the D79 disc.
+/// An agent's avatar: the leaf (D92) while the flag is on, else the D79 disc.
 pub fn agent(
     seed: &str,
     name: &str,
@@ -277,7 +277,7 @@ pub fn agent(
     }
 }
 
-/// The agent's profile hero (D91: swaying leaf; D79 disc when the flag is off).
+/// The agent's profile hero (D92: swaying leaf; D79 disc when the flag is off).
 pub fn project_hero(p: &Project, size: f32, theme: &Theme) -> Div {
     if leaf_avatars_on() {
         leaf_hero(project_leaf(p), size, hover_key(&p.id, size))
@@ -286,7 +286,7 @@ pub fn project_hero(p: &Project, size: f32, theme: &Theme) -> Div {
     }
 }
 
-/// The bubble-bar accent of an agent: its leaf disc colour (D91), else D79.
+/// The bubble-bar accent of an agent: its leaf disc colour (D92), else D79.
 pub fn agent_accent(
     seed: &str,
     color_index: Option<u8>,
@@ -409,7 +409,7 @@ pub fn project(p: &Project, size: f32, theme: &Theme) -> Div {
     )
 }
 
-/// The agent's leaf pick (D91) for callers that animate it.
+/// The agent's leaf pick (D92) for callers that animate it.
 pub fn project_leaf(p: &Project) -> LeafPick {
     leaf_pick(&p.id, p.avatar_leaf, p.avatar_leaf_color)
 }

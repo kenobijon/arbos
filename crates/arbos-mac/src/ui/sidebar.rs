@@ -1749,10 +1749,20 @@ fn agent_rows(
     )
 }
 
-/// Right-click / control-click menu on a chat tab or an archived chat row:
-/// Fork (the agent) and Delete (archive, or permanently close when already archived).
-pub fn chat_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
-    let (chat_id, at) = shell.chat_menu.clone()?;
+/// Width of the session row's context menu (`chat_menu`).
+pub(crate) const CHAT_MENU_WIDTH: f32 = 180.0;
+
+/// Right-click / control-click menu of a session row in the header's tab
+/// dropdown (#1256): Rename, Fork and Delete (archive, or permanently close
+/// when already archived). The caller anchors it to the row; the dropdown
+/// stays open behind it with the row highlighted. Delete first swaps the
+/// menu for `Delete "title"?` with Cancel / Delete, so the session being
+/// removed is always named.
+pub fn chat_menu(
+    shell: &Shell,
+    chat_id: &str,
+    cx: &mut Context<Shell>,
+) -> Option<gpui::AnyElement> {
     let theme = Theme::of(cx).clone();
     let state = shell.state.read(cx);
     let chat = state
@@ -1763,17 +1773,78 @@ pub fn chat_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
         .clone();
     let project = state.project(&chat.project_id)?.clone();
     let archived = state.archived_chats.contains(&chat.id);
-    let can_fork = !project.shared && !project.is_people();
+    // Session fork (#1257): this chat again, inside the same agent. The
+    // agent-level fork lives on the sidebar's agent row only.
+    let can_fork =
+        state.multi_chat && crate::app::forked_chat(&chat, &project, String::new()).is_some();
     let can_delete = !chat.is_pinned;
-    let fork_id = project.id.clone();
+    let fork_id = chat.id.clone();
     let delete_id = chat.id.clone();
     let delete_archived = archived;
+    let title = crate::ui::header::tab_title(&chat, &project);
+
+    if shell.chat_delete_armed && can_delete {
+        let note = if archived {
+            "Removes this chat from Previous chats for good."
+        } else {
+            "Closes this chat. It moves to Previous chats."
+        };
+        let body = div()
+            .flex()
+            .flex_col()
+            .gap(px(10.0))
+            .p(px(8.0))
+            .child(
+                div()
+                    .text_size(px(TEXT_SMALL))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.text)
+                    .child(format!("Delete “{title}”?")),
+            )
+            .child(
+                div()
+                    .text_size(px(TEXT_TINY))
+                    .text_color(theme.text_muted)
+                    .child(note),
+            )
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap(px(6.0))
+                    .child(
+                        confirm_button("chat-menu-delete-cancel", "Cancel", false, &theme)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.chat_menu = None;
+                                this.chat_delete_armed = false;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        confirm_button("chat-menu-delete-go", "Delete", true, &theme).on_click(
+                            cx.listener(move |this, _, _, cx| {
+                                this.chat_menu = None;
+                                this.chat_delete_armed = false;
+                                let id = delete_id.clone();
+                                this.state.update(cx, |s, cx| {
+                                    if delete_archived {
+                                        s.delete_chat_tab(id, cx);
+                                    } else {
+                                        s.close_tab(id, cx);
+                                    }
+                                });
+                            }),
+                        ),
+                    ),
+            );
+        return Some(glass::frosted_menu(240.0, &theme, body).into_any_element());
+    }
 
     let mut body = div().flex().flex_col().gap(px(1.0));
     if !archived && !project.is_people() {
         // Rename: the inline field in the tab dropdown (also double-click there).
         let rename_id = chat.id.clone();
-        let rename_label = crate::ui::header::tab_title(&chat, &project);
+        let rename_label = title.clone();
         body = body.child(
             glass::menu_row("chat-menu-rename", "square-pencil", "Rename", false, &theme).on_click(
                 cx.listener(move |this, _, window, cx| {
@@ -1787,29 +1858,25 @@ pub fn chat_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
     if can_fork {
         body = body.child(
             glass::menu_row("chat-menu-fork", "branch", "Fork", false, &theme).on_click(
-                cx.listener(move |this, _, _, cx| {
+                cx.listener(move |this, _, window, cx| {
                     this.chat_menu = None;
                     this.tab_menu_open = false;
                     let id = fork_id.clone();
-                    this.state.update(cx, |s, cx| s.duplicate_project(id, cx));
+                    this.state.update(cx, |s, cx| s.fork_chat(id, cx));
+                    Composer::focus(&this.composer, window, cx);
                 }),
             ),
         );
     }
     if can_delete {
+        if can_fork || !archived {
+            body = body.child(glass::menu_divider(&theme));
+        }
         body = body.child(
             glass::menu_row("chat-menu-delete", "trash", "Delete", true, &theme).on_click(
-                cx.listener(move |this, _, _, cx| {
-                    this.chat_menu = None;
-                    this.tab_menu_open = false;
-                    let id = delete_id.clone();
-                    this.state.update(cx, |s, cx| {
-                        if delete_archived {
-                            s.delete_chat_tab(id, cx);
-                        } else {
-                            s.close_tab(id, cx);
-                        }
-                    });
+                cx.listener(|this, _, _, cx| {
+                    this.chat_delete_armed = true;
+                    cx.notify();
                 }),
             ),
         );
@@ -1817,12 +1884,5 @@ pub fn chat_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
     if !can_fork && !can_delete {
         return None;
     }
-    Some(
-        div()
-            .absolute()
-            .left(at.x)
-            .top(at.y)
-            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(glass::frosted_menu(180.0, &theme, body)),
-    )
+    Some(glass::frosted_menu(CHAT_MENU_WIDTH, &theme, body).into_any_element())
 }

@@ -78,12 +78,12 @@ pub struct ProjectDto {
     pub avatar_color_index: Option<i64>,
     #[typeshare(serialized_as = "I54")]
     pub avatar_color_index_effective: i64,
-    /// D91 leaf avatar: the owner's picks (`null` = automatic) and the pair in effect.
+    /// D92 leaf avatar: the owner's picks (`null` = automatic) and the pair in effect.
     #[typeshare(serialized_as = "Option<I54>")]
     pub avatar_leaf: Option<i64>,
     #[typeshare(serialized_as = "Option<I54>")]
     pub avatar_leaf_color: Option<i64>,
-    /// Always sent by relays with D91; optional so older relays still decode.
+    /// Always sent by relays with D92; optional so older relays still decode.
     #[typeshare(serialized_as = "Option<I54>")]
     pub avatar_leaf_effective: Option<i64>,
     #[typeshare(serialized_as = "Option<I54>")]
@@ -165,7 +165,7 @@ pub struct ChatMemberProjectDto {
     pub avatar_leaf: Option<i64>,
     #[typeshare(serialized_as = "Option<I54>")]
     pub avatar_leaf_color: Option<i64>,
-    /// Always sent by relays with D91; optional so older relays still decode.
+    /// Always sent by relays with D92; optional so older relays still decode.
     #[typeshare(serialized_as = "Option<I54>")]
     pub avatar_leaf_effective: Option<i64>,
     #[typeshare(serialized_as = "Option<I54>")]
@@ -212,7 +212,7 @@ pub struct ChatMemberDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[typeshare(serialized_as = "Option<I54>")]
     pub avatar_color_index_effective: Option<i64>,
-    /// Agent: D91 leaf picks and the pair in effect. Human: omitted.
+    /// Agent: D92 leaf picks and the pair in effect. Human: omitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[typeshare(serialized_as = "Option<Option<I54>>")]
     pub avatar_leaf: Option<Option<i64>>,

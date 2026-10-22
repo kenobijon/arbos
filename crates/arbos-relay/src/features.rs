@@ -3,10 +3,10 @@
 //!
 //! | flag | env | default |
 //! | --- | --- | --- |
-//! | `leaf_avatars` (D91: agents without a photo draw a leaf, not initials) | `ARBOS_FEATURE_LEAF_AVATARS` | on; `0` / `false` / `off` / `no` is the kill switch |
+//! | `vault_connect` (#1265: the Connect 1Password flow) | `ARBOS_FEATURE_VAULT_CONNECT` (`vaults.rs`) | off |
+//! | `leaf_avatars` (D92: agents without a photo draw a leaf, not initials) | `ARBOS_FEATURE_LEAF_AVATARS` | on; `0` / `false` / `off` / `no` is the kill switch |
 //!
-//! `vault_connect` (`ARBOS_FEATURE_VAULT_CONNECT`, default off, #1265) is added here by the
-//! secrets module once it lands; until then it rides on `GET /secrets`.
+//! `GET /secrets` serves the same object (`vaults::features()` delegates here).
 
 use serde_json::{json, Value};
 
@@ -22,14 +22,18 @@ pub fn env_flag(name: &str, default: bool) -> bool {
     }
 }
 
-/// D91 leaf avatars for agents. Default on.
+/// D92 leaf avatars for agents. Default on.
 pub fn leaf_avatars() -> bool {
     env_flag("ARBOS_FEATURE_LEAF_AVATARS", true)
 }
 
-/// The `features` object on `GET /me`.
+/// The `features` object on `GET /me` and `GET /secrets`. Key names are a contract with the
+/// shipped apps (Mac v0.6.104 / TestFlight read `vault_connect`); only add, never rename.
 pub fn features() -> Value {
-    json!({ "leaf_avatars": leaf_avatars() })
+    json!({
+        "vault_connect": crate::vaults::vault_connect(),
+        "leaf_avatars": leaf_avatars(),
+    })
 }
 
 #[cfg(test)]

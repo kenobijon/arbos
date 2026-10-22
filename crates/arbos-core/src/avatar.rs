@@ -10,7 +10,7 @@
 //!
 //! Pure arithmetic on decoded RGBA pixels; the caller owns image decoding.
 //!
-//! Agents without a photo draw a leaf instead of initials (D91): see [`leaf`].
+//! Agents without a photo draw a leaf instead of initials (D92): see [`leaf`].
 
 pub mod leaf;
 

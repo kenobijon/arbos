@@ -89,7 +89,7 @@ pub struct Sender {
     pub user_id: Option<String>,
     /// Agent's initials-colour override (D79); people never have one.
     pub avatar_color_index: Option<i64>,
-    /// Agent's leaf avatar in effect (D91: shape 0–8, disc colour 0–9); people never have one.
+    /// Agent's leaf avatar in effect (D92: shape 0–8, disc colour 0–9); people never have one.
     pub leaf: Option<arbos_core::avatar::leaf::LeafPick>,
 }
 
@@ -871,6 +871,7 @@ mod tests {
                 doc_epoch: 1,
                 kind: "chat".into(),
                 participants: Vec::new(),
+                forked_from: None,
             })
             .expect("chat");
         let bob_tok = register(&state, &bob_dev, &bob);
@@ -1007,6 +1008,7 @@ mod archive_tests {
                 doc_epoch: 1,
                 kind: "chat".into(),
                 participants: Vec::new(),
+                forked_from: None,
             })
             .unwrap();
         for (p, u) in [(&bob_dev, &bob), (&bob_dev2, &bob)] {

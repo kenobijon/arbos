@@ -19,7 +19,7 @@ use crate::ui::sidebar::machine_dot;
 use crate::ui::theme::{Theme, TEXT_SMALL, TEXT_TINY};
 
 use super::kit::{self, Leading};
-use super::{card, editable_name, editable_picture, frame, hero, HeroClick, HERO_AVATAR};
+use super::{card, editable_name, editable_picture, hero, pushed_frame, HeroClick, HERO_AVATAR};
 
 /// An agent that is only known as a member of a people chat (someone else's
 /// project) is shown from that member entry.
@@ -221,9 +221,22 @@ pub(super) fn page(
             &theme,
         ));
     }
+    // Someone else's agent: who runs it (the "owned by" the transcript no longer carries).
+    if let Some(owner) = project
+        .owner_handle
+        .as_deref()
+        .filter(|o| !mine && !o.trim().is_empty())
+    {
+        info = info.child(kit::value_row(
+            "agent-owner-row",
+            "Owned by",
+            format!("@{}", owner.trim_start_matches('@')),
+            &theme,
+        ));
+    }
 
     // ----- appearance (avatar click) -------------------------------------------
-    // D91: the leaf picker (nine leaves, ten colours; the hero above is the live
+    // D92: the leaf picker (nine leaves, ten colours; the hero above is the live
     // preview). With the flag off: Automatic + the seven D79 gradients. Shown
     // only while the picker is open so it is not a permanent settings row.
     let leafy = avatars::leaf_avatars_on();
@@ -279,10 +292,18 @@ pub(super) fn page(
         glass::sheet_button("profile-done", "Done", &theme)
             .on_click(cx.listener(|this, _, window, cx| this.finish_edit_agent(window, cx)))
     });
-    Some(frame(body, done, Some(&shell.profile_scroll), &theme, cx))
+    Some(pushed_frame(
+        &project.name,
+        body,
+        done,
+        Some(&shell.profile_scroll),
+        shell,
+        &theme,
+        cx,
+    ))
 }
 
-/// D91 picker: the nine leaves on the agent's current disc colour, the ten
+/// D92 picker: the nine leaves on the agent's current disc colour, the ten
 /// colours as plain discs, and an Automatic reset. Each click saves at once
 /// (optimistic, then `PATCH /projects/{id}`), so the hero is the live preview.
 fn leaf_picker(project: &Project, theme: &Theme, cx: &mut Context<Shell>) -> Div {

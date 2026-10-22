@@ -1,4 +1,4 @@
-//! Leaf avatars (D91): the default picture of an agent that has no uploaded
+//! Leaf avatars (D92): the default picture of an agent that has no uploaded
 //! photo. A cream leaf on a coloured disc, one of nine shapes × ten autumn
 //! colours. People keep their D79 initials.
 //!

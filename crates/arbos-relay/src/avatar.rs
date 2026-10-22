@@ -90,7 +90,7 @@ pub fn effective_color_index(stable_id: &str, override_index: Option<i64>) -> u8
     }
 }
 
-/// Leaf avatar (D91) in effect for a project: the owner's picks where valid, else the id's cell.
+/// Leaf avatar (D92) in effect for a project: the owner's picks where valid, else the id's cell.
 pub fn effective_leaf(p: &crate::db::Project) -> leaf::LeafPick {
     leaf::pick_for(
         &p.id,
@@ -126,7 +126,7 @@ pub fn check_leaf_pick(
     Ok(())
 }
 
-/// `GET /avatar-leaves` body: the D91 shapes, colours, ink and index rule, so a site or a
+/// `GET /avatar-leaves` body: the D92 shapes, colours, ink and index rule, so a site or a
 /// third client can draw the same leaf.
 pub fn leaves_json() -> Value {
     json!({

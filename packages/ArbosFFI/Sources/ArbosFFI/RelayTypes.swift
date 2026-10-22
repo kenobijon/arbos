@@ -99,7 +99,7 @@ public struct ChatMemberProjectDto: Codable {
 	public let avatar_color_index_effective: Int64
 	public let avatar_leaf: Int64?
 	public let avatar_leaf_color: Int64?
-	/// Always sent by relays with D91; optional so older relays still decode.
+	/// Always sent by relays with D92; optional so older relays still decode.
 	public let avatar_leaf_effective: Int64?
 	public let avatar_leaf_color_effective: Int64?
 	public let description: String
@@ -144,7 +144,7 @@ public struct ChatMemberDto: Codable {
 	public let avatar_color: String?
 	public let avatar_color_index: Int64??
 	public let avatar_color_index_effective: Int64?
-	/// Agent: D91 leaf picks and the pair in effect. Human: omitted.
+	/// Agent: D92 leaf picks and the pair in effect. Human: omitted.
 	public let avatar_leaf: Int64??
 	public let avatar_leaf_color: Int64??
 	public let avatar_leaf_effective: Int64?
@@ -236,10 +236,10 @@ public struct ProjectDto: Codable {
 	public let vision_enabled: Bool
 	public let avatar_color_index: Int64?
 	public let avatar_color_index_effective: Int64
-	/// D91 leaf avatar: the owner's picks (`null` = automatic) and the pair in effect.
+	/// D92 leaf avatar: the owner's picks (`null` = automatic) and the pair in effect.
 	public let avatar_leaf: Int64?
 	public let avatar_leaf_color: Int64?
-	/// Always sent by relays with D91; optional so older relays still decode.
+	/// Always sent by relays with D92; optional so older relays still decode.
 	public let avatar_leaf_effective: Int64?
 	public let avatar_leaf_color_effective: Int64?
 	public let primary_chat_id: String?

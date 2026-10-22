@@ -560,7 +560,7 @@ pub async fn avatar_colors() -> Response {
     Json(crate::avatar::palette_json()).into_response()
 }
 
-/// `GET /avatar-leaves` — the D91 leaf shapes, colours and index rule (public, no auth).
+/// `GET /avatar-leaves` — the D92 leaf shapes, colours and index rule (public, no auth).
 pub async fn avatar_leaves() -> Response {
     Json(crate::avatar::leaves_json()).into_response()
 }
@@ -2844,6 +2844,7 @@ pub(crate) mod tests_support {
                 doc_epoch: 1,
                 kind: "chat".into(),
                 participants: Vec::new(),
+                forked_from: None,
             })
             .expect("pinned chat");
         project.id

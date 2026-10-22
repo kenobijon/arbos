@@ -201,7 +201,7 @@ struct Project: Identifiable, Equatable, Codable {
     var avatarColorIndex: Int? = nil
     var avatarColorIndexEffective: Int? = nil
     var effectiveAvatarColorIndex: Int? { AvatarPalette.clamp(avatarColorIndexEffective) ?? AvatarPalette.clamp(avatarColorIndex) }
-    /// D91: the owner's leaf picks (`avatar_leaf` 0–8, `avatar_leaf_color` 0–9); nil → derived
+    /// D92: the owner's leaf picks (`avatar_leaf` 0–8, `avatar_leaf_color` 0–9); nil → derived
     /// from the id by the shared rule (`LeafArt.pick`), the same pair the relay reports as
     /// `avatar_leaf_effective` / `avatar_leaf_color_effective`.
     var avatarLeaf: Int? = nil

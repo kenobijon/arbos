@@ -48,7 +48,7 @@ extension AvatarPalette {
     }
 }
 
-/// An agent: its D91 leaf on its autumn disc while the relay flag is on (else
+/// An agent: its D92 leaf on its autumn disc while the relay flag is on (else
 /// initials on its D79 colour), with the optional machine dot. `idle` sways the
 /// leaf (profile heroes); a `working` start plays one gust; `still` keeps it
 /// quiet. Reduce Motion stops both.

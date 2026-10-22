@@ -44,7 +44,7 @@ pub fn avatar_accent_version() -> u32 {
     avatar::ACCENT_VERSION
 }
 
-// ---- D91 leaf avatars --------------------------------------------------------------------------
+// ---- D92 leaf avatars --------------------------------------------------------------------------
 
 /// The leaf avatar in effect for an agent: shape 0–8 and disc colour 0–9.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -109,7 +109,7 @@ impl From<&leaf::Segment> for LeafSegment {
     }
 }
 
-/// D91: the leaf and colour for an agent id, honouring the owner's picks.
+/// D92: the leaf and colour for an agent id, honouring the owner's picks.
 #[uniffi::export]
 pub fn leaf_pick(seed: String, leaf: Option<u8>, color: Option<u8>) -> LeafPick {
     leaf::pick_for(&seed, leaf, color).into()

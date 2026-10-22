@@ -1,4 +1,4 @@
-// Leaf avatars (D91): an agent without a photo shows a cream leaf on an
+// Leaf avatars (D92): an agent without a photo shows a cream leaf on an
 // autumn-coloured disc — nine shapes × ten colours, deterministic from the
 // agent id, with the owner's picks on top. The shapes, palette, index rule
 // and motion curves come from arbos-core through ArbosFFI, so the iPhone
