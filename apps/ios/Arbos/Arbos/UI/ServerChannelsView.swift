@@ -1,7 +1,7 @@
 // Servers on the phone (D88). A server is one more row on Home, drawn like a
-// chat row; tapping it slides into its channel list (this file), which lands
-// on `#general` in the normal ChatView. Everything here reuses the home-row
-// metrics and the Hidden chats page header so nothing new has to be learned.
+// chat row; tapping it slides into its channel list (this file). A channel
+// tap opens that room in the normal ChatView. Everything here reuses the
+// home-row metrics and the Hidden chats page header so nothing new has to be learned.
 
 import SwiftUI
 
@@ -321,7 +321,7 @@ struct NewChannelSheet: View {
     }
 }
 
-/// Rule 8: "Server" in the `+` sheet — a name, then `POST /servers`; lands on `#general`.
+/// Rule 8: "Server" in the `+` sheet — a name, then `POST /servers`; lands on its channel list.
 struct NewServerView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme

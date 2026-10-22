@@ -213,7 +213,7 @@ struct HomeView: View {
                             case .server(let server):
                                 // D88 rule 1: a server row is a chat row — avatar, name, preview,
                                 // time, unread dot; no counts, badges or disclosure. Tap → its
-                                // channel list, landing on #general.
+                                // channel list; the user then opens a channel.
                                 Button { model.open(server: server) } label: {
                                     ServerRow(server: server, preview: model.serverPreview(server),
                                               time: timeLabel(ms: model.serverActivity(server)),
