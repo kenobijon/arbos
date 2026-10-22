@@ -37,6 +37,8 @@ enum ProfileTarget: Identifiable, Equatable, Hashable {
     case agent(projectId: String)
     /// D88: a server's details (Channels | Members; admin rows for owner/admin).
     case server(serverId: String)
+    /// D88 (#1317): a channel's own page — what the `# general` pill opens.
+    case channel(channelId: String)
 
     /// Pages whose member rows push a person over them (back chevron returns
     /// here). The agent page runs its own NavigationStack, so it stays a root.
@@ -51,6 +53,7 @@ enum ProfileTarget: Identifiable, Equatable, Hashable {
         case .group(let c, _): return "group:\(c)"
         case .agent(let p): return "agent:\(p)"
         case .server(let s): return "server:\(s)"
+        case .channel(let c): return "channel:\(c)"
         }
     }
 }
@@ -1124,6 +1127,7 @@ struct ServerProfileView: View {
 
     // MARK: Channels
 
+    @ViewBuilder
     private func channelsList(_ server: Server) -> some View {
         ProfileCard(separatorInset: PaneKit.separatorInset(.glyph(""))) {
             if isAdmin {
@@ -1133,8 +1137,26 @@ struct ServerProfileView: View {
                 }
                 .buttonStyle(.plain)
             }
-            ForEach(server.channels) { c in
+            ForEach(server.liveChannels) { c in
                 channelRow(c, in: server)
+            }
+        }
+        if !server.archivedChannels.isEmpty {
+            // Channels I archived (row menu → Archive): Unarchive brings one back to my list.
+            VStack(alignment: .leading, spacing: 8) {
+                PaneSectionTitle("Archived")
+                ProfileCard(separatorInset: PaneKit.separatorInset(.glyph(""))) {
+                    ForEach(server.archivedChannels) { c in
+                        PaneRow(leading: .glyph("archivebox"), title: c.name,
+                                subtitle: model.channelRestricted(c) ? "Admins only post" : nil,
+                                trailing: AnyView(
+                                    Button("Unarchive") { Task { await model.archiveChannel(c, false) } }
+                                        .font(theme.font(Theme.small, weight: .medium))
+                                        .buttonStyle(.bordered)
+                                        .tint(theme.muted)
+                                ))
+                    }
+                }
             }
         }
     }
@@ -1518,6 +1540,71 @@ struct GroupEditSheet: View {
             }
             UIImage(cgImage: cg, scale: image.scale, orientation: image.imageOrientation)
                 .draw(in: CGRect(origin: .zero, size: CGSize(width: side, height: side)))
+        }
+    }
+}
+
+// MARK: - Channel (D88, #1317)
+
+/// A channel's page: minimal until the channel profile (Profile | Settings) is approved — the
+/// `#` disc, the name (never with a leading `#`: the glyph shows it), the topic, who posts,
+/// the server's member count, and a row that pushes the server's page.
+struct ChannelProfileView: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.theme) private var theme
+    let channelId: String
+
+    private var channel: ServerChannel? { model.channel(channelId) }
+    private var server: Server? { channel.flatMap { model.server($0.serverId) } }
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            theme.bg.ignoresSafeArea()
+            ScrollView {
+                VStack(spacing: 18) {
+                    Color.clear.frame(height: 80)
+                    if let channel, let server {
+                        let restricted = model.channelRestricted(channel)
+                        let count = max(server.memberCount, server.members.count)
+                        PaneHeader(name: channel.name,
+                                   subtitle: "\(count) member\(count == 1 ? "" : "s") · \(server.name)") {
+                            RoundedRectangle(cornerRadius: PaneHeader<EmptyView>.avatarSize * 0.3, style: .continuous)
+                                .fill(theme.field)
+                                .overlay(
+                                    Text("#")
+                                        .font(theme.font(PaneHeader<EmptyView>.avatarSize * 0.5, weight: .semibold))
+                                        .foregroundStyle(theme.muted)
+                                )
+                        }
+                        PaneCard {
+                            if let topic = channel.topic, !topic.trimmingCharacters(in: .whitespaces).isEmpty {
+                                PaneRow(title: topic)
+                            }
+                            PaneRow(title: "Posting", value: restricted ? "Admins only" : "Everyone")
+                        }
+                        PaneCard {
+                            Button {
+                                model.showProfile(.server(serverId: server.id))
+                            } label: {
+                                PaneRow(leading: .avatar(AnyView(
+                                    InitialsAvatar(name: server.name, handle: nil, id: server.id,
+                                                   override: server.avatarColorIndex, size: PaneKit.avatar)
+                                )), title: server.name, subtitle: "Server", chevron: true)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    } else {
+                        Text("This channel is no longer available.")
+                            .font(theme.font(Theme.small)).foregroundStyle(theme.muted)
+                            .padding(.top, 80)
+                    }
+                    Color.clear.frame(height: 40)
+                }
+            }
+            ProfileTopBar { EmptyView() }
+        }
+        .task {
+            if let channel { await model.refreshServer(channel.serverId) }
         }
     }
 }

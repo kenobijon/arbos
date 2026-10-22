@@ -1634,6 +1634,23 @@ fn handle_server_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                 fetch_server_detail(&shared, &server_id).await;
             });
         }
+        ClientCommand::ChannelArchive {
+            server_id,
+            channel_id,
+            archived,
+        } => {
+            let shared = shared.clone();
+            let server_id = server_id.clone();
+            let path = format!("/servers/{server_id}/channels/{channel_id}/archive");
+            let body = json!({ "archived": archived });
+            tokio::spawn(async move {
+                if let Err(err) = shared.post_json(&path, body).await {
+                    server_error(&shared, &err);
+                    return;
+                }
+                fetch_server_detail(&shared, &server_id).await;
+            });
+        }
         ClientCommand::ChannelOpen { room_id } => {
             let Some(client) = matrix_client(shared) else {
                 return true;
@@ -4929,6 +4946,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         ClientCommand::CreateProject {
             name,
             avatar_color_index,
+            leaf,
             source_project_id,
             description,
             color,
@@ -4942,6 +4960,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 }
                 if let Some(i) = avatar_color_index {
                     body["avatar_color_index"] = json!(i);
+                }
+                if let Some(l) = leaf {
+                    body["avatar_leaf"] = json!(l.leaf);
+                    body["avatar_leaf_color"] = json!(l.color);
                 }
                 if let Some(src) = source_project_id {
                     body["source_project_id"] = json!(src);
@@ -5744,6 +5766,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         | ClientCommand::ChannelCreate { .. }
         | ClientCommand::ChannelPatch { .. }
         | ClientCommand::ChannelDelete { .. }
+        | ClientCommand::ChannelArchive { .. }
         | ClientCommand::ChannelOpen { .. }
         | ClientCommand::ChannelLoadOlder { .. }
         | ClientCommand::ChannelSend { .. }

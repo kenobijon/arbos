@@ -2,12 +2,10 @@
 //! buttons), the glass pill (header title), grouped cards and rows for the
 //! sheets, menu rows, and the centered sheet scaffold every modal uses.
 
-use std::cell::Cell;
-use std::rc::Rc;
-
 use gpui::{
-    div, prelude::*, px, Div, ElementId, FontWeight, InteractiveElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, Pixels, Point, SharedString, Stateful, WindowControlArea,
+    div, prelude::*, px, Div, ElementId, FontWeight, Global, InteractiveElement, MouseButton,
+    MouseDownEvent, MouseMoveEvent, Pixels, Point, SharedString, Stateful, Window,
+    WindowControlArea,
 };
 
 use crate::ui::frost::{frosted, MENU_BLUR, PANEL_BLUR};
@@ -18,7 +16,8 @@ use crate::ui::theme::{Theme, PANEL_RADIUS, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
 ///
 /// macOS windows open with `app_owns_titlebar_drag`, so AppKit will not move
 /// the window itself. Mark the title-strip (and any other chrome the user
-/// should pull) with this; a left-drag calls [`gpui::Window::start_window_move`].
+/// should pull) with this; a left-drag calls [`gpui::Window::start_window_move`],
+/// a double-click does what the title bar does (zoom, per the system setting).
 /// Interactive children should `cx.stop_propagation()` on mouse-down so a
 /// click on a button does not start a move.
 /// How far the pointer travels (pt) after a press before the window moves.
@@ -26,37 +25,64 @@ use crate::ui::theme::{Theme, PANEL_RADIUS, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
 /// the transcript's top fade), so the drag catchment can overlap content.
 pub const WINDOW_DRAG_SLOP: f32 = 4.0;
 
+/// The press that may become a window move. A global, not a per-render cell:
+/// element listeners belong to the frame that rendered them, and anything
+/// animating (a leaf avatar's sway, a streaming dot) re-renders every frame,
+/// so a cell created inside `window_drag()` lost the press between mouse-down
+/// and the first mouse-move and the window could not be dragged at all
+/// (v0.6.11x–v0.6.131, [feedback mac-window-drag-hotfix]).
+#[derive(Default)]
+pub struct WindowDragPress {
+    /// Where the left button went down inside a drag region.
+    pub start: Option<Point<Pixels>>,
+    /// Window moves requested so far (tests read this).
+    pub moves: u32,
+    /// Tests: record the request instead of asking the platform.
+    pub record_only: bool,
+}
+
+impl Global for WindowDragPress {}
+
+impl WindowDragPress {
+    fn request_move(&mut self, window: &Window) {
+        self.start = None;
+        self.moves += 1;
+        if !self.record_only {
+            window.start_window_move();
+        }
+    }
+}
+
 pub trait WindowDrag: InteractiveElement + Sized {
     fn window_drag(self) -> Self {
-        // The press position while a move is pending; None otherwise.
-        let pending: Rc<Cell<Option<Point<Pixels>>>> = Rc::new(Cell::new(None));
         self.window_control_area(WindowControlArea::Drag)
-            .on_mouse_down(MouseButton::Left, {
-                let pending = pending.clone();
-                move |event: &MouseDownEvent, _, _| pending.set(Some(event.position))
+            .on_mouse_down(MouseButton::Left, |event: &MouseDownEvent, window, cx| {
+                let press = cx.default_global::<WindowDragPress>();
+                if event.click_count == 2 {
+                    press.start = None;
+                    if !press.record_only {
+                        window.titlebar_double_click();
+                    }
+                } else {
+                    press.start = Some(event.position);
+                }
             })
-            .on_mouse_up(MouseButton::Left, {
-                let pending = pending.clone();
-                move |_, _, _| pending.set(None)
+            .on_mouse_up(MouseButton::Left, |_, _, cx| {
+                cx.default_global::<WindowDragPress>().start = None;
             })
-            .on_mouse_up_out(MouseButton::Left, {
-                let pending = pending.clone();
-                move |_, _, _| pending.set(None)
+            .on_mouse_up_out(MouseButton::Left, |_, _, cx| {
+                cx.default_global::<WindowDragPress>().start = None;
             })
-            .on_mouse_down_out({
-                let pending = pending.clone();
-                move |_, _, _| pending.set(None)
+            .on_mouse_down_out(|_, _, cx| {
+                cx.default_global::<WindowDragPress>().start = None;
             })
-            .on_mouse_move({
-                let pending = pending.clone();
-                move |event: &MouseMoveEvent, window, _| {
-                    if let Some(start) = pending.get() {
-                        let dx: f32 = (event.position.x - start.x).into();
-                        let dy: f32 = (event.position.y - start.y).into();
-                        if dx * dx + dy * dy >= WINDOW_DRAG_SLOP * WINDOW_DRAG_SLOP {
-                            pending.set(None);
-                            window.start_window_move();
-                        }
+            .on_mouse_move(|event: &MouseMoveEvent, window, cx| {
+                let press = cx.default_global::<WindowDragPress>();
+                if let Some(start) = press.start {
+                    let dx: f32 = (event.position.x - start.x).into();
+                    let dy: f32 = (event.position.y - start.y).into();
+                    if dx * dx + dy * dy >= WINDOW_DRAG_SLOP * WINDOW_DRAG_SLOP {
+                        press.request_move(window);
                     }
                 }
             })
@@ -495,5 +521,199 @@ mod tests {
     fn wheel_over_menu_does_not_chain_into_underlying_scroll() {
         let hit = scroll_hit_layers([(true, "frosted_menu"), (false, "sidebar_list")]);
         assert_eq!(hit, vec!["frosted_menu"]);
+    }
+}
+
+#[cfg(test)]
+mod drag_tests {
+    use gpui::{point, px, Modifiers, MouseButton, MouseDownEvent, Pixels, Point, TestAppContext};
+
+    use super::*;
+
+    /// The app's top chrome at its real metrics: sidebar strip (296 × 44),
+    /// chat header (44) with a centred non-drag pill and, when the sidebar is
+    /// folded, a 28 pt toggle after the 72 pt traffic-light inset; right pane
+    /// bar (340 × 44) with a 30 pt close circle. Each bar is a drag region.
+    struct TopChrome {
+        collapsed: bool,
+    }
+
+    const SIDEBAR: f32 = 296.0;
+    const PANE: f32 = 340.0;
+    const BAR: f32 = 44.0;
+    const WIDTH: f32 = 1180.0;
+
+    impl gpui::Render for TopChrome {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let stop = |el: Stateful<Div>| {
+                el.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            };
+            let mut row = div().flex().w(px(WIDTH)).h(px(BAR));
+            if !self.collapsed {
+                row = row.child(
+                    div()
+                        .id("strip")
+                        .w(px(SIDEBAR))
+                        .h(px(BAR))
+                        .flex()
+                        .items_center()
+                        .justify_end()
+                        .px(px(12.0))
+                        .child(stop(div().id("plus").size(px(28.0))))
+                        .window_drag(),
+                );
+            }
+            let mut header = div()
+                .id("header")
+                .flex_1()
+                .h(px(BAR))
+                .flex()
+                .items_center()
+                .justify_between()
+                .pl(px(if self.collapsed { 72.0 + 12.0 } else { 12.0 }))
+                .pr(px(10.0))
+                .window_drag();
+            header = header
+                .child(div().w(px(40.0)).flex().when(self.collapsed, |el| {
+                    el.child(stop(div().id("toggle").size(px(28.0))))
+                }))
+                .child(
+                    div()
+                        .flex_1()
+                        .flex()
+                        .justify_center()
+                        .child(stop(div().id("pill").w(px(120.0)).h(px(34.0)))),
+                )
+                .child(div().w(px(40.0)));
+            row = row.child(header).child(
+                div()
+                    .id("pane-bar")
+                    .w(px(PANE))
+                    .h(px(BAR))
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .px(px(10.0))
+                    .child(stop(div().id("close").size(px(30.0))))
+                    .window_drag(),
+            );
+            let _ = cx;
+            div().size_full().child(row)
+        }
+    }
+
+    fn press_and_move(cx: &mut TestAppContext, collapsed: bool, at: Point<Pixels>) -> u32 {
+        cx.update(|cx| {
+            cx.set_global(WindowDragPress {
+                record_only: true,
+                ..Default::default()
+            })
+        });
+        let (view, vcx) = cx.add_window_view(|_, _| TopChrome { collapsed });
+        vcx.run_until_parked();
+        vcx.simulate_event(MouseDownEvent {
+            button: MouseButton::Left,
+            position: at,
+            modifiers: Modifiers::default(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        // An animating avatar re-renders every frame between the press and
+        // the first move: the drag must survive a fresh frame.
+        view.update(vcx, |_, cx| cx.notify());
+        vcx.run_until_parked();
+        vcx.simulate_mouse_move(
+            point(at.x + px(12.0), at.y + px(3.0)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        vcx.run_until_parked();
+        vcx.update(|_, cx| cx.default_global::<WindowDragPress>().moves)
+    }
+
+    #[gpui::test]
+    fn empty_top_strips_drag_the_window_in_all_three_panes(cx: &mut TestAppContext) {
+        // Sidebar strip, left of the + button.
+        assert_eq!(
+            press_and_move(cx, false, point(px(60.0), px(22.0))),
+            1,
+            "sidebar strip"
+        );
+        // Chat header, between the sidebar edge and the pill.
+        assert_eq!(
+            press_and_move(cx, false, point(px(SIDEBAR + 80.0), px(22.0))),
+            1,
+            "header"
+        );
+        // Right pane bar, left of the close circle.
+        assert_eq!(
+            press_and_move(cx, false, point(px(WIDTH - PANE + 60.0), px(22.0))),
+            1,
+            "pane bar"
+        );
+    }
+
+    #[gpui::test]
+    fn the_header_drags_with_the_sidebar_folded_too(cx: &mut TestAppContext) {
+        // Right of the toggle, left of the pill.
+        assert_eq!(
+            press_and_move(cx, true, point(px(160.0), px(22.0))),
+            1,
+            "folded header"
+        );
+        assert_eq!(
+            press_and_move(cx, true, point(px(WIDTH - PANE + 60.0), px(22.0))),
+            1,
+            "pane bar, folded"
+        );
+    }
+
+    #[gpui::test]
+    fn controls_do_not_drag(cx: &mut TestAppContext) {
+        // The pill sits centred in the header: header spans SIDEBAR..WIDTH-PANE.
+        let header_centre = (SIDEBAR + (WIDTH - PANE)) / 2.0;
+        assert_eq!(
+            press_and_move(cx, false, point(px(header_centre), px(22.0))),
+            0,
+            "pill"
+        );
+        assert_eq!(
+            press_and_move(cx, false, point(px(SIDEBAR - 12.0 - 14.0), px(22.0))),
+            0,
+            "+ button"
+        );
+        assert_eq!(
+            press_and_move(cx, true, point(px(72.0 + 12.0 + 14.0), px(22.0))),
+            0,
+            "folded toggle"
+        );
+    }
+
+    #[gpui::test]
+    fn a_short_jitter_is_a_click_not_a_move(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(WindowDragPress {
+                record_only: true,
+                ..Default::default()
+            })
+        });
+        let (_view, vcx) = cx.add_window_view(|_, _| TopChrome { collapsed: false });
+        vcx.run_until_parked();
+        let at = point(px(SIDEBAR + 80.0), px(22.0));
+        vcx.simulate_mouse_down(at, MouseButton::Left, Modifiers::default());
+        vcx.simulate_mouse_move(
+            point(at.x + px(1.0), at.y + px(1.0)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        vcx.run_until_parked();
+        assert_eq!(
+            vcx.update(|_, cx| cx.default_global::<WindowDragPress>().moves),
+            0
+        );
     }
 }

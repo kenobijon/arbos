@@ -55,6 +55,8 @@ pub enum ProfilePage {
     Me,
     /// A server (D88): channels, members, and the admin options for owners/admins.
     Server { server_id: Id },
+    /// A channel of a server (D88, #1317): what the `# general` header pill opens.
+    Channel { server_id: Id, channel_id: Id },
 }
 
 /// Which server sheet is open over the shell (D88).
@@ -458,6 +460,9 @@ pub struct AppState {
     pub servers: Vec<ServerInfo>,
     /// Rig: `ARBOS_OPEN_SERVER` was applied (once, when the registry first lists it).
     open_server_hook_done: bool,
+    /// Rig: `ARBOS_OPEN_SERVER=…:menu|:menu-delete` — the shell opens the selected channel's
+    /// row menu on its next render (`true` = with the Delete confirmation armed).
+    pub rig_channel_menu: Option<bool>,
     /// D88: the room list from the homeserver (previews, unread, `can_post`).
     pub matrix_snapshot: Snapshot,
     pub matrix_connected: bool,
@@ -726,6 +731,7 @@ impl AppState {
             my_call: None,
             servers_available: false,
             open_server_hook_done: false,
+            rig_channel_menu: None,
             servers: Vec::new(),
             matrix_snapshot: Snapshot::default(),
             matrix_connected: false,
@@ -1350,6 +1356,7 @@ impl AppState {
                         self.command(ClientCommand::CreateProject {
                             name: "Home".into(),
                             avatar_color_index: None,
+                            leaf: None,
                             source_project_id: None,
                             description: None,
                             color: None,
@@ -3153,6 +3160,49 @@ impl AppState {
         cx.notify();
     }
 
+    /// Channel row menu / server page: hide a channel from my list, or bring it back. An
+    /// archived channel that was open gives way to `#general`.
+    pub fn archive_channel(
+        &mut self,
+        server_id: Id,
+        channel_id: Id,
+        archived: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let was_open = self
+            .selected_channel
+            .as_ref()
+            .is_some_and(|c| c.channel_id == channel_id);
+        if let Some(c) = self
+            .servers
+            .iter_mut()
+            .find(|s| s.id == server_id)
+            .and_then(|s| s.channels.iter_mut().find(|c| c.id == channel_id))
+        {
+            c.archived = archived;
+        }
+        self.command(ClientCommand::ChannelArchive {
+            server_id: server_id.clone(),
+            channel_id: channel_id.clone(),
+            archived,
+        });
+        if archived && was_open {
+            match self
+                .server(&server_id)
+                .and_then(|s| s.general())
+                .map(|g| g.id.clone())
+                .filter(|g| *g != channel_id)
+            {
+                Some(general) => {
+                    self.select_channel(server_id, general, cx);
+                    return;
+                }
+                None => self.selected_channel = None,
+            }
+        }
+        cx.notify();
+    }
+
     /// Server page, Channels tab: delete a channel (owner/admin; `#general` refuses).
     pub fn delete_channel(&mut self, server_id: Id, channel_id: Id, cx: &mut Context<Self>) {
         let was_open = self
@@ -3270,7 +3320,11 @@ impl AppState {
             self.channel_pending_room = None;
             self.sync_focus();
         }
-        if matches!(&self.profile, Some(ProfilePage::Server { server_id: id }) if id == server_id) {
+        if matches!(
+            &self.profile,
+            Some(ProfilePage::Server { server_id: id }) | Some(ProfilePage::Channel { server_id: id, .. })
+                if id == server_id
+        ) {
             self.close_profile(cx);
         }
         cx.notify();
@@ -3420,9 +3474,10 @@ impl AppState {
         cx.notify();
     }
 
-    /// Rig: `ARBOS_OPEN_SERVER=<name or id>[:<#channel>][:panel]` enters a server once the
-    /// registry lists it (the row click, landing on `#general`), then the named channel, and
-    /// with `panel` its page in the right pane (the server-name click).
+    /// Rig: `ARBOS_OPEN_SERVER=<name or id>[:<#channel>][:panel|:channel]` enters a server once
+    /// the registry lists it (the row click, landing on `#general`), then the named channel;
+    /// `panel` opens the server's page (the server-header click), `channel` the channel's (the
+    /// pill click).
     pub fn apply_open_server_hook(&mut self, cx: &mut Context<Self>) {
         // A first login still running would select its chat over the server; after it ends.
         if self.open_server_hook_done || self.onboarding.is_some() {
@@ -3451,6 +3506,22 @@ impl AppState {
                     },
                     cx,
                 );
+            } else if part == "channel" {
+                if let Some(c) = self.selected_channel.clone() {
+                    self.open_profile(
+                        ProfilePage::Channel {
+                            server_id: c.server_id,
+                            channel_id: c.channel_id,
+                        },
+                        cx,
+                    );
+                }
+            } else if part == "menu" || part == "menu-delete" {
+                self.rig_channel_menu = Some(part == "menu-delete");
+            } else if part == "archive" {
+                if let Some(c) = self.selected_channel.clone() {
+                    self.archive_channel(c.server_id, c.channel_id, true, cx);
+                }
             } else if let Some(channel) = server
                 .channels
                 .iter()
@@ -4153,7 +4224,7 @@ impl AppState {
             ProfilePage::Agent { project_id } => Some(project_id.clone()),
             _ => None,
         };
-        if let ProfilePage::Server { server_id } = &page {
+        if let ProfilePage::Server { server_id } | ProfilePage::Channel { server_id, .. } = &page {
             // Members only come with the detail route.
             self.command(ClientCommand::ServerFetch {
                 server_id: server_id.clone(),
@@ -5397,6 +5468,7 @@ impl AppState {
         &mut self,
         name: String,
         avatar_color_index: Option<u8>,
+        leaf: Option<crate::ui::avatars::LeafPick>,
         cx: &mut Context<Self>,
     ) {
         self.new_project_open = false;
@@ -5404,6 +5476,7 @@ impl AppState {
         self.command(ClientCommand::CreateProject {
             name,
             avatar_color_index,
+            leaf,
             source_project_id: None,
             description: None,
             color: None,
@@ -5430,10 +5503,13 @@ impl AppState {
             &src.id,
             src.avatar_color_override.or(src.avatar_color_index),
         ));
+        // D92: the fork keeps the source's leaf and colour too.
+        let leaf = Some(crate::ui::avatars::project_leaf(src));
         self.awaiting_new_project = true;
         self.command(ClientCommand::CreateProject {
             name,
             avatar_color_index,
+            leaf,
             source_project_id: Some(project_id),
             description,
             color,
