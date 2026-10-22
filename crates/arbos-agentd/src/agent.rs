@@ -1178,6 +1178,9 @@ pub struct Agent {
     pub goals_cache: std::sync::Mutex<String>,
     /// D87: the project-memory text last written into the system prompt and when (debounce).
     pub prompt_memory: std::sync::Mutex<Option<(String, Instant)>>,
+    /// D91 soft-compaction hysteresis per chat: `None` right after a compaction (the floor is
+    /// not known yet), then the window observed on the first turn after it.
+    compaction_floor: std::sync::Mutex<HashMap<String, Option<i64>>>,
 }
 
 impl Agent {
@@ -1251,6 +1254,7 @@ impl Agent {
             turn_images: std::sync::Mutex::new(Vec::new()),
             goals_cache: std::sync::Mutex::new(String::new()),
             prompt_memory: std::sync::Mutex::new(None),
+            compaction_floor: std::sync::Mutex::new(HashMap::new()),
         })
     }
 
@@ -2512,6 +2516,21 @@ impl Agent {
             .await
     }
 
+    /// Run `maybe_soft_compact` behind the current turn: the task waits for the turn lock, so it
+    /// lands after this turn is finished and before the next prompt.
+    fn spawn_soft_compaction(self: &Arc<Self>, chat_id: &str, usage: Option<&Value>) {
+        if crate::workspace::compact_at_tokens() == 0 {
+            return;
+        }
+        let me = self.clone();
+        let chat = chat_id.to_owned();
+        let usage = usage.cloned();
+        tokio::spawn(async move {
+            let _guard = me.turn_lock.lock().await;
+            me.maybe_soft_compact(&chat, usage.as_ref()).await;
+        });
+    }
+
     /// Soft compaction (D91). `usage` is the last model call's usage, so its context size is the
     /// window the next turn would start from. Above `compact_at_tokens()` (64k by default) pi is
     /// asked to compact: `keepRecentTokens` of recent turns stay verbatim, the rest becomes one
@@ -2523,23 +2542,36 @@ impl Agent {
             return;
         }
         let tokens = usage.map(context_tokens).unwrap_or(0);
+        if tokens <= 0 {
+            return;
+        }
+        // Hysteresis: the first turn after a compaction shows where the window landed (the
+        // floor); the next compaction waits until the window has grown a good step past it, so a
+        // turn large enough to land back over the threshold on its own cannot rewrite the cache
+        // every turn. The 128k ceiling still catches a chat that keeps growing meanwhile.
+        {
+            let mut floors = self.compaction_floor.lock().expect("compaction floors");
+            match floors.get(chat_id).copied() {
+                Some(None) => {
+                    floors.insert(chat_id.to_owned(), Some(tokens));
+                    tracing::debug!(chat_id, tokens, "soft compaction: floor observed");
+                    return;
+                }
+                Some(Some(floor))
+                    if tokens < floor + crate::workspace::COMPACTION_HYSTERESIS_TOKENS as i64 =>
+                {
+                    if tokens >= threshold as i64 {
+                        tracing::debug!(chat_id, tokens, floor, "soft compaction deferred: window has not grown enough since the last one");
+                    }
+                    return;
+                }
+                _ => {}
+            }
+        }
         if tokens < threshold as i64 {
             return;
         }
         if self.current_chat.lock().await.as_deref() != Some(chat_id) {
-            return;
-        }
-        let turns_since = self
-            .store
-            .user_turns_since_compaction(chat_id)
-            .unwrap_or(i64::MAX);
-        if turns_since < crate::workspace::MIN_TURNS_BETWEEN_COMPACTIONS {
-            tracing::debug!(
-                chat_id,
-                tokens,
-                turns_since,
-                "soft compaction deferred: compacted recently"
-            );
             return;
         }
         let Ok(pi) = self.pi().await else {
@@ -2572,6 +2604,10 @@ impl Agent {
                 let cut = self
                     .tree
                     .note_session_cut(chat_id, crate::workspace::KEEP_RECENT_TOKENS as usize);
+                self.compaction_floor
+                    .lock()
+                    .expect("compaction floors")
+                    .insert(chat_id.to_owned(), None);
                 tracing::info!(chat_id, tokens, threshold, compactions = n, cut = ?cut, ms = t0.elapsed().as_millis() as i64, "soft compaction");
             }
             Ok(resp) => {
@@ -2985,10 +3021,10 @@ impl Agent {
             .post_timing("main_turn_total_ms", total_ms, Some(turn_kind))
             .await;
         tracing::info!(chat_id, route = route_name, turn = turn_kind, ttft_ms = ?turn.metrics.ttft_ms, route_ms = ?turn.metrics.route_ms, total_ms, tool_calls = turn.metrics.tool_calls, nested_calls = turn.metrics.nested_calls, model_calls = turn.metrics.model_calls, "turn done");
-        // D91: the reply is out; if the window grew past the soft threshold, compact it now
-        // (still under the turn lock, so the next prompt meets a small window).
-        self.maybe_soft_compact(chat_id, turn.metrics.usage.as_ref())
-            .await;
+        // D91: the reply is out; if the window grew past the soft threshold, compact it behind
+        // this turn (the task takes the turn lock, so the next prompt meets the small window and
+        // this turn's own completion is not held up).
+        self.spawn_soft_compaction(chat_id, turn.metrics.usage.as_ref());
         Ok(TurnOutcome {
             assistant_msg_id,
             route_name,
@@ -3604,6 +3640,10 @@ impl Agent {
                 let _ = self
                     .tree
                     .note_session_cut(chat_id, crate::workspace::KEEP_RECENT_TOKENS as usize);
+                self.compaction_floor
+                    .lock()
+                    .expect("compaction floors")
+                    .insert(chat_id.to_owned(), None);
             }
             Event::Other
             | Event::AgentStart
