@@ -3330,14 +3330,6 @@ impl AppState {
         cx.notify();
     }
 
-    pub fn reset_invite(&mut self, server_id: Id, cx: &mut Context<Self>) {
-        if !self.server(&server_id).is_some_and(ServerInfo::is_owner) {
-            return;
-        }
-        self.command(ClientCommand::ServerResetInvite { server_id });
-        cx.notify();
-    }
-
     /// Member: leave; owner: delete. Either way the server leaves this Mac at once.
     pub fn leave_server(&mut self, server_id: Id, cx: &mut Context<Self>) {
         let owner = self.server(&server_id).is_some_and(ServerInfo::is_owner);

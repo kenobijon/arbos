@@ -1557,18 +1557,6 @@ fn handle_server_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                 fetch_server_detail(&shared, &server_id).await;
             });
         }
-        ClientCommand::ServerResetInvite { server_id } => {
-            let shared = shared.clone();
-            let server_id = server_id.clone();
-            tokio::spawn(async move {
-                let path = format!("/servers/{server_id}/invite/reset");
-                if let Err(err) = shared.post_json(&path, json!({})).await {
-                    server_error(&shared, &err);
-                    return;
-                }
-                fetch_server_detail(&shared, &server_id).await;
-            });
-        }
         ClientCommand::ServerSetRole {
             server_id,
             user_id,
@@ -5807,7 +5795,6 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         | ClientCommand::ServerLeave { .. }
         | ClientCommand::ServerInviteCreate { .. }
         | ClientCommand::ServerInviteRevoke { .. }
-        | ClientCommand::ServerResetInvite { .. }
         | ClientCommand::ServerSetRole { .. }
         | ClientCommand::ServerRemoveMember { .. }
         | ClientCommand::ChannelCreate { .. }
