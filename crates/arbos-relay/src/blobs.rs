@@ -6,9 +6,68 @@ use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
+use tokio::io::AsyncReadExt;
 
 use crate::auth::Principal;
+use crate::image_sniff::{check_avatar, ImageKind, NotAnImage, SNIFF_LEN};
+use crate::signin::api_error;
 use crate::state::AppState;
+
+/// What a `PATCH … {"image_key"}` finds under the key before it may become a picture.
+#[derive(Debug)]
+pub enum StoredImage {
+    Image(ImageKind),
+    /// Nothing was uploaded under that key (or the key is not a blob name).
+    Missing,
+    NotAnImage(NotAnImage),
+}
+
+/// Judge the blob a client wants as a group / server picture: its recorded `Content-Type`
+/// and its first bytes must both say "image" (`image_sniff::check_avatar`). The upload
+/// endpoint stays generic (chats carry files too); the picture setter is the gate.
+pub async fn stored_image(state: &AppState, slot: &str, key: &str) -> StoredImage {
+    if !safe_key(key) || !safe_key(slot) {
+        return StoredImage::Missing;
+    }
+    let p = blob_path(state, slot, key);
+    let Ok(mut f) = tokio::fs::File::open(&p).await else {
+        return StoredImage::Missing;
+    };
+    let mut head = [0u8; SNIFF_LEN];
+    let mut n = 0;
+    while n < head.len() {
+        match f.read(&mut head[n..]).await {
+            Ok(0) => break,
+            Ok(k) => n += k,
+            Err(_) => return StoredImage::Missing,
+        }
+    }
+    let mime = tokio::fs::read_to_string(p.with_extension("mime"))
+        .await
+        .ok();
+    match check_avatar(mime.as_deref(), &head[..n]) {
+        Ok(kind) => StoredImage::Image(kind),
+        Err(why) => StoredImage::NotAnImage(why),
+    }
+}
+
+/// The plain refusal every avatar endpoint answers with.
+pub fn not_an_image(why: &NotAnImage) -> Response {
+    api_error(
+        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        "not_an_image",
+        why.to_string(),
+    )
+}
+
+/// `image_key` names nothing that was uploaded.
+pub fn no_such_image() -> Response {
+    api_error(
+        StatusCode::BAD_REQUEST,
+        "no_such_image",
+        "Upload the picture first, then set image_key to its name",
+    )
+}
 
 fn safe_key(k: &str) -> bool {
     // `:` is required for people-chat blob slots (`people:{chat_id}`); still no `/` or `..` path bits.

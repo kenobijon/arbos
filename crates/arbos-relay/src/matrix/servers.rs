@@ -26,8 +26,12 @@ use arbos_core::ids::{now_ms, ulid};
 use super::client::Client;
 use super::servers_db::{Channel, Server, ServerMember};
 use crate::auth::Principal;
+use crate::blobs::{no_such_image, not_an_image, stored_image, StoredImage};
 use crate::signin::api_error;
 use crate::state::AppState;
+
+/// Blob slot a server's picture is uploaded to (`PUT /blob/servers:{id}/{key}`).
+pub const SERVER_BLOB_PREFIX: &str = "servers:";
 
 const NAME_MAX: usize = 60;
 const CHANNEL_MAX: usize = 32;
@@ -384,6 +388,16 @@ pub async fn patch(
             )
         }
     };
+    // The picture is judged on what was uploaded (Content-Type and bytes), not its name.
+    if let Some(Some(key)) = &image {
+        match stored_image(&state, &format!("{SERVER_BLOB_PREFIX}{id}"), key).await {
+            StoredImage::Image(kind) => {
+                tracing::info!(server = %id, %key, %kind, "server picture set");
+            }
+            StoredImage::Missing => return no_such_image(),
+            StoredImage::NotAnImage(why) => return not_an_image(&why),
+        }
+    }
     if let Err(e) =
         state
             .db
@@ -1048,5 +1062,122 @@ mod tests {
         );
         assert!(server_name("").is_none());
         assert_eq!(invite_code().len(), 10);
+    }
+}
+
+#[cfg(test)]
+mod picture_tests {
+    //! `PATCH /servers/{id} {image_key}` runs the same picture gate as groups.
+
+    use axum::extract::{Path, State};
+    use axum::http::StatusCode;
+    use axum::Json;
+
+    use super::*;
+    use crate::image_sniff::samples;
+    use crate::people::tests_support::person;
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    /// A blob as `PUT /blob/servers:{id}/{key}` would leave it: the bytes plus the
+    /// `.mime` sidecar.
+    fn store(state: &AppState, server: &str, key: &str, mime: Option<&str>, bytes: &[u8]) {
+        let dir = state
+            .cfg
+            .data_dir
+            .join("blobs")
+            .join(format!("{SERVER_BLOB_PREFIX}{server}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(key), bytes).unwrap();
+        if let Some(m) = mime {
+            std::fs::write(dir.join(key).with_extension("mime"), m).unwrap();
+        }
+    }
+
+    async fn set_picture(
+        state: &AppState,
+        who: &Principal,
+        server: &str,
+        key: Value,
+    ) -> StatusCode {
+        patch(
+            State(state.clone()),
+            who.clone(),
+            Path(server.to_owned()),
+            Json(PatchBody {
+                name: None,
+                image_key: Some(key),
+            }),
+        )
+        .await
+        .status()
+    }
+
+    #[tokio::test]
+    async fn server_picture_must_be_an_image_by_type_and_bytes() {
+        let state = test_state(AuthMode::Github);
+        let (owner, owner_dev) = person(&state, 51);
+        let server = Server {
+            id: ulid(),
+            name: "Launch Crew".into(),
+            owner_user_id: owner.clone(),
+            image_key: None,
+            invite_code: "crew1234".into(),
+            space_room_id: None,
+            created_at: now_ms(),
+        };
+        state.db.insert_server(&server).unwrap();
+        let picture = |state: &AppState| state.db.server(&server.id).unwrap().unwrap().image_key;
+
+        store(
+            &state,
+            &server.id,
+            "model.onnx",
+            Some("application/octet-stream"),
+            samples::ONNX,
+        );
+        assert_eq!(
+            set_picture(&state, &owner_dev, &server.id, json!("model.onnx")).await,
+            StatusCode::UNSUPPORTED_MEDIA_TYPE
+        );
+        store(
+            &state,
+            &server.id,
+            "fake.png",
+            Some("image/png"),
+            samples::ONNX,
+        );
+        assert_eq!(
+            set_picture(&state, &owner_dev, &server.id, json!("fake.png")).await,
+            StatusCode::UNSUPPORTED_MEDIA_TYPE
+        );
+        store(&state, &server.id, "untyped.gif", None, samples::GIF);
+        assert_eq!(
+            set_picture(&state, &owner_dev, &server.id, json!("untyped.gif")).await,
+            StatusCode::UNSUPPORTED_MEDIA_TYPE
+        );
+        assert_eq!(
+            set_picture(&state, &owner_dev, &server.id, json!("missing.png")).await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(picture(&state), None);
+
+        store(
+            &state,
+            &server.id,
+            "crew.gif",
+            Some("image/gif"),
+            samples::GIF,
+        );
+        assert_eq!(
+            set_picture(&state, &owner_dev, &server.id, json!("crew.gif")).await,
+            StatusCode::OK
+        );
+        assert_eq!(picture(&state).as_deref(), Some("crew.gif"));
+        assert_eq!(
+            set_picture(&state, &owner_dev, &server.id, Value::Null).await,
+            StatusCode::OK
+        );
+        assert_eq!(picture(&state), None);
     }
 }

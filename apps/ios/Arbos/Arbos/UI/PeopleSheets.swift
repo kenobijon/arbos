@@ -57,7 +57,7 @@ struct NewChatSheet: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     searchField
-                        .padding(.horizontal, 16)
+                        .padding(.horizontal, SheetSearchField.inset)
                         .padding(.top, 6)
                         .padding(.bottom, 14)
 
@@ -152,7 +152,7 @@ struct NewChatSheet: View {
 
     private var searchField: some View {
         HStack(spacing: 8) {
-            Image(systemName: "magnifyingglass").font(.system(size: 15, weight: .medium)).foregroundStyle(theme.muted)
+            Image(systemName: "magnifyingglass").font(.system(size: SheetSearchField.iconSize, weight: .medium)).foregroundStyle(theme.muted)
             TextField("", text: $query, prompt: Text("Search people or agents").foregroundStyle(theme.placeholder))
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
@@ -174,10 +174,7 @@ struct NewChatSheet: View {
                 .buttonStyle(.plain)
             }
         }
-        .padding(.horizontal, 12)
-        .frame(height: 38)
-        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.field))
-        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+        .sheetSearchFieldChrome(theme)
     }
 
     private func sectionHeader(_ text: String) -> some View {
@@ -470,24 +467,14 @@ struct NewGroupView: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
                         ForEach(pickedAgents) { p in
-                            HStack(spacing: 6) {
-                                AgentAvatar(project: p, theme: theme, size: 22, still: true)
-                                Text("@\(mentionSlug(p.name))").font(theme.font(Theme.tiny, weight: .medium)).foregroundStyle(theme.text)
-                                Button { toggleAgent(p) } label: { Image(systemName: "xmark").font(.system(size: 10, weight: .bold)).foregroundStyle(theme.muted) }
-                                    .buttonStyle(.plain)
+                            MemberChip(label: "@\(mentionSlug(p.name))", onRemove: { toggleAgent(p) }) {
+                                AgentAvatar(project: p, theme: theme, size: memberChipAvatar, still: true)
                             }
-                            .padding(.leading, 4).padding(.trailing, 10).frame(height: 32)
-                            .background(Capsule().fill(theme.field))
                         }
                         ForEach(picked) { p in
-                            HStack(spacing: 6) {
-                                PersonAvatar(url: p.avatarUrl, handle: p.handle, size: 22, name: p.name, id: p.id, colorIndex: p.avatarColorIndex)
-                                Text("@\(p.handle)").font(theme.font(Theme.tiny, weight: .medium)).foregroundStyle(theme.text)
-                                Button { toggle(p) } label: { Image(systemName: "xmark").font(.system(size: 10, weight: .bold)).foregroundStyle(theme.muted) }
-                                    .buttonStyle(.plain)
+                            MemberChip(label: "@\(p.handle)", onRemove: { toggle(p) }) {
+                                PersonAvatar(url: p.avatarUrl, handle: p.handle, size: memberChipAvatar, name: p.name, id: p.id, colorIndex: p.avatarColorIndex)
                             }
-                            .padding(.leading, 4).padding(.trailing, 10).frame(height: 32)
-                            .background(Capsule().fill(theme.field))
                         }
                     }
                     .padding(.horizontal, 16)
@@ -495,15 +482,13 @@ struct NewGroupView: View {
                 .frame(height: 44)
             }
             HStack(spacing: 8) {
-                Image(systemName: "magnifyingglass").font(.system(size: 15, weight: .medium)).foregroundStyle(theme.muted)
+                Image(systemName: "magnifyingglass").font(.system(size: SheetSearchField.iconSize, weight: .medium)).foregroundStyle(theme.muted)
                 TextField("", text: $query, prompt: Text("Add people or agents").foregroundStyle(theme.placeholder))
                     .textInputAutocapitalization(.never).autocorrectionDisabled()
                     .font(theme.font(Theme.body)).foregroundStyle(theme.text)
             }
-            .padding(.horizontal, 12).frame(height: 38)
-            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.field))
-            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
-            .padding(.horizontal, 16).padding(.vertical, 10)
+            .sheetSearchFieldChrome(theme)
+            .padding(.horizontal, SheetSearchField.inset).padding(.vertical, 10)
             .onChange(of: query) { _, _ in search() }
 
             if let errorText {
@@ -800,5 +785,64 @@ struct ProjectMembersSheet: View {
             }
             busy = false
         }
+    }
+}
+
+
+// MARK: - Shared sheet pieces
+
+/// The search field of the New Message / New group / Add person sheets. Grok's
+/// sheet field (iOS Plugins sheet; Mac ref 57): a 40 pt capsule with a hairline
+/// rim, a 16 pt magnifier 14 pt in, body-size placeholder, and side edges that
+/// line up with the row content below it (card inset 16 + row padding 14).
+enum SheetSearchField {
+    static let height: CGFloat = 40
+    static let inset: CGFloat = 30
+    static let iconSize: CGFloat = 16
+}
+
+private struct SheetSearchFieldChrome: ViewModifier {
+    let theme: Theme
+    func body(content: Content) -> some View {
+        content
+            .padding(.horizontal, 14)
+            .frame(height: SheetSearchField.height)
+            .background(Capsule().fill(theme.field))
+            .overlay(Capsule().strokeBorder(theme.fieldBorder, lineWidth: 1))
+    }
+}
+
+extension View {
+    func sheetSearchFieldChrome(_ theme: Theme) -> some View { modifier(SheetSearchFieldChrome(theme: theme)) }
+}
+
+/// One selected member in a picker (New group, Add members): the member's
+/// picture, `@handle`, and an × that removes it. People and agents share it,
+/// so an agent chip carries the agent's avatar exactly like a person chip.
+/// Avatar size inside a selected-member chip (a free constant: a static on the
+/// generic chip cannot be named without its type parameter).
+let memberChipAvatar: CGFloat = 22
+
+struct MemberChip<Picture: View>: View {
+    @Environment(\.theme) private var theme
+    let label: String
+    let onRemove: () -> Void
+    let picture: () -> Picture
+
+    init(label: String, onRemove: @escaping () -> Void, @ViewBuilder picture: @escaping () -> Picture) {
+        self.label = label
+        self.onRemove = onRemove
+        self.picture = picture
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            picture()
+            Text(label).font(theme.font(Theme.tiny, weight: .medium)).foregroundStyle(theme.text)
+            Button(action: onRemove) { Image(systemName: "xmark").font(.system(size: 10, weight: .bold)).foregroundStyle(theme.muted) }
+                .buttonStyle(.plain)
+        }
+        .padding(.leading, 4).padding(.trailing, 10).frame(height: 32)
+        .background(Capsule().fill(theme.field))
     }
 }

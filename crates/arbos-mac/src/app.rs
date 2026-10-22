@@ -1399,6 +1399,31 @@ impl AppState {
                     }
                     // select_project() keeps the tab within the visible chats.
                     self.select_project(project_id.clone(), cx);
+                    // Rig: `ARBOS_OPEN_NEW_GROUP=1` opens the New group picker with one
+                    // agent and one person already picked (member chips) — here,
+                    // after the fixture's projects exist.
+                    if std::env::var("ARBOS_OPEN_NEW_GROUP").is_ok_and(|v| v == "1") {
+                        self.open_new_chat(cx);
+                        self.open_new_group(cx);
+                        let agent = self.my_projects().next().map(|p| p.id.clone());
+                        let person = self.projects.iter().find_map(|p| p.person().cloned());
+                        if let Some(id) = agent {
+                            self.toggle_group_agent(id, cx);
+                        }
+                        if let Some(person) = person {
+                            self.toggle_group_person(person, cx);
+                        }
+                    }
+                    // Rig: `ARBOS_REPLY_TO=1` arms a reply to the restored chat's
+                    // last message (the composer's reply preview bar).
+                    if std::env::var("ARBOS_REPLY_TO").is_ok_and(|v| v == "1") {
+                        if let Some(chat) = self.active_chat_id() {
+                            if let Some(last) = self.messages_of(&chat).last().map(|m| m.id.clone())
+                            {
+                                self.set_reply_to(chat, last, cx);
+                            }
+                        }
+                    }
                     // Rig: `ARBOS_OPEN_PROFILE=agent[:model|reasoning|voice]|group[:library|:add-members|:member]|user|me`
                     // opens the right pane for the restored chat (selecting it
                     // closed whatever the shell opened at launch), and
@@ -3768,13 +3793,6 @@ impl AppState {
             })
     }
 
-    pub fn set_model(&mut self, model: String, cx: &mut Context<Self>) {
-        let Some(project_id) = self.selected_project.clone() else {
-            return;
-        };
-        self.set_project_model(project_id, model, cx);
-    }
-
     /// The agent's model (profile page picker) — optimistic, then `SetModel`
     /// with its current effort.
     pub fn set_project_model(&mut self, project_id: Id, model: String, cx: &mut Context<Self>) {
@@ -3842,13 +3860,6 @@ impl AppState {
         self.sample_playing.as_deref() == Some(url)
             && (self.sample_wanted.is_some()
                 || self.sample_player.as_ref().is_some_and(|p| p.is_playing()))
-    }
-
-    pub fn set_effort(&mut self, effort: Effort, cx: &mut Context<Self>) {
-        let Some(project_id) = self.selected_project.clone() else {
-            return;
-        };
-        self.set_project_effort(project_id, effort, cx);
     }
 
     /// The agent's reasoning effort (profile page picker) — optimistic, then

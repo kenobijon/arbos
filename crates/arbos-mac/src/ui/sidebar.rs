@@ -14,22 +14,25 @@ use gpui::{
 use crate::app::AppState;
 use crate::model::{Id, MachineState, Message, Project, Role, ServerInfo};
 use crate::ui::avatars;
-use crate::ui::composer::{Composer, Picker};
+use crate::ui::composer::Composer;
 use crate::ui::frost::edge_faded;
 use crate::ui::glass::{self, WindowDrag};
 use crate::ui::groups;
 use crate::ui::icons::icon;
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
-use crate::ui::shell::Shell;
+use crate::ui::shell::{Shell, TRAFFIC_LIGHTS_INSET};
 use crate::ui::theme::{
     Theme, AVATAR_ROW, HEADER_HEIGHT, PANEL_RADIUS, SIDEBAR_WIDTH, TEXT_BODY, TEXT_SMALL, TEXT_TINY,
 };
 
-/// The drag strip beside the traffic lights (+, search, collapse on the right):
-/// Grok Mac's 44 pt top band, the same height as the chat header, with the
-/// controls centred on the traffic lights' line (22 pt)
-/// ([feedback mac-header-height-grok]).
+/// The drag strip beside the traffic lights: Grok Mac's 44 pt top band, the
+/// same height as the chat header ([feedback mac-header-height-grok]). The
+/// collapse control sits right of the lights — at the header toggle's exact
+/// spot, so folding the pane never moves it — and + / search keep the right
+/// end. Controls are centred on the lights' line: macOS draws them at 20.75 pt
+/// in this window, so the 44 band is centred 1 pt high (Grok: 21.75 / 21.75)
+/// ([feedback mac-collapsed-toggle-inline]).
 fn top_strip() -> f32 {
     if cfg!(target_os = "macos") {
         HEADER_HEIGHT
@@ -423,12 +426,14 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         .flex_shrink_0()
         .flex()
         .items_center()
-        .justify_end()
         .gap(px(2.0))
-        .px(px(12.0))
+        .pl(px(TRAFFIC_LIGHTS_INSET + 12.0))
+        .pr(px(12.0))
+        .pb(px(2.0))
+        .child(collapse)
+        .child(div().flex_1())
         .when(show_plus, |el| el.child(plus))
         .child(search_toggle)
-        .child(collapse)
         .window_drag();
     let search = div()
         .id("sidebar-search")
@@ -1322,10 +1327,10 @@ fn render_row(
         )
 }
 
-/// The right-click menu of a sidebar row (Grok Mac, ref 48): profile, mute,
-/// new chat, fork, delete — anchored at the click. For an agent it also
-/// carries what the header's "…" menu used to hold and nothing else offers
-/// yet: model, effort, share / members, "add to this chat", voice mode.
+/// The right-click menu of a sidebar row, anchored at the click. An agent
+/// row (Jacob, #1258): Mute, Fork, a divider, Delete — nothing else; its
+/// settings live on the agent pane. A people row: Profile, Mute, Delete; a
+/// group row: Delete group.
 pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
     let (space_id, at) = shell.row_menu.clone()?;
     let theme = Theme::of(cx).clone();
@@ -1336,9 +1341,6 @@ pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
     let can_fork = !is_people && !space.shared;
     let can_delete = is_people || !space.shared;
     let person = space.person().cloned();
-    let voice_mode = state.voice_mode;
-    let multi_chat = state.multi_chat;
-    let projects_count = state.projects.iter().filter(|p| !p.is_people()).count();
 
     let profile_id = space.id.clone();
     let profile_page = if is_people {
@@ -1361,7 +1363,6 @@ pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
         }
     };
     let mute_id = space.id.clone();
-    let chat_id = space.id.clone();
     let fork_id = space.id.clone();
     let delete_id = space.id.clone();
     let delete_people = is_people;
@@ -1474,27 +1475,24 @@ pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
                 .child(glass::frosted_menu(200.0, &theme, body)),
         );
     }
-    body = body.child(
-        glass::menu_row(
-            "row-menu-profile",
-            "person",
-            if is_people {
-                "Profile"
-            } else {
-                "Agent profile"
-            },
-            false,
-            &theme,
-        )
-        .on_click(cx.listener(move |this, _, _, cx| {
-            this.row_menu = None;
-            let (page, id) = (profile_page.clone(), profile_id.clone());
-            this.state.update(cx, |s, cx| {
-                s.select_project(id, cx);
-                s.open_profile(page, cx);
-            });
-        })),
-    );
+    // Jacob (#1258): an agent row's menu is Mute, Fork, a divider, Delete —
+    // nothing else. The profile is the header pill, New chat is the pill's
+    // "+", Model / Reasoning / Share / Add to this chat / Voice mode are rows
+    // on the agent pane. A people row keeps Profile.
+    if is_people {
+        body = body.child(
+            glass::menu_row("row-menu-profile", "person", "Profile", false, &theme).on_click(
+                cx.listener(move |this, _, _, cx| {
+                    this.row_menu = None;
+                    let (page, id) = (profile_page.clone(), profile_id.clone());
+                    this.state.update(cx, |s, cx| {
+                        s.select_project(id, cx);
+                        s.open_profile(page, cx);
+                    });
+                }),
+            ),
+        );
+    }
     body = body.child(
         glass::menu_row(
             "row-menu-mute",
@@ -1509,38 +1507,6 @@ pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
             this.state.update(cx, |s, cx| s.toggle_mute(id, cx));
         })),
     );
-    if !is_people {
-        body = body.child(glass::menu_divider(&theme)).child(
-            glass::menu_row(
-                "row-menu-new-chat",
-                "square-pencil",
-                "New chat",
-                false,
-                &theme,
-            )
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.row_menu = None;
-                let id = chat_id.clone();
-                this.state.update(cx, |s, cx| {
-                    s.select_project(id, cx);
-                    s.new_tab(cx);
-                });
-                Composer::focus(&this.composer, window, cx);
-            })),
-        );
-        body = agent_rows(
-            body,
-            &space,
-            voice_mode,
-            multi_chat,
-            projects_count,
-            &theme,
-            cx,
-        );
-    }
-    if can_fork || can_delete {
-        body = body.child(glass::menu_divider(&theme));
-    }
     if can_fork {
         body = body.child(
             glass::menu_row("row-menu-fork", "branch", "Fork", false, &theme).on_click(
@@ -1553,6 +1519,7 @@ pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
         );
     }
     if can_delete {
+        body = body.child(glass::menu_divider(&theme));
         body = body.child(
             glass::menu_row("row-menu-delete", "trash", "Delete", true, &theme).on_click(
                 cx.listener(|this, _, _, cx| {
@@ -1609,144 +1576,6 @@ pub(crate) fn confirm_button(
                 .hover(|s| s.bg(theme.surface_2))
         })
         .child(label)
-}
-
-/// The agent-only rows of `row_menu`: the former header "…" entries with no
-/// other home yet. Model and effort open the composer's pickers (the profile
-/// page is getting its own); share / members and "add a project" start the
-/// same flows the header did; voice mode is the global spoken-replies switch.
-fn agent_rows(
-    mut body: Div,
-    space: &Project,
-    voice_mode: bool,
-    multi_chat: bool,
-    projects_count: usize,
-    theme: &Theme,
-    cx: &mut Context<Shell>,
-) -> Div {
-    if !space.is_guest() {
-        let model_id = space.id.clone();
-        let effort_id = space.id.clone();
-        body = body
-            .child(glass::menu_divider(theme))
-            .child(
-                glass::menu_row(
-                    "row-menu-model",
-                    "cpu",
-                    format!("Model · {}", space.model),
-                    false,
-                    theme,
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.row_menu = None;
-                    let id = model_id.clone();
-                    this.state.update(cx, |s, cx| s.select_project(id, cx));
-                    this.composer.update(cx, |c, cx| {
-                        c.open_picker = Some(Picker::Model);
-                        cx.notify();
-                    });
-                })),
-            )
-            .child(
-                glass::menu_row(
-                    "row-menu-effort",
-                    "waveform",
-                    format!("Effort · {}", space.effort.label()),
-                    false,
-                    theme,
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.row_menu = None;
-                    let id = effort_id.clone();
-                    this.state.update(cx, |s, cx| s.select_project(id, cx));
-                    this.composer.update(cx, |c, cx| {
-                        c.open_picker = Some(Picker::Effort);
-                        cx.notify();
-                    });
-                })),
-            );
-        // Shared already: the members list; else the invite sheet.
-        let has_guests = space.guests().next().is_some();
-        let share_id = space.id.clone();
-        body = body.child(glass::menu_divider(theme)).child(
-            glass::menu_row(
-                "row-menu-share",
-                "person-plus",
-                if has_guests {
-                    "Members"
-                } else {
-                    "Share project…"
-                },
-                false,
-                theme,
-            )
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.row_menu = None;
-                let id = share_id.clone();
-                if has_guests {
-                    this.state.update(cx, |s, cx| s.select_project(id, cx));
-                    this.members_open = true;
-                    cx.notify();
-                } else {
-                    this.people_input.update(cx, |i, cx| i.clear(cx));
-                    this.state.update(cx, |s, cx| {
-                        s.select_project(id.clone(), cx);
-                        s.open_invite(id, cx);
-                    });
-                    let handle = this.people_input.read(cx).focus_handle(cx);
-                    window.focus(&handle, cx);
-                }
-            })),
-        );
-        if multi_chat && projects_count > 1 {
-            let group_id = space.id.clone();
-            body = body.child(
-                glass::menu_row(
-                    "row-menu-group",
-                    "people",
-                    "Add to this chat…",
-                    false,
-                    theme,
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.row_menu = None;
-                    let id = group_id.clone();
-                    this.state.update(cx, |s, cx| s.select_project(id, cx));
-                    this.set_group_picker(true, cx);
-                })),
-            );
-        }
-    } else {
-        let members_id = space.id.clone();
-        body = body.child(glass::menu_divider(theme)).child(
-            glass::menu_row("row-menu-members", "people", "Members", false, theme).on_click(
-                cx.listener(move |this, _, _, cx| {
-                    this.row_menu = None;
-                    let id = members_id.clone();
-                    this.state.update(cx, |s, cx| s.select_project(id, cx));
-                    this.members_open = true;
-                    cx.notify();
-                }),
-            ),
-        );
-    }
-    body.child(glass::menu_divider(theme)).child(
-        glass::menu_row(
-            "row-menu-voice-mode",
-            "mic",
-            if voice_mode {
-                "Voice mode · on"
-            } else {
-                "Voice mode · off"
-            },
-            false,
-            theme,
-        )
-        .on_click(cx.listener(|this, _, _, cx| {
-            this.row_menu = None;
-            this.voice.update(cx, |v, cx| v.toggle_voice_mode(cx));
-        })),
-    )
 }
 
 /// Width of the session row's context menu (`chat_menu`).

@@ -1,0 +1,7 @@
+[Unit]
+Description=Add accepted ASC invitees to the Arbos internal TestFlight group (every pending invitation and CUSTOMER_SUPPORT user; no hand-kept list)
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/arbos/feedback.env
+ExecStart=/usr/bin/python3 /usr/local/bin/asc-tester-watch
