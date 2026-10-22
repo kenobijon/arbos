@@ -103,14 +103,14 @@ pub fn image_for_snapshot(cfg: &FleetCfg, local_box_image: &str, snapshot: &str)
 
 /// Snapshot name the relay's default points at (what `boxes.snapshot` records for every box).
 pub fn current_snapshot(state: &AppState) -> String {
-    state.cfg.daytona_snapshot.clone()
+    state.default_snapshot()
 }
 
 pub fn current_image(state: &AppState) -> String {
     image_for_snapshot(
         &state.cfg.fleet,
         &state.cfg.local_box_image,
-        &state.cfg.daytona_snapshot,
+        &state.default_snapshot(),
     )
 }
 

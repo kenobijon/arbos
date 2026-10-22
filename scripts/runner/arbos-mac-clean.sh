@@ -50,6 +50,22 @@ fi
 rm -rf /Library/Developer/CoreSimulator/Caches/* /Users/ec2-user/Library/Developer/CoreSimulator/Caches/* 2>/dev/null
 sudo -u ec2-user xcrun simctl delete unavailable >/dev/null 2>&1 && say "simctl delete unavailable ok"
 
+# Stale per-build artifacts that cargo never removes (2026-10-22 18:2x: 7.7 GiB free with the gate floor at 6):
+#  - the iOS gate's xcframework build leaves one 0.2-0.3 GB libarbos_ffi-<hash>.a per run and target under
+#    */release/deps/ (77 of them = 13 GB); only the newest per directory can still be linked;
+#  - rustc's deps/rustcXXXXXX scratch dirs survive a killed compile (0.7 GB each).
+# Runs in every pass (nightly and --if-low); skips files younger than 30 min so a build in flight is untouched.
+find /Users/ec2-user /Users/arbosgui -maxdepth 6 -type d -path "*/release/deps" -not -path "*/node_modules/*" 2>/dev/null | while read -r deps; do
+  newest=$(ls -t "$deps"/libarbos_ffi-*.a 2>/dev/null | head -n 1)
+  find "$deps" -maxdepth 1 -name "libarbos_ffi-*.a" -mmin +30 2>/dev/null | while read -r f; do
+    [ "$f" = "$newest" ] && continue
+    mib=$(du -sm "$f" 2>/dev/null | cut -f1); rm -f "$f" && say "removed stale $f (${mib} MiB)"
+  done
+done
+find /Users/ec2-user /Users/arbosgui -maxdepth 7 -type d -path "*/deps/rustc*" -mmin +30 2>/dev/null | while read -r d; do
+  mib=$(du -sm "$d" 2>/dev/null | cut -f1); rm -rf "$d" && say "removed rustc leftover $d (${mib} MiB)"
+done
+
 # Lingering booted simulators of the gate user. Skipped while an xcodebuild runs (a gate or rig owns them).
 if pgrep -qx xcodebuild; then
   say "xcodebuild running; leaving booted simulators alone"

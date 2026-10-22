@@ -257,6 +257,7 @@ final class RelayAPI {
     func createProject(
         name: String,
         avatarColorIndex: Int? = nil,
+        leaf: LeafPick? = nil,
         color: String? = nil,
         description: String? = nil,
         instructions: String? = nil,
@@ -264,6 +265,8 @@ final class RelayAPI {
     ) async throws {
         var body: [String: Any] = ["name": name]
         if let avatarColorIndex { body["avatar_color_index"] = avatarColorIndex }
+        // D92: the Create sheet's leaf + colour (forks copy the source's).
+        if let leaf { body["avatar_leaf"] = Int(leaf.leaf); body["avatar_leaf_color"] = Int(leaf.color) }
         if let color { body["color"] = color }
         if let description, !description.isEmpty { body["description"] = String(description.prefix(500)) }
         if let instructions, !instructions.isEmpty { body["instructions"] = instructions }
@@ -657,8 +660,11 @@ final class RelayAPI {
         return chat
     }
 
-    func createGroup(handles: [String]) async throws -> PeopleChat {
-        let v = try await json("POST", "/chats", body: ["kind": "group", "members": handles])
+    func createGroup(handles: [String], agentIds: [Id] = [], title: String? = nil, leaf: LeafPick? = nil) async throws -> PeopleChat {
+        var body: [String: Any] = ["kind": "group", "members": handles, "agent_ids": agentIds]
+        if let title, !title.isEmpty { body["title"] = title }
+        if let leaf { body["avatar_leaf"] = Int(leaf.leaf); body["avatar_leaf_color"] = Int(leaf.color) }
+        let v = try await json("POST", "/chats", body: body)
         guard let chat = PeopleChat.parse(v) else { throw RelayError(status: 0, message: "The relay returned no chat") }
         return chat
     }
@@ -677,8 +683,10 @@ final class RelayAPI {
     }
 
     /// `POST /servers {name}` → 201 the server (with `#general` and members).
-    func createServer(name: String) async throws -> Server {
-        let v = try await json("POST", "/servers", body: ["name": name.trimmingCharacters(in: .whitespacesAndNewlines)])
+    func createServer(name: String, leaf: LeafPick? = nil) async throws -> Server {
+        var body: [String: Any] = ["name": name.trimmingCharacters(in: .whitespacesAndNewlines)]
+        if let leaf { body["avatar_leaf"] = Int(leaf.leaf); body["avatar_leaf_color"] = Int(leaf.color) }
+        let v = try await json("POST", "/servers", body: body)
         guard let s = Server.parse(v) else { throw RelayError(status: 0, message: "The relay returned no server") }
         return s
     }

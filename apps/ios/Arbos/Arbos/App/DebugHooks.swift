@@ -39,6 +39,8 @@ enum DebugHooks {
     /// (`member` = the group page with its first other member pushed over it).
     /// `onboarding` shows the D82 first-login screen frozen on `ARBOS_ONBOARDING_STAGE` (1|2|3|fail).
     static var show: String? { value("ARBOS_SHOW") }
+    /// With `ARBOS_SHOW=newagent`: prefill the Create agent name (the "named" state on the rig).
+    static var newAgentName: String? { value("ARBOS_NEW_AGENT_NAME") }
     static var onboardingStage: String? { value("ARBOS_ONBOARDING_STAGE") }
     static var onboardingAutoplay: Bool { value("ARBOS_ONBOARDING_AUTOPLAY") == "1" }
     /// With `ARBOS_SHOW=onboarding`: also present the name/handle sheet over the terminal (rig).

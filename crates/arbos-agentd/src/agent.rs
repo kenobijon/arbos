@@ -1326,11 +1326,10 @@ impl Agent {
             .map(|m| m.talking.id.clone())
             .unwrap_or_else(|_| self.cfg.talking_model.clone());
         // One box, many workspaces (D70): the project's files live in its own folder, not /work.
-        s.push_str(&format!(
-            "\n\n## This project\n\nProject \"{}\". Its folder is `{}`: every file you create or read for this project goes there (relative paths resolve there; do not use `/work` itself, other folders under `/work` belong to other projects). You run on model `{}`.\n",
-            self.cfg.project_name,
-            self.cfg.work_dir.display(),
-            talking
+        s.push_str(&project_section(
+            &self.cfg.project_name,
+            &self.cfg.work_dir.display().to_string(),
+            &talking,
         ));
         s.push('\n');
         s.push_str(&crate::media::prompt_section(&self.cfg));
@@ -5232,9 +5231,46 @@ fn classify_hard_limit(err: &str) -> Option<(&'static str, bool)> {
     None
 }
 
+/// The "This project" block of the system prompt. The user sees this agent under the
+/// project's name (the sidebar row "Doug" is the agent), so the model is told that name is
+/// its own — not a place to work "in" — and that "Arbos" is the app, never the user.
+pub fn project_section(project_name: &str, work_dir: &str, talking_model: &str) -> String {
+    let name = project_name.trim();
+    let identity = if name.is_empty() || name.eq_ignore_ascii_case("arbos") {
+        "You are this user's agent in Arbos.".to_owned()
+    } else {
+        format!(
+            "You are {name}, this user's agent in Arbos; the user sees you as \"{name}\". \"{name}\" is your own name — not a place, a workspace or a product — so never say \"in {name}\" or \"on {name}\"."
+        )
+    };
+    format!(
+        "\n\n## This project\n\n{identity} Arbos is the app you run in; it is never the user's name — call the user by the name given with their message. Your folder is `{work_dir}`: every file you create or read for this project goes there (relative paths resolve there; do not use `/work` itself, other folders under `/work` belong to other projects). You run on model `{talking_model}`.\n"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Feedback 2026-10-22: "Hello, Arbos. What do you want to work on in Doug?" — the prompt
+    /// must present the project name as the agent's own name and Arbos as the app.
+    #[test]
+    fn project_section_names_the_agent_not_a_place() {
+        let s = project_section("Doug", "/work/01HPROJ", "anthropic/claude-haiku-5.5");
+        assert!(s.starts_with("\n\n## This project\n\n"));
+        assert!(s.contains("You are Doug, this user's agent in Arbos"));
+        assert!(s.contains("never say \"in Doug\" or \"on Doug\""));
+        assert!(s.contains("it is never the user's name"));
+        assert!(s.contains("Your folder is `/work/01HPROJ`"));
+        assert!(s.contains("You run on model `anthropic/claude-haiku-5.5`."));
+        assert!(!s.contains("Project \"Doug\""));
+        // An agent literally called Arbos (or unnamed) gets no self line that contradicts the app.
+        let s = project_section("Arbos", "/work/p", "m");
+        assert!(s.contains("You are this user's agent in Arbos."));
+        assert!(!s.contains("never say \"in Arbos\""));
+        let s = project_section("  ", "/work/p", "m");
+        assert!(s.contains("You are this user's agent in Arbos."));
+    }
 
     /// D91: the window size pi would start the next turn from, as pi counts it.
     #[test]

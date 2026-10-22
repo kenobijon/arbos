@@ -56,141 +56,11 @@ pub fn agent_glyph(agent: &AgentMember, size: f32, theme: &Theme) -> Div {
     crate::ui::avatars::agent_member(agent, size, theme)
 }
 
-/// What the new agent will look like (the iPhone's Create agent page, Grok's
-/// New Bot): the D79 initials disc for the typed name, its `@slug`, and the
-/// seven swatches with "Automatic" first. Before the project exists there is
-/// no id, so the automatic colour previews the name's hash like the iPhone.
-fn new_agent_preview(shell: &Shell, cx: &mut Context<Shell>) -> Div {
-    let theme = Theme::of(cx).clone();
-    let typed = shell.project_input.read(cx).text().trim().to_string();
-    let picked = shell.new_agent_color;
-    let seed = if typed.is_empty() {
-        "new"
-    } else {
-        typed.as_str()
-    };
-    let name = if typed.is_empty() {
-        "Agent"
-    } else {
-        typed.as_str()
-    };
-    let auto_index = avatars::color_index(seed);
-    let caption = if typed.is_empty() {
-        "Name your agent".to_string()
-    } else {
-        format!("@{}", Project::mention_slug(&typed))
-    };
-    let ring = |selected: bool| {
-        div()
-            .size(px(32.0))
-            .flex_shrink_0()
-            .rounded_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .border_2()
-            .border_color(if selected {
-                theme.text
-            } else {
-                gpui::transparent_black()
-            })
-            .cursor_pointer()
-            .hover(|st| st.border_color(theme.border_strong))
-    };
-    let mut swatches = div().flex().items_center().gap(px(9.0)).child(
-        ring(picked.is_none())
-            .id("new-agent-color-auto")
-            .child(
-                avatars::swatch(auto_index, 26.0, &theme)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_size(px(12.0))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(gpui::white())
-                    .child("A"),
-            )
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.new_agent_color = None;
-                cx.notify();
-            })),
-    );
-    for i in 0..avatars::GRADIENTS.len() as u8 {
-        swatches = swatches.child(
-            ring(picked == Some(i))
-                .id(ElementId::Name(SharedString::from(format!(
-                    "new-agent-color-{i}"
-                ))))
-                .child(avatars::swatch(i, 26.0, &theme))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.new_agent_color = Some(i);
-                    cx.notify();
-                })),
-        );
-    }
-    let hint = match picked {
-        None => {
-            "Automatic: the colour comes from the agent's id, the same on every device.".to_string()
-        }
-        Some(i) => format!("{}, chosen by you.", avatars::GRADIENTS[i as usize].name),
-    };
-    // D92: a leaf preview (seeded by the typed name until the id exists); the
-    // leaf and colour are picked on the agent's page once it is created.
-    if avatars::leaf_avatars_on() {
-        return div()
-            .flex()
-            .flex_col()
-            .items_center()
-            .gap(px(8.0))
-            .px(px(14.0))
-            .pt(px(14.0))
-            .pb(px(4.0))
-            .child(avatars::leaf_element(avatars::leaf_pick(seed, None, None), 64.0))
-            .child(
-                div()
-                    .text_size(px(TEXT_SMALL))
-                    .text_color(theme.text_muted)
-                    .child(caption),
-            )
-            .child(
-                div()
-                    .text_size(px(TEXT_TINY))
-                    .text_color(theme.text_muted)
-                    .text_center()
-                    .child("Every agent gets its own leaf. Change the leaf and colour from its profile."),
-            );
-    }
-    div()
-        .flex()
-        .flex_col()
-        .items_center()
-        .gap(px(8.0))
-        .px(px(14.0))
-        .pt(px(14.0))
-        .pb(px(4.0))
-        .child(avatars::element(seed, name, picked, 64.0, &theme))
-        .child(
-            div()
-                .text_size(px(TEXT_SMALL))
-                .text_color(theme.text_muted)
-                .child(caption),
-        )
-        .child(swatches.pt(px(4.0)))
-        .child(
-            div()
-                .text_size(px(TEXT_TINY))
-                .text_color(theme.text_muted)
-                .text_center()
-                .child(hint),
-        )
-}
-
 /// The "New Message" sheet (iPhone / Telegram layout): Cancel · title, a
 /// "Search people" field, New agent / New group rows, then everyone on Arbos.
 /// A person row starts the DM — or, when the sheet was opened from a project's
 /// "Share", invites them into it. New group opens a multi-select picker.
 pub fn new_chat_sheet(
-    shell: &Shell,
     state: &Entity<AppState>,
     input: &Entity<ComposerInput>,
     cx: &mut Context<Shell>,
@@ -218,7 +88,6 @@ pub fn new_chat_sheet(
         .as_ref()
         .and_then(|id| s.projects.iter().find(|p| &p.id == id))
         .map(|p| p.name.clone());
-    let creating = s.new_project_open;
     let servers_available = s.servers_available;
     let my_agents: Vec<Project> = if group_mode {
         let q = typed.to_lowercase();
@@ -302,7 +171,7 @@ pub fn new_chat_sheet(
         body = body.child(search);
         // New agent + New group (iPhone / Grok layout).
         if invite_into.is_none() {
-            let mut agent_row = div()
+            let agent_row = div()
                 .id("new-agent")
                 .flex()
                 .items_center()
@@ -334,31 +203,16 @@ pub fn new_chat_sheet(
                                 .child("Its own workspace on your machine"),
                         ),
                 )
-                .child(icon(
-                    if creating {
-                        "chevron-down"
-                    } else {
-                        "chevron-right"
-                    },
-                    13.0,
-                    theme.text_faint,
-                ))
+                .child(icon("chevron-right", 13.0, theme.text_faint))
+                // D93: opens the Create screen (`create_entity::sheet`) in place of this one.
                 .on_click(cx.listener(|this, _, window, cx| {
-                    let open = !this.state.read(cx).new_project_open;
                     this.state.update(cx, |s, cx| {
-                        s.new_project_open = open;
+                        s.new_project_open = true;
                         cx.notify();
                     });
-                    let handle = if open {
-                        this.project_input.read(cx).focus_handle(cx)
-                    } else {
-                        this.people_input.read(cx).focus_handle(cx)
-                    };
+                    let handle = this.project_input.read(cx).focus_handle(cx);
                     window.focus(&handle, cx);
                 }));
-            if creating {
-                agent_row = agent_row.border_b_1().border_color(theme.border);
-            }
             let group_row = div()
                 .id("new-group")
                 .flex()
@@ -392,50 +246,14 @@ pub fn new_chat_sheet(
                         ),
                 )
                 .child(icon("chevron-right", 13.0, theme.text_faint))
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.people_input.update(cx, |input, _| {
-                        input.set_placeholder("Add people or agents");
-                    });
-                    this.state.update(cx, |s, cx| s.open_new_group(cx));
-                    let handle = this.people_input.read(cx).focus_handle(cx);
-                    window.focus(&handle, cx);
-                }));
+                // D93: step 1 is the Create screen (picture + name); the picker below is step 2.
+                .on_click(cx.listener(|this, _, window, cx| this.open_create_group(window, cx)));
             // Inside the scrolling body the card must keep its height, or the
             // expanded form is squeezed and clipped once the list below is long.
             let mut group = glass::group(&theme)
                 .flex_shrink_0()
                 .mx(px(16.0))
                 .child(agent_row);
-            if creating {
-                group = group.child(new_agent_preview(shell, cx)).child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(10.0))
-                        .px(px(14.0))
-                        .py(px(10.0))
-                        .child(
-                            div()
-                                .flex_1()
-                                .h(px(38.0))
-                                .px(px(12.0))
-                                .flex()
-                                .items_center()
-                                .rounded(px(10.0))
-                                .bg(theme.field)
-                                .border_1()
-                                .border_color(theme.field_border)
-                                .child(shell.project_input.clone()),
-                        )
-                        .child(
-                            glass::primary_button("new-agent-create", "Create", &theme)
-                                .h(px(34.0))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.submit_project(window, cx)
-                                })),
-                        ),
-                );
-            }
             group = group
                 .child(div().h(px(0.5)).ml(px(66.0)).bg(theme.border))
                 .child(group_row);
@@ -637,9 +455,10 @@ pub fn new_chat_sheet(
         (None, false, Some(name)) => format!("Invite to {name}"),
         (None, false, None) => "New Message".to_string(),
     };
-    // Create needs a person (a group of one is a DM); Add takes agents alone too.
-    let can_create = !picked.is_empty() && !busy;
-    let can_add = (!picked.is_empty() || !picked_agents.is_empty()) && !busy;
+    // People, agents, or both — a group of your agents is a group (Jacob,
+    // 2026-10-22: Create greyed out with only agents picked read as broken).
+    let can_create = (!picked.is_empty() || !picked_agents.is_empty()) && !busy;
+    let can_add = can_create;
     let left = if add_to.is_some() {
         // No New Message sheet behind this one: Cancel closes it.
         glass::sheet_button("add-members-cancel", "Cancel", &theme)

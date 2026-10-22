@@ -722,8 +722,20 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
     column.child(account_row)
 }
 
-/// The D79 disc of a server: initials from its name, the relay's gradient index.
+/// A server's picture: the leaf picked on its Create screen (D92 amendment),
+/// else the D79 disc — initials from its name, the relay's gradient index.
 pub fn server_picture(server: &ServerInfo, size: f32, theme: &Theme) -> Div {
+    if let (true, Some(leaf), Some(color)) = (
+        avatars::leaf_avatars_on(),
+        server.avatar_leaf,
+        server.avatar_leaf_color,
+    ) {
+        return avatars::leaf_hover(
+            avatars::LeafPick { leaf, color },
+            size,
+            avatars::leaf_hover_key(&server.id, size),
+        );
+    }
     avatars::element(
         &server.id,
         &server.name,
@@ -1218,7 +1230,7 @@ fn render_row(
         .renaming_project
         .as_ref()
         .is_some_and(|p| p == &space.id);
-    if streaming || typing || avatar_state != avatars::AvatarState::Idle {
+    if typing || avatar_state != avatars::AvatarState::Idle {
         PulseClock::request(cx);
     }
     let phase = PulseClock::phase(cx, 900);
@@ -1453,13 +1465,18 @@ fn render_row(
                                 .text_color(theme.text_muted)
                                 .child(preview),
                         )
-                        .when(streaming || typing, |el| {
-                            el.child(div().size(px(7.0)).rounded_full().bg(Theme::with_alpha(
-                                if typing { theme.online } else { theme.warn },
-                                0.35 + 0.65 * phase,
-                            )))
+                        // No "agent is working" dot on rows (Jacob, 2026-10-22): the
+                        // working state lives in the header / activity line. A person
+                        // typing keeps its green pulse; unread keeps its accent dot.
+                        .when(typing, |el| {
+                            el.child(
+                                div()
+                                    .size(px(7.0))
+                                    .rounded_full()
+                                    .bg(Theme::with_alpha(theme.online, 0.35 + 0.65 * phase)),
+                            )
                         })
-                        .when(!streaming && !typing && unread, |el| {
+                        .when(!typing && unread, |el| {
                             el.child(div().size(px(8.0)).rounded_full().bg(theme.accent))
                         }),
                 ),

@@ -16,12 +16,12 @@ use arbos_client::room::{self, RoomAction, RoomSession};
 use arbos_core::api::{
     ApiErrorDto, CallDto, CallEnvelopeDto, ChannelBindingDto, ChannelPairingDto,
     ChannelPlatformDto, ChatDto, ConnectConnectorReplyDto, ConnectorsCatalogDto, ConnectorsListDto,
-    CreateChatResponseDto, DecideSecretResponseDto, GetProjectResponseDto, GroupDto,
-    LeaveCallResponseDto, LocalDevicesDto, MachineStateDto, MachineStatusDto, MeResponseDto,
-    MeUserResponseDto, ModelListDto, PairResponseDto, PeopleChatDto, ProjectMembersDto,
-    ProjectSecretsDto, PushEventDto, PushItemDto, RoutineDto, RoutineRunDto, SecretEnvelopeDto,
-    SecretRequestsDto, SecretsOverviewDto, SkillDto, StartCallResponseDto, TokenResponseDto,
-    TranscriptionDto, UserCardDto, UsersPageDto, VaultEnvelopeDto, VoiceCatalogDto,
+    CreateChatResponseDto, DecideSecretResponseDto, GetProjectResponseDto, LeaveCallResponseDto,
+    LocalDevicesDto, MachineStateDto, MachineStatusDto, MeResponseDto, MeUserResponseDto,
+    ModelListDto, PairResponseDto, PeopleChatDto, ProjectMembersDto, ProjectSecretsDto,
+    PushEventDto, PushItemDto, RoutineDto, RoutineRunDto, SecretEnvelopeDto, SecretRequestsDto,
+    SecretsOverviewDto, SkillDto, StartCallResponseDto, TokenResponseDto, TranscriptionDto,
+    UserCardDto, UsersPageDto, VaultEnvelopeDto, VoiceCatalogDto,
 };
 use arbos_core::doc::{UserAttachment, UserMessageOpts};
 use arbos_core::wire::{BoxState as WireBox, PROJECT_DOC_CHAT_ID};
@@ -43,9 +43,9 @@ use super::diagnostics;
 use super::doc::ChatDoc;
 use super::dto::{
     account_view_from_me, apply_machine_status, chat_from_create, chat_from_dto,
-    chat_from_group_dto, connectors_view_from_dto, credentials_from_token, local_view_from_dto,
-    model_ids_from_dto, people_space_from, project_from_dto, routine_from_dto,
-    secrets_view_from_dto, skill_from_dto, transcript_text, voices_from_dto,
+    connectors_view_from_dto, credentials_from_token, local_view_from_dto, model_ids_from_dto,
+    people_space_from, project_from_dto, routine_from_dto, secrets_view_from_dto, skill_from_dto,
+    transcript_text, voices_from_dto,
 };
 use super::store::{self, Store};
 use super::{ClientCommand, SyncEvent, SyncSource};
@@ -771,6 +771,10 @@ async fn refresh_me(shared: &Arc<Shared>) {
     let _ = shared.events.send(SyncEvent::Account(Some(view)));
     // D92 remote flag: leaf avatars for agents (absent on older relays = on).
     crate::ui::avatars::set_leaf_avatars(dto.features.leaf_avatars.unwrap_or(true));
+    // Voice mode is a relay-side kill switch; absent = off.
+    let _ = shared.events.send(SyncEvent::Features {
+        voice_mode: dto.features.voice_mode.unwrap_or(false),
+    });
     let m = &dto.machine;
     // D89: provider and waitlist place ride along with `always_on`.
     let position = m
@@ -1442,12 +1446,18 @@ fn handle_server_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             let shared = shared.clone();
             tokio::spawn(async move { refresh_servers_list(&shared).await });
         }
-        ClientCommand::ServerCreate { name } => {
+        ClientCommand::ServerCreate { name, leaf } => {
             let shared = shared.clone();
             let name = name.clone();
+            let leaf = *leaf;
             tokio::spawn(async move {
+                let mut body = json!({ "name": name });
+                if let Some(l) = leaf {
+                    body["avatar_leaf"] = json!(l.leaf);
+                    body["avatar_leaf_color"] = json!(l.color);
+                }
                 match shared
-                    .post_json("/servers", json!({ "name": name }))
+                    .post_json("/servers", body)
                     .await
                     .and_then(parse_server)
                 {
@@ -3450,8 +3460,12 @@ async fn speak(shared: Arc<Shared>, project_id: Id, request_id: u64, text: Strin
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("audio/wav")
                 .to_owned();
-            let bytes = r.bytes().await.map(|b| b.to_vec()).unwrap_or_default();
+            let mut bytes = r.bytes().await.map(|b| b.to_vec()).unwrap_or_default();
             if status.is_success() {
+                // Older relays pass OpenAI's streamed WAV through with placeholder
+                // sizes; fix the header once here so both the decoder and the
+                // rodio player (also hound underneath) take the cached bytes.
+                arbos_core::wav::repair_sizes(&mut bytes);
                 SyncEvent::Speech {
                     request_id,
                     bytes: Arc::new(bytes),
@@ -3739,7 +3753,12 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 }
             });
         }
-        ClientCommand::CreatePeopleGroup { handles, agent_ids } => {
+        ClientCommand::CreatePeopleGroup {
+            handles,
+            agent_ids,
+            title,
+            leaf,
+        } => {
             let shared = shared.clone();
             tokio::spawn(async move {
                 let members: Vec<String> = handles
@@ -3747,24 +3766,41 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .map(|h| h.trim().trim_start_matches('@').to_string())
                     .filter(|h| !h.is_empty())
                     .collect();
-                match shared
-                    .post_json("/chats", json!({ "kind": "group", "members": members }))
-                    .await
-                {
+                // Agents go in the create body (one call, agents-only groups
+                // included); a relay that ignores `agent_ids` leaves them out
+                // of the answer, and they are added one by one as before.
+                let mut body =
+                    json!({ "kind": "group", "members": members, "agent_ids": agent_ids });
+                if let Some(t) = title.filter(|t| !t.trim().is_empty()) {
+                    body["title"] = json!(t.trim());
+                }
+                if let Some(l) = leaf {
+                    body["avatar_leaf"] = json!(l.leaf);
+                    body["avatar_leaf_color"] = json!(l.color);
+                }
+                match shared.post_json("/chats", body).await {
                     Ok(v) => {
-                        let chat_id = match serde_json::from_value::<PeopleChatDto>(v) {
-                            Ok(dto) => dto.id,
+                        let (chat_id, already) = match serde_json::from_value::<PeopleChatDto>(v) {
+                            Ok(dto) => {
+                                let agents: Vec<String> = dto
+                                    .members
+                                    .iter()
+                                    .filter_map(|m| m.member.strip_prefix("agent:"))
+                                    .map(str::to_owned)
+                                    .collect();
+                                (dto.id, agents)
+                            }
                             Err(err) => {
                                 log::warn!(
                                     target: "arbos_mac::relay",
                                     "CreatePeopleGroup PeopleChatDto: {err}"
                                 );
-                                String::new()
+                                (String::new(), Vec::new())
                             }
                         };
                         for project_id in agent_ids {
-                            if chat_id.is_empty() {
-                                break;
+                            if chat_id.is_empty() || already.contains(&project_id) {
+                                continue;
                             }
                             if let Err(err) = shared
                                 .post_json(
@@ -3782,6 +3818,14 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         if let Err(err) = refresh_registry(&shared).await {
                             shared.diagnostic("refresh", format!("{err:#}"));
                         }
+                        if chat_id.is_empty() {
+                            // The list refresh still shows the group; the sheet
+                            // closes on the next Projects event by its members.
+                            return;
+                        }
+                        let _ = shared
+                            .events
+                            .send(SyncEvent::PeopleGroupCreated { chat_id });
                     }
                     Err(err) => {
                         let _ = shared
@@ -4474,74 +4518,6 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 }
             });
         }
-        ClientCommand::GroupCreate {
-            project_id,
-            chat_id: local_id,
-            participants,
-            title,
-        } => {
-            let shared = shared.clone();
-            tokio::spawn(async move {
-                match shared
-                    .post_json(
-                        &format!("/projects/{project_id}/groups"),
-                        json!({ "title": title, "participants": participants }),
-                    )
-                    .await
-                {
-                    Ok(v) => {
-                        let chat = match serde_json::from_value::<GroupDto>(v) {
-                            Ok(dto) => chat_from_group_dto(&dto),
-                            Err(err) => {
-                                log::warn!(target: "arbos_mac::relay", "GroupDto: {err}");
-                                shared.notice("Relay returned no group");
-                                return;
-                            }
-                        };
-                        shared.chats.lock().unwrap().push(chat.clone());
-                        ensure_room(&shared, &project_id, &chat.id, &chat.id);
-                        let _ = shared.events.send(SyncEvent::ChatCreated {
-                            project_id: project_id.clone(),
-                            local_id,
-                            chat,
-                        });
-                    }
-                    Err(err) => shared.notice(format!("New group failed: {err:#}")),
-                }
-            });
-        }
-        ClientCommand::GroupAddParticipant {
-            project_id,
-            chat_id,
-            participant,
-        } => {
-            let shared = shared.clone();
-            tokio::spawn(async move {
-                match shared
-                    .patch_json(
-                        &format!("/projects/{project_id}/groups/{chat_id}"),
-                        json!({ "add": [participant] }),
-                    )
-                    .await
-                {
-                    Ok(v) => {
-                        if let Ok(dto) = serde_json::from_value::<GroupDto>(v) {
-                            let chat = chat_from_group_dto(&dto);
-                            let mut chats = shared.chats.lock().unwrap();
-                            match chats.iter_mut().find(|c| c.id == chat.id) {
-                                Some(slot) => {
-                                    slot.participants = chat.participants;
-                                    slot.title = chat.title;
-                                }
-                                None => chats.push(chat),
-                            }
-                        }
-                        emit_chats(&shared);
-                    }
-                    Err(err) => shared.notice(format!("Add to group failed: {err:#}")),
-                }
-            });
-        }
         ClientCommand::ArchiveChat { chat_id, archived } => {
             cache_archived(shared, &chat_id, archived);
             let project_id = shared
@@ -4942,6 +4918,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         ClientCommand::CreateProject {
             name,
             avatar_color_index,
+            leaf,
             source_project_id,
             description,
             color,
@@ -4955,6 +4932,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 }
                 if let Some(i) = avatar_color_index {
                     body["avatar_color_index"] = json!(i);
+                }
+                if let Some(l) = leaf {
+                    body["avatar_leaf"] = json!(l.leaf);
+                    body["avatar_leaf_color"] = json!(l.color);
                 }
                 if let Some(src) = source_project_id {
                     body["source_project_id"] = json!(src);
