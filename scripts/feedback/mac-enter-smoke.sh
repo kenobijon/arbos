@@ -12,6 +12,16 @@ BIN=${1:?arbos-mac binary}
 export ARBOS_FIXTURE=1 ARBOS_FIXTURE_OPEN=${ARBOS_FIXTURE_OPEN:-Affine} ARBOS_SURFACE=matte ARBOS_UPDATE_AUTO=0
 LOG=$(mktemp -t enter-smoke)
 TEXT="enter smoke $(date +%s)"
+# One GUI app at a time on the shared display (scripts/runner/gui-lock.sh): take the lock, give it back at exit.
+GUI_LOCK=/Users/Shared/arbos-run/gui-lock.sh
+if [[ -x "$GUI_LOCK" ]]; then
+  if ! "$GUI_LOCK" acquire release-smoke 240; then
+    echo "::warning title=enter smoke::display busy ($("$GUI_LOCK" status)); skipped — the GPUI enter_tests remain the gate"
+    echo "== enter smoke: display busy; skipped"
+    exit 0
+  fi
+  trap '"$GUI_LOCK" release release-smoke >/dev/null 2>&1' EXIT
+fi
 "$BIN" >"$LOG" 2>&1 &
 PID=$!
 sleep 8
