@@ -241,7 +241,7 @@ impl Shell {
                         .px(px(16.0))
                         .py(px(10.0))
                         .relative()
-                        .child(kit::hairline_below(16.0, theme))
+                        .child(kit::hairline_below(16.0, &theme))
                         .child(
                             div()
                                 .text_size(px(TEXT_BODY))
