@@ -1034,7 +1034,13 @@ struct MemberChip<Picture: View>: View {
     static var avatar: CGFloat { 22 }
     let label: String
     let onRemove: () -> Void
-    @ViewBuilder let picture: () -> Picture
+    let picture: () -> Picture
+
+    init(label: String, onRemove: @escaping () -> Void, @ViewBuilder picture: @escaping () -> Picture) {
+        self.label = label
+        self.onRemove = onRemove
+        self.picture = picture
+    }
 
     var body: some View {
         HStack(spacing: 6) {
