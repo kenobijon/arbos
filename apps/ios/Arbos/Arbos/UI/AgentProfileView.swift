@@ -319,15 +319,11 @@ struct AgentProfileView: View {
                                 }
                             }
                         case "Settings":
-                            // How the agent runs: model, voice, camera vision, secrets; then sharing.
+                            // How the agent runs: model, camera vision, secrets; then sharing.
+                            // (Voice left the pane on 2026-10-22: spoken replies sit behind a kill switch.)
                             ProfileCard {
                                 Button { if isMine { showModel = true } } label: {
                                     PaneRow(title: "Model", value: "\(project.shortModel) · \(project.effort.label)", chevron: isMine)
-                                }
-                                .buttonStyle(.plain)
-                                .disabled(!isMine)
-                                Button { if isMine { showVoice = true } } label: {
-                                    PaneRow(title: "Voice", value: voiceLine(project), chevron: isMine)
                                 }
                                 .buttonStyle(.plain)
                                 .disabled(!isMine)

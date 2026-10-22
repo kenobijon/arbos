@@ -1,8 +1,8 @@
 //! An agent's page on the shared pane kit, laid out like the own-profile pane
 //! (mock g; Jacob 2026-10-22): the D79 avatar (crayon = the picker for owned
 //! agents), name, what it is doing, @slug, then one tab pill — **Profile**
-//! (name, handle, description, owner) | **Settings** (model, reasoning,
-//! voice; sharing and group chats; spoken replies) | **Library** (images,
+//! (name, handle, description, owner) | **Settings** (model, reasoning;
+//! sharing and group chats) | **Library** (images,
 //! files and links from the agent's chats). The same three tabs as the
 //! iPhone's agent page (Jacob's rule, 2026-10-22). No quick-action row:
 //! call and search live in the chat, mute in the sidebar row's menu. Grok
@@ -69,7 +69,6 @@ pub(super) fn page(
     };
     let avatar_state = state.avatar_state(&project.id);
     let streaming = state.project_is_streaming(&project.id);
-    let voice_text = crate::ui::voicepicker::current_label(&project, &state.voices);
     let machine_state: MachineState = match &project.machine_info {
         Some(m) if !mine => match m.state.as_str() {
             "awake" => MachineState::Awake,
@@ -364,7 +363,6 @@ pub(super) fn page(
             // click; a pick applies and folds the list.
             let model_open = pick == Some(AgentPick::Model);
             let reasoning_open = pick == Some(AgentPick::Reasoning);
-            let voice_open = pick == Some(AgentPick::Voice);
             info = info
                 .child(hoverpick::row(
                     "Model",
@@ -383,24 +381,16 @@ pub(super) fn page(
                     reasoning_open.then(|| hoverpick::reasoning_panel(&project, cx)),
                     &theme,
                     cx,
-                ))
-                .child(hoverpick::row(
-                    "Voice",
-                    voice_text,
-                    AgentPick::Voice,
-                    voice_open,
-                    voice_open.then(|| hoverpick::voice_panel(shell, &project, cx)),
-                    &theme,
-                    cx,
                 ));
-            // Rows are the card's children 0 / 1 / 2; when one has just opened,
-            // scroll the sheet so its list is in view.
-            if let Some(open) = pick {
-                let open_ix = match open {
-                    AgentPick::Model => 0,
-                    AgentPick::Reasoning => 1,
-                    AgentPick::Voice => 2,
-                };
+            // Rows are the card's children 0 / 1; when one has just opened,
+            // scroll the sheet so its list is in view. (Voice left the pane
+            // with Jacob's 2026-10-22 call: spoken replies sit behind a kill
+            // switch; the rig hook `agent:voice` opens nothing here.)
+            if let Some(open_ix) = pick.and_then(|open| match open {
+                AgentPick::Model => Some(0),
+                AgentPick::Reasoning => Some(1),
+                AgentPick::Voice => None,
+            }) {
                 let reveal = cx.listener(
                     move |this, bounds: &Vec<gpui::Bounds<gpui::Pixels>>, window, cx| {
                         this.reveal_agent_pick(bounds.get(open_ix), window, cx);
@@ -588,8 +578,7 @@ fn leaf_picker(project: &Project, theme: &Theme, cx: &mut Context<Shell>) -> Div
 
 /// The owned agent's Settings tab, after the Model card: sharing (invite
 /// sheet, or the members list once it is shared) and the agent-to-agent group
-/// picker in one card, the global spoken-replies switch in its own — the
-/// own-profile pane's grouping.
+/// picker in one card.
 fn settings_cards(
     body: Div,
     shell: &Shell,
@@ -598,7 +587,6 @@ fn settings_cards(
     cx: &mut Context<Shell>,
 ) -> Div {
     let state = shell.state.read(cx);
-    let voice_mode = state.voice_mode;
     let multi_chat = state.multi_chat;
     let other_agents = state
         .projects
@@ -655,24 +643,7 @@ fn settings_cards(
             })),
         );
     }
-    let voice = self::card(theme).child(
-        kit::row(
-            "agent-voice-mode",
-            Leading::Tile("mic"),
-            "Voice mode",
-            Some("Spoken replies, every agent".into()),
-            None,
-            Some(glass::switch(voice_mode, theme).into_any_element()),
-            false,
-            theme,
-        )
-        .cursor_pointer()
-        .hover(|s| s.bg(theme.surface_2))
-        .on_click(cx.listener(|this, _, _, cx| {
-            this.voice.update(cx, |v, cx| v.toggle_voice_mode(cx));
-        })),
-    );
-    body.child(card).child(voice)
+    body.child(card)
 }
 
 fn colour_row(project: &Project, theme: &Theme, cx: &mut Context<Shell>) -> Div {

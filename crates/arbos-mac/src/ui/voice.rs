@@ -605,11 +605,6 @@ impl Voice {
 
     // ----- voice mode ---------------------------------------------------------
 
-    pub fn toggle_voice_mode(&mut self, cx: &mut Context<Self>) {
-        let on = !self.voice_mode(cx);
-        self.set_voice_mode(on, cx);
-    }
-
     fn set_voice_mode(&mut self, on: bool, cx: &mut Context<Self>) {
         if on {
             self.voice_since = now_ms();
