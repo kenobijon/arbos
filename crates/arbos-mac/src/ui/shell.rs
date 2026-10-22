@@ -265,6 +265,9 @@ pub struct Shell {
     pub(crate) profile_scroll: ScrollHandle,
     profile_scroll_epoch: u64,
     pub(crate) agent_pick_reveal: bool,
+    /// Rig: `ARBOS_OPEN_SETTINGS=bottom` — my pane opens scrolled to its end
+    /// (Sign out) each time it fills the pane.
+    settings_open_at_bottom: bool,
     /// Settings header: editing my display name and handle (`PATCH /me`).
     pub(crate) profile_edit_open: bool,
     pub(crate) name_input: Entity<ComposerInput>,
@@ -714,6 +717,7 @@ impl Shell {
             profile_scroll: ScrollHandle::new(),
             profile_scroll_epoch: 0,
             agent_pick_reveal: false,
+            settings_open_at_bottom: open_settings.as_deref() == Some("bottom"),
             profile_edit_open: false,
             name_input,
             handle_input,
@@ -726,11 +730,6 @@ impl Shell {
                 s.open_profile(ProfilePage::Me, cx);
                 s.set_profile_tab(1, cx);
             });
-            // Rig: `ARBOS_OPEN_SETTINGS=bottom` — the Settings tab scrolled to
-            // Sign out (the root page scrolls on the shared pane handle).
-            if open_settings.as_deref() == Some("bottom") {
-                shell.profile_scroll.scroll_to_bottom();
-            }
         }
         shell
     }
@@ -3327,6 +3326,9 @@ impl Render for Shell {
             if self.profile_scroll_epoch != opened {
                 self.profile_scroll_epoch = opened;
                 self.profile_scroll.set_offset(gpui::Point::default());
+                if page == ProfilePage::Me && self.settings_open_at_bottom {
+                    self.profile_scroll.scroll_to_bottom();
+                }
             }
             if page == ProfilePage::Me && !self.settings_page_alive(cx) {
                 self.settings_page = SettingsPage::Root;

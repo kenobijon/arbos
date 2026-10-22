@@ -88,8 +88,12 @@ pub(super) fn pushed_frame(
 
 /// The pane with a pushed page: `‹` back and the page title lead the header.
 /// The band over which the scrolling body fades out under the pinned block
-/// (the chat header's treatment, #1336; Jacob Oct 22: "no hard cut").
-pub(crate) const PANE_FADE_BAND: f32 = 24.0;
+/// (the chat header's treatment, #1336; Jacob Oct 22: "no hard cut"). It is
+/// the pinned block's bottom margin (hero `pb` / tab pill `mb`): the body
+/// starts that far up, under the margin, with the same amount of padding, so
+/// at rest the first card sits fully visible 18 pt under the pill and only
+/// scrolled rows pass through the fade.
+pub(crate) const PANE_FADE_BAND: f32 = 18.0;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn pane_frame(
@@ -131,6 +135,7 @@ pub(crate) fn pane_frame(
         header = header.child(div().flex_1());
     }
     let header = header.children(right).child(close);
+    let has_pinned = pinned.is_some();
     div()
         .id("profile-pane")
         .w(px(width))
@@ -150,6 +155,7 @@ pub(crate) fn pane_frame(
             body.id("profile-body")
                 .flex_1()
                 .min_h_0()
+                .when(has_pinned, |el| el.mt(px(-PANE_FADE_BAND)))
                 .overflow_y_scroll()
                 .when_some(scroll, |el, h| el.track_scroll(h)),
         ))
