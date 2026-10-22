@@ -3,6 +3,7 @@
 // fills these in and the views only read them.
 
 import Foundation
+import ArbosFFI
 
 typealias Id = String
 
@@ -228,6 +229,44 @@ struct Project: Identifiable, Equatable, Codable {
     }
 }
 
+extension Project {
+    /// Maps a relay `ProjectDto` the same way the old hand JSON parse did.
+    init(dto: ProjectDto) {
+        let ownerHandle = dto.owner_handle.flatMap { $0 } ?? dto.owner.handle
+        self.id = dto.id
+        self.name = dto.name.isEmpty ? "Project" : dto.name
+        self.icon = dto.icon.isEmpty ? "Ω" : dto.icon
+        self.color = dto.color.isEmpty ? "#8b7cf6" : dto.color
+        self.state = Arbos.BoxState.from(state: dto.state, box: dto.box)
+        self.stateSince = dto.box_since
+        self.stateDetail = nil
+        self.model = dto.model ?? "anthropic/claude-haiku-5.5"
+        self.effort = .low
+        self.spendTodayUsd = dto.spend_today_usd
+        self.spendCapUsd = dto.spend_cap_usd
+        self.shared = dto.shared ?? false
+        self.ownerId = dto.owner.id
+        self.ownerHandle = ownerHandle.isEmpty ? nil : ownerHandle
+        self.avatar = dto.avatar.isEmpty ? nil : dto.avatar
+        self.avatarColor = dto.avatar_color.isEmpty ? nil : dto.avatar_color
+        self.avatarColorIndex = dto.avatar_color_index.map(Int.init)
+        self.avatarColorIndexEffective = Int(dto.avatar_color_index_effective)
+        self.instructions = dto.instructions
+        self.description = dto.description
+        self.ownerName = dto.owner.name
+        self.ownerAvatarUrl = dto.owner.avatar_url
+        self.ownerLastSeenAt = dto.owner.last_seen_at
+        self.ownerOnline = dto.owner.online
+        self.primaryChatId = dto.primary_chat_id.flatMap { $0.isEmpty ? nil : $0 }
+        self.voice = dto.voice.flatMap { $0.isEmpty ? nil : $0 }
+        self.visionEnabled = dto.vision_enabled
+        self.machineState = dto.machine.state
+        self.machineClass = dto.machine.`class`
+        self.machineSnapshot = dto.machine.snapshot
+        self.machineAlwaysOn = dto.machine.always_on
+    }
+}
+
 struct Chat: Identifiable, Equatable, Codable {
     var id: Id
     var projectId: Id
@@ -244,6 +283,20 @@ struct Chat: Identifiable, Equatable, Codable {
     var isGroup: Bool { kind == "group" }
     /// The agent's "projects" system chat (§9b: shown even with multi-chat off).
     var isSystem: Bool { kind == "projects" }
+}
+
+extension Chat {
+    /// Maps a relay `ChatDto` the same way the old hand JSON parse did.
+    init(dto: ChatDto) {
+        self.id = dto.id
+        self.projectId = dto.project_id
+        self.title = dto.title.isEmpty ? "New chat" : dto.title
+        self.isPinned = dto.is_pinned
+        self.unread = false
+        self.lastMessageAt = dto.created_at
+        self.kind = dto.kind.isEmpty ? "chat" : dto.kind
+        self.participants = dto.participants
+    }
 }
 
 /// §10.3 one entry of `GET /voices`.

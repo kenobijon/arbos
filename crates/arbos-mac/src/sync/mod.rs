@@ -18,11 +18,13 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use arbos_matrix::{MessageRow, Snapshot};
 use futures::future::BoxFuture;
 use tokio::sync::mpsc;
 
 use crate::model::{
-    AccountView, Call, CallEnded, CallKind, CallMissed, Person, Reachable, Sender, Voice,
+    AccountView, Call, CallEnded, CallKind, CallMissed, Person, Reachable, Sender, ServerInfo,
+    Voice,
 };
 use crate::model::{
     BoxState, ChannelsView, Chat, ConnectorsView, Effort, Id, Link, LocalView, Machine, Message,
@@ -259,6 +261,34 @@ pub enum SyncEvent {
         mime: String,
         error: Option<String>,
         mock: bool,
+    },
+    /// D88: whether this relay runs servers at all (`GET /me/matrix` 503 `servers_off` → false).
+    ServersAvailable(bool),
+    /// D88: the servers this account is in (`GET /servers`), whole.
+    Servers(Vec<ServerInfo>),
+    /// D88: one server with its members (`GET /servers/{id}`, or after a write).
+    ServerDetail(ServerInfo),
+    /// D88: a server was just created or joined: select it and land on `#general`.
+    ServerOpened(ServerInfo),
+    /// D88: a server/channel write failed; shown inline in the open sheet and as a notice.
+    ServerError(String),
+    /// D88: the room list of servers and channels changed.
+    MatrixRooms(Snapshot),
+    /// D88: rows of a channel after it was opened, and the whole list after every new row.
+    MatrixTimeline {
+        room_id: String,
+        rows: Vec<MessageRow>,
+    },
+    /// D88: homeserver connection state.
+    MatrixConnection {
+        connected: bool,
+        error: Option<String>,
+    },
+    /// D88: a channel send did not go through; the optimistic row is dropped.
+    ChannelSendFailed {
+        room_id: String,
+        local_id: String,
+        error: String,
     },
 }
 
@@ -721,6 +751,85 @@ pub enum ClientCommand {
         project_id: Id,
         request_id: u64,
         text: String,
+    },
+    /// D88: `GET /servers` again (after a push or when the list is shown).
+    ServersRefresh,
+    /// D88: `POST /servers {name}`; answered by `ServerOpened`.
+    ServerCreate {
+        name: String,
+    },
+    /// D88: `POST /servers/join {code}` with a code or a full invite link; `ServerOpened`.
+    ServerJoin {
+        code: String,
+    },
+    /// D88: `GET /servers/{id}` (members); answered by `ServerDetail`.
+    ServerFetch {
+        server_id: Id,
+    },
+    /// D88: `PATCH /servers/{id} {name}` (owner/admin).
+    ServerRename {
+        server_id: Id,
+        name: String,
+    },
+    /// D88: `DELETE /servers/{id}` (owner).
+    ServerDelete {
+        server_id: Id,
+    },
+    /// D88: `POST /servers/{id}/leave`.
+    ServerLeave {
+        server_id: Id,
+    },
+    /// D88: `POST /servers/{id}/invite/reset` (owner).
+    ServerResetInvite {
+        server_id: Id,
+    },
+    /// D88: `PUT /servers/{id}/members/{uid} {role}` (owner); `admin` or `member`.
+    ServerSetRole {
+        server_id: Id,
+        user_id: Id,
+        role: String,
+    },
+    /// D88: `DELETE /servers/{id}/members/{uid}[?ban=1]` (owner/admin).
+    ServerRemoveMember {
+        server_id: Id,
+        user_id: Id,
+        ban: bool,
+    },
+    /// D88: `POST /servers/{id}/channels {name, restricted}` (owner/admin).
+    ChannelCreate {
+        server_id: Id,
+        name: String,
+        restricted: bool,
+    },
+    /// D88: `PATCH /servers/{id}/channels/{cid}` (owner/admin).
+    ChannelPatch {
+        server_id: Id,
+        channel_id: Id,
+        name: Option<String>,
+        restricted: Option<bool>,
+    },
+    /// D88: `DELETE /servers/{id}/channels/{cid}` (owner/admin; `#general` refuses).
+    ChannelDelete {
+        server_id: Id,
+        channel_id: Id,
+    },
+    /// D88: load a channel's rows (first page + live); answered by `MatrixTimeline`.
+    ChannelOpen {
+        room_id: String,
+    },
+    /// D88: page older rows in; answered by `MatrixTimeline` when there were any.
+    ChannelLoadOlder {
+        room_id: String,
+    },
+    /// D88: send a text row; the echo carries `local_id` and replaces the optimistic row.
+    ChannelSend {
+        room_id: String,
+        local_id: String,
+        text: String,
+    },
+    /// D88: read receipt up to the newest row.
+    ChannelMarkRead {
+        room_id: String,
     },
 }
 

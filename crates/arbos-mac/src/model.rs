@@ -2439,6 +2439,114 @@ pub enum Link {
     Reconnecting,
 }
 
+/// One channel of a server as the relay registry lists it (`GET /servers`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ServerChannel {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub server_id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default, deserialize_with = "null_to_empty")]
+    pub topic: String,
+    /// Admins-only posting.
+    #[serde(default)]
+    pub restricted: bool,
+    #[serde(default)]
+    pub position: i64,
+    /// `None` for a few seconds after creation while the room is being made.
+    #[serde(default)]
+    pub room_id: Option<String>,
+    #[serde(default)]
+    pub created_at: i64,
+}
+
+/// Invite link of a server; the relay only sends it to owners and admins.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ServerInvite {
+    #[serde(default)]
+    pub code: String,
+    #[serde(default)]
+    pub url: String,
+}
+
+/// A server (D88 C1) as the relay returns it; `members` only on the detail route and on create.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ServerInfo {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub image_key: Option<String>,
+    #[serde(default)]
+    pub owner_user_id: String,
+    #[serde(default)]
+    pub space_room_id: Option<String>,
+    #[serde(default)]
+    pub created_at: i64,
+    /// `owner`, `admin` or `member`.
+    #[serde(default)]
+    pub my_role: String,
+    #[serde(default)]
+    pub member_count: u64,
+    #[serde(default)]
+    pub channels: Vec<ServerChannel>,
+    #[serde(default)]
+    pub general_channel_id: Option<String>,
+    #[serde(default)]
+    pub avatar_color_index_effective: Option<u8>,
+    #[serde(default)]
+    pub invite: Option<ServerInvite>,
+    /// Members with `role` set to `owner`/`admin`/`member`; empty until the detail is fetched.
+    #[serde(default)]
+    pub members: Vec<Person>,
+}
+
+impl ServerInfo {
+    pub fn is_owner(&self) -> bool {
+        self.my_role == "owner"
+    }
+
+    pub fn can_admin(&self) -> bool {
+        self.my_role == "owner" || self.my_role == "admin"
+    }
+
+    pub fn channel(&self, channel_id: &str) -> Option<&ServerChannel> {
+        self.channels.iter().find(|c| c.id == channel_id)
+    }
+
+    /// `#general` (the relay names it), else the first channel.
+    pub fn general(&self) -> Option<&ServerChannel> {
+        self.general_channel_id
+            .as_deref()
+            .and_then(|id| self.channel(id))
+            .or_else(|| self.channels.iter().find(|c| c.name == "general"))
+            .or_else(|| self.channels.first())
+    }
+
+    /// Channels in registry order (`position`, then name).
+    pub fn ordered_channels(&self) -> Vec<&ServerChannel> {
+        let mut out: Vec<&ServerChannel> = self.channels.iter().collect();
+        out.sort_by(|a, b| {
+            a.position
+                .cmp(&b.position)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        out
+    }
+}
+
+/// Which channel of which server is open in the centre.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ChannelSel {
+    pub server_id: Id,
+    pub channel_id: Id,
+    /// Known once the registry (or the room list) has the room.
+    pub room_id: Option<String>,
+}
+
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

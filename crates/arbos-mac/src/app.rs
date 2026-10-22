@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use arbos_matrix::{ChannelRow, MessageRow, Snapshot, SpaceRow};
 use gpui::{App, Context, EventEmitter, RenderImage, Task};
 use gpui_tokio::Tokio;
 use tokio::sync::mpsc;
@@ -18,10 +19,10 @@ use crate::model::{
     CallMissed, Person, Reachable, Sender, Voice,
 };
 use crate::model::{
-    new_id, now_ms, AttachmentKind, BoxState, ChannelsView, Chat, ChatKind, ConnectorsView, Effort,
-    Id, Link, LocalView, Machine, Message, MessageStatus, NewSecret, Part, Project, ProjectDocView,
-    ProjectSecrets, QuestionState, Role, Routine, RoutineRun, RoutineTrigger, SecretsView, Skill,
-    StatusKind,
+    new_id, now_ms, AttachmentKind, BoxState, ChannelSel, ChannelsView, Chat, ChatKind,
+    ConnectorsView, Effort, Id, Link, LocalView, Machine, Message, MessageStatus, NewSecret, Part,
+    Project, ProjectDocView, ProjectSecrets, QuestionState, Role, Routine, RoutineRun,
+    RoutineTrigger, SecretsView, ServerInfo, Skill, StatusKind,
 };
 use crate::sync::{ClientCommand, SyncEvent, SyncSource};
 use crate::ui::notify::{self, Gate, Notifier, NotifyEvent, NotifyKind};
@@ -52,6 +53,19 @@ pub enum ProfilePage {
     Agent { project_id: Id },
     /// My own profile and every app setting (the Settings window is gone).
     Me,
+    /// A server (D88): channels, members, and the admin options for owners/admins.
+    Server { server_id: Id },
+}
+
+/// Which server sheet is open over the shell (D88).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ServerSheet {
+    /// `+` → "New server": one name field.
+    NewServer,
+    /// `+` → "Join a server": paste an invite link or code.
+    JoinServer,
+    /// `+` inside a server: channel name and the "Admins only post" toggle.
+    NewChannel { server_id: Id },
 }
 
 /// Which agent-settings row on the agent's profile page is expanded into its
@@ -218,6 +232,9 @@ pub struct ChatUi {
     /// Message the next send replies to (hover reply / people-chat parity).
     pub reply_to: Option<Id>,
 }
+
+/// Rows per history page the shared Matrix client fetches (`arbos_matrix::client::HISTORY_PAGE`).
+const CHANNEL_PAGE: usize = 50;
 
 pub struct AppState {
     pub source_name: &'static str,
@@ -410,6 +427,30 @@ pub struct AppState {
     ended_written: HashSet<String>,
     /// The call this device is in.
     pub my_call: Option<ActiveCall>,
+    /// D88: the relay runs servers (`GET /me/matrix` answered). False → no server rows,
+    /// no "New server" / "Join a server" in the `+` sheet.
+    pub servers_available: bool,
+    /// D88: the servers I am in (`GET /servers`); `members` filled once a detail was fetched.
+    pub servers: Vec<ServerInfo>,
+    /// D88: the room list from the homeserver (previews, unread, `can_post`).
+    pub matrix_snapshot: Snapshot,
+    pub matrix_connected: bool,
+    /// D88: decoded rows per channel room id; the transcript reads them like `messages`.
+    pub channel_rows: HashMap<String, Vec<Message>>,
+    /// D88: rooms that already got their second page of history (one extra page per session,
+    /// asked for when the first page came back full).
+    pub channel_paged: HashSet<String>,
+    /// D88: the channel open in the centre (clears `selected_project` for the transcript).
+    pub selected_channel: Option<ChannelSel>,
+    /// D88: the server whose channel list the left pane slid into.
+    pub open_server: Option<Id>,
+    /// D88: the sheet open over the shell (new server / join / new channel).
+    pub server_sheet: Option<ServerSheet>,
+    /// D88: a server write is in flight (sheet buttons dim) and its last failure.
+    pub server_busy: bool,
+    pub server_error: Option<String>,
+    /// D88: a channel waiting for its room (`room_id` null right after creation).
+    channel_pending_room: Option<(Id, Id)>,
     commands: mpsc::UnboundedSender<ClientCommand>,
     update_commands: mpsc::UnboundedSender<UpdateCommand>,
     call_commands: mpsc::UnboundedSender<CallCmd>,
@@ -653,6 +694,18 @@ impl AppState {
             missed_pending: Vec::new(),
             ended_written: HashSet::new(),
             my_call: None,
+            servers_available: false,
+            servers: Vec::new(),
+            matrix_snapshot: Snapshot::default(),
+            matrix_connected: false,
+            channel_rows: HashMap::new(),
+            channel_paged: HashSet::new(),
+            selected_channel: None,
+            open_server: None,
+            server_sheet: None,
+            server_busy: false,
+            server_error: None,
+            channel_pending_room: None,
             _pump: pump,
             _notify_tick: notify_tick,
             _update_pump: update_pump,
@@ -1675,6 +1728,46 @@ impl AppState {
                     mock,
                 });
             }
+            SyncEvent::ServersAvailable(on) => {
+                self.servers_available = on;
+                if !on {
+                    let gone: Vec<Id> = self.servers.iter().map(|s| s.id.clone()).collect();
+                    for id in gone {
+                        self.drop_server(&id, cx);
+                    }
+                    self.server_sheet = None;
+                }
+                cx.notify();
+            }
+            SyncEvent::Servers(list) => self.on_servers(list, cx),
+            SyncEvent::ServerDetail(server) => self.on_server_detail(server, cx),
+            SyncEvent::ServerOpened(server) => self.on_server_opened(server, cx),
+            SyncEvent::ServerError(text) => {
+                self.server_busy = false;
+                self.server_error = Some(text);
+                cx.notify();
+            }
+            SyncEvent::MatrixRooms(snapshot) => self.on_matrix_rooms(snapshot, cx),
+            SyncEvent::MatrixTimeline { room_id, rows } => {
+                self.on_matrix_timeline(room_id, rows, cx)
+            }
+            SyncEvent::MatrixConnection { connected, error } => {
+                if let (false, Some(err)) = (connected, &error) {
+                    log::warn!("servers: homeserver connection: {err}");
+                }
+                if self.matrix_connected != connected {
+                    self.matrix_connected = connected;
+                    cx.notify();
+                }
+            }
+            SyncEvent::ChannelSendFailed {
+                room_id,
+                local_id,
+                error,
+            } => {
+                log::warn!("servers: send to {room_id} failed: {error}");
+                self.on_channel_send_failed(room_id, local_id, cx)
+            }
         }
     }
 
@@ -1916,7 +2009,12 @@ impl AppState {
         self.tabs(project_id).iter().find(|c| &c.id == chat_id)
     }
 
+    /// The chat the centre shows: a channel's room id when one is open (D88), else the
+    /// selected project's active tab.
     pub fn active_chat_id(&self) -> Option<Id> {
+        if let Some(sel) = &self.selected_channel {
+            return sel.room_id.clone();
+        }
         self.active_chat().map(|c| c.id.clone())
     }
 
@@ -1932,6 +2030,7 @@ impl AppState {
     pub fn messages_of(&self, chat_id: &str) -> &[Message] {
         self.messages
             .get(chat_id)
+            .or_else(|| self.channel_rows.get(chat_id))
             .map(|v| v.as_slice())
             .unwrap_or(&[])
     }
@@ -2026,7 +2125,10 @@ impl AppState {
     }
 
     pub fn select_project(&mut self, project_id: Id, cx: &mut Context<Self>) {
-        let switching = self.selected_project.as_deref() != Some(project_id.as_str());
+        let switching = self.selected_project.as_deref() != Some(project_id.as_str())
+            || self.selected_channel.is_some();
+        // A chat replaces the channel in the centre (D88).
+        self.selected_channel = None;
         if switching {
             self.search_chat = None;
             // The right pane belongs to the chat it was opened from; a new
@@ -2090,6 +2192,7 @@ impl AppState {
                 archived: false,
             });
         }
+        self.selected_channel = None;
         self.selected_project = Some(project_id.clone());
         self.sidebar_overlay = false;
         self.active_tab.insert(project_id.clone(), chat_id.clone());
@@ -2436,6 +2539,15 @@ impl AppState {
         let Some(chat_id) = self.active_chat_id() else {
             return;
         };
+        if self.selected_channel.is_some() {
+            self.send_to_channel(
+                chat_id,
+                text,
+                attachments.len() + usize::from(voice_wav.is_some()),
+                cx,
+            );
+            return;
+        }
         let message_id = new_id();
         // Guide never answers a card — it steers the live turn.
         let answer = !steer && self.chat_needs_answer(&chat_id);
@@ -2605,6 +2717,707 @@ impl AppState {
             });
         }
         cx.emit(AppEvent::TranscriptChanged { chat_id });
+        cx.notify();
+    }
+
+    // ----- servers and channels (D88) --------------------------------------
+
+    pub fn server(&self, server_id: &str) -> Option<&ServerInfo> {
+        self.servers.iter().find(|s| s.id == server_id)
+    }
+
+    /// The server whose channel list the left pane shows.
+    pub fn open_server_info(&self) -> Option<&ServerInfo> {
+        self.open_server.as_deref().and_then(|id| self.server(id))
+    }
+
+    /// The channel open in the centre, with its server.
+    pub fn selected_channel_info(&self) -> Option<(&ServerInfo, &crate::model::ServerChannel)> {
+        let sel = self.selected_channel.as_ref()?;
+        let server = self.server(&sel.server_id)?;
+        let channel = server.channel(&sel.channel_id)?;
+        Some((server, channel))
+    }
+
+    /// The homeserver's row for a channel (preview, unread, `can_post`), by registry id or room.
+    pub fn channel_row(&self, channel: &crate::model::ServerChannel) -> Option<&ChannelRow> {
+        self.matrix_snapshot.channels.iter().find(|c| {
+            c.channel_id == channel.id || channel.room_id.as_deref().is_some_and(|r| r == c.room_id)
+        })
+    }
+
+    /// The homeserver's row for a server (last activity across its channels, unread).
+    pub fn space_row(&self, server: &ServerInfo) -> Option<&SpaceRow> {
+        self.matrix_snapshot.spaces.iter().find(|s| {
+            s.server_id == server.id
+                || server
+                    .space_room_id
+                    .as_deref()
+                    .is_some_and(|r| r == s.room_id)
+        })
+    }
+
+    /// Last activity of a server for the left list's ordering (ms).
+    pub fn server_last_activity(&self, server: &ServerInfo) -> u64 {
+        let from_rooms = self
+            .space_row(server)
+            .map(|s| s.last_ts)
+            .filter(|t| *t > 0)
+            .map(|t| t as u64);
+        from_rooms.unwrap_or(server.created_at.max(0) as u64)
+    }
+
+    /// Rule 9: `false` on a restricted channel where I am not an admin.
+    pub fn channel_can_post(&self) -> bool {
+        let Some((server, channel)) = self.selected_channel_info() else {
+            return true;
+        };
+        if server.can_admin() || !channel.restricted {
+            return true;
+        }
+        self.channel_row(channel).is_some_and(|r| r.can_post)
+    }
+
+    /// The room of a channel: the registry's, else the one the homeserver lists for its id.
+    fn room_of_channel(&self, channel: &crate::model::ServerChannel) -> Option<String> {
+        channel
+            .room_id
+            .clone()
+            .or_else(|| self.channel_row(channel).map(|r| r.room_id.clone()))
+    }
+
+    /// Server row click: slide the left pane into its channels and land on `#general`.
+    pub fn enter_server(&mut self, server_id: Id, cx: &mut Context<Self>) {
+        let Some(server) = self.server(&server_id).cloned() else {
+            return;
+        };
+        self.open_server = Some(server_id.clone());
+        self.sidebar_overlay = false;
+        if let Some(general) = server.general() {
+            let id = general.id.clone();
+            self.select_channel(server_id, id, cx);
+        } else {
+            cx.notify();
+        }
+    }
+
+    /// Back arrow at the top of the channel list: the chat list again. The channel in the
+    /// centre stays until a chat is picked.
+    pub fn close_server_pane(&mut self, cx: &mut Context<Self>) {
+        if self.open_server.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    pub fn select_channel(&mut self, server_id: Id, channel_id: Id, cx: &mut Context<Self>) {
+        let Some(channel) = self
+            .server(&server_id)
+            .and_then(|s| s.channel(&channel_id))
+            .cloned()
+        else {
+            return;
+        };
+        let room_id = self.room_of_channel(&channel);
+        let same = self
+            .selected_channel
+            .as_ref()
+            .is_some_and(|c| c.server_id == server_id && c.channel_id == channel_id);
+        if !same {
+            self.close_profile(cx);
+        }
+        self.search_chat = None;
+        self.reveal_message = None;
+        self.highlight_message = None;
+        self.renaming_project = None;
+        self.selected_project = None;
+        self.sidebar_overlay = false;
+        self.selected_channel = Some(ChannelSel {
+            server_id: server_id.clone(),
+            channel_id: channel_id.clone(),
+            room_id: room_id.clone(),
+        });
+        match room_id {
+            Some(room_id) => {
+                self.channel_pending_room = None;
+                self.command(ClientCommand::ChannelOpen {
+                    room_id: room_id.clone(),
+                });
+                self.command(ClientCommand::ChannelMarkRead { room_id });
+            }
+            // Just created: the room shows up in the next snapshot or registry refresh.
+            None => self.channel_pending_room = Some((server_id, channel_id)),
+        }
+        self.sync_focus();
+        cx.notify();
+    }
+
+    /// A channel whose room was unknown when it was opened: resolve it once it is listed.
+    fn resolve_pending_channel(&mut self, cx: &mut Context<Self>) {
+        let Some((server_id, channel_id)) = self.channel_pending_room.clone() else {
+            return;
+        };
+        let still_open = self
+            .selected_channel
+            .as_ref()
+            .is_some_and(|c| c.server_id == server_id && c.channel_id == channel_id);
+        if !still_open {
+            self.channel_pending_room = None;
+            return;
+        }
+        let room = self
+            .server(&server_id)
+            .and_then(|s| s.channel(&channel_id))
+            .and_then(|c| self.room_of_channel(c));
+        if room.is_some() {
+            self.select_channel(server_id, channel_id, cx);
+        }
+    }
+
+    pub fn open_server_sheet(&mut self, sheet: ServerSheet, cx: &mut Context<Self>) {
+        self.new_chat_open = false;
+        self.new_group_open = false;
+        self.new_project_open = false;
+        self.server_error = None;
+        self.server_busy = false;
+        self.server_sheet = Some(sheet);
+        cx.notify();
+    }
+
+    /// Closes the sheet; `true` when one was open.
+    pub fn close_server_sheet(&mut self, cx: &mut Context<Self>) -> bool {
+        let was = self.server_sheet.take().is_some();
+        self.server_error = None;
+        self.server_busy = false;
+        if was {
+            cx.notify();
+        }
+        was
+    }
+
+    /// Sheet "Create": `POST /servers`; the answer opens it on `#general`.
+    pub fn create_server(&mut self, name: String, cx: &mut Context<Self>) {
+        let name = name.trim().chars().take(64).collect::<String>();
+        if name.is_empty() || self.server_busy {
+            return;
+        }
+        self.server_busy = true;
+        self.server_error = None;
+        self.command(ClientCommand::ServerCreate { name });
+        cx.notify();
+    }
+
+    /// Sheet "Join": `POST /servers/join` with the pasted link or code.
+    pub fn join_server(&mut self, code: String, cx: &mut Context<Self>) {
+        let code = code.trim().to_string();
+        if code.is_empty() || self.server_busy {
+            return;
+        }
+        self.server_busy = true;
+        self.server_error = None;
+        self.command(ClientCommand::ServerJoin { code });
+        cx.notify();
+    }
+
+    /// Rule 7: letters, digits and dashes; lower-cased, spaces become dashes.
+    pub fn channel_name_clean(name: &str) -> String {
+        let mut out = String::new();
+        for ch in name.trim().chars().take(48) {
+            if ch.is_ascii_alphanumeric() {
+                out.extend(ch.to_lowercase());
+            } else if (ch == '-' || ch.is_whitespace() || ch == '_') && !out.ends_with('-') {
+                out.push('-');
+            }
+        }
+        out.trim_matches('-').to_string()
+    }
+
+    /// Sheet "Create" inside a server (owner/admin): `POST /servers/{id}/channels`.
+    pub fn create_channel(
+        &mut self,
+        server_id: Id,
+        name: String,
+        restricted: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let name = Self::channel_name_clean(&name);
+        if name.is_empty() || self.server_busy {
+            return;
+        }
+        if !self.server(&server_id).is_some_and(ServerInfo::can_admin) {
+            return;
+        }
+        self.server_busy = true;
+        self.server_error = None;
+        self.command(ClientCommand::ChannelCreate {
+            server_id,
+            name,
+            restricted,
+        });
+        cx.notify();
+    }
+
+    /// Server page: rename (owner/admin) — optimistic, then `PATCH /servers/{id}`.
+    pub fn set_server_name(&mut self, server_id: Id, name: String, cx: &mut Context<Self>) {
+        let name = name.trim().chars().take(64).collect::<String>();
+        self.profile_editing_name = false;
+        if name.is_empty() {
+            cx.notify();
+            return;
+        }
+        if let Some(s) = self.servers.iter_mut().find(|s| s.id == server_id) {
+            if s.name == name || !s.can_admin() {
+                cx.notify();
+                return;
+            }
+            s.name = name.clone();
+        }
+        self.command(ClientCommand::ServerRename { server_id, name });
+        cx.notify();
+    }
+
+    /// Server page, Channels tab: rename a channel (owner/admin).
+    pub fn set_channel_name(
+        &mut self,
+        server_id: Id,
+        channel_id: Id,
+        name: String,
+        cx: &mut Context<Self>,
+    ) {
+        let name = Self::channel_name_clean(&name);
+        if name.is_empty() {
+            cx.notify();
+            return;
+        }
+        if let Some(c) = self
+            .servers
+            .iter_mut()
+            .find(|s| s.id == server_id)
+            .filter(|s| s.can_admin())
+            .and_then(|s| s.channels.iter_mut().find(|c| c.id == channel_id))
+        {
+            if c.name == name {
+                cx.notify();
+                return;
+            }
+            c.name = name.clone();
+        }
+        self.command(ClientCommand::ChannelPatch {
+            server_id,
+            channel_id,
+            name: Some(name),
+            restricted: None,
+        });
+        cx.notify();
+    }
+
+    /// Server page, Channels tab: "Admins only post" toggle (owner/admin).
+    pub fn set_channel_restricted(
+        &mut self,
+        server_id: Id,
+        channel_id: Id,
+        restricted: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(c) = self
+            .servers
+            .iter_mut()
+            .find(|s| s.id == server_id)
+            .filter(|s| s.can_admin())
+            .and_then(|s| s.channels.iter_mut().find(|c| c.id == channel_id))
+        {
+            c.restricted = restricted;
+        }
+        self.command(ClientCommand::ChannelPatch {
+            server_id,
+            channel_id,
+            name: None,
+            restricted: Some(restricted),
+        });
+        cx.notify();
+    }
+
+    /// Server page, Channels tab: delete a channel (owner/admin; `#general` refuses).
+    pub fn delete_channel(&mut self, server_id: Id, channel_id: Id, cx: &mut Context<Self>) {
+        let was_open = self
+            .selected_channel
+            .as_ref()
+            .is_some_and(|c| c.channel_id == channel_id);
+        if let Some(s) = self
+            .servers
+            .iter_mut()
+            .find(|s| s.id == server_id)
+            .filter(|s| s.can_admin())
+        {
+            s.channels.retain(|c| c.id != channel_id);
+        }
+        self.command(ClientCommand::ChannelDelete {
+            server_id: server_id.clone(),
+            channel_id,
+        });
+        if was_open {
+            if let Some(general) = self.server(&server_id).and_then(|s| s.general()) {
+                let id = general.id.clone();
+                self.select_channel(server_id, id, cx);
+                return;
+            }
+            self.selected_channel = None;
+        }
+        cx.notify();
+    }
+
+    /// Owner: make a member an admin (or an admin a member again).
+    pub fn set_member_role(
+        &mut self,
+        server_id: Id,
+        user_id: Id,
+        role: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(m) = self
+            .servers
+            .iter_mut()
+            .find(|s| s.id == server_id)
+            .filter(|s| s.is_owner())
+            .and_then(|s| s.members.iter_mut().find(|m| m.id == user_id))
+        {
+            m.role = role.to_string();
+        }
+        self.command(ClientCommand::ServerSetRole {
+            server_id,
+            user_id,
+            role: role.to_string(),
+        });
+        cx.notify();
+    }
+
+    /// Owner/admin: remove a member; `ban` keeps them out.
+    pub fn remove_server_member(
+        &mut self,
+        server_id: Id,
+        user_id: Id,
+        ban: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(s) = self
+            .servers
+            .iter_mut()
+            .find(|s| s.id == server_id)
+            .filter(|s| s.can_admin())
+        {
+            s.members.retain(|m| m.id != user_id);
+            s.member_count = s.member_count.saturating_sub(1);
+        }
+        self.command(ClientCommand::ServerRemoveMember {
+            server_id,
+            user_id,
+            ban,
+        });
+        cx.notify();
+    }
+
+    pub fn reset_invite(&mut self, server_id: Id, cx: &mut Context<Self>) {
+        if !self.server(&server_id).is_some_and(ServerInfo::is_owner) {
+            return;
+        }
+        self.command(ClientCommand::ServerResetInvite { server_id });
+        cx.notify();
+    }
+
+    /// Member: leave; owner: delete. Either way the server leaves this Mac at once.
+    pub fn leave_server(&mut self, server_id: Id, cx: &mut Context<Self>) {
+        let owner = self.server(&server_id).is_some_and(ServerInfo::is_owner);
+        self.command(if owner {
+            ClientCommand::ServerDelete {
+                server_id: server_id.clone(),
+            }
+        } else {
+            ClientCommand::ServerLeave {
+                server_id: server_id.clone(),
+            }
+        });
+        self.drop_server(&server_id, cx);
+    }
+
+    /// Forget a server locally (left, deleted, or gone from the list).
+    fn drop_server(&mut self, server_id: &str, cx: &mut Context<Self>) {
+        self.servers.retain(|s| s.id != server_id);
+        if self.open_server.as_deref() == Some(server_id) {
+            self.open_server = None;
+        }
+        if self
+            .selected_channel
+            .as_ref()
+            .is_some_and(|c| c.server_id == server_id)
+        {
+            self.selected_channel = None;
+            self.channel_pending_room = None;
+            self.sync_focus();
+        }
+        if matches!(&self.profile, Some(ProfilePage::Server { server_id: id }) if id == server_id) {
+            self.close_profile(cx);
+        }
+        cx.notify();
+    }
+
+    /// `user:<my id>`: the member string own channel rows carry (`crdt-sync.md` §6.2).
+    fn me_member(&self) -> String {
+        format!("user:{}", self.me_id())
+    }
+
+    /// One transcript row from a homeserver row: the JSON is already the chat-doc shape.
+    fn channel_message(&self, room_id: &str, row: &MessageRow) -> Option<Message> {
+        let mut m: Message = serde_json::from_str(&row.json).ok()?;
+        m.chat_id = room_id.to_string();
+        m.pending = false;
+        if m.sender.is_empty() {
+            m.sender = row.sender.clone();
+        }
+        if m.sender_name.as_deref().is_none_or(str::is_empty) && !row.sender_name.is_empty() {
+            m.sender_name = Some(row.sender_name.clone());
+        }
+        if m.created_at == 0 && row.created_at > 0 {
+            m.created_at = row.created_at as u64;
+        }
+        if m.sender_handle.as_deref().is_some_and(str::is_empty) {
+            m.sender_handle = None;
+        }
+        if m.sender == self.me_member() {
+            // The transcript's "mine" rule and the people-chat avatar lookup.
+            m.sender_handle = Some(self.me_handle());
+        }
+        Some(m)
+    }
+
+    /// Composer send in a channel: optimistic row (id = ULID) that the echo replaces.
+    fn send_to_channel(
+        &mut self,
+        room_id: Id,
+        text: String,
+        extras: usize,
+        cx: &mut Context<Self>,
+    ) {
+        if extras > 0 {
+            self.push_notice("Attachments are not supported in channels yet");
+        }
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            cx.notify();
+            return;
+        }
+        if !self.channel_can_post() {
+            return;
+        }
+        let local_id = new_id();
+        {
+            let ui = self.chat_ui.entry(room_id.clone()).or_default();
+            if !ui.composer_dropped {
+                ui.composer_dropped = true;
+                ui.drop_started_at = Some(now_ms());
+            }
+            ui.reply_to = None;
+        }
+        let me = self.me_member();
+        let handle = self.me_handle();
+        let avatar = self.account.as_ref().map(|a| a.avatar_url.clone());
+        self.channel_rows
+            .entry(room_id.clone())
+            .or_default()
+            .push(Message {
+                id: local_id.clone(),
+                chat_id: room_id.clone(),
+                role: Role::User,
+                sender: me,
+                status: MessageStatus::Done,
+                turn: None,
+                decision: None,
+                subagent_id: None,
+                subagent_name: None,
+                handoff_messages: None,
+                reactions: Default::default(),
+                in_reply_to: None,
+                routine_name: None,
+                sender_name: None,
+                sender_icon: None,
+                sender_handle: Some(handle),
+                sender_avatar: avatar,
+                sender_avatar_color: None,
+                mentions: Vec::new(),
+                reply_to: None,
+                asked_by_handle: None,
+                owner_handle: None,
+                usage: None,
+                return_contract: None,
+                waiting_user: false,
+                waiting_approval: false,
+                model: None,
+                effort: None,
+                created_at: now_ms(),
+                completed_at: Some(now_ms()),
+                call_id: None,
+                activity: None,
+                pending: true,
+                parts: vec![Part::Text {
+                    id: new_id(),
+                    text: text.clone(),
+                }],
+                hidden_parts: Vec::new(),
+                greeting: false,
+            });
+        self.command(ClientCommand::ChannelSend {
+            room_id: room_id.clone(),
+            local_id,
+            text,
+        });
+        cx.emit(AppEvent::TranscriptChanged { chat_id: room_id });
+        cx.notify();
+    }
+
+    /// `GET /servers` landed: keep members already fetched, drop servers that left.
+    fn on_servers(&mut self, list: Vec<ServerInfo>, cx: &mut Context<Self>) {
+        self.servers_available = true;
+        let mut merged = Vec::with_capacity(list.len());
+        for mut s in list {
+            if let Some(old) = self.servers.iter().find(|o| o.id == s.id) {
+                if s.members.is_empty() {
+                    s.members = old.members.clone();
+                }
+            }
+            merged.push(s);
+        }
+        let gone: Vec<Id> = self
+            .servers
+            .iter()
+            .filter(|o| !merged.iter().any(|s| s.id == o.id))
+            .map(|o| o.id.clone())
+            .collect();
+        self.servers = merged;
+        for id in gone {
+            self.drop_server(&id, cx);
+        }
+        self.want_member_avatars();
+        self.resolve_pending_channel(cx);
+        cx.notify();
+    }
+
+    /// One server with members (the detail route or a write's answer).
+    fn on_server_detail(&mut self, server: ServerInfo, cx: &mut Context<Self>) {
+        self.server_busy = false;
+        self.server_error = None;
+        if self.server_sheet.is_some() {
+            // A channel was created: the sheet is done.
+            self.server_sheet = None;
+        }
+        match self.servers.iter_mut().find(|s| s.id == server.id) {
+            Some(slot) => *slot = server,
+            None => self.servers.push(server),
+        }
+        self.want_member_avatars();
+        self.resolve_pending_channel(cx);
+        cx.notify();
+    }
+
+    /// Created or joined: the sheet closes and the server opens on `#general`.
+    fn on_server_opened(&mut self, server: ServerInfo, cx: &mut Context<Self>) {
+        self.server_busy = false;
+        self.server_error = None;
+        self.server_sheet = None;
+        let id = server.id.clone();
+        match self.servers.iter_mut().find(|s| s.id == id) {
+            Some(slot) => *slot = server,
+            None => self.servers.push(server),
+        }
+        self.want_member_avatars();
+        self.enter_server(id, cx);
+    }
+
+    fn want_member_avatars(&mut self) {
+        let urls: Vec<String> = self
+            .servers
+            .iter()
+            .flat_map(|s| s.members.iter())
+            .map(|m| m.avatar_url.clone())
+            .filter(|u| !u.is_empty())
+            .collect();
+        for url in urls {
+            self.want_avatar(url);
+        }
+    }
+
+    /// The homeserver's room list changed: previews, unread, and rooms of fresh channels.
+    fn on_matrix_rooms(&mut self, snapshot: Snapshot, cx: &mut Context<Self>) {
+        self.matrix_snapshot = snapshot;
+        self.resolve_pending_channel(cx);
+        // A channel the registry does not know yet (joined elsewhere): refetch the list.
+        let unknown = self
+            .matrix_snapshot
+            .spaces
+            .iter()
+            .any(|s| !s.server_id.is_empty() && self.server(&s.server_id).is_none());
+        if unknown && self.servers_available {
+            self.command(ClientCommand::ServersRefresh);
+        }
+        cx.notify();
+    }
+
+    /// Rows of a channel (the first page, a page of history, or the whole list after a new row).
+    /// Optimistic rows not echoed yet stay at the end.
+    fn on_matrix_timeline(
+        &mut self,
+        room_id: String,
+        rows: Vec<MessageRow>,
+        cx: &mut Context<Self>,
+    ) {
+        let mut decoded: Vec<Message> = rows
+            .iter()
+            .filter_map(|r| self.channel_message(&room_id, r))
+            .collect();
+        let echoed: HashSet<Id> = decoded.iter().map(|m| m.id.clone()).collect();
+        if let Some(old) = self.channel_rows.get(&room_id) {
+            for m in old.iter().filter(|m| m.pending && !echoed.contains(&m.id)) {
+                decoded.push(m.clone());
+            }
+        }
+        let urls: Vec<String> = decoded
+            .iter()
+            .filter_map(|m| m.sender_avatar.clone())
+            .filter(|u| !u.is_empty())
+            .collect();
+        for url in urls {
+            self.want_avatar(url);
+        }
+        let count = decoded.len();
+        self.channel_rows.insert(room_id.clone(), decoded);
+        // A full first page means there is more above: fetch one more page so the room opens
+        // with a comfortable scrollback (one extra page per session; the rest on demand later).
+        if count >= CHANNEL_PAGE && self.channel_paged.insert(room_id.clone()) {
+            self.command(ClientCommand::ChannelLoadOlder {
+                room_id: room_id.clone(),
+            });
+        }
+        let active = self
+            .selected_channel
+            .as_ref()
+            .and_then(|c| c.room_id.as_deref())
+            == Some(room_id.as_str());
+        if active && self.window_active {
+            self.command(ClientCommand::ChannelMarkRead {
+                room_id: room_id.clone(),
+            });
+        }
+        cx.emit(AppEvent::TranscriptChanged { chat_id: room_id });
+        cx.notify();
+    }
+
+    fn on_channel_send_failed(
+        &mut self,
+        room_id: String,
+        local_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(rows) = self.channel_rows.get_mut(&room_id) {
+            rows.retain(|m| m.id != local_id);
+        }
+        cx.emit(AppEvent::TranscriptChanged { chat_id: room_id });
         cx.notify();
     }
 
@@ -3095,6 +3908,12 @@ impl AppState {
             ProfilePage::Agent { project_id } => Some(project_id.clone()),
             _ => None,
         };
+        if let ProfilePage::Server { server_id } = &page {
+            // Members only come with the detail route.
+            self.command(ClientCommand::ServerFetch {
+                server_id: server_id.clone(),
+            });
+        }
         self.profile = Some(page);
         self.profile_from_name = false;
         self.profile_tab = 0;
@@ -3782,6 +4601,15 @@ impl AppState {
         if self.window_active != active {
             self.window_active = active;
             self.sync_focus();
+            if active {
+                if let Some(room_id) = self
+                    .selected_channel
+                    .as_ref()
+                    .and_then(|c| c.room_id.clone())
+                {
+                    self.command(ClientCommand::ChannelMarkRead { room_id });
+                }
+            }
             cx.notify();
         }
     }
@@ -3789,7 +4617,8 @@ impl AppState {
     /// Tell the relay which chat is on screen in a focused window (API §7c:
     /// presence `focused_chat`), whenever that changes.
     fn sync_focus(&mut self) {
-        let focused = if self.window_active {
+        // Channels (D88) are not relay rooms: presence frames carry no focused chat for them.
+        let focused = if self.window_active && self.selected_channel.is_none() {
             self.active_chat_id()
         } else {
             None
