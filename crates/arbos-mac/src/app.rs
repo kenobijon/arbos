@@ -3279,8 +3279,11 @@ impl AppState {
         if m.sender_handle.as_deref().is_some_and(str::is_empty) {
             m.sender_handle = None;
         }
-        if m.sender == self.me_member() {
-            // The transcript's "mine" rule and the people-chat avatar lookup.
+        // A homeserver row names its sender by Matrix localpart, which is lower-case; relay
+        // ids keep their case (`test_<ULID>`). Own rows take the exact member string the
+        // transcript's "mine" rule compares against, and the people-chat avatar lookup.
+        if m.sender.eq_ignore_ascii_case(&self.me_member()) {
+            m.sender = self.me_member();
             m.sender_handle = Some(self.me_handle());
         }
         Some(m)
