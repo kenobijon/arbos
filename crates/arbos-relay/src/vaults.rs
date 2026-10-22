@@ -10,6 +10,12 @@
 //! `ARBOS_OP_ITEMS_TTL_SECS` (cached item list; default 3600), `ARBOS_OP_CONFIG_DIR` (default
 //! `<data>/op`), `ARBOS_OP_READS_PER_HOUR` / `ARBOS_OP_READS_PER_DAY` (plan limits; defaults
 //! 1000 / 1000). `ARBOS_OP_DISABLED=1` turns the provider off (`providers: []`).
+//!
+//! Remote flag `ARBOS_FEATURE_VAULT_CONNECT` (default **off**, Jacob 2026-10-21): while off the
+//! relay advertises no provider (`providers: []`, `features.vault_connect: false` on `GET /secrets`
+//! and `GET /me`) and `POST /vaults` answers 403 `feature_off`, so no app shows the Connect
+//! 1Password flow. Vaults already connected keep working (list, resolve, access, token, refresh,
+//! disconnect). Flip with `ARBOS_FEATURE_VAULT_CONNECT=1` in the relay env; no client release.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -56,6 +62,21 @@ fn provider_enabled() -> bool {
     !std::env::var("ARBOS_OP_DISABLED").is_ok_and(|v| v == "1")
 }
 
+/// `ARBOS_FEATURE_VAULT_CONNECT=1|true|on` lets users connect new vaults. Default off.
+fn connect_enabled() -> bool {
+    std::env::var("ARBOS_FEATURE_VAULT_CONNECT").is_ok_and(|v| {
+        matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "on" | "yes"
+        )
+    })
+}
+
+/// Remote feature flags the apps read (`GET /secrets` and `GET /me` → `features`).
+pub(crate) fn features() -> Value {
+    json!({ "vault_connect": provider_enabled() && connect_enabled() })
+}
+
 fn cache_ttl() -> Duration {
     Duration::from_secs(env_u64("ARBOS_OP_CACHE_TTL_SECS", 300))
 }
@@ -74,7 +95,7 @@ fn reads_per_day() -> i64 {
 
 /// Providers this relay can connect (`GET /secrets` → `providers[]`).
 pub(crate) fn providers(_state: &AppState) -> Vec<&'static str> {
-    if provider_enabled() {
+    if provider_enabled() && connect_enabled() {
         vec!["onepassword"]
     } else {
         Vec::new()
@@ -746,7 +767,7 @@ pub(crate) fn admin_status(state: &AppState) -> Value {
     let paths = std::env::var("PATH").unwrap_or_default();
     let found = std::env::split_paths(&paths).any(|d| d.join(op_bin()).is_file())
         || std::path::Path::new(&op_bin()).is_file();
-    json!({ "onepassword": { "available": provider_enabled() && found, "op_bin": op_bin(),
+    json!({ "onepassword": { "available": provider_enabled() && found, "connect_enabled": connect_enabled(), "op_bin": op_bin(),
         "cache_ttl_secs": cache_ttl().as_secs(), "items_ttl_secs": items_ttl_ms() / 1000,
         "reads_per_hour": reads_per_hour(), "reads_per_day": reads_per_day(),
         "vaults": state.db.with(|c| c.query_row("SELECT COUNT(*) FROM vaults WHERE disconnected_at IS NULL", [], |r| r.get::<_, i64>(0))).unwrap_or(0) } })
@@ -821,6 +842,13 @@ pub async fn connect(
     Json(b): Json<ConnectBody>,
 ) -> ApiResult {
     let user_id = device_user(&principal)?;
+    if !connect_enabled() {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "feature_off",
+            "Connecting a vault is turned off on this relay.",
+        ));
+    }
     if !provider_enabled() || b.provider != "onepassword" {
         return Err(err(
             StatusCode::NOT_IMPLEMENTED,

@@ -6170,11 +6170,15 @@ async fn refresh_secrets(shared: &Arc<Shared>) {
         .iter()
         .filter_map(|p| p.as_str().map(str::to_string))
         .collect();
+    let vault_connect = overview["features"]["vault_connect"]
+        .as_bool()
+        .unwrap_or(false);
     let _ = shared.events.send(SyncEvent::Secrets(SecretsView {
         paused: overview["paused"].as_bool().unwrap_or(false),
         secrets,
         vaults,
         providers,
+        vault_connect,
         requests,
         activity,
         loaded: true,

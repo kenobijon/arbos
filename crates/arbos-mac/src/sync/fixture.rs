@@ -1802,8 +1802,11 @@ fn seed_secrets() -> SecretsView {
             4_320,
         ),
     ];
-    // One connected 1Password vault (Phase 2), names only — the iPhone fixture's twin.
-    let vaults = vec![crate::model::ConnectedVault {
+    // One connected 1Password vault (Phase 2), names only — the iPhone fixture's twin. Seeded only
+    // with `ARBOS_FIXTURE_VAULT=1` (screenshot rig): the shipped default hides the connect flow
+    // (`features.vault_connect` off) and no user has a vault, so the page shows secrets only.
+    let fixture_vault = std::env::var("ARBOS_FIXTURE_VAULT").is_ok_and(|v| v == "1");
+    let mut vaults = vec![crate::model::ConnectedVault {
         id: "fx-vault-1p".into(),
         provider: "onepassword".into(),
         name: "Arbos — Research".into(),
@@ -1826,11 +1829,19 @@ fn seed_secrets() -> SecretsView {
         ],
         env_items: 1,
     }];
+    if !fixture_vault {
+        vaults.clear();
+    }
     SecretsView {
         paused: false,
         secrets,
         vaults,
-        providers: vec!["onepassword".into()],
+        providers: if fixture_vault {
+            vec!["onepassword".into()]
+        } else {
+            Vec::new()
+        },
+        vault_connect: fixture_vault,
         requests,
         activity,
         loaded: true,
