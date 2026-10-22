@@ -165,7 +165,14 @@ pub struct SyncHub {
     pub hosts: Arc<Mutex<HashMap<String, SharedHost>>>,
     pub incoming: mpsc::Sender<Incoming>,
     pub peer_id: u64,
+    /// The room client tasks, so a stopped workspace takes its sockets down with it.
+    room_tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
 }
+
+/// Backoff while the relay refuses a room outright (HTTP 403 / 404: the project was deleted,
+/// the chat is gone, the box lost access). Redialing every 16 s per room turned a deleted
+/// project with 19 chats into ~80 refused handshakes a minute (Jacob's box, 2026-10-22).
+const REFUSED_ROOM_BACKOFF: Duration = Duration::from_secs(10 * 60);
 
 /// A fresh Loro peer id per process boot. A box killed between a PUSH and its persist would
 /// otherwise mint new ops under ids the relay already holds (same peer, same counters).
@@ -174,6 +181,16 @@ fn peer_id_for(device: &str) -> u64 {
     let nonce = ulid();
     let h = sha2::Sha256::digest(format!("{device}:{nonce}").as_bytes());
     u64::from_le_bytes(h[..8].try_into().expect("8 bytes")) | 1
+}
+
+/// The relay answered the websocket upgrade with 403 or 404: no retrying fast will change that.
+fn handshake_refused(e: &anyhow::Error) -> bool {
+    use tokio_tungstenite::tungstenite::http::StatusCode;
+    use tokio_tungstenite::tungstenite::Error as WsError;
+    matches!(
+        e.downcast_ref::<WsError>(),
+        Some(WsError::Http(r)) if matches!(r.status(), StatusCode::FORBIDDEN | StatusCode::NOT_FOUND)
+    )
 }
 
 impl SyncHub {
@@ -185,6 +202,7 @@ impl SyncHub {
             hosts: Arc::new(Mutex::new(HashMap::new())),
             incoming,
             peer_id,
+            room_tasks: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -238,8 +256,25 @@ impl SyncHub {
             .insert(chat_id.to_owned(), host.clone());
         let hub = self.clone();
         let h2 = host.clone();
-        tokio::spawn(async move { hub.run_room(h2).await });
+        let task = tokio::spawn(async move { hub.run_room(h2).await });
+        let mut tasks = self.room_tasks.lock().await;
+        tasks.retain(|t| !t.is_finished());
+        tasks.push(task);
         Ok(host)
+    }
+
+    /// The workspace is stopping (its project was deleted, or it is held for a migration): close
+    /// every room for good and end the sessions, so nothing keeps redialing the relay. The room
+    /// tasks were detached before, and a removed workspace's 20 rooms kept reconnecting with 403
+    /// every 16 s each until the box restarted.
+    pub async fn close_all(&self) {
+        let hosts: Vec<SharedHost> = self.hosts.lock().await.drain().map(|(_, h)| h).collect();
+        for h in &hosts {
+            h.lock().await.closed = true;
+        }
+        for t in self.room_tasks.lock().await.drain(..) {
+            t.abort();
+        }
     }
 
     /// Leave a room for good (the agent was removed from a people chat): the session closes and
@@ -304,8 +339,17 @@ impl SyncHub {
             }
             let started = std::time::Instant::now();
             let room_name = host.lock().await.room.clone();
+            let mut refused = false;
             match self.room_session(&host).await {
                 Ok(()) => tracing::info!(room = %room_name, "room session closed"),
+                Err(e) if handshake_refused(&e) => {
+                    refused = true;
+                    if backoff < REFUSED_ROOM_BACKOFF {
+                        tracing::warn!(room = %room_name, error = %e, "room refused by the relay; retrying every {REFUSED_ROOM_BACKOFF:?}");
+                    } else {
+                        tracing::debug!(room = %room_name, error = %e, "room still refused");
+                    }
+                }
                 Err(e) => tracing::warn!(room = %room_name, error = %e, "room session error"),
             }
             {
@@ -313,11 +357,15 @@ impl SyncHub {
                 h.clear_inflight();
                 h.caught_up = false;
             }
-            if started.elapsed() > Duration::from_secs(30) {
+            if refused {
+                backoff = REFUSED_ROOM_BACKOFF;
+            } else if started.elapsed() > Duration::from_secs(30) {
                 backoff = Duration::from_millis(250);
             }
             tokio::time::sleep(backoff).await;
-            backoff = (backoff * 2).min(Duration::from_secs(16));
+            if !refused {
+                backoff = (backoff * 2).min(Duration::from_secs(16));
+            }
         }
     }
 

@@ -407,6 +407,7 @@ impl Supervisor {
             .await;
         let _ = tokio::time::timeout(Duration::from_secs(20), w.agent.shutdown()).await;
         w.sync.persist_all().await;
+        w.sync.close_all().await;
         for t in &w.tasks {
             t.abort();
         }
