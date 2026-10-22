@@ -309,4 +309,36 @@ final class CoreFixturesTests: XCTestCase {
         XCTAssertEqual(person.id, "gh_201")
         XCTAssertEqual(person.handle, "user201")
     }
+
+    // MARK: Goals (step 6b-2c-1)
+
+    func testGoalParseFixtures() throws {
+        let raw = try apiFixtureJSON("goal_json.json")
+        let goal = try XCTUnwrap(GoalItem.parse(raw))
+        XCTAssertEqual(goal.id, "goal_fixture")
+        XCTAssertEqual(goal.projectId, "proj_fixture")
+        XCTAssertEqual(goal.projectName, "Fixture")
+        XCTAssertEqual(goal.title, "Ship the DTO step")
+        XCTAssertEqual(goal.status, "active")
+        XCTAssertEqual(goal.autonomy, "suggest")
+        XCTAssertEqual(goal.plan.count, 2)
+        XCTAssertEqual(goal.plan[0].title, "Add GoalDto")
+        XCTAssertEqual(goal.plan[0].status, "done")
+        XCTAssertEqual(goal.plan[1].status, "doing")
+        XCTAssertEqual(goal.progressLog.count, 1)
+        XCTAssertEqual(goal.progressLog[0].text, "Started the shared client core step.")
+        XCTAssertEqual(goal.linkedChatIds, ["chat_primary"])
+        XCTAssertEqual(goal.checkInCron, "0 9 * * 1-5")
+
+        let listData = try apiFixtureData("goals_list.json")
+        let list = try JSONDecoder().decode(GoalsListDto.self, from: listData)
+        XCTAssertEqual(list.goals.count, 1)
+        XCTAssertEqual(list.goals[0].id, "goal_fixture")
+        let rawList = try apiFixtureJSON("goals_list.json") as? [String: Any]
+        let first = try XCTUnwrap((rawList?["goals"] as? [Any])?.first)
+        let listed = try XCTUnwrap(GoalItem.parse(first))
+        XCTAssertEqual(listed.id, "goal_fixture")
+        XCTAssertEqual(listed.plan.count, 2)
+        XCTAssertEqual(listed.progressLog.count, 1)
+    }
 }

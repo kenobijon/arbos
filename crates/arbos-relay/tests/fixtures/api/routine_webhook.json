@@ -1,0 +1,16 @@
+{
+  "chat_id": "chat_primary",
+  "created_at": 1700000000000,
+  "enabled": true,
+  "fire_url": "http://127.0.0.1:7707/routines/routine_webhook_fixture/fire?secret=fixture-webhook-secret-not-real",
+  "id": "routine_webhook_fixture",
+  "last_run_at": null,
+  "name": "Deploy hook",
+  "next_run_at": null,
+  "project_id": "proj_fixture",
+  "prompt": "A deploy finished; summarize.",
+  "trigger": {
+    "kind": "webhook",
+    "secret": "fixture-webhook-secret-not-real"
+  }
+}

@@ -598,6 +598,15 @@ public struct CreditsDto: Codable {
 	}
 }
 
+/// `POST /routines/{rid}/fire` reply.
+public struct FireRoutineResponseDto: Codable {
+	public let run_id: String
+
+	public init(run_id: String) {
+		self.run_id = run_id
+	}
+}
+
 /// `GET /projects/{id}` success body.
 public struct GetProjectResponseDto: Codable {
 	public let project: ProjectDto
@@ -612,6 +621,57 @@ public struct GetProjectResponseDto: Codable {
 		self.box = box
 		self.box_since = box_since
 		self.skills_rev = skills_rev
+	}
+}
+
+/// Goal as clients see it (`goal_json`): `db::Goal` plus optional `project_name`.
+/// 
+/// `plan`, `progress_log`, and the `linked_*_ids` lists stay free-form JSON
+/// (`#[typeshare(skip)]`); Swift still reads them from the raw dict.
+public struct GoalDto: Codable {
+	public let id: String
+	public let project_id: String
+	public let chat_id: String?
+	public let title: String
+	public let outcome: String
+	public let status: String
+	public let next_step: String
+	public let check_in_cron: String?
+	public let check_in_tz: String
+	public let routine_id: String?
+	public let autonomy: String
+	public let waiting_question: String?
+	public let created_at: Int64
+	public let updated_at: Int64
+	public let last_moved_at: Int64?
+	public let project_name: String?
+
+	public init(id: String, project_id: String, chat_id: String?, title: String, outcome: String, status: String, next_step: String, check_in_cron: String?, check_in_tz: String, routine_id: String?, autonomy: String, waiting_question: String?, created_at: Int64, updated_at: Int64, last_moved_at: Int64?, project_name: String?) {
+		self.id = id
+		self.project_id = project_id
+		self.chat_id = chat_id
+		self.title = title
+		self.outcome = outcome
+		self.status = status
+		self.next_step = next_step
+		self.check_in_cron = check_in_cron
+		self.check_in_tz = check_in_tz
+		self.routine_id = routine_id
+		self.autonomy = autonomy
+		self.waiting_question = waiting_question
+		self.created_at = created_at
+		self.updated_at = updated_at
+		self.last_moved_at = last_moved_at
+		self.project_name = project_name
+	}
+}
+
+/// `GET /goals` and `GET /projects/{id}/goals` body.
+public struct GoalsListDto: Codable {
+	public let goals: [GoalDto]
+
+	public init(goals: [GoalDto]) {
+		self.goals = goals
 	}
 }
 
@@ -954,6 +1014,57 @@ public struct ProjectMembersDto: Codable {
 		self.project_id = project_id
 		self.owner = owner
 		self.members = members
+	}
+}
+
+/// Routine as clients see it (`routine_json`): `db::Routine` plus optional `fire_url`.
+/// 
+/// `trigger` stays free-form JSON (`#[typeshare(skip)]`).
+public struct RoutineDto: Codable {
+	public let id: String
+	public let project_id: String
+	public let chat_id: String
+	public let name: String
+	public let prompt: String
+	public let enabled: Bool
+	public let created_at: Int64
+	public let last_run_at: Int64?
+	public let next_run_at: Int64?
+	/// Webhook routines only (omitted otherwise).
+	public let fire_url: String?
+
+	public init(id: String, project_id: String, chat_id: String, name: String, prompt: String, enabled: Bool, created_at: Int64, last_run_at: Int64?, next_run_at: Int64?, fire_url: String?) {
+		self.id = id
+		self.project_id = project_id
+		self.chat_id = chat_id
+		self.name = name
+		self.prompt = prompt
+		self.enabled = enabled
+		self.created_at = created_at
+		self.last_run_at = last_run_at
+		self.next_run_at = next_run_at
+		self.fire_url = fire_url
+	}
+}
+
+/// One routine history row (`db::RoutineRun`).
+public struct RoutineRunDto: Codable {
+	public let id: String
+	public let routine_id: String
+	public let started_at: Int64
+	public let finished_at: Int64?
+	public let status: String
+	public let message_id: String?
+	public let note: String?
+
+	public init(id: String, routine_id: String, started_at: Int64, finished_at: Int64?, status: String, message_id: String?, note: String?) {
+		self.id = id
+		self.routine_id = routine_id
+		self.started_at = started_at
+		self.finished_at = finished_at
+		self.status = status
+		self.message_id = message_id
+		self.note = note
 	}
 }
 

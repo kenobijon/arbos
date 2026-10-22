@@ -977,27 +977,64 @@ final class RelayAPI {
 
     // MARK: Goals (long-running objectives)
 
+    /// Decode a goals list body; free-form plan/log come from the raw array elements.
+    private static func parseGoalsList(_ data: Data) throws -> [GoalItem] {
+        let list = try JSONDecoder().decode(GoalsListDto.self, from: data)
+        let raw = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        let rawGoals = (raw?["goals"] as? [Any]) ?? []
+        if rawGoals.count == list.goals.count {
+            return zip(list.goals, rawGoals).map { dto, raw in
+                GoalItem(dto: dto, raw: raw as? [String: Any] ?? [:])
+            }
+        }
+        return list.goals.map { GoalItem(dto: $0) }
+    }
+
+    private static func parseGoal(_ data: Data) throws -> GoalItem {
+        let dto = try JSONDecoder().decode(GoalDto.self, from: data)
+        let raw = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+        return GoalItem(dto: dto, raw: raw)
+    }
+
     /// `GET /goals` — every goal across the caller's projects.
     func goals() async throws -> [GoalItem] {
-        let v = try await json("GET", "/goals") as? [String: Any]
-        return ((v?["goals"] as? [Any]) ?? []).compactMap(GoalItem.parse)
+        let (data, _) = try await request("GET", "/goals")
+        do {
+            return try Self.parseGoalsList(data)
+        } catch {
+            NSLog("GoalsListDto: \(error)")
+            throw RelayError(status: 0, message: "Bad goals reply")
+        }
     }
 
     func projectGoals(_ projectId: Id) async throws -> [GoalItem] {
-        let v = try await json("GET", "/projects/\(projectId)/goals") as? [String: Any]
-        return ((v?["goals"] as? [Any]) ?? []).compactMap(GoalItem.parse)
+        let (data, _) = try await request("GET", "/projects/\(projectId)/goals")
+        do {
+            return try Self.parseGoalsList(data)
+        } catch {
+            NSLog("GoalsListDto: \(error)")
+            throw RelayError(status: 0, message: "Bad goals reply")
+        }
     }
 
     func createGoal(projectId: Id, _ body: [String: Any]) async throws -> GoalItem {
-        let v = try await json("POST", "/projects/\(projectId)/goals", body: body)
-        guard let g = GoalItem.parse(v) else { throw RelayError(status: 0, message: "Bad goal reply") }
-        return g
+        let (data, _) = try await request("POST", "/projects/\(projectId)/goals", body: body)
+        do {
+            return try Self.parseGoal(data)
+        } catch {
+            NSLog("GoalDto: \(error)")
+            throw RelayError(status: 0, message: "Bad goal reply")
+        }
     }
 
     func patchGoal(projectId: Id, goalId: String, _ body: [String: Any]) async throws -> GoalItem {
-        let v = try await json("PATCH", "/projects/\(projectId)/goals/\(goalId)", body: body)
-        guard let g = GoalItem.parse(v) else { throw RelayError(status: 0, message: "Bad goal reply") }
-        return g
+        let (data, _) = try await request("PATCH", "/projects/\(projectId)/goals/\(goalId)", body: body)
+        do {
+            return try Self.parseGoal(data)
+        } catch {
+            NSLog("GoalDto: \(error)")
+            throw RelayError(status: 0, message: "Bad goal reply")
+        }
     }
 
     func deleteGoal(projectId: Id, goalId: String) async throws {
@@ -1005,8 +1042,14 @@ final class RelayAPI {
     }
 
     func appendGoalLog(projectId: Id, goalId: String, text: String) async throws -> GoalItem {
-        let v = try await json("POST", "/projects/\(projectId)/goals/\(goalId)/log", body: ["text": text])
-        guard let g = GoalItem.parse(v) else { throw RelayError(status: 0, message: "Bad goal reply") }
-        return g
+        let (data, _) = try await request(
+            "POST", "/projects/\(projectId)/goals/\(goalId)/log", body: ["text": text]
+        )
+        do {
+            return try Self.parseGoal(data)
+        } catch {
+            NSLog("GoalDto: \(error)")
+            throw RelayError(status: 0, message: "Bad goal reply")
+        }
     }
 }

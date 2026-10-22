@@ -1,5 +1,5 @@
 //! Shared HTTP response shapes for projects, chats, people, me, machine,
-//! unread, and calls (crdt-sync).
+//! unread, calls, goals, and routines (crdt-sync).
 //!
 //! No I/O. The relay builds these and serializes them; clients will decode the
 //! same JSON. Regenerate Swift with `./scripts/gen-swift-types.sh`.
@@ -820,4 +820,95 @@ pub struct CallAlertDto {
     pub call: CallDto,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sender: Option<SenderDto>,
+}
+
+/// Goal as clients see it (`goal_json`): `db::Goal` plus optional `project_name`.
+///
+/// `plan`, `progress_log`, and the `linked_*_ids` lists stay free-form JSON
+/// (`#[typeshare(skip)]`); Swift still reads them from the raw dict.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GoalDto {
+    pub id: String,
+    pub project_id: String,
+    pub chat_id: Option<String>,
+    pub title: String,
+    pub outcome: String,
+    #[typeshare(skip)]
+    pub plan: Value,
+    pub status: String,
+    #[typeshare(skip)]
+    pub progress_log: Value,
+    pub next_step: String,
+    pub check_in_cron: Option<String>,
+    pub check_in_tz: String,
+    pub routine_id: Option<String>,
+    pub autonomy: String,
+    #[typeshare(skip)]
+    pub linked_chat_ids: Value,
+    #[typeshare(skip)]
+    pub linked_subagent_ids: Value,
+    pub waiting_question: Option<String>,
+    #[typeshare(serialized_as = "I54")]
+    pub created_at: i64,
+    #[typeshare(serialized_as = "I54")]
+    pub updated_at: i64,
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub last_moved_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_name: Option<String>,
+}
+
+/// `GET /goals` and `GET /projects/{id}/goals` body.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GoalsListDto {
+    pub goals: Vec<GoalDto>,
+}
+
+/// Routine as clients see it (`routine_json`): `db::Routine` plus optional `fire_url`.
+///
+/// `trigger` stays free-form JSON (`#[typeshare(skip)]`).
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RoutineDto {
+    pub id: String,
+    pub project_id: String,
+    pub chat_id: String,
+    pub name: String,
+    pub prompt: String,
+    #[typeshare(skip)]
+    pub trigger: Value,
+    pub enabled: bool,
+    #[typeshare(serialized_as = "I54")]
+    pub created_at: i64,
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub last_run_at: Option<i64>,
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub next_run_at: Option<i64>,
+    /// Webhook routines only (omitted otherwise).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fire_url: Option<String>,
+}
+
+/// One routine history row (`db::RoutineRun`).
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RoutineRunDto {
+    pub id: String,
+    pub routine_id: String,
+    #[typeshare(serialized_as = "I54")]
+    pub started_at: i64,
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub finished_at: Option<i64>,
+    pub status: String,
+    pub message_id: Option<String>,
+    pub note: Option<String>,
+}
+
+/// `POST /routines/{rid}/fire` reply.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FireRoutineResponseDto {
+    pub run_id: String,
 }

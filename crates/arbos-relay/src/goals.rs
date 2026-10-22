@@ -10,6 +10,7 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use arbos_core::api::{GoalDto, GoalsListDto};
 use arbos_core::ids::{now_ms, ulid};
 
 use crate::auth::Principal;
@@ -88,12 +89,33 @@ fn as_array(v: Option<&Value>) -> Value {
     }
 }
 
-fn goal_json(g: &Goal, project_name: Option<&str>) -> Value {
-    let mut v = serde_json::to_value(g).unwrap_or_default();
-    if let Some(n) = project_name {
-        v["project_name"] = json!(n);
+pub(crate) fn goal_dto(g: &Goal, project_name: Option<&str>) -> GoalDto {
+    GoalDto {
+        id: g.id.clone(),
+        project_id: g.project_id.clone(),
+        chat_id: g.chat_id.clone(),
+        title: g.title.clone(),
+        outcome: g.outcome.clone(),
+        plan: g.plan.clone(),
+        status: g.status.clone(),
+        progress_log: g.progress_log.clone(),
+        next_step: g.next_step.clone(),
+        check_in_cron: g.check_in_cron.clone(),
+        check_in_tz: g.check_in_tz.clone(),
+        routine_id: g.routine_id.clone(),
+        autonomy: g.autonomy.clone(),
+        linked_chat_ids: g.linked_chat_ids.clone(),
+        linked_subagent_ids: g.linked_subagent_ids.clone(),
+        waiting_question: g.waiting_question.clone(),
+        created_at: g.created_at,
+        updated_at: g.updated_at,
+        last_moved_at: g.last_moved_at,
+        project_name: project_name.map(str::to_owned),
     }
-    v
+}
+
+fn goal_json(g: &Goal, project_name: Option<&str>) -> Value {
+    serde_json::to_value(goal_dto(g, project_name)).expect("GoalDto")
 }
 
 fn check_in_prompt(g: &Goal) -> String {
@@ -226,18 +248,18 @@ pub async fn list_all(State(state): State<AppState>, principal: Principal) -> Ap
         .user_id()
         .ok_or((StatusCode::FORBIDDEN, "admin cannot list goals".into()))?;
     let projects = state.db.projects_of_user(user_id).map_err(internal)?;
-    let mut out = Vec::new();
+    let mut goals = Vec::new();
     for p in &projects {
         for g in state.db.list_goals(&p.id).map_err(internal)? {
-            out.push(goal_json(&g, Some(&p.name)));
+            goals.push(goal_dto(&g, Some(&p.name)));
         }
     }
-    out.sort_by(|a, b| {
-        let la = a.get("last_moved_at").and_then(Value::as_i64).unwrap_or(0);
-        let lb = b.get("last_moved_at").and_then(Value::as_i64).unwrap_or(0);
+    goals.sort_by(|a, b| {
+        let la = a.last_moved_at.unwrap_or(0);
+        let lb = b.last_moved_at.unwrap_or(0);
         lb.cmp(&la)
     });
-    Ok(Json(json!({ "goals": out })).into_response())
+    Ok(Json(GoalsListDto { goals }).into_response())
 }
 
 pub async fn list(
@@ -251,14 +273,14 @@ pub async fn list(
         .project(&project_id)
         .map_err(internal)?
         .map(|p| p.name);
-    let out: Vec<Value> = state
+    let goals: Vec<GoalDto> = state
         .db
         .list_goals(&project_id)
         .map_err(internal)?
         .iter()
-        .map(|g| goal_json(g, name.as_deref()))
+        .map(|g| goal_dto(g, name.as_deref()))
         .collect();
-    Ok(Json(json!({ "goals": out })).into_response())
+    Ok(Json(GoalsListDto { goals }).into_response())
 }
 
 #[derive(Deserialize)]
@@ -530,5 +552,66 @@ mod tests {
         assert_eq!(normalize_status("waiting on me").unwrap(), "waiting");
         assert!(normalize_status("nope").is_err());
         assert_eq!(normalize_autonomy("ACT").unwrap(), "act");
+    }
+
+    const FIXED_AT: i64 = 1_700_000_000_000;
+
+    fn fixtures_dir() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/api")
+    }
+
+    fn load_fixture(name: &str) -> Value {
+        let path = fixtures_dir().join(name);
+        let raw =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        serde_json::from_str(&raw).expect("fixture json")
+    }
+
+    fn assert_builder(name: &str, got: Value) {
+        let path = fixtures_dir().join(name);
+        if !path.exists() || std::env::var_os("UPDATE_API_FIXTURES").is_some() {
+            let pretty = serde_json::to_string_pretty(&got).expect("pretty");
+            std::fs::write(&path, format!("{pretty}\n")).expect("write fixture");
+        }
+        let want = load_fixture(name);
+        assert_eq!(got, want, "fixture {name}");
+    }
+
+    fn fixture_goal() -> Goal {
+        Goal {
+            id: "goal_fixture".into(),
+            project_id: "proj_fixture".into(),
+            chat_id: Some("chat_primary".into()),
+            title: "Ship the DTO step".into(),
+            outcome: "Clients decode GoalDto".into(),
+            plan: json!([
+                { "id": "step_1", "title": "Add GoalDto", "status": "done" },
+                { "id": "step_2", "title": "Wire the relay", "status": "doing" }
+            ]),
+            status: "active".into(),
+            progress_log: json!([{ "at": FIXED_AT, "text": "Started the shared client core step." }]),
+            next_step: "Regenerate RelayTypes.swift".into(),
+            check_in_cron: Some("0 9 * * 1-5".into()),
+            check_in_tz: "UTC".into(),
+            routine_id: Some("routine_goal_checkin".into()),
+            autonomy: "suggest".into(),
+            linked_chat_ids: json!(["chat_primary"]),
+            linked_subagent_ids: json!([]),
+            waiting_question: None,
+            created_at: FIXED_AT,
+            updated_at: FIXED_AT + 60_000,
+            last_moved_at: Some(FIXED_AT + 60_000),
+        }
+    }
+
+    #[test]
+    fn goal_wire_fixtures() {
+        let goal = fixture_goal();
+        let dto = goal_dto(&goal, Some("Fixture"));
+        assert_builder("goal_json.json", goal_json(&goal, Some("Fixture")));
+        assert_builder(
+            "goals_list.json",
+            serde_json::to_value(GoalsListDto { goals: vec![dto] }).expect("GoalsListDto"),
+        );
     }
 }

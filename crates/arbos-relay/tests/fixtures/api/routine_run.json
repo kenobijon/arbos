@@ -1,0 +1,9 @@
+{
+  "finished_at": 1700000005000,
+  "id": "run_fixture",
+  "message_id": "msg_fixture",
+  "note": null,
+  "routine_id": "routine_schedule_fixture",
+  "started_at": 1700000000000,
+  "status": "done"
+}
