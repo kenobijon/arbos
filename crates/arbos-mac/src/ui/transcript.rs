@@ -68,10 +68,8 @@ const SENDER_LANE: f32 = SENDER_DISC + SENDER_DISC_GAP;
 /// Messages for Mac fades a row's hover-only affordances (time, react glyph)
 /// in and out rather than snapping them.
 const HOVER_FADE_MS: f32 = 150.0;
-/// The fade band under the floating header: Grok Mac's content is invisible at
-/// the window edge and fully opaque about 50 pt down (Jacob's reference,
-/// `ref-grok-header.png`, 2 px/pt: faint at 13–20 pt, half at 30–40, full at 52).
-pub const HEADER_FADE_BAND: f32 = crate::ui::theme::HEADER_HEIGHT + 6.0;
+/// The fade band under the floating header (one number for every chat kind).
+pub const HEADER_FADE_BAND: f32 = crate::ui::header::metrics::FADE_BAND;
 /// How long the hover copy glyph stays a checkmark after a successful copy.
 const COPY_FEEDBACK_MS: u64 = 2_000;
 
@@ -319,6 +317,8 @@ pub enum RowKind {
 /// Which replies get a speaker row (F11).
 #[derive(Clone, Copy)]
 pub struct SpeechRows<'a> {
+    /// Relay flag `features.voice_mode`; off = no speaker rows at all.
+    pub enabled: bool,
     pub spoken: &'a HashSet<Id>,
     /// Replies whose speech failed (reason): their speaker row offers a retry.
     pub failed: &'a HashMap<Id, String>,
@@ -550,6 +550,7 @@ impl Transcript {
 
         let show_details = state.show_details;
         let speech = SpeechRows {
+            enabled: state.voice_mode_available(),
             spoken: &state.spoken,
             failed: &state.speech_failed,
             voice_mode: state.voice_mode,
@@ -2476,7 +2477,8 @@ pub fn build_rows(
                 // plus the newest finished reply while voice mode is on.
                 let cached = speech.spoken.contains(&message.id);
                 let failed = speech.failed.contains_key(&message.id);
-                if !streaming
+                if speech.enabled
+                    && !streaming
                     && message.role == Role::Assistant
                     && had_prose
                     && (cached || failed || (speech.voice_mode && last_reply == Some(mix)))

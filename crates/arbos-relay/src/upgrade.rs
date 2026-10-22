@@ -45,7 +45,7 @@ pub fn image_outdated(state: &AppState, sb: &crate::db::Sandbox) -> bool {
         && sb
             .snapshot
             .as_deref()
-            .is_some_and(|s| s != state.cfg.daytona_snapshot)
+            .is_some_and(|s| *s != state.default_snapshot())
 }
 
 /// `upgrade` object for `GET /machine` and `/admin/users`.
@@ -98,7 +98,7 @@ pub async fn start(state: &AppState, user_id: &str, force: bool) -> Result<bool>
     let target = state
         .db
         .user_snapshot(user_id)?
-        .unwrap_or_else(|| state.cfg.daytona_snapshot.clone());
+        .unwrap_or_else(|| state.default_snapshot());
     if !force && sb.snapshot.as_deref() == Some(target.as_str()) {
         return Ok(false);
     }
@@ -163,7 +163,7 @@ async fn start_gvisor(
     let target = state
         .db
         .user_snapshot(user_id)?
-        .unwrap_or_else(|| state.cfg.daytona_snapshot.clone());
+        .unwrap_or_else(|| state.default_snapshot());
     if !force && sb.snapshot.as_deref() == Some(target.as_str()) {
         return Ok(false);
     }
@@ -543,7 +543,7 @@ pub async fn start_repair(state: &AppState, user_id: &str) -> Result<bool> {
     let target = state
         .db
         .user_snapshot(user_id)?
-        .unwrap_or_else(|| state.cfg.daytona_snapshot.clone());
+        .unwrap_or_else(|| state.default_snapshot());
     {
         let mut running = state.upgrading.lock().await;
         if running.contains_key(user_id) {

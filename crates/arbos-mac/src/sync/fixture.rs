@@ -182,6 +182,11 @@ impl SyncSource for FixtureSource {
                 spent_today_usd: 1.6,
                 daily_cap_usd: Some(20.0),
             })));
+            // Same default as the relay (off); `ARBOS_FIXTURE_VOICE_MODE=1` shows the voice UI.
+            let _ = events.send(SyncEvent::Features {
+                voice_mode: std::env::var("ARBOS_FIXTURE_VOICE_MODE")
+                    .is_ok_and(|v| matches!(v.trim(), "1" | "true" | "on" | "yes")),
+            });
             emit_projects(&shared);
             emit_people_seed(&shared);
             emit_machine(&shared);
@@ -719,62 +724,6 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             let _ = shared
                 .events
                 .send(SyncEvent::ChatSnapshot { chat_id, messages });
-        }
-        ClientCommand::GroupCreate {
-            project_id,
-            chat_id,
-            participants,
-            title,
-        } => {
-            add_doc(shared, ChatDoc::new(&chat_id, &project_id));
-            let mut all = vec![project_id.clone()];
-            all.extend(participants.into_iter().filter(|p| *p != project_id));
-            let names: Vec<String> = {
-                let projects = shared.projects.lock().unwrap();
-                all.iter()
-                    .skip(1)
-                    .filter_map(|id| projects.iter().find(|p| &p.id == id))
-                    .map(|p| p.name.clone())
-                    .collect()
-            };
-            let chat = Chat {
-                id: chat_id.clone(),
-                project_id: project_id.clone(),
-                title: title.unwrap_or_else(|| format!("Group · {}", names.join(", "))),
-                is_pinned: false,
-                is_system: false,
-                kind: ChatKind::Group,
-                participants: all,
-                unread: false,
-                last_message_at: now_ms(),
-                archived_at: None,
-            };
-            shared.chats.lock().unwrap().push(chat.clone());
-            emit_chats(shared);
-            let _ = shared.events.send(SyncEvent::ChatCreated {
-                project_id,
-                local_id: chat_id.clone(),
-                chat,
-            });
-            let _ = shared.events.send(SyncEvent::ChatSnapshot {
-                chat_id,
-                messages: Vec::new(),
-            });
-        }
-        ClientCommand::GroupAddParticipant {
-            chat_id,
-            participant,
-            ..
-        } => {
-            {
-                let mut chats = shared.chats.lock().unwrap();
-                if let Some(c) = chats.iter_mut().find(|c| c.id == chat_id) {
-                    if !c.participants.contains(&participant) {
-                        c.participants.push(participant);
-                    }
-                }
-            }
-            emit_chats(shared);
         }
         ClientCommand::MarkRead { chat_id } => mark_read(shared, &chat_id),
         ClientCommand::FetchVoices => {
@@ -5115,7 +5064,12 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             }
             true
         }
-        ClientCommand::CreatePeopleGroup { handles, agent_ids } => {
+        ClientCommand::CreatePeopleGroup {
+            handles,
+            agent_ids,
+            title: draft_title,
+            leaf,
+        } => {
             let mut members: Vec<Person> = Vec::new();
             for raw in handles {
                 let handle = raw.trim().trim_start_matches('@').to_lowercase();
@@ -5169,14 +5123,21 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                     .collect()
             };
             let id = new_id();
-            let title = members
-                .iter()
-                .map(|p| p.handle.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
+            let title = draft_title
+                .clone()
+                .filter(|t| !t.trim().is_empty())
+                .unwrap_or_else(|| {
+                    members
+                        .iter()
+                        .map(|p| p.handle.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                });
             let mut space = people_space(&id, members[0].clone(), agents);
             space.kind = SpaceKind::Group;
             space.name = title.clone();
+            space.avatar_leaf = leaf.as_ref().map(|l| l.leaf);
+            space.avatar_leaf_color = leaf.as_ref().map(|l| l.color);
             space.people = members;
             space.pending = space.people.iter().any(|p| p.status == "invited");
             shared.projects.lock().unwrap().push(space);

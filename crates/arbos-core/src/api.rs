@@ -255,6 +255,13 @@ pub struct PeopleChatDto {
     pub created_at: i64,
     pub title: String,
     pub image_key: Option<String>,
+    /// D92 amendment: the group's leaf picture, when one was picked (`image_key` wins).
+    #[serde(default)]
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub avatar_leaf: Option<i64>,
+    #[serde(default)]
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub avatar_leaf_color: Option<i64>,
     pub pending: bool,
     pub members: Vec<ChatMemberDto>,
     pub room: String,
@@ -514,6 +521,10 @@ pub struct MeFeaturesDto {
     /// D92: agents without a photo draw a leaf, not initials (default on).
     #[serde(default)]
     pub leaf_avatars: Option<bool>,
+    /// Voice mode — spoken replies, the voice picker, reply playback (default off since
+    /// 2026-10-22, Jacob: hidden everywhere until it works end to end). Absent = off.
+    #[serde(default)]
+    pub voice_mode: Option<bool>,
 }
 
 /// `GET /me` success body.

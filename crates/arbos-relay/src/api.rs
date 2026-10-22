@@ -46,7 +46,27 @@ pub(crate) fn healthz_dto(state: &AppState) -> HealthDto {
 }
 
 pub async fn healthz(State(state): State<AppState>) -> Response {
-    Json(healthz_dto(&state)).into_response()
+    // The typeshared HealthDto is what the apps decode; the operational extras ride alongside as plain
+    // JSON keys (Swift ignores unknown keys): `uptime_s` (a restart storm shows as a short uptime — four
+    // restarts in 95 min put "Reconnecting…" banners in every chat on 2026-10-22), `rooms` (open sync rooms
+    // with live websocket sessions) and `snapshot` (the Daytona snapshot new boxes are made from right now).
+    let mut v = serde_json::to_value(healthz_dto(&state))
+        .unwrap_or_else(|_| serde_json::json!({ "ok": true }));
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert(
+            "uptime_s".into(),
+            serde_json::json!(state.started_at.elapsed().as_secs()),
+        );
+        obj.insert(
+            "rooms".into(),
+            serde_json::json!(state.rooms.try_read().map(|r| r.len() as i64).unwrap_or(-1)),
+        );
+        obj.insert(
+            "snapshot".into(),
+            serde_json::json!(state.default_snapshot()),
+        );
+    }
+    Json(v).into_response()
 }
 
 // ---- pairing (D35) ----------------------------------------------------------------------------
@@ -541,7 +561,7 @@ where
     Option::<String>::deserialize(d).map(Some)
 }
 
-fn deserialize_double_option_i64<'de, D>(d: D) -> Result<Option<Option<i64>>, D::Error>
+pub(crate) fn deserialize_double_option_i64<'de, D>(d: D) -> Result<Option<Option<i64>>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -1024,7 +1044,7 @@ pub async fn machine(State(state): State<AppState>, principal: Principal) -> Api
         .as_ref()
         .and_then(|s| s.snapshot.clone())
         .or(state.db.user_snapshot(&user_id).map_err(internal)?)
-        .unwrap_or_else(|| state.cfg.daytona_snapshot.clone());
+        .unwrap_or_else(|| state.default_snapshot());
     // Class from the snapshot when Daytona answers; the known default otherwise. A host sandbox
     // (D89) reports the fleet caps.
     let gvisor = sb.as_ref().is_some_and(|s| s.provider == "gvisor")
@@ -1094,7 +1114,7 @@ pub async fn machine(State(state): State<AppState>, principal: Principal) -> Api
         // box lacks newer agent features until `POST /machine/upgrade` recreates it.
         image: MachineImageDto {
             current: sb.as_ref().and_then(|s| s.snapshot.clone()),
-            default: state.cfg.daytona_snapshot.clone(),
+            default: state.default_snapshot(),
         },
         image_outdated,
         upgrade,

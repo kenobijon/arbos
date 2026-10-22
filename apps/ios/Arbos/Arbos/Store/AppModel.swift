@@ -887,6 +887,8 @@ final class AppModel: ObservableObject {
             saveAccountCache()
             // D92 remote flag `features.leaf_avatars` (absent on an older relay = on).
             LeafAvatarsFlag.shared.set(features?.leaf_avatars ?? true)
+            // Voice mode kill switch (absent on an older relay = off).
+            VoiceModeFlag.shared.set(features?.voice_mode ?? false)
             let position = summary.waitlisted ? Int(summary.waitlist_position ?? 1) : nil
             if position != waitlistPosition { waitlistPosition = position }
             meAlwaysOn = summary.always_on
@@ -1801,7 +1803,7 @@ final class AppModel: ObservableObject {
     /// rest (`POST /chats/{id}/members` turns a DM into a group on the third person).
     /// Optional `agentIds` are added afterwards (`POST /chats/{id}/agents`) so the
     /// group can start with people and your agents in one step.
-    func createGroup(handles: [String], agentIds: [Id] = []) async -> Bool {
+    func createGroup(handles: [String], agentIds: [Id] = [], title: String? = nil, leaf: LeafPick? = nil) async -> Bool {
         let cleaned = handles
             .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "@ ")) }
             .filter { !$0.isEmpty }
@@ -1812,7 +1814,7 @@ final class AppModel: ObservableObject {
         do {
             var chat: PeopleChat
             do {
-                chat = try await api.createGroup(handles: cleaned)
+                chat = try await api.createGroup(handles: cleaned, title: title, leaf: leaf)
             } catch let e as RelayError where e.status == 404 || e.status == 405 || e.status == 501 {
                 chat = try await createGroupViaDm(handles: cleaned)
             }
@@ -1867,9 +1869,10 @@ final class AppModel: ObservableObject {
 
     @Published private(set) var voiceCatalog: VoiceCatalog?
 
-    /// `GET /voices` once per launch (the relay caches it for an hour anyway).
+    /// `GET /voices` once per launch (the relay caches it for an hour anyway). Nothing is
+    /// fetched while voice mode is switched off on the relay (no picker to feed).
     func loadVoices() async {
-        guard voiceCatalog == nil, !isFixture else { return }
+        guard voiceCatalog == nil, !isFixture, VoiceModeFlag.shared.on else { return }
         voiceCatalog = try? await api.voices()
     }
 
