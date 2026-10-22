@@ -312,14 +312,14 @@ struct AgentProfileView: View {
     private func heroPicture(_ project: Project) -> some View {
         if isMine {
             Button { showEdit = true } label: {
-                AgentAvatar(project: project, theme: theme, size: PaneHeader<EmptyView>.avatarSize, working: model.isStreaming(project: project.id), idle: true)
+                AgentAvatar(project: project, theme: theme, size: PaneKit.heroAvatar, working: model.isStreaming(project: project.id), idle: true)
                     .paneCrayon()
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Edit agent")
         } else {
-            AgentAvatar(project: project, theme: theme, size: PaneHeader<EmptyView>.avatarSize, working: model.isStreaming(project: project.id), idle: true)
+            AgentAvatar(project: project, theme: theme, size: PaneKit.heroAvatar, working: model.isStreaming(project: project.id), idle: true)
         }
     }
 

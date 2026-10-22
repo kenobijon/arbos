@@ -99,6 +99,8 @@ enum PaneKit {
     static let gap: CGFloat = 14
     static let tile: CGFloat = 30
     static let avatar: CGFloat = 36
+    /// The hero picture (a free constant: a static on the generic PaneHeader cannot be named without its type parameter).
+    static let heroAvatar: CGFloat = 112
     static let radius: CGFloat = 16
     /// Where a row's hairline starts for a given leading element.
     static func separatorInset(_ leading: PaneLeading) -> CGFloat {
@@ -324,7 +326,8 @@ struct PaneTabs: View {
 
 /// The hero: 112 pt picture, name, subtitle (@handle, member count, …).
 struct PaneHeader<Avatar: View>: View {
-    static var avatarSize: CGFloat { 112 }
+    /// Kept for callers that spell the type (`PaneHeader<EmptyView>.avatarSize`); new code uses `PaneKit.heroAvatar`.
+    static var avatarSize: CGFloat { PaneKit.heroAvatar }
     @Environment(\.theme) private var theme
     let name: String
     let subtitle: String
@@ -334,7 +337,7 @@ struct PaneHeader<Avatar: View>: View {
 
     var body: some View {
         VStack(spacing: 10) {
-            avatar().frame(width: Self.avatarSize, height: Self.avatarSize)
+            avatar().frame(width: PaneKit.heroAvatar, height: PaneKit.heroAvatar)
             HStack(spacing: 6) {
                 Text(name)
                     .font(theme.font(28, weight: .semibold))
@@ -587,7 +590,7 @@ struct UserProfileView: View {
                     // row, no username field, no Open chat / Add members.
                     ProfilePane(
                         hero: PaneHero(
-                            picture: .image(AnyView(PersonAvatar(url: person.avatarUrl, handle: person.handle, size: PaneHeader.avatarSize, name: person.name, id: person.id, colorIndex: person.avatarColorIndex))),
+                            picture: .image(AnyView(PersonAvatar(url: person.avatarUrl, handle: person.handle, size: PaneKit.heroAvatar, name: person.name, id: person.id, colorIndex: person.avatarColorIndex))),
                             name: person.displayName,
                             subtitle: "@\(person.handle)"
                         ),
@@ -1606,10 +1609,10 @@ struct ProfilePane: View {
                 switch hero.picture {
                 case .image(let v): v
                 case .glyph(let glyph):
-                    RoundedRectangle(cornerRadius: PaneHeader.avatarSize * 0.28, style: .continuous)
+                    RoundedRectangle(cornerRadius: PaneKit.heroAvatar * 0.28, style: .continuous)
                         .fill(theme.field)
-                        .frame(width: PaneHeader.avatarSize, height: PaneHeader.avatarSize)
-                        .overlay(Image(systemName: glyph).font(.system(size: PaneHeader.avatarSize * 0.42, weight: .medium)).foregroundStyle(theme.text))
+                        .frame(width: PaneKit.heroAvatar, height: PaneKit.heroAvatar)
+                        .overlay(Image(systemName: glyph).font(.system(size: PaneKit.heroAvatar * 0.42, weight: .medium)).foregroundStyle(theme.text))
                 }
             }
             if tabs.count > 1 {
