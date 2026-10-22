@@ -1323,6 +1323,16 @@ impl AppState {
                     }
                     // select_project() keeps the tab within the visible chats.
                     self.select_project(project_id.clone(), cx);
+                    // Rig: `ARBOS_REPLY_TO=1` arms a reply to the restored chat's
+                    // last message (the composer's reply preview bar).
+                    if std::env::var("ARBOS_REPLY_TO").is_ok_and(|v| v == "1") {
+                        if let Some(chat) = self.active_chat_id() {
+                            if let Some(last) = self.messages_of(&chat).last().map(|m| m.id.clone())
+                            {
+                                self.set_reply_to(chat, last, cx);
+                            }
+                        }
+                    }
                     // Rig: `ARBOS_OPEN_PROFILE=agent[:model|reasoning|voice]|group[:library]|user|me`
                     // opens the right pane for the restored chat (selecting it
                     // closed whatever the shell opened at launch), and

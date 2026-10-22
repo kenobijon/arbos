@@ -461,7 +461,26 @@ impl Shell {
         })
         .detach();
         // Rig: `ARBOS_OPEN_NEW_AGENT=1` opens the New Message sheet with the
-        // "New agent" form expanded.
+        // "New agent" form expanded; `ARBOS_OPEN_NEW_CHAT=1` the plain sheet;
+        // `ARBOS_OPEN_NEW_GROUP=1` the New group picker with one agent and one
+        // person already picked (member chips).
+        if std::env::var("ARBOS_OPEN_NEW_CHAT").is_ok_and(|v| v == "1") {
+            state.update(cx, |s, cx| s.open_new_chat(cx));
+        }
+        if std::env::var("ARBOS_OPEN_NEW_GROUP").is_ok_and(|v| v == "1") {
+            state.update(cx, |s, cx| {
+                s.open_new_chat(cx);
+                s.open_new_group(cx);
+                let agent = s.my_projects().next().map(|p| p.id.clone());
+                let person = s.projects.iter().find_map(|p| p.person().cloned());
+                if let Some(id) = agent {
+                    s.toggle_group_agent(id, cx);
+                }
+                if let Some(person) = person {
+                    s.toggle_group_person(person, cx);
+                }
+            });
+        }
         if std::env::var("ARBOS_OPEN_NEW_AGENT").is_ok_and(|v| v == "1") {
             state.update(cx, |s, cx| {
                 s.open_new_chat(cx);
