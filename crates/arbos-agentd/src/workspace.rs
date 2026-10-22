@@ -874,11 +874,11 @@ pub const KEEP_RECENT_TOKENS: u64 = 20_000;
 /// window back over the soft threshold right after a compaction.
 pub const COMPACTION_RESERVE_TOKENS: u64 = 8_192;
 
-/// A soft compaction is not repeated before this many user turns have passed since the last
-/// compaction of the chat: a turn large enough to land the window back above the threshold on
-/// its own (an 8k paste, a big retrieved block) must not rewrite the cache on every turn. The
-/// 128k ceiling still catches a chat that keeps growing meanwhile.
-pub const MIN_TURNS_BETWEEN_COMPACTIONS: i64 = 4;
+/// After a soft compaction the next one waits until the window has grown by at least this much
+/// past where it landed (the window seen on the first turn after the compaction): a turn large
+/// enough to land back above the threshold on its own (an 8k paste, a big retrieved block) must
+/// not rewrite the cache on every turn. The 128k ceiling still catches a chat that keeps growing.
+pub const COMPACTION_HYSTERESIS_TOKENS: u64 = 16_000;
 
 pub fn compact_at_tokens() -> u64 {
     match std::env::var("ARBOS_CONTEXT_COMPACT_AT_TOKENS")
