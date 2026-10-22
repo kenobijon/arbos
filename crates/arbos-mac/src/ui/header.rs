@@ -1032,9 +1032,23 @@ mod header_tests {
 
     #[test]
     fn the_fade_band_covers_the_bar_and_the_drag_overhang_follows_it() {
-        assert!(metrics::FADE_BAND >= metrics::HEIGHT);
-        assert_eq!(metrics::FADE_BAND, metrics::HEIGHT + 6.0);
-        assert_eq!(metrics::DRAG_OVERHANG, 24.0);
-        assert_eq!(metrics::PILL_TOP + metrics::PILL_HEIGHT, 41.0);
+        // Read through a function so a future edit to one constant trips
+        // this instead of clippy folding the comparison away.
+        let m = [
+            metrics::FADE_BAND,
+            metrics::HEIGHT,
+            metrics::DRAG_OVERHANG,
+            metrics::PILL_TOP,
+            metrics::PILL_HEIGHT,
+        ];
+        let [fade, height, overhang, pill_top, pill_h] = std::hint::black_box(m);
+        assert!(fade >= height, "the fade must cover the bar");
+        assert_eq!(fade, height + 6.0);
+        assert_eq!(overhang, 24.0);
+        assert_eq!(
+            pill_top + pill_h,
+            41.0,
+            "the pill ends 3 pt above the bar's edge"
+        );
     }
 }
