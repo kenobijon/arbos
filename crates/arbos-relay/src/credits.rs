@@ -401,8 +401,8 @@ mod tests {
         let (user, dev_a) = sign_up(&state, 1, "a");
         let (_, dev_b) = sign_up(&state, 1, "b");
         let tokens = issue_tokens(&state, &user, &dev_a).expect("tokens");
-        let access = tokens["access_token"].as_str().unwrap().to_owned();
-        let refresh = tokens["refresh_token"].as_str().unwrap().to_owned();
+        let access = tokens.access_token.clone();
+        let refresh = tokens.refresh_token.clone();
 
         // The token resolves to the device it was minted for, not to a sibling device.
         match resolve_checked(&state, &access).expect("valid") {
@@ -445,7 +445,7 @@ mod tests {
         assert!(row.revoked_at.is_some());
         // The sibling device is untouched.
         let b = issue_tokens(&state, &user, &dev_b).expect("tokens b");
-        assert!(resolve_checked(&state, b["access_token"].as_str().unwrap()).is_ok());
+        assert!(resolve_checked(&state, &b.access_token).is_ok());
     }
 
     #[test]

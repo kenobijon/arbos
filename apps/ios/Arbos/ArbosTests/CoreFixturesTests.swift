@@ -406,4 +406,44 @@ final class CoreFixturesTests: XCTestCase {
         XCTAssertEqual(decide.request.status, "allowed_always")
         XCTAssertEqual(decide.access?.access_id, "acc_secret_fixture")
     }
+
+    // MARK: Sign-in / pairing / media (step 6b-2d-1)
+
+    func testPairTokenHealthVoicesFixtures() throws {
+        let pair = try JSONDecoder().decode(PairResponseDto.self, from: try apiFixtureData("pair_response.json"))
+        XCTAssertEqual(pair.device_id, "dev_fixture")
+        XCTAssertEqual(pair.device_token, "adv_fixture_not_a_real_token")
+
+        let token = try JSONDecoder().decode(TokenResponseDto.self, from: try apiFixtureData("token_response.json"))
+        let (toks, user) = RelayAPI.parseTokens(token, relayUrl: "http://relay.test")
+        XCTAssertEqual(toks.deviceId, "dev_fixture")
+        XCTAssertFalse(toks.accessToken.isEmpty)
+        XCTAssertEqual(user?.login, "user301")
+
+        let grace = try JSONDecoder().decode(TokenResponseDto.self, from: try apiFixtureData("token_response_refresh_grace.json"))
+        XCTAssertEqual(grace.access_token, token.access_token)
+        XCTAssertEqual(grace.refresh_token, token.refresh_token)
+
+        let health = try JSONDecoder().decode(HealthDto.self, from: try apiFixtureData("healthz.json"))
+        XCTAssertEqual(health.auth_mode, "github")
+        XCTAssertEqual(health.ok, true)
+        if let mode = health.auth_mode, let parsed = AuthMode(rawValue: mode) {
+            XCTAssertEqual(parsed, .github)
+        } else {
+            XCTFail("healthz auth_mode")
+        }
+
+        let voices = try JSONDecoder().decode(VoiceCatalogDto.self, from: try apiFixtureData("voices.json"))
+        XCTAssertEqual(voices.`default`, "marin")
+        XCTAssertEqual(voices.voices.count, 1)
+        XCTAssertEqual(voices.voices[0].id, "marin")
+        let catalog = Arbos.VoiceCatalog(
+            defaultId: voices.`default`,
+            voices: voices.voices.map {
+                Arbos.Voice(id: $0.id, name: $0.name, description: $0.description, seconds: $0.seconds, sampleURL: URL(string: $0.sample_url))
+            }
+        )
+        XCTAssertEqual(catalog.defaultId, "marin")
+        XCTAssertEqual(catalog.voices.count, 1)
+    }
 }

@@ -95,12 +95,6 @@ struct HomeView: View {
                                     .listRowSeparator(.hidden)
                                     .listRowBackground(theme.bg)
                             }
-                            ForEach(model.approvals) { device in
-                                ApprovalCard(device: device)
-                                    .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
-                                    .listRowSeparator(.hidden)
-                                    .listRowBackground(theme.bg)
-                            }
                             if !model.openGoals.isEmpty {
                                 goalsSection
                             }
@@ -861,45 +855,6 @@ struct WaitlistCard: View {
         .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
         .padding(.top, 10)
         .accessibilityIdentifier("home-waitlist-card")
-    }
-}
-
-/// "Approve new device" — another device of this account is waiting (RFC 8628 user code).
-struct ApprovalCard: View {
-    @EnvironmentObject private var model: AppModel
-    @Environment(\.theme) private var theme
-    let device: PendingDevice
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 10) {
-                GlassCircle(size: 36) {
-                    Image(systemName: "iphone.and.arrow.right.inward").font(.system(size: 15)).foregroundStyle(theme.text)
-                }
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Approve new device").font(theme.font(Theme.body, weight: .semibold)).foregroundStyle(theme.text)
-                    Text("\(device.name) · code \(device.userCode)").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
-                }
-                Spacer()
-            }
-            HStack(spacing: 10) {
-                Button { model.deny(device) } label: {
-                    Text("Deny").font(theme.font(Theme.small, weight: .semibold)).foregroundStyle(theme.text)
-                        .frame(maxWidth: .infinity).frame(height: 38)
-                        .background(Capsule().fill(theme.field)).overlay(Capsule().strokeBorder(theme.fieldBorder, lineWidth: 1))
-                }
-                .buttonStyle(.plain)
-                Button { model.approve(device) } label: {
-                    Text("Approve").font(theme.font(Theme.small, weight: .semibold)).foregroundStyle(theme.onPrimary)
-                        .frame(maxWidth: .infinity).frame(height: 38)
-                        .background(Capsule().fill(theme.primary))
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(14)
-        .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
-        .padding(.top, 10)
     }
 }
 

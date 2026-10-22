@@ -838,6 +838,40 @@ public struct GroupDto: Codable {
 	}
 }
 
+/// Provider flags on `GET /healthz`.
+public struct HealthProvidersDto: Codable {
+	public let openai_compatible: Bool
+	public let anthropic: Bool
+
+	public init(openai_compatible: Bool, anthropic: Bool) {
+		self.openai_compatible = openai_compatible
+		self.anthropic = anthropic
+	}
+}
+
+/// `GET /healthz` body. Clients read `auth_mode` (and legacy `auth`); other keys stay for probes.
+public struct HealthDto: Codable {
+	public let ok: Bool?
+	public let proto: Int64?
+	public let devices: Int64?
+	public let daytona: Bool?
+	/// Present on current relays; absent on very old ones that only had `auth`.
+	public let auth_mode: String?
+	/// Older relays only (`"github"`); omitted on current relays.
+	public let auth: String?
+	public let providers: HealthProvidersDto?
+
+	public init(ok: Bool?, proto: Int64?, devices: Int64?, daytona: Bool?, auth_mode: String?, auth: String?, providers: HealthProvidersDto?) {
+		self.ok = ok
+		self.proto = proto
+		self.devices = devices
+		self.daytona = daytona
+		self.auth_mode = auth_mode
+		self.auth = auth
+		self.providers = providers
+	}
+}
+
 /// `POST /calls/{id}/leave`.
 public struct LeaveCallResponseDto: Codable {
 	public let ended: Bool
@@ -1042,6 +1076,35 @@ public struct MeUserResponseDto: Codable {
 	public init(user: AccountUserDto, avatar_url: String??) {
 		self.user = user
 		self.avatar_url = avatar_url
+	}
+}
+
+/// One row of `GET /proxy/v1/models` `data[]` (id only; unknown upstream keys ignored).
+public struct ModelListItemDto: Codable {
+	public let id: String
+
+	public init(id: String) {
+		self.id = id
+	}
+}
+
+/// `GET /proxy/v1/models` body (passthrough; clients read `data[].id`).
+public struct ModelListDto: Codable {
+	public let data: [ModelListItemDto]
+
+	public init(data: [ModelListItemDto]) {
+		self.data = data
+	}
+}
+
+/// `POST /pair` success body.
+public struct PairResponseDto: Codable {
+	public let device_id: String
+	public let device_token: String
+
+	public init(device_id: String, device_token: String) {
+		self.device_id = device_id
+		self.device_token = device_token
 	}
 }
 
@@ -1534,6 +1597,34 @@ public struct StartCallResponseDto: Codable {
 	}
 }
 
+/// `POST /auth/token` and `POST /auth/refresh` success body.
+public struct TokenResponseDto: Codable {
+	public let access_token: String
+	public let token_type: String
+	public let expires_in: Int64
+	public let refresh_token: String
+	public let device_id: String
+	public let user: AccountUserDto
+
+	public init(access_token: String, token_type: String, expires_in: Int64, refresh_token: String, device_id: String, user: AccountUserDto) {
+		self.access_token = access_token
+		self.token_type = token_type
+		self.expires_in = expires_in
+		self.refresh_token = refresh_token
+		self.device_id = device_id
+		self.user = user
+	}
+}
+
+/// `POST /proxy/v1/audio/transcriptions` body (passthrough / mock; clients read `text`).
+public struct TranscriptionDto: Codable {
+	public let text: String
+
+	public init(text: String) {
+		self.text = text
+	}
+}
+
 /// One unread row on `GET /me/unread`.
 public struct UnreadChatDto: Codable {
 	public let chat_id: String
@@ -1630,6 +1721,34 @@ public struct VaultItemsEnvelopeDto: Codable {
 
 	public init(vault: VaultDto) {
 		self.vault = vault
+	}
+}
+
+/// One entry of `GET /voices`.
+public struct VoiceDto: Codable {
+	public let id: String
+	public let name: String
+	public let description: String?
+	public let seconds: Double?
+	public let sample_url: String
+
+	public init(id: String, name: String, description: String?, seconds: Double?, sample_url: String) {
+		self.id = id
+		self.name = name
+		self.description = description
+		self.seconds = seconds
+		self.sample_url = sample_url
+	}
+}
+
+/// `GET /voices` catalogue.
+public struct VoiceCatalogDto: Codable {
+	public let `default`: String
+	public let voices: [VoiceDto]
+
+	public init(default: String, voices: [VoiceDto]) {
+		self.default = `default`
+		self.voices = voices
 	}
 }
 

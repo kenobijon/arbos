@@ -179,7 +179,8 @@ pub async fn create_test_user(
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
     }
     match crate::signin::issue_tokens(&state, &id, &device_id) {
-        Ok(mut tokens) => {
+        Ok(dto) => {
+            let mut tokens = crate::signin::token_response_json(&dto);
             tokens["test"] = json!(true);
             (StatusCode::CREATED, Json(tokens)).into_response()
         }
@@ -244,7 +245,8 @@ pub async fn add_device(
     }
     tracing::info!(user = %id, device = %device_id, %name, "admin attached a device");
     match crate::signin::issue_tokens(&state, &id, &device_id) {
-        Ok(mut tokens) => {
+        Ok(dto) => {
+            let mut tokens = crate::signin::token_response_json(&dto);
             tokens["device_name"] = json!(name);
             tokens["test"] = json!(user.test);
             (StatusCode::CREATED, Json(tokens)).into_response()

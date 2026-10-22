@@ -28,7 +28,7 @@ use sha2::Sha256;
 
 use arbos_core::api::{
     AccountUserDto, CreditsDto, MeDeviceDto, MeLimitsDto, MeMachineDto, MeResponseDto,
-    MeUserResponseDto,
+    MeUserResponseDto, TokenResponseDto,
 };
 use arbos_core::auth::hash;
 use arbos_core::ids::{now_ms, ulid};
@@ -180,7 +180,7 @@ pub(crate) fn issue_tokens(
     state: &AppState,
     user_id: &str,
     device_id: &str,
-) -> anyhow::Result<Value> {
+) -> anyhow::Result<TokenResponseDto> {
     let access = mint_access(&state.jwt_key, user_id, device_id, ACCESS_TTL_S);
     let mut raw = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut raw);
@@ -189,14 +189,19 @@ pub(crate) fn issue_tokens(
         .db
         .insert_refresh(&hash(&refresh), device_id, user_id, REFRESH_TTL_MS)?;
     let _ = state.db.touch_device(device_id);
-    Ok(json!({
-        "access_token": access,
-        "token_type": "Bearer",
-        "expires_in": ACCESS_TTL_S,
-        "refresh_token": refresh,
-        "device_id": device_id,
-        "user": user_dto(state, user_id),
-    }))
+    Ok(TokenResponseDto {
+        access_token: access,
+        token_type: "Bearer".into(),
+        expires_in: ACCESS_TTL_S,
+        refresh_token: refresh,
+        device_id: device_id.to_owned(),
+        user: user_dto(state, user_id),
+    })
+}
+
+/// Wire JSON for a token pair (token + refresh grace cache).
+pub(crate) fn token_response_json(dto: &TokenResponseDto) -> Value {
+    serde_json::to_value(dto).expect("TokenResponseDto")
 }
 
 // ---- GitHub OAuth -------------------------------------------------------------------------------
@@ -527,7 +532,7 @@ pub struct TokenBody {
 pub async fn token(State(state): State<AppState>, Json(b): Json<TokenBody>) -> Response {
     match state.db.take_auth_grant(&hash(b.grant_code.trim())) {
         Ok(Some((device_id, user_id))) => match issue_tokens(&state, &user_id, &device_id) {
-            Ok(v) => Json(v).into_response(),
+            Ok(dto) => Json(dto).into_response(),
             Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
         },
         Ok(None) => api_error(
@@ -559,6 +564,7 @@ pub async fn refresh(State(state): State<AppState>, Json(b): Json<RefreshBody>) 
         grace.retain(|_, (at, _)| now - *at < REFRESH_GRACE_MS);
         if let Some((_, pair)) = grace.get(&h) {
             tracing::debug!("refresh token re-presented within the grace window; same pair");
+            // Cached copy was built from TokenResponseDto (same as issue_tokens).
             return Json(pair.clone()).into_response();
         }
     }
@@ -604,13 +610,10 @@ pub async fn refresh(State(state): State<AppState>, Json(b): Json<RefreshBody>) 
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
     }
     match issue_tokens(&state, &row.user_id, &row.device_id) {
-        Ok(v) => {
-            state
-                .refresh_grace
-                .lock()
-                .await
-                .insert(h, (now_ms(), v.clone()));
-            Json(v).into_response()
+        Ok(dto) => {
+            let pair = token_response_json(&dto);
+            state.refresh_grace.lock().await.insert(h, (now_ms(), pair));
+            Json(dto).into_response()
         }
         Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
     }

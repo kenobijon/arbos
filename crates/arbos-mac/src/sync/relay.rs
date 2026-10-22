@@ -17,9 +17,10 @@ use arbos_core::api::{
     CallDto, CallEndedPayloadDto, CallEnvelopeDto, CallMissedPayloadDto, CallStartedPayloadDto,
     CreateChatResponseDto, DecideSecretResponseDto, GetProjectResponseDto, GroupDto,
     LeaveCallResponseDto, MachineStateDto, MachineStatusDto, MeResponseDto, MeUserResponseDto,
-    PeopleChatDto, ProjectMembersDto, ProjectSecretsDto, RoutineDto, RoutineRunDto,
-    SecretEnvelopeDto, SecretRequestsDto, SecretsOverviewDto, StartCallResponseDto, UserCardDto,
-    UsersPageDto, VaultEnvelopeDto,
+    ModelListDto, PairResponseDto, PeopleChatDto, ProjectMembersDto, ProjectSecretsDto, RoutineDto,
+    RoutineRunDto, SecretEnvelopeDto, SecretRequestsDto, SecretsOverviewDto, StartCallResponseDto,
+    TokenResponseDto, TranscriptionDto, UserCardDto, UsersPageDto, VaultEnvelopeDto,
+    VoiceCatalogDto,
 };
 use arbos_core::doc::{UserAttachment, UserMessageOpts};
 use arbos_core::wire::{BoxState as WireBox, PROJECT_DOC_CHAT_ID};
@@ -41,8 +42,8 @@ use super::diagnostics;
 use super::doc::ChatDoc;
 use super::dto::{
     account_view_from_me, apply_machine_status, chat_from_create, chat_from_dto,
-    chat_from_group_dto, people_space_from, project_from_dto, routine_from_dto,
-    secrets_view_from_dto,
+    chat_from_group_dto, credentials_from_token, model_ids_from_dto, people_space_from,
+    project_from_dto, routine_from_dto, secrets_view_from_dto, transcript_text, voices_from_dto,
 };
 use super::store::{self, Store};
 use super::{ClientCommand, SyncEvent, SyncSource};
@@ -51,7 +52,7 @@ use crate::model::{
     CallMissed, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelsView, Chat, Connector,
     ConnectorProvider, ConnectorsView, Effort, Id, Link, LocalDevice, LocalView, Machine,
     MachineState, Message, Part, Person, Project, ProjectDocView, ProjectSecrets, Reachable, Role,
-    Routine, RoutineRun, Sender, ServerInfo, Skill, ThreadInfo, Voice,
+    Routine, RoutineRun, Sender, ServerInfo, Skill, ThreadInfo,
 };
 use crate::update;
 
@@ -230,34 +231,13 @@ impl Shared {
 
     /// Store the body of `/auth/token` or `/auth/refresh`.
     fn apply_token_response(&self, v: &Value) -> Result<DeviceCredentials> {
-        let access = v
-            .get("access_token")
-            .and_then(Value::as_str)
-            .filter(|t| !t.is_empty())
-            .ok_or_else(|| anyhow!("relay returned no access token"))?;
-        let expires_in = v.get("expires_in").and_then(Value::as_u64).unwrap_or(3600);
+        let dto: TokenResponseDto =
+            serde_json::from_value(v.clone()).context("token response: bad JSON")?;
+        if dto.access_token.is_empty() {
+            return Err(anyhow!("relay returned no access token"));
+        }
         let previous = self.creds.read().unwrap().clone();
-        let user = v
-            .get("user")
-            .and_then(|u| serde_json::from_value(u.clone()).ok())
-            .or_else(|| previous.as_ref().and_then(|c| c.user.clone()));
-        let creds = DeviceCredentials {
-            relay_url: self.http_url.clone(),
-            device_id: v
-                .get("device_id")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .or_else(|| previous.as_ref().map(|c| c.device_id.clone()))
-                .unwrap_or_else(|| "device".into()),
-            access_token: access.to_string(),
-            refresh_token: v
-                .get("refresh_token")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .or_else(|| previous.and_then(|c| c.refresh_token)),
-            expires_at: now_ms() + expires_in * 1000,
-            user,
-        };
+        let creds = credentials_from_token(&dto, &self.http_url, previous.as_ref(), now_ms());
         if let Err(err) = credentials::store(&creds) {
             self.notice(format!("Token saved in memory only: {err:#}"));
         }
@@ -816,27 +796,11 @@ fn start_after_pairing(shared: &Arc<Shared>) {
     let models_shared = shared.clone();
     tokio::spawn(async move {
         if let Ok(v) = models_shared.get_json("/proxy/v1/models").await {
-            let mut ids: Vec<String> = v
-                .get("data")
-                .and_then(Value::as_array)
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|m| m.get("id").and_then(Value::as_str))
-                        .filter(|id| !id.contains(':'))
-                        .filter(|id| {
-                            id.starts_with("anthropic/")
-                                || id.starts_with("openai/")
-                                || id.starts_with("google/")
-                                || id.starts_with("x-ai/")
-                        })
-                        .map(str::to_string)
-                        .collect()
-                })
-                .unwrap_or_default();
-            ids.sort();
-            ids.dedup();
-            if !ids.is_empty() {
-                let _ = models_shared.events.send(SyncEvent::Models(ids));
+            if let Ok(dto) = serde_json::from_value::<ModelListDto>(v) {
+                let ids = model_ids_from_dto(&dto);
+                if !ids.is_empty() {
+                    let _ = models_shared.events.send(SyncEvent::Models(ids));
+                }
             }
         }
     });
@@ -1778,34 +1742,21 @@ async fn fetch_avatar(shared: Arc<Shared>, url: String) {
 /// `GET /voices` → `SyncEvent::Voices` (a relay without it just leaves the list empty).
 async fn fetch_voices(shared: &Arc<Shared>) {
     match shared.get_json("/voices").await {
-        Ok(v) => {
-            let default = v
-                .get("default")
-                .and_then(Value::as_str)
-                .filter(|d| !d.is_empty())
-                .map(str::to_string);
-            let list = v.get("voices").cloned().unwrap_or(v);
-            let voices: Vec<Voice> = list
-                .as_array()
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|x| serde_json::from_value::<Voice>(x.clone()).ok())
-                        .filter(|x| !x.id.is_empty())
-                        .map(|mut x| {
-                            // Relative sample paths live on the relay.
-                            if x.sample_url.starts_with('/') {
-                                x.sample_url = format!("{}{}", shared.http_url, x.sample_url);
-                            } else if x.sample_url.is_empty() {
-                                x.sample_url =
-                                    format!("{}/voices/{}/sample.mp3", shared.http_url, x.id);
-                            }
-                            x
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            let _ = shared.events.send(SyncEvent::Voices { default, voices });
-        }
+        Ok(v) => match serde_json::from_value::<VoiceCatalogDto>(v) {
+            Ok(dto) => {
+                let (default, mut voices) = voices_from_dto(&dto);
+                for x in &mut voices {
+                    // Relative sample paths live on the relay.
+                    if x.sample_url.starts_with('/') {
+                        x.sample_url = format!("{}{}", shared.http_url, x.sample_url);
+                    } else if x.sample_url.is_empty() {
+                        x.sample_url = format!("{}/voices/{}/sample.mp3", shared.http_url, x.id);
+                    }
+                }
+                let _ = shared.events.send(SyncEvent::Voices { default, voices });
+            }
+            Err(err) => shared.diagnostic("voices", format!("bad /voices JSON: {err}")),
+        },
         Err(err) => {
             if !err.to_string().contains("HTTP 404") {
                 shared.diagnostic("voices", people_error(&err));
@@ -3377,9 +3328,8 @@ async fn transcribe(shared: Arc<Shared>, project_id: Id, request_id: u64, wav: A
             let status = r.status();
             let body = r.text().await.unwrap_or_default();
             if status.is_success() {
-                let text = serde_json::from_str::<Value>(&body)
-                    .ok()
-                    .and_then(|v| v.get("text").and_then(Value::as_str).map(str::to_owned))
+                let text = serde_json::from_str::<TranscriptionDto>(&body)
+                    .map(|dto| transcript_text(&dto))
                     .unwrap_or_default();
                 SyncEvent::Transcript {
                     request_id,
@@ -3529,12 +3479,16 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .await
                 {
                     Ok(v) => {
-                        let token = v
-                            .get("device_token")
-                            .and_then(Value::as_str)
-                            .unwrap_or("")
-                            .to_string();
-                        if token.is_empty() {
+                        let dto: PairResponseDto = match serde_json::from_value(v) {
+                            Ok(d) => d,
+                            Err(_) => {
+                                let _ = shared.events.send(SyncEvent::PairingFailed(
+                                    "relay returned no token".into(),
+                                ));
+                                return;
+                            }
+                        };
+                        if dto.device_token.is_empty() {
                             let _ = shared
                                 .events
                                 .send(SyncEvent::PairingFailed("relay returned no token".into()));
@@ -3542,12 +3496,12 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         }
                         let creds = DeviceCredentials {
                             relay_url: shared.http_url.clone(),
-                            device_id: v
-                                .get("device_id")
-                                .and_then(Value::as_str)
-                                .unwrap_or("device")
-                                .to_string(),
-                            access_token: token,
+                            device_id: if dto.device_id.is_empty() {
+                                "device".into()
+                            } else {
+                                dto.device_id
+                            },
+                            access_token: dto.device_token,
                             refresh_token: None,
                             expires_at: 0,
                             user: None,

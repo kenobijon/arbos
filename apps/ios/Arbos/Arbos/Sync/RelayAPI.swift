@@ -139,14 +139,21 @@ final class RelayAPI {
     // MARK: Pairing (D35)
 
     func pair(code: String, name: String) async throws -> DeviceCredentials {
-        let v = try await json("POST", "/pair", body: ["code": code.trimmingCharacters(in: .whitespaces), "name": name], auth: false)
-        guard let m = v as? [String: Any], let tok = m["device_token"] as? String, !tok.isEmpty else {
+        let (data, _) = try await request("POST", "/pair", body: ["code": code.trimmingCharacters(in: .whitespaces), "name": name], auth: false)
+        let dto: PairResponseDto
+        do {
+            dto = try JSONDecoder().decode(PairResponseDto.self, from: data)
+        } catch {
+            NSLog("PairResponseDto: \(error)")
+            throw RelayError(status: 0, message: "The relay returned no token")
+        }
+        guard !dto.device_token.isEmpty else {
             throw RelayError(status: 0, message: "The relay returned no token")
         }
         return DeviceCredentials(
             relayUrl: endpoint.httpUrl,
-            deviceId: m["device_id"] as? String ?? "device",
-            deviceToken: tok
+            deviceId: dto.device_id.isEmpty ? "device" : dto.device_id,
+            deviceToken: dto.device_token
         )
     }
 
@@ -306,10 +313,10 @@ final class RelayAPI {
     /// Model ids the relay proxy can serve, filtered like the Mac client,
     /// then trimmed to the newest major of each family and sorted newest-first.
     func models() async throws -> [String] {
-        let v = try await json("GET", "/proxy/v1/models")
-        let data = (v as? [String: Any])?["data"] as? [Any] ?? []
+        let (data, _) = try await request("GET", "/proxy/v1/models")
+        let list = (try? JSONDecoder().decode(ModelListDto.self, from: data))?.data ?? []
         let allowed = ["anthropic/", "openai/", "google/", "x-ai/"]
-        var ids = data.compactMap { ($0 as? [String: Any])?["id"] as? String }
+        var ids = list.map(\.id)
             .filter { id in !id.contains(":") && allowed.contains { id.hasPrefix($0) } }
         var seen = Set<String>()
         ids = ids.filter { seen.insert($0).inserted }
@@ -394,7 +401,7 @@ final class RelayAPI {
         return key
     }
 
-    /// `PUT /me/avatar` (raw JPEG) → `{avatar_url}`; updates the signed-in user's picture.
+    /// `PUT /me/avatar` (raw JPEG) → `MeUserResponseDto`; updates the signed-in user's picture.
     func putMeAvatar(jpeg: Data) async throws -> String {
         guard let url = URL(string: "\(endpoint.httpUrl)/me/avatar") else {
             throw RelayError(status: 0, message: "Bad relay URL")
@@ -409,11 +416,12 @@ final class RelayAPI {
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
             throw RelayError(status: status, message: String(data: body, encoding: .utf8) ?? "Avatar upload failed")
         }
-        guard let m = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
-              let avatarUrl = m["avatar_url"] as? String, !avatarUrl.isEmpty else {
+        guard let dto = try? JSONDecoder().decode(MeUserResponseDto.self, from: body) else {
             throw RelayError(status: 0, message: "The relay returned no avatar URL")
         }
-        return avatarUrl
+        if let url = dto.avatar_url.flatMap({ $0 }), !url.isEmpty { return url }
+        if let url = dto.user.avatar_url.flatMap({ $0 }), !url.isEmpty { return url }
+        throw RelayError(status: 0, message: "The relay returned no avatar URL")
     }
 
     /// `POST /feedback` (JSON, device token): `{note ≤4000, image: base64 PNG/JPEG ≤15 MB,
@@ -478,10 +486,10 @@ final class RelayAPI {
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
             throw RelayError(status: status, message: String(data: reply, encoding: .utf8) ?? "")
         }
-        guard let obj = try? JSONSerialization.jsonObject(with: reply) as? [String: Any], let text = obj["text"] as? String else {
+        guard let dto = try? JSONDecoder().decode(TranscriptionDto.self, from: reply) else {
             throw RelayError(status: http.statusCode, message: "No transcript in the reply")
         }
-        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return dto.text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     // MARK: Calls v1
@@ -793,18 +801,30 @@ final class RelayAPI {
 
     /// §10.3 `GET /voices` (no auth) → the default id and the catalogue. `sample_url` may be
     /// relative; it is resolved against the relay.
-    func voices() async throws -> VoiceCatalog {
-        let v = try await json("GET", "/voices", auth: false)
-        guard let m = v as? [String: Any] else { throw RelayError(status: 0, message: "The relay returned no voices") }
-        let base = endpoint.httpUrl
-        let list: [Voice] = ((m["voices"] as? [[String: Any]]) ?? []).compactMap { d in
-            guard let id = d["id"] as? String, !id.isEmpty else { return nil }
-            let rawSample = (d["sample_url"] as? String) ?? "/voices/\(id)/sample.mp3"
-            let sample = rawSample.hasPrefix("http") ? rawSample : base + (rawSample.hasPrefix("/") ? "" : "/") + rawSample
-            return Voice(id: id, name: (d["name"] as? String) ?? id.capitalized, description: d["description"] as? String,
-                         seconds: (d["seconds"] as? NSNumber)?.doubleValue, sampleURL: URL(string: sample))
+    func voices() async throws -> Arbos.VoiceCatalog {
+        let (data, _) = try await request("GET", "/voices", auth: false)
+        let dto: VoiceCatalogDto
+        do {
+            dto = try JSONDecoder().decode(VoiceCatalogDto.self, from: data)
+        } catch {
+            NSLog("VoiceCatalogDto: \(error)")
+            throw RelayError(status: 0, message: "The relay returned no voices")
         }
-        return VoiceCatalog(defaultId: (m["default"] as? String) ?? list.first?.id ?? "", voices: list)
+        let base = endpoint.httpUrl
+        let list: [Arbos.Voice] = dto.voices.compactMap { v in
+            guard !v.id.isEmpty else { return nil }
+            let rawSample = v.sample_url.isEmpty ? "/voices/\(v.id)/sample.mp3" : v.sample_url
+            let sample = rawSample.hasPrefix("http") ? rawSample : base + (rawSample.hasPrefix("/") ? "" : "/") + rawSample
+            return Arbos.Voice(
+                id: v.id,
+                name: v.name.isEmpty ? v.id.capitalized : v.name,
+                description: v.description,
+                seconds: v.seconds,
+                sampleURL: URL(string: sample)
+            )
+        }
+        let defaultId = dto.`default`.isEmpty ? (list.first?.id ?? "") : dto.`default`
+        return Arbos.VoiceCatalog(defaultId: defaultId, voices: list)
     }
 
     func peopleChats() async throws -> [PeopleChat] {

@@ -6,11 +6,12 @@
 
 use arbos_core::api::{
     AccountUserDto, CallDto, CallReachabilityDto, ChatDto, ChatMemberDto, CreateChatResponseDto,
-    GetProjectResponseDto, GroupDto, MachineStatusDto, MeResponseDto, PeopleChatDto,
+    GetProjectResponseDto, GroupDto, MachineStatusDto, MeResponseDto, ModelListDto, PeopleChatDto,
     ProjectMemberDto, ProjectMembersDto, ProjectOwnerDto, ProjectSecretItemDto,
     ProjectSecretSummaryDto, ProjectSecretsDto, ProjectVaultSummaryDto, RoutineDto, RoutineRunDto,
     SecretAccessDto, SecretActivityDto, SecretDirectorDto, SecretDto, SecretRequestDto,
-    SecretsOverviewDto, SenderDto, UserCardDto, VaultDto,
+    SecretsOverviewDto, SenderDto, TokenResponseDto, TranscriptionDto, UserCardDto, VaultDto,
+    VoiceCatalogDto, VoiceDto,
 };
 use arbos_core::wire::BoxState as WireBox;
 use serde_json::Value;
@@ -20,9 +21,9 @@ use crate::model::{
     Machine, MachineState, Person, Project, ProjectMachine, ProjectSecretAccess, ProjectSecrets,
     Reachable, ReachableDevice, ReplyPolicy, Routine, RoutineRun, RoutineRunStatus, RoutineTrigger,
     Secret, SecretActivity, SecretAgent, SecretDirector, SecretRequest, SecretScope, SecretsView,
-    Sender, SpaceKind,
+    Sender, SpaceKind, Voice,
 };
-use crate::sync::credentials::AccountUser;
+use crate::sync::credentials::{AccountUser, DeviceCredentials};
 
 /// Wire box word → the string `box_state_from` already understands.
 fn wire_box_word(state: WireBox) -> &'static str {
@@ -120,6 +121,91 @@ impl From<&AccountUserDto> for AccountUser {
             avatar_url: u.avatar_url.clone().flatten().unwrap_or_default(),
             name: u.name.clone().flatten().unwrap_or_default(),
         }
+    }
+}
+
+impl From<&VoiceDto> for Voice {
+    fn from(v: &VoiceDto) -> Self {
+        Voice {
+            id: v.id.clone(),
+            name: if v.name.is_empty() {
+                v.id.clone()
+            } else {
+                v.name.clone()
+            },
+            description: v.description.clone(),
+            sample_url: v.sample_url.clone(),
+        }
+    }
+}
+
+/// Model ids clients keep from `GET /proxy/v1/models` (filtered like the apps).
+pub fn model_ids_from_dto(dto: &ModelListDto) -> Vec<String> {
+    let allowed = ["anthropic/", "openai/", "google/", "x-ai/"];
+    let mut ids: Vec<String> = dto
+        .data
+        .iter()
+        .map(|m| m.id.clone())
+        .filter(|id| !id.contains(':'))
+        .filter(|id| allowed.iter().any(|p| id.starts_with(p)))
+        .collect();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+/// Voices catalogue → default id + model voices (relative sample paths resolved by the caller).
+pub fn voices_from_dto(dto: &VoiceCatalogDto) -> (Option<String>, Vec<Voice>) {
+    let default = (!dto.default_voice.is_empty()).then(|| dto.default_voice.clone());
+    let voices: Vec<Voice> = dto
+        .voices
+        .iter()
+        .map(Voice::from)
+        .filter(|v| !v.id.is_empty())
+        .collect();
+    (default, voices)
+}
+
+/// Transcript text from a transcription reply (unknown keys ignored).
+pub fn transcript_text(dto: &TranscriptionDto) -> String {
+    dto.text.trim().to_owned()
+}
+
+/// Apply `/auth/token` or `/auth/refresh` onto credentials (keeps prior refresh/user when omitted).
+pub fn credentials_from_token(
+    dto: &TokenResponseDto,
+    relay_url: &str,
+    previous: Option<&DeviceCredentials>,
+    now_ms: u64,
+) -> DeviceCredentials {
+    DeviceCredentials {
+        relay_url: relay_url.to_owned(),
+        device_id: if dto.device_id.is_empty() {
+            previous
+                .map(|c| c.device_id.clone())
+                .unwrap_or_else(|| "device".into())
+        } else {
+            dto.device_id.clone()
+        },
+        access_token: dto.access_token.clone(),
+        refresh_token: if dto.refresh_token.is_empty() {
+            previous.and_then(|c| c.refresh_token.clone())
+        } else {
+            Some(dto.refresh_token.clone())
+        },
+        expires_at: if dto.expires_in > 0 {
+            now_ms + (dto.expires_in as u64) * 1000
+        } else {
+            0
+        },
+        user: {
+            let u: AccountUser = (&dto.user).into();
+            if u.id.is_empty() {
+                previous.and_then(|c| c.user.clone())
+            } else {
+                Some(u)
+            }
+        },
     }
 }
 
@@ -1070,5 +1156,43 @@ mod tests {
             decide.access.as_ref().map(|a| a.access_id.as_str()),
             Some("acc_secret_fixture")
         );
+    }
+
+    #[test]
+    fn pair_token_health_voices_fixtures() {
+        use arbos_core::api::{HealthDto, PairResponseDto};
+
+        let pair: PairResponseDto = load_json("pair_response.json");
+        assert_eq!(pair.device_id, "dev_fixture");
+        assert_eq!(pair.device_token, "adv_fixture_not_a_real_token");
+
+        let token: TokenResponseDto = load_json("token_response.json");
+        assert!(!token.access_token.is_empty());
+        assert_eq!(token.device_id, "dev_fixture");
+        let creds = credentials_from_token(&token, "http://relay.test", None, 1_700_000_000_000);
+        assert_eq!(creds.device_id, "dev_fixture");
+        assert_eq!(creds.access_token, token.access_token);
+        assert_eq!(
+            creds.user.as_ref().map(|u| u.login.as_str()),
+            Some("user301")
+        );
+
+        let grace: TokenResponseDto = load_json("token_response_refresh_grace.json");
+        assert_eq!(grace.access_token, token.access_token);
+        assert_eq!(grace.refresh_token, token.refresh_token);
+
+        let health: HealthDto = load_json("healthz.json");
+        assert_eq!(health.auth_mode.as_deref(), Some("github"));
+        assert!(health.ok);
+
+        let voices: VoiceCatalogDto = load_json("voices.json");
+        let (default, list) = voices_from_dto(&voices);
+        assert_eq!(default.as_deref(), Some("marin"));
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, "marin");
+        assert_eq!(list[0].name, "Marin");
+
+        let tx: TranscriptionDto = load_json("transcription_mock.json");
+        assert!(transcript_text(&tx).contains("mock transcript"));
     }
 }

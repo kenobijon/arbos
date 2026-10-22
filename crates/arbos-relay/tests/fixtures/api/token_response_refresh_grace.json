@@ -1,0 +1,16 @@
+{
+  "access_token": "fixture_access_token_not_real",
+  "device_id": "dev_fixture",
+  "expires_in": 3600,
+  "refresh_token": "arf_fixture_refresh_token_not_real",
+  "token_type": "Bearer",
+  "user": {
+    "avatar_url": null,
+    "created_at": 1700000000000,
+    "github_id": 301,
+    "id": "gh_301",
+    "last_login_at": 1700000000000,
+    "login": "user301",
+    "name": "Fixture User"
+  }
+}

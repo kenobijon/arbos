@@ -1,0 +1,11 @@
+{
+  "auth_mode": "github",
+  "daytona": false,
+  "devices": 0,
+  "ok": true,
+  "proto": 1,
+  "providers": {
+    "anthropic": false,
+    "openai_compatible": false
+  }
+}

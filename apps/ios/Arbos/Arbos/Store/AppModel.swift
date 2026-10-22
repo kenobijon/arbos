@@ -113,7 +113,6 @@ final class AppModel: ObservableObject {
     func setFixtureUser(_ who: AuthUser) { user = who }
     #endif
     @Published private(set) var credits: Credits?
-    @Published private(set) var approvals: [PendingDevice] = []
     /// A newer TestFlight build than the one running (continuous delivery, D85): the Home card
     /// and Settings → About offer one tap into TestFlight. `nil` when up to date or dismissed.
     @Published private(set) var availableUpdate: AvailableBuild?
@@ -824,7 +823,7 @@ final class AppModel: ObservableObject {
         return ok
     }
 
-    /// `/me` + pending approvals; runs with every registry poll.
+    /// `/me`; runs with every registry poll.
     func refreshAccount() async {
         guard credentials != nil, !isFixture else { return }
         if tokens?.isExpiringSoon == true { _ = await refreshTokens() }
@@ -845,21 +844,6 @@ final class AppModel: ObservableObject {
             }
             machine = m
         }
-        if let list = try? await api.approvals() { approvals = list }
-    }
-
-    func approve(_ device: PendingDevice) {
-        approvals.removeAll { $0.id == device.id }
-        Task {
-            do { try await api.approve(userCode: device.userCode) } catch {
-                notice = Notice(text: "Approve failed: \(error.localizedDescription)")
-            }
-        }
-    }
-
-    func deny(_ device: PendingDevice) {
-        approvals.removeAll { $0.id == device.id }
-        Task { try? await api.deny(userCode: device.userCode) }
     }
 
     func signOut(remote: Bool = true) {
@@ -876,7 +860,6 @@ final class AppModel: ObservableObject {
         tokens = nil
         user = nil
         credits = nil
-        approvals = []
         needsProfileSetup = false
         unpair(forget: true)
     }

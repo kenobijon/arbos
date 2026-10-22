@@ -47,16 +47,6 @@ struct Credits: Codable, Equatable {
     var dailyCapUsd: Double?
 }
 
-/// A device waiting for this signed-in user's approval (`GET /auth/approvals`).
-struct PendingDevice: Identifiable, Equatable {
-    var id: String { pendingId }
-    var pendingId: String
-    var userCode: String
-    var name: String
-    var createdAt: Int64
-    var expiresAt: Int64
-}
-
 /// Relay auth routes (internal/selfserve-auth-api.md, 2026-10-15).
 enum AuthEndpoints {
     static let callbackScheme = "arbos"
@@ -72,9 +62,6 @@ enum AuthEndpoints {
     static let refresh = "/auth/refresh"
     static let logout = "/auth/logout"
     static let me = "/me"
-    static let approvals = "/auth/approvals"
-    static let approve = "/auth/approvals/approve"
-    static let deny = "/auth/approvals/deny"
     /// Refresh when less than this is left on the access token.
     static let refreshAheadMs: Int64 = 5 * 60 * 1000
 
@@ -159,11 +146,12 @@ final class WebAuth: NSObject, ASWebAuthenticationPresentationContextProviding {
 
 extension RelayAPI {
     /// github | paircode. `/healthz` carries `auth_mode` on new relays; older
-    /// relays (no field) are paircode.
+    /// relays (legacy `auth`) are paircode unless `auth == "github"`.
     func authMode() async -> AuthMode {
-        guard let v = try? await json("GET", "/healthz", auth: false) as? [String: Any] else { return .paircode }
-        if let raw = v["auth_mode"] as? String, let mode = AuthMode(rawValue: raw) { return mode }
-        return v["auth"] as? String == "github" ? .github : .paircode
+        guard let (data, _) = try? await request("GET", "/healthz", auth: false),
+              let dto = try? JSONDecoder().decode(HealthDto.self, from: data) else { return .paircode }
+        if let raw = dto.auth_mode, let mode = AuthMode(rawValue: raw) { return mode }
+        return dto.auth == "github" ? .github : .paircode
     }
 
     func authStartURL(deviceName: String) -> URL? {
@@ -235,38 +223,32 @@ extension RelayAPI {
         return user
     }
 
-    func approvals() async throws -> [PendingDevice] {
-        let v = try await json("GET", AuthEndpoints.approvals)
-        let list = (v as? [Any]) ?? ((v as? [String: Any])?["approvals"] as? [Any]) ?? []
-        return list.compactMap { raw -> PendingDevice? in
-            guard let d = raw as? [String: Any], let pid = d["pending_id"] as? String else { return nil }
-            return PendingDevice(pendingId: pid, userCode: d["user_code"] as? String ?? "", name: d["name"] as? String ?? "New device",
-                                 createdAt: (d["created_at"] as? NSNumber)?.int64Value ?? 0,
-                                 expiresAt: (d["expires_at"] as? NSNumber)?.int64Value ?? 0)
-        }
-    }
-
-    func approve(userCode: String) async throws {
-        _ = try await json("POST", AuthEndpoints.approve, body: ["user_code": userCode])
-    }
-
-    func deny(userCode: String) async throws {
-        _ = try await json("POST", AuthEndpoints.deny, body: ["user_code": userCode])
-    }
-
     func logout() async {
         _ = try? await json("POST", AuthEndpoints.logout, body: [String: Any]())
     }
 
     static func parseTokens(_ v: Any, relayUrl: String) throws -> (AuthTokens, AuthUser?) {
-        guard let m = v as? [String: Any], let access = m["access_token"] as? String, !access.isEmpty else {
+        guard JSONSerialization.isValidJSONObject(v),
+              let data = try? JSONSerialization.data(withJSONObject: v),
+              let dto = try? JSONDecoder().decode(TokenResponseDto.self, from: data),
+              !dto.access_token.isEmpty else {
             throw AuthError(message: "The relay returned no access token")
         }
-        let refresh = m["refresh_token"] as? String ?? ""
-        var expiresAt: Int64 = 0
-        if let s = (m["expires_in"] as? NSNumber)?.int64Value { expiresAt = nowMs() + s * 1000 }
-        return (AuthTokens(accessToken: access, refreshToken: refresh, expiresAt: expiresAt, relayUrl: relayUrl,
-                           deviceId: m["device_id"] as? String ?? ""), parseUser(m["user"] as? [String: Any]))
+        return parseTokens(dto, relayUrl: relayUrl)
+    }
+
+    static func parseTokens(_ dto: TokenResponseDto, relayUrl: String) -> (AuthTokens, AuthUser?) {
+        let expiresAt: Int64 = dto.expires_in > 0 ? nowMs() + dto.expires_in * 1000 : 0
+        return (
+            AuthTokens(
+                accessToken: dto.access_token,
+                refreshToken: dto.refresh_token,
+                expiresAt: expiresAt,
+                relayUrl: relayUrl,
+                deviceId: dto.device_id
+            ),
+            parseUser(dto.user)
+        )
     }
 
     static func parseUser(_ u: [String: Any]?) -> AuthUser? {
