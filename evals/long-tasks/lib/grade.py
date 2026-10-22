@@ -198,6 +198,9 @@ def grade_turn(turn, ctx, box, project, env):
     produced = ""
     if turn.get("verify"):
         code, verify_out = box.run_as_ws(project, turn["verify"], env=env, timeout=240)
+        if not verify_out.strip():
+            # an empty answer is a transport hiccup (ssh / docker exec), not a verdict: once more
+            code, verify_out = box.run_as_ws(project, turn["verify"], env=env, timeout=240)
         lines = [l for l in verify_out.splitlines() if l.strip()]
         verdict = next((l for l in lines if l.startswith("PASS") or l.startswith("FAIL")), "FAIL: verify printed nothing")
         if not verdict.startswith("PASS"):
@@ -256,6 +259,8 @@ def grade_turn(turn, ctx, box, project, env):
         t = res.get("ttfr_s")
         if t is None or t > turn["latency_max_s"]:
             reasons.append(f"first reply took {t} s (limit {turn['latency_max_s']} s)")
+    if turn.get("max_doc_tool_parts") is not None and (dm.get("tool_parts") or 0) > turn["max_doc_tool_parts"]:
+        reasons.append(f"{dm.get('tool_parts')} tool cards in the turn (limit {turn['max_doc_tool_parts']})")
     if turn.get("wall_max_s") is not None and (res.get("timed_out") or (res.get("wall_s") or 0) > turn["wall_max_s"]):
         reasons.append(f"turn took {res.get('wall_s')} s (limit {turn['wall_max_s']} s)")
     if res.get("timed_out") and not turn.get("allow_timeout"):

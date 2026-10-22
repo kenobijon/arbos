@@ -96,7 +96,7 @@ class Lane(threading.Thread):
         proj_dir = f"/work/{self.project}"
         d_rel = f"lt-{tid}-{tag}"
         D = f"{proj_dir}/{d_rel}"
-        env = {"D": D}
+        env = {"D": D, "P": proj_dir}
         self.say(f"{tid}: start ({D})")
         t_task0 = time.time()
         usage0 = rl.usage_all(self.project)
@@ -110,7 +110,7 @@ class Lane(threading.Thread):
         for i, turn in enumerate(task["turns"], 1):
             prompt = turn["prompt"].replace("{D}", D).replace("{FIXTURES}", FIXTURES)
             if turn.get("seed"):
-                code, out = self.box.run_as_ws(self.project, turn["seed"].replace("{D}", D), env=env, timeout=180)
+                code, out = self.box.run_as_ws(self.project, turn["seed"].replace("{D}", D).replace("{P}", proj_dir), env=env, timeout=180)
                 if "fatal" in out.lower() or (code not in (0, None)):
                     self.say(f"{tid}: seed rc={code}: {out[-200:]}")
             if turn.get("generate"):
@@ -142,7 +142,7 @@ class Lane(threading.Thread):
             turn_spec["prompt"] = prompt
             for k in ("verify", "show"):
                 if turn_spec.get(k):
-                    turn_spec[k] = turn_spec[k].replace("{D}", D)
+                    turn_spec[k] = turn_spec[k].replace("{D}", D).replace("{P}", proj_dir)
             ctx = {"reply": dm.get("reply") or dm.get("all_text") or "", "all_text": dm.get("all_text"), "dm": dm, "res": res, "gen_truth": gen_truth}
             g = gr.grade_turn(turn_spec, ctx, self.box, self.project, env)
             turn_rec = {
@@ -205,11 +205,25 @@ class Lane(threading.Thread):
             all_docs.append(doc)
         dc = task.get("doc_checks")
         if dc:
-            handoffs, dup_status = doc_checks(all_docs)
-            if dc.get("max_handoffs") is not None and handoffs > dc["max_handoffs"]:
-                reasons.append(f"{handoffs} handoffs (continue-act) > {dc['max_handoffs']}")
-            if dc.get("no_duplicate_status") and dup_status:
-                reasons.append(f"duplicated status lines: {dup_status[:3]}")
+            checks = doc_checks(all_docs)
+            if dc.get("max_handoffs") is not None and checks["handoffs"] > dc["max_handoffs"]:
+                reasons.append(f"{checks['handoffs']} handoffs (continue-act) > {dc['max_handoffs']}")
+            if dc.get("no_duplicate_status") and checks["dup_status"]:
+                reasons.append(f"duplicated status lines: {checks['dup_status'][:3]}")
+            if dc.get("no_empty_result_rows") and checks["empty_result_rows"]:
+                reasons.append(f"{checks['empty_result_rows']} result row(s) with tool cards but no text (reply lost)")
+            if dc.get("no_repeated_sentence") and checks["repeated_sentences"]:
+                reasons.append(f"a sentence appears twice in one bubble: {checks['repeated_sentences'][:2]}")
+            if dc.get("forbid_text_regex"):
+                hits = [t[:80] for t in checks["texts"] if re.search(dc["forbid_text_regex"], t, re.I)]
+                if hits:
+                    reasons.append(f"raw error text shown to the user: {hits[:2]}")
+            if dc.get("failure_lines_exactly") is not None:
+                n = sum(1 for t in checks["texts"] if re.search(dc.get("failure_regex", "could not|couldn't|failed|unable|did not start|didn't start"), t, re.I))
+                if n != dc["failure_lines_exactly"]:
+                    reasons.append(f"{n} failure line(s) shown, expected exactly {dc['failure_lines_exactly']}")
+        if task.get("cleanup"):
+            self.box.run_as_ws(self.project, task["cleanup"].replace("{D}", D).replace("{P}", proj_dir), env=env, timeout=120)
         if task.get("cleanup_routines"):
             for r in rl.routines(self.project):
                 if r.get("id"):
@@ -244,12 +258,16 @@ class Lane(threading.Thread):
 
 
 def doc_checks(docs):
+    """Whole-transcript checks over every chat doc a task touched (rows are deduplicated by id)."""
     handoffs = 0
-    dups = []
+    dups, repeated, texts = [], [], []
+    empty_result_rows = 0
+    seen_rows = set()
     for doc in docs:
         for m in doc.get("messages", []):
-            if m.get("role") != "assistant":
+            if m.get("role") != "assistant" or m.get("id") in seen_rows:
                 continue
+            seen_rows.add(m.get("id"))
             s = json.dumps(m)
             if m.get("escalatedFromAct") or m.get("escalated_from_act") or "continue-act" in s:
                 handoffs += 1
@@ -260,7 +278,17 @@ def doc_checks(docs):
                     if key in seen and key[1]:
                         dups.append(key[1][:60])
                     seen.add(key)
-    return handoffs, dups
+            text = dr.text_of(m)
+            tools = [p for p in m.get("parts", []) if p.get("kind") == "tool"]
+            if text:
+                texts.append(text)
+                sentences = [x.strip() for x in re.split(r"(?<=[.!?])\s+", text) if len(x.strip()) > 25]
+                for x in sentences:
+                    if sentences.count(x) > 1 and x[:60] not in repeated:
+                        repeated.append(x[:60])
+            elif tools and m.get("turnRole") != "ack" and m.get("status") == "done":
+                empty_result_rows += 1
+    return {"handoffs": handoffs, "dup_status": dups, "empty_result_rows": empty_result_rows, "repeated_sentences": repeated, "texts": texts}
 
 
 def main():

@@ -1,0 +1,33 @@
+{
+  "id": "b6-subagent-failed-start",
+  "lane": "c",
+  "category": "recovery",
+  "title": "A subagent that fails to start: one plain line, no raw error, no stuck turn, no leaked child",
+  "turns": [
+    {
+      "prompt": "Please delegate this to a subagent (it is a separate piece of work): write a 200-word note about garden compost to {D}/compost.md and tell me when it is done.",
+      "seed": "H={P}/.arbos/home; mkdir -p $H/.local/bin && printf '#!/bin/bash\\n# eval fault injection: a harness binary that never answers get_state\\nexec sleep 600\\n' > $H/.local/bin/prime-agent && chmod +x $H/.local/bin/prime-agent && mkdir -p {D} && echo injected",
+      "after_s": 15,
+      "verify": "n=$(pgrep -f 'sleep 600' | wc -l); echo \"SHOW leaked_children=$n\"; [ $n -eq 0 ] && echo PASS || echo FAIL: $n harness harness children outlived the failed start",
+      "max_doc_tool_parts": 0,
+      "wall_max_s": 150,
+      "allow_timeout": false,
+      "timeout_s": 300
+    },
+    {
+      "prompt": "hello",
+      "latency_max_s": 5,
+      "reply_regex": "\\w",
+      "timeout_s": 60
+    }
+  ],
+  "doc_checks": {
+    "forbid_text_regex": "child prime|st-1|timed out on|rpc error|get_state|stderr",
+    "failure_lines_exactly": 1,
+    "no_repeated_sentence": true,
+    "no_duplicate_status": true,
+    "max_handoffs": 0
+  },
+  "cleanup": "rm -f {P}/.arbos/home/.local/bin/prime-agent; pkill -f 'sleep 600' 2>/dev/null; echo cleaned",
+  "regression": "subagent failed start: plain line, kill stuck child, result turn replies only (bc-d117b386, #1349)"
+}
