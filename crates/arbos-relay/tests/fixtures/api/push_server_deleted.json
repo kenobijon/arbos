@@ -1,6 +1,6 @@
 {
-  "id": "push_server_deleted",
   "created_at": 1700000000000,
+  "id": "push_server_deleted",
   "kind": "server_deleted",
   "payload": {
     "server_id": "srv_fixture"

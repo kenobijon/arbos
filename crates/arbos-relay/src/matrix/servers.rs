@@ -960,7 +960,7 @@ pub async fn leave(
         &id,
         &me,
         &PushEventDto::ServerMemberRemoved(ServerMemberRemovedPayloadDto {
-            server_id: id,
+            server_id: id.clone(),
             user_id: me.clone(),
             banned: None,
             handle: Some(handle_of(&state, &me)),

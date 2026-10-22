@@ -1,9 +1,9 @@
 {
-  "id": "push_project_member_removed",
   "created_at": 1700000000000,
+  "id": "push_project_member_removed",
   "kind": "project_member_removed",
   "payload": {
-    "project_id": "proj_fixture",
-    "by_handle": "user201"
+    "by_handle": "user201",
+    "project_id": "proj_fixture"
   }
 }

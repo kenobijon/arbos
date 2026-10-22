@@ -1,11 +1,11 @@
 {
-  "id": "push_people_member_added",
   "created_at": 1700000000000,
+  "id": "push_people_member_added",
   "kind": "people_member_added",
   "payload": {
+    "by_handle": "user201",
     "chat_id": "people_dm",
-    "user_id": "gh_202",
     "handle": "user202",
-    "by_handle": "user201"
+    "user_id": "gh_202"
   }
 }

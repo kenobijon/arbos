@@ -1,6 +1,6 @@
 {
-  "id": "push_call_missed",
   "created_at": 1700000000000,
+  "id": "push_call_missed",
   "kind": "call_missed",
   "payload": {
     "call_id": "call_fixture",

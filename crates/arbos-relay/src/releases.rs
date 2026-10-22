@@ -384,6 +384,6 @@ mod tests {
             .unwrap();
         let all = state.db.all_releases().unwrap();
         assert_eq!(all.len(), 1);
-        assert_eq!(all[0]["version"], "0.6.31");
+        assert_eq!(all[0].version, "0.6.31");
     }
 }

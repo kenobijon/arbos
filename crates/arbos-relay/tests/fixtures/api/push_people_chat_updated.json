@@ -1,6 +1,6 @@
 {
-  "id": "push_people_chat_updated",
   "created_at": 1700000000000,
+  "id": "push_people_chat_updated",
   "kind": "people_chat_updated",
   "payload": {
     "chat_id": "people_dm"

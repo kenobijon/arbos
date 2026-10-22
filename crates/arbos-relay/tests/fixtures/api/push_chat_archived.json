@@ -1,10 +1,10 @@
 {
-  "id": "push_chat_archived",
   "created_at": 1700000000000,
+  "id": "push_chat_archived",
   "kind": "chat_archived",
   "payload": {
+    "archived_at": 1700000000000,
     "chat_id": "chat_fixture",
-    "project_id": "proj_fixture",
-    "archived_at": 1700000000000
+    "project_id": "proj_fixture"
   }
 }

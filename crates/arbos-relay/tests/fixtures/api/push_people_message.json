@@ -1,12 +1,11 @@
 {
-  "id": "push_people_message",
   "created_at": 1700000000000,
+  "id": "push_people_message",
   "kind": "people_message",
   "payload": {
     "chat_id": "people_dm",
     "from": "user:gh_201",
     "from_handle": "user201",
-    "seq": 42,
     "sender": {
       "avatar": null,
       "avatar_color": null,
@@ -19,6 +18,7 @@
       "id": "gh_201",
       "kind": "user",
       "name": "@user201"
-    }
+    },
+    "seq": 42
   }
 }

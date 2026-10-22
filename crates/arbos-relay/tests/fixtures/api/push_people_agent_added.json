@@ -1,10 +1,10 @@
 {
-  "id": "push_people_agent_added",
   "created_at": 1700000000000,
+  "id": "push_people_agent_added",
   "kind": "people_agent_added",
   "payload": {
+    "by_handle": "user201",
     "chat_id": "people_dm",
-    "project_id": "proj_fixture",
-    "by_handle": "user201"
+    "project_id": "proj_fixture"
   }
 }
