@@ -9,6 +9,7 @@ use serde_json::Value;
 use arbos_core::doc::{message_text, ChatDoc};
 use arbos_core::wire;
 
+use super::worker::room_spec;
 use super::Job;
 use crate::people::PEOPLE_PROJECT;
 use crate::state::AppState;
@@ -27,6 +28,7 @@ pub struct Report {
     pub rooms_queued: usize,
     pub messages_queued: usize,
     pub reads_queued: usize,
+    pub rooms_closed: usize,
     pub skipped_empty: usize,
     pub doc_errors: usize,
 }
@@ -214,7 +216,18 @@ pub fn run(state: &AppState, scope: Scope) -> Report {
             rep.messages_queued += 1;
         }
     }
-    // Read marks: a member with nothing unread in a chat gets a receipt on its newest event.
+    // Rooms whose chat is gone (a closed project tab, a deleted group) get closed.
+    if scope.chat_id.is_none() && scope.user_id.is_none() && scope.project_id.is_none() {
+        for (chat_id, project_id) in state.db.matrix_open_chat_rooms().unwrap_or_default() {
+            if room_spec(state, &chat_id, project_id.as_deref()).is_none() {
+                state.matrix.close_chat(state, &chat_id);
+                rep.rooms_closed += 1;
+            }
+        }
+    }
+    // Read marks: a member gets a receipt where their mark is (the worker places it on the
+    // event at the mark, or on the newest event once caught up); a member with nothing unread
+    // but no mark gets one on the newest event.
     if !scope.rooms_only {
         let users: Vec<String> = match &scope.user_id {
             Some(u) => vec![u.clone()],
@@ -236,6 +249,12 @@ pub fn run(state: &AppState, scope: Scope) -> Report {
                 .into_iter()
                 .filter(|c| c.unread > 0)
                 .map(|c| c.chat_id)
+                .collect();
+            let marked: std::collections::HashSet<String> = state
+                .db
+                .matrix_read_marked_chats(&u)
+                .unwrap_or_default()
+                .into_iter()
                 .collect();
             // People chats by membership; project chats as owner or guest.
             let mut mine: Vec<String> = state
@@ -264,7 +283,9 @@ pub fn run(state: &AppState, scope: Scope) -> Report {
                 );
             }
             for chat_id in mine {
-                if wanted.contains(&chat_id) && !unread.contains(&chat_id) {
+                if wanted.contains(&chat_id)
+                    && (marked.contains(&chat_id) || !unread.contains(&chat_id))
+                {
                     state.matrix.read(state, &chat_id, &u);
                     rep.reads_queued += 1;
                 }

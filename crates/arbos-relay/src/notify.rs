@@ -338,6 +338,8 @@ pub async fn announce(
         }
         if user_focused_on_chat(state, &user, &chat.chat_id).await {
             let _ = state.db.mark_chat_read(&user, &chat.chat_id);
+            // Queued after the message job for this chat, so the receipt lands on it.
+            state.matrix.read(state, &chat.chat_id, &user);
         }
         if !state.push.is_on() {
             continue;
