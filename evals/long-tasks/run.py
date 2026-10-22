@@ -120,7 +120,9 @@ class Lane(threading.Thread):
                     self.say(f"{tid}: fixture upload failed: {msg}")
             if turn.get("pre_wait_s"):
                 time.sleep(turn["pre_wait_s"])
-            if chat_id is None or turn.get("new_chat"):
+            if turn.get("chat") == "first" and first_chat:
+                chat_id = first_chat  # back to the task's first chat after a new_chat turn
+            elif chat_id is None or turn.get("new_chat"):
                 chat_id = rl.chat_open(self.project, f"{tid} {tag}" + (f" t{i}" if turn.get("new_chat") else ""))
                 if first_chat is None:
                     first_chat = chat_id
@@ -186,6 +188,8 @@ class Lane(threading.Thread):
             while time.time() < deadline:
                 code, out = self.box.run_as_ws(self.project, verify, env=env, timeout=120)
                 if "PASS" in out:
+                    # the files are there; give the agent's own final note time to land
+                    time.sleep(vw.get("settle_s", 0))
                     break
                 time.sleep(20)
             doc = rl.chat_dump(self.project, first_chat)

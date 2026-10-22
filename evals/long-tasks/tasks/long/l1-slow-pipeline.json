@@ -20,6 +20,7 @@
     "rubric": {
       "criteria": "The transcript shows at least three progress notes at sensible points and a final summary stating all 20 chunks were processed; notes are short and not duplicated.",
       "min": 3
-    }
+    },
+    "settle_s": 150
   }
 }

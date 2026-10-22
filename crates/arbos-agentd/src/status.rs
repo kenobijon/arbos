@@ -870,9 +870,11 @@ mod tests {
     }
 
     /// #1355: an act turn that closes with a second `route reply {reply: …}` must show that text
-    /// in its result row; the streamed path only follows the first route of a turn.
+    /// in its result row (the streamed path only follows the first route of a turn). #1373: a
+    /// plain reply turn whose text already streamed must not get it a second time — the hook may
+    /// run before the argument deltas are folded, so the decision is made at turn end only.
     #[tokio::test]
-    async fn act_turn_closing_with_route_reply_keeps_the_reply_text() {
+    async fn route_reply_text_is_written_once_at_turn_end() {
         let (agent, root) = test_agent().await;
         let chat = "01TESTCHATQUICKREPLY000004";
         let host = agent.sync.open_room(chat).await.unwrap();
@@ -882,14 +884,15 @@ mod tests {
             let t = tl.as_mut().unwrap();
             agent.test_open_row(&host, t).await;
         }
+        let reply =
+            "Torn down. The logger (process 4555) is stopped and the scheduled job is gone.";
+        // Case A (#1355): act turn, then a second `route reply` carrying the text; nothing streamed.
         agent
             .hook_route(
                 &json!({ "action": "act", "ack": "Stopping the loop now.", "plan": "kill it" }),
             )
             .await
             .unwrap();
-        let reply =
-            "Torn down. The logger (process 4555) is stopped and the scheduled job is gone.";
         agent
             .hook_route(&json!({ "action": "reply", "reply": reply }))
             .await
@@ -897,20 +900,50 @@ mod tests {
         {
             let mut tl = agent.turn.lock().await;
             let t = tl.as_mut().unwrap();
-            assert!(
-                t.act_buffer.contains("Torn down."),
-                "staged: {:?}",
-                t.act_buffer
+            assert!(t.streamed_text.is_empty(), "the hook itself writes nothing");
+            agent.write_route_reply_if_missing(&host, t).await;
+            assert_eq!(
+                t.streamed_text.matches("Torn down.").count(),
+                1,
+                "{}",
+                t.streamed_text
             );
-            // Pretend the same reply streamed already (first-route case): not staged twice.
+            agent.write_route_reply_if_missing(&host, t).await;
+            assert_eq!(
+                t.streamed_text.matches("Torn down.").count(),
+                1,
+                "written once"
+            );
+        }
+        // Case B (#1373): the reply streamed through the argument deltas before (or after) the
+        // hook ran; at turn end the call's copy is dropped.
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            t.streamed_text.clear();
             t.route = None;
         }
         agent
             .hook_route(&json!({ "action": "reply", "reply": reply }))
             .await
             .unwrap();
-        let staged = agent.turn.lock().await.as_ref().unwrap().act_buffer.clone();
-        assert_eq!(staged.matches("Torn down.").count(), 1, "{staged}");
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            assert!(t.route_reply_text.is_some());
+            // The deltas land after the hook, with the prose filter's spacing fixes applied.
+            t.streamed_text.push_str(
+                "Torn down. The logger (process 4555) is stopped and the scheduled job is gone.",
+            );
+            agent.write_route_reply_if_missing(&host, t).await;
+            assert_eq!(
+                t.streamed_text.matches("Torn down.").count(),
+                1,
+                "{}",
+                t.streamed_text
+            );
+            assert!(t.route_reply_text.is_none());
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 

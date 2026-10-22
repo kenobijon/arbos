@@ -24,7 +24,7 @@ use crate::ui::theme::{Theme, TEXT_BODY, TEXT_SMALL};
 use super::pane::{self, Hero, Picture, ProfilePane, Section};
 use super::{editable_name, editable_picture, kit, list_row, HeroClick, HERO_AVATAR};
 
-const TABS: [&str; 3] = ["Channels", "Members", "Settings"];
+pub(super) const TABS: [&str; 3] = ["Channels", "Members", "Settings"];
 
 /// Owner first, then admins, then members, each group by handle.
 fn sorted_members(server: &ServerInfo) -> Vec<Person> {

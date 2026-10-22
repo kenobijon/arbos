@@ -8,7 +8,7 @@ store (`docs/agent-eval.md`, `docs/agent-eval-runs/`).
 - `tasks/<category>/<id>.json` — one task each: `turns[]` with `prompt`, optional `seed` (bash on the
   box), `generate` (fixture generator in `lib/fixtures.py`), `verify` (bash printing PASS/FAIL and
   `SHOW` lines), `truth` (driver-side comparison), `reply_regex`, `expect_question`, `routine`,
-  `latency_max_s`, `rubric`; task-level `lane`, `same_chat_as`, `verify_wait`, `doc_checks`, `regression`.
+  `latency_max_s`, `rubric`, `new_chat` / `chat: "first"`; task-level `lane`, `same_chat_as`, `verify_wait`, `doc_checks`, `regression`.
 - `run.py` — runner (lanes = projects on the test sandbox, run in parallel); `report.py` — scoreboard
   summary + per-run report; `lib/issues.py` — one root-cause issue per failure.
 - `scoreboard/<run>.json`, `scoreboard/SUMMARY.md` — versioned results. `results/` is local evidence

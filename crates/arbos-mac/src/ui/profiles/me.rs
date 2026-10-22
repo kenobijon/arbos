@@ -39,7 +39,7 @@ impl Render for GlassOpacityDragGhost {
 }
 
 /// Profile | Settings — the iPhone's `SettingsView` has the same two.
-const TABS: [&str; 2] = ["Profile", "Settings"];
+pub(super) const TABS: [&str; 2] = ["Profile", "Settings"];
 
 /// The open page of my pane.
 pub(super) fn page(shell: &Shell, cx: &mut gpui::Context<Shell>) -> Stateful<Div> {

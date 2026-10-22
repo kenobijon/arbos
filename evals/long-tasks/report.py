@@ -153,9 +153,15 @@ def main():
     ap.add_argument("--issues", default="")
     ap.add_argument("--report-out", default="")
     ap.add_argument("--fixed", default="")
+    ap.add_argument("--one-line", action="store_true", help="print the run's one-line summary and exit")
     args = ap.parse_args()
     runs = all_runs()
     board = load(args.run)
+    if args.one_line:
+        s = board["summary"]
+        cost = s.get("run_cost_usd") if s.get("run_cost_usd") is not None else s["cost_usd"]
+        print(f"{s['passed']}/{s['run']} passed ({s['pass_pct']} %), first reply p50 {s['ttfr_p50_s']} s, tool errors {s['tool_errors']}, cost ${cost:.2f}")
+        return
     prev = load(args.prev) if args.prev else next((b for b in reversed(runs) if b["meta"]["run_id"] < args.run), None)
     issues = json.loads(Path(args.issues).read_text()) if args.issues and Path(args.issues).exists() else []
     (SB / "SUMMARY.md").write_text(summary_md(runs))

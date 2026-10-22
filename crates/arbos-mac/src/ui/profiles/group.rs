@@ -26,7 +26,7 @@ use super::{
     chats_of, collect, editable_name, editable_picture, kit, list_row, HeroClick, HERO_AVATAR,
 };
 
-const TABS: [&str; 2] = ["Members", "Library"];
+pub(super) const TABS: [&str; 2] = ["Members", "Library"];
 
 /// Everyone in the space, me first, then the others by handle.
 fn members(state: &AppState, space: &Project) -> Vec<Person> {

@@ -226,8 +226,8 @@ struct AgentProfileView: View {
     /// For an agent that is not in my project list (someone else's agent in a DM).
     var fallback: Project? = nil
     /// Jacob's rule (2026-10-22): one tab set per entity, identical on Mac
-    /// and iPhone. Agents: Profile | Settings (the Mac's `agent.rs`); what the
-    /// agent's chats hold is reached from the group and person panes.
+    /// and iPhone — Profile | Settings | Library (`PaneKinds.agent`, the Mac's
+    /// `agent.rs`). Kinds share the structure, not a tab count (22:32 UTC).
     @State private var tab = "Profile"
     @State private var showEdit = false
     @State private var showModel = false
@@ -238,6 +238,10 @@ struct AgentProfileView: View {
 
     private var project: Project? { model.project(projectId) ?? fallback }
     private var isMine: Bool { model.project(projectId) != nil && project?.shared != true }
+    private var items: [ChatItem] {
+        let msgs = model.chats(of: projectId).flatMap { model.messages(of: $0.id) }
+        return ChatMedia.items(messages: msgs, slot: projectId, model: model)
+    }
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -247,11 +251,11 @@ struct AgentProfileView: View {
                     VStack(spacing: 18) {
                         Color.clear.frame(height: 80)
                         // The shared pane (D93): leaf / photo with the owner's crayon,
-                        // name, "working" or who runs it; Profile | Settings
+                        // name, "working" or who runs it; Profile | Settings | Library
                         // (the Mac's set); Delete agent for the owner.
                         ProfilePane(
                             hero: PaneHero(picture: .image(AnyView(heroPicture(project))), name: project.name, subtitle: subtitleLine(project)),
-                            tabs: ["Profile", "Settings"],
+                            tabs: PaneKinds.agent,
                             selected: $tab,
                             body: sections(project),
                             footer: isMine ? [.card([AnyView(ProfileLinkRow(title: "Delete agent", destructive: true) { confirmDelete = true })])] : []
@@ -337,6 +341,22 @@ struct AgentProfileView: View {
                 ),
             ]
             return [.card(rows)]
+        case "Library":
+            // Everything the agent's chats hold — images, files, voice memos, links
+            // — in sections (the group pane's Library, plus links).
+            let media = items.filter { $0.kind == .media }
+            let files = items.filter { $0.kind == .file }
+            let voice = items.filter { $0.kind == .voice }
+            let links = items.filter { $0.kind == .link }
+            if media.isEmpty && files.isEmpty && voice.isEmpty && links.isEmpty {
+                return [.empty("Nothing shared in \(project.name)'s chats yet.")]
+            }
+            var out: [PaneSection] = []
+            if !media.isEmpty { out += [.title("Images · \(media.count)"), .grid(media)] }
+            if !files.isEmpty { out += [.title("Files · \(files.count)"), .custom(AnyView(ChatItemsList(items: files, kind: .file, empty: "")))] }
+            if !voice.isEmpty { out += [.title("Voice · \(voice.count)"), .custom(AnyView(ChatItemsList(items: voice, kind: .voice, empty: "")))] }
+            if !links.isEmpty { out += [.title("Links · \(links.count)"), .custom(AnyView(ChatItemsList(items: links, kind: .link, empty: "")))] }
+            return out
         default:
             // Profile: name, handle, description (the owner edits by tapping).
             var rows: [AnyView] = [

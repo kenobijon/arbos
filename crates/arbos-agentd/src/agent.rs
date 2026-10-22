@@ -549,32 +549,36 @@ impl ProseFilter {
         if body.trim().is_empty() {
             return String::new();
         }
-        let mut sentences: Vec<String> = Vec::new();
+        // Sentences with their end offsets in `body`, so the kept part is cut from the original
+        // text: re-joining trimmed sentences with spaces flattened every paragraph break and list
+        // line into one line (#1356).
+        let mut ends: Vec<(usize, String)> = Vec::new();
+        let mut pos = body.len() - body.trim_start().len();
         let mut rest = body.trim_start();
         while let Some((sentence, after)) = Self::split_first_sentence(rest) {
-            sentences.push(sentence.trim().to_string());
+            pos += sentence.len();
+            ends.push((pos, sentence.trim().to_string()));
+            let skipped = after.len() - after.trim_start().len();
+            pos += skipped;
             rest = after.trim_start();
         }
         if !rest.is_empty() {
-            sentences.push(rest.trim().to_string());
+            ends.push((body.len(), rest.trim().to_string()));
         }
-        while sentences
+        while ends
             .last()
-            .is_some_and(|s| Self::is_boilerplate(s) || Self::is_thought_sentence(s))
+            .is_some_and(|(_, s)| Self::is_boilerplate(s) || Self::is_thought_sentence(s))
         {
-            sentences.pop();
+            ends.pop();
         }
-        if sentences.is_empty() {
+        let Some((end, _)) = ends.last() else {
+            return String::new();
+        };
+        let kept = body[..*end].trim_end();
+        if kept.is_empty() {
             return String::new();
         }
-        let mut out = String::new();
-        for s in sentences {
-            if !out.is_empty() && !out.ends_with([' ', '\n', '\r']) {
-                out.push(' ');
-            }
-            out.push_str(&s);
-        }
-        format!("{out}{nl}")
+        format!("{kept}{nl}")
     }
 
     /// True when `s` is (or is still typing toward) a short tool-narration sentence.
@@ -837,11 +841,6 @@ impl ProseFilter {
         out
     }
 
-    /// Whether the held-back text already carries `head` (a `norm_head` key).
-    pub fn pending_contains(&self, head: &str) -> bool {
-        !head.is_empty() && norm_head(&self.pending, usize::MAX).contains(head)
-    }
-
     /// End of a text run (tool call or turn end): judge what is still held back.
     pub fn flush(&mut self) -> String {
         let rest = std::mem::take(&mut self.pending);
@@ -1084,6 +1083,9 @@ pub struct TurnState {
     pub notices: Vec<String>,
     /// What a relay turn says when it is cut short and the model wrote nothing yet.
     pub relay_fallback: String,
+    /// The `reply` text of a `route reply` call, written at turn end when it never streamed
+    /// (#1355; a second `route` of an act turn, or a provider sending no argument deltas).
+    pub route_reply_text: Option<String>,
 }
 
 /// How the model call failed, as pi reported it.
@@ -1182,6 +1184,7 @@ impl TurnState {
             preempted: false,
             notices: Vec::new(),
             relay_fallback: String::new(),
+            route_reply_text: None,
         }
     }
 }
@@ -2931,6 +2934,7 @@ impl Agent {
             preempted: false,
             notices: Vec::new(),
             relay_fallback: relay_fallback_line(&kind),
+            route_reply_text: None,
         });
         self.turn_running.store(true, Ordering::SeqCst);
         let keepalive = self.spawn_keepalive();
@@ -2969,6 +2973,7 @@ impl Agent {
             let mut tl = self.turn.lock().await;
             if let Some(t) = tl.as_mut() {
                 self.flush_staged_text(host, t).await;
+                self.write_route_reply_if_missing(host, t).await;
             }
         }
         let turn = self.turn.lock().await.take();
@@ -4126,6 +4131,27 @@ impl Agent {
         }
     }
 
+    /// End of turn, every event folded: a `route reply {reply}` text that never streamed is
+    /// written now, once; one that did stream (the first route of a plain reply turn) is not.
+    pub(crate) async fn write_route_reply_if_missing(&self, host: &SharedHost, t: &mut TurnState) {
+        let Some(text) = t.route_reply_text.take() else {
+            return;
+        };
+        if t.stopped {
+            return;
+        }
+        let head = norm_head(&text, 40);
+        if head.is_empty() || norm_head(&t.streamed_text, usize::MAX).contains(&head) {
+            return;
+        }
+        let cleaned = ProseFilter::clean_prose(&text);
+        if cleaned.trim().is_empty() {
+            return;
+        }
+        tracing::info!(chat_id = %t.chat_id, chars = cleaned.chars().count(), "route reply text taken from the call");
+        self.write_text(host, t, &cleaned).await;
+    }
+
     async fn write_text(&self, host: &SharedHost, t: &mut TurnState, delta: &str) {
         if t.row_closed {
             // The turn said it was over (ack only) but the model kept talking: give it a row.
@@ -4178,28 +4204,16 @@ impl Agent {
                     &format!("route {action}: {args}"),
                     None,
                 );
-                let second_route = t.route.is_some();
                 t.route = Some(r);
-                // `route reply` with the text in the call (#1355): the streamed-argument path only
-                // follows the first `route` of a turn, so an act turn that closes with a second
-                // `route reply {reply: …}` — or a provider that sends no argument deltas — would
-                // leave the result row empty while the model is told "Reply delivered". Stage it
-                // like streamed prose; the end-of-turn flush writes it into the live row.
+                // `route reply` with the text in the call (#1355): remembered here, written at
+                // the end of the turn if it never streamed. The decision cannot be made now: the
+                // hook is an HTTP call pi makes when the tool runs, and the argument deltas that
+                // stream the same text may still be queued behind it in the event channel
+                // (#1373: deciding here wrote the reply twice).
                 if let Some(ValidRoute::Reply { reply: Some(text) }) = &t.route {
-                    let text = text.trim().to_owned();
+                    let text = text.trim();
                     if !text.is_empty() {
-                        let head = norm_head(&text, 40);
-                        let seen = !second_route
-                            && (norm_head(&t.act_buffer, usize::MAX).contains(&head)
-                                || norm_head(&t.streamed_text, usize::MAX).contains(&head)
-                                || t.prose.pending_contains(&head));
-                        if !seen {
-                            if let Some(host) = self.sync.host(&t.chat_id).await {
-                                tracing::info!(chat_id = %t.chat_id, second_route, chars = text.chars().count(), "route reply text taken from the call");
-                                t.act_buffer.clear();
-                                self.stage_text(&host, t, &text).await;
-                            }
-                        }
+                        t.route_reply_text = Some(text.to_owned());
                     }
                 }
                 if action != "reply" {
@@ -5747,7 +5761,7 @@ mod tests {
         let cleaned = ProseFilter::clean_prose(raw);
         assert_eq!(
             cleaned.trim(),
-            "Kenobi, 42 nodes on Lium right now. Prices are per GPU per hour. No RTX 5070s listed at the moment. Renting still needs Const's go-ahead since it bills to his account."
+            "Kenobi, 42 nodes on Lium right now. Prices are per GPU per hour.\n\nNo RTX 5070s listed at the moment. Renting still needs Const's go-ahead since it bills to his account."
         );
         assert!(!cleaned.contains("I only need to state"));
         assert!(!cleaned.contains("not treat Arbos"));
@@ -5850,6 +5864,16 @@ mod tests {
             out.push_str(&f.flush());
             assert_eq!(out, text, "chunking {sizes:?}");
         }
+    }
+
+    /// The final bubble keeps its paragraph breaks and list lines; only a trailing narration
+    /// sentence is cut (#1356, second half).
+    #[test]
+    fn clean_prose_keeps_paragraphs_and_lists() {
+        let text = "The logger started at 22:48 UTC.\n\nThe every-minute job exists too.\n- `loop.log`: 7 lines\n- `sched.log`: 2 lines\n\nTell me when to stop it.";
+        assert_eq!(ProseFilter::clean_prose(text), text);
+        let with_tail = format!("{text}\n\nChecking the routine list now.");
+        assert_eq!(ProseFilter::clean_prose(&with_tail), text);
     }
 
     /// Narration is still stripped, and the whitespace rule does not glue what follows it.
