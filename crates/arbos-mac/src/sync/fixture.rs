@@ -612,6 +612,15 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .transact(|d| d.set_reaction(&message_id, &emoji, &me, on));
             }
         }
+        ClientCommand::DeleteMessage {
+            chat_id,
+            message_id,
+        } => {
+            let docs = shared.docs.lock().unwrap();
+            if let Some(doc) = docs.get(&chat_id) {
+                let _ = doc.core.transact(|d| d.delete_message(&message_id));
+            }
+        }
         ClientCommand::Approve {
             chat_id,
             approval_id,

@@ -461,6 +461,11 @@ pub enum ClientCommand {
         message_id: Id,
         emoji: String,
     },
+    /// Delete a message for everyone (removed from the chat doc; #1370).
+    DeleteMessage {
+        chat_id: Id,
+        message_id: Id,
+    },
     /// S18: decide an approval card (`approve` / `reject` commands, `arbos_core::approval`).
     Approve {
         chat_id: Id,

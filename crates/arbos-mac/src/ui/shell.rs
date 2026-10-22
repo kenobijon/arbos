@@ -29,6 +29,7 @@ use crate::ui::glass::{self, WindowDrag};
 use crate::ui::header;
 use crate::ui::icons::icon;
 use crate::ui::local::{LocalEvent, LocalPanel};
+use crate::ui::message_menu;
 use crate::ui::motion::{ease_out_cubic, PulseClock, COMPOSER_DROP_MS, SHAKE_MS};
 use crate::ui::onboarding;
 use crate::ui::people;
@@ -161,7 +162,7 @@ impl SettingsPage {
 
 pub struct Shell {
     pub(crate) state: Entity<AppState>,
-    transcript: Entity<Transcript>,
+    pub(crate) transcript: Entity<Transcript>,
     pub(crate) composer: Entity<Composer>,
     /// F11: call strip + mic/TTS owner.
     pub(crate) voice: Entity<Voice>,
@@ -183,12 +184,15 @@ pub struct Shell {
     /// Which page my pane's Settings tab shows (#1086): the card list, or a
     /// pushed page with `‹` back.
     pub(crate) settings_page: SettingsPage,
-    /// Emoji react menu over a bubble: (chat, message, where it was clicked).
-    react_menu: Option<(
+    /// The message menu over a bubble (`message_menu`): (chat, message, the click).
+    pub(crate) message_menu: Option<(
         crate::model::Id,
         crate::model::Id,
         gpui::Point<gpui::Pixels>,
     )>,
+    /// `ARBOS_RIG_MESSAGE_MENU=x,y` (screenshot rig): opens the menu once the
+    /// open chat has a message; cleared when it has.
+    rig_message_menu: Option<gpui::Point<gpui::Pixels>>,
     pub(crate) settings_scroll: ScrollHandle,
     pub(crate) routines: Entity<RoutinesPanel>,
     pub(crate) routines_open: bool,
@@ -307,13 +311,13 @@ impl Shell {
         cx.subscribe(
             &transcript,
             |this, _, event: &TranscriptEvent, cx| match event {
-                TranscriptEvent::ReactMenu {
+                TranscriptEvent::MessageMenu {
                     chat_id,
                     message_id,
                     position,
                 } => {
                     this.close_popovers(cx);
-                    this.react_menu = Some((chat_id.clone(), message_id.clone(), *position));
+                    this.message_menu = Some((chat_id.clone(), message_id.clone(), *position));
                     cx.notify();
                 }
                 TranscriptEvent::Reply {
@@ -685,7 +689,8 @@ impl Shell {
             member_remove_armed: None,
             chat_menu: None,
             chat_delete_armed: false,
-            react_menu: None,
+            message_menu: None,
+            rig_message_menu: message_menu::rig_anchor(),
             renaming_tab: None,
             tab_rename_input,
             tab_menu_open: false,
@@ -1674,7 +1679,7 @@ impl Shell {
             || self.tab_menu_open
             || self.row_menu.is_some()
             || self.chat_menu.is_some()
-            || self.react_menu.is_some();
+            || self.message_menu.is_some();
         self.close_popovers(cx);
         if floating {
             return;
@@ -1827,7 +1832,7 @@ impl Shell {
             || self.row_menu.is_some()
             || self.channel_menu.is_some()
             || self.chat_menu.is_some()
-            || self.react_menu.is_some()
+            || self.message_menu.is_some()
         {
             self.menu_open = false;
             self.members_open = false;
@@ -1841,75 +1846,9 @@ impl Shell {
             self.channel_delete_armed = false;
             self.chat_menu = None;
             self.chat_delete_armed = false;
-            self.react_menu = None;
+            self.message_menu = None;
             cx.notify();
         }
-    }
-
-    // ----- react menu -----------------------------------------------------------------
-    /// The quick-react bar (iPhone parity: the long-press palette) at the click.
-    fn react_menu(&self, cx: &mut Context<Self>) -> Option<Div> {
-        let (chat_id, message_id, at) = self.react_menu.clone()?;
-        let theme = Theme::of(cx).clone();
-        let me = format!("user:{}", self.state.read(cx).me_id());
-        let held: Vec<String> = self
-            .state
-            .read(cx)
-            .messages
-            .get(&chat_id)
-            .and_then(|list| list.iter().find(|m| m.id == message_id))
-            .map(|m| {
-                m.reaction_list()
-                    .into_iter()
-                    .filter(|(_, s)| s.contains(&me))
-                    .map(|(e, _)| e)
-                    .collect()
-            })
-            .unwrap_or_default();
-        let mut bar = div().flex().items_center().gap(px(2.0)).p(px(4.0));
-        for emoji in crate::model::REACTION_PALETTE {
-            let on = held.iter().any(|e| e == emoji);
-            let (chat, msg) = (chat_id.clone(), message_id.clone());
-            bar = bar.child(
-                div()
-                    .id(SharedString::from(format!("react-{emoji}")))
-                    .size(px(32.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_full()
-                    .cursor_pointer()
-                    .when(on, |el| el.bg(Theme::with_alpha(theme.accent, 0.22)))
-                    .hover(|s| s.bg(theme.surface_2))
-                    .text_size(px(18.0))
-                    .child(emoji)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.react_menu = None;
-                        let (chat, msg) = (chat.clone(), msg.clone());
-                        this.state.update(cx, |s, cx| {
-                            s.toggle_reaction(chat, msg, emoji.to_string(), cx)
-                        });
-                        cx.notify();
-                    })),
-            );
-        }
-        // Appended straight to the root (see sidebar::row_menu): sits just above the click.
-        Some(
-            div()
-                .absolute()
-                .left(at.x - px(16.0))
-                .top(at.y - px(48.0))
-                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .child(
-                    div()
-                        .rounded_full()
-                        .bg(theme.card())
-                        .border_1()
-                        .border_color(theme.border_strong)
-                        .shadow_lg()
-                        .child(bar),
-                ),
-        )
     }
 
     // ----- update pill (sidebar bottom) ------------------------------------------
@@ -3351,7 +3290,18 @@ impl Render for Shell {
         if let Some(menu) = sidebar::channel_menu(self, cx) {
             root = root.child(menu);
         }
-        if let Some(menu) = self.react_menu(cx) {
+        if let Some(at) = self.rig_message_menu {
+            let target = self.state.read(cx).active_chat_id().and_then(|chat| {
+                let state = self.state.read(cx);
+                let last = state.messages.get(&chat)?.last()?.id.clone();
+                Some((chat, last))
+            });
+            if let Some((chat, message)) = target {
+                self.rig_message_menu = None;
+                self.message_menu = Some((chat, message, at));
+            }
+        }
+        if let Some(menu) = message_menu::render(self, window, cx) {
             root = root.child(menu);
         }
         if let Some(space) = people_space {

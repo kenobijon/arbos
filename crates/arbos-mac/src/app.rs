@@ -3998,6 +3998,19 @@ impl AppState {
         cx.notify();
     }
 
+    /// Delete a message for everyone through the shared chat doc (the
+    /// message menu's Delete, #1370; the iPhone's `deleteMessage`).
+    pub fn delete_message(&mut self, chat_id: Id, message_id: Id, cx: &mut Context<Self>) {
+        if message_id.is_empty() {
+            return;
+        }
+        self.command(ClientCommand::DeleteMessage {
+            chat_id,
+            message_id,
+        });
+        cx.notify();
+    }
+
     pub fn retry(&mut self, chat_id: Id, message_id: Id, cx: &mut Context<Self>) {
         self.command(ClientCommand::Retry {
             chat_id,

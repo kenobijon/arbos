@@ -804,51 +804,8 @@ struct ChatView: View {
                             .padding(.top, gap(before: i))
                             .id(row.id)
                             .contextMenu {
-                                if canReact(to: row) {
-                                    // ControlGroup .menu style only lays out 3 side-by-side;
-                                    // 6 in one group wraps into a broken vertical stack.
-                                    ControlGroup {
-                                        ForEach(Array(MessageReaction.palette.prefix(3)), id: \.self) { emoji in
-                                            Button {
-                                                model.toggleReaction(chatId: chatId, messageId: row.messageId, emoji: emoji)
-                                            } label: {
-                                                Text(emoji)
-                                            }
-                                        }
-                                    }
-                                    ControlGroup {
-                                        ForEach(Array(MessageReaction.palette.suffix(3)), id: \.self) { emoji in
-                                            Button {
-                                                model.toggleReaction(chatId: chatId, messageId: row.messageId, emoji: emoji)
-                                            } label: {
-                                                Text(emoji)
-                                            }
-                                        }
-                                    }
-                                }
-                                if canReact(to: row), let m = messages.first(where: { $0.id == row.messageId }) {
-                                    Button {
-                                        replyTo = m
-                                        if isPeople, let member = agentMember(for: m)?.member {
-                                            talkTo = [member]
-                                        }
-                                        composerFocused = true
-                                    } label: { Label("Reply", systemImage: "arrowshape.turn.up.left") }
-                                    if isPeople, m.role == .assistant, let h = m.senderHandle {
-                                        Button {
-                                            draft = "@\(h) " + draft
-                                            if let member = agentMember(for: m)?.member {
-                                                talkTo = [member]
-                                            }
-                                            composerFocused = true
-                                        } label: { Label("Mention @\(h)", systemImage: "at") }
-                                    }
-                                }
-                                Button { UIPasteboard.general.string = m_text(row) } label: { Label("Copy", systemImage: "doc.on.doc") }
-                                if canReact(to: row) {
-                                    Button(role: .destructive) {
-                                        model.deleteMessage(chatId: chatId, messageId: row.messageId)
-                                    } label: { Label("Delete", systemImage: "trash") }
+                                MessageMenuContent(items: MessageMenu.items(forMessage: isMessageRow(row))) { item in
+                                    runMessageMenu(item, row: row)
                                 }
                             }
                     }
@@ -958,15 +915,35 @@ struct ChatView: View {
         }
     }
 
-    /// Emoji reactions apply to real chat bubbles, not date / join / system lines.
-    /// Channels carry no reactions or replies yet (C1 scope): Copy only.
-    private func canReact(to row: Row) -> Bool {
+    /// A real message in the shared chat doc (the full menu: Copy, Reply,
+    /// Delete) — not a date / join / system line. Channels carry no replies
+    /// or deletes yet (C1 scope): Copy only.
+    private func isMessageRow(_ row: Row) -> Bool {
         if isChannel { return false }
         switch row.kind {
         case .system, .question, .error:
             return false
         case .user, .other, .member, .assistant, .file, .voiceMemo, .image:
             return messages.contains { $0.id == row.messageId }
+        }
+    }
+
+    /// The long-press menu's actions (`MessageMenu`): Copy the text, Reply
+    /// (in a people chat the agent that wrote it becomes the recipient),
+    /// Delete for everyone.
+    private func runMessageMenu(_ item: MessageMenuItem, row: Row) {
+        switch item {
+        case .copy:
+            UIPasteboard.general.string = m_text(row)
+        case .reply:
+            guard let m = messages.first(where: { $0.id == row.messageId }) else { return }
+            replyTo = m
+            if isPeople, let member = agentMember(for: m)?.member {
+                talkTo = [member]
+            }
+            composerFocused = true
+        case .delete:
+            model.deleteMessage(chatId: chatId, messageId: row.messageId)
         }
     }
 

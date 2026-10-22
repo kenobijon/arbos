@@ -266,6 +266,16 @@ pub fn segment(id: impl Into<ElementId>, label: &str, on: bool, theme: &Theme) -
         .child(label.to_string())
 }
 
+/// Geometry of a [`frosted_menu`] / [`menu_card`], shared with the code that
+/// places a menu inside the window (`message_menu::menu_size`): one row,
+/// the gap between children, the card's padding and border, a divider's
+/// full height (1 pt line + 4 pt margins).
+pub const MENU_ROW_HEIGHT: f32 = 36.0;
+pub const MENU_GAP: f32 = 1.0;
+pub const MENU_CARD_PADDING: f32 = 6.0;
+pub const MENU_CARD_BORDER: f32 = 1.0;
+pub const MENU_DIVIDER_HEIGHT: f32 = 9.0;
+
 /// Menu row (the "…" menu): glyph, label, optional trailing value.
 pub fn menu_row(
     id: impl Into<ElementId>,
@@ -280,7 +290,7 @@ pub fn menu_row(
         .flex()
         .items_center()
         .gap(px(10.0))
-        .h(px(36.0))
+        .h(px(MENU_ROW_HEIGHT))
         .px(px(12.0))
         .rounded(px(9.0))
         .text_size(px(TEXT_SMALL))
@@ -325,7 +335,11 @@ pub fn contained_y_scroll(id: impl Into<ElementId>) -> Stateful<Div> {
 }
 
 pub fn menu_divider(theme: &Theme) -> Div {
-    div().h(px(1.0)).my(px(4.0)).bg(theme.border)
+    let line = 1.0;
+    div()
+        .h(px(line))
+        .my(px((MENU_DIVIDER_HEIGHT - line) / 2.0))
+        .bg(theme.border)
 }
 
 /// A dropdown card under a header control: frosted, rounded, shadowed.
@@ -334,8 +348,8 @@ pub fn menu_card(width: f32, theme: &Theme) -> Div {
         .w(px(width))
         .flex()
         .flex_col()
-        .gap(px(1.0))
-        .p(px(6.0))
+        .gap(px(MENU_GAP))
+        .p(px(MENU_CARD_PADDING))
         .rounded(px(PANEL_RADIUS))
         .bg(theme.card())
         .border_1()
