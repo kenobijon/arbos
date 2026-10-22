@@ -801,6 +801,12 @@ struct GroupProfileView: View {
         .task {
             if let projectId { projectMembers = await model.projectMembers(projectId) }
         }
+        .onAppear {
+            // Rig: `ARBOS_SHOW=addmembers` lands on the Add members picker.
+            if DebugHooks.show == "addmembers", project == nil {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { showAdd = true }
+            }
+        }
     }
 
     /// Members: Add members, then every person (name, @handle) and agent

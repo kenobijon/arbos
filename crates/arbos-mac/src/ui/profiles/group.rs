@@ -151,9 +151,6 @@ pub(super) fn page(
                         // A people group gets the New group picker aimed at
                         // it; a shared project keeps the one-pick invite sheet.
                         if is_people {
-                            this.people_input.update(cx, |input, _| {
-                                input.set_placeholder("Add people or agents");
-                            });
                             this.state.update(cx, |s, cx| s.open_add_members(id, cx));
                         } else {
                             this.state.update(cx, |s, cx| s.open_invite(id, cx));
