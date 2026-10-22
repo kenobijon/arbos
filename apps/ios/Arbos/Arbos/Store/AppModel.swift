@@ -429,6 +429,9 @@ final class AppModel: ObservableObject {
         if let scale = DebugHooks.textScale, TextScale.steps.contains(where: { abs($0 - CGFloat(scale)) < 0.001 }) {
             textScaleSetting = scale
         }
+        // Set here, in init, so the observers do not write the one-launch override to disk.
+        if let a = DebugHooks.appearance { appearanceSetting = a.rawValue }
+        if let s = DebugHooks.surface { surfaceSetting = s.rawValue }
         #endif
         var saved = UserDefaults.standard.string(forKey: "relayUrl") ?? AppModel.defaultRelayUrl
         var creds: DeviceCredentials?
