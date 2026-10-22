@@ -1089,12 +1089,14 @@ pub async fn admin_calls(State(state): State<AppState>, principal: Principal) ->
     let mut real_shas: Vec<(i64, String)> = Vec::new();
     for a in state.db.all_box_agentd().unwrap_or_default() {
         let (bs, _) = state.box_state(&a.user_id).await;
+        // No user row (a deleted test user, or a box minted under a project id by mistake) is
+        // never a real user's box: it must not hold the fleet minimum (3 h on 0.1.72, Oct 22).
         let is_test = state
             .db
             .user(&a.user_id)
             .ok()
             .flatten()
-            .is_some_and(|u| u.test);
+            .is_none_or(|u| u.test);
         if matches!(bs, arbos_core::wire::BoxState::Awake) {
             if let Some(sha) = &a.sha {
                 awake_shas.push((a.reported_at, sha.clone()));
