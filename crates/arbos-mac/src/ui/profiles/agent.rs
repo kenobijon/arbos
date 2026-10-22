@@ -2,7 +2,9 @@
 //! (mock g; Jacob 2026-10-22): the D79 avatar (crayon = the picker for owned
 //! agents), name, what it is doing, @slug, then one tab pill — **Profile**
 //! (name, handle, description, owner) | **Settings** (model, reasoning,
-//! voice; sharing and group chats; spoken replies). No quick-action row:
+//! voice; sharing and group chats; spoken replies) | **Library** (images,
+//! files and links from the agent's chats). The same three tabs as the
+//! iPhone's agent page (Jacob's rule, 2026-10-22). No quick-action row:
 //! call and search live in the chat, mute in the sidebar row's menu. Grok
 //! bot page otherwise: no camera vision, secrets, or Media / Files / Links.
 
@@ -20,8 +22,12 @@ use crate::ui::theme::{Theme, TEXT_SMALL, TEXT_TINY};
 
 use super::kit::{self, Leading};
 use super::{
-    card, editable_name, editable_picture, hero, pushed_frame, tab_bar, HeroClick, HERO_AVATAR,
+    card, chats_of, collect, editable_name, editable_picture, empty, file_list, hero, link_list,
+    media_grid, pushed_frame, tab_bar, HeroClick, HERO_AVATAR,
 };
+
+/// The agent pane's tabs — the same three on the iPhone (`AgentProfileView`).
+const TABS: [&str; 3] = ["Profile", "Settings", "Library"];
 
 /// An agent that is only known as a member of a people chat (someone else's
 /// project) is shown from that member entry.
@@ -101,6 +107,11 @@ pub(super) fn page(
     let tab = state.profile_tab;
     let editing_description = state.profile_editing_description && mine;
     let pid: Id = project.id.clone();
+    // Library tab: what the agent's chats hold (read while `state` is borrowed).
+    let content = (tab == 2).then(|| {
+        let chats: Vec<&crate::model::Chat> = chats_of(state, &project.id);
+        collect(state, &chats)
+    });
 
     if avatar_state != AvatarState::Idle {
         PulseClock::request(cx);
@@ -166,7 +177,10 @@ pub(super) fn page(
     // One tab pill under the hero, like mock g. Profile = who the agent is
     // (name, handle, description, owner); Settings = how it runs (model,
     // reasoning, voice, sharing, group chats, spoken replies).
-    let tabs = tab_bar(&["Profile", "Settings"], tab, &theme, cx);
+    // Jacob's rule (2026-10-22): one tab set per entity, identical on Mac and
+    // iPhone. Agents: Profile | Settings | Library (what the agent's chats
+    // hold — images, files, links).
+    let tabs = tab_bar(&TABS, tab, &theme, cx);
     let description = project.description.clone().unwrap_or_default();
     let slug = format!("@{}", Project::mention_slug(&project.name));
     let owner = project
@@ -311,6 +325,37 @@ pub(super) fn page(
             },
             &theme,
         ));
+    } else if tab == 2 {
+        // ----- Library: everything the agent's chats hold ----------------------------
+        let content = content.expect("collected for the Library tab");
+        if content.media.is_empty() && content.files.is_empty() && content.links.is_empty() {
+            body = body.child(empty("Nothing shared here yet", &theme));
+        } else {
+            if !content.media.is_empty() {
+                body = body
+                    .child(kit::section_title(
+                        format!("Images · {}", content.media.len()),
+                        &theme,
+                    ))
+                    .child(media_grid(&content.media, &theme));
+            }
+            if !content.files.is_empty() {
+                body = body
+                    .child(kit::section_title(
+                        format!("Files · {}", content.files.len()),
+                        &theme,
+                    ))
+                    .child(file_list(&content.files, "doc", "", &theme));
+            }
+            if !content.links.is_empty() {
+                body = body
+                    .child(kit::section_title(
+                        format!("Links · {}", content.links.len()),
+                        &theme,
+                    ))
+                    .child(link_list(&content.links, shell, &theme, cx));
+            }
+        }
     } else {
         // ----- Settings: how the agent runs ----------------------------------------
         let mut info = card(&theme);

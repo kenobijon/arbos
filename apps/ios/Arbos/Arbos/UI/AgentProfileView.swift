@@ -245,13 +245,16 @@ struct AgentProfileView: View {
     let projectId: Id
     /// For an agent that is not in my project list (someone else's agent in a DM).
     var fallback: Project? = nil
-    @State private var tab = "Media"
+    /// Jacob's rule (2026-10-22): one tab set per entity, identical on Mac
+    /// and iPhone. Agents: Profile | Settings | Library (the Mac's `agent.rs`).
+    @State private var tab = "Profile"
     @State private var showEdit = false
     @State private var showModel = false
     @State private var showVoice = false
     @State private var showDescription = false
     @State private var descriptionDraft = ""
     @State private var showSecrets = false
+    @State private var showShare = false
 
     private var project: Project? { model.project(projectId) ?? fallback }
     private var isMine: Bool { model.project(projectId) != nil && project?.shared != true }
@@ -294,42 +297,66 @@ struct AgentProfileView: View {
                             .foregroundStyle(theme.placeholder)
                             .padding(.top, -10)
                             .onTapGesture { UIPasteboard.general.string = "@\(mentionSlug(project.name))" }
-                        ProfileCard {
-                            ownerRow(project)
-                            PaneRow(title: "Machine", value: machineLine(project))
-                            Button { if isMine { showModel = true } } label: {
-                                PaneRow(title: "Model", value: "\(project.shortModel) · \(project.effort.label)", chevron: isMine)
-                            }
-                            .buttonStyle(.plain)
-                            .disabled(!isMine)
-                            Button { if isMine { showVoice = true } } label: {
-                                PaneRow(title: "Voice", value: voiceLine(project), chevron: isMine)
-                            }
-                            .buttonStyle(.plain)
-                            .disabled(!isMine)
-                            Button { showSecrets = true } label: {
-                                PaneRow(title: "Secrets", value: secretsLine(project), chevron: true)
-                            }
-                            .buttonStyle(.plain)
-                            if project.description.isEmpty {
-                                if isMine {
-                                    ProfileLinkRow(title: "Add a description") { descriptionDraft = ""; showDescription = true }
+                        ProfileTabs(tabs: ["Profile", "Settings", "Library"], selected: $tab)
+                        switch tab {
+                        case "Profile":
+                            // Who the agent is: owner, machine, description.
+                            ProfileCard {
+                                ownerRow(project)
+                                PaneRow(title: "Machine", value: machineLine(project))
+                                if project.description.isEmpty {
+                                    if isMine {
+                                        ProfileLinkRow(title: "Add a description") { descriptionDraft = ""; showDescription = true }
+                                    } else {
+                                        PaneRow(title: "Description", value: "—")
+                                    }
                                 } else {
-                                    PaneRow(title: "Description", value: "—")
+                                    Button { if isMine { descriptionDraft = project.description; showDescription = true } } label: {
+                                        PaneRow(title: "Description", value: project.description, chevron: isMine)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .disabled(!isMine)
                                 }
-                            } else {
-                                Button { if isMine { descriptionDraft = project.description; showDescription = true } } label: {
-                                    PaneRow(title: "Description", value: project.description, chevron: isMine)
+                            }
+                        case "Settings":
+                            // How the agent runs: model, voice, camera vision, secrets; then sharing.
+                            ProfileCard {
+                                Button { if isMine { showModel = true } } label: {
+                                    PaneRow(title: "Model", value: "\(project.shortModel) · \(project.effort.label)", chevron: isMine)
                                 }
                                 .buttonStyle(.plain)
                                 .disabled(!isMine)
+                                Button { if isMine { showVoice = true } } label: {
+                                    PaneRow(title: "Voice", value: voiceLine(project), chevron: isMine)
+                                }
+                                .buttonStyle(.plain)
+                                .disabled(!isMine)
+                                if isMine {
+                                    PaneRow(
+                                        title: "Camera vision",
+                                        trailing: AnyView(
+                                            Toggle("", isOn: Binding(get: { project.visionEnabled }, set: { model.setVision(projectId, enabled: $0) }))
+                                                .labelsHidden()
+                                                .tint(theme.online)
+                                                .accessibilityLabel("Camera vision")
+                                        )
+                                    )
+                                }
+                                Button { showSecrets = true } label: {
+                                    PaneRow(title: "Secrets", value: secretsLine(project), chevron: true)
+                                }
+                                .buttonStyle(.plain)
                             }
-                        }
-                        ProfileTabs(tabs: ["Media", "Files", "Links"], selected: $tab)
-                        switch tab {
-                        case "Media": ChatItemsList(items: items, kind: .media, empty: "No photos or videos in \(project.name)'s chats yet.")
-                        case "Files": ChatItemsList(items: items, kind: .file, empty: "No files in \(project.name)'s chats yet.")
-                        default: ChatItemsList(items: items, kind: .link, empty: "No links in \(project.name)'s chats yet.")
+                            if isMine {
+                                ProfileCard {
+                                    Button { showShare = true } label: {
+                                        PaneRow(title: project.shared ? "Members" : "Share project", value: project.shared ? "" : "Invite by @handle", chevron: true)
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                        default:
+                            library(project)
                         }
                         Color.clear.frame(height: 40)
                     }
@@ -349,6 +376,9 @@ struct AgentProfileView: View {
         .sheet(isPresented: $showEdit) {
             AgentEditSheet(projectId: projectId).environmentObject(model).environment(\.theme, theme)
         }
+        .sheet(isPresented: $showShare) {
+            if let project { ProjectMembersSheet(project: project).environmentObject(model).environment(\.theme, theme) }
+        }
         .sheet(isPresented: $showSecrets) {
             NavigationStack { AgentSecretsPage(projectId: projectId) }
                 .environmentObject(model).environment(\.theme, theme)
@@ -361,6 +391,45 @@ struct AgentProfileView: View {
             Button("Save") { model.updateProject(projectId, description: descriptionDraft.trimmingCharacters(in: .whitespacesAndNewlines)) }
             Button("Cancel", role: .cancel) { }
         } message: { Text("Shown to everyone who can see this agent (up to 500 characters).") }
+    }
+
+    /// Library: everything the agent's chats hold — images, files, voice
+    /// memos, links — in sections (the group pane's Library).
+    @ViewBuilder
+    private func library(_ project: Project) -> some View {
+        let media = items.filter { $0.kind == .media }
+        let files = items.filter { $0.kind == .file }
+        let voice = items.filter { $0.kind == .voice }
+        let links = items.filter { $0.kind == .link }
+        if media.isEmpty && files.isEmpty && voice.isEmpty && links.isEmpty {
+            Text("Nothing shared in \(project.name)'s chats yet.").font(theme.font(Theme.small)).foregroundStyle(theme.muted)
+                .frame(maxWidth: .infinity).padding(.top, 36)
+        } else {
+            if !media.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    PaneSectionTitle("Images · \(media.count)")
+                    ChatItemsList(items: media, kind: .media, empty: "")
+                }
+            }
+            if !files.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    PaneSectionTitle("Files · \(files.count)")
+                    ChatItemsList(items: files, kind: .file, empty: "")
+                }
+            }
+            if !voice.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    PaneSectionTitle("Voice · \(voice.count)")
+                    ChatItemsList(items: voice, kind: .voice, empty: "")
+                }
+            }
+            if !links.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    PaneSectionTitle("Links · \(links.count)")
+                    ChatItemsList(items: links, kind: .link, empty: "")
+                }
+            }
+        }
     }
 
     private func statusLine(_ p: Project) -> String {
