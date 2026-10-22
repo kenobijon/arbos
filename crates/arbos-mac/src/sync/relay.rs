@@ -414,7 +414,8 @@ impl Shared {
     /// An app error the user did not cause and cannot act on (a thumbnail that did not load, a
     /// list that did not refresh). Logged, and reported once per signature per week as a silent
     /// feedback item (`submitted_by: "app"`); nothing is shown in the chat. Transient network
-    /// blips (timeout, reset, DNS, TLS decrypt) only log — they are not product bugs.
+    /// blips (timeout, reset, DNS, TLS decrypt, empty/truncated body) only log — they are not
+    /// product bugs.
     fn diagnostic(self: &Arc<Self>, kind: &'static str, detail: impl Into<String>) {
         let detail = detail.into();
         log::warn!(target: "arbos_mac::diagnostic", "{kind}: {detail}");
@@ -488,6 +489,11 @@ impl Shared {
             }
             if !status.is_success() {
                 return Err(anyhow!("GET {path}: HTTP {status} {body}"));
+            }
+            // A 200 with no bytes is a cut connection / proxy blip, not valid JSON — surface it
+            // so people-chats can retry and diagnostics treat it as transient.
+            if body.trim().is_empty() {
+                return Err(anyhow!("GET {path}: empty body"));
             }
             return serde_json::from_str(&body).with_context(|| format!("GET {path}: bad JSON"));
         }
