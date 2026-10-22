@@ -200,7 +200,7 @@ struct ServerRowView {
 
 /// One entry of the left list, chats and servers interleaved.
 enum ListEntry {
-    Chat(RowView),
+    Chat(Box<RowView>),
     Server(ServerRowView),
 }
 
@@ -305,7 +305,7 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
             avatar_state: state.avatar_state(&p.id),
             space: p.clone(),
         };
-        rows.push((last_activity(state, p), ListEntry::Chat(row)));
+        rows.push((last_activity(state, p), ListEntry::Chat(Box::new(row))));
     }
     rows.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
     let empty = state.projects.is_empty() && state.servers.is_empty();
@@ -527,7 +527,7 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
     }
     for (_, entry) in rows {
         list = match entry {
-            ListEntry::Chat(row) => list.child(render_row(row, shell, &theme, cx)),
+            ListEntry::Chat(row) => list.child(render_row(*row, shell, &theme, cx)),
             ListEntry::Server(row) => list.child(render_server_row(row, &theme, cx)),
         };
     }
