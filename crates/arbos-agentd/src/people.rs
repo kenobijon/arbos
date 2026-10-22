@@ -1128,9 +1128,18 @@ impl Agent {
         let avatar_color = mine
             .and_then(|m| m["avatar_color"].as_str())
             .map(str::to_owned);
+        // The display name rides on the row so clients can name the agent without a member
+        // lookup ("Lium didn't answer. Ask again.", feedback agent-name-no-answer-2026-10-22).
+        let name = mine
+            .and_then(|m| m["project"]["name"].as_str().or_else(|| m["name"].as_str()))
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .unwrap_or(self.cfg.project_name.as_str())
+            .to_owned();
         let fields = vec![
             ("sender", json!(format!("agent:{}", self.cfg.project_id))),
             ("senderHandle", json!(info.slug)),
+            ("senderName", json!(name)),
             ("senderAvatar", json!(avatar)),
             ("senderAvatarColor", json!(avatar_color)),
             ("ownerHandle", json!(info.owner_handle())),

@@ -4839,6 +4839,25 @@ fn seed_people_docs(shared: &Arc<Shared>) {
         },
     ];
     let _ = group.insert_message(&refused);
+    // The same failure from an older box: no error part, no `senderName` — the transcript
+    // resolves the name from the agent id ("Arbos didn't answer. Ask again.").
+    let _ = group.insert_message(&human_message(
+        GROUP_LAUNCH,
+        &samir,
+        "@arbos and the press list for the embargo?",
+        base + 430_000,
+    ));
+    let mut silent = human_message(GROUP_LAUNCH, &samir, "", base + 433_000);
+    silent.role = Role::Assistant;
+    silent.status = MessageStatus::Error;
+    silent.sender = format!("agent:{PROJECT_ARBOS}");
+    silent.sender_name = None;
+    silent.sender_handle = Some("arbos".into());
+    silent.sender_avatar = None;
+    silent.asked_by_handle = Some("samir".into());
+    silent.owner_handle = Some(ME_HANDLE.into());
+    silent.parts = vec![text_part("")];
+    let _ = group.insert_message(&silent);
     group.commit();
     add_doc(shared, group);
 }
