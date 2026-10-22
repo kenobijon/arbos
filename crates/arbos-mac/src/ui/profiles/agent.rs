@@ -2,13 +2,13 @@
 //! (mock g; Jacob 2026-10-22): the D79 avatar (crayon = the picker for owned
 //! agents), name, what it is doing, @slug, then one tab pill — **Profile**
 //! (name, handle, description, owner) | **Settings** (model, reasoning;
-//! sharing and group chats) | **Library** (images,
+//! group chats) | **Library** (images,
 //! files and links from the agent's chats). The same three tabs as the
 //! iPhone's agent page (Jacob's rule, 2026-10-22). No quick-action row:
 //! call and search live in the chat, mute in the sidebar row's menu. Grok
 //! bot page otherwise: no camera vision, secrets, or Media / Files / Links.
 
-use gpui::{div, prelude::*, px, Context, Div, ElementId, Focusable, SharedString, Stateful};
+use gpui::{div, prelude::*, px, Context, Div, ElementId, SharedString, Stateful};
 
 use crate::app::AgentPick;
 use crate::model::{Id, MachineState, Project};
@@ -576,9 +576,9 @@ fn leaf_picker(project: &Project, theme: &Theme, cx: &mut Context<Shell>) -> Div
         .child(div().flex().child(reset))
 }
 
-/// The owned agent's Settings tab, after the Model card: sharing (invite
-/// sheet, or the members list once it is shared) and the agent-to-agent group
-/// picker in one card.
+/// The owned agent's Settings tab, after the Model card: the agent-to-agent
+/// group picker. (Share project left the pane on 2026-10-22, Jacob: sharing
+/// an agent starts from a group's Add members.)
 fn settings_cards(
     body: Div,
     shell: &Shell,
@@ -593,42 +593,12 @@ fn settings_cards(
         .iter()
         .filter(|p| !p.is_people() && p.id != project.id)
         .count();
-    let guests = project.guests().count();
-    let has_guests = guests > 0;
-
-    let share_id = project.id.clone();
-    let mut card = card(theme).child(
-        kit::nav_row(
-            "agent-share",
-            "person-plus",
-            if has_guests {
-                "Members"
-            } else {
-                "Share project…"
-            },
-            has_guests.then(|| format!("{}", guests + 1)),
-            theme,
-        )
-        .on_click(cx.listener(move |this, _, window, cx| {
-            let id = share_id.clone();
-            if has_guests {
-                this.state.update(cx, |s, cx| s.select_project(id, cx));
-                this.members_open = true;
-                cx.notify();
-            } else {
-                this.people_input.update(cx, |i, cx| i.clear(cx));
-                this.state.update(cx, |s, cx| {
-                    s.select_project(id.clone(), cx);
-                    s.open_invite(id, cx);
-                });
-                let handle = this.people_input.read(cx).focus_handle(cx);
-                window.focus(&handle, cx);
-            }
-        })),
-    );
-    if multi_chat && other_agents > 0 {
-        let group_id = project.id.clone();
-        card = card.child(
+    if !(multi_chat && other_agents > 0) {
+        return body;
+    }
+    let group_id = project.id.clone();
+    body.child(
+        self::card(theme).child(
             kit::nav_row(
                 "agent-add-to-chat",
                 "people",
@@ -641,9 +611,8 @@ fn settings_cards(
                 this.state.update(cx, |s, cx| s.select_project(id, cx));
                 this.set_group_picker(true, cx);
             })),
-        );
-    }
-    body.child(card)
+        ),
+    )
 }
 
 fn colour_row(project: &Project, theme: &Theme, cx: &mut Context<Shell>) -> Div {

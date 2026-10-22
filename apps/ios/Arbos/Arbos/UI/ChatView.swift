@@ -45,7 +45,6 @@ struct ChatView: View {
     @State private var memoPressStartedAt: Date?
     @FocusState private var composerFocused: Bool
 
-    @State private var showShare = false
     @State private var showProfile = false
     @State private var showSearch = false
     @State private var searchText = ""
@@ -349,11 +348,6 @@ struct ChatView: View {
         }
         .sheet(isPresented: $showSettings) {
             SettingsView().environmentObject(model).environment(\.theme, theme)
-        }
-        .sheet(isPresented: $showShare) {
-            if let project {
-                ProjectMembersSheet(project: project).environmentObject(model).environment(\.theme, theme)
-            }
         }
         .sheet(isPresented: $showProfile) {
             AgentEditSheet(projectId: projectId).environmentObject(model).environment(\.theme, theme)
