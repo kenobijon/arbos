@@ -3,6 +3,9 @@
 //! `#general`; **Join a server** takes an invite link or its code; **New channel** (owner/admin,
 //! from the `+` inside a server) takes a name — letters, digits and dashes — and the "Admins
 //! only post" switch. Errors from the relay show under the field, in the sheet.
+//!
+//! None of this appears when the relay answers `servers_off` (`ARBOS_MATRIX=off`, the remote
+//! kill switch): the rows, the sheets and the server list stay hidden on every device.
 
 use gpui::{div, prelude::*, px, Context, Div, Focusable as _};
 
