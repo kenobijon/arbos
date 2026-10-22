@@ -3734,13 +3734,6 @@ impl AppState {
             })
     }
 
-    pub fn set_model(&mut self, model: String, cx: &mut Context<Self>) {
-        let Some(project_id) = self.selected_project.clone() else {
-            return;
-        };
-        self.set_project_model(project_id, model, cx);
-    }
-
     /// The agent's model (profile page picker) — optimistic, then `SetModel`
     /// with its current effort.
     pub fn set_project_model(&mut self, project_id: Id, model: String, cx: &mut Context<Self>) {
@@ -3808,13 +3801,6 @@ impl AppState {
         self.sample_playing.as_deref() == Some(url)
             && (self.sample_wanted.is_some()
                 || self.sample_player.as_ref().is_some_and(|p| p.is_playing()))
-    }
-
-    pub fn set_effort(&mut self, effort: Effort, cx: &mut Context<Self>) {
-        let Some(project_id) = self.selected_project.clone() else {
-            return;
-        };
-        self.set_project_effort(project_id, effort, cx);
     }
 
     /// The agent's reasoning effort (profile page picker) — optimistic, then
