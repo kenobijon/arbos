@@ -1,0 +1,12 @@
+{
+  "default": "marin",
+  "voices": [
+    {
+      "description": "Warm and clear.",
+      "id": "marin",
+      "name": "Marin",
+      "sample_url": "http://127.0.0.1:7707/voices/marin/sample.mp3",
+      "seconds": 2.5
+    }
+  ]
+}

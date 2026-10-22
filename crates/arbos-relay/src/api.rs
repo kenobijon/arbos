@@ -9,8 +9,9 @@ use serde_json::{json, Value};
 
 use arbos_core::api::{
     ChatDto, ChatMeDto, CreateChatResponseDto, CreateProjectResponseDto, CreateProjectRoomsDto,
-    CreateProjectSandboxDto, GetProjectResponseDto, MachineDto, MachineImageDto, MachineSpecDto,
-    MachineStateDto, MachineStatusDto, MachineWorkspaceDto, ProjectDto, ProjectOwnerDto,
+    CreateProjectSandboxDto, GetProjectResponseDto, HealthDto, HealthProvidersDto, MachineDto,
+    MachineImageDto, MachineSpecDto, MachineStateDto, MachineStatusDto, MachineWorkspaceDto,
+    PairResponseDto, ProjectDto, ProjectOwnerDto,
 };
 use arbos_core::auth::{hash, mint, pairing_code, TokenKind};
 use arbos_core::ids::{now_ms, ulid};
@@ -27,12 +28,25 @@ pub(crate) fn internal(e: impl std::fmt::Display) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
 }
 
-pub async fn healthz(State(state): State<AppState>) -> Response {
+/// `GET /healthz` body (also used for fixtures).
+pub(crate) fn healthz_dto(state: &AppState) -> HealthDto {
     let devices = state.db.device_count().unwrap_or(0);
-    Json(json!({ "ok": true, "proto": arbos_core::PROTO_VERSION, "devices": devices, "daytona": state.daytona.is_some(),
-        "auth_mode": state.cfg.auth_mode.as_str(),
-        "providers": { "openai_compatible": state.cfg.openrouter_key.is_some() || state.cfg.openai_key.is_some(), "anthropic": state.cfg.anthropic_key.is_some() || state.cfg.openrouter_key.is_some() } }))
-    .into_response()
+    HealthDto {
+        ok: true,
+        proto: i64::from(arbos_core::PROTO_VERSION),
+        devices,
+        daytona: state.daytona.is_some(),
+        auth_mode: Some(state.cfg.auth_mode.as_str().to_owned()),
+        auth: None,
+        providers: HealthProvidersDto {
+            openai_compatible: state.cfg.openrouter_key.is_some() || state.cfg.openai_key.is_some(),
+            anthropic: state.cfg.anthropic_key.is_some() || state.cfg.openrouter_key.is_some(),
+        },
+    }
+}
+
+pub async fn healthz(State(state): State<AppState>) -> Response {
+    Json(healthz_dto(&state)).into_response()
 }
 
 // ---- pairing (D35) ----------------------------------------------------------------------------
@@ -88,7 +102,11 @@ pub async fn pair(State(state): State<AppState>, Json(b): Json<PairBody>) -> Api
             "invalid or expired pairing code".into(),
         ));
     }
-    Ok(Json(json!({ "device_id": device_id, "device_token": token })).into_response())
+    Ok(Json(PairResponseDto {
+        device_id,
+        device_token: token,
+    })
+    .into_response())
 }
 
 pub async fn list_devices(State(state): State<AppState>, principal: Principal) -> ApiResult {

@@ -7,7 +7,8 @@ use serde_json::{json, Value};
 use arbos_core::api::{
     AccountUserDto, CreditsDto, MachineImageDto, MachineSpecDto, MachineStatusDto,
     MachineWorkspaceDto, MeDeviceDto, MeFeaturesDto, MeLimitsDto, MeMachineDto, MeResponseDto,
-    UnreadChatDto, UnreadDto, UserCardDto,
+    PairResponseDto, TokenResponseDto, UnreadChatDto, UnreadDto, UserCardDto, VoiceCatalogDto,
+    VoiceDto,
 };
 use arbos_core::wire::BoxState;
 
@@ -487,6 +488,96 @@ fn me_and_machine_unread_fixtures() {
         total: 2,
     };
     assert_dto("unread.json", unread);
+}
+
+/// Pair / token / healthz / voices / transcription mock (step 6b-2d-1).
+/// Tokens and device ids are obviously fake — never log them.
+#[test]
+fn pair_token_health_voices_transcription_fixtures() {
+    // Pairing reply shape (relay builds PairResponseDto).
+    assert_dto(
+        "pair_response.json",
+        PairResponseDto {
+            device_id: "dev_fixture".into(),
+            device_token: "adv_fixture_not_a_real_token".into(),
+        },
+    );
+
+    let token = TokenResponseDto {
+        access_token: "fixture_access_token_not_real".into(),
+        token_type: "Bearer".into(),
+        expires_in: 3600,
+        refresh_token: "arf_fixture_refresh_token_not_real".into(),
+        device_id: "dev_fixture".into(),
+        user: AccountUserDto {
+            id: "gh_301".into(),
+            github_id: Some(Some(301)),
+            login: Some(Some("user301".into())),
+            avatar_url: Some(None),
+            name: Some(Some("Fixture User".into())),
+            created_at: Some(FIXED_AT),
+            last_login_at: Some(Some(FIXED_AT)),
+        },
+    };
+    assert_dto("token_response.json", &token);
+    // Refresh grace path returns the same TokenResponseDto JSON as issue_tokens.
+    assert_dto(
+        "token_response_refresh_grace.json",
+        crate::signin::token_response_json(&token),
+    );
+
+    let state = test_state(AuthMode::Github);
+    assert_dto("healthz.json", crate::api::healthz_dto(&state));
+
+    let voices = VoiceCatalogDto {
+        default_voice: "marin".into(),
+        voices: vec![VoiceDto {
+            id: "marin".into(),
+            name: "Marin".into(),
+            description: Some("Warm and clear.".into()),
+            seconds: Some(2.5),
+            sample_url: "http://127.0.0.1:7707/voices/marin/sample.mp3".into(),
+        }],
+    };
+    assert_dto("voices.json", &voices);
+    // Builder path with a catalogue on disk must match the same shape.
+    {
+        let dir = state.cfg.data_dir.join("voices-fixture");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("voices.json"),
+            r#"{
+  "default": "marin",
+  "voices": [
+    {
+      "id": "marin",
+      "name": "Marin",
+      "description": "Warm and clear.",
+      "seconds": 2.5,
+      "line": "hello",
+      "model": "fixture"
+    }
+  ]
+}
+"#,
+        )
+        .unwrap();
+        let mut voice_cfg = (*state.voice).clone();
+        voice_cfg.voices_dir = dir;
+        voice_cfg.default_voice = "marin".into();
+        let mut state = state.clone();
+        state.voice = std::sync::Arc::new(voice_cfg);
+        state.cfg = std::sync::Arc::new({
+            let mut c = (*state.cfg).clone();
+            c.public_url = "http://127.0.0.1:7707".into();
+            c
+        });
+        let built = crate::voice::voices_catalog_dto(&state);
+        assert_eq!(built, voices, "voices_catalog_dto matches fixture DTO");
+    }
+
+    let mock = crate::proxy::transcription_mock_json(1.5);
+    assert_dto("transcription_mock.json", mock);
 }
 
 #[tokio::test]

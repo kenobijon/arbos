@@ -39,6 +39,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
+use arbos_core::api::{VoiceCatalogDto, VoiceDto};
 use arbos_core::ids::{now_ms, ulid};
 
 use crate::auth::Principal;
@@ -170,21 +171,31 @@ pub fn voice_for(state: &AppState, project_id: &str) -> String {
         .unwrap_or_else(|| state.voice.default_voice.clone())
 }
 
-/// `GET /voices` (no auth) → `{ default, voices: [{ id, name, description, seconds, sample_url }] }`.
-pub async fn list_voices(State(state): State<AppState>) -> Response {
+/// Build the `GET /voices` catalogue DTO (also used for fixtures).
+pub(crate) fn voices_catalog_dto(state: &AppState) -> VoiceCatalogDto {
     let base = state.cfg.public_url.trim_end_matches('/');
-    let voices: Vec<Value> = voice_catalogue(&state)
+    let voices: Vec<VoiceDto> = voice_catalogue(state)
         .into_iter()
         .map(|v| {
             let id = v["id"].as_str().unwrap_or_default().to_owned();
-            json!({
-                "id": id, "name": v["name"], "description": v["description"], "seconds": v["seconds"],
-                "sample_url": format!("{base}/voices/{id}/sample.mp3"),
-            })
+            VoiceDto {
+                name: v["name"].as_str().unwrap_or(&id).to_owned(),
+                description: v["description"].as_str().map(str::to_owned),
+                seconds: v["seconds"].as_f64(),
+                sample_url: format!("{base}/voices/{id}/sample.mp3"),
+                id,
+            }
         })
         .collect();
-    let mut resp =
-        Json(json!({ "default": state.voice.default_voice, "voices": voices })).into_response();
+    VoiceCatalogDto {
+        default_voice: state.voice.default_voice.clone(),
+        voices,
+    }
+}
+
+/// `GET /voices` (no auth) → `{ default, voices: [{ id, name, description, seconds, sample_url }] }`.
+pub async fn list_voices(State(state): State<AppState>) -> Response {
+    let mut resp = Json(voices_catalog_dto(&state)).into_response();
     resp.headers_mut().insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static("public, max-age=3600"),

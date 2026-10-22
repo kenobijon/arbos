@@ -1,5 +1,6 @@
 //! Shared HTTP response shapes for projects, chats, people, me, machine,
-//! unread, calls, goals, routines, secrets, and vaults (crdt-sync).
+//! unread, calls, goals, routines, secrets, vaults, sign-in, pairing, and
+//! media (crdt-sync).
 //!
 //! No I/O. The relay builds these and serializes them; clients will decode the
 //! same JSON. Regenerate Swift with `./scripts/gen-swift-types.sh`.
@@ -1275,4 +1276,103 @@ pub struct VaultItemsEnvelopeDto {
     pub vault: VaultDto,
     #[typeshare(skip)]
     pub items: Value,
+}
+
+// ---- Sign-in / pairing / media (step 6b-2d-1) ---------------------------------------------------
+//
+// Pairing and token replies carry device / access tokens — fixtures use obviously fake values.
+// Upstream passthroughs (`ModelListDto`, `TranscriptionDto`) are read-only; unknown keys ignored.
+
+/// `POST /pair` success body.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PairResponseDto {
+    pub device_id: String,
+    pub device_token: String,
+}
+
+/// `POST /auth/token` and `POST /auth/refresh` success body.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TokenResponseDto {
+    pub access_token: String,
+    pub token_type: String,
+    #[typeshare(serialized_as = "I54")]
+    pub expires_in: i64,
+    pub refresh_token: String,
+    pub device_id: String,
+    pub user: AccountUserDto,
+}
+
+/// Provider flags on `GET /healthz`.
+#[typeshare]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct HealthProvidersDto {
+    pub openai_compatible: bool,
+    pub anthropic: bool,
+}
+
+/// `GET /healthz` body. Clients read `auth_mode` (and legacy `auth`); other keys stay for probes.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HealthDto {
+    #[serde(default)]
+    pub ok: bool,
+    #[serde(default)]
+    #[typeshare(serialized_as = "I54")]
+    pub proto: i64,
+    #[serde(default)]
+    #[typeshare(serialized_as = "I54")]
+    pub devices: i64,
+    #[serde(default)]
+    pub daytona: bool,
+    /// Present on current relays; absent on very old ones that only had `auth`.
+    #[serde(default)]
+    pub auth_mode: Option<String>,
+    /// Older relays only (`"github"`); omitted on current relays.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<String>,
+    #[serde(default)]
+    pub providers: HealthProvidersDto,
+}
+
+/// One entry of `GET /voices`.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VoiceDto {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub seconds: Option<f64>,
+    pub sample_url: String,
+}
+
+/// `GET /voices` catalogue.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VoiceCatalogDto {
+    #[serde(rename = "default")]
+    pub default_voice: String,
+    pub voices: Vec<VoiceDto>,
+}
+
+/// One row of `GET /proxy/v1/models` `data[]` (id only; unknown upstream keys ignored).
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelListItemDto {
+    pub id: String,
+}
+
+/// `GET /proxy/v1/models` body (passthrough; clients read `data[].id`).
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelListDto {
+    pub data: Vec<ModelListItemDto>,
+}
+
+/// `POST /proxy/v1/audio/transcriptions` body (passthrough / mock; clients read `text`).
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TranscriptionDto {
+    pub text: String,
 }

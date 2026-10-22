@@ -847,6 +847,15 @@ fn audio_key(state: &AppState) -> Option<String> {
     state.cfg.openai_key.clone()
 }
 
+/// Mock transcription body (`ARBOS_VOICE_MOCK=1`). Keeps `duration` on the wire; clients read `text`.
+pub(crate) fn transcription_mock_json(secs: f64) -> Value {
+    let text = format!(
+        "[mock transcript] {:.1} s of audio received by the relay.",
+        secs
+    );
+    json!({ "text": text, "duration": secs })
+}
+
 /// `POST /proxy/v1/audio/transcriptions`: multipart (`file`, `model`, …) → `{ "text": … }`.
 /// Metered by audio minutes; `ARBOS_VOICE_MOCK=1` answers without an upstream.
 pub async fn audio_transcriptions(
@@ -877,17 +886,13 @@ pub async fn audio_transcriptions(
             0,
             None,
         );
-        let text = format!(
-            "[mock transcript] {:.1} s of audio received by the relay.",
-            secs
-        );
         return (
             StatusCode::OK,
             [
                 ("content-type", "application/json"),
                 ("x-arbos-voice-mock", "1"),
             ],
-            json!({ "text": text, "duration": secs }).to_string(),
+            transcription_mock_json(secs).to_string(),
         )
             .into_response();
     }
