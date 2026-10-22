@@ -499,7 +499,7 @@ pub struct Voice {
     /// Timed end of the current playback (also drives the silent player).
     speaking_until: Option<u64>,
     /// One line about the current state ("No microphone — …", "Spoke 4.2 s").
-    notice: Option<String>,
+    notice: Option<Notice>,
     /// The last STT/TTS answer came from a mock.
     mock: bool,
     tick: Option<Task<()>>,
@@ -507,6 +507,41 @@ pub struct Voice {
 }
 
 impl EventEmitter<VoiceEvent> for Voice {}
+
+/// The composer's one-line voice note. A note about a reply (synthesising,
+/// speaking, could not be decoded) belongs to the chat that reply is in: it is
+/// shown only there and dropped when the user moves to another chat, so a
+/// failure in one chat never becomes a banner in every chat. Notes about the
+/// device path (no microphone, call ended) have no chat and show anywhere.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Notice {
+    text: String,
+    chat: Option<Id>,
+}
+
+impl Notice {
+    fn global(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            chat: None,
+        }
+    }
+
+    fn in_chat(text: impl Into<String>, chat: Option<Id>) -> Self {
+        Self {
+            text: text.into(),
+            chat,
+        }
+    }
+
+    /// Visible in `active` chat?
+    fn shows_in(&self, active: Option<&str>) -> bool {
+        match &self.chat {
+            None => true,
+            Some(chat) => active == Some(chat.as_str()),
+        }
+    }
+}
 
 impl Voice {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
@@ -591,8 +626,38 @@ impl Voice {
         (self.level * 6.0).min(1.0)
     }
 
-    pub fn notice(&self) -> Option<&str> {
-        self.notice.as_deref()
+    /// The note the composer shows in `active_chat` (chat-scoped notes stay
+    /// in their own chat).
+    pub fn notice_for(&self, active_chat: Option<&str>) -> Option<&str> {
+        self.notice
+            .as_ref()
+            .filter(|n| n.shows_in(active_chat))
+            .map(|n| n.text.as_str())
+    }
+
+    fn set_notice(&mut self, text: impl Into<String>) {
+        self.notice = Some(Notice::global(text));
+    }
+
+    /// A note about `message_id`'s speech, scoped to the chat that holds it.
+    fn set_reply_notice(&mut self, text: impl Into<String>, message_id: &str, cx: &App) {
+        let state = self.state.read(cx);
+        let chat = state
+            .chat_of_message(message_id)
+            .or_else(|| state.active_chat_id());
+        self.notice = Some(Notice::in_chat(text, chat));
+    }
+
+    /// A chat-scoped note does not follow the user to another chat.
+    fn drop_stale_notice(&mut self, cx: &App) {
+        let active = self.state.read(cx).active_chat_id();
+        if self
+            .notice
+            .as_ref()
+            .is_some_and(|n| n.chat.is_some() && !n.shows_in(active.as_deref()))
+        {
+            self.notice = None;
+        }
     }
 
     pub fn using_test_clip(&self) -> bool {
@@ -665,9 +730,9 @@ impl Voice {
             if self.call.is_none() {
                 self.capture = None;
             }
-            self.notice = Some("Recording discarded".into());
+            self.set_notice("Recording discarded");
         } else if self.pending_stt.take().is_some() {
-            self.notice = Some("Transcription cancelled".into());
+            self.set_notice("Transcription cancelled");
         } else {
             return;
         }
@@ -688,10 +753,12 @@ impl Voice {
     fn ensure_capture(&mut self) {
         if self.capture.is_none() {
             let (capture, notice) = Capture::open();
-            self.notice = notice.or_else(|| match &capture.source {
-                CaptureSource::Device { name, .. } => Some(format!("Microphone: {name}")),
-                CaptureSource::TestClip { .. } => None,
-            });
+            self.notice = notice
+                .or_else(|| match &capture.source {
+                    CaptureSource::Device { name, .. } => Some(format!("Microphone: {name}")),
+                    CaptureSource::TestClip { .. } => None,
+                })
+                .map(Notice::global);
             self.capture = Some(capture);
         }
     }
@@ -722,7 +789,7 @@ impl Voice {
         }
         let secs = rec.samples.len() as f32 / RATE as f32;
         if secs < MIN_MEMO_SECS {
-            self.notice = Some("Too short — hold the mic a little longer".into());
+            self.set_notice("Too short — hold the mic a little longer");
             cx.notify();
             return;
         }
@@ -750,7 +817,7 @@ impl Voice {
             wav: wav.clone(),
             started_at: now_ms(),
         });
-        self.notice = Some(format!(
+        self.set_notice(format!(
             "Transcribing {:.1} s…",
             samples.len() as f32 / RATE as f32
         ));
@@ -773,7 +840,7 @@ impl Voice {
         let took = now_ms().saturating_sub(pending.started_at);
         let text = text.trim();
         if let Some(err) = error {
-            self.notice = Some(format!("Transcription failed: {err}"));
+            self.set_notice(format!("Transcription failed: {err}"));
             if let Some(call) = &mut self.call {
                 call.phase = CallPhase::Listening;
             }
@@ -781,14 +848,14 @@ impl Voice {
             return;
         }
         if text.is_empty() {
-            self.notice = Some("Heard nothing".into());
+            self.set_notice("Heard nothing");
             if let Some(call) = &mut self.call {
                 call.phase = CallPhase::Listening;
             }
             cx.notify();
             return;
         }
-        self.notice = Some(format!(
+        self.set_notice(format!(
             "Transcribed in {:.1} s{}",
             took as f32 / 1000.0,
             if mock { " (mock)" } else { "" }
@@ -812,6 +879,7 @@ impl Voice {
     /// Called on every state change: a reply that just finished in the active
     /// chat is spoken while voice mode is on (or during a call).
     fn check_replies(&mut self, cx: &mut Context<Self>) {
+        self.drop_stale_notice(cx);
         if self.voice_since == u64::MAX {
             cx.notify();
             return;
@@ -867,11 +935,12 @@ impl Voice {
     ) {
         self.next_request += 1;
         let request_id = self.next_request;
-        self.pending_tts.insert(request_id, (message_id, autoplay));
+        self.pending_tts
+            .insert(request_id, (message_id.clone(), autoplay));
         if let Some(call) = &mut self.call {
             call.phase = CallPhase::Thinking;
         }
-        self.notice = Some("Synthesising the reply…".into());
+        self.set_reply_notice("Synthesising the reply…", &message_id, cx);
         self.state.update(cx, |s, _| s.speak(request_id, text));
     }
 
@@ -889,16 +958,15 @@ impl Voice {
         };
         self.mock = mock;
         if let Some(err) = error {
-            self.notice = Some(format!("Speech failed: {err}"));
-            if let Some(call) = &mut self.call {
-                call.phase = CallPhase::Listening;
-            }
-            cx.notify();
+            self.fail_speech(&message_id, format!("Speech failed: {err}"), cx);
             return;
         }
         if !mime.starts_with("audio/") && audio::decode_wav(&bytes).is_none() {
-            self.notice = Some(format!("Speech came back as {mime}, not audio"));
-            cx.notify();
+            self.fail_speech(
+                &message_id,
+                format!("Speech came back as {mime}, not audio"),
+                cx,
+            );
             return;
         }
         self.speech.insert(message_id.clone(), bytes.clone());
@@ -906,6 +974,19 @@ impl Voice {
             .update(cx, |s, cx| s.mark_spoken(message_id.clone(), cx));
         if autoplay {
             self.play(message_id, bytes, cx);
+        }
+        cx.notify();
+    }
+
+    /// Speech for one reply did not arrive or did not play: the note stays in
+    /// that reply's chat and the reply's speaker row says so; nothing global.
+    fn fail_speech(&mut self, message_id: &Id, reason: String, cx: &mut Context<Self>) {
+        self.set_reply_notice(reason.clone(), message_id, cx);
+        self.state.update(cx, |s, cx| {
+            s.mark_speech_failed(message_id.clone(), reason, cx)
+        });
+        if let Some(call) = &mut self.call {
+            call.phase = CallPhase::Listening;
         }
         cx.notify();
     }
@@ -935,8 +1016,7 @@ impl Voice {
     fn play(&mut self, message_id: Id, bytes: Arc<Vec<u8>>, cx: &mut Context<Self>) {
         self.stop_playback();
         let Some(pcm) = audio::decode_wav(&bytes) else {
-            self.notice = Some("Reply audio could not be decoded".into());
-            cx.notify();
+            self.fail_speech(&message_id, "Reply audio could not be decoded".into(), cx);
             return;
         };
         let secs = pcm.duration_secs();
@@ -944,25 +1024,27 @@ impl Voice {
             let (player, notice) = Player::open();
             self.player = Some(player);
             if let Some(n) = notice {
-                self.notice = Some(n);
+                self.set_notice(n);
             }
         }
         let silent = matches!(self.player, Some(Player::Silent) | None);
         if let Some(player) = &mut self.player {
             if let Err(err) = player.play(&bytes) {
-                self.notice = Some(format!("Playback failed: {err}"));
-                cx.notify();
+                self.fail_speech(&message_id, format!("Playback failed: {err}"), cx);
                 return;
             }
         }
-        self.now_speaking = Some(message_id);
+        // This reply plays: a failure note from an earlier attempt is over.
+        self.state
+            .update(cx, |s, cx| s.clear_speech_failed(&message_id, cx));
+        self.now_speaking = Some(message_id.clone());
         self.speaking_until = Some(now_ms() + (secs * 1000.0) as u64);
         if let Some(call) = &mut self.call {
             call.phase = CallPhase::Speaking;
             // Nothing the mic heard during our own speech counts.
             call.vad.reset();
         }
-        self.notice = Some(if silent {
+        let text = if silent {
             format!(
                 "No speaker — reply decoded ({secs:.1} s, {} kHz){}",
                 pcm.rate / 1000,
@@ -973,7 +1055,8 @@ impl Voice {
                 "Speaking {secs:.1} s{}",
                 if self.mock { " (mock)" } else { "" }
             )
-        });
+        };
+        self.set_reply_notice(text, &message_id, cx);
         self.ensure_tick(cx);
         cx.notify();
     }
@@ -1042,7 +1125,7 @@ impl Voice {
         if call.voice_was_off {
             self.set_voice_mode(false, cx);
         }
-        self.notice = Some(format!(
+        self.set_notice(format!(
             "Call ended after {}",
             mmss(now_ms().saturating_sub(call.started_at))
         ));
