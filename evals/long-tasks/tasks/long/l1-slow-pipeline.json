@@ -22,5 +22,6 @@
       "min": 3
     },
     "settle_s": 150
-  }
+  },
+  "cleanup_routines": true
 }
