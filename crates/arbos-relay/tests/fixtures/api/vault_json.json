@@ -1,0 +1,62 @@
+{
+  "agents": [
+    {
+      "access_id": "acc_vault_fixture",
+      "created_at": 1700000000000,
+      "created_from": "settings",
+      "disabled_at": null,
+      "enabled": true,
+      "hosts": [],
+      "item_hosts": [],
+      "last_used_at": null,
+      "name": "Research",
+      "note": "Everything in the fixture vault.",
+      "project_id": "proj_secrets_fixture",
+      "scope": {
+        "chat_id": null,
+        "kind": "all"
+      }
+    }
+  ],
+  "created_at": 1700000000000,
+  "env_items": 0,
+  "external_vaults": [
+    {
+      "id": "ev_fixture",
+      "name": "Fixture Vault"
+    }
+  ],
+  "id": "vault_fixture",
+  "items": [
+    {
+      "category": "Login",
+      "env": "FIXTURE_LOGIN_ITEM",
+      "fields": [
+        "username",
+        "password"
+      ],
+      "id": "item_fixture",
+      "inject_env": false,
+      "ref": "op://Fixture/Login/password",
+      "title": "Fixture Login Item",
+      "urls": [
+        "https://login.fixture.example"
+      ]
+    }
+  ],
+  "items_count": 1,
+  "items_refreshed_at": 1700000000000,
+  "last_error": null,
+  "last_refreshed_at": 1700000000000,
+  "limits": {
+    "cache_ttl_secs": 300,
+    "reads_per_day": 1000,
+    "reads_per_hour": 1000,
+    "reads_used_day": 0,
+    "reads_used_hour": 0
+  },
+  "name": "Fixture 1Password",
+  "provider": "onepassword",
+  "status": "ok",
+  "token_expires_at": 1700086400000
+}

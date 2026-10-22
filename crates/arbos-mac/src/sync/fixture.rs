@@ -1208,6 +1208,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         .map(|(_, v)| v.clone()),
                     vault_name: "Arbos".into(),
                     agents,
+                    directors: Vec::new(),
                 });
                 view.secrets.sort_by(|a, b| a.env.cmp(&b.env));
             }
@@ -1752,6 +1753,7 @@ fn seed_secrets() -> SecretsView {
         username: (kind == "login").then(|| "unarbos".to_string()),
         vault_name: "Arbos".into(),
         agents,
+        directors: Vec::new(),
     };
     let mut stripe = secret(
         "STRIPE_KEY",
@@ -1824,6 +1826,7 @@ fn seed_secrets() -> SecretsView {
         at: now - mins_ago * 60_000,
         action: action.into(),
         name: name.into(),
+        target_kind: "secret".into(),
         project_id: project.map(|(id, _)| id.to_string()),
         project_name: project.map(|(_, n)| n.to_string()),
         host: host.map(str::to_string),

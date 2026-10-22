@@ -28,6 +28,11 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use arbos_core::api::{
+    ProjectSecretItemDto, ProjectVaultSummaryDto, SecretAccessDto, SecretAccessEnvelopeDto,
+    SecretAccessScopeDto, VaultDetailDto, VaultDto, VaultEnvelopeDto, VaultItemHostDto,
+    VaultItemsEnvelopeDto, VaultLimitsDto,
+};
 use arbos_core::ids::{now_ms, ulid};
 
 use crate::auth::Principal;
@@ -79,6 +84,7 @@ pub(crate) fn vault_connect() -> bool {
 
 /// Remote feature flags the apps read (`GET /secrets` and `GET /me` → `features`): the one
 /// object from `crate::features`, so every flag ships on both endpoints.
+#[allow(dead_code)] // kept as the documented alias; handlers use `crate::features::dto()`.
 pub(crate) fn features() -> Value {
     crate::features::features()
 }
@@ -428,29 +434,54 @@ pub fn find_refs(s: &str) -> Vec<String> {
     out
 }
 
-// ---- JSON --------------------------------------------------------------------------------------
+// ---- JSON (Dto builders; wire JSON unchanged) --------------------------------------------------
 
-fn vault_json(state: &AppState, v: &Vault) -> Value {
+fn to_json<T: serde::Serialize>(v: T) -> Value {
+    serde_json::to_value(v).expect("vault dto")
+}
+
+pub(crate) fn vault_dto(state: &AppState, v: &Vault) -> VaultDto {
     let (hour, day) = state.db.vault_reads(&v.id).unwrap_or((0, 0));
-    let agents: Vec<Value> = state
+    let agents: Vec<SecretAccessDto> = state
         .db
         .accesses_of_target("vault", &v.id)
         .unwrap_or_default()
         .iter()
-        .map(|a| access_json(state, a))
+        .map(|a| access_dto(state, a))
         .collect();
-    json!({
-        "id": v.id, "provider": v.provider, "name": v.name,
-        "external_vaults": v.external_vaults, "items_count": v.items_count,
-        "items_refreshed_at": v.items_refreshed_at, "token_expires_at": v.token_expires_at,
-        "limits": { "reads_per_hour": reads_per_hour(), "reads_used_hour": hour, "reads_per_day": reads_per_day(), "reads_used_day": day,
-                    "cache_ttl_secs": cache_ttl().as_secs() },
-        "status": v.status, "last_error": v.last_error, "last_refreshed_at": v.last_refreshed_at,
-        "created_at": v.created_at, "agents": agents,
+    VaultDto {
+        id: v.id.clone(),
+        provider: v.provider.clone(),
+        name: v.name.clone(),
+        external_vaults: v.external_vaults.clone(),
+        items_count: v.items_count,
+        items_refreshed_at: v.items_refreshed_at,
+        token_expires_at: v.token_expires_at,
+        limits: VaultLimitsDto {
+            reads_per_hour: reads_per_hour(),
+            reads_used_hour: hour,
+            reads_per_day: reads_per_day(),
+            reads_used_day: day,
+            cache_ttl_secs: cache_ttl().as_secs() as i64,
+        },
+        status: v.status.clone(),
+        last_error: v.last_error.clone(),
+        last_refreshed_at: v.last_refreshed_at,
+        created_at: v.created_at,
+        agents,
         // Cached names only (title, category, fields, urls): small, and the Mac shows them inline.
-        "items": items_json(state, v),
-        "env_items": state.db.vault_item_envs(&v.id).map(|e| e.len()).unwrap_or(0),
-    })
+        items: Value::Array(items_json(state, v)),
+        env_items: state
+            .db
+            .vault_item_envs(&v.id)
+            .map(|e| e.len() as i64)
+            .unwrap_or(0),
+    }
+}
+
+#[allow(dead_code)] // Value form; HTTP handlers return DTOs, fixtures still use this.
+pub(crate) fn vault_json(state: &AppState, v: &Vault) -> Value {
+    to_json(vault_dto(state, v))
 }
 
 /// The cached items with the owner's env mapping on each: `env` (the name agents get the real
@@ -508,7 +539,7 @@ pub(crate) fn item_env_vars(env: &str, fields: &[String]) -> Vec<(String, String
         .collect()
 }
 
-fn access_json(state: &AppState, a: &Access) -> Value {
+pub(crate) fn access_dto(state: &AppState, a: &Access) -> SecretAccessDto {
     let name = state
         .db
         .project(&a.project_id)
@@ -516,40 +547,92 @@ fn access_json(state: &AppState, a: &Access) -> Value {
         .flatten()
         .map(|p| p.name)
         .unwrap_or_else(|| a.project_id.clone());
-    let pinned: Vec<Value> = state
+    let pinned: Vec<VaultItemHostDto> = state
         .db
         .vault_access_hosts(&a.id)
         .unwrap_or_default()
         .into_iter()
-        .map(|(r, h)| json!({ "ref": r, "host": h }))
+        .map(|(r, h)| VaultItemHostDto {
+            item_ref: r,
+            host: h,
+        })
         .collect();
-    json!({
-        "project_id": a.project_id, "name": name, "access_id": a.id, "enabled": a.enabled,
-        "note": a.note, "hosts": a.hosts, "item_hosts": pinned,
-        "scope": { "kind": a.scope_kind, "chat_id": a.scope_chat_id },
-        "created_from": a.created_from, "created_at": a.created_at,
-        "last_used_at": a.last_used_at, "disabled_at": a.disabled_at,
-    })
+    SecretAccessDto {
+        project_id: a.project_id.clone(),
+        name,
+        access_id: a.id.clone(),
+        enabled: a.enabled,
+        note: a.note.clone(),
+        hosts: a.hosts.clone(),
+        scope: SecretAccessScopeDto {
+            kind: a.scope_kind.clone(),
+            chat_id: a.scope_chat_id.clone(),
+        },
+        created_from: a.created_from.clone(),
+        created_at: a.created_at,
+        last_used_at: a.last_used_at,
+        disabled_at: a.disabled_at,
+        item_hosts: Some(pinned),
+    }
+}
+
+#[allow(dead_code)] // Value form of [`access_dto`].
+fn access_json(state: &AppState, a: &Access) -> Value {
+    to_json(access_dto(state, a))
 }
 
 /// `GET /secrets` → `vaults[]`.
-pub(crate) fn list_json(state: &AppState, user_id: &str) -> Vec<Value> {
+pub(crate) fn list_dto(state: &AppState, user_id: &str) -> Vec<VaultDto> {
     state
         .db
         .list_vaults(user_id)
         .unwrap_or_default()
         .iter()
-        .map(|v| vault_json(state, v))
+        .map(|v| vault_dto(state, v))
         .collect()
 }
 
+#[allow(dead_code)] // Value form for callers that still want raw JSON arrays.
+pub(crate) fn list_json(state: &AppState, user_id: &str) -> Vec<Value> {
+    list_dto(state, user_id).into_iter().map(to_json).collect()
+}
+
 /// One vault-level access as an item of the agent profile page.
-pub(crate) fn access_item_json(state: &AppState, owner: &str, a: &Access) -> Option<Value> {
+pub(crate) fn access_item_dto(
+    state: &AppState,
+    owner: &str,
+    a: &Access,
+) -> Option<ProjectSecretItemDto> {
     let v = state.db.vault(owner, &a.target_id).ok().flatten()?;
-    let mut j = access_json(state, a);
-    j["target_kind"] = json!("vault");
-    j["vault"] = json!({ "id": v.id, "provider": v.provider, "name": v.name, "items_count": v.items_count, "status": v.status });
-    Some(j)
+    let access = access_dto(state, a);
+    Some(ProjectSecretItemDto {
+        project_id: access.project_id,
+        name: access.name,
+        access_id: access.access_id,
+        enabled: access.enabled,
+        note: access.note,
+        hosts: access.hosts,
+        scope: access.scope,
+        created_from: access.created_from,
+        created_at: access.created_at,
+        last_used_at: access.last_used_at,
+        disabled_at: access.disabled_at,
+        item_hosts: access.item_hosts,
+        target_kind: Some("vault".into()),
+        secret: None,
+        vault: Some(ProjectVaultSummaryDto {
+            id: v.id,
+            provider: v.provider,
+            name: v.name,
+            items_count: v.items_count,
+            status: v.status,
+        }),
+    })
+}
+
+#[allow(dead_code)] // Value form of [`access_item_dto`].
+pub(crate) fn access_item_json(state: &AppState, owner: &str, a: &Access) -> Option<Value> {
+    access_item_dto(state, owner, a).map(to_json)
 }
 
 /// Items of connected vaults this project may use (names only), one per cached item.
@@ -763,10 +846,11 @@ pub async fn put_item_env(
     {
         after_access_change(&state, &v, &a);
     }
-    Ok(
-        Json(json!({ "vault": vault_json(&state, &v), "items": items_json(&state, &v) }))
-            .into_response(),
-    )
+    Ok(Json(VaultItemsEnvelopeDto {
+        vault: vault_dto(&state, &v),
+        items: Value::Array(items_json(&state, &v)),
+    })
+    .into_response())
 }
 
 pub(crate) fn admin_status(state: &AppState) -> Value {
@@ -932,7 +1016,9 @@ pub async fn connect(
     }
     Ok((
         StatusCode::CREATED,
-        Json(json!({ "vault": vault_json(&state, &v) })),
+        Json(VaultEnvelopeDto {
+            vault: vault_dto(&state, &v),
+        }),
     )
         .into_response())
 }
@@ -1041,10 +1127,12 @@ pub async fn get(
             ..Default::default()
         },
     );
-    Ok(
-        Json(json!({ "vault": vault_json(&state, &v), "items": items_json(&state, &v), "activity": activity }))
-            .into_response(),
-    )
+    Ok(Json(VaultDetailDto {
+        vault: vault_dto(&state, &v),
+        items: Value::Array(items_json(&state, &v)),
+        activity,
+    })
+    .into_response())
 }
 
 /// Re-read the item list (1 + n provider reads) and clear the value cache.
@@ -1100,7 +1188,10 @@ pub async fn refresh(
     let user_id = device_user(&principal)?;
     let v = load_vault(&state, &user_id, &id)?;
     let v2 = refresh_items(&state, &v).await?;
-    Ok(Json(json!({ "vault": vault_json(&state, &v2) })).into_response())
+    Ok(Json(VaultEnvelopeDto {
+        vault: vault_dto(&state, &v2),
+    })
+    .into_response())
 }
 
 #[derive(Deserialize)]
@@ -1139,7 +1230,10 @@ pub async fn replace_token(
             ..entry("vault_refreshed", &v2, &format!("user:{user_id}"))
         },
     );
-    Ok(Json(json!({ "vault": vault_json(&state, &v2) })).into_response())
+    Ok(Json(VaultEnvelopeDto {
+        vault: vault_dto(&state, &v2),
+    })
+    .into_response())
 }
 
 #[derive(Deserialize, Default)]
@@ -1175,7 +1269,10 @@ pub async fn put_access(
     )?
     .ok_or_else(|| err(StatusCode::NOT_FOUND, "not_found", "no such agent"))?;
     after_access_change(&state, &v, &a);
-    Ok(Json(json!({ "access": access_json(&state, &a) })).into_response())
+    Ok(Json(SecretAccessEnvelopeDto {
+        access: access_dto(&state, &a),
+    })
+    .into_response())
 }
 
 /// `DELETE /vaults/{id}` → 204. Token ciphertext and cached items go, every access is removed,
@@ -1693,7 +1790,10 @@ pub async fn put_item_hosts(
             ..entry("updated", &v, &format!("user:{user_id}"))
         },
     );
-    Ok(Json(json!({ "access": access_json(&state, &a) })).into_response())
+    Ok(Json(SecretAccessEnvelopeDto {
+        access: access_dto(&state, &a),
+    })
+    .into_response())
 }
 
 #[cfg(test)]

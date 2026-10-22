@@ -15,9 +15,11 @@ use anyhow::{anyhow, Context as _, Result};
 use arbos_client::room::{self, RoomAction, RoomSession};
 use arbos_core::api::{
     CallDto, CallEndedPayloadDto, CallEnvelopeDto, CallMissedPayloadDto, CallStartedPayloadDto,
-    CreateChatResponseDto, GetProjectResponseDto, GroupDto, LeaveCallResponseDto, MachineStateDto,
-    MachineStatusDto, MeResponseDto, MeUserResponseDto, PeopleChatDto, ProjectMembersDto,
-    RoutineDto, RoutineRunDto, StartCallResponseDto, UserCardDto, UsersPageDto,
+    CreateChatResponseDto, DecideSecretResponseDto, GetProjectResponseDto, GroupDto,
+    LeaveCallResponseDto, MachineStateDto, MachineStatusDto, MeResponseDto, MeUserResponseDto,
+    PeopleChatDto, ProjectMembersDto, ProjectSecretsDto, RoutineDto, RoutineRunDto,
+    SecretEnvelopeDto, SecretRequestsDto, SecretsOverviewDto, StartCallResponseDto, UserCardDto,
+    UsersPageDto, VaultEnvelopeDto,
 };
 use arbos_core::doc::{UserAttachment, UserMessageOpts};
 use arbos_core::wire::{BoxState as WireBox, PROJECT_DOC_CHAT_ID};
@@ -40,6 +42,7 @@ use super::doc::ChatDoc;
 use super::dto::{
     account_view_from_me, apply_machine_status, chat_from_create, chat_from_dto,
     chat_from_group_dto, people_space_from, project_from_dto, routine_from_dto,
+    secrets_view_from_dto,
 };
 use super::store::{self, Store};
 use super::{ClientCommand, SyncEvent, SyncSource};
@@ -48,8 +51,7 @@ use crate::model::{
     CallMissed, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelsView, Chat, Connector,
     ConnectorProvider, ConnectorsView, Effort, Id, Link, LocalDevice, LocalView, Machine,
     MachineState, Message, Part, Person, Project, ProjectDocView, ProjectSecrets, Reachable, Role,
-    Routine, RoutineRun, Secret, SecretActivity, SecretRequest, SecretsView, Sender, ServerInfo,
-    Skill, ThreadInfo, Voice,
+    Routine, RoutineRun, Sender, ServerInfo, Skill, ThreadInfo, Voice,
 };
 use crate::update;
 
@@ -5272,7 +5274,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 }
                 match shared.post_json("/secrets", body).await {
                     Ok(v) => {
-                        let env = v["secret"]["env"].as_str().unwrap_or(&item.name);
+                        let env = serde_json::from_value::<SecretEnvelopeDto>(v)
+                            .ok()
+                            .map(|e| e.secret.env)
+                            .unwrap_or_else(|| item.name.clone());
                         shared.notice(format!("Secrets: saved {env}."));
                     }
                     Err(err) => shared.notice(format!("Secrets: {}", relay_message(&err))),
@@ -5370,8 +5375,15 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .await
                 {
                     Ok(v) => {
-                        let name = v["request"]["name"].as_str().unwrap_or("the secret");
-                        let agent = v["request"]["project_name"].as_str().unwrap_or("the agent");
+                        let (name, agent) = serde_json::from_value::<DecideSecretResponseDto>(v)
+                            .ok()
+                            .map(|d| {
+                                (
+                                    d.request.name,
+                                    d.request.project_name.unwrap_or_else(|| "the agent".into()),
+                                )
+                            })
+                            .unwrap_or_else(|| ("the secret".into(), "the agent".into()));
                         shared.notice(match decision.as_str() {
                             "deny" => format!("{agent} asked for {name}. Denied."),
                             "once" => format!("{agent} may use {name} once."),
@@ -5394,10 +5406,13 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 let body = json!({ "provider": "onepassword", "token": token,
                     "agents": agents.iter().map(|p| json!({ "project_id": p, "note": note })).collect::<Vec<_>>() });
                 match shared.post_json("/vaults", body).await {
-                    Ok(v) => shared.notice(format!(
-                        "Connected {}.",
-                        v["vault"]["name"].as_str().unwrap_or("the vault")
-                    )),
+                    Ok(v) => {
+                        let name = serde_json::from_value::<VaultEnvelopeDto>(v)
+                            .ok()
+                            .map(|e| e.vault.name)
+                            .unwrap_or_else(|| "the vault".into());
+                        shared.notice(format!("Connected {name}."));
+                    }
                     Err(err) => {
                         let text = format!("{err:#}");
                         shared.notice(if text.contains("bad_token") {
@@ -5914,41 +5929,15 @@ async fn refresh_secrets(shared: &Arc<Shared>) {
             return;
         }
     };
-    let list =
-        |v: &Value, key: &str| -> Vec<Value> { v[key].as_array().cloned().unwrap_or_default() };
-    let secrets: Vec<Secret> = list(&overview, "secrets")
-        .iter()
-        .filter_map(|i| serde_json::from_value(i.clone()).ok())
-        .collect();
-    let vaults = list(&overview, "vaults")
-        .iter()
-        .filter_map(|i| serde_json::from_value(i.clone()).ok())
-        .collect();
-    let activity: Vec<SecretActivity> = list(&overview, "activity")
-        .iter()
-        .filter_map(|i| serde_json::from_value(i.clone()).ok())
-        .collect();
-    let requests: Vec<SecretRequest> = list(&requests, "items")
-        .iter()
-        .filter_map(|r| serde_json::from_value(r.clone()).ok())
-        .collect();
-    let providers = list(&overview, "providers")
-        .iter()
-        .filter_map(|p| p.as_str().map(str::to_string))
-        .collect();
-    let vault_connect = overview["features"]["vault_connect"]
-        .as_bool()
-        .unwrap_or(false);
-    let _ = shared.events.send(SyncEvent::Secrets(SecretsView {
-        paused: overview["paused"].as_bool().unwrap_or(false),
-        secrets,
-        vaults,
-        providers,
-        vault_connect,
-        requests,
-        activity,
-        loaded: true,
-    }));
+    let Ok(overview) = serde_json::from_value::<SecretsOverviewDto>(overview) else {
+        return;
+    };
+    let requests = serde_json::from_value::<SecretRequestsDto>(requests)
+        .map(|r| r.items)
+        .unwrap_or_default();
+    let _ = shared.events.send(SyncEvent::Secrets(secrets_view_from_dto(
+        &overview, &requests,
+    )));
 }
 
 /// One agent's Secrets page (`GET /projects/{id}/secrets`).
@@ -5958,10 +5947,10 @@ async fn refresh_project_secrets(shared: &Arc<Shared>, project_id: &str) {
         .await
     {
         Ok(v) => {
-            if let Ok(view) = serde_json::from_value::<ProjectSecrets>(v) {
+            if let Ok(dto) = serde_json::from_value::<ProjectSecretsDto>(v) {
                 let _ = shared.events.send(SyncEvent::ProjectSecrets {
                     project_id: project_id.to_string(),
-                    view,
+                    view: ProjectSecrets::from(&dto),
                 });
             }
         }

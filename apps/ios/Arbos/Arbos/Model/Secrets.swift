@@ -4,6 +4,15 @@
 // phone: the relay never returns one, and these types have no field for it.
 
 import Foundation
+import ArbosFFI
+
+private enum SecretsDto {
+    static func decode<T: Decodable>(_ type: T.Type, from v: Any?) -> T? {
+        guard let v, JSONSerialization.isValidJSONObject(v),
+              let data = try? JSONSerialization.data(withJSONObject: v) else { return nil }
+        return try? JSONDecoder().decode(type, from: data)
+    }
+}
 
 /// A person the owner authorized to direct agents to use this secret (`secret.directors[]`).
 struct SecretDirector: Identifiable, Equatable {
@@ -22,16 +31,17 @@ struct SecretDirector: Identifiable, Equatable {
         return handle.isEmpty ? userId : "@\(handle)"
     }
 
+    init(dto: SecretDirectorDto) {
+        self.userId = dto.user_id
+        self.handle = dto.handle.trimmingCharacters(in: CharacterSet(charactersIn: "@"))
+        self.name = dto.name
+        self.avatarUrl = dto.avatar_url
+        self.note = dto.note
+        self.createdAt = dto.created_at
+    }
+
     static func parse(_ v: Any?) -> SecretDirector? {
-        guard let m = v as? [String: Any], let userId = DocJSON.str(m["user_id"]) else { return nil }
-        return SecretDirector(
-            userId: userId,
-            handle: (DocJSON.str(m["handle"]) ?? "").trimmingCharacters(in: CharacterSet(charactersIn: "@")),
-            name: DocJSON.str(m["name"]),
-            avatarUrl: DocJSON.str(m["avatar_url"]),
-            note: DocJSON.str(m["note"]) ?? "",
-            createdAt: DocJSON.int(m["created_at"]) ?? 0
-        )
+        SecretsDto.decode(SecretDirectorDto.self, from: v).map(SecretDirector.init(dto:))
     }
 }
 
@@ -49,21 +59,21 @@ struct SecretAgentAccess: Identifiable, Equatable {
     var lastUsedAt: Int64?
     var disabledAt: Int64?
 
+    init(dto: SecretAccessDto) {
+        self.id = dto.access_id
+        self.projectId = dto.project_id
+        self.name = dto.name
+        self.enabled = dto.enabled
+        self.note = dto.note
+        self.hosts = dto.hosts
+        self.scopeKind = dto.scope.kind
+        self.scopeChatId = dto.scope.chat_id
+        self.lastUsedAt = dto.last_used_at
+        self.disabledAt = dto.disabled_at
+    }
+
     static func parse(_ v: Any?) -> SecretAgentAccess? {
-        guard let m = v as? [String: Any], let pid = DocJSON.str(m["project_id"]) else { return nil }
-        let scope = m["scope"] as? [String: Any]
-        return SecretAgentAccess(
-            id: DocJSON.str(m["access_id"]) ?? pid,
-            projectId: pid,
-            name: DocJSON.str(m["name"]) ?? pid,
-            enabled: DocJSON.bool(m["enabled"]),
-            note: DocJSON.str(m["note"]) ?? "",
-            hosts: (m["hosts"] as? [Any])?.compactMap { $0 as? String } ?? [],
-            scopeKind: DocJSON.str(scope?["kind"]) ?? "all",
-            scopeChatId: DocJSON.str(scope?["chat_id"]),
-            lastUsedAt: DocJSON.int(m["last_used_at"]),
-            disabledAt: DocJSON.int(m["disabled_at"])
-        )
+        SecretsDto.decode(SecretAccessDto.self, from: v).map(SecretAgentAccess.init(dto:))
     }
 }
 
@@ -101,26 +111,47 @@ struct SecretItem: Identifiable, Equatable {
 
     var icon: String { kind == "login" ? "person.fill" : "key.fill" }
 
+    init(dto: SecretDto) {
+        self.id = dto.id
+        self.name = dto.name
+        self.env = dto.env
+        self.kind = dto.kind
+        self.note = dto.note
+        self.hosts = dto.hosts
+        self.askEveryTime = dto.ask_every_time
+        self.injectEnv = dto.inject_env
+        self.expiresAt = dto.expires_at
+        self.version = Int(dto.version)
+        self.createdAt = dto.created_at
+        self.lastUsedAt = dto.last_used_at
+        self.username = dto.username
+        self.vaultName = dto.vault_name
+        self.agents = dto.agents.map(SecretAgentAccess.init(dto:))
+        self.directors = dto.directors.map(SecretDirector.init(dto:))
+    }
+
+    /// Reduced project-page secret (`ProjectSecretSummaryDto`) with empty agents/directors.
+    init(summary: ProjectSecretSummaryDto) {
+        self.id = summary.id
+        self.name = summary.name
+        self.env = summary.env
+        self.kind = summary.kind
+        self.note = summary.note
+        self.hosts = summary.hosts
+        self.askEveryTime = false
+        self.injectEnv = summary.inject_env
+        self.expiresAt = nil
+        self.version = 1
+        self.createdAt = 0
+        self.lastUsedAt = summary.last_used_at
+        self.username = nil
+        self.vaultName = summary.vault_name
+        self.agents = []
+        self.directors = []
+    }
+
     static func parse(_ v: Any?) -> SecretItem? {
-        guard let m = v as? [String: Any], let id = DocJSON.str(m["id"]) else { return nil }
-        return SecretItem(
-            id: id,
-            name: DocJSON.str(m["name"]) ?? id,
-            env: DocJSON.str(m["env"]) ?? DocJSON.str(m["name"]) ?? id,
-            kind: DocJSON.str(m["kind"]) ?? "key",
-            note: DocJSON.str(m["note"]) ?? "",
-            hosts: (m["hosts"] as? [Any])?.compactMap { $0 as? String } ?? [],
-            askEveryTime: DocJSON.bool(m["ask_every_time"]),
-            injectEnv: DocJSON.bool(m["inject_env"]),
-            expiresAt: DocJSON.int(m["expires_at"]),
-            version: Int(DocJSON.int(m["version"]) ?? 1),
-            createdAt: DocJSON.int(m["created_at"]) ?? 0,
-            lastUsedAt: DocJSON.int(m["last_used_at"]),
-            username: DocJSON.str(m["username"]),
-            vaultName: DocJSON.str(m["vault_name"]) ?? "Arbos",
-            agents: (m["agents"] as? [Any])?.compactMap(SecretAgentAccess.parse) ?? [],
-            directors: (m["directors"] as? [Any])?.compactMap(SecretDirector.parse) ?? []
-        )
+        SecretsDto.decode(SecretDto.self, from: v).map(SecretItem.init(dto:))
     }
 }
 
@@ -139,22 +170,26 @@ struct SecretActivity: Identifiable, Equatable {
     var reason: String?
     var decision: String?
 
+    /// Typed fields from `SecretActivityDto`; `reason` / `decision` from raw `detail`
+    /// (`#[typeshare(skip)]` on the Dto).
+    init(dto: SecretActivityDto, raw: [String: Any] = [:]) {
+        self.id = dto.id
+        self.at = dto.at
+        self.action = dto.action
+        self.name = dto.name
+        self.targetKind = dto.target_kind
+        self.projectId = dto.project_id
+        self.projectName = dto.project_name
+        self.host = dto.host
+        self.by = dto.by
+        let detail = raw["detail"] as? [String: Any]
+        self.reason = DocJSON.str(detail?["reason"])
+        self.decision = DocJSON.str(detail?["decision"])
+    }
+
     static func parse(_ v: Any?) -> SecretActivity? {
-        guard let m = v as? [String: Any], let id = DocJSON.int(m["id"]) else { return nil }
-        let detail = m["detail"] as? [String: Any]
-        return SecretActivity(
-            id: id,
-            at: DocJSON.int(m["at"]) ?? 0,
-            action: DocJSON.str(m["action"]) ?? "",
-            name: DocJSON.str(m["name"]) ?? DocJSON.str(m["target_name"]) ?? "",
-            targetKind: DocJSON.str(m["target_kind"]) ?? "secret",
-            projectId: DocJSON.str(m["project_id"]),
-            projectName: DocJSON.str(m["project_name"]),
-            host: DocJSON.str(m["host"]),
-            by: DocJSON.str(m["by"]) ?? "",
-            reason: DocJSON.str(detail?["reason"]),
-            decision: DocJSON.str(detail?["decision"])
-        )
+        guard let dto = SecretsDto.decode(SecretActivityDto.self, from: v) else { return nil }
+        return SecretActivity(dto: dto, raw: v as? [String: Any] ?? [:])
     }
 
     /// One line for the activity card: "Research used STRIPE_KEY · api.stripe.com".
@@ -210,19 +245,20 @@ struct SecretRequestItem: Identifiable, Equatable {
 
     var isPending: Bool { status == "pending" }
 
+    init(dto: SecretRequestDto) {
+        self.id = dto.id
+        self.projectId = dto.project_id
+        self.projectName = dto.project_name
+        self.name = dto.name
+        self.purpose = dto.purpose
+        self.use = dto.use
+        self.host = dto.host
+        self.status = dto.status
+        self.createdAt = dto.created_at
+    }
+
     static func parse(_ v: Any?) -> SecretRequestItem? {
-        guard let m = v as? [String: Any], let id = DocJSON.str(m["id"]) else { return nil }
-        return SecretRequestItem(
-            id: id,
-            projectId: DocJSON.str(m["project_id"]) ?? "",
-            projectName: DocJSON.str(m["project_name"]),
-            name: DocJSON.str(m["name"]) ?? "",
-            purpose: DocJSON.str(m["purpose"]) ?? "",
-            use: DocJSON.str(m["use"]) ?? "header",
-            host: DocJSON.str(m["host"]),
-            status: DocJSON.str(m["status"]) ?? "pending",
-            createdAt: DocJSON.int(m["created_at"]) ?? 0
-        )
+        SecretsDto.decode(SecretRequestDto.self, from: v).map(SecretRequestItem.init(dto:))
     }
 }
 
@@ -243,21 +279,35 @@ struct ConnectedVault: Identifiable, Equatable {
 
     var providerLabel: String { provider == "onepassword" ? "1Password" : provider.capitalized }
 
+    init(dto: VaultDto) {
+        self.id = dto.id
+        self.provider = dto.provider
+        self.name = dto.name
+        self.itemsCount = Int(dto.items_count)
+        self.tokenExpiresAt = dto.token_expires_at
+        self.status = dto.status
+        self.readsUsedHour = Int(dto.limits.reads_used_hour)
+        self.readsPerHour = Int(dto.limits.reads_per_hour)
+        self.agents = dto.agents.map(SecretAgentAccess.init(dto:))
+        self.envItems = Int(dto.env_items)
+    }
+
+    /// Reduced project-page vault.
+    init(summary: ProjectVaultSummaryDto) {
+        self.id = summary.id
+        self.provider = summary.provider
+        self.name = summary.name
+        self.itemsCount = Int(summary.items_count)
+        self.tokenExpiresAt = nil
+        self.status = summary.status
+        self.readsUsedHour = nil
+        self.readsPerHour = nil
+        self.agents = []
+        self.envItems = 0
+    }
+
     static func parse(_ v: Any?) -> ConnectedVault? {
-        guard let m = v as? [String: Any], let id = DocJSON.str(m["id"]) else { return nil }
-        let limits = m["limits"] as? [String: Any]
-        return ConnectedVault(
-            id: id,
-            provider: DocJSON.str(m["provider"]) ?? "onepassword",
-            name: DocJSON.str(m["name"]) ?? "Vault",
-            itemsCount: Int(DocJSON.int(m["items_count"]) ?? 0),
-            tokenExpiresAt: DocJSON.int(m["token_expires_at"]),
-            status: DocJSON.str(m["status"]) ?? "ok",
-            readsUsedHour: DocJSON.int(limits?["reads_used_hour"]).map(Int.init),
-            readsPerHour: DocJSON.int(limits?["reads_per_hour"]).map(Int.init),
-            agents: (m["agents"] as? [Any])?.compactMap(SecretAgentAccess.parse) ?? [],
-            envItems: Int(DocJSON.int(m["env_items"]) ?? 0)
-        )
+        SecretsDto.decode(VaultDto.self, from: v).map(ConnectedVault.init(dto:))
     }
 }
 
@@ -278,19 +328,53 @@ struct SecretsOverview: Equatable {
     var requests: [SecretRequestItem] = []
     var loaded = true
 
+    /// Memberwise init (kept explicit because `init(dto:)` would suppress synthesis).
+    init(
+        paused: Bool,
+        pausedAt: Int64?,
+        vaults: [ConnectedVault],
+        secrets: [SecretItem],
+        requestsPending: Int,
+        activity: [SecretActivity],
+        providers: [String] = [],
+        vaultConnect: Bool = false,
+        requests: [SecretRequestItem] = [],
+        loaded: Bool = true
+    ) {
+        self.paused = paused
+        self.pausedAt = pausedAt
+        self.vaults = vaults
+        self.secrets = secrets
+        self.requestsPending = requestsPending
+        self.activity = activity
+        self.providers = providers
+        self.vaultConnect = vaultConnect
+        self.requests = requests
+        self.loaded = loaded
+    }
+
+    init(dto: SecretsOverviewDto, raw: [String: Any] = [:]) {
+        self.paused = dto.paused
+        self.pausedAt = dto.paused_at
+        self.vaults = dto.vaults.map(ConnectedVault.init(dto:))
+        self.secrets = dto.secrets.map(SecretItem.init(dto:))
+        self.requestsPending = Int(dto.requests_pending)
+        let rawActivity = (raw["activity"] as? [Any]) ?? []
+        self.activity = zip(dto.activity, rawActivity).compactMap { row, rawRow in
+            SecretActivity(dto: row, raw: rawRow as? [String: Any] ?? [:])
+        }
+        if self.activity.count != dto.activity.count {
+            self.activity = dto.activity.map { SecretActivity(dto: $0) }
+        }
+        self.providers = dto.providers
+        self.vaultConnect = dto.features.vault_connect ?? false
+        self.requests = dto.requests.map(SecretRequestItem.init(dto:))
+        self.loaded = true
+    }
+
     static func parse(_ v: Any?) -> SecretsOverview? {
-        guard let m = v as? [String: Any] else { return nil }
-        return SecretsOverview(
-            paused: DocJSON.bool(m["paused"]),
-            pausedAt: DocJSON.int(m["paused_at"]),
-            vaults: (m["vaults"] as? [Any])?.compactMap(ConnectedVault.parse) ?? [],
-            secrets: (m["secrets"] as? [Any])?.compactMap(SecretItem.parse) ?? [],
-            requestsPending: Int(DocJSON.int(m["requests_pending"]) ?? 0),
-            activity: (m["activity"] as? [Any])?.compactMap(SecretActivity.parse) ?? [],
-            providers: (m["providers"] as? [Any])?.compactMap { $0 as? String } ?? [],
-            vaultConnect: DocJSON.bool((m["features"] as? [String: Any])?["vault_connect"]),
-            requests: (m["requests"] as? [Any])?.compactMap(SecretRequestItem.parse) ?? []
-        )
+        guard let dto = SecretsDto.decode(SecretsOverviewDto.self, from: v) else { return nil }
+        return SecretsOverview(dto: dto, raw: v as? [String: Any] ?? [:])
     }
 
     /// Settings row value: `4 secrets · 1Password`, `No secrets yet`, `Paused`.
@@ -320,25 +404,20 @@ struct ProjectSecretAccess: Identifiable, Equatable {
     var title: String { secret?.env ?? vault?.name ?? "Secret" }
     var icon: String { vault != nil ? "lock.rectangle.stack.fill" : (secret?.icon ?? "key.fill") }
 
+    init(dto: ProjectSecretItemDto) {
+        self.id = dto.access_id
+        self.enabled = dto.enabled
+        self.note = dto.note
+        self.hosts = dto.hosts
+        self.lastUsedAt = dto.last_used_at
+        self.disabledAt = dto.disabled_at
+        self.targetKind = dto.target_kind ?? (dto.vault != nil ? "vault" : "secret")
+        self.secret = dto.secret.map(SecretItem.init(summary:))
+        self.vault = dto.vault.map(ConnectedVault.init(summary:))
+    }
+
     static func parse(_ v: Any?) -> ProjectSecretAccess? {
-        guard let m = v as? [String: Any], let access = SecretAgentAccess.parse(m) else { return nil }
-        var secret: SecretItem? = nil
-        if let s = m["secret"] as? [String: Any] {
-            var sm = s
-            sm["agents"] = []
-            secret = SecretItem.parse(sm)
-        }
-        return ProjectSecretAccess(
-            id: access.id,
-            enabled: access.enabled,
-            note: access.note,
-            hosts: access.hosts,
-            lastUsedAt: access.lastUsedAt,
-            disabledAt: access.disabledAt,
-            targetKind: DocJSON.str(m["target_kind"]) ?? (m["vault"] != nil ? "vault" : "secret"),
-            secret: secret,
-            vault: ConnectedVault.parse(m["vault"])
-        )
+        SecretsDto.decode(ProjectSecretItemDto.self, from: v).map(ProjectSecretAccess.init(dto:))
     }
 }
 
@@ -349,15 +428,23 @@ struct ProjectSecrets: Equatable {
     var requests: [SecretRequestItem]
     var activity: [SecretActivity]
 
+    init(dto: ProjectSecretsDto, raw: [String: Any] = [:]) {
+        self.paused = dto.paused
+        self.owner = dto.owner
+        self.items = dto.items.map(ProjectSecretAccess.init(dto:))
+        self.requests = dto.requests.map(SecretRequestItem.init(dto:))
+        let rawActivity = (raw["activity"] as? [Any]) ?? []
+        self.activity = zip(dto.activity, rawActivity).compactMap { row, rawRow in
+            SecretActivity(dto: row, raw: rawRow as? [String: Any] ?? [:])
+        }
+        if self.activity.count != dto.activity.count {
+            self.activity = dto.activity.map { SecretActivity(dto: $0) }
+        }
+    }
+
     static func parse(_ v: Any?) -> ProjectSecrets? {
-        guard let m = v as? [String: Any] else { return nil }
-        return ProjectSecrets(
-            paused: DocJSON.bool(m["paused"]),
-            owner: DocJSON.bool(m["owner"]),
-            items: (m["items"] as? [Any])?.compactMap(ProjectSecretAccess.parse) ?? [],
-            requests: (m["requests"] as? [Any])?.compactMap(SecretRequestItem.parse) ?? [],
-            activity: (m["activity"] as? [Any])?.compactMap(SecretActivity.parse) ?? []
-        )
+        guard let dto = SecretsDto.decode(ProjectSecretsDto.self, from: v) else { return nil }
+        return ProjectSecrets(dto: dto, raw: v as? [String: Any] ?? [:])
     }
 }
 
