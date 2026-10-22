@@ -3747,24 +3747,38 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .map(|h| h.trim().trim_start_matches('@').to_string())
                     .filter(|h| !h.is_empty())
                     .collect();
+                // Agents go in the create body (one call, agents-only groups
+                // included); a relay that ignores `agent_ids` leaves them out
+                // of the answer, and they are added one by one as before.
                 match shared
-                    .post_json("/chats", json!({ "kind": "group", "members": members }))
+                    .post_json(
+                        "/chats",
+                        json!({ "kind": "group", "members": members, "agent_ids": agent_ids }),
+                    )
                     .await
                 {
                     Ok(v) => {
-                        let chat_id = match serde_json::from_value::<PeopleChatDto>(v) {
-                            Ok(dto) => dto.id,
+                        let (chat_id, already) = match serde_json::from_value::<PeopleChatDto>(v) {
+                            Ok(dto) => {
+                                let agents: Vec<String> = dto
+                                    .members
+                                    .iter()
+                                    .filter_map(|m| m.member.strip_prefix("agent:"))
+                                    .map(str::to_owned)
+                                    .collect();
+                                (dto.id, agents)
+                            }
                             Err(err) => {
                                 log::warn!(
                                     target: "arbos_mac::relay",
                                     "CreatePeopleGroup PeopleChatDto: {err}"
                                 );
-                                String::new()
+                                (String::new(), Vec::new())
                             }
                         };
                         for project_id in agent_ids {
-                            if chat_id.is_empty() {
-                                break;
+                            if chat_id.is_empty() || already.contains(&project_id) {
+                                continue;
                             }
                             if let Err(err) = shared
                                 .post_json(
@@ -3782,6 +3796,14 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         if let Err(err) = refresh_registry(&shared).await {
                             shared.diagnostic("refresh", format!("{err:#}"));
                         }
+                        if chat_id.is_empty() {
+                            // The list refresh still shows the group; the sheet
+                            // closes on the next Projects event by its members.
+                            return;
+                        }
+                        let _ = shared
+                            .events
+                            .send(SyncEvent::PeopleGroupCreated { chat_id });
                     }
                     Err(err) => {
                         let _ = shared

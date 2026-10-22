@@ -837,7 +837,10 @@ pub(crate) fn people_space_from(
     } else {
         dto.title.clone()
     };
-    let pending = dto.pending || people.iter().all(|p| p.status == "invited");
+    // Pending = every other person still has to sign in; a group of agents
+    // only has nobody to wait for.
+    let pending =
+        dto.pending || (!people.is_empty() && people.iter().all(|p| p.status == "invited"));
     let icon = people
         .first()
         .map(|p| p.initial())

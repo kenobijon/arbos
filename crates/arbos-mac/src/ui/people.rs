@@ -461,9 +461,10 @@ pub fn new_chat_sheet(
         (None, false, Some(name)) => format!("Invite to {name}"),
         (None, false, None) => "New Message".to_string(),
     };
-    // Create needs a person (a group of one is a DM); Add takes agents alone too.
-    let can_create = !picked.is_empty() && !busy;
-    let can_add = (!picked.is_empty() || !picked_agents.is_empty()) && !busy;
+    // People, agents, or both — a group of your agents is a group (Jacob,
+    // 2026-10-22: Create greyed out with only agents picked read as broken).
+    let can_create = (!picked.is_empty() || !picked_agents.is_empty()) && !busy;
+    let can_add = can_create;
     let left = if add_to.is_some() {
         // No New Message sheet behind this one: Cancel closes it.
         glass::sheet_button("add-members-cancel", "Cancel", &theme)

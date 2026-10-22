@@ -15,8 +15,8 @@ use tokio::sync::mpsc;
 use crate::auth;
 use crate::calls::{self, CallCmd, CallEvent};
 use crate::model::{
-    add_members_plan, call_ended_line, reachable_line, AccountView, Call, CallEnded, CallKind,
-    CallMissed, Person, Reachable, Sender, Voice,
+    add_members_plan, call_ended_line, created_group, reachable_line, AccountView, Call, CallEnded,
+    CallKind, CallMissed, Person, Reachable, Sender, Voice,
 };
 use crate::model::{
     new_id, now_ms, AttachmentKind, BoxState, ChannelSel, ChannelsView, Chat, ChatKind,
@@ -1127,6 +1127,14 @@ impl AppState {
                 self.awaiting_group = None;
                 cx.notify();
             }
+            SyncEvent::PeopleGroupCreated { chat_id } => {
+                // Comes after the Projects event that lists the group, so the
+                // sidebar row exists; a stale id (list not refreshed) is left to
+                // the members match below.
+                if self.awaiting_group.is_some() && self.project(&chat_id).is_some() {
+                    self.group_created(chat_id, cx);
+                }
+            }
             SyncEvent::Presence { handle } => {
                 self.presence_seen.insert(handle, now_ms());
                 if self.profile.is_some() {
@@ -1317,22 +1325,14 @@ impl AppState {
                         self.select_project(id, cx);
                     }
                 }
+                // Members match (older relays / the fixture before it sends
+                // `PeopleGroupCreated`): a NEW people group with exactly the
+                // picked handles. Agents-only picks have no handles to match on
+                // and wait for the id event instead.
                 if let Some(handles) = self.awaiting_group.clone() {
-                    if let Some(space) = projects.iter().find(|p| {
-                        p.is_people_group()
-                            && p.people.len() == handles.len()
-                            && handles
-                                .iter()
-                                .all(|h| p.people.iter().any(|x| x.handle == *h))
-                    }) {
-                        self.awaiting_group = None;
-                        self.new_chat_open = false;
-                        self.new_group_open = false;
-                        self.new_group_picked.clear();
-                        self.new_group_agents.clear();
-                        let id = space.id.clone();
+                    if let Some(id) = created_group(&self.projects, &projects, &handles) {
                         self.projects = projects.clone();
-                        self.select_project(id, cx);
+                        self.group_created(id, cx);
                     }
                 }
                 if self.first_project_pending {
@@ -5200,22 +5200,37 @@ impl AppState {
     }
 
     /// Create the people group (at least one other person), then add any agents.
+    /// Create the group: people, agents, or both ("People and agents in one
+    /// chat"); the relay answers with the chat and `PeopleGroupCreated` opens it.
     pub fn create_people_group(&mut self, cx: &mut Context<Self>) {
         let handles: Vec<String> = self
             .new_group_picked
             .iter()
             .map(|p| p.handle.clone())
             .collect();
-        if handles.is_empty() {
-            self.people_error = Some("Add at least one other person".into());
+        let agent_ids = self.new_group_agents.clone();
+        if handles.is_empty() && agent_ids.is_empty() {
+            self.people_error = Some("Pick at least one person or agent".into());
             cx.notify();
             return;
         }
-        let agent_ids = self.new_group_agents.clone();
         self.people_busy = true;
         self.people_error = None;
         self.awaiting_group = Some(handles.clone());
         self.command(ClientCommand::CreatePeopleGroup { handles, agent_ids });
+        cx.notify();
+    }
+
+    /// The group the sheet was waiting for exists: close the picker, open it.
+    fn group_created(&mut self, chat_id: Id, cx: &mut Context<Self>) {
+        self.awaiting_group = None;
+        self.people_busy = false;
+        self.people_error = None;
+        self.new_chat_open = false;
+        self.new_group_open = false;
+        self.new_group_picked.clear();
+        self.new_group_agents.clear();
+        self.select_project(chat_id, cx);
         cx.notify();
     }
 

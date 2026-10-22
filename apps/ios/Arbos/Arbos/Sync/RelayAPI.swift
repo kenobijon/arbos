@@ -660,8 +660,8 @@ final class RelayAPI {
         return chat
     }
 
-    func createGroup(handles: [String]) async throws -> PeopleChat {
-        let v = try await json("POST", "/chats", body: ["kind": "group", "members": handles])
+    func createGroup(handles: [String], agentIds: [Id] = []) async throws -> PeopleChat {
+        let v = try await json("POST", "/chats", body: ["kind": "group", "members": handles, "agent_ids": agentIds])
         guard let chat = PeopleChat.parse(v) else { throw RelayError(status: 0, message: "The relay returned no chat") }
         return chat
     }
