@@ -2461,8 +2461,12 @@ class Loop:
         shared = any(f.startswith(("crates/arbos-core/", "crates/arbos-client/", "crates/arbos-ffi/")) for f in files)
         mac_files = shared or any(f.startswith("crates/arbos-mac/") or f.startswith("crates/arbos-update/") for f in files)
         ios_files = shared or any(f.startswith("apps/ios/") for f in files)
-        if st.get("testflight_build") or (ios_files and st.get("status") == "shipped"):
-            parts.append(f"TestFlight {st.get('testflight_build') or 'build'}")
+        if st.get("testflight_build"):
+            parts.append(f"TestFlight {st['testflight_build']}")
+        elif ios_files and st.get("status") == "shipped":
+            # The upload ran but Apple's build number was not resolved (#1224 closed as "TestFlight build"): name
+            # the run so the reader can find the build; the audit fills in the number.
+            parts.append(f"TestFlight (the build from {st.get('ios_run') or 'the iOS run on main'})")
         if mac_files or (st.get("edge_release") or "").startswith("edge-"):
             tag = None
             if commit:
