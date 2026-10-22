@@ -187,6 +187,17 @@ commit_age_s() {
 # relay / voice
 # ---------------------------------------------------------------------------------------------
 
+relay_planned_restart() {
+  # Before any restart of the running relay (#1347): POST /admin/restart sends every room socket a
+  # `restart_soon` notice, waits, closes them with 1012 Service Restart and drains, so the apps redial
+  # at once instead of backing off. Answers when the relay is ready; an old relay (404) is just restarted.
+  local code
+  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 60 -X POST \
+    -H "Authorization: Bearer $(secret_from "$RELAY_ENV" ARBOS_RELAY_ADMIN_TOKEN)" -H "Content-Type: application/json" \
+    -d "{\"notice_s\":${RELAY_RESTART_NOTICE_S:-10},\"drain_s\":5}" "$RELAY_URL/admin/restart" || echo 000)
+  log "relay: planned-restart handshake answered HTTP $code"
+}
+
 relay_connect_probe() {
   # Post-deploy connect probe: healthz alone said "ok" while clients sat on "Reconnecting…" (2026-10-22).
   # The room websocket endpoint must answer the upgrade handshake (401 without a token = the route and the
@@ -585,6 +596,7 @@ roll_image() {
     log "agentd: relay default switched to $snapshot without a restart"
   else
     log "agentd: hot snapshot switch answered HTTP $code; restarting the relay (old relay without the endpoint)"
+    relay_planned_restart
     systemctl restart arbos-relay.service
     sleep 3
     curl -fsS --max-time 10 "$RELAY_URL/healthz" >/dev/null || { record_failure agentd "$sha" "relay did not come back after the snapshot switch"; exit 1; }

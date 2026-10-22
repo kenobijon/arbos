@@ -264,6 +264,16 @@ WantedBy=multi-user.target
 EOF
 systemctl daemon-reload
 systemctl enable --now arbos-relay.service >/dev/null
+# Planned restart (#1347): the running relay first sends every room socket a `restart_soon` notice, then
+# closes them with 1012 Service Restart and drains, so the apps redial at once instead of backing off
+# (the Oct 22 "Reconnecting…" banners). Answers when ready; a relay too old for the endpoint (404) is
+# simply restarted. RELAY_RESTART_NOTICE_S=0 skips the notice (hotfixes).
+if systemctl is-active --quiet arbos-relay.service; then
+  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 60 -X POST \
+    -H "Authorization: Bearer $ARBOS_RELAY_ADMIN_TOKEN" -H 'Content-Type: application/json' \
+    -d "{\"notice_s\":${RELAY_RESTART_NOTICE_S:-10},\"drain_s\":5}" "http://$LISTEN/admin/restart" || echo 000)
+  echo "relay: planned-restart handshake answered HTTP $code"
+fi
 systemctl restart arbos-relay.service
 sleep 2
 systemctl is-active arbos-relay.service
