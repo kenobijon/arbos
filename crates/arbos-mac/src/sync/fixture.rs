@@ -182,6 +182,11 @@ impl SyncSource for FixtureSource {
                 spent_today_usd: 1.6,
                 daily_cap_usd: Some(20.0),
             })));
+            // Same default as the relay (off); `ARBOS_FIXTURE_VOICE_MODE=1` shows the voice UI.
+            let _ = events.send(SyncEvent::Features {
+                voice_mode: std::env::var("ARBOS_FIXTURE_VOICE_MODE")
+                    .is_ok_and(|v| matches!(v.trim(), "1" | "true" | "on" | "yes")),
+            });
             emit_projects(&shared);
             emit_people_seed(&shared);
             emit_machine(&shared);

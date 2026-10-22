@@ -315,6 +315,8 @@ pub enum RowKind {
 /// Which replies get a speaker row (F11).
 #[derive(Clone, Copy)]
 pub struct SpeechRows<'a> {
+    /// Relay flag `features.voice_mode`; off = no speaker rows at all.
+    pub enabled: bool,
     pub spoken: &'a HashSet<Id>,
     /// Replies whose speech failed (reason): their speaker row offers a retry.
     pub failed: &'a HashMap<Id, String>,
@@ -546,6 +548,7 @@ impl Transcript {
 
         let show_details = state.show_details;
         let speech = SpeechRows {
+            enabled: state.voice_mode_available(),
             spoken: &state.spoken,
             failed: &state.speech_failed,
             voice_mode: state.voice_mode,
@@ -2471,7 +2474,8 @@ pub fn build_rows(
                 // plus the newest finished reply while voice mode is on.
                 let cached = speech.spoken.contains(&message.id);
                 let failed = speech.failed.contains_key(&message.id);
-                if !streaming
+                if speech.enabled
+                    && !streaming
                     && message.role == Role::Assistant
                     && had_prose
                     && (cached || failed || (speech.voice_mode && last_reply == Some(mix)))

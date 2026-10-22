@@ -833,6 +833,8 @@ final class AppModel: ObservableObject {
             saveAccountCache()
             // D92 remote flag `features.leaf_avatars` (absent on an older relay = on).
             LeafAvatarsFlag.shared.set(features?.leaf_avatars ?? true)
+            // Voice mode kill switch (absent on an older relay = off).
+            VoiceModeFlag.shared.set(features?.voice_mode ?? false)
             let position = summary.waitlisted ? Int(summary.waitlist_position ?? 1) : nil
             if position != waitlistPosition { waitlistPosition = position }
             meAlwaysOn = summary.always_on
@@ -1804,9 +1806,10 @@ final class AppModel: ObservableObject {
 
     @Published private(set) var voiceCatalog: VoiceCatalog?
 
-    /// `GET /voices` once per launch (the relay caches it for an hour anyway).
+    /// `GET /voices` once per launch (the relay caches it for an hour anyway). Nothing is
+    /// fetched while voice mode is switched off on the relay (no picker to feed).
     func loadVoices() async {
-        guard voiceCatalog == nil, !isFixture else { return }
+        guard voiceCatalog == nil, !isFixture, VoiceModeFlag.shared.on else { return }
         voiceCatalog = try? await api.voices()
     }
 

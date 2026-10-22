@@ -514,6 +514,10 @@ pub struct MeFeaturesDto {
     /// D92: agents without a photo draw a leaf, not initials (default on).
     #[serde(default)]
     pub leaf_avatars: Option<bool>,
+    /// Voice mode — spoken replies, the voice picker, reply playback (default off since
+    /// 2026-10-22, Jacob: hidden everywhere until it works end to end). Absent = off.
+    #[serde(default)]
+    pub voice_mode: Option<bool>,
 }
 
 /// `GET /me` success body.

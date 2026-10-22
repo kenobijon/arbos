@@ -1294,10 +1294,14 @@ public struct MeFeaturesDto: Codable {
 	public let vault_connect: Bool?
 	/// D92: agents without a photo draw a leaf, not initials (default on).
 	public let leaf_avatars: Bool?
+	/// Voice mode — spoken replies, the voice picker, reply playback (default off since
+	/// 2026-10-22, Jacob: hidden everywhere until it works end to end). Absent = off.
+	public let voice_mode: Bool?
 
-	public init(vault_connect: Bool?, leaf_avatars: Bool?) {
+	public init(vault_connect: Bool?, leaf_avatars: Bool?, voice_mode: Bool?) {
 		self.vault_connect = vault_connect
 		self.leaf_avatars = leaf_avatars
+		self.voice_mode = voice_mode
 	}
 }
 

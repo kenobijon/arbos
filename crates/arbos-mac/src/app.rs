@@ -412,6 +412,9 @@ pub struct AppState {
     pub local: LocalView,
     /// F11: replies are spoken and a mic transcript sends at once.
     pub voice_mode: bool,
+    /// Relay flag `features.voice_mode` (kill switch, default off): while off, no voice-mode
+    /// UI (switch, picker, speaker rows, composer note) and no TTS request leaves the app.
+    pub voice_mode_feature: bool,
     /// F11: assistant messages whose speech is cached (speaker icon replays).
     pub spoken: HashSet<Id>,
     /// F11: replies whose speech failed to arrive, decode or play, with the
@@ -698,6 +701,7 @@ impl AppState {
             auto_update_failed: None,
             local: LocalView::default(),
             voice_mode: false,
+            voice_mode_feature: false,
             spoken: HashSet::new(),
             speech_failed: HashMap::new(),
             awaiting_new_project: false,
@@ -1045,6 +1049,16 @@ impl AppState {
                 self.begin_onboarding(cx);
                 cx.notify();
             }
+            SyncEvent::Features { voice_mode } => {
+                self.voice_mode_feature = voice_mode;
+                if !voice_mode && self.voice_mode {
+                    self.set_voice_mode(false, cx);
+                }
+                if let Some(chat_id) = self.active_chat_id() {
+                    cx.emit(AppEvent::TranscriptChanged { chat_id });
+                }
+                cx.notify();
+            }
             SyncEvent::Account(account) => {
                 self.account = account;
                 if self.account.is_some() {
@@ -1269,8 +1283,8 @@ impl AppState {
                 // Signed in and synced (also the path without a sign-in event).
                 if !projects.is_empty() {
                     self.maybe_prompt_notifications();
-                    // The "Voice · <name>" label needs the list once.
-                    if !self.voices_requested {
+                    // The "Voice · <name>" label needs the list once (only with voice mode on).
+                    if !self.voices_requested && self.voice_mode_feature {
                         self.voices_requested = true;
                         self.fetch_voices();
                     }
@@ -3571,7 +3585,16 @@ impl AppState {
 
     // ----- voice (F11) -----------------------------------------------------
 
+    /// Voice mode exists for this user: the relay flag is on. The agent pane shows its switch
+    /// and voice row, and the transcript its speaker rows, only then.
+    pub fn voice_mode_available(&self) -> bool {
+        self.voice_mode_feature
+    }
+
     pub fn set_voice_mode(&mut self, on: bool, cx: &mut Context<Self>) {
+        if on && !self.voice_mode_feature {
+            return;
+        }
         if self.voice_mode != on {
             self.voice_mode = on;
             if let Some(chat_id) = self.active_chat_id() {
@@ -3922,6 +3945,10 @@ impl AppState {
 
     /// Ask the relay for the voice list (the picker opening).
     pub fn fetch_voices(&mut self) {
+        // No voice picker while the feature is off: nothing needs the list.
+        if !self.voice_mode_feature {
+            return;
+        }
         self.command(ClientCommand::FetchVoices);
     }
 

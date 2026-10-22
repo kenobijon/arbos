@@ -771,6 +771,10 @@ async fn refresh_me(shared: &Arc<Shared>) {
     let _ = shared.events.send(SyncEvent::Account(Some(view)));
     // D92 remote flag: leaf avatars for agents (absent on older relays = on).
     crate::ui::avatars::set_leaf_avatars(dto.features.leaf_avatars.unwrap_or(true));
+    // Voice mode is a relay-side kill switch; absent = off.
+    let _ = shared.events.send(SyncEvent::Features {
+        voice_mode: dto.features.voice_mode.unwrap_or(false),
+    });
     let m = &dto.machine;
     // D89: provider and waitlist place ride along with `always_on`.
     let position = m
