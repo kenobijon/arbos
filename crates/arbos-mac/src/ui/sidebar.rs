@@ -23,17 +23,18 @@ use crate::ui::motion::PulseClock;
 use crate::ui::people;
 use crate::ui::shell::Shell;
 use crate::ui::theme::{
-    Theme, AVATAR_ROW, PANEL_RADIUS, SIDEBAR_WIDTH, TEXT_BODY, TEXT_SMALL, TEXT_TINY,
+    Theme, AVATAR_ROW, HEADER_HEIGHT, PANEL_RADIUS, SIDEBAR_WIDTH, TEXT_BODY, TEXT_SMALL, TEXT_TINY,
 };
 
-/// The drag strip beside the traffic lights (collapse + "+" on the right).
-/// Twice the former height so the top-of-window catchment matches the chat
-/// header ([feedback app-01M5G7QDRZASSTRMK524NDMQ2R]).
+/// The drag strip beside the traffic lights (+, search, collapse on the right):
+/// Grok Mac's 44 pt top band, the same height as the chat header, with the
+/// controls centred on the traffic lights' line (22 pt)
+/// ([feedback mac-header-height-grok]).
 fn top_strip() -> f32 {
     if cfg!(target_os = "macos") {
-        76.0
+        HEADER_HEIGHT
     } else {
-        68.0
+        40.0
     }
 }
 
@@ -330,11 +331,10 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         .h(px(top_strip()))
         .flex_shrink_0()
         .flex()
-        .items_end()
+        .items_center()
         .justify_end()
         .gap(px(2.0))
         .px(px(12.0))
-        .pb(px(2.0))
         .child(plus)
         .child(search_toggle)
         .child(collapse)
