@@ -1666,8 +1666,10 @@ struct ProfilePane: View {
             Text(t).font(theme.font(Theme.small)).foregroundStyle(theme.muted)
                 .frame(maxWidth: .infinity).padding(.top, 36).padding(.horizontal, 32).multilineTextAlignment(.center)
         case .footnote(let t):
+            // Hugs the card above it (8 pt, the card footer's gap; the Mac's kit::footnote).
             Text(t).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
                 .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, PaneKit.inset + 16)
+                .padding(.top, -10)
         case .custom(let v):
             v
         }
@@ -1682,7 +1684,8 @@ struct PaneToggleRow: View {
     @Binding var isOn: Bool
     var body: some View {
         PaneRow(leading: .none, title: title, subtitle: subtitle, trailing: AnyView(
-            Toggle("", isOn: $isOn).labelsHidden().tint(theme.text)
+            // The Mac switch is green when on (`glass::switch` → `theme.online`); same here.
+            Toggle("", isOn: $isOn).labelsHidden().tint(theme.online)
         ))
     }
 }
@@ -1801,7 +1804,7 @@ struct ChannelProfileView: View {
             Toggle("", isOn: Binding(
                 get: { model.isChannelMuted(channel) },
                 set: { _ in model.toggleChannelMute(channel) }
-            )).labelsHidden().tint(theme.text)
+            )).labelsHidden().tint(theme.online)
         )))
     }
 
@@ -1848,7 +1851,7 @@ struct ChannelProfileView: View {
                 Toggle("", isOn: Binding(
                     get: { restricted },
                     set: { on in Task { await model.setChannelRestricted(channel, on) } }
-                )).labelsHidden().tint(theme.text)
+                )).labelsHidden().tint(theme.online)
             ))))
         } else {
             behaviour.append(AnyView(PaneRow(title: "Posting", value: restricted ? "Admins only" : "Everyone")))

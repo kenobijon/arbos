@@ -385,7 +385,7 @@ pub(crate) struct Found {
 }
 
 /// A link found in a message.
-pub(super) struct Link {
+pub(crate) struct Link {
     pub url: String,
     pub by: String,
     pub chat: String,

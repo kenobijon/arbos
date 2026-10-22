@@ -74,6 +74,7 @@ pub(super) fn page(
             .into(),
         ),
         subtitle_color: theme.text_muted,
+        editor: None,
     };
 
     let body = match tab {

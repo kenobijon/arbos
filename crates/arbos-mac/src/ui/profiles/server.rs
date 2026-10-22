@@ -111,6 +111,7 @@ pub(super) fn page(
         badge: None,
         subtitle: Some(subtitle.into()),
         subtitle_color: theme.text_muted,
+        editor: None,
     };
 
     // ----- tabs: Channels | Members | Settings (the same set on the iPhone) ------

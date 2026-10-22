@@ -1,5 +1,7 @@
-//! My pane: profile + every app setting (mockup g), drawn with the shared
-//! pane kit so it matches the person and group panes row for row.
+//! My pane: profile + every app setting (mockup g). The root page is the
+//! shared profile pane (D93, `profiles::pane`) with Profile | Settings — the
+//! same tabs as the iPhone's Settings sheet; a Settings row pushes its page
+//! into the same pane with `‹` back.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -9,11 +11,13 @@ use gpui::{
     MouseDownEvent, Pixels, Render, Stateful, Window,
 };
 
+use crate::app::ProfilePage;
 use crate::model::{now_ms, MachineState};
 use crate::ui::glass;
 use crate::ui::icons::icon;
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
+use crate::ui::profiles::pane::{self, Hero, Picture, ProfilePane, Section};
 use crate::ui::profiles::{self, kit};
 use crate::ui::shell::{fmt_uptime, human_bytes, SettingsPage, Shell};
 use crate::ui::sidebar;
@@ -33,6 +37,9 @@ impl Render for GlassOpacityDragGhost {
         div()
     }
 }
+
+/// Profile | Settings — the iPhone's `SettingsView` has the same two.
+const TABS: [&str; 2] = ["Profile", "Settings"];
 
 /// The open page of my pane.
 pub(super) fn page(shell: &Shell, cx: &mut gpui::Context<Shell>) -> Stateful<Div> {
@@ -133,7 +140,6 @@ impl Shell {
                         glyph: &'static str,
                         page: SettingsPage,
                         detail: Option<String>,
-                        _last: bool,
                         theme: &Theme,
                         cx: &mut gpui::Context<Self>| {
             kit::nav_row(id, glyph, page.title(), detail, theme).on_click(
@@ -812,238 +818,211 @@ impl Shell {
             &theme,
         )
         .into_any_element();
-        let mut hero = profiles::hero(avatar, name_el, &who, theme.text_muted, &theme);
-        if self.profile_edit_open {
-            // Editing: the handle under the name, Cancel / Save (Return saves).
-            hero = hero.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap(px(8.0))
-                    .pt(px(4.0))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.0))
-                            .child(
-                                div()
-                                    .text_size(px(TEXT_BODY))
-                                    .text_color(theme.text_muted)
-                                    .child("@"),
-                            )
-                            .child(
-                                div()
-                                    .w(px(200.0))
-                                    .px(px(10.0))
-                                    .py(px(6.0))
-                                    .rounded(px(10.0))
-                                    .bg(theme.field)
-                                    .border_1()
-                                    .border_color(theme.field_border)
-                                    .text_size(px(TEXT_BODY))
-                                    .child(self.handle_input.clone()),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .gap(px(8.0))
-                            .child(
-                                glass::quiet_button("profile-edit-cancel", "Cancel", &theme)
-                                    .h(px(30.0))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.profile_edit_open = false;
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                glass::primary_button("profile-edit-save", "Save", &theme)
-                                    .h(px(30.0))
-                                    .on_click(cx.listener(|this, _, _, cx| this.save_profile(cx))),
-                            ),
-                    ),
-            );
-        }
-        let tabs = profiles::tab_bar(&["Profile", "Settings"], tab, &theme, cx);
-
-        let mut body = div()
-            .flex()
-            .flex_col()
-            .gap(px(22.0))
-            .pb(px(20.0))
-            .child(div().flex().flex_col().child(hero).child(tabs));
-
-        if tab == 0 {
-            // ----- Profile: who I am on the relay -------------------------------------
-            let mut card = settings_group(&theme).mx(px(16.0));
-            card = card
+        // Editing: the handle under the name, Cancel / Save (Return saves);
+        // pinned with the hero (D93 `Hero.editor`).
+        let editor = self.profile_edit_open.then(|| {
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(px(8.0))
+                .pt(px(4.0))
                 .child(
-                    kit::value_row("me-name-row", "Name", display_name.clone(), &theme)
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme.surface_2))
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.start_profile_edit(window, cx)),
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .child(
+                            div()
+                                .text_size(px(TEXT_BODY))
+                                .text_color(theme.text_muted)
+                                .child("@"),
+                        )
+                        .child(
+                            div()
+                                .w(px(200.0))
+                                .px(px(10.0))
+                                .py(px(6.0))
+                                .rounded(px(10.0))
+                                .bg(theme.field)
+                                .border_1()
+                                .border_color(theme.field_border)
+                                .text_size(px(TEXT_BODY))
+                                .child(self.handle_input.clone()),
                         ),
                 )
                 .child(
-                    kit::value_row("me-handle-row", "Handle", who.clone(), &theme)
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme.surface_2))
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.start_profile_edit(window, cx)),
+                    div()
+                        .flex()
+                        .gap(px(8.0))
+                        .child(
+                            glass::quiet_button("profile-edit-cancel", "Cancel", &theme)
+                                .h(px(30.0))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.profile_edit_open = false;
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            glass::primary_button("profile-edit-save", "Save", &theme)
+                                .h(px(30.0))
+                                .on_click(cx.listener(|this, _, _, cx| this.save_profile(cx))),
                         ),
-                );
+                )
+                .into_any_element()
+        });
+        let hero = Hero {
+            picture: Picture::Element(avatar),
+            name: name_el,
+            badge: None,
+            subtitle: Some(who.clone().into()),
+            subtitle_color: theme.text_muted,
+            editor,
+        };
+
+        let mut body: Vec<Section> = Vec::new();
+        let mut footer: Vec<Section> = Vec::new();
+        if tab == 0 {
+            // ----- Profile: who I am on the relay -------------------------------------
+            let mut rows: Vec<gpui::AnyElement> = vec![
+                kit::value_row("me-name-row", "Name", display_name.clone(), &theme)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.surface_2))
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.start_profile_edit(window, cx)),
+                    )
+                    .into_any_element(),
+                kit::value_row("me-handle-row", "Handle", who.clone(), &theme)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.surface_2))
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.start_profile_edit(window, cx)),
+                    )
+                    .into_any_element(),
+            ];
             if custom_avatar {
-                card = card.child(
-                    kit::danger_row("me-remove-picture", "Remove picture", &theme).on_click(
-                        cx.listener(|this, _, _, cx| {
+                rows.push(
+                    kit::danger_row("me-remove-picture", "Remove picture", &theme)
+                        .on_click(cx.listener(|this, _, _, cx| {
                             this.state.update(cx, |s, cx| s.remove_my_avatar(cx));
-                        }),
-                    ),
+                        }))
+                        .into_any_element(),
                 );
             }
-            body = body.child(card).child(footnote(
+            body.push(Section::Card(rows));
+            body.push(Section::Footnote(
                 "Your name, handle and picture are what other people and their agents see, here and on the iPhone. Signed in with GitHub.".into(),
-                &theme,
             ));
-            return profiles::pane_frame(
-                pane_width,
-                None,
-                None,
-                body,
-                None,
-                Some(&self.settings_scroll),
-                &theme,
-                cx,
-            );
-        }
-
-        // ----- Settings: D80 cards, mockup g order, every Mac setting kept --------
-        let group = |theme: &Theme| settings_group(theme).mx(px(16.0));
-        // Appearance · Notifications.
-        body = body.child(
-            group(&theme)
-                .child(page_row(
+        } else {
+            // ----- Settings: D80 cards, mockup g order, every Mac setting kept --------
+            // Appearance · Notifications.
+            body.push(Section::Card(vec![
+                page_row(
                     "settings-appearance",
                     "circle-half",
                     SettingsPage::Appearance,
                     Some(appearance_summary),
-                    false,
                     &theme,
                     cx,
-                ))
-                .child(page_row(
+                )
+                .into_any_element(),
+                page_row(
                     "settings-notifications",
                     "bell",
                     SettingsPage::Notifications,
                     Some(if notify_on { "On" } else { "Off" }.into()),
-                    true,
                     &theme,
                     cx,
-                )),
-        );
-        // Secrets (Credits · Connected apps hidden until implemented).
-        body = body.child(group(&theme).child(page_row(
-            "settings-secrets",
-            "key",
-            SettingsPage::Secrets,
-            Some(secrets_value),
-            true,
-            &theme,
-            cx,
-        )));
-        // On this Mac (Routines · Channels · Skills hidden until implemented).
-        body = body.child(
-            group(&theme).child(
+                )
+                .into_any_element(),
+            ]));
+            // Secrets (Credits · Connected apps hidden until implemented).
+            body.push(Section::Card(vec![page_row(
+                "settings-secrets",
+                "key",
+                SettingsPage::Secrets,
+                Some(secrets_value),
+                &theme,
+                cx,
+            )
+            .into_any_element()]));
+            // On this Mac (Routines · Channels · Skills hidden until implemented).
+            body.push(Section::Card(vec![kit::nav_row(
+                "settings-local",
+                "window",
+                "On this Mac",
+                Some(on_this_mac),
+                &theme,
+            )
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.open_settings_page(SettingsPage::ThisMac, window, cx)
+            }))
+            .into_any_element()]));
+            // Machine · Updates.
+            body.push(Section::Card(vec![
+                page_row(
+                    "settings-machine",
+                    "desktop",
+                    SettingsPage::Machine,
+                    Some(shown.label().to_string()),
+                    &theme,
+                    cx,
+                )
+                .into_any_element(),
+                page_row(
+                    "settings-updates",
+                    "arrow-down",
+                    SettingsPage::Updates,
+                    Some(if auto_update { "On" } else { "Off" }.into()),
+                    &theme,
+                    cx,
+                )
+                .into_any_element(),
+            ]));
+            body.push(Section::Footnote(machine_footer.into()));
+            // Send feedback · About.
+            body.push(Section::Card(vec![
                 kit::nav_row(
-                    "settings-local",
-                    "window",
-                    "On this Mac",
-                    Some(on_this_mac),
+                    "settings-feedback",
+                    "square-pencil",
+                    "Send feedback",
+                    Some("⌘⇧F".into()),
                     &theme,
                 )
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.open_settings_page(SettingsPage::ThisMac, window, cx)
-                })),
-            ),
-        );
-        // Machine · Updates.
-        body = body.child(
-            div()
-                .flex()
-                .flex_col()
-                .flex_shrink_0()
-                .child(
-                    group(&theme)
-                        .child(
-                            kit::nav_row(
-                                "settings-machine",
-                                "desktop",
-                                "Machine",
-                                Some(shown.label().to_string()),
-                                &theme,
-                            )
-                            .on_click(cx.listener(
-                                |this, _, window, cx| {
-                                    this.open_settings_page(SettingsPage::Machine, window, cx)
-                                },
-                            )),
-                        )
-                        .child(page_row(
-                            "settings-updates",
-                            "arrow-down",
-                            SettingsPage::Updates,
-                            Some(if auto_update { "On" } else { "Off" }.into()),
-                            true,
-                            &theme,
-                            cx,
-                        )),
-                )
-                .child(footnote(machine_footer.into(), &theme)),
-        );
-        // Send feedback · About.
-        body = body.child(
-            group(&theme)
-                .child(
-                    kit::nav_row(
-                        "settings-feedback",
-                        "square-pencil",
-                        "Send feedback",
-                        Some("⌘⇧F".into()),
-                        &theme,
-                    )
-                    .on_click(cx.listener(|this, _, window, cx| this.open_feedback(window, cx))),
-                )
-                .child(page_row(
+                .on_click(cx.listener(|this, _, window, cx| this.open_feedback(window, cx)))
+                .into_any_element(),
+                page_row(
                     "settings-about",
                     "info",
                     SettingsPage::About,
                     Some(update.current_version.to_string()),
-                    true,
                     &theme,
                     cx,
-                )),
-        );
-        if account.is_some() {
-            body = body.child(group(&theme).child(
-                kit::danger_row("sign-out", "Sign out", &theme).on_click(cx.listener(
-                    |this, _, _, cx| {
-                        this.close_settings(cx);
-                        this.state.update(cx, |s, cx| s.sign_out(cx));
-                    },
-                )),
-            ));
+                )
+                .into_any_element(),
+            ]));
+            if account.is_some() {
+                footer.push(Section::Card(vec![kit::danger_row(
+                    "sign-out", "Sign out", &theme,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.close_settings(cx);
+                    this.state.update(cx, |s, cx| s.sign_out(cx));
+                }))
+                .into_any_element()]));
+            }
         }
-        profiles::pane_frame(
-            pane_width,
-            None,
-            None,
-            body,
-            None,
-            Some(&self.settings_scroll),
-            &theme,
+        pane::render(
+            ProfilePane {
+                page: ProfilePage::Me,
+                hero,
+                tabs: &TABS,
+                selected: tab,
+                body,
+                footer,
+                done: None,
+            },
+            self,
             cx,
         )
     }

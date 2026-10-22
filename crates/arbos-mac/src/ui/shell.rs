@@ -297,9 +297,6 @@ impl Shell {
                 || v.starts_with("secrets")
         });
         let settings_scroll = ScrollHandle::new();
-        if open_settings.as_deref() == Some("bottom") {
-            settings_scroll.scroll_to_bottom();
-        }
         let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
         cx.subscribe(
             &transcript,
@@ -715,6 +712,11 @@ impl Shell {
                 s.open_profile(ProfilePage::Me, cx);
                 s.set_profile_tab(1, cx);
             });
+            // Rig: `ARBOS_OPEN_SETTINGS=bottom` — the Settings tab scrolled to
+            // Sign out (the root page scrolls on the shared pane handle).
+            if open_settings.as_deref() == Some("bottom") {
+                shell.profile_scroll.scroll_to_bottom();
+            }
         }
         shell
     }
