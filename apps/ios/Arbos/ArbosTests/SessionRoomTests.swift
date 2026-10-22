@@ -8,6 +8,7 @@ import ArbosFFI
 final class FakeSocket: RoomSocket {
     var onOpen: (() -> Void)?
     var httpStatus: Int?
+    var closeCode: Int?
     private(set) var sent: [Data] = []
     private var receiveWaiters: [CheckedContinuation<Data, Error>] = []
     private var pending: [Result<Data, Error>] = []

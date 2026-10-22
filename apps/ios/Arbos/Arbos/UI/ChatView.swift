@@ -121,6 +121,8 @@ struct ChatView: View {
         Task { await calls.start(chatId: chatId, projectId: isPeople ? nil : projectId, kind: kind, title: callTitle) }
     }
     @State private var replyTo: Message?
+    /// Drives the connection pill's dot pulse while it is reconnecting / syncing.
+    @State private var pulsePhase = false
     /// The original a quote tap scrolled to; tinted until the fade timer clears it.
     @State private var highlightedMessage: Id?
     @State private var mentionQuery: String?
@@ -264,6 +266,7 @@ struct ChatView: View {
                 headerBlur
                 VStack(spacing: 8) {
                     header
+                    linkPill.padding(.top, -5)
                     if let people, showsMemberChips { memberChips(people).padding(.horizontal, 16) }
                     if showSearch {
                         HStack(spacing: 8) {
@@ -419,6 +422,12 @@ struct ChatView: View {
                 Task { await model.refreshActiveCall(chatId: chatId, projectId: isPeople ? nil : projectId) }
             }
             openPendingSearchIfNeeded()
+            if let link = DebugHooks.link {
+                model.setRoomLink(chatId, link)
+                if let ms = DebugHooks.linkClearsMs {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(ms)) { model.setRoomLink(chatId, .live) }
+                }
+            }
             if let show = DebugHooks.show {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
                     switch show {
@@ -971,16 +980,56 @@ struct ChatView: View {
         return prev.role == cur.role ? 8 : 24
     }
 
+    /// The machine's notice (waking / can't reach). The link has no line here:
+    /// the header's connection pill is its one place ([feedback connection-pill]).
     private var machineBannerText: String? {
         // A channel lives on the servers' link, not the machine.
-        if isChannel { return model.matrixConnected ? nil : "Reconnecting…" }
+        if isChannel { return nil }
         switch model.machine.state {
         case .waking: return "Waking your machine…"
         case .error: return model.machineDetail ?? (model.machine.alwaysOn ? "Your agents are safe — their machine just can't be reached right now." : "Could not wake your machine")
         case .awake, .hibernatedLight, .hibernatedDeep, .stoppedByUser:
-            // This chat's room only — a sibling room reconnecting must not mark
-            // an agent that just reached out as "erroring" on an empty transcript.
-            return model.roomLink(for: chatId) == .reconnecting ? "Reconnecting…" : nil
+            return nil
+        }
+    }
+
+    /// The connection pill under the name pill ([feedback connection-pill], Jacob
+    /// Oct 22): one small centred capsule — a status dot and two words — for
+    /// whatever is wrong with this chat's link (offline > relay down >
+    /// reconnecting > syncing), nothing when it is fine. It replaced the
+    /// "Reconnecting…" line at the top of the transcript.
+    @ViewBuilder private var linkPill: some View {
+        let _ = model.linkPillRepaint
+        if let state = model.linkPill(for: chatId, channel: isChannel), let label = state.label {
+            let dot: Color = {
+                switch state {
+                case .offline: return theme.muted.opacity(0.6)
+                case .relayDown: return theme.danger
+                case .reconnecting, .restartSoon: return theme.warn
+                case .syncing: return theme.accent
+                case .live: return .clear
+                }
+            }()
+            let pulsing = state == .reconnecting || state == .syncing || state == .restartSoon
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(dot)
+                    .frame(width: 6, height: 6)
+                    .opacity(pulsing ? (pulsePhase ? 1 : 0.5) : 1)
+                    .animation(pulsing ? .easeInOut(duration: 0.7).repeatForever(autoreverses: true) : .default, value: pulsePhase)
+                Text(label)
+                    .font(theme.font(Theme.tiny, weight: .medium))
+                    .foregroundStyle(theme.muted)
+            }
+            .padding(.leading, 9)
+            .padding(.trailing, 11)
+            .frame(height: 22)
+            .background(Capsule().fill(theme.field))
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("link-pill")
+            .onAppear { pulsePhase = true }
+            .onDisappear { pulsePhase = false }
+            .transition(.opacity.combined(with: .move(edge: .top)))
         }
     }
 

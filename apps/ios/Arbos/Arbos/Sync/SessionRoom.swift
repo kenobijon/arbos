@@ -18,6 +18,8 @@ protocol RoomSocket: AnyObject {
     var onOpen: (() -> Void)? { get set }
     /// HTTP status from the upgrade response, set when `receive()` throws.
     var httpStatus: Int? { get }
+    /// The WebSocket close code the server sent, set when `receive()` throws after a close frame.
+    var closeCode: Int? { get }
     func resume()
     func send(_ data: Data) async throws
     func receive() async throws -> Data
@@ -32,6 +34,10 @@ final class SessionRoom {
     let doc: CoreChatDoc
 
     var onLink: ((Link) -> Void)?
+    /// The header pill's view of this room: syncing while the socket dials and
+    /// catches up, live after RowsDone, and on a failure the verdict the error
+    /// carries (offline / relay down / reconnecting) — [feedback connection-pill].
+    var onLinkState: ((LinkState) -> Void)?
     var onBoxState: ((BoxState, String?) -> Void)?
     var onCaughtUp: (() -> Void)?
     var onAcked: (() -> Void)?
@@ -69,7 +75,7 @@ final class SessionRoom {
     private let makeSocket: (URL) -> RoomSocket
     private let fetchCheckpoint: (String) async throws -> (Int64, Data)
 
-    private let session: ArbosFFI.RoomSession
+    private var session: ArbosFFI.RoomSession
     private var urlSession: URLSession?
     private var socket: RoomSocket?
     private var generation = 0
@@ -81,6 +87,15 @@ final class SessionRoom {
     private var tickTask: Task<Void, Never>?
     private var presenceTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
+    /// The current socket reached `didOpen` (so a later failure is a drop, not a failed dial).
+    private var sawOpen = false
+    /// The verdict for the next `scheduleReconnect`, set where the error is known.
+    private var pendingFault: LinkState?
+    /// The relay closed the socket on purpose (1012 Service Restart / 1001 Going Away): the
+    /// next reconnect redials soon with a fresh backoff instead of the doubled one (#1340).
+    private var cleanClose = false
+    /// How long after a clean server close the room redials.
+    static let restartRedialMs: UInt64 = 1_500
     private var checkpointTask: Task<Void, Never>?
     private var sendChain: Task<Void, Never>?
 
@@ -192,6 +207,7 @@ final class SessionRoom {
 
         let sock = makeSocket(url)
         socket = sock
+        onLinkState?(.syncing)
         sock.onOpen = { [weak self] in
             Task { @MainActor [weak self] in
                 guard let self, self.generation == gen else { return }
@@ -203,6 +219,7 @@ final class SessionRoom {
     }
 
     private func handleOpen(gen: Int) {
+        sawOpen = true
         session.onOpen(nowMs: sessionNowMs())
         // Presence right after onOpen — core holds it until Live.
         sendPresence()
@@ -239,8 +256,21 @@ final class SessionRoom {
                         self.socket = nil
                         NSLog("relay room \(self.roomChat): HTTP \(status), not retrying")
                         self.lastError = "\(self.roomChat): HTTP \(status)"
+                        self.onLinkState?(.live)
                         self.onUnavailable?()
                         return
+                    }
+                    // A socket that never opened failed to reach the relay: say
+                    // why (offline / relay down). One that was up just dropped.
+                    if let code = socket.closeCode, SessionRoom.isRestartClose(code) {
+                        self.cleanClose = true
+                    }
+                    if self.session.isLive() || self.sawOpen {
+                        self.pendingFault = .reconnecting
+                    } else if let status = socket.httpStatus, (500..<600).contains(status) {
+                        self.pendingFault = .relayDown
+                    } else {
+                        self.pendingFault = LinkState.fault(error)
                     }
                     self.session.onClose(nowMs: self.sessionNowMs())
                     self.drain()
@@ -285,12 +315,15 @@ final class SessionRoom {
             onBoxState?(mapBoxState(state), detail)
         case .linkLive:
             onLink?(.live)
+            onLinkState?(.live)
             onCaughtUp?()
             onCursorMoved?()
         case .scheduleReconnect(let afterMs):
             applyScheduleReconnect(afterMs: afterMs)
         case .sessionError(let code, let message):
             if code == "state_timeout" { stateTimeouts += 1 }
+            // The relay restarts in a few seconds (#1340): the pill says so; the clean close that follows redials.
+            if code == "restart_soon" { onLinkState?(.restartSoon); return }
             NSLog("relay room \(roomChat): error \(code): \(message)")
         case .presence(_, _, _, _, let mine, let headerJson):
             guard !mine else { return }
@@ -333,9 +366,26 @@ final class SessionRoom {
         }
     }
 
+    /// Close codes a relay sends when it is going down on purpose.
+    static func isRestartClose(_ code: Int) -> Bool { code == 1012 || code == 1001 }
+
     private func applyScheduleReconnect(afterMs: UInt64) {
         reconnects += 1
         onLink?(.reconnecting)
+        // A HELLO deadline (`state_timeout`) or a host-side close with no error: a plain reconnect.
+        onLinkState?(pendingFault ?? .reconnecting)
+        pendingFault = nil
+        sawOpen = false
+        // A deploy restart is not a fault: a fresh session (cursor and pending
+        // kept) forgets the backoff, and the redial comes soon. A run of real
+        // failures keeps doubling as before.
+        var afterMs = afterMs
+        if cleanClose {
+            cleanClose = false
+            session = ArbosFFI.RoomSession(deviceId: deviceId(), room: session.room(),
+                                           cursor: session.cursor(), pending: session.pending())
+            afterMs = Self.restartRedialMs
+        }
         checkpointTask?.cancel()
         checkpointTask = nil
         tickTask?.cancel()
@@ -438,6 +488,7 @@ private final class RoomSocketOpenDelegate: NSObject, URLSessionWebSocketDelegat
 private final class URLSessionRoomSocket: RoomSocket {
     var onOpen: (() -> Void)?
     private(set) var httpStatus: Int?
+    private(set) var closeCode: Int?
     fileprivate let task: URLSessionWebSocketTask
 
     init(task: URLSessionWebSocketTask) {
@@ -470,6 +521,7 @@ private final class URLSessionRoomSocket: RoomSocket {
                 }
             } catch {
                 httpStatus = (task.response as? HTTPURLResponse)?.statusCode
+                if task.closeCode != .invalid { closeCode = task.closeCode.rawValue }
                 throw error
             }
         }

@@ -2508,12 +2508,51 @@ pub struct AccountView {
     pub daily_cap_usd: Option<f64>,
 }
 
-/// Connection to the relay, S14.
+/// Connection to the relay, S14 (coarse, app-wide: the sidebar's "Loading…"
+/// copy and the Settings details line). The chat header's status pill reads
+/// [`LinkState`] per room instead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Link {
     Connecting,
     Live,
     Reconnecting,
+}
+
+/// One chat's link to the relay as the header pill shows it ([feedback
+/// connection-pill]). Ordered by priority: when several signals disagree
+/// (this room's socket, the relay's HTTP poll) the highest wins, so the
+/// derived `Ord` is the rule "offline > relay down > reconnecting > syncing >
+/// restart soon".
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LinkState {
+    /// Socket up and caught up: nothing to show.
+    Live,
+    /// The relay said it restarts in a few seconds (`restart_soon` frame):
+    /// the socket is still up; a clean close follows ([#1340]).
+    RestartSoon,
+    /// Socket up, catch-up in flight (HELLO sent, rows still arriving).
+    Syncing,
+    /// The socket dropped or the dial timed out; redialing with backoff.
+    Reconnecting,
+    /// The relay refused the connection or answered 5xx: this Mac is online,
+    /// the relay is not.
+    RelayDown,
+    /// No network from this Mac (DNS failed, network unreachable).
+    Offline,
+}
+
+impl LinkState {
+    /// The pill's text; `None` when there is nothing to say.
+    pub fn label(self) -> Option<&'static str> {
+        match self {
+            LinkState::Live => None,
+            LinkState::RestartSoon => Some("Reconnecting shortly…"),
+            LinkState::Syncing => Some("Syncing…"),
+            LinkState::Reconnecting => Some("Reconnecting…"),
+            LinkState::RelayDown => Some("Relay down"),
+            LinkState::Offline => Some("Offline"),
+        }
+    }
 }
 
 /// One channel of a server as the relay registry lists it (`GET /servers`).

@@ -618,9 +618,65 @@ struct Message: Identifiable, Equatable {
     }
 }
 
-/// Connection to the relay, S14.
+/// Connection to the relay, S14 (coarse, app-wide: Home's "Still connecting…"
+/// and Settings → Relay). The chat header's status pill reads `LinkState` per room.
 enum Link: Equatable {
     case connecting, live, reconnecting
+}
+
+/// One chat's link to the relay as the header pill shows it ([feedback
+/// connection-pill]). Ordered by priority: when several signals disagree (this
+/// room's socket, the relay's HTTP poll) the highest wins — offline > relay down
+/// > reconnecting > syncing > restart soon.
+enum LinkState: Int, Comparable {
+    /// Socket up and caught up: nothing to show.
+    case live
+    /// The relay said it restarts in a few seconds (`restart_soon` frame): the socket is
+    /// still up; a clean close follows (#1340).
+    case restartSoon
+    /// Socket up, catch-up in flight (HELLO sent, rows still arriving).
+    case syncing
+    /// The socket dropped or the dial timed out; redialing with backoff.
+    case reconnecting
+    /// The relay refused the connection or answered 5xx: the phone is online, the relay is not.
+    case relayDown
+    /// No network from the phone (DNS failed, network unreachable, airplane mode).
+    case offline
+
+    static func < (a: LinkState, b: LinkState) -> Bool { a.rawValue < b.rawValue }
+
+    /// The pill's text; nil when there is nothing to say.
+    var label: String? {
+        switch self {
+        case .live: return nil
+        case .restartSoon: return "Reconnecting shortly…"
+        case .syncing: return "Syncing…"
+        case .reconnecting: return "Reconnecting…"
+        case .relayDown: return "Relay down"
+        case .offline: return "Offline"
+        }
+    }
+
+    /// What a failed relay call says about the link: a transport verdict when the
+    /// error carries one, else a plain reconnect.
+    static func fault(_ error: Error) -> LinkState {
+        if let relay = error as? RelayError {
+            return (500..<600).contains(relay.status) ? .relayDown : .reconnecting
+        }
+        let ns = error as NSError
+        guard ns.domain == NSURLErrorDomain else { return .reconnecting }
+        switch URLError.Code(rawValue: ns.code) {
+        case .notConnectedToInternet, .networkConnectionLost, .cannotFindHost, .dnsLookupFailed,
+             .internationalRoamingOff, .dataNotAllowed, .callIsActive:
+            return .offline
+        case .cannotConnectToHost, .badServerResponse, .secureConnectionFailed,
+             .serverCertificateUntrusted, .serverCertificateHasBadDate, .serverCertificateHasUnknownRoot,
+             .serverCertificateNotYetValid:
+            return .relayDown
+        default:
+            return .reconnecting
+        }
+    }
 }
 
 func nowMs() -> Int64 {

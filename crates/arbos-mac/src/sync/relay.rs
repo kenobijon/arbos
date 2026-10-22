@@ -52,8 +52,8 @@ use super::{ClientCommand, SyncEvent, SyncSource};
 use crate::model::{
     new_id, now_ms, AccountView, Attachment, AttachmentKind, BoxState, Call, CallEnded, CallLeft,
     CallMissed, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelsView, Chat, Effort, Id,
-    Link, Machine, MachineState, Message, Part, Person, Project, ProjectDocView, ProjectSecrets,
-    Reachable, Role, Routine, RoutineRun, Sender, ServerInfo, ThreadInfo,
+    Link, LinkState, Machine, MachineState, Message, Part, Person, Project, ProjectDocView,
+    ProjectSecrets, Reachable, Role, Routine, RoutineRun, Sender, ServerInfo, ThreadInfo,
 };
 use crate::update;
 
@@ -882,20 +882,33 @@ fn start_after_pairing(shared: &Arc<Shared>) {
             poll.tick().await;
             // Pending secret requests show up without a manual refresh.
             refresh_secrets(&shared).await;
-            if let Err(err) = refresh_registry(&shared).await {
-                let text = format!("{err:#}");
-                if text.contains("HTTP 401") {
-                    // Token revoked or relay re-initialised: pair again.
-                    shared.stop_matrix();
-                    shared.drop_store(true);
-                    *shared.creds.write().unwrap() = None;
-                    let _ = shared.events.send(SyncEvent::NeedsPairing {
-                        relay_url: shared.http_url.clone(),
-                    });
-                    return;
+            match refresh_registry(&shared).await {
+                Ok(()) => {
+                    let _ = shared.events.send(SyncEvent::RelayLink(LinkState::Live));
                 }
-                shared.notice(format!("Relay: {text}"));
-                let _ = shared.events.send(SyncEvent::Link(Link::Reconnecting));
+                Err(err) => {
+                    let text = format!("{err:#}");
+                    if text.contains("HTTP 401") {
+                        // Token revoked or relay re-initialised: pair again.
+                        shared.stop_matrix();
+                        shared.drop_store(true);
+                        *shared.creds.write().unwrap() = None;
+                        let _ = shared.events.send(SyncEvent::NeedsPairing {
+                            relay_url: shared.http_url.clone(),
+                        });
+                        return;
+                    }
+                    // No toast: the header pill is the one place this shows
+                    // ([feedback connection-pill]). Only a verdict about
+                    // reachability goes up; an odd error (bad JSON, a 404)
+                    // says nothing about the link.
+                    eprintln!("relay registry: {text}");
+                    let _ = shared.events.send(SyncEvent::Link(Link::Reconnecting));
+                    let fault = link_fault(&err);
+                    if matches!(fault, LinkState::Offline | LinkState::RelayDown) {
+                        let _ = shared.events.send(SyncEvent::RelayLink(fault));
+                    }
+                }
             }
         }
     });
@@ -2574,6 +2587,12 @@ async fn room_loop(
     let is_people = shared.is_people(&room_chat);
     let room = room::room_path(&project_id, &room_chat, is_people);
     let mut session = RoomSession::new(shared.device_id(), room, saved_cursor, saved_pending);
+    // The first dial: the chat is about to catch up, so the pill (after its
+    // grace) says "Syncing…", not "Reconnecting…".
+    let _ = shared.events.send(SyncEvent::RoomLink {
+        key: key.clone(),
+        state: LinkState::Syncing,
+    });
     loop {
         // Re-resolve on every dial. Before RoomSession, run_session re-checked
         // the people HashSet each attempt; baking the path once meant a cold
@@ -2600,10 +2619,24 @@ async fn room_loop(
             &mut cmd_rx,
         )
         .await;
-        if let Err(err) = &outcome {
-            eprintln!("relay room {project_id}/{room_chat}: {err:#}");
-        }
-        let _ = shared.events.send(SyncEvent::Link(Link::Reconnecting));
+        // What the pill says while this room is down, from the real failure:
+        // a dial that could not reach the relay is "Offline" / "Relay down";
+        // a socket that was up and dropped is "Reconnecting…".
+        let state = match &outcome {
+            Err(err) => {
+                eprintln!("relay room {project_id}/{room_chat}: {err:#}");
+                if err.downcast_ref::<DialFailed>().is_some() {
+                    link_fault(err)
+                } else {
+                    LinkState::Reconnecting
+                }
+            }
+            Ok(()) => LinkState::Reconnecting,
+        };
+        let _ = shared.events.send(SyncEvent::RoomLink {
+            key: key.clone(),
+            state,
+        });
         // If run_session returned without closing (e.g. dial failure), close now.
         if !session.is_closed() {
             session.on_close(now_ms());
@@ -2618,9 +2651,49 @@ async fn room_loop(
             None,
         )
         .await;
-        sleep(session.reconnect_after()).await;
-        session.prepare_reconnect();
+        // A clean server close (1012 Service Restart / 1001 Going Away: the
+        // relay is restarting for a deploy) is not a fault: redial soon with a
+        // fresh backoff. The doubled backoff of a run of failures is for the
+        // relay being unreachable; a deploy must never leave a client parked on
+        // it (#1340 — that is what stranded Jacob on Oct 22).
+        let clean_close = outcome
+            .as_ref()
+            .err()
+            .is_some_and(|err| err.downcast_ref::<ServerRestart>().is_some());
+        if clean_close {
+            session = RoomSession::new(
+                shared.device_id(),
+                session.room().to_string(),
+                session.cursor(),
+                session.pending().to_vec(),
+            );
+            sleep(RESTART_REDIAL).await;
+        } else {
+            sleep(session.reconnect_after()).await;
+            session.prepare_reconnect();
+        }
     }
+}
+
+/// How long after a clean server close (deploy restart) the room redials.
+const RESTART_REDIAL: Duration = Duration::from_millis(1_500);
+
+/// Marker in a `run_session` error chain: the relay closed the socket on
+/// purpose (close code 1012 Service Restart or 1001 Going Away).
+#[derive(Debug)]
+struct ServerRestart(u16);
+
+impl std::fmt::Display for ServerRestart {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "server closed the socket ({})", self.0)
+    }
+}
+
+impl std::error::Error for ServerRestart {}
+
+/// Close codes a relay sends when it is going down on purpose.
+fn is_restart_close(code: u16) -> bool {
+    code == 1012 || code == 1001
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2638,9 +2711,16 @@ async fn run_session(
     let url = format!("{}/room/{}?token={}", shared.ws_url, room, shared.token());
     let (ws, _) = timeout(HELLO_DEADLINE, connect_async(&url))
         .await
-        .context("dial timed out")??;
+        .context("dial timed out")
+        .context(DialFailed)?
+        .context(DialFailed)?;
     let (mut tx, mut rx) = ws.split();
 
+    // Socket up: catching up until RowsDone (`RoomAction::LinkLive`).
+    let _ = shared.events.send(SyncEvent::RoomLink {
+        key: key.to_string(),
+        state: LinkState::Syncing,
+    });
     session.on_open(now_ms());
     perform_room_actions(
         shared,
@@ -2655,6 +2735,8 @@ async fn run_session(
 
     let mut presence = interval(PRESENCE_EVERY);
     let mut tick = interval(Duration::from_secs(1));
+    // The close code the relay sent, if it sent one before the stream ended.
+    let mut close_code: Option<u16> = None;
     loop {
         if session.is_closed() {
             anyhow::bail!("session closed");
@@ -2666,9 +2748,17 @@ async fn run_session(
                     perform_room_actions(
                         shared, project_id, key, room_chat, is_people, session, Some(&mut tx),
                     ).await?;
+                    if let Some(code) = close_code.filter(|c| is_restart_close(*c)) {
+                        return Err(anyhow::Error::new(ServerRestart(code)));
+                    }
                     anyhow::bail!("socket closed");
                 };
-                let WsMessage::Binary(bytes) = msg? else { continue };
+                let msg = msg?;
+                if let WsMessage::Close(frame) = &msg {
+                    close_code = frame.as_ref().map(|f| u16::from(f.code));
+                    continue;
+                }
+                let WsMessage::Binary(bytes) = msg else { continue };
                 session.on_frame(&bytes);
                 perform_room_actions(
                     shared, project_id, key, room_chat, is_people, session, Some(&mut tx),
@@ -2826,6 +2916,10 @@ async fn perform_room_actions(
                 }
                 RoomAction::LinkLive => {
                     let _ = shared.events.send(SyncEvent::Link(Link::Live));
+                    let _ = shared.events.send(SyncEvent::RoomLink {
+                        key: key.to_string(),
+                        state: LinkState::Live,
+                    });
                     if room_chat == PROJECT_DOC_CHAT_ID {
                         emit_project_doc(shared, project_id);
                     } else {
@@ -2837,7 +2931,14 @@ async fn perform_room_actions(
                     reconnect = Some(after);
                 }
                 RoomAction::SessionError { code, message } => {
-                    if code != "state_timeout" && code != "lagging" {
+                    if code == "restart_soon" {
+                        // The relay restarts in a few seconds (#1340): the
+                        // pill says so; the clean close that follows redials.
+                        let _ = shared.events.send(SyncEvent::RoomLink {
+                            key: key.to_string(),
+                            state: LinkState::RestartSoon,
+                        });
+                    } else if code != "state_timeout" && code != "lagging" {
                         eprintln!("relay room {}: error {}: {}", session.room(), code, message);
                     }
                 }
@@ -5969,6 +6070,96 @@ async fn refresh_project_secrets(shared: &Arc<Shared>, project_id: &str) {
     }
 }
 
+/// Marker in a `run_session` error chain: the WebSocket never opened (TCP,
+/// TLS, DNS or the HTTP upgrade failed, or the dial timed out).
+#[derive(Debug)]
+struct DialFailed;
+
+impl std::fmt::Display for DialFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("dial failed")
+    }
+}
+
+/// What a failed relay call says about the link, for the header pill: the
+/// first cause in the chain that names a transport verdict wins; anything
+/// else (a protocol error, a timeout, bad JSON) is a plain "Reconnecting…".
+fn link_fault(err: &anyhow::Error) -> LinkState {
+    for cause in err.chain() {
+        if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+            return io_fault(io);
+        }
+        if let Some(ws) = cause.downcast_ref::<tokio_tungstenite::tungstenite::Error>() {
+            use tokio_tungstenite::tungstenite::Error as Ws;
+            return match ws {
+                Ws::Io(io) => io_fault(io),
+                Ws::Http(resp) if resp.status().is_server_error() => LinkState::RelayDown,
+                Ws::Tls(_) => LinkState::RelayDown,
+                Ws::Http(_)
+                | Ws::ConnectionClosed
+                | Ws::AlreadyClosed
+                | Ws::Capacity(_)
+                | Ws::Protocol(_)
+                | Ws::WriteBufferFull(_)
+                | Ws::Utf8
+                | Ws::AttackAttempt
+                | Ws::Url(_)
+                | Ws::HttpFormat(_) => LinkState::Reconnecting,
+            };
+        }
+        if let Some(req) = cause.downcast_ref::<reqwest::Error>() {
+            if req.status().is_some_and(|s| s.is_server_error()) {
+                return LinkState::RelayDown;
+            }
+            if req.is_connect() {
+                let mut source = std::error::Error::source(req);
+                while let Some(inner) = source {
+                    if let Some(io) = inner.downcast_ref::<std::io::Error>() {
+                        return io_fault(io);
+                    }
+                    source = inner.source();
+                }
+                return LinkState::RelayDown;
+            }
+            if req.is_timeout() {
+                return LinkState::Reconnecting;
+            }
+        }
+        if let Some(relay) = cause.downcast_ref::<RelayError>() {
+            if (500..600).contains(&relay.status) {
+                return LinkState::RelayDown;
+            }
+        }
+    }
+    LinkState::Reconnecting
+}
+
+/// Socket-level verdict: no route / no DNS is this Mac being offline; a refusal
+/// or a reset is a relay that is not listening.
+fn io_fault(io: &std::io::Error) -> LinkState {
+    use std::io::ErrorKind as K;
+    match io.kind() {
+        K::NetworkUnreachable | K::HostUnreachable | K::NetworkDown => return LinkState::Offline,
+        K::ConnectionRefused | K::ConnectionReset | K::ConnectionAborted => {
+            return LinkState::RelayDown
+        }
+        _ => {}
+    }
+    let text = io.to_string().to_ascii_lowercase();
+    // getaddrinfo failures surface as `Uncategorized` with the resolver's text
+    // (macOS: "nodename nor servname provided, or not known"; glibc: "Temporary
+    // failure in name resolution"; tokio: "failed to lookup address information").
+    if text.contains("lookup")
+        || text.contains("nodename")
+        || text.contains("name resolution")
+        || text.contains("no address associated")
+        || text.contains("dns")
+    {
+        return LinkState::Offline;
+    }
+    LinkState::Reconnecting
+}
+
 fn hostname() -> String {
     std::fs::read_to_string("/etc/hostname")
         .ok()
@@ -5981,5 +6172,107 @@ fn hostname() -> String {
 impl Drop for Room {
     fn drop(&mut self) {
         self.task.abort();
+    }
+}
+
+#[cfg(test)]
+mod link_fault_tests {
+    use super::*;
+    use std::io::{Error as IoError, ErrorKind as K};
+
+    fn dial(io: IoError) -> anyhow::Error {
+        anyhow::Error::from(tokio_tungstenite::tungstenite::Error::Io(io)).context(DialFailed)
+    }
+
+    #[test]
+    fn no_route_or_no_dns_is_offline() {
+        assert_eq!(
+            link_fault(&dial(IoError::from(K::NetworkUnreachable))),
+            LinkState::Offline
+        );
+        assert_eq!(
+            link_fault(&dial(IoError::other(
+                "failed to lookup address information: nodename nor servname provided, or not known"
+            ))),
+            LinkState::Offline
+        );
+        assert_eq!(
+            link_fault(&dial(IoError::other(
+                "Temporary failure in name resolution"
+            ))),
+            LinkState::Offline
+        );
+    }
+
+    #[test]
+    fn a_refusal_a_5xx_or_a_tls_failure_is_relay_down() {
+        assert_eq!(
+            link_fault(&dial(IoError::from(K::ConnectionRefused))),
+            LinkState::RelayDown
+        );
+        let resp = tokio_tungstenite::tungstenite::http::Response::builder()
+            .status(502)
+            .body(None)
+            .expect("response");
+        assert_eq!(
+            link_fault(&anyhow::Error::from(
+                tokio_tungstenite::tungstenite::Error::Http(resp)
+            )),
+            LinkState::RelayDown
+        );
+        let relay = RelayError {
+            status: 503,
+            kind: String::new(),
+            message: "bad gateway".into(),
+        };
+        assert_eq!(
+            link_fault(&anyhow::Error::from(relay)),
+            LinkState::RelayDown
+        );
+    }
+
+    #[test]
+    fn anything_else_is_a_plain_reconnect() {
+        assert_eq!(
+            link_fault(&dial(IoError::from(K::TimedOut))),
+            LinkState::Reconnecting
+        );
+        assert_eq!(
+            link_fault(&anyhow::anyhow!("dial timed out").context(DialFailed)),
+            LinkState::Reconnecting
+        );
+        assert_eq!(
+            link_fault(&anyhow::Error::from(
+                tokio_tungstenite::tungstenite::Error::ConnectionClosed
+            )),
+            LinkState::Reconnecting
+        );
+        let relay = RelayError {
+            status: 404,
+            kind: "not_found".into(),
+            message: String::new(),
+        };
+        assert_eq!(
+            link_fault(&anyhow::Error::from(relay)),
+            LinkState::Reconnecting
+        );
+    }
+
+    #[test]
+    fn the_priority_order_is_offline_relay_reconnecting_syncing_restart() {
+        assert!(LinkState::Offline > LinkState::RelayDown);
+        assert!(LinkState::RelayDown > LinkState::Reconnecting);
+        assert!(LinkState::Reconnecting > LinkState::Syncing);
+        assert!(LinkState::Syncing > LinkState::RestartSoon);
+        assert!(LinkState::RestartSoon > LinkState::Live);
+    }
+
+    #[test]
+    fn only_service_restart_and_going_away_are_clean_closes() {
+        assert!(is_restart_close(1012));
+        assert!(is_restart_close(1001));
+        assert!(!is_restart_close(1000));
+        assert!(!is_restart_close(1006));
+        assert!(!is_restart_close(1011));
     }
 }
