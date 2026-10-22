@@ -2396,8 +2396,24 @@ final class AppModel: ObservableObject {
     @Published var profilePath: [ProfileTarget] = []
     /// A chat the next ChatView should open with its search bar up (profile "search").
     @Published var pendingSearchChat: String?
+    /// Unsent composer text kept per chat while the ChatView is off-screen (Mac `Composer.drafts`).
+    private var composerDrafts: [Id: String] = [:]
     /// Last presence time per user id, from room presence frames this session.
     @Published private(set) var lastSeen: [String: Int64] = [:]
+
+    /// Draft text for a chat, or `""` when none.
+    func composerDraft(for chatId: Id) -> String {
+        composerDrafts[chatId] ?? ""
+    }
+
+    /// Remember (or clear) the unsent composer text for a chat.
+    func setComposerDraft(_ text: String, for chatId: Id) {
+        if text.isEmpty {
+            composerDrafts.removeValue(forKey: chatId)
+        } else {
+            composerDrafts[chatId] = text
+        }
+    }
 
     func showProfile(_ target: ProfileTarget) {
         if let root = profile, root.pushesPeople, case .user = target {
