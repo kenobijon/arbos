@@ -26,6 +26,10 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::Sha256;
 
+use arbos_core::api::{
+    AccountUserDto, CreditsDto, MeDeviceDto, MeLimitsDto, MeMachineDto, MeResponseDto,
+    MeUserResponseDto,
+};
 use arbos_core::auth::hash;
 use arbos_core::ids::{now_ms, ulid};
 
@@ -141,14 +145,32 @@ pub fn verify_access(key: &[u8; 32], token: &str) -> Result<Claims, AccessError>
 
 // ---- token issue --------------------------------------------------------------------------------
 
-fn user_json(state: &AppState, user_id: &str) -> Value {
+fn user_dto(state: &AppState, user_id: &str) -> AccountUserDto {
     match state.db.user(user_id).ok().flatten() {
-        Some(u) => json!({
-            "id": u.id, "github_id": u.github_id, "login": u.login, "avatar_url": u.avatar_url,
-            "name": u.name, "created_at": u.created_at, "last_login_at": u.last_login_at,
-        }),
-        None => json!({ "id": user_id }),
+        Some(u) => AccountUserDto {
+            id: u.id,
+            github_id: Some(u.github_id),
+            login: Some(u.login),
+            avatar_url: Some(u.avatar_url),
+            name: Some(u.name),
+            created_at: Some(u.created_at),
+            last_login_at: Some(u.last_login_at),
+        },
+        None => AccountUserDto {
+            id: user_id.to_owned(),
+            github_id: None,
+            login: None,
+            avatar_url: None,
+            name: None,
+            created_at: None,
+            last_login_at: None,
+        },
     }
+}
+
+#[allow(dead_code)] // kept for callers that still want Value
+fn user_json(state: &AppState, user_id: &str) -> Value {
+    serde_json::to_value(user_dto(state, user_id)).expect("AccountUserDto")
 }
 
 /// Access + refresh pair for a device. The refresh token is stored hashed, bound to the device.
@@ -171,7 +193,7 @@ pub(crate) fn issue_tokens(
         "expires_in": ACCESS_TTL_S,
         "refresh_token": refresh,
         "device_id": device_id,
-        "user": user_json(state, user_id),
+        "user": user_dto(state, user_id),
     }))
 }
 
@@ -741,7 +763,7 @@ pub async fn patch_me(
                 );
             }
             if let Ok(Some(other)) = state.db.user_by_handle(&handle) {
-                let other_id = other.get("id").and_then(Value::as_str).unwrap_or("");
+                let other_id = other.id.as_str();
                 if other_id != user_id {
                     return api_error(
                         StatusCode::CONFLICT,
@@ -758,7 +780,11 @@ pub async fn patch_me(
         .db
         .set_user_profile(&user_id, name.as_deref(), login.as_deref())
     {
-        Ok(()) => Json(json!({ "user": user_json(&state, &user_id) })).into_response(),
+        Ok(()) => Json(MeUserResponseDto {
+            user: user_dto(&state, &user_id),
+            avatar_url: None,
+        })
+        .into_response(),
         Err(e) if e.to_string() == "no such user" => {
             api_error(StatusCode::NOT_FOUND, "not_found", "no such user")
         }
@@ -822,7 +848,11 @@ pub async fn put_avatar(
     if let Err(e) = state.db.set_user_avatar_url(&user_id, &avatar_url) {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
     }
-    Json(json!({ "avatar_url": avatar_url, "user": user_json(&state, &user_id) })).into_response()
+    Json(MeUserResponseDto {
+        user: user_dto(&state, &user_id),
+        avatar_url: Some(Some(avatar_url)),
+    })
+    .into_response()
 }
 
 /// `DELETE /me/avatar`: drop the uploaded picture; the GitHub avatar (by github_id, GitHub's
@@ -846,8 +876,11 @@ pub async fn delete_avatar(State(state): State<AppState>, principal: Principal) 
         .and_then(|u| u.github_id)
         .map(|id| format!("https://avatars.githubusercontent.com/u/{id}?v=4"));
     match state.db.clear_user_avatar_url(&user_id, github.as_deref()) {
-        Ok(()) => Json(json!({ "avatar_url": github, "user": user_json(&state, &user_id) }))
-            .into_response(),
+        Ok(()) => Json(MeUserResponseDto {
+            user: user_dto(&state, &user_id),
+            avatar_url: Some(github),
+        })
+        .into_response(),
         Err(e) if e.to_string() == "no such user" => {
             api_error(StatusCode::NOT_FOUND, "not_found", "no such user")
         }
@@ -897,13 +930,23 @@ pub async fn me(State(state): State<AppState>, principal: Principal) -> Response
     let ks = state.db.kill_switch().unwrap_or_default();
     let (bs, since) = state.box_state(&user_id).await;
     let sb = state.db.user_box(&user_id).ok().flatten();
-    let device_json = device.and_then(|id| {
+    let device = device.and_then(|id| {
         state
             .db
             .devices_of_user(&user_id)
             .ok()?
             .into_iter()
             .find(|d| d.get("id").and_then(Value::as_str) == Some(id.as_str()))
+            .and_then(|d| {
+                Some(MeDeviceDto {
+                    id: d.get("id")?.as_str()?.to_owned(),
+                    name: d.get("name")?.as_str()?.to_owned(),
+                    created_at: d.get("created_at")?.as_i64()?,
+                    revoked_at: d.get("revoked_at").and_then(Value::as_i64),
+                    last_seen_at: d.get("last_seen_at").and_then(Value::as_i64),
+                    kind: d.get("kind")?.as_str()?.to_owned(),
+                })
+            })
     });
     // D89: a host that is full waitlists new machines; `signup` tells the apps so, and a
     // waitlisted user sees their place in line instead of a machine.
@@ -918,30 +961,39 @@ pub async fn me(State(state): State<AppState>, principal: Principal) -> Response
     } else {
         "open"
     };
-    Json(json!({
-        "user": user_json(&state, &user_id),
-        "device": device_json,
-        "credits": credits,
-        "limits": {
-            "read_only": ks.on,
-            "read_only_reason": ks.reason,
-            "signup": signup,
-            "auth_mode": state.cfg.auth_mode.as_str(),
+    Json(MeResponseDto {
+        user: user_dto(&state, &user_id),
+        device,
+        credits: CreditsDto {
+            balance_usd: credits.balance_usd,
+            granted_usd: credits.granted_usd,
+            spent_usd: credits.spent_usd,
+            spent_today_usd: credits.spent_today_usd,
+            daily_cap_usd: credits.daily_cap_usd,
+            allow_negative: credits.allow_negative,
+            machine_today_usd: credits.machine_today_usd,
+            machine_total_usd: credits.machine_total_usd,
         },
-        "features": crate::vaults::features(),
-        "machine": {
-            "exists": sb.is_some(),
-            "state": bs,
-            "since": since,
-            "provider": sb.as_ref().map(|s| s.provider.clone()),
-            "sandbox_id": sb.as_ref().and_then(|s| s.sandbox_id.clone()),
-            "always_on": state.cfg.always_on,
-            "held": state.db.box_held(&user_id).unwrap_or(false),
-            "waitlisted": waitlist_position.is_some(),
-            "waitlist_position": waitlist_position,
-            "evicted": crate::fleet::is_evicted(&state, &user_id).await,
+        limits: MeLimitsDto {
+            read_only: ks.on,
+            read_only_reason: ks.reason,
+            signup: signup.to_owned(),
+            auth_mode: state.cfg.auth_mode.as_str().to_owned(),
         },
-    }))
+        features: crate::vaults::features(),
+        machine: MeMachineDto {
+            exists: sb.is_some(),
+            state: bs,
+            since,
+            provider: sb.as_ref().map(|s| s.provider.clone()),
+            sandbox_id: sb.as_ref().and_then(|s| s.sandbox_id.clone()),
+            always_on: state.cfg.always_on,
+            held: state.db.box_held(&user_id).unwrap_or(false),
+            waitlisted: waitlist_position.is_some(),
+            waitlist_position: waitlist_position.map(|p| p as i64),
+            evicted: crate::fleet::is_evicted(&state, &user_id).await,
+        },
+    })
     .into_response()
 }
 

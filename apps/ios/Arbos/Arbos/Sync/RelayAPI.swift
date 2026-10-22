@@ -268,44 +268,19 @@ final class RelayAPI {
 
     /// `GET /machine` → the caller's one box and its workspaces.
     func machine() async throws -> Machine {
-        guard let m = try await json("GET", "/machine") as? [String: Any] else {
+        let v = try await json("GET", "/machine")
+        guard JSONSerialization.isValidJSONObject(v),
+              let data = try? JSONSerialization.data(withJSONObject: v) else {
             throw RelayError(status: 0, message: "Bad /machine response")
         }
-        let spec = m["spec"] as? [String: Any] ?? [:]
-        var workspaces: [Id: WorkspaceState] = [:]
-        for w in (m["workspaces"] as? [Any]) ?? [] {
-            if let w = w as? [String: Any], let pid = w["project_id"] as? String {
-                workspaces[pid] = WorkspaceState.from(w["state"] as? String)
-            }
+        let m: MachineStatusDto
+        do {
+            m = try JSONDecoder().decode(MachineStatusDto.self, from: data)
+        } catch {
+            NSLog("MachineStatusDto: \(error)")
+            throw RelayError(status: 0, message: "Bad /machine response")
         }
-        let alwaysOn = (m["always_on"] as? NSNumber)?.boolValue ?? false
-        let held = (m["held"] as? NSNumber)?.boolValue ?? false
-        let wire = BoxState.fromWire(m["state"] as? String ?? "") ?? .hibernatedLight
-        return Machine(
-            state: alwaysOn && !held && wire != .error ? .awake : wire,
-            since: (m["since"] as? NSNumber)?.int64Value,
-            spec: Machine.specLine(
-                cpu: (spec["cpu"] as? NSNumber)?.intValue,
-                memGib: (spec["mem_gib"] as? NSNumber)?.intValue,
-                diskGib: (spec["disk_gib"] as? NSNumber)?.intValue,
-                klass: spec["class"] as? String,
-                provider: m["provider"] as? String
-            ),
-            provider: m["provider"] as? String ?? "",
-            sandboxId: m["sandbox_id"] as? String,
-            spendTodayUsd: (m["spend_today_usd"] as? NSNumber)?.doubleValue ?? 0,
-            spendCapUsd: (m["spend_cap_usd"] as? NSNumber)?.doubleValue ?? 0,
-            workspaces: workspaces,
-            alwaysOn: alwaysOn,
-            held: held,
-            machineTodayUsd: (m["machine_today_usd"] as? NSNumber)?.doubleValue ?? 0,
-            reported: true,
-            rawState: wire,
-            cpu: (spec["cpu"] as? NSNumber)?.intValue,
-            memGib: (spec["mem_gib"] as? NSNumber)?.intValue,
-            image: ((m["image"] as? [String: Any])?["current"] as? String)
-                ?? (spec["class"] as? String)
-        )
+        return Machine(dto: m)
     }
 
     func startMachine() async throws {
@@ -583,15 +558,13 @@ final class RelayAPI {
     /// `GET /me/unread` → total + per-chat counts. nil when the relay has no route yet.
     func unread() async throws -> (total: Int, chats: [String: Int])? {
         do {
-            guard let v = try await json("GET", "/me/unread") as? [String: Any] else { return nil }
+            let v = try await json("GET", "/me/unread")
+            guard JSONSerialization.isValidJSONObject(v),
+                  let data = try? JSONSerialization.data(withJSONObject: v),
+                  let dto = try? JSONDecoder().decode(UnreadDto.self, from: data) else { return nil }
             var chats: [String: Int] = [:]
-            if let list = v["chats"] as? [[String: Any]] {
-                for c in list { if let id = c["chat_id"] as? String { chats[id] = (c["unread"] as? NSNumber)?.intValue ?? 0 } }
-            } else if let dict = v["chats"] as? [String: Any] {
-                for (k, n) in dict { chats[k] = (n as? NSNumber)?.intValue ?? 0 }
-            }
-            let total = (v["total"] as? NSNumber)?.intValue ?? chats.values.reduce(0, +)
-            return (total, chats)
+            for c in dto.chats { chats[c.chat_id] = Int(c.unread) }
+            return (Int(dto.total), chats)
         } catch let e as RelayError where e.status == 404 || e.status == 405 {
             return nil
         }
@@ -611,9 +584,12 @@ final class RelayAPI {
         var out: [Person] = []
         var offset = 0
         while true {
-            guard let page = try await json("GET", "/users?offset=\(offset)&limit=500") as? [String: Any] else { break }
-            out += ((page["users"] as? [Any]) ?? []).compactMap(Person.parse)
-            guard let next = (page["next_offset"] as? NSNumber)?.intValue, next > offset else { break }
+            let v = try await json("GET", "/users?offset=\(offset)&limit=500")
+            guard JSONSerialization.isValidJSONObject(v),
+                  let data = try? JSONSerialization.data(withJSONObject: v),
+                  let page = try? JSONDecoder().decode(UsersPageDto.self, from: data) else { break }
+            out += page.users.map(Person.init(dto:))
+            guard let next = page.next_offset.map(Int.init), next > offset else { break }
             offset = next
         }
         return out
@@ -622,7 +598,11 @@ final class RelayAPI {
     func searchUsers(_ q: String) async throws -> [Person] {
         let query = q.trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "@"))
         guard !query.isEmpty, let enc = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else { return [] }
-        return ((try await json("GET", "/users/search?q=\(enc)")) as? [Any] ?? []).compactMap(Person.parse)
+        let v = try await json("GET", "/users/search?q=\(enc)")
+        guard JSONSerialization.isValidJSONObject(v),
+              let data = try? JSONSerialization.data(withJSONObject: v),
+              let cards = try? JSONDecoder().decode([UserCardDto].self, from: data) else { return [] }
+        return cards.map(Person.init(dto:))
     }
 
     func openDM(handle: String) async throws -> PeopleChat {

@@ -112,6 +112,36 @@ struct Machine: Equatable {
 
     static let unknown = Machine(state: .hibernatedLight, since: nil, spec: "")
 
+    init(dto: MachineStatusDto) {
+        var workspaces: [Id: WorkspaceState] = [:]
+        for w in dto.workspaces {
+            workspaces[w.project_id] = WorkspaceState.from(w.state)
+        }
+        let wire = BoxState.fromWire(dto.state) ?? .hibernatedLight
+        self.state = dto.always_on && !dto.held && wire != .error ? .awake : wire
+        self.since = dto.since
+        self.spec = Machine.specLine(
+            cpu: Int(dto.spec.cpu),
+            memGib: Int(dto.spec.mem_gib),
+            diskGib: Int(dto.spec.disk_gib),
+            klass: dto.spec.`class`,
+            provider: dto.provider
+        )
+        self.provider = dto.provider ?? ""
+        self.sandboxId = dto.sandbox_id
+        self.spendTodayUsd = dto.spend_today_usd
+        self.spendCapUsd = dto.spend_cap_usd
+        self.workspaces = workspaces
+        self.alwaysOn = dto.always_on
+        self.held = dto.held
+        self.machineTodayUsd = dto.machine_today_usd
+        self.reported = true
+        self.rawState = wire
+        self.cpu = Int(dto.spec.cpu)
+        self.memGib = Int(dto.spec.mem_gib)
+        self.image = dto.image.current ?? (dto.spec.`class`.isEmpty ? nil : dto.spec.`class`)
+    }
+
     /// The state the UI may show: always-on boxes collapse everything but
     /// error onto awake (unless a manual Stop holds the box down).
     func coerced(_ s: BoxState) -> BoxState {

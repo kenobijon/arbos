@@ -98,7 +98,8 @@ fn handle_of(state: &AppState, user_id: &str) -> String {
         .user_card(user_id)
         .ok()
         .flatten()
-        .and_then(|c| c["handle"].as_str().map(str::to_owned))
+        .map(|c| c.handle)
+        .filter(|h| !h.is_empty())
         .unwrap_or_else(|| user_id.to_owned())
 }
 
@@ -111,15 +112,18 @@ fn channel_json(ch: &Channel) -> Value {
 }
 
 fn member_json(state: &AppState, m: &ServerMember) -> Value {
-    let mut v = crate::people::with_presence(
-        state,
+    let card =
         state
             .db
             .user_card(&m.user_id)
             .ok()
             .flatten()
-            .unwrap_or_else(|| json!({ "id": m.user_id })),
-    );
+            .unwrap_or(arbos_core::api::UserCardDto {
+                id: m.user_id.clone(),
+                ..Default::default()
+            });
+    let mut v =
+        serde_json::to_value(crate::people::with_presence(state, card)).unwrap_or(Value::Null);
     v["user_id"] = json!(m.user_id);
     v["role"] = json!(m.role);
     v["joined_at"] = json!(m.joined_at);

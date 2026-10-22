@@ -1339,8 +1339,14 @@ mod tests {
         // Bob's app is open: fresh presence, focused on this very chat, device just seen.
         state.db.touch_device(bob_device).unwrap();
         notify::set_focus(&state, bob_device, Some(&chat)).await;
-        let card = crate::people::with_presence(&state, json!({ "id": bob }));
-        assert_eq!(card["online"], true);
+        let card = crate::people::with_presence(
+            &state,
+            arbos_core::api::UserCardDto {
+                id: bob.clone(),
+                ..Default::default()
+            },
+        );
+        assert_eq!(card.online, Some(true));
 
         let r = start_people_call(
             State(state.clone()),
