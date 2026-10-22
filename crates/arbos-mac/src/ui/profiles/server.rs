@@ -290,7 +290,7 @@ fn channels_tab(
             kit::row(
                 ElementId::Name(SharedString::from(format!("profile-channel-{key}"))),
                 kit::Leading::Glyph("hash"),
-                format!("#{}", ch.name),
+                ch.name.clone(),
                 subtitle,
                 None,
                 trailing,

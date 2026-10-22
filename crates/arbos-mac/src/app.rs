@@ -55,6 +55,8 @@ pub enum ProfilePage {
     Me,
     /// A server (D88): channels, members, and the admin options for owners/admins.
     Server { server_id: Id },
+    /// A channel of a server (D88, #1317): what the `# general` header pill opens.
+    Channel { server_id: Id, channel_id: Id },
 }
 
 /// Which server sheet is open over the shell (D88).
@@ -3251,7 +3253,11 @@ impl AppState {
             self.channel_pending_room = None;
             self.sync_focus();
         }
-        if matches!(&self.profile, Some(ProfilePage::Server { server_id: id }) if id == server_id) {
+        if matches!(
+            &self.profile,
+            Some(ProfilePage::Server { server_id: id }) | Some(ProfilePage::Channel { server_id: id, .. })
+                if id == server_id
+        ) {
             self.close_profile(cx);
         }
         cx.notify();
@@ -3401,9 +3407,10 @@ impl AppState {
         cx.notify();
     }
 
-    /// Rig: `ARBOS_OPEN_SERVER=<name or id>[:<#channel>][:panel]` enters a server once the
-    /// registry lists it (the row click, landing on `#general`), then the named channel, and
-    /// with `panel` its page in the right pane (the server-name click).
+    /// Rig: `ARBOS_OPEN_SERVER=<name or id>[:<#channel>][:panel|:channel]` enters a server once
+    /// the registry lists it (the row click, landing on `#general`), then the named channel;
+    /// `panel` opens the server's page (the server-header click), `channel` the channel's (the
+    /// pill click).
     pub fn apply_open_server_hook(&mut self, cx: &mut Context<Self>) {
         // A first login still running would select its chat over the server; after it ends.
         if self.open_server_hook_done || self.onboarding.is_some() {
@@ -3432,6 +3439,16 @@ impl AppState {
                     },
                     cx,
                 );
+            } else if part == "channel" {
+                if let Some(c) = self.selected_channel.clone() {
+                    self.open_profile(
+                        ProfilePage::Channel {
+                            server_id: c.server_id,
+                            channel_id: c.channel_id,
+                        },
+                        cx,
+                    );
+                }
             } else if let Some(channel) = server
                 .channels
                 .iter()
@@ -4101,7 +4118,7 @@ impl AppState {
             ProfilePage::Agent { project_id } => Some(project_id.clone()),
             _ => None,
         };
-        if let ProfilePage::Server { server_id } = &page {
+        if let ProfilePage::Server { server_id } | ProfilePage::Channel { server_id, .. } = &page {
             // Members only come with the detail route.
             self.command(ClientCommand::ServerFetch {
                 server_id: server_id.clone(),

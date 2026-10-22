@@ -31,6 +31,11 @@ CREATE INDEX IF NOT EXISTS channels_server ON channels(server_id, position);
 "#;
 
 pub fn migrate_servers(c: &Connection) {
+    // A channel's display name never carries '#': the glyph shows it (#1317).
+    let _ = c.execute(
+        "UPDATE channels SET name = replace(name, '#', '') WHERE name LIKE '%#%'",
+        [],
+    );
     let _ = c.execute(
         "ALTER TABLE servers ADD COLUMN is_open INTEGER NOT NULL DEFAULT 0",
         [],
