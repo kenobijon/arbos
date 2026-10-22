@@ -1222,17 +1222,16 @@ pub fn members_popover(
         .child(frosted(PANEL_RADIUS, MENU_BLUR, card))
 }
 
-/// "@sam is typing…" above the composer (Grok's muted system line).
+/// "@sam is typing…" above the composer (Grok's muted system line). Sits in
+/// the chat column (`transcript::column_row`), indented to the input text.
 pub fn typing_line(handle: &str, theme: &Theme) -> Div {
-    div().w_full().flex().justify_center().pb(px(4.0)).child(
-        div()
-            .w(px(crate::ui::theme::COMPOSER_WIDTH))
-            .max_w_full()
-            .px(px(crate::ui::theme::PLUS_BUTTON + 26.0))
-            .text_size(px(TEXT_TINY))
-            .text_color(theme.text_muted)
-            .child(format!("@{handle} is typing…")),
-    )
+    div()
+        .w_full()
+        .pb(px(4.0))
+        .px(px(crate::ui::theme::PLUS_BUTTON + 26.0))
+        .text_size(px(TEXT_TINY))
+        .text_color(theme.text_muted)
+        .child(format!("@{handle} is typing…"))
 }
 
 /// Stacked avatars for a project with people in it (tile corner / header).
