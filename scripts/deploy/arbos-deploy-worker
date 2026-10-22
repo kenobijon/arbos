@@ -28,7 +28,8 @@
 #   agentd.deployed-sha is written only when the relay's `agentd.real_min_sha` is that commit.
 #
 # Files: /var/lib/arbos-deploy/{repo,log,failed/,runs/,agentd.deployed-sha};
-# knobs in /etc/arbos/deploy.env (AUTO_DEPLOY_RELAY/AGENTD/VOICE=0|1, SETTLE_S, MAX_WAIT_S);
+# knobs in /etc/arbos/deploy.env (AUTO_DEPLOY_RELAY/AGENTD/VOICE=0|1, SETTLE_S, MAX_WAIT_S,
+# RELAY_DEPLOY_MIN_S, RELAY_DEPLOY_MAX_WAIT_S);
 # kill switch /etc/arbos/deploy.disabled. Secrets are read from /etc/arbos/feedback.env
 # (GITHUB_TOKEN) and /etc/arbos/relay.env (DAYTONA_API_KEY, ARBOS_RELAY_ADMIN_TOKEN); none is
 # printed. The feedback loop judges "live" from the deployed shas, not from this script.
@@ -55,6 +56,11 @@ IMAGE_WAIT_S=2700
 ROLL_WAIT_S=5400
 RETRY_AFTER_S=600
 ROLL_RETRY_EVERY_S=900
+# Every relay deploy restarts the relay and drops every websocket (Mac, iPhone, boxes). Outside
+# hotfixes, relay deploys are coalesced: at most one per RELAY_DEPLOY_MIN_S, and no request is
+# held longer than RELAY_DEPLOY_MAX_WAIT_S from when it was first asked for.
+RELAY_DEPLOY_MIN_S=1800
+RELAY_DEPLOY_MAX_WAIT_S=2700
 EVENTS="${ARBOS_DEPLOY_EVENTS:-/var/lib/arbos-feedback/deploy-events.jsonl}"
 BUILD_USER="${BUILD_USER:-const}"
 # shellcheck disable=SC1090
@@ -636,6 +642,41 @@ auto_requests() {
   done
 }
 
+# A relay request is a hotfix when a commit it brings in (deployed..request) is a revert or
+# hotfix commit, the same subjects the auto-stable fast path releases immediately. Hotfixes
+# skip the coalescing window.
+relay_request_is_hotfix() {
+  local full="$1" deployed
+  deployed="$(deployed_sha relay)"
+  [[ -n "$deployed" ]] && git -C "$REPO" cat-file -e "$deployed^{commit}" 2>/dev/null || return 1
+  git -C "$REPO" log --format=%s "$deployed..$full" 2>/dev/null | grep -qiE '^(revert|hotfix)\b|\[hotfix\]'
+}
+
+# Four relay deploys in 95 minutes caused the 2026-10-22 "Reconnecting..." outage. Hold a relay
+# request (return 0) while the last deploy is younger than RELAY_DEPLOY_MIN_S, unless the request
+# is a hotfix or has already waited RELAY_DEPLOY_MAX_WAIT_S. Logs once per held request.
+relay_deploy_held() {
+  local full="$1" age_first="$2" last gap
+  last="$(cat "$STATE/relay.last-deploy" 2>/dev/null || true)"
+  [[ "$last" =~ ^[0-9]+$ ]] || return 1
+  gap=$(( $(date -u +%s) - last ))
+  (( gap < RELAY_DEPLOY_MIN_S )) || return 1
+  if (( age_first >= RELAY_DEPLOY_MAX_WAIT_S )); then
+    log "relay: $full waited ${age_first}s (RELAY_DEPLOY_MAX_WAIT_S); deploying now"
+    return 1
+  fi
+  if relay_request_is_hotfix "$full"; then
+    log "relay: $full brings a revert/hotfix commit; skipping the coalescing window"
+    return 1
+  fi
+  if [[ "$(cat "$STATE/relay.held" 2>/dev/null || true)" != "$full" ]]; then
+    echo "$full" > "$STATE/relay.held"
+    log "relay: last deploy ${gap}s ago (< ${RELAY_DEPLOY_MIN_S}s); holding $full to coalesce restarts"
+    event relay "$full" deploy_held "last relay deploy ${gap}s ago; coalescing (min ${RELAY_DEPLOY_MIN_S}s, max wait ${RELAY_DEPLOY_MAX_WAIT_S}s)"
+  fi
+  return 0
+}
+
 handle_request() {
   local file="$1" kind sha requested first now age_last age_first full state
   kind="$(sed -n 's/^kind=//p' "$file")"
@@ -709,7 +750,9 @@ handle_request() {
   esac
   case "$kind" in
     relay)
-      if deploy_relay "$full"; then rm -f "$file"; fi ;;
+      if relay_deploy_held "$full" "$age_first"; then return 0; fi
+      rm -f "$STATE/relay.held"
+      if deploy_relay "$full"; then date -u +%s > "$STATE/relay.last-deploy"; rm -f "$file"; fi ;;
     voice)
       if deploy_voice "$full"; then rm -f "$file"; fi ;;
     agentd)
