@@ -1520,9 +1520,10 @@ impl Agent {
         self.switch_session_to(chat_id, &path).await
     }
 
-    /// Replace the chat's model window: a fresh pi session file, switched to at once. Used after
-    /// a provider refusal, which is bound to the window's content, not to the user's message.
-    async fn rotate_chat_session(self: &Arc<Self>, chat_id: &str) -> Result<()> {
+    /// Replace the chat's model window: a fresh pi session file, switched to at once. Used when
+    /// the current window is stuck — a provider refusal bound to its content, or a turn that
+    /// settled with no route and no prose (the same session keeps failing the same way).
+    async fn rotate_chat_session(self: &Arc<Self>, chat_id: &str, reason: &str) -> Result<()> {
         let previous = self
             .store
             .chat(chat_id)?
@@ -1531,10 +1532,10 @@ impl Agent {
         let path = self.new_session_file(chat_id)?;
         *self.current_chat.lock().await = None;
         self.switch_session_to(chat_id, &path).await?;
-        tracing::warn!(chat_id, previous = %previous, fresh = %path.display(), "fresh pi session after a model refusal");
+        tracing::warn!(chat_id, reason, previous = %previous, fresh = %path.display(), "fresh pi session after empty turn");
         self.append_audit(
             "session_rotated",
-            json!({ "chat_id": chat_id, "reason": "model_refused", "previous": previous, "fresh": path.display().to_string() }),
+            json!({ "chat_id": chat_id, "reason": reason, "previous": previous, "fresh": path.display().to_string() }),
         );
         let _ = self.store.t3_append(
             chat_id,
@@ -1542,7 +1543,7 @@ impl Agent {
             Some(chat_id),
             "compaction",
             Some("system"),
-            "pi session replaced after a model refusal (history stays in the memory tree)",
+            &format!("pi session replaced after {reason} (history stays in the memory tree)"),
             None,
         );
         Ok(())
@@ -2605,20 +2606,29 @@ impl Agent {
         self.turn_running.store(true, Ordering::SeqCst);
         let keepalive = self.spawn_keepalive();
         let mut result = self.run_main_turn(chat_id, host, prompt_text).await;
-        // A refusal is the provider declining this model window, not this question: the same
-        // session answers the same way every time (Lium, 2026-10-21: six turns in a row, 208–242k
-        // tokens each, zero output). The chat history lives in the memory tree, so rebuild the
-        // window — a fresh pi session for this chat — and ask once more before failing visibly.
-        if result.is_ok() && self.refusal_wants_fresh_session().await {
-            match self.rotate_chat_session(chat_id).await {
-                Ok(()) => {
-                    if let Some(t) = self.turn.lock().await.as_mut() {
-                        t.model_error = None;
-                        t.session_rotated = true;
+        // An empty turn is usually the model window, not the question: a provider refusal on a
+        // bloated session (Lium, 2026-10-21: six turns, 208–242k tokens, zero output) or a settle
+        // with no `route` and no prose (mr.agi group + DM, feedback app-01M5GCK…: consecutive
+        // "didn't answer" until the session recovered). History lives in the memory tree, so
+        // rebuild the window and ask once more before failing visibly.
+        if result.is_ok() {
+            if let Some(reason) = self.empty_turn_retry_reason().await {
+                match self.rotate_chat_session(chat_id, reason).await {
+                    Ok(()) => {
+                        if let Some(t) = self.turn.lock().await.as_mut() {
+                            t.model_error = None;
+                            t.session_rotated = true;
+                            // Drop a synthetic reply from the miss so the retry can route for real.
+                            if t.metrics.route_missing {
+                                t.route = None;
+                            }
+                        }
+                        result = self.run_main_turn(chat_id, host, prompt_text).await;
                     }
-                    result = self.run_main_turn(chat_id, host, prompt_text).await;
+                    Err(e) => {
+                        tracing::warn!(chat_id, reason, error = %e, "fresh session after empty turn")
+                    }
                 }
-                Err(e) => tracing::warn!(chat_id, error = %e, "fresh session after refusal"),
             }
         }
         self.turn_running.store(false, Ordering::SeqCst);
@@ -3842,16 +3852,53 @@ impl Agent {
         t.model_error = Some(m);
     }
 
-    /// The turn ended on a provider refusal with nothing shown and has not been retried yet.
-    async fn refusal_wants_fresh_session(&self) -> bool {
+    /// When the turn showed the user nothing, return why a fresh-session retry is warranted
+    /// (`model_refused` or `route_missing`). `None` when a retry would not help or already ran.
+    async fn empty_turn_retry_reason(&self) -> Option<&'static str> {
         let tl = self.turn.lock().await;
-        let Some(t) = tl.as_ref() else {
-            return false;
+        let t = tl.as_ref()?;
+        if t.stopped || t.session_rotated {
+            return None;
+        }
+        if !t.streamed_text.trim().is_empty() || !t.ack_text.trim().is_empty() {
+            return None;
+        }
+        if t.model_error.as_ref().is_some_and(|m| m.refusal) {
+            return Some("model_refused");
+        }
+        // Settled without `route` and without prose: pi cannot correct when `canContinue` is
+        // false (ended on plain text / empty), so agentd rebuilds the window once.
+        if t.metrics.route_missing {
+            return Some("route_missing");
+        }
+        None
+    }
+
+    /// `/hook/turn-without-route`: the main run settled without calling `route`. When pi could
+    /// not continue (`corrected=false`), record the turn as `reply` so any prose already
+    /// streamed is a normal answer (arbos-pi-ext route guard). An empty miss is retried once
+    /// via `empty_turn_retry_reason` after the run returns.
+    pub async fn hook_turn_without_route(&self, session_id: &str, corrected: bool) {
+        tracing::warn!(session = %session_id, corrected, "turn ended without a route call");
+        let _ = self.store.t3_append(
+            session_id,
+            None,
+            Some(session_id),
+            "route",
+            Some("system"),
+            &format!("turn without route; corrective continuation={corrected}"),
+            None,
+        );
+        let mut tl = self.turn.lock().await;
+        let Some(t) = tl.as_mut() else {
+            return;
         };
-        !t.stopped
-            && !t.session_rotated
-            && t.streamed_text.trim().is_empty()
-            && t.model_error.as_ref().is_some_and(|m| m.refusal)
+        t.metrics.route_missing = true;
+        // No further corrective prompt: treat the turn as a reply (harness contract).
+        if !corrected && t.route.is_none() {
+            t.route = Some(ValidRoute::Reply { reply: None });
+            tracing::info!(session = %session_id, "route missing without correction; recorded as reply");
+        }
     }
 
     /// Post a one- or two-sentence hard-limit notice into the live chat row (never silent).
