@@ -110,6 +110,8 @@ struct ServerChannelsView: View {
     @Environment(\.dismiss) private var dismiss
     let serverId: String
     @State private var showNewChannel = false
+    /// Long-press menu → Delete: the channel asking "Delete #name?".
+    @State private var deletingChannel: ServerChannel?
 
     private var server: Server? { model.server(serverId) }
 
@@ -123,7 +125,7 @@ struct ServerChannelsView: View {
                     .listRowBackground(Color.clear)
                     .accessibilityHidden(true)
                 if let server {
-                    if server.channels.isEmpty {
+                    if server.liveChannels.isEmpty {
                         Text("No channels yet")
                             .font(theme.font(Theme.small))
                             .foregroundStyle(theme.muted)
@@ -133,7 +135,7 @@ struct ServerChannelsView: View {
                             .listRowSeparator(.hidden)
                             .listRowBackground(Color.clear)
                     }
-                    ForEach(server.channels) { channel in
+                    ForEach(server.liveChannels) { channel in
                         Button { model.open(channel: channel) } label: {
                             ChannelRow(channel: channel,
                                        restricted: model.channelRestricted(channel),
@@ -142,6 +144,19 @@ struct ServerChannelsView: View {
                                        unread: model.channelUnread(channel))
                         }
                         .buttonStyle(.borderless)
+                        // Long-press (the Mac's right-click): Archive for everyone; Delete for
+                        // owners/admins, never on #general; Delete asks first.
+                        .contextMenu {
+                            Button {
+                                Task { await model.archiveChannel(channel, true) }
+                            } label: { Label("Archive", systemImage: "archivebox") }
+                            if server.isAdmin, channel.id != server.general?.id {
+                                Divider()
+                                Button(role: .destructive) { deletingChannel = channel } label: {
+                                    Label("Delete", systemImage: "trash")
+                                }
+                            }
+                        }
                         .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
                         .listRowSeparator(.hidden)
                         .listRowBackground(theme.bg)
@@ -157,6 +172,19 @@ struct ServerChannelsView: View {
         .toolbar(.hidden, for: .navigationBar)
         .sheet(isPresented: $showNewChannel) {
             NewChannelSheet(serverId: serverId).environmentObject(model).environment(\.theme, theme)
+        }
+        .confirmationDialog(
+            deletingChannel.map { "Delete #\($0.name)?" } ?? "Delete channel?",
+            isPresented: Binding(get: { deletingChannel != nil }, set: { if !$0 { deletingChannel = nil } }),
+            titleVisibility: .visible
+        ) {
+            Button("Delete", role: .destructive) {
+                if let c = deletingChannel { Task { _ = await model.deleteChannel(c) } }
+                deletingChannel = nil
+            }
+            Button("Cancel", role: .cancel) { deletingChannel = nil }
+        } message: {
+            Text("Deletes the channel and its messages for everyone in the server.")
         }
         // `AppModel.forgetServer` empties the path when the server goes (deleted, left, removed).
     }
