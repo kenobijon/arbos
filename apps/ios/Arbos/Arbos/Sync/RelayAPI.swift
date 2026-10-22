@@ -854,7 +854,8 @@ final class RelayAPI {
     func block(handle: String) async throws { _ = try await request("POST", "/blocks", body: ["handle": handle]) }
     func unblock(userId: String) async throws { _ = try await request("DELETE", "/blocks/\(userId)") }
     func blocks() async throws -> [Person] {
-        ((try await json("GET", "/blocks")) as? [Any] ?? []).compactMap { raw -> Person? in
+        let list = (try await json("GET", "/blocks")) as? [Any] ?? []
+        return list.compactMap { raw -> Person? in
             guard let d = raw as? [String: Any], let id = d["id"] as? String else { return nil }
             return Person(id: id, handle: d["handle"] as? String ?? "", avatarUrl: d["avatar_url"] as? String, name: nil, status: "blocked")
         }

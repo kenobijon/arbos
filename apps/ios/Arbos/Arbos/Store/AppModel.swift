@@ -835,11 +835,13 @@ final class AppModel: ObservableObject {
             let position = summary.waitlisted ? Int(summary.waitlist_position ?? 1) : nil
             if position != waitlistPosition { waitlistPosition = position }
             meAlwaysOn = summary.always_on
-            machine.held = summary.held
-            if summary.always_on, !machine.alwaysOn {
-                machine.alwaysOn = true
-                machine.state = machine.coerced(machine.state)
+            var m = machine
+            m.held = summary.held
+            if summary.always_on, !m.alwaysOn {
+                m.alwaysOn = true
+                m.state = m.coerced(m.state)
             }
+            machine = m
         }
         if let list = try? await api.approvals() { approvals = list }
     }

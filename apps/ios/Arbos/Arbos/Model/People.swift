@@ -19,15 +19,38 @@ struct Person: Identifiable, Equatable, Hashable {
 
     var displayName: String { name?.isEmpty == false ? name! : handle }
 
+    /// Memberwise init (kept explicit because `init(dto:)` would suppress synthesis).
+    init(
+        id: String,
+        handle: String,
+        avatarUrl: String? = nil,
+        name: String? = nil,
+        status: String = "member",
+        lastSeenAt: Int64? = nil,
+        online: Bool = false,
+        avatarColorIndex: Int? = nil
+    ) {
+        self.id = id
+        self.handle = handle
+        self.avatarUrl = avatarUrl
+        self.name = name
+        self.status = status
+        self.lastSeenAt = lastSeenAt
+        self.online = online
+        self.avatarColorIndex = avatarColorIndex
+    }
+
     init(dto: UserCardDto) {
-        id = dto.id
-        handle = dto.handle
-        avatarUrl = dto.avatar_url
-        name = dto.name
-        status = dto.status.isEmpty ? "member" : dto.status
-        lastSeenAt = dto.last_seen_at.flatMap { $0 }
-        online = dto.online ?? false
-        avatarColorIndex = dto.avatar_color_index_effective.map(Int.init)
+        self.init(
+            id: dto.id,
+            handle: dto.handle,
+            avatarUrl: dto.avatar_url,
+            name: dto.name,
+            status: dto.status.isEmpty ? "member" : dto.status,
+            lastSeenAt: dto.last_seen_at.flatMap { $0 },
+            online: dto.online ?? false,
+            avatarColorIndex: dto.avatar_color_index_effective.map(Int.init)
+        )
     }
 
     static func parse(_ raw: Any) -> Person? {
