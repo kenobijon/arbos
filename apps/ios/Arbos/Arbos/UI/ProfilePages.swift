@@ -741,31 +741,20 @@ struct GroupProfileView: View {
             ScrollView {
                 VStack(spacing: 18) {
                     Color.clear.frame(height: 80)
-                    // The shared pane layout (panels-unify, 2026-10-21): picture
-                    // (crayon when a people group — it opens the edit sheet), name,
-                    // member count, Members | Library, one leave row at the end.
-                    PaneHeader(name: title, subtitle: "\(memberCount) member\(memberCount == 1 ? "" : "s")") {
-                        if let project {
-                            AgentAvatar(project: project, theme: theme, size: 112, idle: true)
-                        } else {
-                            Button { showEdit = true } label: {
-                                AvatarCluster(members: clusterMembers, size: 72, imageUrl: groupImageURL, leaf: people?.leafPick)
-                                    .frame(width: PaneHeader<EmptyView>.avatarSize, height: PaneHeader<EmptyView>.avatarSize)
-                                    .paneCrayon()
-                                    .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel("Edit group name and picture")
-                        }
-                    }
-                    ProfileTabs(tabs: ["Members", "Library"], selected: $tab)
-                    if tab == "Members" {
-                        membersList
-                    } else {
-                        library
-                    }
-                    // No Mute / Leave here (Jacob, 2026-10-20, same as the Mac): leaving
-                    // or deleting a group is the chat list's Delete; mute is gone.
+                    // The shared pane (D93): picture (crayon when a people group — it
+                    // opens the edit sheet), name, member count, Members | Library.
+                    // No Mute / Leave footer (Jacob, 2026-10-20, same as the Mac):
+                    // leaving or deleting a group is the chat list's Delete.
+                    ProfilePane(
+                        hero: PaneHero(
+                            picture: .image(AnyView(heroPicture)),
+                            name: title,
+                            subtitle: "\(memberCount) member\(memberCount == 1 ? "" : "s")"
+                        ),
+                        tabs: ["Members", "Library"],
+                        selected: $tab,
+                        body: tab == "Members" ? membersSections : librarySections
+                    )
                     Color.clear.frame(height: 40)
                 }
             }
@@ -826,18 +815,34 @@ struct GroupProfileView: View {
         }
     }
 
-    /// Members: Add members, then every person (name, @handle) and agent
-    /// ("Agent · run by …") as kit rows — the Mac group pane's list.
-    private var membersList: some View {
-        ProfileCard(separatorInset: PaneKit.separatorInset(.glyph(""))) {
-            Button { showAdd = true } label: {
-                PaneRow(leading: .glyph("person.badge.plus"), title: "Add members")
+    /// The hero picture: the agent's leaf for a shared project; the group's
+    /// cluster or picked image (tap → the edit sheet) for a people group.
+    @ViewBuilder private var heroPicture: some View {
+        if let project {
+            AgentAvatar(project: project, theme: theme, size: PaneKit.heroAvatar, idle: true)
+        } else {
+            Button { showEdit = true } label: {
+                AvatarCluster(members: clusterMembers, size: 72, imageUrl: groupImageURL, leaf: people?.leafPick)
+                    .frame(width: PaneKit.heroAvatar, height: PaneKit.heroAvatar)
+                    .paneCrayon()
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            ForEach(rows) { r in
-                memberRow(r)
-            }
+            .accessibilityLabel("Edit group name and picture")
         }
+    }
+
+    /// Members: Add members, then every person (name, @handle) and agent
+    /// ("Agent · run by …") as kit rows — the Mac group pane's list.
+    private var membersSections: [PaneSection] {
+        var list: [AnyView] = [
+            AnyView(Button { showAdd = true } label: {
+                PaneRow(leading: .glyph("person.badge.plus"), title: "Add members")
+            }
+            .buttonStyle(.plain)),
+        ]
+        list += rows.map { r in AnyView(memberRow(r)) }
+        return [.card(list, separatorInset: PaneKit.separatorInset(.glyph("")))]
     }
 
     private func memberSubtitle(_ r: Row) -> String {
@@ -891,35 +896,18 @@ struct GroupProfileView: View {
     }
 
     /// Library: every image, then every file shared in the chat — one place.
-    private var library: some View {
+    private var librarySections: [PaneSection] {
         let media = items.filter { $0.kind == .media }
         let files = items.filter { $0.kind == .file }
         let voice = items.filter { $0.kind == .voice }
-        return Group {
-            if media.isEmpty && files.isEmpty && voice.isEmpty {
-                Text("Nothing shared here yet.").font(theme.font(Theme.small)).foregroundStyle(theme.muted)
-                    .frame(maxWidth: .infinity).padding(.top, 36)
-            } else {
-                if !media.isEmpty {
-                    VStack(alignment: .leading, spacing: 8) {
-                        PaneSectionTitle("Images · \(media.count)")
-                        ChatItemsList(items: media, kind: .media, empty: "")
-                    }
-                }
-                if !files.isEmpty {
-                    VStack(alignment: .leading, spacing: 8) {
-                        PaneSectionTitle("Files · \(files.count)")
-                        ChatItemsList(items: files, kind: .file, empty: "")
-                    }
-                }
-                if !voice.isEmpty {
-                    VStack(alignment: .leading, spacing: 8) {
-                        PaneSectionTitle("Voice · \(voice.count)")
-                        ChatItemsList(items: voice, kind: .voice, empty: "")
-                    }
-                }
-            }
+        if media.isEmpty && files.isEmpty && voice.isEmpty {
+            return [.empty("Nothing shared here yet.")]
         }
+        var out: [PaneSection] = []
+        if !media.isEmpty { out += [.title("Images · \(media.count)"), .grid(media)] }
+        if !files.isEmpty { out += [.title("Files · \(files.count)"), .files(files)] }
+        if !voice.isEmpty { out += [.title("Voice · \(voice.count)"), .voice(voice)] }
+        return out
     }
 
 }
@@ -1579,6 +1567,12 @@ enum PaneSection {
     case card([AnyView], separatorInset: CGFloat = PaneKit.inset)
     /// Media thumbnails, three square tiles per row.
     case grid([ChatItem])
+    /// The Library's file rows (the Mac's `Section::Files`).
+    case files([ChatItem])
+    /// The Library's link rows (the Mac's `Section::Links`).
+    case links([ChatItem])
+    /// Voice notes — iPhone only; the Mac Library has no voice section.
+    case voice([ChatItem])
     /// Centred muted line for an empty tab.
     case empty(String)
     case footnote(String)
@@ -1655,13 +1649,20 @@ struct ProfilePane: View {
     private func section(_ s: PaneSection) -> some View {
         switch s {
         case .title(let t):
-            PaneSectionTitle(t)
+            // 8 pt down to the list it names (the kit's title spacing).
+            PaneSectionTitle(t).padding(.bottom, -10)
         case .card(let rows, let inset):
             ProfileCard(separatorInset: inset) {
                 ForEach(Array(rows.enumerated()), id: \.offset) { _, r in r }
             }
         case .grid(let items):
             ChatItemsList(items: items, kind: .media, empty: "No photos or videos yet.")
+        case .files(let items):
+            ChatItemsList(items: items, kind: .file, empty: "No files shared yet.")
+        case .links(let items):
+            ChatItemsList(items: items, kind: .link, empty: "No links shared yet.")
+        case .voice(let items):
+            ChatItemsList(items: items, kind: .voice, empty: "No voice notes yet.")
         case .empty(let t):
             Text(t).font(theme.font(Theme.small)).foregroundStyle(theme.muted)
                 .frame(maxWidth: .infinity).padding(.top, 36).padding(.horizontal, 32).multilineTextAlignment(.center)

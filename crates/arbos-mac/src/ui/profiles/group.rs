@@ -1,9 +1,10 @@
 //! A group's pane — a people group chat or a project shared with other
-//! humans (redesign 2026-10-20, mockups b–d): big picture, name, two tabs.
-//! **Members** starts with "Add members" (people and agents alike), then
-//! name + handle rows. **Library** is every image, then every file shared
-//! here. The picture takes a crayon on hover, the name an inline field; no
-//! actions row, no counts, no presence, no badges.
+//! humans (redesign 2026-10-20, mockups b–d) on the shared profile pane
+//! (D93): big picture, name, member count, two tabs. **Members** starts with
+//! "Add members" (people and agents alike), then name + handle rows.
+//! **Library** is every image, then every file shared here. The picture takes
+//! a crayon on hover, the name an inline field; no actions row, no presence,
+//! no badges, no Leave (that is the chat list's Delete — Jacob, 2026-10-20).
 
 use std::sync::Arc;
 
@@ -20,9 +21,9 @@ use crate::ui::people;
 use crate::ui::shell::Shell;
 use crate::ui::theme::Theme;
 
+use super::pane::{self, Hero, Picture, ProfilePane, Section};
 use super::{
-    card, chats_of, collect, editable_name, editable_picture, empty, file_list, frame, hero, kit,
-    list_row, media_grid, tab_bar, HeroClick, HERO_AVATAR,
+    chats_of, collect, editable_name, editable_picture, kit, list_row, HeroClick, HERO_AVATAR,
 };
 
 const TABS: [&str; 2] = ["Members", "Library"];
@@ -121,15 +122,20 @@ pub(super) fn page(
     // Subtitle: the member count (the person pane shows @handle here).
     let count = people.len();
     let subtitle = format!("{count} member{}", if count == 1 { "" } else { "s" });
-    let hero = hero(avatar, name, &subtitle, theme.text_muted, &theme);
+    let hero = Hero {
+        picture: Picture::Element(avatar),
+        name,
+        badge: None,
+        subtitle: Some(subtitle.into()),
+        subtitle_color: theme.text_muted,
+        editor: None,
+    };
 
-    // ----- tabs -----------------------------------------------------------------
-    let tabs = tab_bar(&TABS, tab, &theme, cx);
-    let body_tab = match tab {
+    let body: Vec<Section> = match tab {
         0 => {
             // Mock b: "Add members" is a card of its own above the member list.
             let mut add = None;
-            let mut list = card(&theme);
+            let mut list: Vec<gpui::AnyElement> = Vec::new();
             let sid = space.id.clone();
             let i_own = !space.is_guest();
             if is_people || i_own {
@@ -170,27 +176,30 @@ pub(super) fn page(
                 let key = format!("user:{}", p.id);
                 if armed.as_deref() == Some(key.as_str()) {
                     let (sid, uid) = (space.id.clone(), p.id.clone());
-                    list = list.child(remove_confirm(
-                        &format!("Remove @{} from {}?", p.handle, space.name),
-                        move |this, cx| {
-                            let (sid, uid) = (sid.clone(), uid.clone());
-                            this.state.update(cx, |s, cx| {
-                                if is_people {
-                                    s.remove_member(sid, uid, cx);
-                                } else {
-                                    s.remove_project_member(sid, uid, cx);
-                                }
-                            });
-                        },
-                        &theme,
-                        cx,
-                    ));
+                    list.push(
+                        remove_confirm(
+                            &format!("Remove @{} from {}?", p.handle, space.name),
+                            move |this, cx| {
+                                let (sid, uid) = (sid.clone(), uid.clone());
+                                this.state.update(cx, |s, cx| {
+                                    if is_people {
+                                        s.remove_member(sid, uid, cx);
+                                    } else {
+                                        s.remove_project_member(sid, uid, cx);
+                                    }
+                                });
+                            },
+                            &theme,
+                            cx,
+                        )
+                        .into_any_element(),
+                    );
                     continue;
                 }
                 let handle = p.handle.clone();
                 let sid = space.id.clone();
                 let removable = i_own_group && !is_me;
-                list = list.child(
+                list.push(
                     list_row(
                         ElementId::Name(SharedString::from(format!("profile-member-{}", p.handle))),
                         people::avatar(images[i].clone(), p, kit::AVATAR, &theme)
@@ -214,7 +223,8 @@ pub(super) fn page(
                             },
                             cx,
                         );
-                    })),
+                    }))
+                    .into_any_element(),
                 );
             }
             // Agents in the chat (people groups) — or the project's own agent.
@@ -230,18 +240,21 @@ pub(super) fn page(
                     let key = format!("agent:{}", a.project_id);
                     if armed.as_deref() == Some(key.as_str()) {
                         let (sid, pid) = (space.id.clone(), a.project_id.clone());
-                        list = list.child(remove_confirm(
-                            &format!("Remove @{} from {}?", a.handle, space.name),
-                            move |this, cx| {
-                                let (sid, pid) = (sid.clone(), pid.clone());
-                                this.state.update(cx, |s, cx| s.remove_agent(sid, pid, cx));
-                            },
-                            &theme,
-                            cx,
-                        ));
+                        list.push(
+                            remove_confirm(
+                                &format!("Remove @{} from {}?", a.handle, space.name),
+                                move |this, cx| {
+                                    let (sid, pid) = (sid.clone(), pid.clone());
+                                    this.state.update(cx, |s, cx| s.remove_agent(sid, pid, cx));
+                                },
+                                &theme,
+                                cx,
+                            )
+                            .into_any_element(),
+                        );
                         continue;
                     }
-                    list = list.child(
+                    list.push(
                         list_row(
                             ElementId::Name(SharedString::from(format!(
                                 "profile-agent-{}",
@@ -261,7 +274,8 @@ pub(super) fn page(
                         .on_click(cx.listener(move |this, _, _, cx| {
                             let pid = pid.clone();
                             this.push_profile(ProfilePage::Agent { project_id: pid }, cx);
-                        })),
+                        }))
+                        .into_any_element(),
                     );
                 }
             } else {
@@ -274,7 +288,7 @@ pub(super) fn page(
                 } else {
                     "Agent · run by you".to_string()
                 };
-                list = list.child(
+                list.push(
                     list_row(
                         "profile-agent-self",
                         avatars::project(&space, kit::AVATAR, &theme).into_any_element(),
@@ -289,50 +303,55 @@ pub(super) fn page(
                     .on_click(cx.listener(move |this, _, _, cx| {
                         let pid = pid.clone();
                         this.push_profile(ProfilePage::Agent { project_id: pid }, cx);
-                    })),
+                    }))
+                    .into_any_element(),
                 );
             }
-            div()
-                .flex()
-                .flex_col()
-                .children(add.map(|row| card(&theme).child(row)))
-                .child(list)
+            let mut out = Vec::new();
+            if let Some(row) = add {
+                out.push(Section::Card(vec![row.into_any_element()]));
+            }
+            out.push(Section::Card(list));
+            out
         }
         _ => {
             // Library: images first, then files — one place for everything shared.
-            let mut lib = div().flex().flex_col();
+            let mut out = Vec::new();
             if content.media.is_empty() && content.files.is_empty() {
-                lib = lib.child(empty("Nothing shared here yet", &theme));
+                out.push(Section::Empty("Nothing shared here yet".into()));
             } else {
                 if !content.media.is_empty() {
-                    lib = lib
-                        .child(kit::section_title(
-                            format!("Images · {}", content.media.len()),
-                            &theme,
-                        ))
-                        .child(media_grid(&content.media, &theme));
+                    out.push(Section::Title(
+                        format!("Images · {}", content.media.len()).into(),
+                    ));
+                    out.push(Section::Grid(content.media));
                 }
                 if !content.files.is_empty() {
-                    lib = lib
-                        .child(kit::section_title(
-                            format!("Files · {}", content.files.len()),
-                            &theme,
-                        ))
-                        .child(file_list(&content.files, "doc", "", &theme));
+                    out.push(Section::Title(
+                        format!("Files · {}", content.files.len()).into(),
+                    ));
+                    out.push(Section::Files(content.files));
                 }
             }
-            lib
+            out
         }
     };
 
-    let body = div()
-        .flex()
-        .flex_col()
-        .pb(px(16.0))
-        .child(hero)
-        .child(tabs)
-        .child(body_tab);
-    Some(frame(body, None, Some(&shell.profile_scroll), &theme, cx))
+    Some(pane::render(
+        ProfilePane {
+            page: ProfilePage::Group {
+                space_id: space.id.clone(),
+            },
+            hero,
+            tabs: &TABS,
+            selected: tab,
+            body,
+            footer: Vec::new(),
+            done: None,
+        },
+        shell,
+        cx,
+    ))
 }
 
 /// The hover-only ✕ at a member row's trailing edge; click arms the confirm.

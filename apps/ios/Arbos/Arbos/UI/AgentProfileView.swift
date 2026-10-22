@@ -365,9 +365,9 @@ struct AgentProfileView: View {
             }
             var out: [PaneSection] = []
             if !media.isEmpty { out += [.title("Images · \(media.count)"), .grid(media)] }
-            if !files.isEmpty { out += [.title("Files · \(files.count)"), .custom(AnyView(ChatItemsList(items: files, kind: .file, empty: "")))] }
-            if !voice.isEmpty { out += [.title("Voice · \(voice.count)"), .custom(AnyView(ChatItemsList(items: voice, kind: .voice, empty: "")))] }
-            if !links.isEmpty { out += [.title("Links · \(links.count)"), .custom(AnyView(ChatItemsList(items: links, kind: .link, empty: "")))] }
+            if !files.isEmpty { out += [.title("Files · \(files.count)"), .files(files)] }
+            if !voice.isEmpty { out += [.title("Voice · \(voice.count)"), .voice(voice)] }
+            if !links.isEmpty { out += [.title("Links · \(links.count)"), .links(links)] }
             return out
         default:
             // Profile: name, handle, description (the owner edits by tapping).
