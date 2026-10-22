@@ -1000,11 +1000,7 @@ impl Transcript {
         // gone with the bar itself (#1370).
         let hover_actions = (last && !live).then(|| {
             let actions = self.hover_reply_copy(row_id, message_id, reveal, theme, cx);
-            div()
-                .flex()
-                .items_center()
-                .gap(px(2.0))
-                .child(actions)
+            div().flex().items_center().gap(px(2.0)).child(actions)
         });
         // Messages for Mac: the bubble's time shows beside the glyph on hover.
         let hover_time = (last && !live)
