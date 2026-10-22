@@ -11,6 +11,9 @@ enum DebugHooks {
     static var fixture: Bool { value("ARBOS_FIXTURE") == "1" }
     /// D89 waitlist card and Machine rows: the fixture account's place in line.
     static var fixtureWaitlist: Int? { value("ARBOS_FIXTURE_WAITLIST").flatMap { Int($0) } }
+    /// Seed the connected 1Password vault and the connect flow (`features.vault_connect` on).
+    /// Default off, like the shipped relay flag.
+    static var fixtureVault: Bool { value("ARBOS_FIXTURE_VAULT") == "1" }
     /// Join a call seen via presence automatically (two-simulator relay tests).
     static var autoJoinCall: Bool { value("ARBOS_AUTO_JOIN") == "1" }
     /// Accept an incoming call automatically (two-simulator relay tests).
