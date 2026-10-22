@@ -413,6 +413,9 @@ struct ChatView: View {
         .onAppear {
             model.markRead(chatId: chatId)
             model.visibleChatId = chatId
+            // Restore unsent text left when the user backed out of this thread.
+            let saved = model.composerDraft(for: chatId)
+            if draft.isEmpty, !saved.isEmpty { draft = saved }
             if isPeople { model.markPeopleRead(chatId) }
             if isChannel {
                 // The newest page now, live rows through the listener from here on.
@@ -478,6 +481,8 @@ struct ChatView: View {
             }
         }
         .onDisappear {
+            // Keep the typed draft so coming back to this thread restores it.
+            model.setComposerDraft(draft, for: chatId)
             // Catch notifies that landed after the last onChange mark-read while we were still in the chat
             // (including rows that arrived while the app was inactive on a call — isWatching was false).
             if isPeople { model.markPeopleRead(chatId) }
@@ -1251,6 +1256,9 @@ struct ChatView: View {
                     .padding(.leading, 16)
                     .padding(.vertical, 10)
                     .onChange(of: draft) { _, d in
+                        // Keep the draft while the view is still up so a process kill mid-type
+                        // is not required — leaving the thread saves on disappear too.
+                        model.setComposerDraft(d, for: chatId)
                         // `@` completion: the token the caret is in (approximated by the last token).
                         guard isPeople, let last = d.split(separator: " ", omittingEmptySubsequences: false).last, last.hasPrefix("@"), !d.hasSuffix(" ") else {
                             mentionQuery = nil
@@ -1502,6 +1510,7 @@ struct ChatView: View {
         let chips = chipMentions(for: typed)
         pending.removeAll()
         draft = ""
+        model.setComposerDraft("", for: chatId)
         replyTo = nil
         mentionQuery = nil
         pinTalkTo(afterSending: address, chipMentions: chips)
@@ -1555,6 +1564,7 @@ struct ChatView: View {
             model.sendChannel(chatId: chatId, text: text)
             pending.removeAll()
             draft = ""
+            model.setComposerDraft("", for: chatId)
             replyTo = nil
             sentOnce = true
             return
@@ -1566,6 +1576,7 @@ struct ChatView: View {
                              chipMentions: chips, attachments: pending)
             pending.removeAll()
             draft = ""
+            model.setComposerDraft("", for: chatId)
             replyTo = nil
             mentionQuery = nil
             pinTalkTo(afterSending: address, chipMentions: chips)
@@ -1579,6 +1590,7 @@ struct ChatView: View {
         }
         pending.removeAll()
         draft = ""
+        model.setComposerDraft("", for: chatId)
         replyTo = nil
         sentOnce = true
     }
