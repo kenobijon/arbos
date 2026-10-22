@@ -3,8 +3,8 @@
 //! member lists, group lists, file lists, Block user and Sign out all come
 //! from here, so a metric lives in exactly one place:
 //!
-//! * card: `PANEL_RADIUS` corners, `bubble_assistant` fill (the D80 grey, the iPhone's
-//!   `PaneCard`), 16 pt side margins;
+//! * card: `PANEL_RADIUS` corners, `pane_card` fill (dark: the D80 grey, the
+//!   iPhone's `PaneCard`; light: white on the grey pane), 16 pt side margins;
 //! * row: 48 pt minimum, 16 pt inset, 12 pt gap, hairline under the label;
 //! * leading: a 30 pt icon tile (settings), a 36 pt avatar (people, agents,
 //!   groups) or nothing;
@@ -53,7 +53,7 @@ pub fn card(theme: &Theme) -> Div {
         .mx(px(INSET))
         .mb(px(14.0))
         .rounded(px(PANEL_RADIUS))
-        .bg(theme.bubble_assistant)
+        .bg(theme.pane_card)
         .overflow_hidden()
 }
 
