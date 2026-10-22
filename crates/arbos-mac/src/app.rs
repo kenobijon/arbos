@@ -3109,6 +3109,39 @@ impl AppState {
             server_id,
             channel_id,
             name: Some(name),
+            topic: None,
+            restricted: None,
+        });
+        cx.notify();
+    }
+
+    /// Channel page, Settings: the topic (owner/admin; ≤ 200 chars, empty clears it).
+    pub fn set_channel_topic(
+        &mut self,
+        server_id: Id,
+        channel_id: Id,
+        topic: String,
+        cx: &mut Context<Self>,
+    ) {
+        let topic: String = topic.trim().chars().take(200).collect();
+        if let Some(c) = self
+            .servers
+            .iter_mut()
+            .find(|s| s.id == server_id)
+            .filter(|s| s.can_admin())
+            .and_then(|s| s.channels.iter_mut().find(|c| c.id == channel_id))
+        {
+            if c.topic == topic {
+                cx.notify();
+                return;
+            }
+            c.topic = topic.clone();
+        }
+        self.command(ClientCommand::ChannelPatch {
+            server_id,
+            channel_id,
+            name: None,
+            topic: Some(topic),
             restricted: None,
         });
         cx.notify();
@@ -3135,6 +3168,7 @@ impl AppState {
             server_id,
             channel_id,
             name: None,
+            topic: None,
             restricted: Some(restricted),
         });
         cx.notify();
@@ -3486,7 +3520,7 @@ impl AppState {
                     },
                     cx,
                 );
-            } else if part == "channel" {
+            } else if part == "channel" || part == "channel-settings" {
                 if let Some(c) = self.selected_channel.clone() {
                     self.open_profile(
                         ProfilePage::Channel {
@@ -3495,6 +3529,9 @@ impl AppState {
                         },
                         cx,
                     );
+                    if part == "channel-settings" {
+                        self.set_profile_tab(1, cx);
+                    }
                 }
             } else if part == "menu" || part == "menu-delete" {
                 self.rig_channel_menu = Some(part == "menu-delete");

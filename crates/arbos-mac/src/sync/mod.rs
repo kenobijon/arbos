@@ -823,6 +823,7 @@ pub enum ClientCommand {
         server_id: Id,
         channel_id: Id,
         name: Option<String>,
+        topic: Option<String>,
         restricted: Option<bool>,
     },
     /// D88: `DELETE /servers/{id}/channels/{cid}` (owner/admin; `#general` refuses).

@@ -207,6 +207,8 @@ pub struct Shell {
     /// on the server page; `channel_rename` is the channel being renamed there.
     pub(crate) server_input: Entity<ComposerInput>,
     pub(crate) channel_rename: Option<crate::model::Id>,
+    /// Channel page › Settings: the channel whose topic is being edited in `server_input`.
+    pub(crate) channel_topic_edit: Option<crate::model::Id>,
     /// D88: the "Admins only post" toggle of the new-channel sheet.
     pub(crate) new_channel_restricted: bool,
     /// D88: a member row's ✕ was clicked on the server page: Cancel / Remove / Ban.
@@ -664,6 +666,7 @@ impl Shell {
             search_open: false,
             server_input,
             channel_rename: None,
+            channel_topic_edit: None,
             new_channel_restricted: false,
             server_member_armed: None,
             server_leave_armed: false,
@@ -1062,6 +1065,7 @@ impl Shell {
         self.row_menu = None;
         self.channel_menu = None;
         self.channel_rename = None;
+        self.channel_topic_edit = None;
         self.new_channel_restricted = false;
         self.server_input.update(cx, |input, cx| {
             input.clear(cx);
@@ -1092,14 +1096,26 @@ impl Shell {
     /// rename on the server page.
     pub(crate) fn submit_server_input(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let text = self.server_input.read(cx).text().trim().to_string();
+        // The inline channel rename / topic edit lives on the server page or the channel page.
+        let page_server = match self.state.read(cx).profile.clone() {
+            Some(ProfilePage::Server { server_id })
+            | Some(ProfilePage::Channel { server_id, .. }) => Some(server_id),
+            _ => None,
+        };
         if let Some(channel_id) = self.channel_rename.take() {
-            let server_id = match self.state.read(cx).profile.clone() {
-                Some(ProfilePage::Server { server_id }) => server_id,
-                _ => return,
-            };
+            let Some(server_id) = page_server else { return };
             self.server_input.update(cx, |input, cx| input.clear(cx));
             self.state.update(cx, |s, cx| {
                 s.set_channel_name(server_id, channel_id, text, cx);
+            });
+            cx.notify();
+            return;
+        }
+        if let Some(channel_id) = self.channel_topic_edit.take() {
+            let Some(server_id) = page_server else { return };
+            self.server_input.update(cx, |input, cx| input.clear(cx));
+            self.state.update(cx, |s, cx| {
+                s.set_channel_topic(server_id, channel_id, text, cx);
             });
             cx.notify();
             return;
@@ -1125,6 +1141,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.channel_topic_edit = None;
         self.channel_rename = Some(channel_id);
         self.server_input.update(cx, |input, cx| {
             input.set_placeholder("channel-name");
@@ -1136,8 +1153,28 @@ impl Shell {
         cx.notify();
     }
 
+    /// Channel page › Settings: the Topic row becomes a field (owner/admin).
+    pub(crate) fn start_edit_channel_topic(
+        &mut self,
+        channel_id: crate::model::Id,
+        topic: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.channel_rename = None;
+        self.channel_topic_edit = Some(channel_id);
+        self.server_input.update(cx, |input, cx| {
+            input.set_placeholder("What this channel is for");
+            input.set_text(topic, cx);
+            input.select_all_text(cx);
+        });
+        let handle = self.server_input.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
     pub(crate) fn cancel_rename_channel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.channel_rename.take().is_some() {
+        if self.channel_rename.take().is_some() || self.channel_topic_edit.take().is_some() {
             self.server_input.update(cx, |input, cx| input.clear(cx));
             Composer::focus(&self.composer, window, cx);
             cx.notify();
@@ -1265,6 +1302,7 @@ impl Shell {
         self.server_member_armed = None;
         self.server_leave_armed = false;
         self.channel_rename = None;
+        self.channel_topic_edit = None;
         self.state.update(cx, |s, cx| {
             s.close_profile(cx);
         });
@@ -1451,7 +1489,7 @@ impl Shell {
             self.cancel_tab_rename(window, cx);
             return;
         }
-        if self.channel_rename.is_some() {
+        if self.channel_rename.is_some() || self.channel_topic_edit.is_some() {
             self.cancel_rename_channel(window, cx);
             return;
         }
@@ -3044,7 +3082,7 @@ impl Render for Shell {
                     }
                     // Likewise a click outside an inline channel rename (its row stops
                     // propagation too) — that one cancels.
-                    if this.channel_rename.is_some() {
+                    if this.channel_rename.is_some() || this.channel_topic_edit.is_some() {
                         this.cancel_rename_channel(window, cx);
                         return;
                     }
