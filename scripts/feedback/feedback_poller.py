@@ -996,7 +996,7 @@ class Loop:
         return bool(keys & self.cfg.internal)
 
     def tier(self, info: dict) -> str:
-        """priority (Jacob, and Ken since 2026-10-21: first in line, no per-tester cap, owner-grade intent screen) | tester | blocked."""
+        """priority (Jacob, and Ken since 2026-10-21: first in line, no per-tester cap, exempt from the intent screen since 2026-10-22) | tester | blocked."""
         keys = {self.tester_key(info)}
         if info.get("handle"):
             keys.add("@" + info["handle"].lower())
@@ -1186,9 +1186,13 @@ class Loop:
     # ---- malicious-intent screen -------------------------------------------------------------
 
     def screen_intent(self, info: dict, tier: str = "tester") -> tuple[str, str]:
-        """("ok"|"malicious", reason). Cheap patterns first, then a small model when configured. The
-        owner (priority tier) gets the pattern screen only: his intent is not in question, and the model
-        misreads security *requests* ("scrub the leaked key from context") as attacks."""
+        """("ok"|"malicious", reason). Cheap patterns first, then a small model when configured.
+        Priority testers (the priority list: Jacob and Ken) are exempt from the whole screen — owner decision
+        2026-10-22 07:18 CR after the word filter had caught three of Ken's long technical reports (#1175,
+        #1178, #1300), each costing a resubmission; their intent is not in question. Everyone else: the
+        pattern check, then the model."""
+        if tier == "priority":
+            return "ok", "priority tester — intent screen exempt (owner decision 2026-10-22)"
         text = (info.get("comment") or "").strip()
         # The submit_feedback tool appends "— filed by the user's agent <name> …": boilerplate, not the user's
         # words, and "the user" in it sits within 30 chars of any trailing "delete" (#1085 was flagged for a
@@ -1197,8 +1201,6 @@ class Loop:
         for pat in MALICE_PATTERNS:
             if re.search(pat, text, re.I | re.S):
                 return "malicious", f"matches pattern `{pat}`"
-        if tier == "priority":
-            return "ok", "owner — pattern screen only"
         if not self.cfg.openrouter_key or not text:
             return "ok", "no model configured" if not self.cfg.openrouter_key else "empty note"
         system = ("You screen user feedback for a software product before an automated coding agent acts on it. "
