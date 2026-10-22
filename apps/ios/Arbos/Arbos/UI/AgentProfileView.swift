@@ -15,7 +15,6 @@ struct AgentEditSheet: View {
     @State private var editingName = false
     @State private var showModel = false
     @State private var showVoice = false
-    @State private var showShare = false
     @FocusState private var nameFocused: Bool
 
     private var project: Project? { model.project(projectId) }
@@ -74,10 +73,6 @@ struct AgentEditSheet: View {
                                         .accessibilityLabel("Camera vision")
                                 )
                             )
-                            Button { showShare = true } label: {
-                                row(icon: "person.2", title: project.shared ? "Members" : "Share", value: project.shared ? "Owned by @\(project.ownerHandle ?? "?")" : "Invite by @handle")
-                            }
-                            .buttonStyle(.plain)
                         }
                         .padding(.horizontal, 16)
                         .padding(.top, 14)
@@ -122,9 +117,6 @@ struct AgentEditSheet: View {
             }
             .sheet(isPresented: $showVoice) {
                 if let project { VoicePickerView(project: project).environmentObject(model).environment(\.theme, theme) }
-            }
-            .sheet(isPresented: $showShare) {
-                if let project { ProjectMembersSheet(project: project).environmentObject(model).environment(\.theme, theme) }
             }
             .onAppear { name = project?.name ?? "" }
         }
@@ -254,7 +246,6 @@ struct AgentProfileView: View {
     @State private var descriptionDraft = ""
     @State private var showSecrets = false
     @State private var confirmDelete = false
-    @State private var showShare = false
 
     private var project: Project? { model.project(projectId) ?? fallback }
     private var isMine: Bool { model.project(projectId) != nil && project?.shared != true }
@@ -301,9 +292,6 @@ struct AgentProfileView: View {
         }
         .sheet(isPresented: $showEdit) {
             AgentEditSheet(projectId: projectId).environmentObject(model).environment(\.theme, theme)
-        }
-        .sheet(isPresented: $showShare) {
-            if let project { ProjectMembersSheet(project: project).environmentObject(model).environment(\.theme, theme) }
         }
         .sheet(isPresented: $showSecrets) {
             NavigationStack { AgentSecretsPage(projectId: projectId) }
