@@ -4971,6 +4971,33 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 }
             });
         }
+        ClientCommand::SetVision {
+            project_id,
+            enabled,
+        } => {
+            {
+                let mut projects = shared.projects.lock().unwrap();
+                if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
+                    p.vision_enabled = enabled;
+                }
+                let snapshot = projects.clone();
+                drop(projects);
+                let _ = shared.events.send(SyncEvent::Projects(snapshot));
+            }
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let body = json!({ "vision_enabled": enabled });
+                match shared
+                    .patch_json(&format!("/projects/{project_id}"), body)
+                    .await
+                {
+                    Ok(_) => {}
+                    Err(err) => {
+                        shared.notice(format!("Camera vision not saved: {}", people_error(&err)))
+                    }
+                }
+            });
+        }
         ClientCommand::SetModel {
             project_id,
             model,

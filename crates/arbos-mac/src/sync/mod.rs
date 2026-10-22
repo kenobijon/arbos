@@ -533,6 +533,12 @@ pub enum ClientCommand {
         project_id: Id,
         voice: Option<String>,
     },
+    /// `PATCH /projects/{id} {"vision_enabled": bool}` — may the agent look
+    /// through my camera on calls (voice API §11). Set from the call screen.
+    SetVision {
+        project_id: Id,
+        enabled: bool,
+    },
     /// `GET /voices` → [`SyncEvent::Voices`].
     FetchVoices,
     /// Download (once; cached in the config dir) a voice sample → [`SyncEvent::VoiceSample`].
