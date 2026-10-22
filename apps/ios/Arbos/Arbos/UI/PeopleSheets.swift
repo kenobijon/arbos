@@ -468,12 +468,12 @@ struct NewGroupView: View {
                     HStack(spacing: 8) {
                         ForEach(pickedAgents) { p in
                             MemberChip(label: "@\(mentionSlug(p.name))", onRemove: { toggleAgent(p) }) {
-                                AgentAvatar(project: p, theme: theme, size: MemberChip.avatar, still: true)
+                                AgentAvatar(project: p, theme: theme, size: memberChipAvatar, still: true)
                             }
                         }
                         ForEach(picked) { p in
                             MemberChip(label: "@\(p.handle)", onRemove: { toggle(p) }) {
-                                PersonAvatar(url: p.avatarUrl, handle: p.handle, size: MemberChip.avatar, name: p.name, id: p.id, colorIndex: p.avatarColorIndex)
+                                PersonAvatar(url: p.avatarUrl, handle: p.handle, size: memberChipAvatar, name: p.name, id: p.id, colorIndex: p.avatarColorIndex)
                             }
                         }
                     }
@@ -819,9 +819,12 @@ extension View {
 /// One selected member in a picker (New group, Add members): the member's
 /// picture, `@handle`, and an × that removes it. People and agents share it,
 /// so an agent chip carries the agent's avatar exactly like a person chip.
+/// Avatar size inside a selected-member chip (a free constant: a static on the
+/// generic chip cannot be named without its type parameter).
+let memberChipAvatar: CGFloat = 22
+
 struct MemberChip<Picture: View>: View {
     @Environment(\.theme) private var theme
-    static var avatar: CGFloat { 22 }
     let label: String
     let onRemove: () -> Void
     let picture: () -> Picture
