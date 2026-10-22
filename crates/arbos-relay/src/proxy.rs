@@ -962,13 +962,18 @@ pub async fn audio_transcriptions(
 }
 
 /// `POST /proxy/v1/audio/speech`: `{ model, input, voice, response_format }` → audio bytes.
-/// Metered by input characters; `ARBOS_VOICE_MOCK=1` returns a 1 s sine WAV.
+/// Metered by input characters; `ARBOS_VOICE_MOCK=1` returns a 1 s sine WAV. Refused with
+/// 403 `feature_off` while `features.voice_mode` is off — the one place every client's TTS
+/// spend goes through, so an app that still shows the switch cannot spend either.
 pub async fn audio_speech(
     State(state): State<AppState>,
     principal: Principal,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    if !crate::features::voice_mode() {
+        return speech_feature_off();
+    }
     let project_id = audio_project(&state, &principal, &headers);
     if let Some(r) = audio_spend_cap(&state, &principal, &project_id) {
         return r;
@@ -1104,6 +1109,20 @@ pub async fn audio_speech(
     (status, resp_headers, bytes).into_response()
 }
 
+/// The answer to a TTS request while voice mode is switched off on the relay.
+pub fn speech_feature_off() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        [("content-type", "application/json")],
+        json!({
+            "error": "feature_off",
+            "message": "Voice mode is off on this relay (features.voice_mode); spoken replies are not synthesised.",
+        })
+        .to_string(),
+    )
+        .into_response()
+}
+
 /// A buffered TTS body with real RIFF/`data` sizes: streamed WAV placeholders are rewritten,
 /// every other format (mp3, opus, …) passes through unchanged.
 pub fn finish_wav_body(mut bytes: Vec<u8>) -> Vec<u8> {
@@ -1185,6 +1204,19 @@ mod tests {
 
         let mp3 = b"ID3\x04\x00\x00\x00\x00\x00\x00\xff\xfb\x90\x00".to_vec();
         assert_eq!(finish_wav_body(mp3.clone()), mp3);
+    }
+
+    /// Voice mode off → TTS is refused before any upstream call or metering (no spend).
+    #[test]
+    fn speech_is_refused_while_voice_mode_is_off() {
+        let r = speech_feature_off();
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            r.headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok()),
+            Some("application/json")
+        );
     }
 
     #[test]

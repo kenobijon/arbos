@@ -22,11 +22,10 @@ use crate::ui::callview;
 use crate::ui::channels::{ChannelsEvent, ChannelsPanel};
 use crate::ui::composer::{Composer, ComposerEvent, ComposerInput};
 use crate::ui::connectors::{ConnectorsEvent, ConnectorsPanel};
-use crate::ui::create_agent;
+use crate::ui::create_entity::{self, Kind as CreateKind};
 use crate::ui::feedback::{FeedbackSheet, SendFeedback};
 use crate::ui::frost::{frosted, MENU_BLUR, PANEL_BLUR};
 use crate::ui::glass::{self, WindowDrag};
-use crate::ui::groups;
 use crate::ui::header;
 use crate::ui::icons::icon;
 use crate::ui::local::{LocalEvent, LocalPanel};
@@ -172,9 +171,11 @@ pub struct Shell {
     pub(crate) project_input: Entity<ComposerInput>,
     /// D79: the swatch picked for the agent being created; `None` = automatic.
     pub(crate) new_agent_color: Option<u8>,
-    /// D92 Create agent sheet: the leaf and colour clicked; `None` = the sheet's default pick.
-    pub(crate) new_agent_leaf: Option<u8>,
-    pub(crate) new_agent_leaf_color: Option<u8>,
+    /// D93 Create screen: the leaf and colour clicked; `None` = the sheet's default pick.
+    pub(crate) create_leaf: Option<u8>,
+    pub(crate) create_leaf_color: Option<u8>,
+    /// Create group, step 1 (picture + name) showing over the New Message backdrop.
+    pub(crate) create_group_open: bool,
     /// Sidebar search field.
     pub(crate) search_input: Entity<ComposerInput>,
     pub(crate) connectors: Entity<ConnectorsPanel>,
@@ -194,8 +195,6 @@ pub struct Shell {
     pub(crate) routines: Entity<RoutinesPanel>,
     pub(crate) routines_open: bool,
     pub(crate) channels: Entity<ChannelsPanel>,
-    /// F6: the "add a project to this chat" picker (sidebar row menu).
-    group_picker_open: bool,
     pub(crate) secrets: Entity<SecretsPanel>,
     shake_started_at: Option<u64>,
     /// True while the sign-in screen is up; its clearing focuses the composer.
@@ -231,6 +230,9 @@ pub struct Shell {
     /// The row menu's Delete was clicked once: it now shows "Delete …?" with
     /// Cancel / Delete instead of the action list (iPhone confirmationDialog).
     pub(crate) row_delete_armed: bool,
+    /// The agent pane's "Delete agent" was clicked once: the footer row asks
+    /// to confirm (D93 footer, #1318).
+    pub(crate) agent_delete_armed: bool,
     /// Group pane › Members: the row whose ✕ was clicked (`user:<id>` or
     /// `agent:<project>`); it shows "Remove … ?" with Cancel / Remove.
     pub(crate) member_remove_armed: Option<String>,
@@ -285,15 +287,6 @@ pub struct Shell {
 }
 
 impl Shell {
-    pub(crate) fn app_state(&self) -> &Entity<AppState> {
-        &self.state
-    }
-
-    pub(crate) fn set_group_picker(&mut self, open: bool, cx: &mut Context<Self>) {
-        self.group_picker_open = open;
-        cx.notify();
-    }
-
     pub fn new(state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let open_settings = std::env::var("ARBOS_OPEN_SETTINGS").ok().filter(|v| {
             v == "1"
@@ -544,6 +537,28 @@ impl Shell {
                 project_input.update(cx, |input, cx| input.set_text(name, cx));
             }
         }
+        // Rig: `ARBOS_OPEN_CREATE=group|server` opens the D93 Create screen for that entity
+        // (group = step 1; `ARBOS_OPEN_NEW_GROUP=1` is step 2); `ARBOS_NEW_AGENT_NAME` prefills.
+        let open_create = std::env::var("ARBOS_OPEN_CREATE").ok();
+        let create_group_open = open_create.as_deref() == Some("group");
+        if create_group_open {
+            state.update(cx, |s, cx| s.open_new_chat(cx));
+            project_input.update(cx, |input, cx| {
+                input.set_placeholder(CreateKind::Group.placeholder());
+                if let Ok(name) = std::env::var("ARBOS_NEW_AGENT_NAME") {
+                    input.set_text(name, cx);
+                }
+            });
+        }
+        if open_create.as_deref() == Some("server") {
+            state.update(cx, |s, cx| s.open_server_sheet(ServerSheet::NewServer, cx));
+            server_input.update(cx, |input, cx| {
+                input.set_placeholder(CreateKind::Server.placeholder());
+                if let Ok(name) = std::env::var("ARBOS_NEW_AGENT_NAME") {
+                    input.set_text(name, cx);
+                }
+            });
+        }
         let connectors = cx.new(|cx| ConnectorsPanel::new(state.clone(), cx));
         // Rig: `ARBOS_OPEN_SETTINGS=connectors` — the Connectors page inside the sheet.
         if open_settings.as_deref() == Some("connectors") {
@@ -630,8 +645,9 @@ impl Shell {
             pairing_input,
             project_input,
             new_agent_color: None,
-            new_agent_leaf: None,
-            new_agent_leaf_color: None,
+            create_leaf: None,
+            create_leaf_color: None,
+            create_group_open,
             search_input,
             connectors,
             skills,
@@ -653,11 +669,11 @@ impl Shell {
             channel_menu: None,
             channel_delete_armed: false,
             row_delete_armed: false,
+            agent_delete_armed: false,
             member_remove_armed: None,
             chat_menu: None,
             chat_delete_armed: false,
             react_menu: None,
-            group_picker_open: false,
             renaming_tab: None,
             tab_rename_input,
             tab_menu_open: false,
@@ -910,15 +926,84 @@ impl Shell {
         let color = self.new_agent_color.take();
         // D92: the Create sheet always shows a definite leaf + colour; send that pair so the
         // new agent looks exactly like its preview.
-        let pick = crate::ui::create_agent::current_pick(self, cx);
-        self.new_agent_leaf = None;
-        self.new_agent_leaf_color = None;
+        let pick = create_entity::current_pick(self, CreateKind::Agent, cx);
+        self.create_leaf = None;
+        self.create_leaf_color = None;
         self.state.update(cx, |s, cx| {
             s.new_project_open = false;
             s.close_new_chat(cx);
             s.create_project(name, color, Some(pick), cx);
         });
         Composer::focus(&self.composer, window, cx);
+    }
+
+    /// Open the Create group screen (step 1) over the New Message backdrop.
+    pub(crate) fn open_create_group(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.create_group_open = true;
+        self.create_leaf = None;
+        self.create_leaf_color = None;
+        self.project_input.update(cx, |input, cx| {
+            input.set_placeholder(CreateKind::Group.placeholder());
+            input.clear(cx);
+        });
+        let handle = self.project_input.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
+    /// The Create screen's action: agents create, groups go on to the member
+    /// picker (step 2) with the name + leaf kept as the draft, servers create.
+    pub(crate) fn submit_create(
+        &mut self,
+        kind: CreateKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match kind {
+            CreateKind::Agent => self.submit_project(window, cx),
+            CreateKind::Group => {
+                let name = self.project_input.read(cx).text().trim().to_string();
+                if name.is_empty() {
+                    return;
+                }
+                let pick = create_entity::current_pick(self, kind, cx);
+                self.create_group_open = false;
+                self.create_leaf = None;
+                self.create_leaf_color = None;
+                self.project_input.update(cx, |input, cx| input.clear(cx));
+                self.people_input.update(cx, |input, _| {
+                    input.set_placeholder("Add people or agents");
+                });
+                self.state.update(cx, |s, cx| {
+                    s.new_group_draft = Some((name, pick));
+                    s.open_new_group(cx);
+                });
+                let handle = self.people_input.read(cx).focus_handle(cx);
+                window.focus(&handle, cx);
+            }
+            CreateKind::Server => {
+                let name = self.server_input.read(cx).text().trim().to_string();
+                if name.is_empty() {
+                    return;
+                }
+                let pick = create_entity::current_pick(self, kind, cx);
+                self.state
+                    .update(cx, |s, cx| s.create_server(name, Some(pick), cx));
+            }
+        }
+    }
+
+    /// × / Cancel / click outside on a Create screen.
+    pub(crate) fn cancel_create(
+        &mut self,
+        kind: CreateKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match kind {
+            CreateKind::Agent | CreateKind::Group => self.close_new_chat_sheet(window, cx),
+            CreateKind::Server => self.close_server_sheet(window, cx),
+        }
     }
 
     /// Double-click an agent's name: load it into the rename field and focus.
@@ -1070,7 +1155,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         let placeholder = match &sheet {
-            ServerSheet::NewServer => "Server name",
+            ServerSheet::NewServer => CreateKind::Server.placeholder(),
             ServerSheet::JoinServer => "Invite link or code",
             ServerSheet::NewChannel { .. } => "channel-name",
         };
@@ -1124,8 +1209,10 @@ impl Shell {
             return;
         };
         let restricted = self.new_channel_restricted;
+        // Enter in the Create screen: same as its action button.
+        let server_pick = create_entity::current_pick(self, CreateKind::Server, cx);
         self.state.update(cx, |s, cx| match sheet {
-            ServerSheet::NewServer => s.create_server(text, cx),
+            ServerSheet::NewServer => s.create_server(text, Some(server_pick), cx),
             ServerSheet::JoinServer => s.join_server(text, cx),
             ServerSheet::NewChannel { server_id } => {
                 s.create_channel(server_id, text, restricted, cx)
@@ -1278,6 +1365,7 @@ impl Shell {
         self.hide_settings_page(cx);
         self.profile_edit_open = false;
         self.member_remove_armed = None;
+        self.agent_delete_armed = false;
         self.server_member_armed = None;
         self.server_leave_armed = false;
         self.channel_rename = None;
@@ -1328,11 +1416,16 @@ impl Shell {
     pub(crate) fn close_new_chat_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.people_input
             .update(cx, |input, _| input.set_placeholder("Search people"));
-        self.new_agent_leaf = None;
-        self.new_agent_leaf_color = None;
-        self.project_input.update(cx, |input, cx| input.clear(cx));
+        self.create_leaf = None;
+        self.create_leaf_color = None;
+        self.create_group_open = false;
+        self.project_input.update(cx, |input, cx| {
+            input.set_placeholder(CreateKind::Agent.placeholder());
+            input.clear(cx);
+        });
         self.state.update(cx, |s, cx| {
             s.new_project_open = false;
+            s.new_group_draft = None;
             s.close_new_chat(cx);
         });
         Composer::focus(&self.composer, window, cx);
@@ -1527,7 +1620,6 @@ impl Shell {
         let floating = self.menu_open
             || self.members_open
             || self.add_agent_open
-            || self.group_picker_open
             || self.tab_menu_open
             || self.row_menu.is_some()
             || self.chat_menu.is_some()
@@ -1680,7 +1772,6 @@ impl Shell {
         if self.menu_open
             || self.members_open
             || self.add_agent_open
-            || self.group_picker_open
             || self.tab_menu_open
             || self.row_menu.is_some()
             || self.channel_menu.is_some()
@@ -1690,11 +1781,11 @@ impl Shell {
             self.menu_open = false;
             self.members_open = false;
             self.add_agent_open = false;
-            self.group_picker_open = false;
             self.tab_menu_open = false;
             self.row_menu = None;
             self.channel_menu = None;
             self.row_delete_armed = false;
+            self.agent_delete_armed = false;
             self.channel_menu = None;
             self.channel_delete_armed = false;
             self.chat_menu = None;
@@ -2130,17 +2221,34 @@ impl Shell {
         let shake_offset = shake
             .map(|dt| ((dt as f32 / SHAKE_MS as f32) * std::f32::consts::PI * 4.0).sin() * 3.0)
             .unwrap_or(0.0);
-        column = column.child(
-            div()
-                .relative()
-                .left(px(shake_offset))
-                // Without the sidebar the traffic lights sit over this header:
-                // clear them (14 pt in, three 12 pt lights, 8 pt gaps).
-                .when(sidebar_hidden, |el| el.pl(px(TRAFFIC_LIGHTS_INSET)))
-                .child(header::render(self, &space, sidebar_hidden, cx)),
-        );
+        // The header. With a transcript it floats over the list top like Grok's
+        // (the list runs under it and fades out through the band, see below),
+        // so it is appended last as an absolute overlay; everything else in the
+        // column is laid out from the top as before.
+        let header_bar = div()
+            .relative()
+            .left(px(shake_offset))
+            // Without the sidebar the traffic lights sit over this header:
+            // clear them (14 pt in, three 12 pt lights, 8 pt gaps).
+            .when(sidebar_hidden, |el| el.pl(px(TRAFFIC_LIGHTS_INSET)))
+            .child(header::render(self, &space, sidebar_hidden, cx));
+        let floating_header = dropped;
+        let mut flow_under_header = !floating_header;
+        let mut header_bar = Some(header_bar);
+        if !floating_header {
+            column = column.child(header_bar.take().expect("header built once"));
+        }
+        // Flow children between the header and the list start under the bar.
+        let mut pad_first = |el: Div| -> Div {
+            if !flow_under_header {
+                flow_under_header = true;
+                el.pt(px(HEADER_HEIGHT))
+            } else {
+                el
+            }
+        };
         if let Some(chips) = header::chips(self, &space, cx) {
-            column = column.child(chips);
+            column = column.child(pad_first(div()).child(chips));
         }
         // Calls v1: my call (bar, or the full screen below), or a live call to join.
         let my_call = self.state.read(cx).my_call.clone();
@@ -2150,7 +2258,7 @@ impl Shell {
             .map(|c| c.expanded && c.call.space_id() == space.id)
             .unwrap_or(false);
         if let Some(active) = my_call.as_ref().filter(|_| !screen_open) {
-            column = column.child(callview::bar(self, active, cx));
+            column = column.child(pad_first(div()).child(callview::bar(self, active, cx)));
         } else if let Some(call) = call_here.filter(|c| {
             c.is_live()
                 && my_call
@@ -2158,10 +2266,10 @@ impl Shell {
                     .map(|m| m.call.call_id != c.call_id)
                     .unwrap_or(true)
         }) {
-            column = column.child(callview::join_bar(&call, cx));
+            column = column.child(pad_first(div()).child(callview::join_bar(&call, cx)));
         }
         if let Some(banner) = self.render_banner(cx) {
-            column = column.child(banner);
+            column = column.child(pad_first(div()).child(banner));
         }
         if screen_open {
             if let Some(active) = my_call.as_ref() {
@@ -2199,7 +2307,7 @@ impl Shell {
             } else {
                 // A group of agents only: its own picture, else the initials disc.
                 let state = self.state.read(cx);
-                hero = hero.child(groups::picture(&space, state, 88.0, &theme));
+                hero = hero.child(crate::ui::groups::picture(&space, state, 88.0, &theme));
             }
             column = column.child(
                 div()
@@ -2238,11 +2346,12 @@ impl Shell {
             // Transcript above, composer pinned at the bottom. On the first
             // send the composer slides down from the centre over 220 ms using
             // a relative `top` inset (GPUI has no transform).
-            // The window-drag catchment reaches 24 pt past the 44 pt header,
-            // over the transcript's top fade (Jacob: the band alone was too
-            // small to grab). The strip arms a move only after the pointer
-            // travels `WINDOW_DRAG_SLOP`, so a click there still lands on the
-            // faded bubble beneath ([feedback mac-collapsed-toggle-inline]).
+            // Grok's header treatment (Jacob, Oct 22 12:49 CR, superseding the
+            // opaque band): the list runs up under the floating pill and fades
+            // out through the top band (`Transcript` fades `HEADER_FADE_BAND`).
+            // The window-drag catchment is the 44 pt header plus 24 pt below
+            // it; the strip arms a move only after `WINDOW_DRAG_SLOP`, so a
+            // click there still lands on the faded bubble beneath.
             let body = div()
                 .flex_1()
                 .min_h_0()
@@ -2251,7 +2360,11 @@ impl Shell {
                 .child(
                     div()
                         .absolute()
-                        .top_0()
+                        .top(px(if flow_under_header {
+                            0.0
+                        } else {
+                            HEADER_HEIGHT
+                        }))
                         .left_0()
                         .right_0()
                         .h(px(HEADER_DRAG_OVERHANG))
@@ -2290,6 +2403,17 @@ impl Shell {
                 .child(body)
                 .child(self.voice.clone())
                 .child(composer_row);
+            // Last, so it paints over the list: the floating header (its own
+            // hitboxes — pill, toggle, drag band — stay on top as well).
+            column = column.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .right_0()
+                    .h(px(HEADER_HEIGHT))
+                    .children(header_bar.take()),
+            );
         }
         // Accept Finder / file drops anywhere over the conversation (transcript,
         // empty hero, or composer) — not only the input field. The composer
@@ -3176,14 +3300,6 @@ impl Render for Shell {
         if let Some(menu) = self.react_menu(cx) {
             root = root.child(menu);
         }
-        if self.group_picker_open {
-            root = root.child(glass::popover(groups::picker(
-                &self.state,
-                TAB_BAR_HEIGHT - 4.0,
-                16.0,
-                cx,
-            )));
-        }
         if let Some(space) = people_space {
             let right = 16.0;
             if self.add_agent_open {
@@ -3239,15 +3355,21 @@ impl Render for Shell {
             }
         }
         if new_chat_open {
-            // D92: "New agent" opens its own Create sheet over the same backdrop.
+            // D93: "New agent" / "New group" open the Create screen over the same backdrop
+            // (a group goes on to the member picker as step 2).
             if self.state.read(cx).new_project_open {
-                root = root.child(create_agent::sheet(self, cx));
+                root = root.child(create_entity::sheet(self, CreateKind::Agent, cx));
+            } else if self.create_group_open {
+                root = root.child(create_entity::sheet(self, CreateKind::Group, cx));
             } else {
                 root = root.child(people::new_chat_sheet(&self.state, &self.people_input, cx));
             }
         }
         if let Some(sheet) = self.state.read(cx).server_sheet.clone() {
-            root = root.child(servers::sheet(self, &sheet, cx));
+            root = root.child(match sheet {
+                ServerSheet::NewServer => create_entity::sheet(self, CreateKind::Server, cx),
+                other => servers::sheet(self, &other, cx),
+            });
         }
         if self.feedback.read(cx).is_open() {
             root = root.child(self.feedback.clone());

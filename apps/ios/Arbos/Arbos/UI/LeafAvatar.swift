@@ -21,6 +21,20 @@ final class LeafAvatarsFlag: ObservableObject {
     }
 }
 
+/// Remote flag `features.voice_mode` from `GET /me` (default **off**; the relay's
+/// `ARBOS_FEATURE_VOICE_MODE=1` brings it back without an app release). Off → no voice
+/// picker row, no voice catalogue request; the code stays (Jacob, 2026-10-22).
+final class VoiceModeFlag: ObservableObject {
+    static let shared = VoiceModeFlag()
+    @Published private(set) var on: Bool = UserDefaults.standard.object(forKey: "features.voice_mode") as? Bool ?? false
+
+    func set(_ value: Bool) {
+        guard value != on else { return }
+        on = value
+        UserDefaults.standard.set(value, forKey: "features.voice_mode")
+    }
+}
+
 /// The shared tables, cached per launch.
 enum LeafArt {
     static let count = Int(leafCount())
@@ -142,6 +156,21 @@ struct LeafAvatar: View {
         guard idle else { return 0 }
         let t = Float(date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: Double(leafIdleSecs(index: pick.leaf))))
         return leafIdleAngle(index: pick.leaf, t: t)
+    }
+}
+
+/// A server's picture: the leaf picked on its Create screen (D92 amendment), else D79 initials.
+struct ServerAvatar: View {
+    @ObservedObject private var flag = LeafAvatarsFlag.shared
+    let server: Server
+    var size: CGFloat = Theme.avatar
+
+    var body: some View {
+        if let pick = server.leafPick, flag.on {
+            LeafAvatar(pick: pick, size: size)
+        } else {
+            InitialsAvatar(name: server.name, handle: nil, id: server.id, override: server.avatarColorIndex, size: size)
+        }
     }
 }
 

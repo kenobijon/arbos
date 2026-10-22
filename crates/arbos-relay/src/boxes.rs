@@ -114,7 +114,7 @@ pub async fn create_box(
 ) -> Result<Sandbox> {
     let snapshot_name = snapshot
         .map(str::to_owned)
-        .unwrap_or_else(|| state.cfg.daytona_snapshot.clone());
+        .unwrap_or_else(|| state.default_snapshot());
     let box_token = mint(TokenKind::Box);
     let mcp_token = mint(TokenKind::Mcp);
     let mut sb = Sandbox {

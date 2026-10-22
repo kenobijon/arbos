@@ -260,6 +260,8 @@ pub struct AppState {
     pub new_chat_open: bool,
     /// New Message → New group: multi-select people (and optional agents).
     pub new_group_open: bool,
+    /// D93 Create group step 1 → 2: the name and leaf picked, sent with the members on Create.
+    pub new_group_draft: Option<(String, crate::ui::avatars::LeafPick)>,
     pub new_group_picked: Vec<Person>,
     pub new_group_agents: Vec<Id>,
     pub people_query: String,
@@ -414,6 +416,9 @@ pub struct AppState {
     pub local: LocalView,
     /// F11: replies are spoken and a mic transcript sends at once.
     pub voice_mode: bool,
+    /// Relay flag `features.voice_mode` (kill switch, default off): while off, no voice-mode
+    /// UI (switch, picker, speaker rows, composer note) and no TTS request leaves the app.
+    pub voice_mode_feature: bool,
     /// F11: assistant messages whose speech is cached (speaker icon replays).
     pub spoken: HashSet<Id>,
     /// F11: replies whose speech failed to arrive, decode or play, with the
@@ -626,6 +631,7 @@ impl AppState {
                 }),
             new_chat_open: false,
             new_group_open: false,
+            new_group_draft: None,
             new_group_picked: Vec::new(),
             new_group_agents: Vec::new(),
             people_query: String::new(),
@@ -703,6 +709,7 @@ impl AppState {
             auto_update_failed: None,
             local: LocalView::default(),
             voice_mode: false,
+            voice_mode_feature: false,
             spoken: HashSet::new(),
             speech_failed: HashMap::new(),
             awaiting_new_project: false,
@@ -1051,6 +1058,16 @@ impl AppState {
                 self.begin_onboarding(cx);
                 cx.notify();
             }
+            SyncEvent::Features { voice_mode } => {
+                self.voice_mode_feature = voice_mode;
+                if !voice_mode && self.voice_mode {
+                    self.set_voice_mode(false, cx);
+                }
+                if let Some(chat_id) = self.active_chat_id() {
+                    cx.emit(AppEvent::TranscriptChanged { chat_id });
+                }
+                cx.notify();
+            }
             SyncEvent::Account(account) => {
                 self.account = account;
                 if self.account.is_some() {
@@ -1283,8 +1300,8 @@ impl AppState {
                 // Signed in and synced (also the path without a sign-in event).
                 if !projects.is_empty() {
                     self.maybe_prompt_notifications();
-                    // The "Voice · <name>" label needs the list once.
-                    if !self.voices_requested {
+                    // The "Voice · <name>" label needs the list once (only with voice mode on).
+                    if !self.voices_requested && self.voice_mode_feature {
                         self.voices_requested = true;
                         self.fetch_voices();
                     }
@@ -2476,69 +2493,6 @@ impl AppState {
         cx.notify();
     }
 
-    /// F6: a group chat hosted by the selected project with `participant` (and, when the active
-    /// tab is already a group, the participant is added there instead).
-    pub fn add_project_to_chat(&mut self, participant: Id, cx: &mut Context<Self>) {
-        if !self.multi_chat {
-            return;
-        }
-        let Some(project_id) = self.selected_project.clone() else {
-            return;
-        };
-        if let Some(group) = self.active_chat().filter(|c| c.is_group()).cloned() {
-            if group.participants.contains(&participant) {
-                return;
-            }
-            if let Some(slot) = self
-                .chats
-                .get_mut(&project_id)
-                .and_then(|tabs| tabs.iter_mut().find(|c| c.id == group.id))
-            {
-                slot.participants.push(participant.clone());
-            }
-            self.command(ClientCommand::GroupAddParticipant {
-                project_id,
-                chat_id: group.id,
-                participant,
-            });
-            cx.notify();
-            return;
-        }
-        let name = self
-            .projects
-            .iter()
-            .find(|p| p.id == participant)
-            .map(|p| p.name.clone())
-            .unwrap_or_else(|| "project".into());
-        let chat_id = new_id();
-        self.chats
-            .entry(project_id.clone())
-            .or_default()
-            .push(Chat {
-                id: chat_id.clone(),
-                project_id: project_id.clone(),
-                title: format!("Group · {name}"),
-                is_pinned: false,
-                is_system: false,
-                kind: ChatKind::Group,
-                participants: vec![project_id.clone(), participant.clone()],
-                unread: false,
-                last_message_at: now_ms(),
-                archived_at: None,
-            });
-        self.messages.insert(chat_id.clone(), Vec::new());
-        self.chat_ui.insert(chat_id.clone(), ChatUi::default());
-        self.active_tab.insert(project_id.clone(), chat_id.clone());
-        self.command(ClientCommand::GroupCreate {
-            project_id,
-            chat_id: chat_id.clone(),
-            participants: vec![participant],
-            title: None,
-        });
-        self.command(ClientCommand::OpenChat { chat_id });
-        cx.notify();
-    }
-
     /// The tab's "×" / ⌘W: archives the chat (as the iPhone does). Returns
     /// false for the pinned "Main" chat, which never leaves the strip.
     pub fn close_tab(&mut self, chat_id: Id, cx: &mut Context<Self>) -> bool {
@@ -3005,14 +2959,19 @@ impl AppState {
     }
 
     /// Sheet "Create": `POST /servers`; the answer opens it on `#general`.
-    pub fn create_server(&mut self, name: String, cx: &mut Context<Self>) {
+    pub fn create_server(
+        &mut self,
+        name: String,
+        leaf: Option<crate::ui::avatars::LeafPick>,
+        cx: &mut Context<Self>,
+    ) {
         let name = name.trim().chars().take(64).collect::<String>();
         if name.is_empty() || self.server_busy {
             return;
         }
         self.server_busy = true;
         self.server_error = None;
-        self.command(ClientCommand::ServerCreate { name });
+        self.command(ClientCommand::ServerCreate { name, leaf });
         cx.notify();
     }
 
@@ -3642,7 +3601,16 @@ impl AppState {
 
     // ----- voice (F11) -----------------------------------------------------
 
+    /// Voice mode exists for this user: the relay flag is on. The agent pane shows its switch
+    /// and voice row, and the transcript its speaker rows, only then.
+    pub fn voice_mode_available(&self) -> bool {
+        self.voice_mode_feature
+    }
+
     pub fn set_voice_mode(&mut self, on: bool, cx: &mut Context<Self>) {
+        if on && !self.voice_mode_feature {
+            return;
+        }
         if self.voice_mode != on {
             self.voice_mode = on;
             if let Some(chat_id) = self.active_chat_id() {
@@ -3993,6 +3961,10 @@ impl AppState {
 
     /// Ask the relay for the voice list (the picker opening).
     pub fn fetch_voices(&mut self) {
+        // No voice picker while the feature is off: nothing needs the list.
+        if !self.voice_mode_feature {
+            return;
+        }
         self.command(ClientCommand::FetchVoices);
     }
 
@@ -5217,7 +5189,16 @@ impl AppState {
         self.people_busy = true;
         self.people_error = None;
         self.awaiting_group = Some(handles.clone());
-        self.command(ClientCommand::CreatePeopleGroup { handles, agent_ids });
+        let (title, leaf) = match self.new_group_draft.take() {
+            Some((t, l)) => (Some(t), Some(l)),
+            None => (None, None),
+        };
+        self.command(ClientCommand::CreatePeopleGroup {
+            handles,
+            agent_ids,
+            title,
+            leaf,
+        });
         cx.notify();
     }
 

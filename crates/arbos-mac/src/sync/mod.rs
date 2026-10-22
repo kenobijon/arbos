@@ -42,6 +42,12 @@ pub enum SyncEvent {
     },
     /// Who is signed in (`/auth/token` or `/me`); `None` after sign-out.
     Account(Option<AccountView>),
+    /// Remote feature flags from `GET /me` → `features` (one object, one place on the relay).
+    Features {
+        /// `features.voice_mode`: spoken replies, voice picker, reply playback. Absent on an
+        /// older relay = off (Jacob, 2026-10-22: hidden everywhere until it works end to end).
+        voice_mode: bool,
+    },
     /// `GET /users/search` results for the new-chat sheet (D72).
     PeopleSearch {
         query: String,
@@ -324,6 +330,9 @@ pub enum ClientCommand {
     CreatePeopleGroup {
         handles: Vec<String>,
         agent_ids: Vec<Id>,
+        /// D93 Create screen: the group's name and leaf picture, when it came through it.
+        title: Option<String>,
+        leaf: Option<crate::ui::avatars::LeafPick>,
     },
     /// Presence `typing` for a people chat.
     SetTyping {
@@ -469,19 +478,6 @@ pub enum ClientCommand {
         source_chat_id: Id,
         chat_id: Id,
         title: String,
-    },
-    /// F6: a group chat hosted by `project_id` with the other `participants`; `chat_id` is the
-    /// client's placeholder until `ChatCreated` brings the relay's.
-    GroupCreate {
-        project_id: Id,
-        chat_id: Id,
-        participants: Vec<Id>,
-        title: Option<String>,
-    },
-    GroupAddParticipant {
-        project_id: Id,
-        chat_id: Id,
-        participant: Id,
     },
     /// Archive (hide from the tab strip) or unarchive a chat for me on every
     /// device (§9c `PUT /chats/{id}/settings {archived}`); the relay keeps it
@@ -782,6 +778,8 @@ pub enum ClientCommand {
     /// D88: `POST /servers {name}`; answered by `ServerOpened`.
     ServerCreate {
         name: String,
+        /// D93 Create screen: the server's leaf picture.
+        leaf: Option<crate::ui::avatars::LeafPick>,
     },
     /// D88: `POST /servers/join {code}` with a code or a full invite link; `ServerOpened`.
     ServerJoin {

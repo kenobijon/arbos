@@ -8,8 +8,8 @@ use arbos_core::api::{
     AccountUserDto, CallDto, CallReachabilityDto, ChannelBindingDto, ChannelPairingDto,
     ChannelPlatformDto, ChannelsOverviewDto, ChatDto, ChatMemberDto, ConnectorDto,
     ConnectorsCatalogDto, ConnectorsListDto, CreateChatResponseDto, GetProjectResponseDto,
-    GroupDto, LocalDeviceDto, LocalDevicesDto, MachineStatusDto, MeResponseDto, ModelListDto,
-    PeopleChatDto, ProjectMemberDto, ProjectMembersDto, ProjectOwnerDto, ProjectSecretItemDto,
+    LocalDeviceDto, LocalDevicesDto, MachineStatusDto, MeResponseDto, ModelListDto, PeopleChatDto,
+    ProjectMemberDto, ProjectMembersDto, ProjectOwnerDto, ProjectSecretItemDto,
     ProjectSecretSummaryDto, ProjectSecretsDto, ProjectVaultSummaryDto, ProviderDto, RoutineDto,
     RoutineRunDto, SecretAccessDto, SecretActivityDto, SecretDirectorDto, SecretDto,
     SecretRequestDto, SecretsOverviewDto, SenderDto, SkillDto, TokenResponseDto, TranscriptionDto,
@@ -697,26 +697,6 @@ pub(crate) fn chat_from_dto(dto: &ChatDto) -> Chat {
     }
 }
 
-/// `GroupDto` → [`Chat`] (same fields the old `parse_chat` read).
-pub(crate) fn chat_from_group_dto(dto: &GroupDto) -> Chat {
-    Chat {
-        id: dto.id.clone(),
-        project_id: dto.project_id.clone(),
-        title: if dto.title.is_empty() {
-            "New chat".into()
-        } else {
-            dto.title.clone()
-        },
-        is_pinned: dto.is_pinned,
-        is_system: dto.is_system,
-        kind: chat_kind(&dto.kind),
-        participants: dto.participants.clone(),
-        unread: false,
-        last_message_at: dto.created_at.max(0) as u64,
-        archived_at: None,
-    }
-}
-
 /// Nested chat on `CreateChatResponseDto`.
 pub(crate) fn chat_from_create(dto: &CreateChatResponseDto) -> Chat {
     chat_from_dto(&dto.chat)
@@ -878,8 +858,9 @@ pub(crate) fn people_space_from(
         vision_enabled: true,
         avatar_color_index: None,
         avatar_color_override: None,
-        avatar_leaf: None,
-        avatar_leaf_color: None,
+        // D92 amendment: a group's leaf picture from the Create screen (the uploaded picture wins).
+        avatar_leaf: dto.avatar_leaf.and_then(leaf_index),
+        avatar_leaf_color: dto.avatar_leaf_color.and_then(leaf_index),
         image_url: dto
             .image_key
             .as_deref()
@@ -1045,7 +1026,7 @@ pub fn local_view_from_dto(d: &LocalDevicesDto, relay_url: &str) -> LocalView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arbos_core::api::{ChatMemberDto, MeResponseDto, ProjectDto, UnreadDto};
+    use arbos_core::api::{ChatMemberDto, GroupDto, MeResponseDto, ProjectDto, UnreadDto};
     use std::fs;
     use std::path::PathBuf;
 
@@ -1160,11 +1141,10 @@ mod tests {
 
     #[test]
     fn group_dto_participants_fixture() {
+        // The Mac no longer creates agent groups (#1329); the DTO still decodes.
         let dto: GroupDto = load_json("group_json.json");
         assert_eq!(dto.participants, vec!["proj_fixture", "proj_other"]);
-        let chat = chat_from_group_dto(&dto);
-        assert_eq!(chat.id, "group_fixture");
-        assert_eq!(chat.participants, vec!["proj_fixture", "proj_other"]);
+        assert_eq!(dto.id, "group_fixture");
     }
 
     #[test]

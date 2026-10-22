@@ -14,7 +14,7 @@ pub const SERVERS_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS servers (
   id TEXT PRIMARY KEY, name TEXT NOT NULL, owner_user_id TEXT NOT NULL, image_key TEXT,
   invite_code TEXT NOT NULL UNIQUE, space_room_id TEXT, created_at INTEGER NOT NULL, deleted_at INTEGER,
-  is_open INTEGER NOT NULL DEFAULT 0
+  is_open INTEGER NOT NULL DEFAULT 0, avatar_leaf INTEGER, avatar_leaf_color INTEGER
 );
 CREATE TABLE IF NOT EXISTS server_members (
   server_id TEXT NOT NULL, user_id TEXT NOT NULL, role TEXT NOT NULL, added_by TEXT NOT NULL,
@@ -28,9 +28,21 @@ CREATE TABLE IF NOT EXISTS channels (
   created_at INTEGER NOT NULL, deleted_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS channels_server ON channels(server_id, position);
+CREATE TABLE IF NOT EXISTS server_invites (
+  id TEXT PRIMARY KEY, server_id TEXT NOT NULL, code TEXT NOT NULL UNIQUE, created_by TEXT NOT NULL,
+  created_at INTEGER NOT NULL, expires_at INTEGER, uses_left INTEGER, revoked_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS server_invites_server ON server_invites(server_id, created_at);
 "#;
 
 pub fn migrate_servers(c: &Connection) {
+    // Invite links are rows now (several per server, expiry, limited uses — Jacob 2026-10-22):
+    // every server's single code becomes one unlimited row so existing links keep working.
+    let _ = c.execute(
+        "INSERT OR IGNORE INTO server_invites(id, server_id, code, created_by, created_at)
+         SELECT 'legacy-' || id, id, invite_code, owner_user_id, created_at FROM servers WHERE deleted_at IS NULL",
+        [],
+    );
     // A channel's display name never carries '#': the glyph shows it (#1317).
     let _ = c.execute(
         "UPDATE channels SET name = replace(name, '#', '') WHERE name LIKE '%#%'",
@@ -38,6 +50,11 @@ pub fn migrate_servers(c: &Connection) {
     );
     let _ = c.execute(
         "ALTER TABLE servers ADD COLUMN is_open INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = c.execute("ALTER TABLE servers ADD COLUMN avatar_leaf INTEGER", []);
+    let _ = c.execute(
+        "ALTER TABLE servers ADD COLUMN avatar_leaf_color INTEGER",
         [],
     );
     let _ = c.execute_batch(
@@ -56,6 +73,10 @@ pub struct Server {
     pub created_at: i64,
     /// Anyone on Arbos can find and join without an invite link.
     pub is_open: bool,
+    /// D92 amendment: the server's leaf picture (0–8) and disc colour (0–9) from the Create
+    /// screen; `None` = initials. An `image_key` picture wins.
+    pub avatar_leaf: Option<i64>,
+    pub avatar_leaf_color: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -73,6 +94,45 @@ impl ServerMember {
         matches!(self.role.as_str(), "owner" | "admin")
     }
 }
+
+/// One invite link of a server. `expires_at` / `uses_left` are `None` for a link without a
+/// limit; `revoked_at` ends it early. `servers.invite_code` mirrors the newest live unlimited
+/// code for older clients.
+#[derive(Debug, Clone, Serialize)]
+pub struct ServerInvite {
+    pub id: String,
+    pub server_id: String,
+    pub code: String,
+    pub created_by: String,
+    pub created_at: i64,
+    pub expires_at: Option<i64>,
+    pub uses_left: Option<i64>,
+    pub revoked_at: Option<i64>,
+}
+
+impl ServerInvite {
+    pub fn usable(&self, now: i64) -> bool {
+        self.revoked_at.is_none()
+            && self.expires_at.is_none_or(|t| t > now)
+            && self.uses_left.is_none_or(|n| n > 0)
+    }
+}
+
+fn invite_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ServerInvite> {
+    Ok(ServerInvite {
+        id: r.get(0)?,
+        server_id: r.get(1)?,
+        code: r.get(2)?,
+        created_by: r.get(3)?,
+        created_at: r.get(4)?,
+        expires_at: r.get(5)?,
+        uses_left: r.get(6)?,
+        revoked_at: r.get(7)?,
+    })
+}
+
+const INVITE_COLS: &str =
+    "id, server_id, code, created_by, created_at, expires_at, uses_left, revoked_at";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Channel {
@@ -97,11 +157,12 @@ fn server_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Server> {
         space_room_id: r.get(5)?,
         created_at: r.get(6)?,
         is_open: r.get::<_, i64>(7)? != 0,
+        avatar_leaf: r.get(8)?,
+        avatar_leaf_color: r.get(9)?,
     })
 }
 
-const SERVER_COLS: &str =
-    "id, name, owner_user_id, image_key, invite_code, space_room_id, created_at, is_open";
+const SERVER_COLS: &str = "id, name, owner_user_id, image_key, invite_code, space_room_id, created_at, is_open, avatar_leaf, avatar_leaf_color";
 
 fn channel_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Channel> {
     Ok(Channel {
@@ -132,8 +193,8 @@ impl Db {
     pub fn insert_server(&self, s: &Server) -> Result<()> {
         self.with(|c| {
             c.execute(
-                "INSERT INTO servers(id, name, owner_user_id, image_key, invite_code, space_room_id, created_at, is_open)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                "INSERT INTO servers(id, name, owner_user_id, image_key, invite_code, space_room_id, created_at, is_open, avatar_leaf, avatar_leaf_color)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     s.id,
                     s.name,
@@ -142,7 +203,9 @@ impl Db {
                     s.invite_code,
                     s.space_room_id,
                     s.created_at,
-                    if s.is_open { 1 } else { 0 }
+                    if s.is_open { 1 } else { 0 },
+                    s.avatar_leaf,
+                    s.avatar_leaf_color
                 ],
             )?;
             c.execute(
@@ -164,17 +227,6 @@ impl Db {
         })
     }
 
-    pub fn server_by_invite(&self, code: &str) -> Result<Option<Server>> {
-        self.with(|c| {
-            c.query_row(
-                &format!("SELECT {SERVER_COLS} FROM servers WHERE invite_code = ?1 AND deleted_at IS NULL"),
-                params![code],
-                server_from_row,
-            )
-            .optional()
-        })
-    }
-
     pub fn servers_of_user(&self, user_id: &str) -> Result<Vec<(Server, ServerMember)>> {
         self.with(|c| {
             let mut st = c.prepare(&format!(
@@ -186,11 +238,11 @@ impl Db {
             let rows = st.query_map(params![user_id], |r| {
                 let s = server_from_row(r)?;
                 let m = ServerMember {
-                    server_id: r.get(8)?,
-                    user_id: r.get(9)?,
-                    role: r.get(10)?,
-                    joined_at: r.get(11)?,
-                    banned_at: r.get(12)?,
+                    server_id: r.get(10)?,
+                    user_id: r.get(11)?,
+                    role: r.get(12)?,
+                    joined_at: r.get(13)?,
+                    banned_at: r.get(14)?,
                 };
                 Ok((s, m))
             })?;
@@ -217,7 +269,7 @@ impl Db {
             ))?;
             let rows = st.query_map(params![needle, limit], |r| {
                 let s = server_from_row(r)?;
-                let count: i64 = r.get(8)?;
+                let count: i64 = r.get(10)?;
                 Ok((s, count))
             })?;
             rows.collect()
@@ -262,6 +314,78 @@ impl Db {
                 params![id, room_id],
             )?;
             Ok(())
+        })
+    }
+
+    // ---- invites ----------------------------------------------------------------------------
+
+    pub fn insert_server_invite(&self, inv: &ServerInvite) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                &format!("INSERT INTO server_invites({INVITE_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"),
+                params![
+                    inv.id,
+                    inv.server_id,
+                    inv.code,
+                    inv.created_by,
+                    inv.created_at,
+                    inv.expires_at,
+                    inv.uses_left,
+                    inv.revoked_at
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Live invites of a server (not revoked), newest first; expired / used-up ones included
+    /// so the owner sees why a link stopped working.
+    pub fn invites_of_server(&self, server_id: &str) -> Result<Vec<ServerInvite>> {
+        self.with(|c| {
+            let mut st = c.prepare(&format!(
+                "SELECT {INVITE_COLS} FROM server_invites WHERE server_id = ?1 AND revoked_at IS NULL ORDER BY created_at DESC"
+            ))?;
+            let rows = st.query_map(params![server_id], invite_from_row)?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+        })
+    }
+
+    pub fn invite_by_code(&self, code: &str) -> Result<Option<ServerInvite>> {
+        self.with(|c| {
+            c.query_row(
+                &format!("SELECT {INVITE_COLS} FROM server_invites WHERE code = ?1"),
+                params![code],
+                invite_from_row,
+            )
+            .optional()
+        })
+    }
+
+    pub fn revoke_server_invite(&self, server_id: &str, invite_id: &str) -> Result<bool> {
+        self.with(|c| {
+            Ok(c.execute(
+                "UPDATE server_invites SET revoked_at = ?3 WHERE server_id = ?1 AND id = ?2 AND revoked_at IS NULL",
+                params![server_id, invite_id, now_ms()],
+            )? > 0)
+        })
+    }
+
+    pub fn revoke_all_invites(&self, server_id: &str) -> Result<usize> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE server_invites SET revoked_at = ?2 WHERE server_id = ?1 AND revoked_at IS NULL",
+                params![server_id, now_ms()],
+            )
+        })
+    }
+
+    /// One use of a limited link; `false` when it had none left.
+    pub fn consume_invite_use(&self, invite_id: &str) -> Result<bool> {
+        self.with(|c| {
+            Ok(c.execute(
+                "UPDATE server_invites SET uses_left = uses_left - 1 WHERE id = ?1 AND (uses_left IS NULL OR uses_left > 0)",
+                params![invite_id],
+            )? > 0)
         })
     }
 
@@ -478,10 +602,43 @@ mod tests {
             space_room_id: None,
             created_at: 1,
             is_open: false,
+            avatar_leaf: None,
+            avatar_leaf_color: None,
         };
         d.insert_server(&s).unwrap();
         assert_eq!(d.server("S1").unwrap().unwrap().name, "Launch Crew");
-        assert_eq!(d.server_by_invite("abc").unwrap().unwrap().id, "S1");
+        // Invite links are rows: unlimited, limited-use, expiring, revoked.
+        let inv = ServerInvite {
+            id: "I1".into(),
+            server_id: "S1".into(),
+            code: "abc".into(),
+            created_by: "gh_1".into(),
+            created_at: 1,
+            expires_at: None,
+            uses_left: Some(1),
+            revoked_at: None,
+        };
+        d.insert_server_invite(&inv).unwrap();
+        let got = d.invite_by_code("abc").unwrap().unwrap();
+        assert_eq!(got.server_id, "S1");
+        assert!(got.usable(5));
+        assert!(d.consume_invite_use("I1").unwrap());
+        assert!(!d.consume_invite_use("I1").unwrap(), "one use only");
+        assert!(!d.invite_by_code("abc").unwrap().unwrap().usable(5));
+        let expiring = ServerInvite {
+            id: "I2".into(),
+            code: "exp".into(),
+            uses_left: None,
+            expires_at: Some(10),
+            ..inv.clone()
+        };
+        d.insert_server_invite(&expiring).unwrap();
+        assert!(d.invite_by_code("exp").unwrap().unwrap().usable(9));
+        assert!(!d.invite_by_code("exp").unwrap().unwrap().usable(11));
+        assert_eq!(d.invites_of_server("S1").unwrap().len(), 2);
+        assert!(d.revoke_server_invite("S1", "I2").unwrap());
+        assert_eq!(d.invites_of_server("S1").unwrap().len(), 1);
+        assert!(!d.invite_by_code("exp").unwrap().unwrap().usable(5));
         assert!(d.add_server_member("S1", "gh_2", "gh_1").unwrap());
         assert!(d.set_server_role("S1", "gh_2", "admin").unwrap());
         assert_eq!(d.servers_of_user("gh_2").unwrap()[0].1.role, "admin");
@@ -512,7 +669,9 @@ mod tests {
         assert!(d.delete_channel("C1").unwrap());
         assert_eq!(d.channels_of_server("S1").unwrap().len(), 1);
         d.set_server_invite("S1", "xyz").unwrap();
-        assert!(d.server_by_invite("abc").unwrap().is_none());
+        assert_eq!(d.server("S1").unwrap().unwrap().invite_code, "xyz");
+        assert_eq!(d.revoke_all_invites("S1").unwrap(), 1);
+        assert!(d.invites_of_server("S1").unwrap().is_empty());
         assert!(d.update_server("S1", None, None, Some(true)).unwrap());
         assert!(d.server("S1").unwrap().unwrap().is_open);
         let hits = d.search_open_servers("crew", 10).unwrap();

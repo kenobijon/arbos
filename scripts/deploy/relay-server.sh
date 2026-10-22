@@ -28,6 +28,8 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 RELAY_VERSION="${RELAY_VERSION:-}"
 PUBLIC_URL="${ARBOS_RELAY_PUBLIC_URL:-https://relay.arbos.life}"
+# Server invite links are minted on the site host (arbos.life/s/<code> → deep link + fallback page).
+SITE_URL="${ARBOS_SITE_URL:-https://arbos.life}"
 LISTEN="${ARBOS_RELAY_LISTEN:-127.0.0.1:7700}"
 DATA_DIR="${ARBOS_RELAY_DATA_DIR:-/var/lib/arbos-relay}"
 ENV_FILE=/etc/arbos/relay.env
@@ -199,6 +201,7 @@ cat > "$ENV_FILE" <<EOF
 ARBOS_RELAY_LISTEN=$LISTEN
 ARBOS_RELAY_PUBLIC_URL=$PUBLIC_URL
 ARBOS_PUBLIC_URL=$PUBLIC_URL
+ARBOS_SITE_URL=$SITE_URL
 ARBOS_RELAY_DATA=$DATA_DIR
 ARBOS_RELAY_ADMIN_TOKEN=$ARBOS_RELAY_ADMIN_TOKEN
 ARBOS_RELAY_KEY=$ARBOS_RELAY_KEY
