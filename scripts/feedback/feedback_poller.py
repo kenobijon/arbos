@@ -1719,6 +1719,24 @@ class Loop:
         if active and active.get("fid"):
             # A run from the one-at-a-time scheduler (before batch mode): nothing to resume, re-batch it.
             cur.pop("rust_gate", None); self.store.save_cursor(cur); active = None
+        pending = self.cfg.state_dir / "gate-next.json"
+        if pending.exists():
+            # `gate-next` arrived while a tick held the lock (ticks hold it for the whole iOS build); apply it here.
+            try:
+                req = json.loads(pending.read_text())
+            except (OSError, ValueError):
+                req = {}
+            pending.unlink(missing_ok=True)
+            if active and req.get("abort") and not active.get("warm"):
+                self.gate_abort(active, cur, by="operator (gate-next)")
+                active = None
+            heads = {fid: st["branch_head"] for fid, st in self.rust_gate_ready() if fid in (req.get("members") or [])}
+            if heads:
+                cur["rust_gate_plan"] = [heads] + [h for h in (cur.get("rust_gate_plan") or []) if not set(h) & set(heads)]
+                self.store.save_cursor(cur)
+                for fid in heads:
+                    self.store.event(fid, "gate_next", by="operator", members=list(heads))
+                log(f"Gate: next batch pinned to {', '.join(heads)} (operator gate-next)")
         for marker in self.cfg.state_dir.glob("gate-abort.*"):
             if active and marker.name == f"gate-abort.{active['id']}":
                 # `gate-abort` arrived while a tick was in flight (that tick would have written its stale
@@ -3494,8 +3512,11 @@ def main(argv: list[str]) -> int:
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
-                print("a tick is in flight; retry in a minute")
-                return 1
+                (cfg.state_dir / "gate-next.json").write_text(json.dumps({"members": list(heads), "abort": "--abort" in argv}))
+                for fid in heads:
+                    loop.store.event(fid, "gate_next_queued", by="operator", members=list(heads))
+                print(f"a tick is in flight; next gate batch {', '.join(heads)} is pinned at the start of the next tick")
+                return 0
             cur = loop.store.cursor()
             active = cur.get("rust_gate")
             if active and "--abort" in argv and not active.get("warm"):
