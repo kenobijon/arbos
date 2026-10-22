@@ -281,15 +281,3 @@ pub fn list(
     }
     list
 }
-
-/// The label for the "…" menu row and the profile's info row.
-pub fn current_label(space: &Project, voices: &[Voice]) -> String {
-    match space.voice.as_deref() {
-        None => "Default".into(),
-        Some(id) => voices
-            .iter()
-            .find(|v| v.id == id)
-            .map(|v| v.name.clone())
-            .unwrap_or_else(|| id.to_string()),
-    }
-}

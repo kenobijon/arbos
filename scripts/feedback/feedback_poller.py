@@ -2778,6 +2778,7 @@ class Loop:
             log(f"track-comment watch failed: {e}")
         try:
             self.watch_main_red()
+            self.watch_relay_restarts()
         except Exception as e:  # noqa: BLE001
             log(f"main-red watch failed: {e}")
         try:
@@ -2819,6 +2820,56 @@ class Loop:
         self.store.save_state(fid, st)
         self.store.event(fid, "tracked", issue=number, owner=owner)
         return st
+
+    def watch_relay_restarts(self) -> None:
+        """Every relay restart drops every client's websocket; a burst of them leaves the apps on
+        "Reconnecting…" for minutes (2026-10-22 18:5x: four restarts in 95 min — three CD relay deploys and an
+        image roll). `healthz.uptime_s` resets on a restart: remember each reset, and when there were ≥3 in the
+        last 60 min open (or update) one `relay-restarts` issue with the times; close it after a quiet hour."""
+        if not self.cfg.relay_url:
+            return
+        try:
+            with urllib.request.urlopen(f"{self.cfg.relay_url}/healthz", timeout=15) as r:
+                hz = json.loads(r.read() or b"{}")
+        except Exception as e:  # noqa: BLE001
+            log(f"relay-restarts: healthz unreachable: {str(e)[:80]}")
+            return
+        uptime = hz.get("uptime_s")
+        if uptime is None:
+            return  # a relay older than the hot-snapshot change
+        cur = self.store.cursor()
+        watch = cur.get("relay_restarts") or {"last_uptime": None, "restarts": [], "issue": None}
+        now = utcnow()
+        last = watch.get("last_uptime")
+        if last is not None and uptime < last:
+            started = (now - dt.timedelta(seconds=int(uptime))).strftime("%Y-%m-%dT%H:%M:%SZ")
+            watch["restarts"].append(started)
+            log(f"relay-restarts: the relay restarted at {started} (uptime {uptime}s)")
+        watch["last_uptime"] = uptime
+        cutoff = (now - dt.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        recent = [t for t in watch["restarts"] if t >= cutoff]
+        watch["restarts"] = recent[-20:]
+        if len(recent) >= 3 and not watch.get("issue"):
+            self.gh.ensure_label("relay-restarts", "D93F0B", "The relay restarted repeatedly; every restart drops every client's websocket")
+            body = ("The relay restarted **" + str(len(recent)) + " times in the last hour** (healthz `uptime_s` resets): " + ", ".join(recent) +
+                    ".\n\nEvery restart closes every client's websocket; the apps show \"Reconnecting…\" and their backoff grows with each "
+                    "drop. Sources: CD relay deploys (`deploy-events.jsonl`) and, before the hot snapshot switch, image rolls. "
+                    "This issue closes itself after a quiet hour. Runbook: docs/feedback-loop.md → relay restarts.")
+            issue = self.gh.create_issue(f"relay restarted {len(recent)}× in the last hour — clients reconnecting", body, ["relay-restarts"])
+            watch["issue"] = issue["number"]
+            watch["issue_count"] = len(recent)
+            log(f"ALERT relay-restarts: {len(recent)} restarts in the last hour → #{issue['number']}")
+        elif watch.get("issue") and len(recent) > int(watch.get("issue_count") or 0):
+            with contextlib.suppress(HttpError):
+                self.gh.comment(watch["issue"], f"Another restart: {recent[-1]} — {len(recent)} in the last hour.")
+            watch["issue_count"] = len(recent)
+        elif watch.get("issue") and not recent:
+            with contextlib.suppress(HttpError):
+                self.gh.close_issue(watch["issue"], "completed", "No relay restart in the last hour; clients are stable.")
+            watch["issue"] = None
+            watch["issue_count"] = 0
+        cur["relay_restarts"] = watch
+        self.store.save_cursor(cur)
 
     def watch_main_red(self) -> None:
         """A failed CI / iOS run on main is announced within a tick: a GitHub issue labelled `main-red` ("main is red:

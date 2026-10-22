@@ -197,6 +197,12 @@ pub struct AppState {
     pub voice: Arc<crate::voice::VoiceCfg>,
     /// user_id → the box's `WS /box/voice` link (tool calls and transcript rows to agentd).
     pub voice_conns: crate::voice::VoiceConns,
+    /// The Daytona snapshot new boxes are made from, switchable at runtime (`POST /admin/snapshot/default`)
+    /// so an image roll no longer restarts the relay — every restart dropped every client's websocket
+    /// (2026-10-22 18:5x: four restarts in 95 min, "Reconnecting…" banners in Jacob's chats).
+    pub default_snapshot: Arc<std::sync::RwLock<String>>,
+    /// Process start, for `healthz.uptime_s` (a restart storm shows as a short uptime).
+    pub started_at: std::time::Instant,
     /// `call:project` → when the voice worker was last dispatched for it (no double dispatch).
     pub voice_dispatched: Arc<Mutex<HashMap<String, i64>>>,
     /// What the voice worker last reported about itself (`POST /voice/worker/hello`).
@@ -205,6 +211,22 @@ pub struct AppState {
     pub client_seen: Arc<crate::releases::ClientSeen>,
     /// Chats on Matrix (D88): mode, homeserver tokens and the outbox wake-up.
     pub matrix: Arc<crate::matrix::Matrix>,
+}
+
+impl AppState {
+    /// The snapshot new boxes are created from: the runtime override when set, else the configured one.
+    pub fn default_snapshot(&self) -> String {
+        let cur = self
+            .default_snapshot
+            .read()
+            .map(|s| s.clone())
+            .unwrap_or_default();
+        if cur.is_empty() {
+            self.cfg.daytona_snapshot.clone()
+        } else {
+            cur
+        }
+    }
 }
 
 /// The agent's current activity as the box last reported it.
@@ -462,6 +484,8 @@ pub(crate) mod test_support {
             fleet_pressure: Arc::new(Mutex::new(None)),
             voice: Arc::new(crate::voice::VoiceCfg::default()),
             voice_conns: Arc::new(Mutex::new(HashMap::new())),
+            default_snapshot: Arc::new(std::sync::RwLock::new(String::new())),
+            started_at: std::time::Instant::now(),
             voice_dispatched: Arc::new(Mutex::new(HashMap::new())),
             voice_worker: Arc::new(Mutex::new(None)),
             client_seen: Arc::new(std::sync::Mutex::new(HashMap::new())),
