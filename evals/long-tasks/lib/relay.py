@@ -1,0 +1,211 @@
+"""Relay access for the long-task eval: HTTP with the test user's token, arbosctl wrapper,
+usage, routines. Nothing here talks to a model; everything goes through the product path."""
+
+import json
+import os
+import subprocess
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+RELAY = os.environ.get("ARBOS_RELAY_URL", "https://relay.arbos.life").rstrip("/")
+STATE_DIR = Path(os.environ.get("LT_STATE_DIR", "/tmp/lt"))
+TOKENS = STATE_DIR / "tokens.json"
+CTL_CONFIG = STATE_DIR / "ctl" / "arbosctl.json"
+ARBOSCTL = os.environ.get("ARBOSCTL", "arbosctl")
+
+
+def http(method, url, token=None, body=None, timeout=60, headers=None):
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("content-type", "application/json")
+    for k, v in (headers or {}).items():
+        req.add_header(k, v)
+    if token:
+        req.add_header("authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            raw = r.read()
+            try:
+                return r.status, (json.loads(raw) if raw else None)
+            except json.JSONDecodeError:
+                return r.status, {"raw": raw.decode(errors="replace")}
+    except urllib.error.HTTPError as e:
+        raw = e.read()
+        try:
+            return e.code, json.loads(raw)
+        except Exception:
+            return e.code, {"error": raw.decode(errors="replace")[:500]}
+    except Exception as e:  # network
+        return 0, {"error": str(e)}
+
+
+def admin_token():
+    return os.environ["ARBOS_RELAY_ADMIN_TOKEN"]
+
+
+def ensure_test_user(handle, name):
+    """Create the test user once; afterwards reuse the saved token pair."""
+    if TOKENS.exists():
+        return json.loads(TOKENS.read_text())
+    st, v = http("POST", f"{RELAY}/admin/users/test", token=admin_token(), body={"handle": handle, "name": name})
+    if st != 201:
+        raise SystemExit(f"create test user: {st} {v}")
+    v["issued_at"] = time.time()
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    TOKENS.write_text(json.dumps(v))
+    write_ctl_config(v["access_token"], v.get("device_id", ""))
+    return v
+
+
+def write_ctl_config(access_token, device_id):
+    CTL_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+    CTL_CONFIG.write_text(json.dumps({"relay_url": RELAY, "device_token": access_token, "device_id": device_id}, indent=2))
+
+
+def user_token():
+    """Access token, refreshed when < 10 min remain (the relay issues 1 h tokens)."""
+    t = json.loads(TOKENS.read_text())
+    issued = t.get("issued_at", TOKENS.stat().st_mtime)
+    if time.time() > issued + t.get("expires_in", 3600) - 600:
+        st, new = http("POST", f"{RELAY}/auth/refresh", body={"refresh_token": t["refresh_token"]})
+        if st != 200:
+            raise SystemExit(f"token refresh failed: {st} {new}")
+        for k in ("user", "device_id", "test"):
+            new.setdefault(k, t.get(k))
+        new["issued_at"] = time.time()
+        TOKENS.write_text(json.dumps(new))
+        write_ctl_config(new["access_token"], new.get("device_id", ""))
+        t = new
+    return t["access_token"]
+
+
+def user_id():
+    return json.loads(TOKENS.read_text())["user"]["id"]
+
+
+def relay(method, path, body=None, timeout=60):
+    return http(method, f"{RELAY}{path}", token=user_token(), body=body, timeout=timeout)
+
+
+def admin(method, path, body=None):
+    return http(method, f"{RELAY}{path}", token=admin_token(), body=body)
+
+
+def me():
+    st, v = relay("GET", "/me")
+    return v if st == 200 else {}
+
+
+def spent_today():
+    c = (me() or {}).get("credits") or {}
+    return float(c.get("spent_today_usd") or 0.0), float(c.get("daily_cap_usd") or 0.0)
+
+
+def machine():
+    st, v = relay("GET", "/machine")
+    return v if st == 200 else {}
+
+
+def usage_all(project):
+    st, v = relay("GET", f"/projects/{project}/usage")
+    if st != 200:
+        return {}
+    return v.get("all") or {}
+
+
+def diff_usage(a, b):
+    return {k: round((b.get(k, 0) or 0) - (a.get(k, 0) or 0), 6) for k in ("calls", "input", "output", "cache_read", "cache_write", "usd")}
+
+
+def routines(project):
+    st, v = relay("GET", f"/projects/{project}/routines")
+    if st != 200:
+        return []
+    if isinstance(v, list):
+        return v
+    return v.get("routines") or v.get("items") or []
+
+
+def routine_runs(project, routine_id, limit=20):
+    st, v = relay("GET", f"/projects/{project}/routines/{routine_id}/runs?limit={limit}")
+    if st != 200:
+        return []
+    if isinstance(v, list):
+        return v
+    return v.get("runs") or v.get("items") or []
+
+
+def delete_routine(project, routine_id):
+    return relay("DELETE", f"/projects/{project}/routines/{routine_id}")
+
+
+def projects():
+    st, v = relay("GET", "/projects")
+    if st != 200:
+        return []
+    return v if isinstance(v, list) else (v.get("projects") or v.get("items") or [])
+
+
+# ---- arbosctl ----------------------------------------------------------------------------------
+
+
+def ctl(*args, timeout=900, input_text=None):
+    user_token()
+    env = dict(os.environ, ARBOSCTL_CONFIG=str(CTL_CONFIG))
+    p = subprocess.run([ARBOSCTL, *args], capture_output=True, text=True, timeout=timeout, env=env, input=input_text)
+    return p.returncode, p.stdout, p.stderr
+
+
+def ctl_popen(*args):
+    user_token()
+    env = dict(os.environ, ARBOSCTL_CONFIG=str(CTL_CONFIG))
+    return subprocess.Popen([ARBOSCTL, *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env, bufsize=1)
+
+
+def ensure_project(name):
+    for p in projects():
+        if p.get("name") == name:
+            return p["id"]
+    code, out, err = ctl("project", "create", "--name", name)
+    if code != 0:
+        raise SystemExit(f"project create {name}: {err}")
+    for p in projects():
+        if p.get("name") == name:
+            return p["id"]
+    raise SystemExit(f"project {name} not listed after create")
+
+
+def chat_open(project, title):
+    code, out, err = ctl("chat", "open", project, "--title", title)
+    if code != 0:
+        raise RuntimeError(f"chat open: {err[-300:]}")
+    chat_id = out.strip().splitlines()[-1].split()[-1]
+    # A send in the first second of a brand-new chat lost its turn 4 times in 48 on an earlier
+    # eval; give the box a moment to join the room.
+    time.sleep(3)
+    return chat_id
+
+
+def chat_dump(project, chat_id):
+    # Fresh replica every time: a cursor that moved past rows during a catch-up race would hide
+    # the box's rows for the rest of the run.
+    ctl("chat", "reset", project, chat_id, timeout=60)
+    code, out, err = ctl("chat", "dump", project, chat_id, timeout=120)
+    i = out.find("{")
+    if i < 0:
+        return {"messages": []}
+    try:
+        return json.loads(out[i:])
+    except json.JSONDecodeError:
+        return {"messages": []}
+
+
+def pinned_chat(project):
+    st, v = relay("GET", f"/projects/{project}/chats")
+    chats = v if isinstance(v, list) else ((v or {}).get("chats") or [])
+    for c in chats:
+        if c.get("is_pinned") or c.get("pinned"):
+            return c["id"]
+    return None

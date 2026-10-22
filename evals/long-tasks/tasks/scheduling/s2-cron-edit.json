@@ -1,0 +1,18 @@
+{
+  "id": "s2-cron-edit",
+  "lane": "c",
+  "category": "scheduling",
+  "title": "Edit the recurring job (interval and name)",
+  "turns": [
+    {
+      "prompt": "Change the ticks job so it runs every 2 minutes instead of every minute, and rename it to \"ticker\".",
+      "routine": {
+        "cron": "*/2 * * * *",
+        "name_regex": "ticker",
+        "count": 1
+      },
+      "timeout_s": 300
+    }
+  ],
+  "same_chat_as": "s1-cron-create-fires"
+}

@@ -1,0 +1,18 @@
+{
+  "id": "e4-wrong-filename",
+  "lane": "a",
+  "category": "recovery",
+  "title": "Summarise a note whose filename is slightly wrong",
+  "turns": [
+    {
+      "prompt": "Summarise {D}/notes/meeting.md for me in three bullets.",
+      "seed": "mkdir -p {D}/notes && cat > {D}/notes/meeting-2026-10-20.md <<'EOF'\n# Platform sync 2026-10-20\n- Decided to move the nightly ETL from 02:00 to 04:00 UTC to avoid the backup window.\n- Owner for the Postgres 16 upgrade: Lena; target the first week of November.\n- Open question: whether the Falcon dashboard should keep its weekly email digest.\nEOF",
+      "reply_regex": "ETL|04:00|Lena|Postgres|Falcon",
+      "rubric": {
+        "criteria": "The assistant found the closest matching file (meeting-2026-10-20.md), said that meeting.md did not exist, and summarised the real content (ETL move to 04:00, Lena owns Postgres 16 upgrade, Falcon digest question). It did not invent content.",
+        "min": 3
+      },
+      "timeout_s": 300
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "id": "f2-pdf-extract",
+  "lane": "a",
+  "category": "data",
+  "title": "Extract fields from a PDF invoice",
+  "turns": [
+    {
+      "prompt": "Read the invoice PDF at {D}/invoice.pdf and write a JSON file {D}/invoice.json with keys invoice_number and total (the amount due, as a number). Then tell me both values.",
+      "generate": "invoice_pdf",
+      "verify": "f={D}/invoice.json; test -f $f || { echo FAIL: no invoice.json; exit 0; }; sed 's/^/SHOW /' $f; python3 - <<'EOF'\nimport json\nd=json.load(open('{D}/invoice.json'))\nnum=str(d.get('invoice_number','')).strip()\ntot=str(d.get('total','')).replace('USD','').replace('$','').replace(',','').strip()\nok = num=='INV-2026-0931' and abs(float(tot)-515.26)<0.01\nprint('PASS' if ok else f'FAIL: number={num} total={tot}')\nEOF",
+      "timeout_s": 420
+    }
+  ]
+}

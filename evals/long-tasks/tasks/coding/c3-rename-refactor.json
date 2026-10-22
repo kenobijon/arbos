@@ -1,0 +1,15 @@
+{
+  "id": "c3-rename-refactor",
+  "lane": "b",
+  "category": "coding",
+  "title": "Rename a function across a package and keep the tests green",
+  "turns": [
+    {
+      "prompt": "In {D}/cfgapp rename the function load_cfg to load_config everywhere (package code and tests), so that no occurrence of load_cfg remains, and run `python3 -m unittest discover -s tests -t .` to prove it still passes. Report what you changed.",
+      "seed": "mkdir -p {D}/cfgapp/cfgapp {D}/cfgapp/tests && cd {D}/cfgapp && cat > cfgapp/__init__.py <<'EOF'\nfrom .loader import load_cfg\nEOF\ncat > cfgapp/loader.py <<'EOF'\nimport json\n\ndef load_cfg(path):\n    with open(path) as f:\n        return json.load(f)\nEOF\ncat > cfgapp/app.py <<'EOF'\nfrom .loader import load_cfg\n\ndef run(path):\n    cfg = load_cfg(path)\n    return cfg.get(\"name\", \"unnamed\")\nEOF\ncat > tests/test_app.py <<'EOF'\nimport json, os, tempfile, unittest\nfrom cfgapp.app import run\nfrom cfgapp import load_cfg\n\nclass T(unittest.TestCase):\n    def test_run(self):\n        d = tempfile.mkdtemp()\n        p = os.path.join(d, \"c.json\")\n        json.dump({\"name\": \"zed\"}, open(p, \"w\"))\n        self.assertEqual(run(p), \"zed\")\n        self.assertEqual(load_cfg(p)[\"name\"], \"zed\")\n\nif __name__ == \"__main__\":\n    unittest.main()\nEOF",
+      "verify": "cd {D}/cfgapp && out=$(python3 -m unittest discover -s tests -t . 2>&1 | tail -3); old=$(grep -r 'load_cfg' --include='*.py' . | wc -l); new=$(grep -r 'load_config' --include='*.py' . | wc -l); echo \"SHOW tests=$out old=$old new=$new\"; if echo \"$out\" | grep -q '^OK' && [ $old -eq 0 ] && [ $new -ge 3 ]; then echo PASS; else echo \"FAIL: old=$old new=$new\"; fi",
+      "forbid_question": true,
+      "timeout_s": 600
+    }
+  ]
+}

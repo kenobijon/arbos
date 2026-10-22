@@ -1,0 +1,18 @@
+{
+  "id": "e3-malformed-json",
+  "lane": "a",
+  "category": "recovery",
+  "title": "Count records in a malformed JSON file",
+  "turns": [
+    {
+      "prompt": "How many records are in {D}/data.json? It should be a JSON array of objects.",
+      "seed": "mkdir -p {D} && python3 -c \"import json; print(json.dumps([{'id': i, 'ok': True} for i in range(37)], indent=1)[:-1].rstrip() + ',\\n]')\" > {D}/data.json",
+      "reply_regex": "37|malformed|invalid|trailing comma|not valid|parse error|syntax",
+      "rubric": {
+        "criteria": "The assistant notices the file is not valid JSON (a trailing comma before the closing bracket), says so plainly, and either gives the count after a safe repair (37) or explains exactly what is wrong. It must not silently invent a number.",
+        "min": 3
+      },
+      "timeout_s": 300
+    }
+  ]
+}

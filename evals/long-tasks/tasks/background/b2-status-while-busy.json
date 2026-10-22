@@ -1,0 +1,28 @@
+{
+  "id": "b2-status-while-busy",
+  "lane": "c",
+  "category": "background",
+  "title": "Give a real status while the background job runs",
+  "turns": [
+    {
+      "prompt": "Start a background job: compute the SHA-256 of every integer from 1 to 3,000,000 (as decimal strings) and write the number of digests that start with '00' to {D}/zeros.txt. Reply to me right away that it started; do not wait for it.",
+      "seed": "mkdir -p {D}",
+      "background": true,
+      "latency_max_s": 10,
+      "timeout_s": 120
+    },
+    {
+      "prompt": "How is the background job going? Is it still running?",
+      "latency_max_s": 10,
+      "rubric": {
+        "criteria": "The reply gives a real status of the background job (running / finished / progress), not a generic 'working on it' and not a refusal; it does not pretend to have a result it cannot know.",
+        "min": 3
+      },
+      "timeout_s": 120
+    }
+  ],
+  "verify_wait": {
+    "verify": "f={D}/zeros.txt; test -f $f || { echo FAIL: no zeros.txt yet; exit 0; }; v=$(tr -dc '0-9' < $f); echo \"SHOW zeros=$v\"; [ -n \"$v\" ] && [ $v -gt 10000 ] && [ $v -lt 13000 ] && echo PASS || echo FAIL: got $v",
+    "wait_s": 600
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "id": "b1-ack-while-busy",
+  "lane": "c",
+  "category": "background",
+  "title": "Reply at once while a slow background job runs",
+  "turns": [
+    {
+      "prompt": "Start a background job now: count the prime numbers below 5,000,000 with a simple Python sieve and write only the count to {D}/primes.txt when done. Do not wait for it to finish before replying to me; just confirm it started.",
+      "seed": "mkdir -p {D}",
+      "background": true,
+      "latency_max_s": 10,
+      "timeout_s": 120
+    },
+    {
+      "prompt": "Quick one: what is 17 × 23?",
+      "latency_max_s": 10,
+      "reply_regex": "391",
+      "timeout_s": 120
+    }
+  ],
+  "verify_wait": {
+    "verify": "f={D}/primes.txt; test -f $f || { echo FAIL: no primes.txt yet; exit 0; }; v=$(tr -dc '0-9' < $f); echo \"SHOW primes=$v\"; [ \"$v\" = 348513 ] && echo PASS || echo FAIL: got $v",
+    "wait_s": 600
+  }
+}

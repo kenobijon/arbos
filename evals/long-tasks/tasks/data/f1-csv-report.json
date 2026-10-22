@@ -1,0 +1,27 @@
+{
+  "id": "f1-csv-report",
+  "lane": "b",
+  "category": "data",
+  "title": "CSV to a report with totals and top products",
+  "turns": [
+    {
+      "prompt": "{D}/sales.csv has 500 orders (columns date, order_id, product, quantity, unit_price, revenue). Write {D}/report.md with: total revenue, the top 3 products by revenue (with their revenue), and revenue per month. Use two decimals. Then give me the total and the top 3.",
+      "generate": "sales_csv",
+      "verify": "f={D}/report.md; test -f $f || { echo FAIL: no report.md; exit 0; }; sed 's/^/SHOW /' $f | head -50; echo PASS",
+      "truth": {
+        "kind": "generated",
+        "keys": [
+          "total",
+          "top3",
+          "monthly"
+        ],
+        "tolerance": 1
+      },
+      "rubric": {
+        "criteria": "Report is organised (sections for total, top 3 with amounts, per-month table), numbers have two decimals, nothing invented.",
+        "min": 3
+      },
+      "timeout_s": 600
+    }
+  ]
+}
