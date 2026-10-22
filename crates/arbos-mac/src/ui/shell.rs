@@ -51,8 +51,11 @@ actions!(
     [CloseTab, NewTab, PrevTab, NextTab, ToggleRail, Escape, Quit]
 );
 
+/// How far the header's window-drag catchment overhangs the transcript (its top fade band).
+const HEADER_DRAG_OVERHANG: f32 = 24.0;
 /// Left inset for the conversation header while the sidebar is hidden: the window's traffic lights.
-const TRAFFIC_LIGHTS_INSET: f32 = 72.0;
+/// The sidebar's collapse control sits at the same inset, so it never moves when the pane folds.
+pub(crate) const TRAFFIC_LIGHTS_INSET: f32 = 72.0;
 
 /// How long a single click on the header name waits for a second one before
 /// it opens the profile (#1068). Shorter than the system double-click
@@ -1871,11 +1874,25 @@ impl Shell {
             // Transcript above, composer pinned at the bottom. On the first
             // send the composer slides down from the centre over 220 ms using
             // a relative `top` inset (GPUI has no transform).
+            // The window-drag catchment reaches 24 pt past the 44 pt header,
+            // over the transcript's top fade (Jacob: the band alone was too
+            // small to grab). The strip arms a move only after the pointer
+            // travels `WINDOW_DRAG_SLOP`, so a click there still lands on the
+            // faded bubble beneath ([feedback mac-collapsed-toggle-inline]).
             let body = div()
                 .flex_1()
                 .min_h_0()
                 .relative()
-                .child(self.transcript.clone());
+                .child(self.transcript.clone())
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .right_0()
+                        .h(px(HEADER_DRAG_OVERHANG))
+                        .window_drag(),
+                );
             if typing.is_some() {
                 PulseClock::request(cx);
             }
