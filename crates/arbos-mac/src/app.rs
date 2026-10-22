@@ -6502,7 +6502,10 @@ impl AppState {
                 present,
             } => {
                 if present {
-                    let mut sender: Sender = serde_json::from_str(&metadata).unwrap_or_default();
+                    let mut sender: Sender =
+                        serde_json::from_str::<arbos_core::api::SenderDto>(&metadata)
+                            .map(|dto| Sender::from(&dto))
+                            .unwrap_or_default();
                     if sender.name.is_empty() {
                         sender.name = name;
                     }

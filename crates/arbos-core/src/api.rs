@@ -1,5 +1,5 @@
-//! Shared HTTP response shapes for projects, chats, people, me, machine, and
-//! unread (crdt-sync).
+//! Shared HTTP response shapes for projects, chats, people, me, machine,
+//! unread, and calls (crdt-sync).
 //!
 //! No I/O. The relay builds these and serializes them; clients will decode the
 //! same JSON. Regenerate Swift with `./scripts/gen-swift-types.sh`.
@@ -588,4 +588,185 @@ pub struct MachineStateDto {
     pub since: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub held: Option<bool>,
+}
+
+/// `sender{}` on calls, pushes, and LiveKit participant metadata (`Sender::json`).
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SenderDto {
+    pub kind: String,
+    pub id: String,
+    pub name: String,
+    pub handle: String,
+    pub avatar: Option<String>,
+    pub avatar_color: Option<String>,
+    pub avatar_url: Option<String>,
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub avatar_color_index: Option<i64>,
+    #[typeshare(serialized_as = "I54")]
+    pub avatar_color_index_effective: i64,
+}
+
+/// One device under `reachable[].devices` on a start-call reply.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReachableDeviceDto {
+    pub device_id: String,
+    pub name: String,
+    pub kind: String,
+    pub platform: Option<String>,
+    pub app_version: Option<String>,
+    pub polled_within_30s: bool,
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub last_seen_at: Option<i64>,
+    pub voip_token: bool,
+    pub push_token: bool,
+}
+
+/// One callee in `reachable[]` on a 201 start-call reply.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CallReachabilityDto {
+    pub user_id: String,
+    pub handle: String,
+    pub name: String,
+    pub any_live: bool,
+    pub any_voip: bool,
+    pub any_push: bool,
+    pub devices: Vec<ReachableDeviceDto>,
+}
+
+/// Call object (`call_json`): token fields only when the relay mints a join token.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CallDto {
+    pub call_id: String,
+    pub chat_id: String,
+    pub project_id: String,
+    pub kind: String,
+    pub room: String,
+    pub livekit_url: Option<String>,
+    #[typeshare(serialized_as = "I54")]
+    pub max_participants: i64,
+    pub started_by: SenderDto,
+    pub participants: Vec<SenderDto>,
+    pub agents: Vec<SenderDto>,
+    #[typeshare(serialized_as = "I54")]
+    pub started_at: i64,
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub ended_at: Option<i64>,
+    pub reason: Option<String>,
+    pub started_device: Option<String>,
+    pub platform: Option<String>,
+    pub app_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub token_expires_at: Option<i64>,
+}
+
+/// `POST …/calls` success: new call (201) or join the live one (200).
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StartCallResponseDto {
+    pub call: CallDto,
+    pub joined: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reachable: Option<Vec<CallReachabilityDto>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[typeshare(skip)]
+    pub agents_dispatched: Option<Value>,
+}
+
+/// `{ "call": … }` envelope (`GET /calls/{id}`, join, active-call).
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CallEnvelopeDto {
+    pub call: CallDto,
+}
+
+/// `POST /calls/{id}/leave`.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LeaveCallResponseDto {
+    pub ended: bool,
+    #[typeshare(serialized_as = "I54")]
+    pub duration_s: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub already_ended: Option<bool>,
+}
+
+/// `POST /devices/{id}/voip`.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VoipRegisterResponseDto {
+    pub device_id: String,
+    pub push: bool,
+}
+
+/// `/me/pushes` `call_started` payload.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CallStartedPayloadDto {
+    pub call: CallDto,
+    pub sender: SenderDto,
+}
+
+/// `/me/pushes` `call_ended` payload.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CallEndedPayloadDto {
+    pub call_id: String,
+    pub chat_id: String,
+    pub project_id: String,
+    #[typeshare(serialized_as = "I54")]
+    pub duration_s: i64,
+    pub reason: String,
+    pub writer_device: Option<String>,
+}
+
+/// `/me/pushes` `call_missed` payload (`from` is the starter).
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CallMissedPayloadDto {
+    pub call_id: String,
+    pub chat_id: String,
+    pub project_id: String,
+    pub kind: String,
+    pub from: SenderDto,
+    #[typeshare(serialized_as = "I54")]
+    pub started_at: i64,
+    #[typeshare(serialized_as = "I54")]
+    pub ended_at: i64,
+    #[typeshare(serialized_as = "I54")]
+    pub duration_s: i64,
+    pub reason: Option<String>,
+}
+
+/// PushKit VoIP wake payload (`caller` is the starter).
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CallRingPayloadDto {
+    pub call_id: String,
+    pub chat_id: String,
+    pub project_id: String,
+    pub kind: String,
+    pub room: String,
+    pub livekit_url: Option<String>,
+    pub caller: SenderDto,
+    #[typeshare(serialized_as = "I54")]
+    pub started_at: i64,
+}
+
+/// APNs `ARBOS_CALL` alert body without `aps` (`sender` on started/missed only).
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CallAlertDto {
+    pub event: String,
+    pub chat_id: String,
+    pub project_id: String,
+    pub call: CallDto,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender: Option<SenderDto>,
 }

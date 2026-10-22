@@ -1,0 +1,44 @@
+{
+  "call": {
+    "agents": [],
+    "app_version": "0.6.24",
+    "call_id": "call_fixture",
+    "chat_id": "people_call_fixture",
+    "ended_at": null,
+    "kind": "voice",
+    "livekit_url": "wss://lk.test",
+    "max_participants": 16,
+    "participants": [
+      {
+        "avatar": null,
+        "avatar_color": null,
+        "avatar_color_index": null,
+        "avatar_color_index_effective": 1,
+        "avatar_url": null,
+        "handle": "user201",
+        "id": "gh_201",
+        "kind": "user",
+        "name": "@user201"
+      }
+    ],
+    "platform": "mac",
+    "project_id": "people",
+    "reason": null,
+    "room": "call_room_fixture",
+    "started_at": 1700000000000,
+    "started_by": {
+      "avatar": null,
+      "avatar_color": null,
+      "avatar_color_index": null,
+      "avatar_color_index_effective": 1,
+      "avatar_url": null,
+      "handle": "user201",
+      "id": "gh_201",
+      "kind": "user",
+      "name": "@user201"
+    },
+    "started_device": "dev_alice_call",
+    "token": "fixture.join.token",
+    "token_expires_at": 1700003600000
+  }
+}

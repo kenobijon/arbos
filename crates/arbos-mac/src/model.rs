@@ -492,6 +492,9 @@ pub struct Call {
     /// Live participants.
     #[serde(default)]
     pub participants: Vec<Sender>,
+    /// Project agents that belong to this chat (Phase 2).
+    #[serde(default)]
+    pub agents: Vec<Sender>,
 }
 
 impl Call {

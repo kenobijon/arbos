@@ -4,6 +4,7 @@
 // the participant metadata is the sender JSON.
 
 import Foundation
+import ArbosFFI
 
 enum CallKind: String, Codable {
     case voice, video
@@ -24,19 +25,60 @@ struct CallPerson: Identifiable, Equatable, Hashable {
     var displayName: String { name?.isEmpty == false ? name! : "@\(handle)" }
     var isAgent: Bool { kind == "agent" }
 
+    /// Memberwise init (kept explicit because `init(dto:)` would suppress synthesis).
+    init(
+        id: String,
+        kind: String,
+        name: String? = nil,
+        handle: String,
+        avatar: String? = nil,
+        avatarColor: String? = nil,
+        avatarUrl: String? = nil,
+        avatarColorIndex: Int? = nil
+    ) {
+        self.id = id
+        self.kind = kind
+        self.name = name
+        self.handle = handle
+        self.avatar = avatar
+        self.avatarColor = avatarColor
+        self.avatarUrl = avatarUrl
+        self.avatarColorIndex = avatarColorIndex
+    }
+
+    init(dto: SenderDto) {
+        let emptyToNil: (String?) -> String? = { $0.flatMap { $0.isEmpty ? nil : $0 } }
+        self.init(
+            id: dto.id,
+            kind: dto.kind.isEmpty ? "user" : dto.kind,
+            name: emptyToNil(dto.name),
+            handle: dto.handle.isEmpty ? dto.id : dto.handle,
+            avatar: emptyToNil(dto.avatar),
+            avatarColor: emptyToNil(dto.avatar_color),
+            avatarUrl: emptyToNil(dto.avatar_url),
+            avatarColorIndex: Int(dto.avatar_color_index_effective)
+        )
+    }
+
     static func parse(_ raw: Any?) -> CallPerson? {
-        guard let d = raw as? [String: Any], let id = d["id"] as? String else { return nil }
-        func s(_ k: String) -> String? { (d[k] as? String).flatMap { $0.isEmpty ? nil : $0 } }
-        var p = CallPerson(id: id, kind: s("kind") ?? "user", name: s("name"), handle: s("handle") ?? id,
-                           avatar: s("avatar"), avatarColor: s("avatar_color"), avatarUrl: s("avatar_url"))
-        p.avatarColorIndex = (d["avatar_color_index_effective"] as? NSNumber)?.intValue
-        return p
+        guard let raw, JSONSerialization.isValidJSONObject(raw),
+              let data = try? JSONSerialization.data(withJSONObject: raw) else { return nil }
+        do {
+            return CallPerson(dto: try JSONDecoder().decode(SenderDto.self, from: data))
+        } catch {
+            NSLog("SenderDto: \(error)")
+            return nil
+        }
     }
 
     static func parse(metadata: String?) -> CallPerson? {
-        guard let metadata, let data = metadata.data(using: .utf8),
-              let obj = try? JSONSerialization.jsonObject(with: data) else { return nil }
-        return parse(obj)
+        guard let metadata, let data = metadata.data(using: .utf8) else { return nil }
+        do {
+            return CallPerson(dto: try JSONDecoder().decode(SenderDto.self, from: data))
+        } catch {
+            NSLog("SenderDto metadata: \(error)")
+            return nil
+        }
     }
 
     /// From a LiveKit identity `u_<id>` when there is no metadata yet.
@@ -74,13 +116,35 @@ struct CallReachability: Equatable {
     /// PushKit or a normal alert can reach them while Arbos is closed.
     var canRingClosed: Bool { anyVoip || anyPush }
 
+    init(userId: String, handle: String, name: String?, anyLive: Bool, anyVoip: Bool, anyPush: Bool) {
+        self.userId = userId
+        self.handle = handle
+        self.name = name
+        self.anyLive = anyLive
+        self.anyVoip = anyVoip
+        self.anyPush = anyPush
+    }
+
+    init(dto: CallReachabilityDto) {
+        self.init(
+            userId: dto.user_id,
+            handle: dto.handle.isEmpty ? dto.user_id : dto.handle,
+            name: dto.name.isEmpty ? nil : dto.name,
+            anyLive: dto.any_live,
+            anyVoip: dto.any_voip,
+            anyPush: dto.any_push
+        )
+    }
+
     static func parse(_ raw: Any?) -> CallReachability? {
-        guard let d = raw as? [String: Any], let id = d["user_id"] as? String else { return nil }
-        func flag(_ k: String) -> Bool {
-            (d[k] as? Bool) ?? (d[k] as? NSNumber)?.boolValue ?? false
+        guard let raw, JSONSerialization.isValidJSONObject(raw),
+              let data = try? JSONSerialization.data(withJSONObject: raw) else { return nil }
+        do {
+            return CallReachability(dto: try JSONDecoder().decode(CallReachabilityDto.self, from: data))
+        } catch {
+            NSLog("CallReachabilityDto: \(error)")
+            return nil
         }
-        return CallReachability(userId: id, handle: d["handle"] as? String ?? id, name: d["name"] as? String,
-                                anyLive: flag("any_live"), anyVoip: flag("any_voip"), anyPush: flag("any_push"))
     }
 }
 
@@ -109,20 +173,72 @@ struct Call: Identifiable, Equatable {
     var isPeople: Bool { projectId == peopleSlot || projectId.isEmpty }
     var ended: Bool { endedAt != nil }
 
+    init(
+        callId: String,
+        chatId: String,
+        projectId: String,
+        kind: CallKind,
+        room: String,
+        livekitUrl: String,
+        token: String? = nil,
+        tokenExpiresAt: Int64? = nil,
+        startedBy: CallPerson? = nil,
+        startedAt: Int64,
+        endedAt: Int64? = nil,
+        reason: String? = nil,
+        participants: [CallPerson] = [],
+        agents: [CallPerson] = [],
+        reachable: [CallReachability] = []
+    ) {
+        self.callId = callId
+        self.chatId = chatId
+        self.projectId = projectId
+        self.kind = kind
+        self.room = room
+        self.livekitUrl = livekitUrl
+        self.token = token
+        self.tokenExpiresAt = tokenExpiresAt
+        self.startedBy = startedBy
+        self.startedAt = startedAt
+        self.endedAt = endedAt
+        self.reason = reason
+        self.participants = participants
+        self.agents = agents
+        self.reachable = reachable
+    }
+
+    init(dto: CallDto, reachable: [CallReachability] = []) {
+        self.init(
+            callId: dto.call_id,
+            chatId: dto.chat_id,
+            projectId: dto.project_id.isEmpty ? peopleSlot : dto.project_id,
+            kind: CallKind(rawValue: dto.kind) ?? .voice,
+            room: dto.room,
+            livekitUrl: dto.livekit_url ?? "",
+            token: dto.token.flatMap { $0.isEmpty ? nil : $0 },
+            tokenExpiresAt: dto.token_expires_at,
+            startedBy: CallPerson(dto: dto.started_by),
+            startedAt: dto.started_at,
+            endedAt: dto.ended_at,
+            reason: dto.reason,
+            participants: dto.participants.map(CallPerson.init(dto:)),
+            agents: dto.agents.map(CallPerson.init(dto:)),
+            reachable: reachable
+        )
+    }
+
     static func parse(_ raw: Any?) -> Call? {
-        guard let outer = raw as? [String: Any] else { return nil }
-        let d = (outer["call"] as? [String: Any]) ?? outer
-        guard let callId = (d["call_id"] as? String) ?? (d["id"] as? String), let chatId = d["chat_id"] as? String else { return nil }
-        let n = { (k: String) -> Int64? in (d[k] as? NSNumber)?.int64Value }
-        return Call(callId: callId, chatId: chatId, projectId: (d["project_id"] as? String) ?? peopleSlot,
-                    kind: CallKind(rawValue: d["kind"] as? String ?? "voice") ?? .voice,
-                    room: d["room"] as? String ?? "", livekitUrl: d["livekit_url"] as? String ?? "",
-                    token: (d["token"] as? String).flatMap { $0.isEmpty ? nil : $0 }, tokenExpiresAt: n("token_expires_at"),
-                    startedBy: CallPerson.parse(d["started_by"]), startedAt: n("started_at") ?? nowMs(), endedAt: n("ended_at"),
-                    reason: d["reason"] as? String,
-                    participants: ((d["participants"] as? [Any]) ?? []).compactMap(CallPerson.parse),
-                    agents: ((d["agents"] as? [Any]) ?? []).compactMap(CallPerson.parse),
-                    reachable: ((outer["reachable"] as? [Any]) ?? (d["reachable"] as? [Any]) ?? []).compactMap(CallReachability.parse))
+        guard let raw, JSONSerialization.isValidJSONObject(raw),
+              let data = try? JSONSerialization.data(withJSONObject: raw) else { return nil }
+        let decoder = JSONDecoder()
+        if let env = try? decoder.decode(CallEnvelopeDto.self, from: data) {
+            return Call(dto: env.call)
+        }
+        if let dto = try? decoder.decode(CallDto.self, from: data) {
+            return Call(dto: dto)
+        }
+        NSLog("CallDto: could not decode call")
+        return nil
     }
 }
 

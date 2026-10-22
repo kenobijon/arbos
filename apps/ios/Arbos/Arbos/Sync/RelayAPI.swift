@@ -491,47 +491,70 @@ final class RelayAPI {
     func startCall(chatId: String, projectId: String?, kind: CallKind) async throws -> (Call, started: Bool) {
         let path = (projectId == nil || projectId == peopleSlot) ? "/chats/\(chatId)/calls" : "/projects/\(projectId!)/chats/\(chatId)/calls"
         let (data, http) = try await request("POST", path, body: ["kind": kind.rawValue], headers: ["X-Arbos-Client": RelayAPI.clientHeader])
-        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let call = Call.parse(obj) else {
+        let resp: StartCallResponseDto
+        do {
+            resp = try JSONDecoder().decode(StartCallResponseDto.self, from: data)
+        } catch {
+            NSLog("StartCallResponseDto: \(error)")
             throw RelayError(status: http.statusCode, message: "Bad call response")
         }
+        let reachable = (resp.reachable ?? []).map(CallReachability.init(dto:))
+        let call = Call(dto: resp.call, reachable: reachable)
         // 201 {call, joined: false} = we started it; 200 {call, joined: true} = we were added.
-        let joined = (obj["joined"] as? NSNumber)?.boolValue ?? (http.statusCode != 201)
-        return (call, !joined)
+        return (call, !resp.joined)
     }
 
     func joinCall(_ callId: String) async throws -> Call {
-        guard let call = Call.parse(try await json("POST", "/calls/\(callId)/join", body: [String: Any]())) else {
+        let data = try await request("POST", "/calls/\(callId)/join", body: [String: Any]()).0
+        do {
+            let env = try JSONDecoder().decode(CallEnvelopeDto.self, from: data)
+            return Call(dto: env.call)
+        } catch {
+            NSLog("CallEnvelopeDto: \(error)")
             throw RelayError(status: 0, message: "Bad call response")
         }
-        return call
     }
 
     /// `POST /calls/{id}/leave` → `{ended, duration_s}`; the client told `ended: true` writes the end line.
     func leaveCall(_ callId: String) async throws -> (ended: Bool, durationS: Int) {
-        let v = try await json("POST", "/calls/\(callId)/leave", body: [String: Any]()) as? [String: Any]
-        return (((v?["ended"] as? NSNumber)?.boolValue) ?? false, ((v?["duration_s"] as? NSNumber)?.intValue) ?? 0)
+        let data = try await request("POST", "/calls/\(callId)/leave", body: [String: Any]()).0
+        let resp = (try? JSONDecoder().decode(LeaveCallResponseDto.self, from: data))
+            ?? LeaveCallResponseDto(ended: false, duration_s: 0, already_ended: nil)
+        return (resp.ended, Int(resp.duration_s))
     }
 
     /// `GET /calls/{id}` → the call, also after it ended (no token then).
     func call(_ callId: String) async throws -> Call {
-        guard let call = Call.parse(try await json("GET", "/calls/\(callId)")) else { throw RelayError(status: 0, message: "Bad call response") }
-        return call
+        let data = try await request("GET", "/calls/\(callId)").0
+        do {
+            let env = try JSONDecoder().decode(CallEnvelopeDto.self, from: data)
+            return Call(dto: env.call)
+        } catch {
+            NSLog("CallEnvelopeDto: \(error)")
+            throw RelayError(status: 0, message: "Bad call response")
+        }
     }
 
     /// `GET /chats/{id}/call` (or the projects form) → the active call, nil on 404.
     func activeCall(chatId: String, projectId: String?) async throws -> Call? {
         let path = (projectId == nil || projectId == peopleSlot) ? "/chats/\(chatId)/call" : "/projects/\(projectId!)/chats/\(chatId)/call"
         do {
-            return Call.parse(try await json("GET", path))
+            let data = try await request("GET", path).0
+            let env = try JSONDecoder().decode(CallEnvelopeDto.self, from: data)
+            return Call(dto: env.call)
         } catch let e as RelayError where e.status == 404 {
+            return nil
+        } catch {
+            NSLog("CallEnvelopeDto: \(error)")
             return nil
         }
     }
 
     /// `POST /devices/{id}/voip {token, environment, bundle_id}` → `{push}` (false until the APNs key exists).
     func registerVoip(deviceId: Id, token: String, environment: String, bundleId: String) async throws -> Bool {
-        let v = try await json("POST", "/devices/\(deviceId)/voip", body: ["token": token, "environment": environment, "bundle_id": bundleId])
-        return ((v as? [String: Any])?["push"] as? NSNumber)?.boolValue ?? true
+        let data = try await request("POST", "/devices/\(deviceId)/voip", body: ["token": token, "environment": environment, "bundle_id": bundleId]).0
+        let resp = try? JSONDecoder().decode(VoipRegisterResponseDto.self, from: data)
+        return resp?.push ?? true
     }
 
     func unregisterVoip(deviceId: Id) async throws {
