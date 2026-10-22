@@ -11,6 +11,7 @@ use gpui::{
 use crate::app::AppState;
 use crate::model::{now_ms, LocalDevice, LocalView};
 use crate::ui::frost::{frosted, MENU_BLUR};
+use crate::ui::profiles::kit;
 use crate::ui::theme::{Theme, PANEL_RADIUS, RAIL_WIDTH};
 
 pub enum LocalEvent {
@@ -192,8 +193,8 @@ impl LocalPanel {
             .flex_col()
             .gap(px(5.0))
             .py(px(8.0))
-            .border_b_1()
-            .border_color(theme.border)
+            .relative()
+            .child(kit::hairline_below(16.0, theme))
             .child(
                 div()
                     .flex()

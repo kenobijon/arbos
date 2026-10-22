@@ -20,6 +20,7 @@ use crate::ui::composer::ComposerInput;
 use crate::ui::frost::{frosted, MENU_BLUR};
 use crate::ui::glass;
 use crate::ui::icons::icon;
+use crate::ui::profiles::kit;
 use crate::ui::theme::{Theme, PANEL_RADIUS, RAIL_WIDTH, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
 
 pub enum SecretsEvent {
@@ -403,14 +404,14 @@ impl SecretsPanel {
     ) -> Stateful<Div> {
         div()
             .id(id)
+            .relative()
             .flex()
             .items_center()
             .gap(px(10.0))
             .min_h(px(52.0))
             .px(px(16.0))
             .py(px(8.0))
-            .border_b_1()
-            .border_color(theme.border)
+            .child(kit::hairline_below(16.0, theme))
             .child(glass::icon_tile(glyph, theme).when(dim, |el| el.opacity(0.55)))
             .child(
                 div()
@@ -646,8 +647,8 @@ impl SecretsPanel {
                     .gap(px(2.0))
                     .px(px(16.0))
                     .py(px(8.0))
-                    .border_b_1()
-                    .border_color(theme.border)
+                    .relative()
+                    .child(kit::hairline_below(16.0, theme))
                     .child(
                         div()
                             .text_size(px(TEXT_SMALL))
@@ -706,8 +707,8 @@ impl SecretsPanel {
             .gap(px(3.0))
             .px(px(16.0))
             .py(px(10.0))
-            .border_b_1()
-            .border_color(theme.border)
+            .relative()
+            .child(kit::hairline_below(16.0, theme))
             .child(
                 div()
                     .text_size(px(TEXT_BODY))
@@ -967,8 +968,8 @@ impl SecretsPanel {
                 .gap(px(8.0))
                 .px(px(16.0))
                 .py(px(10.0))
-                .border_b_1()
-                .border_color(theme.border);
+                .relative()
+                .child(kit::hairline_below(16.0, theme));
             if s.kind == "login" {
                 form = form
                     .child(Self::field(
@@ -1151,8 +1152,8 @@ impl SecretsPanel {
                     .min_h(px(52.0))
                     .px(px(16.0))
                     .py(px(8.0))
-                    .border_b_1()
-                    .border_color(theme.border)
+                    .relative()
+                    .child(kit::hairline_below(16.0, theme))
                     .cursor_pointer()
                     .hover(|st| st.bg(theme.surface_2))
                     .child(avatar)
@@ -1912,8 +1913,8 @@ impl SecretsPanel {
                     .min_h(px(52.0))
                     .px(px(16.0))
                     .py(px(8.0))
-                    .border_b_1()
-                    .border_color(theme.border)
+                    .relative()
+                    .child(kit::hairline_below(16.0, theme))
                     .cursor_pointer()
                     .hover(|st| st.bg(theme.surface_2))
                     .child(avatar)
@@ -2034,8 +2035,8 @@ impl SecretsPanel {
                     .gap(px(10.0))
                     .px(px(16.0))
                     .py(px(8.0))
-                    .border_b_1()
-                    .border_color(theme.border)
+                    .relative()
+                    .child(kit::hairline_below(16.0, theme))
                     .cursor_pointer()
                     .hover(|s| s.bg(theme.surface_2))
                     .child(
