@@ -9,7 +9,7 @@ use crate::ui::icons::icon;
 use crate::ui::profiles::kit;
 use crate::ui::shell::Shell;
 use crate::ui::sidebar::server_picture;
-use crate::ui::theme::{Theme, TEXT_SMALL};
+use crate::ui::theme::{Theme, TEXT_BODY, TEXT_SMALL};
 
 use super::{card, frame, hero, HERO_AVATAR};
 
@@ -41,7 +41,7 @@ pub(super) fn page(
         .gap(px(6.0))
         .child(
             div()
-                .text_size(px(crate::ui::theme::TEXT_TITLE))
+                .text_size(px(TEXT_BODY + 6.0))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme.text)
                 .child(channel.name.clone()),

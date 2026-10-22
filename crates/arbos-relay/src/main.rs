@@ -449,6 +449,10 @@ async fn main() -> anyhow::Result<()> {
                 .delete(matrix::servers::channel_delete),
         )
         .route(
+            "/servers/{id}/channels/{cid}/archive",
+            post(matrix::servers::channel_archive),
+        )
+        .route(
             "/servers/{id}/invite/reset",
             post(matrix::servers::invite_reset),
         )

@@ -830,6 +830,13 @@ pub enum ClientCommand {
         server_id: Id,
         channel_id: Id,
     },
+    /// D88: `POST /servers/{id}/channels/{cid}/archive {archived}` — hide the channel from my
+    /// list or bring it back (per user, mirrored as the room's `m.lowpriority` tag).
+    ChannelArchive {
+        server_id: Id,
+        channel_id: Id,
+        archived: bool,
+    },
     /// D88: load a channel's rows (first page + live); answered by `MatrixTimeline`.
     ChannelOpen {
         room_id: String,
