@@ -904,6 +904,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         ClientCommand::CreateProject {
             name,
             avatar_color_index,
+            leaf,
             source_project_id: _,
             description,
             color,
@@ -945,8 +946,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 avatar_color_index: avatar_color_index
                     .map(|i| crate::ui::avatars::index_for(&id, Some(i))),
                 avatar_color_override: avatar_color_index,
-                avatar_leaf: None,
-                avatar_leaf_color: None,
+                avatar_leaf: leaf.map(|l| l.leaf),
+                avatar_leaf_color: leaf.map(|l| l.color),
                 image_url: None,
             });
             let chat_id = new_id();

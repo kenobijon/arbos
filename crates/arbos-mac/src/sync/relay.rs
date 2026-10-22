@@ -3446,8 +3446,12 @@ async fn speak(shared: Arc<Shared>, project_id: Id, request_id: u64, text: Strin
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("audio/wav")
                 .to_owned();
-            let bytes = r.bytes().await.map(|b| b.to_vec()).unwrap_or_default();
+            let mut bytes = r.bytes().await.map(|b| b.to_vec()).unwrap_or_default();
             if status.is_success() {
+                // Older relays pass OpenAI's streamed WAV through with placeholder
+                // sizes; fix the header once here so both the decoder and the
+                // rodio player (also hound underneath) take the cached bytes.
+                arbos_core::wav::repair_sizes(&mut bytes);
                 SyncEvent::Speech {
                     request_id,
                     bytes: Arc::new(bytes),
@@ -4938,6 +4942,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         ClientCommand::CreateProject {
             name,
             avatar_color_index,
+            leaf,
             source_project_id,
             description,
             color,
@@ -4951,6 +4956,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 }
                 if let Some(i) = avatar_color_index {
                     body["avatar_color_index"] = json!(i);
+                }
+                if let Some(l) = leaf {
+                    body["avatar_leaf"] = json!(l.leaf);
+                    body["avatar_leaf_color"] = json!(l.color);
                 }
                 if let Some(src) = source_project_id {
                     body["source_project_id"] = json!(src);

@@ -532,6 +532,8 @@ pub enum ClientCommand {
         name: String,
         /// D79: the owner's swatch pick at creation; `None` = automatic (the id's colour).
         avatar_color_index: Option<u8>,
+        /// D92: the leaf + colour the Create sheet previewed (forks copy the source's); `None` = automatic.
+        leaf: Option<crate::ui::avatars::LeafPick>,
         /// Fork: copy this agent's workspace (files + memory) into the new one.
         source_project_id: Option<Id>,
         /// Optional profile blurb for the new agent (forks copy the source's).

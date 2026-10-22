@@ -416,6 +416,10 @@ pub struct AppState {
     pub voice_mode: bool,
     /// F11: assistant messages whose speech is cached (speaker icon replays).
     pub spoken: HashSet<Id>,
+    /// F11: replies whose speech failed to arrive, decode or play, with the
+    /// reason; the speaker row under that reply offers a retry. Scoped to the
+    /// message, never shown as an app-wide banner.
+    pub speech_failed: HashMap<Id, String>,
     awaiting_new_project: bool,
     /// Calls v1: live calls I know about per chat (the "On a call · Join" bar).
     pub calls_in_chat: HashMap<Id, Call>,
@@ -700,6 +704,7 @@ impl AppState {
             local: LocalView::default(),
             voice_mode: false,
             spoken: HashSet::new(),
+            speech_failed: HashMap::new(),
             awaiting_new_project: false,
             commands: command_tx,
             update_commands: update_command_tx,
@@ -1337,6 +1342,7 @@ impl AppState {
                         self.command(ClientCommand::CreateProject {
                             name: "Home".into(),
                             avatar_color_index: None,
+                            leaf: None,
                             source_project_id: None,
                             description: None,
                             color: None,
@@ -3681,7 +3687,27 @@ impl AppState {
         cx.emit(AppEvent::ReplaySpeech { message_id });
     }
 
-    fn chat_of_message(&self, message_id: &str) -> Option<Id> {
+    /// Speech for this reply did not arrive, decode or play.
+    pub fn mark_speech_failed(&mut self, message_id: Id, reason: String, cx: &mut Context<Self>) {
+        let chat_id = self.chat_of_message(&message_id);
+        self.speech_failed.insert(message_id, reason);
+        if let Some(chat_id) = chat_id {
+            cx.emit(AppEvent::TranscriptChanged { chat_id });
+        }
+        cx.notify();
+    }
+
+    /// The reply plays now: forget the earlier failure.
+    pub fn clear_speech_failed(&mut self, message_id: &str, cx: &mut Context<Self>) {
+        if self.speech_failed.remove(message_id).is_some() {
+            if let Some(chat_id) = self.chat_of_message(message_id) {
+                cx.emit(AppEvent::TranscriptChanged { chat_id });
+            }
+            cx.notify();
+        }
+    }
+
+    pub fn chat_of_message(&self, message_id: &str) -> Option<Id> {
         self.messages
             .iter()
             .find(|(_, list)| list.iter().any(|m| m.id == message_id))
@@ -5415,6 +5441,7 @@ impl AppState {
         &mut self,
         name: String,
         avatar_color_index: Option<u8>,
+        leaf: Option<crate::ui::avatars::LeafPick>,
         cx: &mut Context<Self>,
     ) {
         self.new_project_open = false;
@@ -5422,6 +5449,7 @@ impl AppState {
         self.command(ClientCommand::CreateProject {
             name,
             avatar_color_index,
+            leaf,
             source_project_id: None,
             description: None,
             color: None,
@@ -5448,10 +5476,13 @@ impl AppState {
             &src.id,
             src.avatar_color_override.or(src.avatar_color_index),
         ));
+        // D92: the fork keeps the source's leaf and colour too.
+        let leaf = Some(crate::ui::avatars::project_leaf(src));
         self.awaiting_new_project = true;
         self.command(ClientCommand::CreateProject {
             name,
             avatar_color_index,
+            leaf,
             source_project_id: Some(project_id),
             description,
             color,

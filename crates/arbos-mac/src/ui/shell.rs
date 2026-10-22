@@ -22,6 +22,7 @@ use crate::ui::callview;
 use crate::ui::channels::{ChannelsEvent, ChannelsPanel};
 use crate::ui::composer::{Composer, ComposerEvent, ComposerInput};
 use crate::ui::connectors::{ConnectorsEvent, ConnectorsPanel};
+use crate::ui::create_agent;
 use crate::ui::feedback::{FeedbackSheet, SendFeedback};
 use crate::ui::frost::{frosted, MENU_BLUR, PANEL_BLUR};
 use crate::ui::glass::{self, WindowDrag};
@@ -171,6 +172,9 @@ pub struct Shell {
     pub(crate) project_input: Entity<ComposerInput>,
     /// D79: the swatch picked for the agent being created; `None` = automatic.
     pub(crate) new_agent_color: Option<u8>,
+    /// D92 Create agent sheet: the leaf and colour clicked; `None` = the sheet's default pick.
+    pub(crate) new_agent_leaf: Option<u8>,
+    pub(crate) new_agent_leaf_color: Option<u8>,
     /// Sidebar search field.
     pub(crate) search_input: Entity<ComposerInput>,
     pub(crate) connectors: Entity<ConnectorsPanel>,
@@ -403,7 +407,8 @@ impl Shell {
         {
             let weak = cx.weak_entity();
             project_input.update(cx, |input, _| {
-                input.set_placeholder("Agent name");
+                input.set_placeholder("Name your agent");
+                input.set_text_center(true);
                 input.on_submit = Some(Rc::new(move |window, cx| {
                     let _ = weak.update(cx, |this, cx| this.submit_project(window, cx));
                 }));
@@ -534,6 +539,10 @@ impl Shell {
                 s.new_project_open = true;
                 cx.notify();
             });
+            // `ARBOS_NEW_AGENT_NAME=…` prefills the name (the "named" state on the rig).
+            if let Ok(name) = std::env::var("ARBOS_NEW_AGENT_NAME") {
+                project_input.update(cx, |input, cx| input.set_text(name, cx));
+            }
         }
         let connectors = cx.new(|cx| ConnectorsPanel::new(state.clone(), cx));
         // Rig: `ARBOS_OPEN_SETTINGS=connectors` — the Connectors page inside the sheet.
@@ -621,6 +630,8 @@ impl Shell {
             pairing_input,
             project_input,
             new_agent_color: None,
+            new_agent_leaf: None,
+            new_agent_leaf_color: None,
             search_input,
             connectors,
             skills,
@@ -897,10 +908,15 @@ impl Shell {
         }
         self.project_input.update(cx, |input, cx| input.clear(cx));
         let color = self.new_agent_color.take();
+        // D92: the Create sheet always shows a definite leaf + colour; send that pair so the
+        // new agent looks exactly like its preview.
+        let pick = crate::ui::create_agent::current_pick(self, cx);
+        self.new_agent_leaf = None;
+        self.new_agent_leaf_color = None;
         self.state.update(cx, |s, cx| {
             s.new_project_open = false;
             s.close_new_chat(cx);
-            s.create_project(name, color, cx);
+            s.create_project(name, color, Some(pick), cx);
         });
         Composer::focus(&self.composer, window, cx);
     }
@@ -1312,6 +1328,9 @@ impl Shell {
     pub(crate) fn close_new_chat_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.people_input
             .update(cx, |input, _| input.set_placeholder("Search people"));
+        self.new_agent_leaf = None;
+        self.new_agent_leaf_color = None;
+        self.project_input.update(cx, |input, cx| input.clear(cx));
         self.state.update(cx, |s, cx| {
             s.new_project_open = false;
             s.close_new_chat(cx);
@@ -3216,12 +3235,12 @@ impl Render for Shell {
             }
         }
         if new_chat_open {
-            root = root.child(people::new_chat_sheet(
-                self,
-                &self.state,
-                &self.people_input,
-                cx,
-            ));
+            // D92: "New agent" opens its own Create sheet over the same backdrop.
+            if self.state.read(cx).new_project_open {
+                root = root.child(create_agent::sheet(self, cx));
+            } else {
+                root = root.child(people::new_chat_sheet(&self.state, &self.people_input, cx));
+            }
         }
         if let Some(sheet) = self.state.read(cx).server_sheet.clone() {
             root = root.child(servers::sheet(self, &sheet, cx));
