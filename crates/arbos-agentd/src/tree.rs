@@ -57,6 +57,9 @@ CREATE TABLE IF NOT EXISTS tree_walk_log (
   jev_ms INTEGER NOT NULL DEFAULT 0, walk_ms INTEGER NOT NULL DEFAULT 0, pack_tokens INTEGER NOT NULL DEFAULT 0,
   recent_window TEXT, created_at INTEGER NOT NULL
 );
+CREATE VIRTUAL TABLE IF NOT EXISTS tree_cards_fts USING fts5(text, node_id UNINDEXED, thread_id UNINDEXED, tokenize = 'porter unicode61');
+CREATE TABLE IF NOT EXISTS tree_score_cache (key TEXT PRIMARY KEY, p REAL NOT NULL, created_at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS tree_score_cache_at ON tree_score_cache(created_at);
 "#;
 
 const EPISODE_GAP_MS: i64 = 30 * 60 * 1000;
@@ -76,6 +79,14 @@ const JEV_CHUNK: usize = 24;
 const BM25_EXTRA: i64 = 20;
 const WALK_DEADLINE_MS: u64 = 2500;
 const JEV_TIMEOUT_MS: u64 = 1500;
+/// Fast walk: when the prefilter leaves at most this many threads, their episodes and leaves
+/// are gathered up front and, if the whole candidate set fits `FLAT_MAX_CANDIDATES`, every level
+/// is scored in one parallel round instead of three sequential ones. Jev judges each candidate on
+/// its own, so the keep decisions are the same; only the round trips differ.
+const FLAT_MAX_THREADS: usize = 6;
+const FLAT_MAX_CANDIDATES: usize = 48;
+/// Cached Jev scores live this long (same candidate card, same question words, same day).
+const SCORE_CACHE_TTL_MS: i64 = 14 * 24 * 60 * 60 * 1000;
 // Pack budgets (estimated tokens). "Full" is the pack as shipped with D77: one budget by content
 // kind, raw leaf text clipped. "Compact" (`ARBOS_MEMORY_PACK_COMPACT`) is the D87 follow-up: with
 // the prompt prefix stable the per-turn block is the largest fresh cache write of a turn, and
@@ -236,6 +247,41 @@ pub struct Pack {
     /// `injected` | `fallback` | `empty` | `logged`.
     pub outcome: String,
     pub reason: Option<String>,
+    /// Threads the keyword prefilter kept away from Jev.
+    pub prefiltered: usize,
+    /// Candidates answered from `tree_score_cache` instead of a Jev request.
+    pub cache_hits: i64,
+    /// Every level scored in one parallel round.
+    pub flat: bool,
+    /// What the prefilter did: `off` (D77 walk), `evidence` (only matching threads expanded on
+    /// their own), `first-person` (nothing matched but the question is about the user's own
+    /// world, so every thread was scored), `no-words` (no content words; every thread scored).
+    pub prefilter: &'static str,
+}
+
+/// How one walk renders and runs. `compact` is the D87 pack policy; `fast` is the prefilter +
+/// score cache + one-round scoring (`ARBOS_MEMORY_WALK_FAST`); off = the D77 walk exactly.
+#[derive(Debug, Clone, Copy)]
+pub struct WalkOptions {
+    pub compact: bool,
+    pub fast: bool,
+}
+
+/// Where a leaf candidate came from; decides whether it stays once its parents are scored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Via {
+    Episode(String),
+    Thread(String),
+}
+
+/// Episode-level candidates of a set of threads.
+#[derive(Debug, Default)]
+struct Gathered {
+    /// Ready episodes as cards for Jev.
+    ep_cards: Vec<(String, Value)>,
+    ep_nodes: HashMap<String, Node>,
+    /// Leaves of episodes without a card yet: (leaf id, thread node id).
+    direct: Vec<(String, String)>,
 }
 
 pub struct Tree {
@@ -343,6 +389,69 @@ fn day_start_ms(now: i64) -> i64 {
     now - now.rem_euclid(86_400_000)
 }
 
+/// FTS5 query for the question's content words: an OR of quoted terms. The porter tokenizer
+/// stems both sides, so "remembered" meets "remember" and "cats" meets "cat".
+fn fts_or(words: &[String]) -> Option<String> {
+    let terms: Vec<String> = words
+        .iter()
+        .map(|w| w.replace('"', ""))
+        .filter(|w| !w.trim().is_empty())
+        .map(|w| format!("\"{w}\""))
+        .collect();
+    (!terms.is_empty()).then(|| terms.join(" OR "))
+}
+
+/// The part of a node's card the prefilter indexes.
+fn card_text(n: &Node) -> String {
+    format!(
+        "{} {} {} {}",
+        n.title,
+        n.heading,
+        n.summary,
+        n.entities.join(" ")
+    )
+}
+
+/// Does the question speak of the user's own world ("my", "our", "I", "we")? Such a question can
+/// need a record that shares no word with it ("what breed is my pet?" vs "Biscuit, our golden
+/// retriever"), so when no thread has keyword evidence it still gets the full walk.
+fn first_person(q: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "i",
+        "i'm",
+        "i've",
+        "i'd",
+        "i'll",
+        "my",
+        "mine",
+        "myself",
+        "we",
+        "we're",
+        "we've",
+        "we'd",
+        "we'll",
+        "our",
+        "ours",
+        "ourselves",
+    ];
+    q.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric() && c != '\'')
+        .any(|w| MARKERS.contains(&w))
+}
+
+/// Cache context for one walk: the question's content words (order-free), the UTC day it was
+/// asked (Jev sees `asked_at`, so "yesterday" must not outlive the day), who asked, and the
+/// visibility scope.
+fn cache_ctx(words: &[String], asked_at: i64, asker: &str, restricted: bool) -> String {
+    let mut w = words.to_vec();
+    w.sort();
+    format!(
+        "{}|{}|{asker}|{restricted}",
+        w.join(" "),
+        day_start_ms(asked_at)
+    )
+}
+
 impl Tree {
     pub fn new(cfg: &Config, store: Store, llm: Arc<Llm>) -> Self {
         Self::with_ids(
@@ -365,7 +474,7 @@ impl Tree {
         // Every card and walk call carries `x-arbos-purpose: memory-tree`, so the relay's usage
         // table and credit ledger show the feature's spend on its own.
         let llm = Arc::new(llm.with_purpose("memory-tree"));
-        Self {
+        let tree = Self {
             project_id: project_id.to_owned(),
             project_name: project_name.to_owned(),
             card_model: card_model.to_owned(),
@@ -373,7 +482,25 @@ impl Tree {
             llm,
             build_lock: tokio::sync::Mutex::new(()),
             cap_warned: std::sync::Mutex::new(None),
+        };
+        tree.backfill_cards_fts();
+        tree
+    }
+
+    /// Trees built before the prefilter existed have cards but no `tree_cards_fts` rows: index
+    /// them once (no model calls; a few thousand rows at most).
+    fn backfill_cards_fts(&self) {
+        if self.state_get("cards_fts_built").is_some() {
+            return;
         }
+        let nodes = self.nodes_where("level IN ('thread','episode')", &[]);
+        let _ = self
+            .store
+            .with(|c| c.execute("DELETE FROM tree_cards_fts", []));
+        for n in &nodes {
+            self.index_card(n);
+        }
+        self.state_set("cards_fts_built", "1");
     }
 
     // ---- settings -----------------------------------------------------------------------------
@@ -566,6 +693,104 @@ impl Tree {
             c.execute(
                 "UPDATE tree_nodes SET status = ?2, updated_at = CASE WHEN ?2 = 'card_failed' THEN ?3 ELSE updated_at END WHERE id = ?1",
                 params![id, status, now_ms()],
+            )
+        });
+    }
+
+    /// Keep the prefilter's card index in step with a thread or episode card.
+    fn index_card(&self, n: &Node) {
+        if n.level != "thread" && n.level != "episode" {
+            return;
+        }
+        let text = card_text(n);
+        let _ = self.store.with(|c| {
+            c.execute(
+                "DELETE FROM tree_cards_fts WHERE node_id = ?1",
+                params![n.id],
+            )?;
+            if !text.trim().is_empty() {
+                c.execute(
+                    "INSERT INTO tree_cards_fts(text, node_id, thread_id) VALUES (?1, ?2, ?3)",
+                    params![text, n.id, n.thread_id],
+                )?;
+            }
+            Ok(())
+        });
+    }
+
+    /// Threads with keyword evidence for the question: a leaf (`t3_fts`) or an index card
+    /// (`tree_cards_fts`) shares a stemmed content word with it. `None` = no filter: the question
+    /// has no content words, or the lookup failed (fail open — memory is never lost to a query
+    /// syntax error).
+    fn threads_with_evidence(&self, words: &[String]) -> Option<HashSet<String>> {
+        let q = fts_or(words)?;
+        let found = self.store.with(|c| {
+            let mut set: HashSet<String> = HashSet::new();
+            let mut st = c.prepare("SELECT DISTINCT thread_id FROM t3_fts WHERE t3_fts MATCH ?1")?;
+            for r in st.query_map(params![q], |r| r.get::<_, String>(0))? {
+                set.insert(r?);
+            }
+            let mut st = c.prepare(
+                "SELECT DISTINCT thread_id FROM tree_cards_fts WHERE tree_cards_fts MATCH ?1 AND thread_id IS NOT NULL",
+            )?;
+            for r in st.query_map(params![q], |r| r.get::<_, String>(0))? {
+                set.insert(r?);
+            }
+            Ok(set)
+        });
+        match found {
+            Ok(set) => Some(set),
+            Err(e) => {
+                tracing::debug!(error = %e, "tree walk: keyword prefilter failed; scoring every thread");
+                None
+            }
+        }
+    }
+
+    fn cached_scores(&self, keys: &[String]) -> HashMap<String, f64> {
+        let mut out = HashMap::new();
+        for chunk in keys.chunks(200) {
+            let marks = std::iter::repeat_n("?", chunk.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let p: Vec<&dyn rusqlite::ToSql> =
+                chunk.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+            let rows: Vec<(String, f64)> = self
+                .store
+                .with(|c| {
+                    let mut st = c.prepare(&format!(
+                        "SELECT key, p FROM tree_score_cache WHERE key IN ({marks})"
+                    ))?;
+                    let it = st.query_map(p.as_slice(), |r| Ok((r.get(0)?, r.get(1)?)))?;
+                    it.collect()
+                })
+                .unwrap_or_default();
+            out.extend(rows);
+        }
+        out
+    }
+
+    fn cache_put(&self, entries: &[(String, f64)]) {
+        if entries.is_empty() {
+            return;
+        }
+        let now = now_ms();
+        let _ = self.store.with(|c| {
+            for (k, p) in entries {
+                c.execute(
+                    "INSERT INTO tree_score_cache(key, p, created_at) VALUES (?1, ?2, ?3) ON CONFLICT(key) DO UPDATE SET p = excluded.p, created_at = excluded.created_at",
+                    params![k, p, now],
+                )?;
+            }
+            Ok(())
+        });
+    }
+
+    fn expire_score_cache(&self) {
+        let _ = self.store.with(|c| {
+            c.execute(
+                "DELETE FROM tree_score_cache WHERE created_at < ?1",
+                params![now_ms() - SCORE_CACHE_TTL_MS],
             )
         });
     }
@@ -802,6 +1027,7 @@ impl Tree {
             updated_at: 0,
         };
         self.upsert_node(&n);
+        self.index_card(&n);
         for p in &parents {
             if let Some(mut pn) = self.node(p) {
                 if !pn.children.contains(&id) {
@@ -821,6 +1047,7 @@ impl Tree {
     pub async fn build_pass(&self) -> Result<Value> {
         let _g = self.build_lock.lock().await;
         self.ensure_root();
+        self.expire_score_cache();
         let t0 = Instant::now();
         let mut stats = json!({ "leaves": 0, "episodes_new": 0, "cards": 0, "page_cards": 0, "skipped_cap": false });
         // 1. leaves → episodes (no model calls)
@@ -1063,6 +1290,7 @@ impl Tree {
                     ep.status = "ready".into();
                     ep.updated_at = now_ms();
                     self.upsert_node(&ep);
+                    self.index_card(&ep);
                     if let Some(t) = &ep.thread_id {
                         self.set_status(&format!("thread:{t}"), "stale");
                     }
@@ -1124,6 +1352,7 @@ impl Tree {
                     th.status = "ready".into();
                     th.updated_at = now_ms();
                     self.upsert_node(&th);
+                    self.index_card(&th);
                     self.set_status(ROOT_ID, "stale");
                     stats["cards"] = json!(stats["cards"].as_i64().unwrap_or(0) + 1);
                 }
@@ -1361,8 +1590,225 @@ impl Tree {
         out
     }
 
-    /// The walk proper. `exclude_thread` is the chat the question is asked in (its recent window
-    /// is already in the model's session); `restricted` limits the walk to that chat's subtree.
+    /// `score` behind the score cache: a candidate whose card was already judged for the same
+    /// question words today (same asker, same scope) reuses that probability; only the misses go
+    /// to Jev, and their answers are stored. Ids are unique across levels (`thread:`, `ep:`,
+    /// leaf ULIDs), so one table serves all three.
+    #[allow(clippy::too_many_arguments)]
+    async fn score_cached(
+        &self,
+        scorer: &str,
+        query: &Value,
+        cards: &[(String, Value)],
+        ctx: &str,
+        tally: &mut (i64, f64, i64),
+        cache_hits: &mut i64,
+    ) -> HashMap<String, f64> {
+        let keys: Vec<String> = cards
+            .iter()
+            .map(|(id, card)| sha16(&format!("{id}|{card}|{ctx}")))
+            .collect();
+        let hits = self.cached_scores(&keys);
+        let mut out = HashMap::new();
+        let mut todo: Vec<(String, Value)> = Vec::new();
+        let mut todo_keys: Vec<String> = Vec::new();
+        for ((id, card), key) in cards.iter().zip(&keys) {
+            if let Some(p) = hits.get(key) {
+                out.insert(id.clone(), *p);
+                *cache_hits += 1;
+            } else {
+                todo.push((id.clone(), card.clone()));
+                todo_keys.push(key.clone());
+            }
+        }
+        if !todo.is_empty() {
+            let fresh = self.score(scorer, query, &todo, tally).await;
+            let puts: Vec<(String, f64)> = todo
+                .iter()
+                .zip(&todo_keys)
+                .filter_map(|((id, _), key)| fresh.get(id).map(|p| (key.clone(), *p)))
+                .collect();
+            self.cache_put(&puts);
+            out.extend(fresh);
+        }
+        out
+    }
+
+    /// Episodes of `threads`: ready ones as cards to score, the rest as leaves to scan directly
+    /// (`direct` = leaf id, thread node id).
+    fn gather_episodes(&self, threads: &[&Node]) -> Gathered {
+        let mut g = Gathered::default();
+        for t in threads {
+            for c in &t.children {
+                if let Some(ep) = self.node(c) {
+                    if ep.level != "episode" {
+                        continue;
+                    }
+                    if ep.status == "ready" && !ep.heading.is_empty() {
+                        g.ep_cards.push((ep.id.clone(), self.card_json(&ep)));
+                        g.ep_nodes.insert(ep.id.clone(), ep);
+                    } else {
+                        g.direct
+                            .extend(ep.children.iter().map(|l| (l.clone(), t.id.clone())));
+                    }
+                }
+            }
+        }
+        g
+    }
+
+    /// Keyword hits (bm25) outside the current chat and inside the allowed scope.
+    fn bm25_hits(
+        &self,
+        words: &[String],
+        chat_id: &str,
+        allowed: &Option<HashSet<String>>,
+    ) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Ok(hits) = self.store.t3_search_any(words, BM25_EXTRA) {
+            for (r, _, _) in hits {
+                if r.kind == "route" || r.thread_id == chat_id {
+                    continue;
+                }
+                if let Some(a) = allowed {
+                    if !a.contains(&r.thread_id) {
+                        continue;
+                    }
+                }
+                out.push(r.id);
+            }
+        }
+        out
+    }
+
+    /// Threads to expand, best first. A thread with keyword evidence is kept above the threshold
+    /// within the beam, as the group's own thread, or as one of the top two (recall over
+    /// precision, as in D77). A thread without evidence rode along in the same request and is
+    /// kept only when Jev itself says so.
+    #[allow(clippy::too_many_arguments)]
+    fn keep_threads<'a>(
+        &self,
+        evidence: &'a [Node],
+        ride: &'a [Node],
+        probs: &HashMap<String, f64>,
+        chat_id: &str,
+        restricted: bool,
+        pack: &mut Pack,
+    ) -> Vec<&'a Node> {
+        let mut ranked: Vec<(&Node, bool)> = evidence
+            .iter()
+            .map(|n| (n, true))
+            .chain(ride.iter().map(|n| (n, false)))
+            .collect();
+        ranked.sort_by(|(a, _), (b, _)| {
+            probs
+                .get(&b.id)
+                .unwrap_or(&0.0)
+                .partial_cmp(probs.get(&a.id).unwrap_or(&0.0))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let mut kept: Vec<&Node> = Vec::new();
+        let mut kept_evidence = 0usize;
+        let mut per_kind: HashMap<&str, usize> = HashMap::new();
+        for (n, has_evidence) in ranked {
+            let p = *probs.get(&n.id).unwrap_or(&0.0);
+            let c = per_kind.entry(n.kind.as_str()).or_insert(0);
+            let scored = p >= n.kind.threshold("thread") && *c < n.kind.beam("thread");
+            let keep = scored
+                || (has_evidence
+                    && ((restricted && n.thread_id.as_deref() == Some(chat_id))
+                        || kept_evidence < 2));
+            pack.decisions.push(json!({ "level": "thread", "node_id": n.id, "p": (p * 1000.0).round() / 1000.0, "thr": n.kind.threshold("thread"), "expanded": keep, "evidence": has_evidence, "heading": clip_chars(&n.heading, 120) }));
+            if keep {
+                *c += 1;
+                if has_evidence {
+                    kept_evidence += 1;
+                }
+                kept.push(n);
+            }
+        }
+        kept
+    }
+
+    /// Episodes to expand, best first: above the threshold within the beam, and always the top
+    /// two. Ties break on the id so the order is the same in every run.
+    fn keep_episodes(
+        &self,
+        ep_nodes: &HashMap<String, Node>,
+        probs: &HashMap<String, f64>,
+        pack: &mut Pack,
+    ) -> Vec<Node> {
+        let mut ranked: Vec<&Node> = ep_nodes.values().collect();
+        ranked.sort_by(|a, b| {
+            probs
+                .get(&b.id)
+                .unwrap_or(&0.0)
+                .partial_cmp(probs.get(&a.id).unwrap_or(&0.0))
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        let mut kept: Vec<Node> = Vec::new();
+        let mut per_kind: HashMap<&str, usize> = HashMap::new();
+        for n in ranked {
+            let p = *probs.get(&n.id).unwrap_or(&0.0);
+            let c = per_kind.entry(n.kind.as_str()).or_insert(0);
+            let keep =
+                (p >= n.kind.threshold("episode") && *c < n.kind.beam("episode")) || kept.len() < 2;
+            pack.decisions.push(json!({ "level": "episode", "node_id": n.id, "p": (p * 1000.0).round() / 1000.0, "thr": n.kind.threshold("episode"), "expanded": keep, "heading": clip_chars(&n.heading, 120) }));
+            if keep {
+                *c += 1;
+                kept.push(n.clone());
+            }
+        }
+        kept
+    }
+
+    /// One scoring round over the candidates not sent to Jev yet: through the cache when
+    /// `fast`, straight to Jev otherwise. Nothing new → no request.
+    #[allow(clippy::too_many_arguments)]
+    async fn score_round(
+        &self,
+        fast: bool,
+        scorer: &str,
+        query: &Value,
+        cards: Vec<(String, Value)>,
+        ctx: &str,
+        asked: &mut HashSet<String>,
+        probs: &mut HashMap<String, f64>,
+        tally: &mut (i64, f64, i64),
+        cache_hits: &mut i64,
+    ) {
+        let todo: Vec<(String, Value)> = cards
+            .into_iter()
+            .filter(|(id, _)| asked.insert(id.clone()))
+            .collect();
+        if todo.is_empty() {
+            return;
+        }
+        let got = if fast {
+            self.score_cached(scorer, query, &todo, ctx, tally, cache_hits)
+                .await
+        } else {
+            self.score(scorer, query, &todo, tally).await
+        };
+        probs.extend(got);
+    }
+
+    /// The walk proper. `chat_id` is the chat the question is asked in (its recent window is
+    /// already in the model's session, so it is excluded); `restricted` limits the walk to that
+    /// chat's subtree.
+    ///
+    /// With `opts.fast` off this is the D77 walk: every other thread scored, then the ready
+    /// episodes of the kept threads, then their leaves plus keyword hits — three Jev rounds,
+    /// every score fresh. With it on, three things change and nothing else:
+    /// 1. **Prefilter.** A thread with no stemmed content word in common with the question (in a
+    ///    leaf or an index card) is never expanded on its own: when no thread has evidence the
+    ///    walk ends here with no Jev request at all; otherwise such threads ride along in the
+    ///    first request (no extra round trip) and are expanded only when Jev says yes.
+    /// 2. **Cache.** Every score goes through `tree_score_cache` (card + question words + day).
+    /// 3. **One round when small.** With few evidence threads, their episodes and leaves are
+    ///    scored in the same request as the thread cards; Jev judges each candidate on its own,
+    ///    so the keep rules give the same result as three rounds would.
     #[allow(clippy::too_many_arguments)]
     async fn walk_inner(
         &self,
@@ -1372,15 +1818,22 @@ impl Tree {
         query_text: &str,
         asker: &str,
         prompt_memory: &str,
-        compact: bool,
+        opts: WalkOptions,
     ) -> Pack {
         let t0 = Instant::now();
+        let asked_at = now_ms();
         let mut pack = Pack::default();
         let allowed = self.allowed_threads(chat_id, restricted);
-        let query = json!({ "text": query_text, "asked_at": fmt_ts(now_ms()), "asked_in": if restricted { "a group or people chat" } else { "a chat with the project owner" }, "asked_by": asker });
+        let words = content_words(query_text);
+        let query = json!({ "text": query_text, "asked_at": fmt_ts(asked_at), "asked_in": if restricted { "a group or people chat" } else { "a chat with the project owner" }, "asked_by": asker });
+        let ctx = cache_ctx(&words, asked_at, asker, restricted);
         let mut tally = (0i64, 0f64, 0i64);
-        // level 1: threads
-        let mut threads: Vec<Node> = self
+        let mut cache_hits = 0i64;
+        let fast = opts.fast;
+        let compact = opts.compact;
+        // level 1 candidates: every other visible thread, split (fast) into those with keyword
+        // evidence for the question and those without
+        let mut evidence: Vec<Node> = self
             .nodes_where("level = 'thread' ORDER BY t1 DESC LIMIT 400", &[])
             .into_iter()
             .filter(|n| {
@@ -1391,152 +1844,245 @@ impl Tree {
                         .unwrap_or(true)
             })
             .collect();
+        let mut ride: Vec<Node> = Vec::new();
+        pack.prefilter = if fast { "no-words" } else { "off" };
+        if fast {
+            if let Some(found) = self.threads_with_evidence(&words) {
+                let (yes, no): (Vec<Node>, Vec<Node>) = evidence
+                    .into_iter()
+                    .partition(|n| n.thread_id.as_ref().is_some_and(|t| found.contains(t)));
+                evidence = yes;
+                ride = no;
+                pack.prefilter = "evidence";
+                if evidence.is_empty() && !ride.is_empty() && first_person(query_text) {
+                    evidence = std::mem::take(&mut ride);
+                    pack.prefilter = "first-person";
+                }
+            }
+        }
         if restricted {
             // the group's own thread is the subtree root; keep its episodes (not the recent ones)
             if let Some(n) = self.node(&format!("thread:{chat_id}")) {
-                threads.push(n);
+                evidence.push(n);
             }
         }
-        if threads.is_empty() {
+        pack.prefiltered = ride.len();
+        if evidence.is_empty() {
             pack.outcome = "empty".into();
-            pack.reason = Some("no threads".into());
+            pack.reason = Some(if ride.is_empty() {
+                "no threads".into()
+            } else {
+                "no keyword match".into()
+            });
             pack.walk_ms = t0.elapsed().as_millis() as i64;
             return pack;
         }
-        let cards: Vec<(String, Value)> = threads
+        let mut probs: HashMap<String, f64> = HashMap::new();
+        let mut asked: HashSet<String> = HashSet::new();
+        let mut cards: Vec<(String, Value)> = evidence
             .iter()
+            .chain(ride.iter())
             .map(|n| (n.id.clone(), self.card_json(n)))
             .collect();
-        let probs = self.score(scorer, &query, &cards, &mut tally).await;
-        let mut keep_threads: Vec<&Node> = Vec::new();
-        {
-            let mut ranked: Vec<&Node> = threads.iter().collect();
-            ranked.sort_by(|a, b| {
-                probs
-                    .get(&b.id)
-                    .unwrap_or(&0.0)
-                    .partial_cmp(probs.get(&a.id).unwrap_or(&0.0))
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-            let mut per_kind: HashMap<&str, usize> = HashMap::new();
-            for n in ranked {
-                let p = *probs.get(&n.id).unwrap_or(&0.0);
-                let c = per_kind.entry(n.kind.as_str()).or_insert(0);
-                let keep = (p >= n.kind.threshold("thread") && *c < n.kind.beam("thread"))
-                    || (restricted && n.thread_id.as_deref() == Some(chat_id))
-                    || keep_threads.len() < 2;
-                pack.decisions.push(json!({ "level": "thread", "node_id": n.id, "p": (p * 1000.0).round() / 1000.0, "thr": n.kind.threshold("thread"), "expanded": keep, "heading": clip_chars(&n.heading, 120) }));
-                if keep {
-                    *c += 1;
-                    keep_threads.push(n);
-                }
-            }
-        }
-        // level 2: episodes (ready ones scored; open/closed ones scanned at leaf level directly)
-        let mut ep_cards: Vec<(String, Value)> = Vec::new();
-        let mut ep_nodes: HashMap<String, Node> = HashMap::new();
-        let mut direct_leaves: Vec<String> = Vec::new();
-        for t in &keep_threads {
-            for c in &t.children {
-                if let Some(ep) = self.node(c) {
-                    if ep.level != "episode" {
-                        continue;
-                    }
-                    if ep.status == "ready" && !ep.heading.is_empty() {
-                        ep_cards.push((ep.id.clone(), self.card_json(&ep)));
-                        ep_nodes.insert(ep.id.clone(), ep);
-                    } else {
-                        direct_leaves.extend(ep.children.iter().cloned());
-                    }
-                }
-            }
-        }
-        let ep_probs = if ep_cards.is_empty() {
-            HashMap::new()
-        } else {
-            self.score(scorer, &query, &ep_cards, &mut tally).await
-        };
-        let mut keep_eps: Vec<&Node> = Vec::new();
-        {
-            let mut ranked: Vec<&Node> = ep_nodes.values().collect();
-            ranked.sort_by(|a, b| {
-                ep_probs
-                    .get(&b.id)
-                    .unwrap_or(&0.0)
-                    .partial_cmp(ep_probs.get(&a.id).unwrap_or(&0.0))
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-            let mut per_kind: HashMap<&str, usize> = HashMap::new();
-            for n in ranked {
-                let p = *ep_probs.get(&n.id).unwrap_or(&0.0);
-                let c = per_kind.entry(n.kind.as_str()).or_insert(0);
-                let keep = (p >= n.kind.threshold("episode") && *c < n.kind.beam("episode"))
-                    || keep_eps.len() < 2;
-                pack.decisions.push(json!({ "level": "episode", "node_id": n.id, "p": (p * 1000.0).round() / 1000.0, "thr": n.kind.threshold("episode"), "expanded": keep, "heading": clip_chars(&n.heading, 120) }));
-                if keep {
-                    *c += 1;
-                    keep_eps.push(n);
-                }
-            }
-        }
-        // level 3: leaves of kept episodes + unsummarized leaves + keyword hits
-        let mut leaf_ids: Vec<String> = Vec::new();
+        // Shape: with few evidence threads, gather their episodes and leaves now; if the whole
+        // set is small, round 1 scores all three levels at once.
+        let mut pre: Option<Gathered> = None;
+        let mut hits: Option<Vec<String>> = None;
+        let mut loaded: HashMap<String, T3Row> = HashMap::new();
+        let mut leaf_via: HashMap<String, Via> = HashMap::new();
         let mut leaf_kind: HashMap<String, Kind> = HashMap::new();
+        if fast && evidence.len() <= FLAT_MAX_THREADS {
+            let all: Vec<&Node> = evidence.iter().collect();
+            let g = self.gather_episodes(&all);
+            let h = self.bm25_hits(&words, chat_id, &allowed);
+            let mut ids: Vec<String> = Vec::new();
+            for ep in g.ep_nodes.values() {
+                for l in &ep.children {
+                    ids.push(l.clone());
+                    leaf_via.insert(l.clone(), Via::Episode(ep.id.clone()));
+                    leaf_kind.insert(l.clone(), ep.kind);
+                }
+            }
+            for (l, t) in &g.direct {
+                ids.push(l.clone());
+                leaf_via.entry(l.clone()).or_insert(Via::Thread(t.clone()));
+            }
+            ids.extend(h.iter().cloned());
+            let mut seen = HashSet::new();
+            ids.retain(|l| seen.insert(l.clone()));
+            if evidence.len() + g.ep_cards.len() + ids.len() <= FLAT_MAX_CANDIDATES {
+                pack.flat = true;
+                for l in self.leaves_by_ids(&ids) {
+                    loaded.insert(l.id.clone(), l);
+                }
+                if loaded.is_empty() {
+                    // nothing to pack, so nothing to score: not one Jev request
+                    pack.outcome = "empty".into();
+                    pack.reason = Some("no candidate leaves".into());
+                    pack.walk_ms = t0.elapsed().as_millis() as i64;
+                    return pack;
+                }
+                cards.extend(g.ep_cards.iter().cloned());
+                cards.extend(
+                    ids.iter()
+                        .filter_map(|id| loaded.get(id))
+                        .map(|l| (l.id.clone(), self.leaf_card_json(l))),
+                );
+            }
+            pre = Some(g);
+            hits = Some(h);
+        }
+        // round 1: threads (and, when small, everything under them)
+        self.score_round(
+            fast,
+            scorer,
+            &query,
+            cards,
+            &ctx,
+            &mut asked,
+            &mut probs,
+            &mut tally,
+            &mut cache_hits,
+        )
+        .await;
+        let keep_threads =
+            self.keep_threads(&evidence, &ride, &probs, chat_id, restricted, &mut pack);
+        // level 2: ready episodes of the kept threads are scored; open/closed ones go straight
+        // to the leaf level
+        let g = match pre.take() {
+            Some(g) => {
+                let kept_ids: HashSet<&String> = keep_threads.iter().map(|t| &t.id).collect();
+                let ep_nodes: HashMap<String, Node> = g
+                    .ep_nodes
+                    .into_iter()
+                    .filter(|(_, n)| n.parents.first().is_some_and(|p| kept_ids.contains(p)))
+                    .collect();
+                let mut g2 = Gathered {
+                    ep_cards: g
+                        .ep_cards
+                        .into_iter()
+                        .filter(|(id, _)| ep_nodes.contains_key(id))
+                        .collect(),
+                    ep_nodes,
+                    direct: g
+                        .direct
+                        .into_iter()
+                        .filter(|(_, t)| kept_ids.contains(t))
+                        .collect(),
+                };
+                // ride-along threads Jev kept were not pre-gathered
+                let late: Vec<&Node> = keep_threads
+                    .iter()
+                    .copied()
+                    .filter(|t| ride.iter().any(|r| r.id == t.id))
+                    .collect();
+                if !late.is_empty() {
+                    let gl = self.gather_episodes(&late);
+                    g2.ep_cards.extend(gl.ep_cards);
+                    g2.ep_nodes.extend(gl.ep_nodes);
+                    g2.direct.extend(gl.direct);
+                }
+                g2
+            }
+            None => self.gather_episodes(&keep_threads),
+        };
+        // round 2: episode cards not scored yet (none when round 1 covered them)
+        self.score_round(
+            fast,
+            scorer,
+            &query,
+            g.ep_cards.clone(),
+            &ctx,
+            &mut asked,
+            &mut probs,
+            &mut tally,
+            &mut cache_hits,
+        )
+        .await;
+        let keep_eps = self.keep_episodes(&g.ep_nodes, &probs, &mut pack);
+        // level 3: leaves of kept episodes + unsummarized leaves of kept threads + keyword hits
+        let mut leaf_ids: Vec<String> = Vec::new();
         for ep in &keep_eps {
             for l in &ep.children {
                 leaf_ids.push(l.clone());
+                leaf_via.insert(l.clone(), Via::Episode(ep.id.clone()));
                 leaf_kind.insert(l.clone(), ep.kind);
             }
         }
-        for l in &direct_leaves {
+        for (l, t) in &g.direct {
             leaf_ids.push(l.clone());
+            leaf_via.entry(l.clone()).or_insert(Via::Thread(t.clone()));
         }
-        let mut extra: HashSet<String> = HashSet::new();
-        if let Ok(hits) = self
-            .store
-            .t3_search_any(&content_words(query_text), BM25_EXTRA)
-        {
-            for (r, _, _) in hits {
-                if r.kind == "route" || r.thread_id == chat_id {
-                    continue;
-                }
-                if let Some(a) = &allowed {
-                    if !a.contains(&r.thread_id) {
-                        continue;
-                    }
-                }
-                if !leaf_ids.contains(&r.id) {
-                    leaf_ids.push(r.id.clone());
-                    extra.insert(r.id.clone());
-                }
-            }
-        }
+        let hits = match hits.take() {
+            Some(h) => h,
+            None => self.bm25_hits(&words, chat_id, &allowed),
+        };
+        leaf_ids.extend(hits.iter().cloned());
         let mut seen = HashSet::new();
         leaf_ids.retain(|l| seen.insert(l.clone()));
-        let leaves = self.leaves_by_ids(&leaf_ids);
+        let missing: Vec<String> = leaf_ids
+            .iter()
+            .filter(|l| !loaded.contains_key(*l))
+            .cloned()
+            .collect();
+        for l in self.leaves_by_ids(&missing) {
+            loaded.insert(l.id.clone(), l);
+        }
+        let mut leaves: Vec<&T3Row> = leaf_ids.iter().filter_map(|l| loaded.get(l)).collect();
+        leaves.sort_by(|a, b| (a.at, &a.id).cmp(&(b.at, &b.id)));
         if leaves.is_empty() {
             pack.outcome = "empty".into();
             pack.reason = Some("no candidate leaves".into());
             pack.jev_calls = tally.0;
             pack.jev_cost = tally.1;
             pack.jev_ms = tally.2;
+            pack.cache_hits = cache_hits;
             pack.walk_ms = t0.elapsed().as_millis() as i64;
             return pack;
         }
+        // round 3: leaf cards not scored yet (none when round 1 covered them)
         let leaf_cards: Vec<(String, Value)> = leaves
             .iter()
             .map(|l| (l.id.clone(), self.leaf_card_json(l)))
             .collect();
-        let lp = self.score(scorer, &query, &leaf_cards, &mut tally).await;
+        self.score_round(
+            fast,
+            scorer,
+            &query,
+            leaf_cards,
+            &ctx,
+            &mut asked,
+            &mut probs,
+            &mut tally,
+            &mut cache_hits,
+        )
+        .await;
+        // leaf stage: a leaf reached through the tree needs its parent kept; a keyword hit
+        // stands on its own (as before: keyword hits were extra candidates in every walk)
+        let kept_thread_ids: HashSet<&String> = keep_threads.iter().map(|t| &t.id).collect();
+        let kept_ep_ids: HashSet<&String> = keep_eps.iter().map(|e| &e.id).collect();
+        let bm25_set: HashSet<&String> = hits.iter().collect();
         let mut kept: Vec<&T3Row> = Vec::new();
         for l in &leaves {
-            let kind = leaf_kind
-                .get(&l.id)
-                .copied()
-                .unwrap_or_else(|| self.thread_meta(&l.thread_id).1);
-            let p = *lp.get(&l.id).unwrap_or(&0.0);
+            let via_tree = match leaf_via.get(&l.id) {
+                Some(Via::Episode(ep)) => kept_ep_ids.contains(ep),
+                Some(Via::Thread(t)) => kept_thread_ids.contains(t),
+                None => false,
+            };
+            if !via_tree && !bm25_set.contains(&l.id) {
+                continue;
+            }
+            let kind = match leaf_kind.get(&l.id) {
+                Some(k) if via_tree => *k,
+                _ => {
+                    let k = self.thread_meta(&l.thread_id).1;
+                    leaf_kind.insert(l.id.clone(), k);
+                    k
+                }
+            };
+            let p = *probs.get(&l.id).unwrap_or(&0.0);
             let keep = p >= kind.threshold("leaf");
-            pack.decisions.push(json!({ "level": "leaf", "node_id": l.id, "p": (p * 1000.0).round() / 1000.0, "thr": kind.threshold("leaf"), "expanded": keep, "source": if extra.contains(&l.id) { "bm25" } else { "tree" }, "heading": clip_chars(&l.text, 100) }));
+            pack.decisions.push(json!({ "level": "leaf", "node_id": l.id, "p": (p * 1000.0).round() / 1000.0, "thr": kind.threshold("leaf"), "expanded": keep, "source": if via_tree { "tree" } else { "bm25" }, "heading": clip_chars(&l.text, 100) }));
             if keep {
                 kept.push(l);
             }
@@ -1621,6 +2167,7 @@ impl Tree {
         pack.jev_calls = tally.0;
         pack.jev_cost = tally.1;
         pack.jev_ms = tally.2;
+        pack.cache_hits = cache_hits;
         pack.walk_ms = t0.elapsed().as_millis() as i64;
         pack.outcome = if pack.text.is_empty() {
             "empty".into()
@@ -1645,11 +2192,12 @@ impl Tree {
         asker: &str,
         recent_window: &Value,
         prompt_memory: &str,
-        compact: bool,
+        opts: WalkOptions,
     ) -> Option<String> {
         if mode == TreeMode::Off {
             return None;
         }
+        let compact = opts.compact;
         let built = self.state_get("built_through").is_some();
         let mut pack = if !built {
             Pack {
@@ -1673,7 +2221,7 @@ impl Tree {
                     query_text,
                     asker,
                     prompt_memory,
-                    compact,
+                    opts,
                 ),
             )
             .await
@@ -1692,6 +2240,9 @@ impl Tree {
         } else if inject {
             pack.outcome = "injected".into();
         }
+        // one summary row per walk so the log answers "how often did the fast path fire" without
+        // a schema change
+        pack.decisions.push(json!({ "level": "walk", "fast": opts.fast, "prefilter": pack.prefilter, "flat": pack.flat, "prefiltered": pack.prefiltered, "cache_hits": pack.cache_hits, "jev_calls": pack.jev_calls }));
         let _ = self.store.with(|c| {
             c.execute(
                 "INSERT INTO tree_walk_log(id, chat_id, message_id, purpose, mode, outcome, reason, query, pack, decisions, jev_calls, jev_cost, jev_ms, walk_ms, pack_tokens, recent_window, created_at)
@@ -1716,7 +2267,7 @@ impl Tree {
             Some(pack.walk_ms),
             Some(&json!({ "provider": "jev", "calls": pack.jev_calls, "cost_usd": pack.jev_cost, "max_latency_ms": pack.jev_ms })),
         );
-        tracing::info!(chat = chat_id, purpose, outcome = %pack.outcome, leaves = pack.leaf_ids.len(), tokens = pack.tokens, jev_calls = pack.jev_calls, cost_usd = pack.jev_cost, walk_ms = pack.walk_ms, "memory tree walk");
+        tracing::info!(chat = chat_id, purpose, outcome = %pack.outcome, leaves = pack.leaf_ids.len(), tokens = pack.tokens, jev_calls = pack.jev_calls, cache_hits = pack.cache_hits, prefilter = pack.prefilter, prefiltered = pack.prefiltered, flat = pack.flat, cost_usd = pack.jev_cost, walk_ms = pack.walk_ms, "memory tree walk");
         if !inject {
             return None;
         }
@@ -1735,7 +2286,7 @@ impl Tree {
         scorer: &str,
         chat_id: &str,
         query: &str,
-        compact: bool,
+        opts: WalkOptions,
     ) -> Result<Value> {
         let mut passes = Vec::new();
         for _ in 0..30 {
@@ -1768,13 +2319,13 @@ impl Tree {
                 query,
                 "the project owner",
                 &prompt_memory,
-                compact,
+                opts,
             )
             .await;
         Ok(json!({
             "passes": passes,
             "stats": self.stats(),
-            "pack": { "outcome": pack.outcome, "reason": pack.reason, "tokens": pack.tokens, "leaves": pack.leaf_ids, "nodes": pack.node_ids, "jev_calls": pack.jev_calls, "jev_cost": pack.jev_cost, "jev_ms": pack.jev_ms, "walk_ms": pack.walk_ms, "text": pack.text },
+            "pack": { "outcome": pack.outcome, "reason": pack.reason, "tokens": pack.tokens, "leaves": pack.leaf_ids, "nodes": pack.node_ids, "jev_calls": pack.jev_calls, "jev_cost": pack.jev_cost, "jev_ms": pack.jev_ms, "walk_ms": pack.walk_ms, "cache_hits": pack.cache_hits, "prefilter": pack.prefilter, "prefiltered": pack.prefiltered, "flat": pack.flat, "text": pack.text },
             "decisions": pack.decisions,
         }))
     }
@@ -1923,5 +2474,325 @@ mod tests {
     fn clip_counts_chars() {
         assert_eq!(clip_chars("héllo", 10), "héllo");
         assert!(clip_chars("héllo wörld", 5).starts_with("héllo …["));
+    }
+
+    #[test]
+    fn first_person_markers() {
+        assert!(first_person("What breed is my pet?"));
+        assert!(first_person("Did we decide on a port?"));
+        assert!(first_person("I'm allergic to what again?"));
+        assert!(!first_person("Write me a haiku about autumn rain."));
+        assert!(!first_person("Explain quicksort in two sentences."));
+    }
+
+    #[test]
+    fn fts_or_quotes_terms() {
+        assert_eq!(
+            fts_or(&["name".into(), "tree.rs".into()]).as_deref(),
+            Some("\"name\" OR \"tree.rs\"")
+        );
+        assert_eq!(fts_or(&[]), None);
+    }
+
+    // ---- cross-chat recall: the fast walk must find what the D77 walk finds ---------------------
+    //
+    // A local stand-in for the relay proxy serves the two model routes the tree uses. Cards come
+    // back as JSON built from the text (heading = first line, summary = the lines, entities =
+    // capitalised words), so they carry the words a real Haiku card would. The decision route
+    // scores a candidate 0.9 when it shares a word stem (or a listed synonym) with the question,
+    // else 0.05 — deterministic, so the two arms see identical judgements and any difference in
+    // the packed leaves is the walk's own doing.
+
+    const SYNONYMS: &[(&str, &[&str])] = &[
+        ("pet", &["dog", "cat", "retriever", "tabby"]),
+        ("breed", &["retriever", "tabby"]),
+        ("called", &["name"]),
+    ];
+
+    fn stem5(w: &str) -> String {
+        w.chars().take(5).collect()
+    }
+
+    fn mock_score(query: &str, candidate: &str) -> f64 {
+        let hay: Vec<String> = candidate
+            .to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| w.len() > 2)
+            .map(stem5)
+            .collect();
+        let mut needles: Vec<String> = content_words(query).iter().map(|w| stem5(w)).collect();
+        for w in content_words(query) {
+            if let Some((_, syns)) = SYNONYMS.iter().find(|(k, _)| *k == w) {
+                needles.extend(syns.iter().map(|s| stem5(s)));
+            }
+        }
+        if needles.iter().any(|n| hay.iter().any(|h| h == n)) {
+            0.9
+        } else {
+            0.05
+        }
+    }
+
+    fn strip_leaf_prefix(line: &str) -> &str {
+        // "[2026-10-21 12:00 UTC] user (user): text" or "- [a – b] heading — summary"
+        match line.find("): ") {
+            Some(i) => &line[i + 3..],
+            None => line.trim_start_matches("- "),
+        }
+    }
+
+    async fn mock_cards(axum::Json(body): axum::Json<Value>) -> axum::Json<Value> {
+        let system = body["messages"][0]["content"].as_str().unwrap_or("");
+        let user = body["messages"][1]["content"].as_str().unwrap_or("");
+        let content = if system.contains("index tool results") {
+            let out = user.split("Output:\n").nth(1).unwrap_or(user);
+            let facts: Vec<String> = out
+                .lines()
+                .filter(|l| l.contains(['=', ':']) && !l.starts_with("log line"))
+                .take(14)
+                .map(|l| l.trim().to_owned())
+                .collect();
+            json!({ "page": out.lines().next().unwrap_or(""), "facts": facts }).to_string()
+        } else {
+            let text = user.split("Content:\n").nth(1).unwrap_or(user);
+            let lines: Vec<&str> = text.lines().map(strip_leaf_prefix).collect();
+            let heading: String = lines.first().unwrap_or(&"").chars().take(110).collect();
+            let summary: String = lines.join(" ").chars().take(600).collect();
+            let entities: Vec<String> = text
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|w| w.len() > 2 && w.chars().next().is_some_and(char::is_uppercase))
+                .map(str::to_owned)
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .take(10)
+                .collect();
+            json!({ "heading": heading, "summary": summary, "entities": entities }).to_string()
+        };
+        axum::Json(json!({
+            "choices": [{ "message": { "content": content } }],
+            "usage": { "prompt_tokens": user.len() / 4, "completion_tokens": 60, "cost": 0.0001 }
+        }))
+    }
+
+    async fn mock_decide(axum::Json(body): axum::Json<Value>) -> axum::Json<Value> {
+        let query = body["state"]["query"]["text"].as_str().unwrap_or("");
+        let mut answers = serde_json::Map::new();
+        if let Some(c) = body["state"]["candidates"].as_object() {
+            for (id, card) in c {
+                answers.insert(
+                    id.clone(),
+                    json!({ "type": "noul", "noul": mock_score(query, &card.to_string()) }),
+                );
+            }
+        }
+        axum::Json(json!({
+            "answers": answers,
+            "model": "mock-jev",
+            "usage": { "input_tokens": body.to_string().len() / 4, "output_tokens": 0, "cost": 0.0001 }
+        }))
+    }
+
+    async fn spawn_mock_relay() -> u16 {
+        let app = axum::Router::new()
+            .route("/v1/chat/completions", axum::routing::post(mock_cards))
+            .route("/decisions", axum::routing::post(mock_decide));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        port
+    }
+
+    /// Load the fixture into a fresh store at fixed timestamps (`t` minutes ago), in time order
+    /// so the ULIDs sort like the clock.
+    fn load_fixture(store: &Store, fixture: &Value, now: i64) {
+        let mut rows: Vec<(i64, String, Option<String>, String, String, String)> = Vec::new();
+        for chat in fixture["chats"].as_array().unwrap() {
+            let id = chat["id"].as_str().unwrap();
+            store
+                .upsert_chat(
+                    id,
+                    chat["title"].as_str().unwrap(),
+                    false,
+                    now - 10 * 86_400_000,
+                )
+                .unwrap();
+            for l in chat["leaves"].as_array().unwrap() {
+                rows.push((
+                    now - l["t"].as_i64().unwrap() * 60_000,
+                    id.to_owned(),
+                    None,
+                    l["kind"].as_str().unwrap().to_owned(),
+                    l["role"].as_str().unwrap().to_owned(),
+                    l["text"].as_str().unwrap().to_owned(),
+                ));
+            }
+        }
+        for sub in fixture["subagents"].as_array().unwrap() {
+            let id = sub["id"].as_str().unwrap();
+            store
+                .insert_subagent(
+                    id,
+                    sub["name"].as_str().unwrap(),
+                    sub["purpose"].as_str().unwrap(),
+                    "prime",
+                    sub["chat_id"].as_str().unwrap(),
+                )
+                .unwrap();
+            for l in sub["leaves"].as_array().unwrap() {
+                rows.push((
+                    now - l["t"].as_i64().unwrap() * 60_000,
+                    id.to_owned(),
+                    Some(id.to_owned()),
+                    l["kind"].as_str().unwrap().to_owned(),
+                    l["role"].as_str().unwrap().to_owned(),
+                    l["text"].as_str().unwrap().to_owned(),
+                ));
+            }
+        }
+        rows.sort_by_key(|r| r.0);
+        store
+            .with(|c| {
+                for (at, thread, sub, kind, role, text) in &rows {
+                    let id = ulid();
+                    c.execute(
+                        "INSERT INTO t3(id, thread_id, subagent_id, session_id, kind, role, at, text, source, size) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,NULL,?9)",
+                        params![id, thread, sub, thread, kind, role, at, text, text.len() as i64],
+                    )?;
+                    c.execute(
+                        "INSERT INTO t3_fts(text, id, thread_id, kind) VALUES (?1,?2,?3,?4)",
+                        params![text, id, thread, kind],
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    fn id_set(p: &Pack) -> std::collections::BTreeSet<String> {
+        p.leaf_ids.iter().cloned().collect()
+    }
+
+    #[tokio::test]
+    async fn fast_walk_keeps_every_cross_chat_hit() {
+        let port = spawn_mock_relay().await;
+        let dir = std::env::temp_dir().join(format!("arbos-walk-recall-{}", ulid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("agentd.db")).unwrap();
+        let fixture: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/memory-walk-recall.json"))
+                .unwrap();
+        load_fixture(&store, &fixture, now_ms());
+        let llm = Llm::with_endpoints(
+            &format!("http://127.0.0.1:{port}/v1"),
+            &format!("http://127.0.0.1:{port}/decisions"),
+            "test-token",
+        );
+        let tree = Tree::with_ids("p-test", "Bob", "mock-card-model", store, Arc::new(llm));
+        for _ in 0..10 {
+            let st = tree.build_pass().await.unwrap();
+            if st["cards"].as_i64().unwrap_or(0) == 0 && st["leaves"].as_i64().unwrap_or(0) == 0 {
+                break;
+            }
+        }
+        let ready = tree.nodes_where("level = 'episode' AND status = 'ready'", &[]);
+        assert!(ready.len() >= 6, "episode cards written: {}", ready.len());
+        assert!(
+            !tree
+                .nodes_where("level = 'thread' AND heading <> ''", &[])
+                .is_empty(),
+            "thread cards written"
+        );
+        assert!(
+            tree.store
+                .with(
+                    |c| c.query_row("SELECT COUNT(*) FROM tree_cards_fts", [], |r| r
+                        .get::<_, i64>(0))
+                )
+                .unwrap()
+                > 0,
+            "card index populated"
+        );
+
+        let slow = WalkOptions {
+            compact: true,
+            fast: false,
+        };
+        let fast = WalkOptions {
+            compact: true,
+            fast: true,
+        };
+        let (mut calls_slow, mut calls_fast, mut calls_fast_again) = (0i64, 0i64, 0i64);
+        for case in fixture["cases"].as_array().unwrap() {
+            let id = case["id"].as_str().unwrap();
+            let from = case["from"].as_str().unwrap();
+            let q = case["query"].as_str().unwrap();
+            let a = tree
+                .walk_inner("mock-jev", from, false, q, "the project owner", "", slow)
+                .await;
+            let b = tree
+                .walk_inner("mock-jev", from, false, q, "the project owner", "", fast)
+                .await;
+            let c = tree
+                .walk_inner("mock-jev", from, false, q, "the project owner", "", fast)
+                .await;
+            calls_slow += a.jev_calls;
+            calls_fast += b.jev_calls;
+            calls_fast_again += c.jev_calls;
+            eprintln!(
+                "{id:>10}: D77 {} leaves / {} requests · fast {} leaves / {} requests ({}, flat={}, ride-along={}) · cached {} requests / {} hits",
+                a.leaf_ids.len(),
+                a.jev_calls,
+                b.leaf_ids.len(),
+                b.jev_calls,
+                b.prefilter,
+                b.flat,
+                b.prefiltered,
+                c.jev_calls,
+                c.cache_hits
+            );
+            assert_eq!(
+                id_set(&a),
+                id_set(&b),
+                "{id}: fast walk packs the same leaves as the D77 walk ({} / {})",
+                a.prefilter,
+                b.prefilter
+            );
+            assert_eq!(
+                id_set(&b),
+                id_set(&c),
+                "{id}: a cached walk packs the same leaves"
+            );
+            assert_eq!(
+                c.jev_calls, 0,
+                "{id}: the second fast walk is answered from the cache"
+            );
+            for gold in case["gold"].as_array().unwrap() {
+                let g = gold.as_str().unwrap();
+                assert!(a.text.contains(g), "{id}: D77 walk packs {g:?}\n{}", a.text);
+                assert!(
+                    b.text.contains(g),
+                    "{id}: fast walk packs {g:?}\n{}",
+                    b.text
+                );
+            }
+            if case["expect_empty"].as_bool().unwrap_or(false) {
+                assert_eq!(a.outcome, "empty", "{id}: D77 walk injects nothing");
+                assert_eq!(b.outcome, "empty", "{id}: fast walk injects nothing");
+                assert_eq!(b.jev_calls, 0, "{id}: no Jev request when no chat matches");
+                assert_eq!(b.prefilter, "evidence");
+            }
+            if id == "pet-breed" {
+                assert_eq!(b.prefilter, "first-person");
+            }
+        }
+        assert!(
+            calls_fast < calls_slow,
+            "fewer Jev requests: {calls_fast} vs {calls_slow}"
+        );
+        assert_eq!(calls_fast_again, 0);
+        eprintln!("jev requests over the set: D77 walk {calls_slow}, fast walk {calls_fast}, fast walk again {calls_fast_again}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -7,9 +7,13 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use arbos_core::api::{
+    ChatDto, ChatMeDto, CreateChatResponseDto, CreateProjectResponseDto, CreateProjectRoomsDto,
+    CreateProjectSandboxDto, GetProjectResponseDto, MachineDto, ProjectDto, ProjectOwnerDto,
+};
 use arbos_core::auth::{hash, mint, pairing_code, TokenKind};
 use arbos_core::ids::{now_ms, ulid};
-use arbos_core::wire::PROJECT_DOC_CHAT_ID;
+use arbos_core::wire::{BoxState, PROJECT_DOC_CHAT_ID};
 
 use crate::auth::Principal;
 use crate::boxes::{self, Provider};
@@ -141,6 +145,9 @@ pub struct CreateProjectBody {
     /// Short public blurb for the agent's profile (≤ 500 chars).
     #[serde(default)]
     pub description: Option<String>,
+    /// Telegram-style initials colour (D79): 0–6. Omitted = automatic from the id.
+    #[serde(default)]
+    pub avatar_color_index: Option<i64>,
     /// Fork: copy the source project's workspace folder (files + memory) into the new agent.
     /// Own projects only; chat UI history is not copied (the new pinned chat stays empty).
     #[serde(default)]
@@ -239,6 +246,14 @@ pub async fn create_project(
         }
         None => default_color,
     };
+    if let Some(i) = b.avatar_color_index {
+        if !(0..7).contains(&i) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "avatar_color_index must be 0–6 or null".into(),
+            ));
+        }
+    }
     let project = Project {
         id,
         name: name.clone(),
@@ -256,7 +271,7 @@ pub async fn create_project(
         avatar_color: Some(avatar_color),
         description: clean_description(b.description.as_deref().unwrap_or_default())?,
         primary_chat_id: None,
-        avatar_color_index: None,
+        avatar_color_index: b.avatar_color_index,
     };
     if state
         .db
@@ -325,17 +340,26 @@ pub async fn create_project(
             boxes::copy_workspace_for_fork(&state2, &owner, &src_id, &dest).await;
         });
     }
-    Ok(Json(json!({
-        "project": project_json(&state, &project).await,
-        "pinned_chat": chat_json(&pinned),
-        "sandbox": {
-            "provider": sb.as_ref().map(|s| s.provider.clone()).unwrap_or_else(|| provider.as_str().to_owned()),
-            "sandbox_id": sb.as_ref().and_then(|s| s.sandbox_id.clone()),
-            "device_id": sb.as_ref().map(|s| s.device_id.clone()),
-            "box_url": sb.as_ref().and_then(|s| s.box_url.clone()),
-        },
-        "rooms": { "project": format!("/room/{}/{}", project.id, PROJECT_DOC_CHAT_ID), "pinned_chat": format!("/room/{}/{}", project.id, pinned.id) }
-    }))
+    Ok(Json(
+        serde_json::to_value(CreateProjectResponseDto {
+            project: project_dto(&state, &project).await,
+            pinned_chat: chat_dto(&pinned),
+            sandbox: CreateProjectSandboxDto {
+                provider: sb
+                    .as_ref()
+                    .map(|s| s.provider.clone())
+                    .unwrap_or_else(|| provider.as_str().to_owned()),
+                sandbox_id: sb.as_ref().and_then(|s| s.sandbox_id.clone()),
+                device_id: sb.as_ref().map(|s| s.device_id.clone()),
+                box_url: sb.as_ref().and_then(|s| s.box_url.clone()),
+            },
+            rooms: CreateProjectRoomsDto {
+                project: format!("/room/{}/{}", project.id, PROJECT_DOC_CHAT_ID),
+                pinned_chat: format!("/room/{}/{}", project.id, pinned.id),
+            },
+        })
+        .expect("CreateProjectResponseDto"),
+    )
     .into_response())
 }
 
@@ -351,26 +375,30 @@ pub async fn list_projects(State(state): State<AppState>, principal: Principal) 
         }
         Principal::Device { user_id, .. } | Principal::Box { user_id } => {
             for p in state.db.projects_of_user(user_id).map_err(internal)? {
-                let mut v = project_json(&state, &p).await;
-                v["shared"] = json!(false);
+                let mut dto = project_dto(&state, &p).await;
+                dto.shared = Some(false);
+                dto.my_role = Some("owner".into());
+                // Wire: list overwrites the owner card with the user id string.
+                let mut v = serde_json::to_value(dto).expect("ProjectDto");
                 v["owner"] = json!(p.user_id);
-                v["my_role"] = json!("owner");
                 out.push(v);
             }
             if matches!(principal, Principal::Device { .. }) {
                 for pid in state.db.shared_project_ids(user_id).map_err(internal)? {
                     if let Ok(Some(p)) = state.db.project(&pid) {
-                        let mut v = project_json(&state, &p).await;
-                        v["shared"] = json!(true);
+                        let mut dto = project_dto(&state, &p).await;
+                        dto.shared = Some(true);
+                        dto.my_role = Some("member".into());
+                        dto.owner_handle = Some(
+                            state
+                                .db
+                                .user_card(&p.user_id)
+                                .ok()
+                                .flatten()
+                                .and_then(|c| c["handle"].as_str().map(str::to_owned)),
+                        );
+                        let mut v = serde_json::to_value(dto).expect("ProjectDto");
                         v["owner"] = json!(p.user_id);
-                        v["owner_handle"] = state
-                            .db
-                            .user_card(&p.user_id)
-                            .ok()
-                            .flatten()
-                            .map(|c| c["handle"].clone())
-                            .unwrap_or(Value::Null);
-                        v["my_role"] = json!("member");
                         out.push(v);
                     }
                 }
@@ -397,12 +425,12 @@ pub async fn get_project(
         Principal::Device { user_id, .. } => Some(user_id.clone()),
         Principal::Box { .. } | Principal::Admin => None,
     };
-    let chats: Vec<Value> = state
+    let chats: Vec<ChatDto> = state
         .db
         .list_chats(&p.id)
         .map_err(internal)?
         .iter()
-        .map(|c| chat_json_for(&state, c, viewer.as_deref()))
+        .map(|c| chat_dto_for(&state, c, viewer.as_deref()))
         .collect();
     let (bs, since) = state.box_state(&p.user_id).await;
     let today = state
@@ -411,7 +439,18 @@ pub async fn get_project(
         .map_err(internal)?;
     // The box polls this every 3 s; a changed marker tells it to refetch `/skills/index` (F5).
     let skills_rev = state.db.skills_rev(Some(&p.id)).map_err(internal)?;
-    Ok(Json(json!({ "project": project_json(&state, &p).await, "chats": chats, "box": bs, "box_since": since, "spend_today": today, "skills_rev": skills_rev })).into_response())
+    Ok(Json(
+        serde_json::to_value(GetProjectResponseDto {
+            project: project_dto(&state, &p).await,
+            chats,
+            box_state: bs,
+            box_since: since,
+            spend_today: serde_json::to_value(today).unwrap_or(Value::Null),
+            skills_rev,
+        })
+        .expect("GetProjectResponseDto"),
+    )
+    .into_response())
 }
 
 /// A model id the proxy can serve: `vendor/name`, no spaces. Picker labels ("Claude Fable 5.1")
@@ -714,6 +753,10 @@ pub(crate) fn resolve_project_id(
 
 /// The project record as clients see it (additive; `arbos-mac` maps it onto its `Project`).
 pub(crate) async fn project_json(state: &AppState, p: &Project) -> Value {
+    serde_json::to_value(project_dto(state, p).await).expect("ProjectDto")
+}
+
+pub(crate) async fn project_dto(state: &AppState, p: &Project) -> ProjectDto {
     let (bs, since) = state.box_state(&p.user_id).await;
     let today = state
         .db
@@ -721,25 +764,72 @@ pub(crate) async fn project_json(state: &AppState, p: &Project) -> Value {
         .map(|u| u.usd)
         .unwrap_or(0.0);
     let voice_settings = state.db.voice_agent_settings(&p.id).ok();
-    json!({
-        "id": p.id, "name": p.name, "icon": p.icon, "color": p.color, "instructions": p.instructions,
-        "avatar": p.avatar.clone().unwrap_or_else(|| crate::avatar::default_for(&p.id, &state.cfg.avatar_slugs)),
-        "avatar_color": p.avatar_color.clone().unwrap_or_else(|| crate::avatar::default_color_for(&p.id, &state.cfg.avatar_colors)),
-        "state": p.state, "box": bs, "box_since": since,
-        "models": p.models,
-        "spend_today_usd": today, "spend_cap_usd": p.spend_cap_daily,
-        "created_at": p.created_at, "last_active_at": p.last_active_at,
-        "description": p.description,
-        "voice": voice_settings.as_ref().and_then(|s| s.voice.clone()),
-        "vision_enabled": voice_settings.as_ref().map(|s| s.vision_enabled).unwrap_or(true),
-        "avatar_color_index": p.avatar_color_index,
-        "avatar_color_index_effective": crate::avatar::effective_color_index(&p.id, p.avatar_color_index),
-        "primary_chat_id": primary_chat_id(state, p),
-        "owner": crate::people::with_presence(state, crate::notify::Sender::user(state, &p.user_id).json()),
-        "model": p.models.get("talking_model").and_then(|m| m.get("id")).cloned().unwrap_or(Value::Null),
-        "machine": machine_profile(state, &p.user_id, bs, since),
-        "activity": activity_json(state, &p.id).await,
-    })
+    ProjectDto {
+        id: p.id.clone(),
+        name: p.name.clone(),
+        icon: p.icon.clone(),
+        color: p.color.clone(),
+        instructions: p.instructions.clone(),
+        avatar: p
+            .avatar
+            .clone()
+            .unwrap_or_else(|| crate::avatar::default_for(&p.id, &state.cfg.avatar_slugs)),
+        avatar_color: p
+            .avatar_color
+            .clone()
+            .unwrap_or_else(|| crate::avatar::default_color_for(&p.id, &state.cfg.avatar_colors)),
+        state: p.state.clone(),
+        box_state: bs,
+        box_since: since,
+        models: p.models.clone(),
+        spend_today_usd: today,
+        spend_cap_usd: p.spend_cap_daily,
+        created_at: p.created_at,
+        last_active_at: p.last_active_at,
+        description: p.description.clone(),
+        voice: voice_settings.as_ref().and_then(|s| s.voice.clone()),
+        vision_enabled: voice_settings
+            .as_ref()
+            .map(|s| s.vision_enabled)
+            .unwrap_or(true),
+        avatar_color_index: p.avatar_color_index,
+        avatar_color_index_effective: i64::from(crate::avatar::effective_color_index(
+            &p.id,
+            p.avatar_color_index,
+        )),
+        primary_chat_id: primary_chat_id(state, p),
+        owner: project_owner_dto(state, &p.user_id),
+        model: p
+            .models
+            .get("talking_model")
+            .and_then(|m| m.get("id"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        machine: machine_dto(state, &p.user_id, bs, since),
+        activity: activity_json(state, &p.id).await,
+        shared: None,
+        my_role: None,
+        owner_handle: None,
+    }
+}
+
+pub(crate) fn project_owner_dto(state: &AppState, user_id: &str) -> ProjectOwnerDto {
+    let s = crate::notify::Sender::user(state, user_id);
+    let seen = state.db.user_last_seen(user_id).ok().flatten();
+    ProjectOwnerDto {
+        kind: s.kind.to_owned(),
+        id: s.id,
+        name: s.name,
+        handle: s.handle,
+        avatar: s.avatar,
+        avatar_color: s.avatar_color,
+        avatar_url: s.avatar_url,
+        avatar_color_index: s.avatar_color_index,
+        // with_presence overwrites Sender's effective index with color_index(user_id).
+        avatar_color_index_effective: i64::from(crate::avatar::color_index(user_id)),
+        last_seen_at: seen.map(|t| t - t % 60_000),
+        online: seen.is_some_and(|t| now_ms() - t < crate::people::ONLINE_MS),
+    }
 }
 
 /// The one chat clients show for this agent. Stored on the project the first time it is asked
@@ -770,12 +860,7 @@ pub fn primary_chat_id(state: &AppState, p: &Project) -> Option<String> {
 }
 
 /// The agent's machine as a profile line: state, since when, and what kind of machine.
-fn machine_profile(
-    state: &AppState,
-    user_id: &str,
-    bs: arbos_core::wire::BoxState,
-    since: i64,
-) -> Value {
+fn machine_dto(state: &AppState, user_id: &str, bs: BoxState, since: i64) -> MachineDto {
     let sb = state.db.user_box(user_id).ok().flatten();
     let class = match sb.as_ref().map(|s| s.provider.as_str()) {
         Some("daytona") => "daytona",
@@ -783,30 +868,58 @@ fn machine_profile(
         Some(_) => "process",
         None => "none",
     };
-    json!({
-        "state": bs,
-        "since": since,
-        "class": class,
-        "snapshot": sb.as_ref().and_then(|s| s.snapshot.clone()),
-        "image_outdated": sb.as_ref().is_some_and(|s| crate::upgrade::image_outdated(state, s)),
-        "always_on": state.cfg.always_on,
-    })
+    MachineDto {
+        state: bs,
+        since,
+        class: class.into(),
+        snapshot: sb.as_ref().and_then(|s| s.snapshot.clone()),
+        image_outdated: sb
+            .as_ref()
+            .is_some_and(|s| crate::upgrade::image_outdated(state, s)),
+        always_on: state.cfg.always_on,
+    }
 }
 
+#[allow(dead_code)] // helper kept for wire/fixture tests; handlers use chat_dto
 pub(crate) fn chat_json(c: &Chat) -> Value {
-    json!({ "id": c.id, "project_id": c.project_id, "title": c.title, "is_pinned": c.is_pinned, "is_system": c.kind == "projects",
-            "kind": c.kind, "participants": c.participants,
-            "position": c.position, "created_at": c.created_at, "doc_epoch": c.doc_epoch, "room": format!("/room/{}/{}", c.project_id, c.id) })
+    serde_json::to_value(chat_dto(c)).expect("ChatDto")
+}
+
+pub(crate) fn chat_dto(c: &Chat) -> ChatDto {
+    ChatDto {
+        id: c.id.clone(),
+        project_id: c.project_id.clone(),
+        title: c.title.clone(),
+        is_pinned: c.is_pinned,
+        is_system: c.kind == "projects",
+        kind: c.kind.clone(),
+        participants: c.participants.clone(),
+        position: c.position,
+        created_at: c.created_at,
+        doc_epoch: c.doc_epoch,
+        room: format!("/room/{}/{}", c.project_id, c.id),
+        archived_at: None,
+        me: None,
+    }
 }
 
 /// The chat as one person sees it: `archived_at` (and `me.archived_at`) are theirs alone;
 /// boxes and the admin see `null`.
 pub(crate) fn chat_json_for(state: &AppState, c: &Chat, user: Option<&str>) -> Value {
-    let mut v = chat_json(c);
+    serde_json::to_value(chat_dto_for(state, c, user)).expect("ChatDto")
+}
+
+pub(crate) fn chat_dto_for(state: &AppState, c: &Chat, user: Option<&str>) -> ChatDto {
     let archived_at = user.and_then(|u| state.db.chat_archived_at(u, &c.id).ok().flatten());
-    v["archived_at"] = json!(archived_at);
-    v["me"] = json!({ "archived_at": archived_at });
-    v
+    let mut dto = chat_dto(c);
+    dto.archived_at = Some(archived_at);
+    dto.me = Some(ChatMeDto {
+        role: None,
+        muted: None,
+        archived_at,
+        read_receipts: None,
+    });
+    dto
 }
 
 fn start_of_day() -> i64 {
@@ -1201,9 +1314,14 @@ pub async fn create_chat(
         if let Some(primary) =
             primary_chat_id(&state, &p).and_then(|id| existing.iter().find(|c| c.id == id))
         {
-            return Ok(Json(json!({
-                "chat": chat_json(primary), "room": format!("/room/{}/{}", p.id, primary.id), "primary": true,
-            }))
+            return Ok(Json(
+                serde_json::to_value(CreateChatResponseDto {
+                    chat: chat_dto(primary),
+                    room: format!("/room/{}/{}", p.id, primary.id),
+                    primary: Some(true),
+                })
+                .expect("CreateChatResponseDto"),
+            )
             .into_response());
         }
     }
@@ -1211,7 +1329,12 @@ pub async fn create_chat(
     if kind == "projects" {
         if let Some(c) = existing.iter().find(|c| c.kind == "projects") {
             return Ok(Json(
-                json!({ "chat": chat_json(c), "room": format!("/room/{}/{}", p.id, c.id) }),
+                serde_json::to_value(CreateChatResponseDto {
+                    chat: chat_dto(c),
+                    room: format!("/room/{}/{}", p.id, c.id),
+                    primary: None,
+                })
+                .expect("CreateChatResponseDto"),
             )
             .into_response());
         }
@@ -1234,10 +1357,15 @@ pub async fn create_chat(
         participants: Vec::new(),
     };
     state.db.insert_chat(&chat).map_err(internal)?;
-    Ok(
-        Json(json!({ "chat": chat_json(&chat), "room": format!("/room/{}/{}", p.id, chat.id) }))
-            .into_response(),
+    Ok(Json(
+        serde_json::to_value(CreateChatResponseDto {
+            chat: chat_dto(&chat),
+            room: format!("/room/{}/{}", p.id, chat.id),
+            primary: None,
+        })
+        .expect("CreateChatResponseDto"),
     )
+    .into_response())
 }
 
 pub async fn list_chats(

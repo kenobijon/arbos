@@ -1,0 +1,59 @@
+{
+  "activity": null,
+  "avatar": "oak",
+  "avatar_color": "teal",
+  "avatar_color_index": 3,
+  "avatar_color_index_effective": 3,
+  "box": "asleep",
+  "box_since": 0,
+  "color": "#8b7cf6",
+  "created_at": 1700000000000,
+  "description": "A fixture agent",
+  "icon": "Ab",
+  "id": "proj_fixture",
+  "instructions": "be helpful",
+  "last_active_at": 1700000000000,
+  "machine": {
+    "always_on": false,
+    "class": "none",
+    "image_outdated": false,
+    "since": 0,
+    "snapshot": null,
+    "state": "asleep"
+  },
+  "model": "anthropic/claude-haiku-5.5",
+  "models": {
+    "decision_model": {
+      "effort": "off",
+      "id": "anthropic/claude-haiku-5.5"
+    },
+    "subagent_model": {
+      "effort": "medium",
+      "id": "anthropic/claude-sonnet-5.5"
+    },
+    "talking_model": {
+      "effort": "off",
+      "id": "anthropic/claude-haiku-5.5"
+    }
+  },
+  "name": "Fixture",
+  "owner": {
+    "avatar": null,
+    "avatar_color": null,
+    "avatar_color_index": null,
+    "avatar_color_index_effective": 0,
+    "avatar_url": null,
+    "handle": "user101",
+    "id": "gh_101",
+    "kind": "user",
+    "last_seen_at": null,
+    "name": "@user101",
+    "online": false
+  },
+  "primary_chat_id": "chat_primary",
+  "spend_cap_usd": 25.0,
+  "spend_today_usd": 0.0,
+  "state": "hibernated_light",
+  "vision_enabled": true,
+  "voice": null
+}

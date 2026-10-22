@@ -1,0 +1,17 @@
+{
+  "archived_at": null,
+  "created_at": 1700000000000,
+  "doc_epoch": 1,
+  "id": "chat_fixture",
+  "is_pinned": false,
+  "is_system": false,
+  "kind": "chat",
+  "me": {
+    "archived_at": null
+  },
+  "participants": [],
+  "position": 1,
+  "project_id": "proj_fixture",
+  "room": "/room/proj_fixture/chat_fixture",
+  "title": "Hello"
+}

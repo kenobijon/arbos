@@ -141,6 +141,11 @@ impl SyncSource for FixtureSource {
                     spend_cap_usd: 25.0,
                     detail: None,
                     progress: None,
+                    provider: Some("gvisor".into()),
+                    // `ARBOS_FIXTURE_WAITLIST=<n>` seeds the D89 waitlist card (screenshot rig).
+                    waitlist_position: std::env::var("ARBOS_FIXTURE_WAITLIST")
+                        .ok()
+                        .and_then(|v| v.parse().ok()),
                     always_on: std::env::var("ARBOS_FIXTURE_ALWAYS_ON")
                         .map(|v| v != "0")
                         .unwrap_or(true),

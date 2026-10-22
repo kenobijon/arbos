@@ -1,0 +1,34 @@
+{
+  "created_at": 1700000000000,
+  "doc_epoch": 1,
+  "id": "group_fixture",
+  "is_pinned": false,
+  "is_system": false,
+  "kind": "group",
+  "participants": [
+    "proj_fixture",
+    "proj_other"
+  ],
+  "participants_detail": [
+    {
+      "box": "asleep",
+      "color": "#8b7cf6",
+      "description": "A fixture agent",
+      "icon": "Ab",
+      "id": "proj_fixture",
+      "name": "Fixture"
+    },
+    {
+      "box": "asleep",
+      "color": "#8b7cf6",
+      "description": "A fixture agent",
+      "icon": "Ab",
+      "id": "proj_other",
+      "name": "Other"
+    }
+  ],
+  "position": 2,
+  "project_id": "proj_fixture",
+  "room": "/room/proj_fixture/group_fixture",
+  "title": "Group · Other"
+}
