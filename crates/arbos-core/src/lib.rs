@@ -11,6 +11,7 @@ pub mod local;
 pub mod route;
 pub mod rpc;
 pub mod skill;
+pub mod wav;
 pub mod widget;
 pub mod wire;
 
