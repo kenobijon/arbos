@@ -456,9 +456,18 @@ async fn main() -> anyhow::Result<()> {
             "/servers/{id}/invite/reset",
             post(matrix::servers::invite_reset),
         )
+        .route("/servers/{id}/members", post(matrix::servers::member_add))
         .route(
             "/servers/{id}/members/{uid}",
             put(matrix::servers::member_role).delete(matrix::servers::member_remove),
+        )
+        .route(
+            "/servers/{id}/invites",
+            get(matrix::servers::invites_list).post(matrix::servers::invites_create),
+        )
+        .route(
+            "/servers/{id}/invites/{iid}",
+            axum::routing::delete(matrix::servers::invites_revoke),
         )
         .route("/servers/{id}/leave", post(matrix::servers::leave))
         .route("/s/{code}", get(matrix::servers::landing))
