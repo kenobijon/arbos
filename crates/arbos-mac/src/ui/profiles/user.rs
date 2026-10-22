@@ -160,7 +160,7 @@ pub(super) fn page(
         &person.display_name(),
         body,
         None,
-        None,
+        Some(&shell.profile_scroll),
         shell,
         &theme,
         cx,

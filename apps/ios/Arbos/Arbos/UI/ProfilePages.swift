@@ -31,12 +31,19 @@ struct ProfilePerson: Identifiable, Equatable, Hashable {
 }
 
 /// What the root view presents.
-enum ProfileTarget: Identifiable, Equatable {
+enum ProfileTarget: Identifiable, Equatable, Hashable {
     case user(ProfilePerson)
     case group(chatId: String, projectId: String?)
     case agent(projectId: String)
     /// D88: a server's details (Channels | Members; admin rows for owner/admin).
     case server(serverId: String)
+
+    /// Pages whose member rows push a person over them (back chevron returns
+    /// here). The agent page runs its own NavigationStack, so it stays a root.
+    var pushesPeople: Bool {
+        if case .agent = self { return false }
+        return true
+    }
 
     var id: String {
         switch self {

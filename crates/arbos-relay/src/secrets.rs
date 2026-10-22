@@ -368,19 +368,13 @@ pub(crate) fn director_json(state: &AppState, d: &SecretDirector) -> Value {
     let card = state.db.user_card(&d.user_id).ok().flatten();
     let handle = card
         .as_ref()
-        .and_then(|c| c["handle"].as_str())
-        .unwrap_or("")
-        .trim_start_matches('@')
-        .to_owned();
+        .map(|c| c.handle.trim_start_matches('@').to_owned())
+        .unwrap_or_default();
     let name = card
         .as_ref()
-        .and_then(|c| c["name"].as_str())
-        .filter(|n| !n.is_empty())
-        .map(str::to_owned);
-    let avatar_url = card
-        .as_ref()
-        .and_then(|c| c["avatar_url"].as_str())
-        .map(str::to_owned);
+        .and_then(|c| c.name.clone())
+        .filter(|n| !n.is_empty());
+    let avatar_url = card.as_ref().and_then(|c| c.avatar_url.clone());
     json!({
         "user_id": d.user_id,
         "handle": handle,
@@ -1493,7 +1487,7 @@ pub async fn post_director(
                 format!("@{handle} is not on Arbos yet"),
             )
         })?;
-    let director_id = person["id"].as_str().unwrap_or("").to_owned();
+    let director_id = person.id.clone();
     if director_id.is_empty() || director_id == user_id {
         return Err(err(
             StatusCode::BAD_REQUEST,
@@ -1960,16 +1954,10 @@ pub(crate) fn box_items(state: &AppState, user_id: &str, project_id: &str) -> Ve
                 .user_card(&d.user_id)
                 .ok()
                 .flatten()
-                .and_then(|c| {
-                    c["name"]
-                        .as_str()
+                .map(|c| {
+                    c.name
                         .filter(|n| !n.is_empty())
-                        .map(str::to_owned)
-                        .or_else(|| {
-                            c["handle"]
-                                .as_str()
-                                .map(|h| h.trim_start_matches('@').to_owned())
-                        })
+                        .unwrap_or_else(|| c.handle.trim_start_matches('@').to_owned())
                 })
                 .unwrap_or_else(|| d.user_id.clone());
             use_notes.push(format!("When {who} directs you: {note}"));

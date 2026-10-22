@@ -79,9 +79,7 @@ pub(super) fn pushed_frame(
     }
     let back = glass::circle("profile-back", 30.0, theme)
         .child(icon("chevron-left", 14.0, theme.text))
-        .on_click(cx.listener(|this, _, _, cx| {
-            this.state.update(cx, |s, cx| s.back_profile(cx));
-        }));
+        .on_click(cx.listener(|this, _, _, cx| this.back_profile(cx)));
     pane_frame(
         SHEET_WIDTH,
         Some((title, back)),
@@ -143,7 +141,7 @@ pub(crate) fn pane_frame(
         .flex_col()
         .border_l_1()
         .border_color(theme.border)
-        .bg(theme.card())
+        .bg(theme.pane())
         .child(header)
         .child(
             body.id("profile-body")

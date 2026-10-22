@@ -68,6 +68,16 @@ pub enum ServerSheet {
     NewChannel { server_id: Id },
 }
 
+/// A page under the open one in the right pane's stack (a group under the
+/// member opened from it), kept with what `‹` needs to bring it back as it
+/// was: its tab and how far its body was scrolled (px from the top).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProfileFrame {
+    pub page: ProfilePage,
+    pub tab: usize,
+    pub scroll: f32,
+}
+
 /// Which agent-settings row on the agent's profile page is expanded into its
 /// choice list (click to open; see `ui::hoverpick`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -359,9 +369,13 @@ pub struct AppState {
     /// Telegram-style profile sheet (user / group / agent) and its tab.
     pub profile: Option<ProfilePage>,
     pub profile_tab: usize,
-    /// Pages under the open one (a sender's profile pushed from a group): `‹` pops back.
-    /// Minimal stack for the right pane; the pane-as-navigation-stack work extends it.
-    pub profile_stack: Vec<ProfilePage>,
+    /// Pages under the open one, outermost first (a sender's profile pushed
+    /// from a group, a member from its pane): `‹` pops back to the page with
+    /// its tab and scroll.
+    pub profile_stack: Vec<ProfileFrame>,
+    /// Bumped whenever a different page fills the pane, so the shell starts
+    /// its body at the top (a popped page keeps its saved scroll instead).
+    pub profile_opened: u64,
     /// Agent page: the Appearance (tree + colour) section is unfolded.
     pub profile_picker_open: bool,
     /// Agent page: which settings row (model / reasoning / voice) is dropped down.
@@ -659,8 +673,9 @@ impl AppState {
             window_active: true,
             notify_prompt: false,
             profile: None,
-            profile_stack: Vec::new(),
             profile_tab: 0,
+            profile_stack: Vec::new(),
+            profile_opened: 0,
             profile_picker_open: false,
             agent_pick: None,
             profile_editing_description: false,
@@ -815,8 +830,8 @@ impl AppState {
                     return;
                 }
                 self.push_notice(format!(
-                    "Arbos {version} is installed — it restarts in a minute or when you pause. \
-                     Press Restart now in the rail to do it at once."
+                    "Arbos {version} is installed — it restarts in a minute while you are in Arbos, \
+                     or when you pause. Press Restart now in the rail to do it at once."
                 ));
                 cx.spawn(async move |this, cx| loop {
                     cx.background_executor()
@@ -857,12 +872,15 @@ impl AppState {
         cx.notify();
     }
 
-    /// Is this a moment the app may restart itself? Never in a call or right after a keystroke;
-    /// otherwise when the window is not focused, when nothing was typed for a while, or when the
-    /// countdown is over.
+    /// Is this a moment the app may restart itself? Never in a call, right after a keystroke, or
+    /// while another app has focus (relaunch would steal it). When Arbos is focused: after a pause
+    /// with no typing, or when the countdown is over.
     fn relaunch_is_safe(&self) -> bool {
         let now = now_ms();
         if self.my_call.is_some() || self.incoming_call.is_some() {
+            return false;
+        }
+        if !self.window_active {
             return false;
         }
         if now.saturating_sub(self.last_input_at) < update::TYPING_GUARD_MS {
@@ -879,9 +897,7 @@ impl AppState {
             | UpdatePhase::Restarting(_)
             | UpdatePhase::Failed { .. } => true,
         };
-        !self.window_active
-            || now.saturating_sub(self.last_input_at) >= update::IDLE_RELAUNCH_MS
-            || countdown_over
+        now.saturating_sub(self.last_input_at) >= update::IDLE_RELAUNCH_MS || countdown_over
     }
 
     /// Relaunch into the pending install when it is safe; true when the relaunch was started.
@@ -1413,7 +1429,7 @@ impl AppState {
                             }
                         }
                     }
-                    // Rig: `ARBOS_OPEN_PROFILE=agent[:model|reasoning|voice]|group[:library|:add-members]|user|me`
+                    // Rig: `ARBOS_OPEN_PROFILE=agent[:model|reasoning|voice]|group[:library|:add-members|:member]|user|me`
                     // opens the right pane for the restored chat (selecting it
                     // closed whatever the shell opened at launch), and
                     // `ARBOS_OPEN_SETTINGS=…` re-opens my pane on its Settings tab.
@@ -1436,6 +1452,25 @@ impl AppState {
                             } else if rest == ":add-members" {
                                 // The pane's Add members sheet over the Members tab.
                                 self.open_add_members(project_id, cx);
+                            } else if rest == ":member" {
+                                // `:member` lands on the first other member, pushed
+                                // over the group as a click on its row would.
+                                let me = self.me_handle();
+                                if let Some(handle) = self
+                                    .projects
+                                    .iter()
+                                    .find(|p| p.id == project_id)
+                                    .and_then(|p| p.people.iter().find(|x| x.handle != me))
+                                    .map(|x| x.handle.clone())
+                                {
+                                    self.push_profile(
+                                        ProfilePage::User {
+                                            handle,
+                                            space_id: Some(project_id),
+                                        },
+                                        cx,
+                                    );
+                                }
                             }
                         } else if spec == "user" {
                             if let Some(handle) = self
@@ -2872,16 +2907,25 @@ impl AppState {
             channel_id: channel_id.clone(),
             room_id: room_id.clone(),
         });
+        // Open only when Matrix already lists the room. A registry room_id alone can
+        // race sliding sync (memory store empty until the next snapshot) or point at a
+        // gone room — both yield "no such room", which is not a product bug.
+        let synced = room_id.as_ref().is_some_and(|rid| {
+            self.matrix_snapshot
+                .channels
+                .iter()
+                .any(|c| c.room_id == *rid)
+        });
         match room_id {
-            Some(room_id) => {
+            Some(room_id) if synced => {
                 self.channel_pending_room = None;
                 self.command(ClientCommand::ChannelOpen {
                     room_id: room_id.clone(),
                 });
                 self.command(ClientCommand::ChannelMarkRead { room_id });
             }
-            // Just created: the room shows up in the next snapshot or registry refresh.
-            None => self.channel_pending_room = Some((server_id, channel_id)),
+            // Just created, or Matrix has not listed the room yet: wait for a snapshot.
+            _ => self.channel_pending_room = Some((server_id, channel_id)),
         }
         self.sync_focus();
         cx.notify();
@@ -2904,7 +2948,13 @@ impl AppState {
             .server(&server_id)
             .and_then(|s| s.channel(&channel_id))
             .and_then(|c| self.room_of_channel(c));
-        if room.is_some() {
+        let synced = room.as_ref().is_some_and(|rid| {
+            self.matrix_snapshot
+                .channels
+                .iter()
+                .any(|c| c.room_id == *rid)
+        });
+        if synced {
             self.select_channel(server_id, channel_id, cx);
         }
     }
@@ -3925,35 +3975,51 @@ impl AppState {
         }
     }
 
-    /// Open `page` on top of the current one (a sender tapped inside a group): the pane
-    /// gets a `‹` back to where it was. Same page again is a no-op.
-    pub fn push_profile(&mut self, page: ProfilePage, cx: &mut Context<Self>) {
-        if self.profile.as_ref() == Some(&page) {
-            return;
-        }
-        let under = self.profile.take();
-        let mut stack = std::mem::take(&mut self.profile_stack);
-        self.open_profile(page, cx);
-        stack.extend(under);
-        self.profile_stack = stack;
+    /// Fill the pane with `page`, forgetting whatever was under it.
+    pub fn open_profile(&mut self, page: ProfilePage, cx: &mut Context<Self>) {
+        self.profile_stack.clear();
+        self.show_profile(page, cx);
     }
 
-    /// `‹` in the pane header: back to the page underneath (closes when none).
-    pub fn back_profile(&mut self, cx: &mut Context<Self>) {
+    /// Open `page` on top of the current one (a sender tapped inside a group,
+    /// a member from a group's pane, an agent's owner): the page underneath
+    /// is kept with its tab so `‹` brings it back as it was. Callers that
+    /// know the body's scroll set it on the pushed frame (`Shell::push_profile`).
+    /// Same page again is a no-op; nothing open is a plain open.
+    pub fn push_profile(&mut self, page: ProfilePage, cx: &mut Context<Self>) {
+        let Some(under) = self.profile.clone() else {
+            self.open_profile(page, cx);
+            return;
+        };
+        if under == page {
+            return;
+        }
+        let tab = self.profile_tab;
+        self.profile_stack.push(ProfileFrame {
+            page: under,
+            tab,
+            scroll: 0.0,
+        });
+        self.show_profile(page, cx);
+    }
+
+    /// `‹` in the pane header: back to the page underneath on its tab, returning
+    /// the body scroll it had for the shell to restore; closes when none.
+    pub fn back_profile(&mut self, cx: &mut Context<Self>) -> Option<f32> {
         match self.profile_stack.pop() {
-            Some(prev) => {
-                let stack = std::mem::take(&mut self.profile_stack);
-                self.open_profile(prev, cx);
-                self.profile_stack = stack;
+            Some(frame) => {
+                self.show_profile(frame.page, cx);
+                self.profile_tab = frame.tab;
+                Some(frame.scroll)
             }
             None => {
                 self.close_profile(cx);
+                None
             }
         }
     }
 
-    pub fn open_profile(&mut self, page: ProfilePage, cx: &mut Context<Self>) {
-        self.profile_stack.clear();
+    fn show_profile(&mut self, page: ProfilePage, cx: &mut Context<Self>) {
         self.avatar_picker = match &page {
             ProfilePage::Agent { project_id } => Some(project_id.clone()),
             _ => None,
@@ -3965,6 +4031,7 @@ impl AppState {
             });
         }
         self.profile = Some(page);
+        self.profile_opened = self.profile_opened.wrapping_add(1);
         self.profile_from_name = false;
         self.profile_tab = 0;
         self.profile_picker_open = false;

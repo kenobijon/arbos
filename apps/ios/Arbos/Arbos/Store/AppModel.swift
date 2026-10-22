@@ -832,17 +832,16 @@ final class AppModel: ObservableObject {
             user = who
             credits = cr
             saveAccountCache()
-            let waitlisted = (summary["waitlisted"] as? NSNumber)?.boolValue ?? false
-            let position = waitlisted ? ((summary["waitlist_position"] as? NSNumber)?.intValue ?? 1) : nil
+            let position = summary.waitlisted ? Int(summary.waitlist_position ?? 1) : nil
             if position != waitlistPosition { waitlistPosition = position }
-            if let on = (summary["always_on"] as? NSNumber)?.boolValue {
-                meAlwaysOn = on
-                if let held = (summary["held"] as? NSNumber)?.boolValue { machine.held = held }
-                if on, !machine.alwaysOn {
-                    machine.alwaysOn = true
-                    machine.state = machine.coerced(machine.state)
-                }
+            meAlwaysOn = summary.always_on
+            var m = machine
+            m.held = summary.held
+            if summary.always_on, !m.alwaysOn {
+                m.alwaysOn = true
+                m.state = m.coerced(m.state)
             }
+            machine = m
         }
         if let list = try? await api.approvals() { approvals = list }
     }
@@ -2390,12 +2389,25 @@ final class AppModel: ObservableObject {
 
     /// The profile page the root view presents (person, group or agent).
     @Published var profile: ProfileTarget?
+    /// People pushed over `profile` (a member tapped on a group's or server's
+    /// page): the sheet is a NavigationStack, the back chevron pops them.
+    @Published var profilePath: [ProfileTarget] = []
     /// A chat the next ChatView should open with its search bar up (profile "search").
     @Published var pendingSearchChat: String?
     /// Last presence time per user id, from room presence frames this session.
     @Published private(set) var lastSeen: [String: Int64] = [:]
 
-    func showProfile(_ target: ProfileTarget) { profile = target }
+    func showProfile(_ target: ProfileTarget) {
+        if let root = profile, root.pushesPeople, case .user = target {
+            // A person opened from a page that is already up is pushed, so
+            // back returns to that page with its tab and scroll untouched.
+            let top = profilePath.last ?? root
+            if top != target { profilePath.append(target) }
+            return
+        }
+        profilePath = []
+        profile = target
+    }
 
     /// A sender avatar was tapped: resolve the handle through the chat's members.
     /// Stable user id for a handle seen in a chat (members first, then the directory); nil when unknown.

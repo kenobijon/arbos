@@ -1,0 +1,33 @@
+{
+  "always_on": false,
+  "held": false,
+  "image": {
+    "current": null,
+    "default": ""
+  },
+  "image_outdated": false,
+  "machine_today_usd": 0.0,
+  "migrated_from": [],
+  "provider": null,
+  "sandbox_id": null,
+  "since": 0,
+  "spec": {
+    "class": "",
+    "cpu": 4,
+    "disk_gib": 10,
+    "mem_gib": 8
+  },
+  "spend_cap_usd": 0.0,
+  "spend_today_usd": 0.0,
+  "state": "asleep",
+  "upgrade": {
+    "in_progress": false
+  },
+  "user_id": "gh_301",
+  "workspaces": [
+    {
+      "project_id": "proj_fixture",
+      "state": "stopped"
+    }
+  ]
+}
