@@ -2221,6 +2221,26 @@ class Loop:
                         f"processed: **{number}** ({later['html_url']}).")
         return True
 
+    def red_after_merge_to_owner(self, fid: str, st: dict, what: str, run_url: str, errors: list[str]) -> None:
+        """A handed-off item's merged commit went red on main (iOS build or CI). There is no agent to call: tell the
+        owner once, remember the merged commit, and put the item back to `handed_off` so the owner's repair push on
+        `feedback/<id>` is gated and merged like the first one; the ship checks then follow the repair commit."""
+        noted = st.setdefault("red_after_merge", [])
+        if run_url not in noted:
+            noted.append(run_url)
+            self.gh.comment(st["issue"], f"{what} on `main` failed after the merge ({run_url}). {st['handed_off_to']}: push the repair as a "
+                            f"new commit on `feedback/{fid}` from `origin/main` (the loop gates and merges it; the ship checks then follow "
+                            f"the repair).\n\n```\n" + "\n".join(errors or ["(no error lines captured; open the run)"]) + "\n```")
+            self.store.event(fid, "red_after_merge", what=what, run=run_url)
+        st.setdefault("previous_commits", []).append(st.get("commit"))
+        st["gated_head"] = st.get("branch_head")
+        for k in ("commit", "commit_url", "commit_message", "pushed_at", "merge_sha", "merge_url", "commit_date", "ios_done", "ios_run",
+                  "testflight_build", "release_done", "release_run", "ci_failed_noted", "ios_failed_noted"):
+            st.pop(k, None)
+        st["status"] = "handed_off"
+        self.store.save_state(fid, st)
+        log(f"[{fid}] {what} red on main after the merge; back to handed_off for the owner's repair")
+
     def check_ship(self, fid: str, st: dict) -> None:
         sha = st["commit"]
         if not st.get("expects_ios") and not st.get("expects_ci"):
@@ -2235,6 +2255,11 @@ class Loop:
                 st["commit_date"] = self.gh.commit(sha)["commit"]["committer"]["date"]
         since = st.get("commit_date") or st["pushed_at"]
         runs = self.gh.runs_for_sha(sha)
+        # The same commit may head other branches too (a worker's `cursor/**` mirror of its feedback branch); only
+        # runs on main or the item's own branch say anything about what shipped (06:00 Oct 22: a red ios.yml run
+        # on `cursor/leaf-avatars-a502` was taken for main's verdict while main@550f3163 was green).
+        own = {"main", f"feedback/{fid}", st.get("branch") or ""}
+        runs = [r for r in runs if (r.get("head_branch") or "") in own or (r.get("head_branch") or "").startswith("v")]
         by_name: dict[str, dict] = {}
         for r in runs:
             if r["name"] in ("iOS", "CI", "Release") and (r["name"] not in by_name or r["run_number"] > by_name[r["name"]]["run_number"]):
@@ -2279,12 +2304,11 @@ class Loop:
                                 "Waiting for Apple to finish processing.")
             else:
                 errors = self.gh.run_error_lines(ios["id"])
-                if st.get("handed_off_to") and not st.get("ios_failed_noted"):
-                    st["ios_failed_noted"] = True
-                    self.store.save_state(fid, st)
-                    self.gh.comment(st["issue"], f"The iOS build on `main` failed after the merge ({ios['html_url']}). {st['handed_off_to']}: "
-                                    f"push the repair as a new commit on `feedback/{fid}` from `origin/main` (the loop gates and merges it).\n\n```\n"
-                                    + "\n".join(errors or ["(no error lines captured; open the run)"]) + "\n```")
+                if st.get("handed_off_to"):
+                    # No agent to send the errors to: the owner repairs on the branch; the item goes back to
+                    # handed_off so watch_handoffs gates and merges the re-push (05:48 Oct 22: this path raised
+                    # KeyError 'agent_id' every tick and the item ignored the owner's follow-up pushes).
+                    self.red_after_merge_to_owner(fid, st, "iOS build", ios["html_url"], errors)
                     return
                 if st.get("retries", 0) < 1:
                     st["retries"] = st.get("retries", 0) + 1
@@ -2401,11 +2425,8 @@ class Loop:
         if st.get("expects_ci") and ci and ci["status"] == "completed" and ci["conclusion"] != "success" and not st.get("ci_failed_noted"):
             errors = self.gh.run_error_lines(ci["id"])
             if st.get("handed_off_to"):
-                st["ci_failed_noted"] = True
-                self.store.save_state(fid, st)
-                self.gh.comment(st["issue"], f"CI on `main` failed after the merge ({ci['html_url']}). {st['handed_off_to']}: push the repair as a "
-                                f"new commit on `feedback/{fid}` from `origin/main` (the loop gates and merges it).\n\n```\n"
-                                + "\n".join(errors or ["(no error lines captured; open the run)"]) + "\n```")
+                self.red_after_merge_to_owner(fid, st, "CI", ci["html_url"], errors)
+                return
             elif st.get("retries", 0) < 1 and not (self.rate_limit_reason() or "").endswith("already today"):
                 followup = (f"CI on `main` failed after your push ({ci['html_url']}): fmt, clippy (-D warnings) or tests. "
                             "Fix it with the smallest change, run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings` "
