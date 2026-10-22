@@ -869,7 +869,7 @@ fn context_tokens(usage: &Value) -> i64 {
         .sum()
 }
 
-/// What the rolling summary must keep when agentd compacts a chat (D90). Anything it drops is
+/// What the rolling summary must keep when agentd compacts a chat (D91). Anything it drops is
 /// still one memory walk away, but facts the user stated and the thread of the current task
 /// should not need a lookup.
 const SOFT_COMPACTION_INSTRUCTIONS: &str = "Keep, exactly as written, every fact the user stated about themselves or their preferences, every decision and rule agreed, every number, date, name, file path, URL, identifier and command that was used or produced, and every open question or task with its current state. State the current goal and what the next step was going to be. Older detail you leave out is still retrievable with context_search / context_open, so prefer precision over coverage.";
@@ -1579,7 +1579,7 @@ impl Agent {
         let path = self.new_session_file(chat_id)?;
         *self.current_chat.lock().await = None;
         self.switch_session_to(chat_id, &path).await?;
-        // A fresh window holds none of the chat: every earlier turn is now the tree's to offer (D90).
+        // A fresh window holds none of the chat: every earlier turn is now the tree's to offer (D91).
         let _ = self.tree.note_session_cut(chat_id, 0);
         tracing::warn!(chat_id, reason, previous = %previous, fresh = %path.display(), "fresh pi session after empty turn");
         self.append_audit(
@@ -2512,7 +2512,7 @@ impl Agent {
             .await
     }
 
-    /// Soft compaction (D90). `usage` is the last model call's usage, so its context size is the
+    /// Soft compaction (D91). `usage` is the last model call's usage, so its context size is the
     /// window the next turn would start from. Above `compact_at_tokens()` (64k by default) pi is
     /// asked to compact: `keepRecentTokens` of recent turns stay verbatim, the rest becomes one
     /// summary, and the walk gets the compacted-away leaves of this chat as candidates. pi's own
@@ -2933,7 +2933,7 @@ impl Agent {
             .post_timing("main_turn_total_ms", total_ms, Some(turn_kind))
             .await;
         tracing::info!(chat_id, route = route_name, turn = turn_kind, ttft_ms = ?turn.metrics.ttft_ms, route_ms = ?turn.metrics.route_ms, total_ms, tool_calls = turn.metrics.tool_calls, nested_calls = turn.metrics.nested_calls, model_calls = turn.metrics.model_calls, "turn done");
-        // D90: the reply is out; if the window grew past the soft threshold, compact it now
+        // D91: the reply is out; if the window grew past the soft threshold, compact it now
         // (still under the turn lock, so the next prompt meets a small window).
         self.maybe_soft_compact(chat_id, turn.metrics.usage.as_ref())
             .await;
@@ -5144,7 +5144,7 @@ fn classify_hard_limit(err: &str) -> Option<(&'static str, bool)> {
 mod tests {
     use super::*;
 
-    /// D90: the window size pi would start the next turn from, as pi counts it.
+    /// D91: the window size pi would start the next turn from, as pi counts it.
     #[test]
     fn context_tokens_follow_pi() {
         assert_eq!(

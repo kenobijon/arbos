@@ -275,7 +275,7 @@ enum Via {
 }
 
 /// What one walk may see: the asking chat, the allowed threads (restricted scopes), and — after
-/// a session compaction — the asking chat's own leaves older than `own_cut` (D90: those left the
+/// a session compaction — the asking chat's own leaves older than `own_cut` (D91: those left the
 /// model's window and live on only in the tree).
 struct Scope<'a> {
     chat_id: &'a str,
@@ -1728,7 +1728,7 @@ impl Tree {
         out
     }
 
-    /// After a session compaction (D90): the chat's leaves older than the kept tail left the
+    /// After a session compaction (D91): the chat's leaves older than the kept tail left the
     /// model's window. Record the oldest kept leaf; everything before it becomes a walk
     /// candidate for questions asked in that chat. The tail is estimated at half of pi's
     /// `keepRecentTokens` (T3 holds tool outputs clipped, so its token counts run low): the cut
@@ -2932,7 +2932,7 @@ mod tests {
         .unwrap_or_else(|| panic!("no leaf containing {needle:?}"))
     }
 
-    /// D90: after a session compaction the asking chat's own early turns are walk candidates;
+    /// D91: after a session compaction the asking chat's own early turns are walk candidates;
     /// what the window still holds is not. Both walk shapes agree, and the gold facts come back.
     #[tokio::test]
     async fn long_chat_recall_after_compaction() {

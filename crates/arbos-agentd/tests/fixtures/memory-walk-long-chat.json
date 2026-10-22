@@ -1,5 +1,5 @@
 {
-  "note": "Long single-chat recall set for D90 (tree.rs tests). One long chat whose early turns hold facts, followed by many turns on other work, then a recent fact. After a session compaction only the recent tail is still in the model's window; the walk must bring the early facts back when asked in that same chat, and must not pack what the window still holds. `t` is minutes before 'now'; gaps over 30 minutes split episodes.",
+  "note": "Long single-chat recall set for D91 (tree.rs tests). One long chat whose early turns hold facts, followed by many turns on other work, then a recent fact. After a session compaction only the recent tail is still in the model's window; the walk must bring the early facts back when asked in that same chat, and must not pack what the window still holds. `t` is minutes before 'now'; gaps over 30 minutes split episodes.",
   "chats": [
     {
       "id": "chat-launch",

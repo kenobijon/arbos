@@ -697,14 +697,14 @@ pub fn write_models_json(cfg: &Config, talking: &str, subagent: &str) -> Result<
     Ok(())
 }
 
-/// The hard ceiling of a chat's model window (D90). pi plans against it and compacts on its own
+/// The hard ceiling of a chat's model window (D91). pi plans against it and compacts on its own
 /// at `window − reserve` (≈ 112k), and a provider overflow at this size is answered with a
 /// compact-and-retry — so the window never passes it. Was 200k (#1229, Anthropic's standard
 /// window); 128k halves the worst-case cache write and keeps every call under the 5× Haiku tier.
 /// The usual working window is far smaller: agentd compacts at [`DEFAULT_COMPACT_AT_TOKENS`].
 pub const DEFAULT_CONTEXT_WINDOW_TOKENS: u64 = 128_000;
 
-/// Soft compaction (D90): after a turn that leaves the chat's session above this many tokens,
+/// Soft compaction (D91): after a turn that leaves the chat's session above this many tokens,
 /// agentd asks pi to compact — `keepRecentTokens` (20k) of recent turns stay verbatim and the rest
 /// becomes one rolling summary, so the window settles at ≈ 20–30k. Older detail is not lost: it
 /// stays in the memory tree and the walk brings it back when a question needs it.
@@ -759,7 +759,7 @@ fn seed_file_differs(seed: &std::path::Path, target: &std::path::Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    /// D90: the soft threshold reads its override and defaults to the design's 64k.
+    /// D91: the soft threshold reads its override and defaults to the design's 64k.
     #[test]
     fn compact_at_tokens_default_and_override() {
         std::env::remove_var("ARBOS_CONTEXT_COMPACT_AT_TOKENS");
