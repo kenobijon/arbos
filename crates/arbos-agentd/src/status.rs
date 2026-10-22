@@ -852,19 +852,15 @@ mod tests {
             agent.write_notice(&host, t, line).await;
             agent.write_notice(&host, t, line).await;
             agent
-                .write_notice(
-                    &host,
-                    t,
-                    "I hit the turn time limit; I'm handing the rest to a subagent.",
-                )
+                .write_notice(&host, t, crate::agent::TURN_LIMIT_NOTICE)
                 .await;
             assert_eq!(
                 t.streamed_text.matches("time limit").count(),
-                2,
+                1,
                 "{}",
                 t.streamed_text
             );
-            assert_eq!(t.streamed_text.matches("smaller steps").count(), 1);
+            assert_eq!(t.streamed_text.matches("longer than one go").count(), 1);
         }
         let _ = std::fs::remove_dir_all(&root);
     }

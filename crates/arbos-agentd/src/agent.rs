@@ -2371,7 +2371,7 @@ impl Agent {
             )),
             (Some(ValidRoute::Act { plan }), true) => {
                 let brief = format!(
-                    "Continue this task that the project agent started and could not finish within its limits.\n\nUser request: {user_text}\n\nPlan: {plan}\n\nAct so far:\n{}\n\nFinish the task.",
+                    "Continue this task that the project agent started and could not finish within its limits.\n\nUser request: {user_text}\n\nPlan: {plan}\n\nAct so far:\n{}\n\nFinish the task. If what remains is waiting on a background process or job (a loop, a pipeline, a long build), do not wait for it in this session: check its state once, post what is done so far with send_message, then schedule the promised check-ins with routines_create (one-shot `once` triggers with `in_seconds` at the cadence the user was promised, the last one for the final summary; each prompt tells you to check the job and tell the user the outcome) and end. Every promised note must have a routine behind it.",
                     turn.act_transcript.join("\n").chars().take(2400).collect::<String>()
                 );
                 Some((
@@ -3490,11 +3490,7 @@ impl Agent {
                         if let Some(t) = self.turn.lock().await.as_mut() {
                             t.escalate = true;
                         }
-                        self.post_limit_notice(
-                            host,
-                            "I hit the turn time limit; I'm handing the rest to a subagent.",
-                        )
-                        .await;
+                        self.post_limit_notice(host, TURN_LIMIT_NOTICE).await;
                         let _ = pi
                             .call(RpcCommand::Abort {
                                 id: pi.next_id("ab"),
@@ -5399,6 +5395,11 @@ fn turn_deadline_secs() -> u64 {
         .filter(|&n| n > 0)
         .unwrap_or(TURN_DEADLINE_SECS)
 }
+
+/// What the user reads when an act turn reaches its deadline and the rest is handed off (#1037
+/// keeps the announcement; #1357: in the user's words, not the harness's).
+pub(crate) const TURN_LIMIT_NOTICE: &str =
+    "This is taking longer than one go; I'm continuing in the background and will keep posting updates here.";
 
 /// The chat line for a helper that could not be started; the raw error stays in a hidden part.
 pub(crate) fn subagent_start_failure_line(err: &str) -> String {
