@@ -9,16 +9,13 @@ use axum::Json;
 use serde_json::{json, Value};
 
 use arbos_core::api::{
-    AccountUserDto, ChatArchivedPayloadDto, CreditsDto, FeedbackCapturePayloadDto, MachineImageDto,
-    MachineReadyPayloadDto, MachineSpecDto, MachineStatusDto, MachineWorkspaceDto, MeDeviceDto,
-    MeFeaturesDto, MeLimitsDto, MeMachineDto, MeResponseDto, PeopleAgentAddedPayloadDto,
+    ChatArchivedPayloadDto, FeedbackCapturePayloadDto, PeopleAgentAddedPayloadDto,
     PeopleAgentRemovedPayloadDto, PeopleChatCreatedPayloadDto, PeopleChatDeletedPayloadDto,
     PeopleChatUpdatedPayloadDto, PeopleInviteAcceptedPayloadDto, PeopleMemberAddedPayloadDto,
     PeopleMemberRemovedPayloadDto, PeopleMessagePayloadDto, PeopleProjectSharedPayloadDto,
     ProjectMemberRemovedPayloadDto, PushEventDto, ReleasePublishedPayloadDto,
-    SecretExpiringPayloadDto, SecretRequestPushPayloadDto, SecretsPausedPayloadDto, SenderDto,
-    ServerDeletedPayloadDto, ServerMemberJoinedPayloadDto, ServerMemberRemovedPayloadDto,
-    ServerUpdatedPayloadDto, UnreadChatDto, UnreadDto, UserCardDto,
+    SecretExpiringPayloadDto, SecretsPausedPayloadDto, SenderDto, ServerDeletedPayloadDto,
+    ServerMemberJoinedPayloadDto, ServerMemberRemovedPayloadDto, ServerUpdatedPayloadDto,
 };
 use arbos_core::auth::hash;
 use arbos_core::skill::Skill;
@@ -397,131 +394,174 @@ fn user_card_fixtures() {
     let with_presence = people::with_presence(&state, card);
     assert_dto("user_card_presence.json", with_presence);
 
-    let github = UserCardDto {
-        id: "gh_999001".into(),
-        handle: "ghostuser".into(),
-        avatar_url: Some("https://avatars.githubusercontent.com/u/999001?v=4".into()),
-        name: Some("Ghost".into()),
-        status: "github".into(),
-        created_at: None,
-        test: None,
-        last_seen_at: None,
-        online: None,
-        avatar_color_index_effective: None,
-    };
-    assert_dto("user_card_github.json", github);
+    assert_dto(
+        "user_card_github.json",
+        people::github_status_card(
+            999_001,
+            "ghostuser",
+            Some("https://avatars.githubusercontent.com/u/999001?v=4"),
+            Some("Ghost"),
+        ),
+    );
 }
 
-#[test]
-fn me_and_machine_unread_fixtures() {
-    let me_no_machine = MeResponseDto {
-        user: AccountUserDto {
-            id: "gh_301".into(),
-            github_id: Some(Some(301)),
-            login: Some(Some("user301".into())),
-            avatar_url: Some(None),
-            name: Some(None),
-            created_at: Some(FIXED_AT),
-            last_login_at: Some(Some(FIXED_AT)),
-        },
-        device: Some(MeDeviceDto {
-            id: "dev_fixture".into(),
-            name: "Test Mac".into(),
-            created_at: FIXED_AT,
-            revoked_at: None,
-            last_seen_at: Some(FIXED_AT),
-            kind: "github".into(),
-        }),
-        credits: CreditsDto {
-            balance_usd: 20.0,
-            granted_usd: 20.0,
-            spent_usd: 0.0,
-            spent_today_usd: 0.0,
-            daily_cap_usd: None,
-            allow_negative: false,
-            machine_today_usd: 0.0,
-            machine_total_usd: 0.0,
-        },
-        limits: MeLimitsDto {
-            read_only: false,
-            read_only_reason: None,
-            signup: "open".into(),
-            auth_mode: "github".into(),
-        },
-        features: MeFeaturesDto {
-            vault_connect: Some(false),
-            leaf_avatars: Some(true),
-        },
-        machine: MeMachineDto {
-            exists: false,
-            state: BoxState::Asleep,
-            since: 0,
-            provider: None,
-            sandbox_id: None,
-            always_on: false,
-            held: false,
-            waitlisted: false,
-            waitlist_position: None,
-            evicted: false,
-        },
-    };
-    assert_dto("me_without_machine.json", me_no_machine.clone());
+fn fix_device_times(state: &AppState, device_id: &str) {
+    state
+        .db
+        .with(|c| {
+            c.execute(
+                "UPDATE devices SET created_at = ?2, last_seen_at = ?2 WHERE id = ?1",
+                rusqlite::params![device_id, FIXED_AT],
+            )
+        })
+        .unwrap();
+}
 
-    let mut me_with = me_no_machine;
-    me_with.machine = MeMachineDto {
-        exists: true,
-        state: BoxState::Awake,
-        since: FIXED_AT,
-        provider: Some("gvisor".into()),
-        sandbox_id: Some("sb_fixture".into()),
-        always_on: false,
-        held: false,
-        waitlisted: false,
-        waitlist_position: None,
-        evicted: false,
-    };
-    assert_dto("me_with_machine.json", me_with);
+fn stabilize_me(mut v: Value) -> Value {
+    if let Some(device) = v.get_mut("device") {
+        device["id"] = json!("dev_fixture");
+        device["created_at"] = json!(FIXED_AT);
+        device["last_seen_at"] = json!(FIXED_AT);
+        device["name"] = json!("Test Mac");
+    }
+    if let Some(user) = v.get_mut("user") {
+        user["created_at"] = json!(FIXED_AT);
+        user["last_login_at"] = json!(FIXED_AT);
+    }
+    if let Some(machine) = v.get_mut("machine") {
+        if machine.get("since").and_then(Value::as_i64).unwrap_or(0) > 0 {
+            machine["since"] = json!(FIXED_AT);
+        }
+    }
+    v
+}
 
-    let machine = MachineStatusDto {
-        user_id: "gh_301".into(),
-        state: BoxState::Asleep,
-        since: 0,
-        provider: None,
-        sandbox_id: None,
-        spec: MachineSpecDto {
-            cpu: 4,
-            mem_gib: 8,
-            disk_gib: 10,
-            class: String::new(),
-        },
-        spend_today_usd: 0.0,
-        spend_cap_usd: 0.0,
-        workspaces: vec![MachineWorkspaceDto {
-            project_id: "proj_fixture".into(),
-            state: "stopped".into(),
-        }],
-        migrated_from: Vec::new(),
-        image: MachineImageDto {
-            current: None,
-            default: String::new(),
-        },
-        image_outdated: false,
-        upgrade: json!({ "in_progress": false }),
-        always_on: false,
-        held: false,
-        machine_today_usd: 0.0,
+/// `GET /me`, `GET /machine`, and `GET /me/unread` through their handlers (step 6b-2d leftover).
+#[tokio::test]
+async fn me_and_machine_unread_fixtures() {
+    let state = test_state(AuthMode::Github);
+    let (user, _) = state
+        .db
+        .upsert_github_user(
+            &GithubIdentity {
+                id: 301,
+                login: "user301".into(),
+                avatar_url: None,
+                name: None,
+            },
+            20.0,
+        )
+        .unwrap();
+    fix_user_created_at(&state, &user.id);
+    state
+        .db
+        .with(|c| {
+            c.execute(
+                "UPDATE users SET last_login_at = ?2 WHERE id = ?1",
+                rusqlite::params![user.id, FIXED_AT],
+            )
+        })
+        .unwrap();
+    // Match the checked-in fixtures: $20 grant, no daily cap on /me, spend_cap 0 on /machine.
+    state
+        .db
+        .grant_credits(&user.id, 20.0, "fixture", "test")
+        .unwrap();
+    state
+        .db
+        .set_user_limits(&user.id, Some(None), None)
+        .unwrap();
+    state
+        .db
+        .with(|c| {
+            c.execute(
+                "UPDATE users SET spend_cap_usd = 0 WHERE id = ?1",
+                rusqlite::params![user.id],
+            )
+        })
+        .unwrap();
+    state
+        .db
+        .insert_device(
+            "dev_fixture",
+            "Test Mac",
+            &hash("jwt:dev_fixture"),
+            &user.id,
+            "github",
+        )
+        .unwrap();
+    fix_device_times(&state, "dev_fixture");
+    let device = Principal::Device {
+        id: "dev_fixture".into(),
+        token: String::new(),
+        user_id: user.id.clone(),
     };
-    assert_dto("machine_status.json", machine);
 
-    let unread = UnreadDto {
-        chats: vec![UnreadChatDto {
-            chat_id: "people_dm".into(),
-            project_id: "people".into(),
-            unread: 2,
-        }],
-        total: 2,
+    let me = body_json(crate::signin::me(State(state.clone()), device.clone()).await).await;
+    assert_dto("me_without_machine.json", stabilize_me(me));
+
+    insert_project(
+        &state,
+        "proj_fixture",
+        &user.id,
+        "Fixture",
+        "chat_fixture",
+        None,
+    );
+    let machine = crate::api::machine(State(state.clone()), device.clone())
+        .await
+        .expect("machine");
+    assert_dto("machine_status.json", body_json(machine).await);
+
+    let (alice, _) = person(&state, 201);
+    let chat = crate::db_people::PeopleChat {
+        id: "people_dm".into(),
+        kind: "dm".into(),
+        created_by: alice.clone(),
+        created_at: FIXED_AT,
+        title: None,
+        image_key: None,
     };
+    state.db.insert_people_chat(&chat).unwrap();
+    for u in [&alice, &user.id] {
+        state
+            .db
+            .add_member(&chat.id, &format!("user:{u}"), "owner", &alice, &json!({}))
+            .unwrap();
+    }
+    for mid in ["m1", "m2"] {
+        state
+            .db
+            .insert_chat_event("people_dm", None, mid, Some(&alice))
+            .unwrap();
+    }
+    let unread =
+        body_json(crate::notify::me_unread(State(state.clone()), device.clone()).await).await;
     assert_dto("unread.json", unread);
+
+    state
+        .db
+        .upsert_box(&crate::db::Sandbox {
+            user_id: user.id.clone(),
+            provider: "gvisor".into(),
+            sandbox_id: Some("sb_fixture".into()),
+            daytona_state: None,
+            device_id: "box:sb_fixture".into(),
+            box_token_hash: "hash".into(),
+            mcp_token: "mcp".into(),
+            snapshot: None,
+            last_started_at: None,
+            last_stopped_at: None,
+            last_seen_at: None,
+            box_url: None,
+            preview_token: None,
+            local_pid: None,
+            migrated_from: Vec::new(),
+        })
+        .unwrap();
+    state.set_box_state(&user.id, BoxState::Awake, None).await;
+    let me_with = body_json(crate::signin::me(State(state.clone()), device).await).await;
+    assert_dto("me_with_machine.json", stabilize_me(me_with));
 }
 
 /// Pair / token / refresh grace through their handlers (step 6b-2d-1). Random tokens and ids are
@@ -850,9 +890,7 @@ fn push_fixture_events() -> Vec<(&'static str, PushEventDto)> {
         ),
         (
             "push_machine_ready.json",
-            PushEventDto::MachineReady(MachineReadyPayloadDto {
-                message: "Your Arbos computer is ready.".into(),
-            }),
+            crate::fleet::machine_ready_push(),
         ),
         (
             "push_release_published.json",
@@ -867,27 +905,26 @@ fn push_fixture_events() -> Vec<(&'static str, PushEventDto)> {
         ),
         (
             "push_secret_request.json",
-            PushEventDto::SecretRequest(SecretRequestPushPayloadDto {
-                request_id: "req_secret_fixture".into(),
-                project_id: "proj_fixture".into(),
-                project_name: "Fixture".into(),
-                name: "STRIPE_KEY".into(),
-                host: Some("api.stripe.com".into()),
-                use_kind: "env".into(),
-                vault_id: Some("vault_fixture".into()),
-            }),
+            crate::vaults::secret_request_push(
+                "req_secret_fixture",
+                "proj_fixture",
+                "Fixture",
+                "STRIPE_KEY",
+                Some("api.stripe.com".into()),
+                "env",
+                "vault_fixture",
+            ),
         ),
         (
             "push_secret_request_secret.json",
-            PushEventDto::SecretRequest(SecretRequestPushPayloadDto {
-                request_id: "req_secret_fixture".into(),
-                project_id: "proj_fixture".into(),
-                project_name: "Fixture".into(),
-                name: "STRIPE_KEY".into(),
-                host: Some("api.stripe.com".into()),
-                use_kind: "env".into(),
-                vault_id: None,
-            }),
+            crate::secrets::secret_request_push(
+                "req_secret_fixture",
+                "proj_fixture",
+                "Fixture",
+                "STRIPE_KEY",
+                Some("api.stripe.com".into()),
+                "env",
+            ),
         ),
         (
             "push_secrets_paused.json",

@@ -175,10 +175,14 @@ fn write_chat_doc(dir: &std::path::Path) {
 
     let snap = doc.snapshot();
     fs::write(dir.join("chat_doc.bin"), &snap).expect("chat_doc.bin");
-
     // Side-car expected shape (kinds / text / projected reactions / hiddenCount)
     // for the Rust test and the Swift check. Built from the same projected_rows
     // path the FFI uses.
+    write_expected_rows(dir, "chat_doc_expected.json", &doc);
+}
+
+/// Side-car expected shape for a chat-doc snapshot (same fields as `chat_doc_expected.json`).
+fn write_expected_rows(dir: &std::path::Path, name: &str, doc: &ChatDoc) {
     let mut expected = Vec::new();
     for json in doc.projected_rows() {
         let hidden_count = json
@@ -197,10 +201,219 @@ fn write_chat_doc(dir: &std::path::Path) {
         }));
     }
     fs::write(
-        dir.join("chat_doc_expected.json"),
+        dir.join(name),
         serde_json::to_vec_pretty(&expected).unwrap(),
     )
-    .expect("expected json");
+    .expect(name);
+}
+
+/// Older chat-doc shapes core readers still accept (step 9b-1). One row per shape;
+/// committed once so a later reader change cannot silently drop docs from older builds.
+fn write_chat_doc_legacy(dir: &std::path::Path) {
+    let doc = ChatDoc::new(Some(44), false);
+    doc.init_meta("chat-legacy", "proj-legacy", 1);
+    let msgs = doc.messages_list();
+    let created = 1_700_000_000_000i64;
+
+    // 1. Old Swift-client user row (ios_mirror shape): chatId, pending, waitingUser false,
+    // empty hiddenParts, replyTo, mentions, nested attachment wrapper, LoroText body.
+    {
+        let m = msgs.push_container(LoroMap::new()).expect("ios user");
+        m.insert("id", "msg-ios-user").ok();
+        m.insert("chatId", "chat1").ok();
+        m.insert("role", "user").ok();
+        m.insert("sender", "user").ok();
+        m.insert("status", "done").ok();
+        m.insert("deviceId", "dev:ios").ok();
+        m.insert("createdAt", created).ok();
+        m.insert("waitingUser", false).ok();
+        m.insert("pending", false).ok();
+        m.insert("replyTo", "m0").ok();
+        m.insert("senderHandle", "ken").ok();
+        m.insert("senderName", "Ken").ok();
+        m.insert("senderAvatar", "avatar-1").ok();
+        let ml = m
+            .insert_container("mentions", LoroList::new())
+            .expect("mentions");
+        ml.push("agent:p1").ok();
+        ml.push("user:sam").ok();
+        for k in [
+            "turn",
+            "decision",
+            "subagentId",
+            "subagentName",
+            "inReplyTo",
+            "usage",
+            "returnContract",
+            "model",
+            "effort",
+            "completedAt",
+        ] {
+            m.insert(k, LoroValue::Null).ok();
+        }
+        let parts = m.insert_container("parts", LoroList::new()).expect("parts");
+        for (name, mime, kind, blob_ref) in [
+            ("pic.png", "image/png", Some("image"), Some("blob-1")),
+            ("notes.txt", "text/plain", None, None),
+        ] {
+            let part = parts.push_container(LoroMap::new()).expect("part");
+            part.insert("id", format!("part-att-{name}")).ok();
+            part.insert("kind", "attachment").ok();
+            let a = part
+                .insert_container("attachment", LoroMap::new())
+                .expect("attachment");
+            a.insert("name", name).ok();
+            a.insert("mime", mime).ok();
+            if let Some(k) = kind {
+                a.insert("kind", k).ok();
+            }
+            if let Some(r) = blob_ref {
+                a.insert("ref", r).ok();
+            }
+        }
+        let part = parts.push_container(LoroMap::new()).expect("text part");
+        part.insert("id", "part-ios-text").ok();
+        part.insert("kind", "text").ok();
+        let t = part
+            .insert_container("text", LoroText::new())
+            .expect("text");
+        t.insert(0, "hello from ios").ok();
+        m.insert_container("hiddenParts", LoroList::new())
+            .expect("hiddenParts");
+    }
+
+    // 2. Pre-0.6.64: no reactions map at all.
+    {
+        let m = msgs.push_container(LoroMap::new()).expect("no reactions");
+        m.insert("id", "msg-no-reactions").ok();
+        m.insert("role", "user").ok();
+        m.insert("sender", "user:legacy").ok();
+        m.insert("status", "done").ok();
+        m.insert("deviceId", "dev:legacy").ok();
+        m.insert("createdAt", created + 1).ok();
+        let parts = m.insert_container("parts", LoroList::new()).expect("parts");
+        let part = parts.push_container(LoroMap::new()).expect("part");
+        part.insert("id", "part-no-react").ok();
+        part.insert("kind", "text").ok();
+        let t = part
+            .insert_container("text", LoroText::new())
+            .expect("text");
+        t.insert(0, "no reactions map").ok();
+    }
+
+    // 3. turn as a plain string.
+    {
+        let m = msgs.push_container(LoroMap::new()).expect("turn string");
+        m.insert("id", "msg-turn-string").ok();
+        m.insert("role", "assistant").ok();
+        m.insert("sender", "agent").ok();
+        m.insert("status", "done").ok();
+        m.insert("deviceId", "dev:legacy").ok();
+        m.insert("createdAt", created + 2).ok();
+        m.insert("turn", "reply").ok();
+        let parts = m.insert_container("parts", LoroList::new()).expect("parts");
+        let part = parts.push_container(LoroMap::new()).expect("part");
+        part.insert("id", "part-turn-str").ok();
+        part.insert("kind", "text").ok();
+        let t = part
+            .insert_container("text", LoroText::new())
+            .expect("text");
+        t.insert(0, "turn was a string").ok();
+    }
+
+    // 4. turn as a {kind} object.
+    {
+        let m = msgs.push_container(LoroMap::new()).expect("turn object");
+        m.insert("id", "msg-turn-object").ok();
+        m.insert("role", "assistant").ok();
+        m.insert("sender", "agent").ok();
+        m.insert("status", "done").ok();
+        m.insert("deviceId", "dev:legacy").ok();
+        m.insert("createdAt", created + 3).ok();
+        let turn = m
+            .insert_container("turn", LoroMap::new())
+            .expect("turn map");
+        turn.insert("kind", "reply").ok();
+        let parts = m.insert_container("parts", LoroList::new()).expect("parts");
+        let part = parts.push_container(LoroMap::new()).expect("part");
+        part.insert("id", "part-turn-obj").ok();
+        part.insert("kind", "text").ok();
+        let t = part
+            .insert_container("text", LoroText::new())
+            .expect("text");
+        t.insert(0, "turn was an object").ok();
+    }
+
+    // 5. Flat attachment part (no nested `attachment` wrapper).
+    {
+        let m = msgs.push_container(LoroMap::new()).expect("flat attach");
+        m.insert("id", "msg-flat-attach").ok();
+        m.insert("role", "user").ok();
+        m.insert("sender", "user").ok();
+        m.insert("status", "done").ok();
+        m.insert("deviceId", "dev:legacy").ok();
+        m.insert("createdAt", created + 4).ok();
+        let parts = m.insert_container("parts", LoroList::new()).expect("parts");
+        let part = parts.push_container(LoroMap::new()).expect("part");
+        part.insert("id", "part-flat-att").ok();
+        part.insert("kind", "attachment").ok();
+        part.insert("name", "flat.png").ok();
+        part.insert("mime", "image/png").ok();
+        part.insert("ref", "blob-flat").ok();
+        let text = parts.push_container(LoroMap::new()).expect("text");
+        text.insert("id", "part-flat-text").ok();
+        text.insert("kind", "text").ok();
+        let t = text
+            .insert_container("text", LoroText::new())
+            .expect("text");
+        t.insert(0, "with flat attachment").ok();
+    }
+
+    // 6. Text part whose `text` is a plain string (not LoroText).
+    {
+        let m = msgs.push_container(LoroMap::new()).expect("plain text");
+        m.insert("id", "msg-plain-text").ok();
+        m.insert("role", "assistant").ok();
+        m.insert("sender", "agent").ok();
+        m.insert("status", "done").ok();
+        m.insert("deviceId", "dev:legacy").ok();
+        m.insert("createdAt", created + 5).ok();
+        let parts = m.insert_container("parts", LoroList::new()).expect("parts");
+        let part = parts.push_container(LoroMap::new()).expect("part");
+        part.insert("id", "part-plain").ok();
+        part.insert("kind", "text").ok();
+        part.insert("text", "plain string text body").ok();
+    }
+
+    // 7. Agent status part next to an open question part.
+    {
+        let m = msgs
+            .push_container(LoroMap::new())
+            .expect("status+question");
+        m.insert("id", "msg-status-question").ok();
+        m.insert("role", "assistant").ok();
+        m.insert("sender", "agent:proj-legacy").ok();
+        m.insert("status", "done").ok();
+        m.insert("deviceId", "dev:legacy").ok();
+        m.insert("createdAt", created + 6).ok();
+        m.insert("waitingUser", true).ok();
+        let parts = m.insert_container("parts", LoroList::new()).expect("parts");
+        let q = parts.push_container(LoroMap::new()).expect("question");
+        q.insert("id", "part-question").ok();
+        q.insert("kind", "question").ok();
+        q.insert("questionId", "q-legacy").ok();
+        q.insert("question", "Pick one").ok();
+        q.insert("state", "open").ok();
+        let st = parts.push_container(LoroMap::new()).expect("status");
+        st.insert("id", "part-status").ok();
+        st.insert("kind", "status").ok();
+        st.insert("code", "waiting_user").ok();
+        st.insert("message", "Waiting for your answer").ok();
+    }
+
+    doc.doc.commit();
+    fs::write(dir.join("chat_doc_legacy.bin"), doc.snapshot()).expect("chat_doc_legacy.bin");
+    write_expected_rows(dir, "chat_doc_legacy_expected.json", &doc);
 }
 
 /// Rows as the Mac fixture's old `insert_message` / `insert_json` wrote them: every
@@ -300,6 +513,7 @@ fn main() {
     fs::create_dir_all(&dir).expect("fixtures dir");
     write_frames(&dir);
     write_chat_doc(&dir);
+    write_chat_doc_legacy(&dir);
     write_mac_placeholder_rows(&dir);
     eprintln!("wrote fixtures to {}", dir.display());
 }

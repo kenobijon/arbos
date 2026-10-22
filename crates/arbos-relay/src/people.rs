@@ -180,24 +180,34 @@ async fn resolve_via_github(state: &AppState, login: &str, create: bool) -> Opti
     let avatar = v.get("avatar_url").and_then(Value::as_str);
     let name = v.get("name").and_then(Value::as_str);
     if !create {
-        return Some(UserCardDto {
-            id: format!("gh_{id}"),
-            handle: gh_login,
-            avatar_url: avatar.map(str::to_owned),
-            name: name.map(str::to_owned),
-            status: "github".into(),
-            created_at: None,
-            test: None,
-            last_seen_at: None,
-            online: None,
-            avatar_color_index_effective: None,
-        });
+        return Some(github_status_card(id, &gh_login, avatar, name));
     }
     let user_id = state
         .db
         .upsert_invited_user(id, &gh_login, avatar, name)
         .ok()?;
     state.db.user_card(&user_id).ok().flatten()
+}
+
+/// Card for a GitHub login that is not stored locally (`status: "github"`).
+pub(crate) fn github_status_card(
+    github_id: i64,
+    login: &str,
+    avatar_url: Option<&str>,
+    name: Option<&str>,
+) -> UserCardDto {
+    UserCardDto {
+        id: format!("gh_{github_id}"),
+        handle: login.to_owned(),
+        avatar_url: avatar_url.map(str::to_owned),
+        name: name.map(str::to_owned),
+        status: "github".into(),
+        created_at: None,
+        test: None,
+        last_seen_at: None,
+        online: None,
+        avatar_color_index_effective: None,
+    }
 }
 
 /// A person by handle for a DM or a block: local first, GitHub second (stored as `invited`).

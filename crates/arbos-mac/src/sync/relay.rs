@@ -14,14 +14,14 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Context as _, Result};
 use arbos_client::room::{self, RoomAction, RoomSession};
 use arbos_core::api::{
-    ApiErrorDto, CallDto, CallEnvelopeDto, ChannelsOverviewDto, ChatDto, ConnectConnectorReplyDto,
-    ConnectorsCatalogDto, ConnectorsListDto, CreateChatResponseDto, DecideSecretResponseDto,
-    GetProjectResponseDto, GroupDto, LeaveCallResponseDto, LocalDevicesDto, MachineStateDto,
-    MachineStatusDto, MeResponseDto, MeUserResponseDto, ModelListDto, PairResponseDto,
-    PeopleChatDto, ProjectMembersDto, ProjectSecretsDto, PushEventDto, PushItemDto, RoutineDto,
-    RoutineRunDto, SecretEnvelopeDto, SecretRequestsDto, SecretsOverviewDto, SkillDto,
-    StartCallResponseDto, TokenResponseDto, TranscriptionDto, UserCardDto, UsersPageDto,
-    VaultEnvelopeDto, VoiceCatalogDto,
+    ApiErrorDto, CallDto, CallEnvelopeDto, ChannelBindingDto, ChannelPairingDto,
+    ChannelPlatformDto, ChatDto, ConnectConnectorReplyDto, ConnectorsCatalogDto, ConnectorsListDto,
+    CreateChatResponseDto, DecideSecretResponseDto, GetProjectResponseDto, GroupDto,
+    LeaveCallResponseDto, LocalDevicesDto, MachineStateDto, MachineStatusDto, MeResponseDto,
+    MeUserResponseDto, ModelListDto, PairResponseDto, PeopleChatDto, ProjectMembersDto,
+    ProjectSecretsDto, PushEventDto, PushItemDto, RoutineDto, RoutineRunDto, SecretEnvelopeDto,
+    SecretRequestsDto, SecretsOverviewDto, SkillDto, StartCallResponseDto, TokenResponseDto,
+    TranscriptionDto, UserCardDto, UsersPageDto, VaultEnvelopeDto, VoiceCatalogDto,
 };
 use arbos_core::doc::{UserAttachment, UserMessageOpts};
 use arbos_core::wire::{BoxState as WireBox, PROJECT_DOC_CHAT_ID};
@@ -51,9 +51,9 @@ use super::store::{self, Store};
 use super::{ClientCommand, SyncEvent, SyncSource};
 use crate::model::{
     new_id, now_ms, AccountView, Attachment, AttachmentKind, BoxState, Call, CallEnded, CallLeft,
-    CallMissed, ChannelsView, Chat, Effort, Id, Link, Machine, MachineState, Message, Part, Person,
-    Project, ProjectDocView, ProjectSecrets, Reachable, Role, Routine, RoutineRun, Sender,
-    ServerInfo, ThreadInfo,
+    CallMissed, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelsView, Chat, Effort, Id,
+    Link, Machine, MachineState, Message, Part, Person, Project, ProjectDocView, ProjectSecrets,
+    Reachable, Role, Routine, RoutineRun, Sender, ServerInfo, ThreadInfo,
 };
 use crate::update;
 
@@ -716,15 +716,20 @@ impl SyncSource for RelaySource {
     }
 }
 
-/// `GET /skills` → `SyncEvent::Skills` (F5).
+/// `GET /skills` → `SyncEvent::Skills` (F5). Decode rows one at a time so a bad
+/// skill does not drop the rest of the list.
 async fn refresh_skills(shared: &Arc<Shared>) {
-    let skills = shared
-        .get_json("/skills")
-        .await
-        .and_then(|v| serde_json::from_value::<Vec<SkillDto>>(v).context("decode GET /skills"));
-    match skills {
-        Ok(list) => {
-            let skills = list.iter().map(skill_from_dto).collect();
+    match shared.get_json("/skills").await {
+        Ok(v) => {
+            let mut skills = Vec::new();
+            for item in v.as_array().cloned().unwrap_or_default() {
+                match serde_json::from_value::<SkillDto>(item) {
+                    Ok(d) => skills.push(skill_from_dto(&d)),
+                    Err(err) => {
+                        log::warn!(target: "arbos_mac::relay", "SkillDto: {err}");
+                    }
+                }
+            }
             let _ = shared.events.send(SyncEvent::Skills(skills));
         }
         Err(err) => shared.diagnostic("skills", format!("{err:#}")),
@@ -5738,16 +5743,57 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
     }
 }
 
-/// Settings → Channels: `GET /channels` → one view (F7).
+/// Settings → Channels: `GET /channels` → one view (F7). Decode platform and
+/// binding rows one at a time so a bad row does not drop the overview.
 async fn refresh_channels(shared: &Arc<Shared>) {
-    let overview = shared.get_json("/channels").await.and_then(|v| {
-        serde_json::from_value::<ChannelsOverviewDto>(v).context("decode GET /channels")
-    });
-    match overview {
-        Ok(dto) => {
-            let _ = shared
-                .events
-                .send(SyncEvent::Channels(ChannelsView::from(&dto)));
+    match shared.get_json("/channels").await {
+        Ok(v) => {
+            let mock = v.get("mock").and_then(Value::as_bool).unwrap_or(false);
+            let mut platforms = Vec::new();
+            for item in v
+                .get("platforms")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+            {
+                match serde_json::from_value::<ChannelPlatformDto>(item) {
+                    Ok(d) => platforms.push(ChannelPlatform::from(&d)),
+                    Err(err) => {
+                        log::warn!(target: "arbos_mac::relay", "ChannelPlatformDto: {err}");
+                    }
+                }
+            }
+            let mut bindings = Vec::new();
+            for item in v
+                .get("bindings")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+            {
+                match serde_json::from_value::<ChannelBindingDto>(item) {
+                    Ok(d) => bindings.push(ChannelBinding::from(&d)),
+                    Err(err) => {
+                        log::warn!(target: "arbos_mac::relay", "ChannelBindingDto: {err}");
+                    }
+                }
+            }
+            let pairing = match v.get("pairing") {
+                None | Some(Value::Null) => None,
+                Some(p) => match serde_json::from_value::<ChannelPairingDto>(p.clone()) {
+                    Ok(d) => Some(ChannelPairing::from(&d)),
+                    Err(err) => {
+                        log::warn!(target: "arbos_mac::relay", "ChannelPairingDto: {err}");
+                        None
+                    }
+                },
+            };
+            let _ = shared.events.send(SyncEvent::Channels(ChannelsView {
+                mock,
+                platforms,
+                bindings,
+                pairing,
+                loaded: true,
+            }));
         }
         // Older relays have no channels; stay quiet unless it is a real failure.
         Err(err) => {
