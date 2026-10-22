@@ -244,9 +244,14 @@ struct ChatView: View {
         }
         // A channel is a people-style transcript: my lines right, everyone else by name.
         let slot = isPeople ? "\(peopleSlot):\(chatId)" : isChannel ? "\(channelSlot):\(chatId)" : projectId
+        var agentNames: [String: String] = [:]
+        for m in people?.agents ?? [] {
+            let id = m.member.hasPrefix("agent:") ? String(m.member.dropFirst(6)) : m.member
+            if let name = m.project?.name ?? m.name, !name.isEmpty { agentNames[id] = name }
+        }
         rows = Transcript.rows(messages, projectId: slot,
                                me: isChannel ? model.channelMe : model.myUserId,
-                               people: isPeople || isChannel, joins: joins)
+                               people: isPeople || isChannel, joins: joins, agentNames: agentNames)
     }
 
     var body: some View {
