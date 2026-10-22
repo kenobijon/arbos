@@ -5,23 +5,27 @@
 //! effort, spend today, and reply policy are read from them.
 
 use arbos_core::api::{
-    AccountUserDto, CallDto, CallReachabilityDto, ChatDto, ChatMemberDto, CreateChatResponseDto,
-    GetProjectResponseDto, GroupDto, MachineStatusDto, MeResponseDto, ModelListDto, PeopleChatDto,
-    ProjectMemberDto, ProjectMembersDto, ProjectOwnerDto, ProjectSecretItemDto,
-    ProjectSecretSummaryDto, ProjectSecretsDto, ProjectVaultSummaryDto, RoutineDto, RoutineRunDto,
-    SecretAccessDto, SecretActivityDto, SecretDirectorDto, SecretDto, SecretRequestDto,
-    SecretsOverviewDto, SenderDto, TokenResponseDto, TranscriptionDto, UserCardDto, VaultDto,
-    VoiceCatalogDto, VoiceDto,
+    AccountUserDto, CallDto, CallReachabilityDto, ChannelBindingDto, ChannelPairingDto,
+    ChannelPlatformDto, ChannelsOverviewDto, ChatDto, ChatMemberDto, ConnectorDto,
+    ConnectorsCatalogDto, ConnectorsListDto, CreateChatResponseDto, GetProjectResponseDto,
+    GroupDto, LocalDeviceDto, LocalDevicesDto, MachineStatusDto, MeResponseDto, ModelListDto,
+    PeopleChatDto, ProjectMemberDto, ProjectMembersDto, ProjectOwnerDto, ProjectSecretItemDto,
+    ProjectSecretSummaryDto, ProjectSecretsDto, ProjectVaultSummaryDto, ProviderDto, RoutineDto,
+    RoutineRunDto, SecretAccessDto, SecretActivityDto, SecretDirectorDto, SecretDto,
+    SecretRequestDto, SecretsOverviewDto, SenderDto, SkillDto, TokenResponseDto, TranscriptionDto,
+    UserCardDto, VaultDto, VoiceCatalogDto, VoiceDto,
 };
 use arbos_core::wire::BoxState as WireBox;
 use serde_json::Value;
 
 use crate::model::{
-    AccountView, AgentMember, BoxState, Call, CallKind, Chat, ChatKind, ConnectedVault, Effort,
-    Machine, MachineState, Person, Project, ProjectMachine, ProjectSecretAccess, ProjectSecrets,
-    Reachable, ReachableDevice, ReplyPolicy, Routine, RoutineRun, RoutineRunStatus, RoutineTrigger,
-    Secret, SecretActivity, SecretAgent, SecretDirector, SecretRequest, SecretScope, SecretsView,
-    Sender, SpaceKind, Voice,
+    AccountView, AgentMember, BoxState, Call, CallKind, ChannelBinding, ChannelPairing,
+    ChannelPlatform, ChannelPlatformState, ChannelsView, Chat, ChatKind, ConnectedVault, Connector,
+    ConnectorAction, ConnectorProvider, ConnectorStatus, ConnectorsView, Effort, LocalDevice,
+    LocalView, Machine, MachineState, Person, Project, ProjectMachine, ProjectSecretAccess,
+    ProjectSecrets, Reachable, ReachableDevice, ReplyPolicy, Routine, RoutineRun, RoutineRunStatus,
+    RoutineTrigger, Secret, SecretActivity, SecretAgent, SecretDirector, SecretRequest,
+    SecretScope, SecretsView, Sender, Skill, SpaceKind, Voice,
 };
 use crate::sync::credentials::{AccountUser, DeviceCredentials};
 
@@ -894,6 +898,147 @@ pub(crate) fn people_space_from(
     (space, chat)
 }
 
+impl From<&ConnectorDto> for Connector {
+    fn from(d: &ConnectorDto) -> Self {
+        Self {
+            id: d.id.clone(),
+            provider: d.provider.clone(),
+            label: d.label.clone(),
+            scopes: d.scopes.clone(),
+            status: serde_json::from_value(Value::String(d.status.clone()))
+                .unwrap_or(ConnectorStatus::Other),
+            last_error: d.last_error.clone(),
+            mock: d.mock,
+        }
+    }
+}
+
+impl From<&ProviderDto> for ConnectorProvider {
+    fn from(d: &ProviderDto) -> Self {
+        Self {
+            provider: d.provider.clone(),
+            label: d.label.clone(),
+            connect: d.connect.clone(),
+            oauth_configured: d.oauth_configured,
+            actions: d
+                .actions
+                .iter()
+                .map(|a| ConnectorAction {
+                    name: a.name.clone(),
+                    kind: a.kind.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
+pub fn connectors_view_from_dto(
+    catalog: &ConnectorsCatalogDto,
+    list: &ConnectorsListDto,
+) -> ConnectorsView {
+    ConnectorsView {
+        mock: list.mock,
+        providers: catalog
+            .providers
+            .iter()
+            .map(ConnectorProvider::from)
+            .collect(),
+        items: list.items.iter().map(Connector::from).collect(),
+        loaded: true,
+    }
+}
+
+impl From<&ChannelPlatformDto> for ChannelPlatform {
+    fn from(d: &ChannelPlatformDto) -> Self {
+        Self {
+            platform: d.platform.clone(),
+            label: d.label.clone(),
+            state: serde_json::from_value(Value::String(d.state.clone()))
+                .unwrap_or(ChannelPlatformState::Other),
+            detail: d.detail.clone(),
+            inbound: d.inbound.clone(),
+        }
+    }
+}
+
+impl From<&ChannelBindingDto> for ChannelBinding {
+    fn from(d: &ChannelBindingDto) -> Self {
+        Self {
+            id: d.id.clone(),
+            platform: d.platform.clone(),
+            external_chat_id: d.external_chat_id.clone(),
+            external_user_id: d.external_user_id.clone(),
+            project_id: d.project_id.clone(),
+            chat_id: d.chat_id.clone(),
+            label: d.label.clone(),
+            bound_at: u64::try_from(d.bound_at).unwrap_or(0),
+        }
+    }
+}
+
+impl From<&ChannelPairingDto> for ChannelPairing {
+    fn from(d: &ChannelPairingDto) -> Self {
+        Self {
+            code: d.code.clone(),
+            project_id: d.project_id.clone(),
+            chat_id: d.chat_id.clone(),
+            expires_at: u64::try_from(d.expires_at).unwrap_or(0),
+        }
+    }
+}
+
+impl From<&ChannelsOverviewDto> for ChannelsView {
+    fn from(d: &ChannelsOverviewDto) -> Self {
+        Self {
+            mock: d.mock,
+            platforms: d.platforms.iter().map(ChannelPlatform::from).collect(),
+            bindings: d.bindings.iter().map(ChannelBinding::from).collect(),
+            pairing: d.pairing.as_ref().map(ChannelPairing::from),
+            loaded: true,
+        }
+    }
+}
+
+pub fn skill_from_dto(d: &SkillDto) -> Skill {
+    Skill {
+        id: d.id.clone(),
+        slug: d.slug.clone(),
+        name: d.name.clone(),
+        description: d.description.clone(),
+        tags: d.tags.clone(),
+        when_to_use: d.when_to_use.clone(),
+        body: d.body.clone(),
+        origin_project_id: d.origin_project_id.clone(),
+        shared: d.shared,
+        version: d.version,
+        created_at: d.created_at,
+        updated_at: d.updated_at,
+    }
+}
+
+impl From<&LocalDeviceDto> for LocalDevice {
+    fn from(d: &LocalDeviceDto) -> Self {
+        Self {
+            device_id: d.device_id.clone(),
+            name: d.name.clone(),
+            hostname: d.hostname.clone(),
+            os: d.os.clone(),
+            home: d.home.clone(),
+            connected: d.connected,
+            last_seen: d.last_seen,
+            allow_reads: d.allow_reads,
+        }
+    }
+}
+
+pub fn local_view_from_dto(d: &LocalDevicesDto, relay_url: &str) -> LocalView {
+    LocalView {
+        devices: d.items.iter().map(LocalDevice::from).collect(),
+        relay_url: relay_url.to_owned(),
+        loaded: true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1228,6 +1373,7 @@ mod tests {
             "push_machine_ready.json",
             "push_release_published.json",
             "push_secret_request.json",
+            "push_secret_request_secret.json",
             "push_secrets_paused.json",
             "push_secret_expiring.json",
         ];
@@ -1261,6 +1407,24 @@ mod tests {
             other => panic!("expected feedback_capture, got {other:?}"),
         }
 
+        let ready: PushItemDto = load_json("push_machine_ready.json");
+        match ready.event {
+            PushEventDto::MachineReady(p) => {
+                assert_eq!(p.message, "Your Arbos computer is ready.")
+            }
+            other => panic!("expected machine_ready, got {other:?}"),
+        }
+
+        let secret: PushItemDto = load_json("push_secret_request_secret.json");
+        match secret.event {
+            PushEventDto::SecretRequest(p) => {
+                assert_eq!(p.request_id, "req_secret_fixture");
+                assert_eq!(p.host.as_deref(), Some("api.stripe.com"));
+                assert!(p.vault_id.is_none());
+            }
+            other => panic!("expected secret_request, got {other:?}"),
+        }
+
         let unknown: Value = serde_json::from_str(&fixture("push_unknown_kind.json")).unwrap();
         assert!(parse_push_item(unknown).is_none());
         assert!(parse_push_item(serde_json::json!({
@@ -1286,5 +1450,102 @@ mod tests {
         assert_eq!(reg.device_id, "dev_fixture");
         assert_eq!(reg.environment, "production");
         assert!(reg.push);
+    }
+
+    #[test]
+    fn connectors_from_fixtures() {
+        use arbos_core::api::ConnectConnectorReplyDto;
+
+        let catalog: ConnectorsCatalogDto = load_json("connectors_catalog.json");
+        let list: ConnectorsListDto = load_json("connectors_list.json");
+        let view = connectors_view_from_dto(&catalog, &list);
+        assert!(view.loaded);
+        assert!(view.mock);
+        let names: Vec<&str> = view.providers.iter().map(|p| p.provider.as_str()).collect();
+        assert_eq!(names, ["google", "slack", "github", "harness_comms"]);
+        let github = view.providers.iter().find(|p| p.provider == "github");
+        let github = github.expect("github provider");
+        assert!(github.has_oauth() && github.accepts_token());
+        assert!(!github.actions.is_empty());
+        let conn = view.connector_for("github").expect("github connector");
+        assert_eq!(conn.id, "conn_fixture");
+        assert_eq!(conn.status, ConnectorStatus::Connected);
+
+        let provider: ProviderDto = load_json("provider_json.json");
+        assert_eq!(ConnectorProvider::from(&provider).connect, "oauth_or_token");
+
+        let connector = Connector::from(&load_json::<ConnectorDto>("connector_json.json"));
+        assert_eq!(connector.scopes, ["read", "search"]);
+        assert!(connector.last_error.is_none());
+
+        let auth: ConnectConnectorReplyDto = load_json("connect_reply_auth.json");
+        assert_eq!(auth.state.as_deref(), Some("oauth_state_fixture"));
+        assert!(auth
+            .auth_url
+            .is_some_and(|u| u.contains("oauth_state_fixture")));
+        assert!(auth.connector.is_none());
+
+        let stored: ConnectConnectorReplyDto = load_json("connect_reply_connector.json");
+        assert!(stored.auth_url.is_none());
+        assert_eq!(
+            stored.connector.map(|c| c.status).as_deref(),
+            Some("connected")
+        );
+    }
+
+    #[test]
+    fn channels_from_fixtures() {
+        let view = ChannelsView::from(&load_json::<ChannelsOverviewDto>("channels_overview.json"));
+        assert!(view.loaded && view.mock);
+        assert_eq!(view.platforms.len(), 4);
+        assert!(view
+            .platforms
+            .iter()
+            .all(|p| p.state != ChannelPlatformState::Other));
+        assert_eq!(view.bindings[0].external_chat_id, "tg_chat_fixture");
+        assert_eq!(
+            view.pairing.as_ref().map(|p| p.code.as_str()),
+            Some("PAIR42")
+        );
+
+        let binding =
+            ChannelBinding::from(&load_json::<ChannelBindingDto>("channel_binding_json.json"));
+        assert_eq!(binding.project_id, "proj_fixture");
+        assert_eq!(binding.bound_at, 1_700_000_000_000);
+
+        let pair = ChannelPairing::from(&load_json::<ChannelPairingDto>("channel_pair_json.json"));
+        assert_eq!(pair.chat_id, "chat_primary");
+        assert_eq!(pair.expires_at, 4_102_444_800_000);
+    }
+
+    #[test]
+    fn skill_from_fixture() {
+        let dto: SkillDto = load_json("skill_json.json");
+        let skill = skill_from_dto(&dto);
+        assert_eq!(skill.slug, "release-notes");
+        assert_eq!(skill.version, 2);
+        assert_eq!(skill.origin_project_id.as_deref(), Some("proj_fixture"));
+        assert_eq!(skill.to_markdown(), dto.markdown);
+    }
+
+    #[test]
+    fn local_devices_from_fixture() {
+        let dto: LocalDevicesDto = load_json("local_devices.json");
+        let view = local_view_from_dto(&dto, "http://relay.test");
+        assert!(view.loaded);
+        assert_eq!(view.relay_url, "http://relay.test");
+        assert_eq!(view.devices[0].device_id, "ldev_fixture");
+        assert_eq!(view.devices[0].os_label(), "macOS");
+        assert_eq!(view.devices[0].last_seen, Some(1_700_000_000_000));
+    }
+
+    #[test]
+    fn feedback_submit_reply_fixture() {
+        use arbos_core::api::FeedbackSubmitReplyDto;
+
+        let reply: FeedbackSubmitReplyDto = load_json("feedback_submit_reply.json");
+        assert_eq!(reply.id, "fb_fixture");
+        assert!(!reply.has_image);
+        assert!(reply.duplicate.is_none() && reply.occurrences.is_none());
     }
 }

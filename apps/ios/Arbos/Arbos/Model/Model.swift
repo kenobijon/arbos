@@ -911,6 +911,19 @@ struct Connector: Identifiable, Equatable {
     var mock: Bool
 }
 
+extension Connector {
+    init(dto: ConnectorDto) {
+        self.init(
+            id: dto.id,
+            provider: dto.provider,
+            label: dto.label.isEmpty ? dto.provider : dto.label,
+            status: ConnectorStatus(wire: dto.status),
+            lastError: dto.last_error,
+            mock: dto.mock
+        )
+    }
+}
+
 /// One catalog entry (`GET /connectors/catalog`).
 struct ConnectorProvider: Identifiable, Equatable {
     var id: String { provider }
@@ -924,6 +937,17 @@ struct ConnectorProvider: Identifiable, Equatable {
     var acceptsToken: Bool { connect == "token" || connect == "oauth_or_token" }
 }
 
+extension ConnectorProvider {
+    init(dto: ProviderDto) {
+        self.init(
+            provider: dto.provider,
+            label: dto.label.isEmpty ? dto.provider : dto.label,
+            connect: dto.connect.isEmpty ? "oauth" : dto.connect,
+            oauthConfigured: dto.oauth_configured
+        )
+    }
+}
+
 /// Settings → Connectors state.
 struct ConnectorsView: Equatable {
     var mock = false
@@ -933,6 +957,17 @@ struct ConnectorsView: Equatable {
 
     func connector(for provider: String) -> Connector? {
         items.first { $0.provider == provider }
+    }
+}
+
+extension ConnectorsView {
+    init(catalog: ConnectorsCatalogDto, list: ConnectorsListDto) {
+        self.init(
+            mock: list.mock,
+            providers: catalog.providers.map(ConnectorProvider.init(dto:)),
+            items: list.items.map(Connector.init(dto:)),
+            loaded: true
+        )
     }
 }
 

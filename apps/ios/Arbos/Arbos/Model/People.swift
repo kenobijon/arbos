@@ -278,17 +278,6 @@ extension ProjectMember {
         self.online = dto.online
         self.avatarColorIndex = Int(dto.avatar_color_index_effective)
     }
-
-    static func parse(_ raw: Any) -> ProjectMember? {
-        guard JSONSerialization.isValidJSONObject(raw),
-              let data = try? JSONSerialization.data(withJSONObject: raw) else { return nil }
-        do {
-            return ProjectMember(dto: try JSONDecoder().decode(ProjectMemberDto.self, from: data))
-        } catch {
-            NSLog("ProjectMemberDto: \(error)")
-            return nil
-        }
-    }
 }
 
 /// `GET /me/pushes` item: `id`/`created_at` from `PushItemDto`, event from the same JSON object.

@@ -1,0 +1,145 @@
+{
+  "actions": [
+    {
+      "args": {
+        "properties": {
+          "per_page": {
+            "description": "max results, default 30",
+            "type": "integer"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "description": "Repositories the user can access, most recently updated first.",
+      "kind": "read",
+      "name": "list_repos"
+    },
+    {
+      "args": {
+        "properties": {
+          "repo": {
+            "description": "owner/name",
+            "type": "string"
+          },
+          "state": {
+            "description": "open|closed|all, default open",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo"
+        ],
+        "type": "object"
+      },
+      "description": "Issues of a repository.",
+      "kind": "read",
+      "name": "list_issues"
+    },
+    {
+      "args": {
+        "properties": {
+          "number": {
+            "description": "issue number",
+            "type": "integer"
+          },
+          "repo": {
+            "description": "owner/name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo",
+          "number"
+        ],
+        "type": "object"
+      },
+      "description": "One issue with its body.",
+      "kind": "read",
+      "name": "read_issue"
+    },
+    {
+      "args": {
+        "properties": {
+          "repo": {
+            "description": "owner/name",
+            "type": "string"
+          },
+          "state": {
+            "description": "open|closed|all, default open",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo"
+        ],
+        "type": "object"
+      },
+      "description": "Pull requests of a repository.",
+      "kind": "read",
+      "name": "list_prs"
+    },
+    {
+      "args": {
+        "properties": {
+          "body": {
+            "description": "Markdown body",
+            "type": "string"
+          },
+          "repo": {
+            "description": "owner/name",
+            "type": "string"
+          },
+          "title": {
+            "description": "title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo",
+          "title"
+        ],
+        "type": "object"
+      },
+      "description": "Open a new issue.",
+      "kind": "write",
+      "name": "create_issue"
+    },
+    {
+      "args": {
+        "properties": {
+          "body": {
+            "description": "Markdown body",
+            "type": "string"
+          },
+          "number": {
+            "description": "issue or PR number",
+            "type": "integer"
+          },
+          "repo": {
+            "description": "owner/name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo",
+          "number",
+          "body"
+        ],
+        "type": "object"
+      },
+      "description": "Comment on an issue or pull request.",
+      "kind": "send",
+      "name": "comment"
+    }
+  ],
+  "connect": "oauth_or_token",
+  "label": "GitHub",
+  "mock": true,
+  "oauth_configured": false,
+  "provider": "github",
+  "scopes": [
+    "repo",
+    "read:user"
+  ]
+}

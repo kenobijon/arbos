@@ -474,6 +474,7 @@ final class CoreFixturesTests: XCTestCase {
             "push_machine_ready.json",
             "push_release_published.json",
             "push_secret_request.json",
+            "push_secret_request_secret.json",
             "push_secrets_paused.json",
             "push_secret_expiring.json",
         ]
@@ -499,6 +500,16 @@ final class CoreFixturesTests: XCTestCase {
         XCTAssertEqual(f.request_id, "cap_fixture")
         XCTAssertEqual(f.expires_at, 1_700_003_600_000)
 
+        let ready = try XCTUnwrap(PushItem.parse(try apiFixtureJSON("push_machine_ready.json")))
+        guard case .machineReady(let r) = ready.event else { return XCTFail("machine_ready") }
+        XCTAssertEqual(r.message, "Your Arbos computer is ready.")
+
+        let secret = try XCTUnwrap(PushItem.parse(try apiFixtureJSON("push_secret_request_secret.json")))
+        guard case .secretRequest(let s) = secret.event else { return XCTFail("secret_request") }
+        XCTAssertEqual(s.request_id, "req_secret_fixture")
+        XCTAssertEqual(s.host, "api.stripe.com")
+        XCTAssertNil(s.vault_id)
+
         XCTAssertNil(PushItem.parse(try apiFixtureJSON("push_unknown_kind.json")))
         XCTAssertNil(PushItem.parse([
             "id": "bad", "created_at": 1, "kind": "not_a_real_push_kind", "payload": ["x": 1],
@@ -514,5 +525,68 @@ final class CoreFixturesTests: XCTestCase {
         XCTAssertEqual(reg.device_id, "dev_fixture")
         XCTAssertEqual(reg.environment, "production")
         XCTAssertEqual(reg.push, true)
+    }
+
+    func testConnectorsFixtures() throws {
+        let catalog = try JSONDecoder().decode(ConnectorsCatalogDto.self, from: try apiFixtureData("connectors_catalog.json"))
+        let list = try JSONDecoder().decode(ConnectorsListDto.self, from: try apiFixtureData("connectors_list.json"))
+        let view = ConnectorsView(catalog: catalog, list: list)
+        XCTAssertTrue(view.loaded)
+        XCTAssertTrue(view.mock)
+        XCTAssertEqual(view.providers.map(\.provider), ["google", "slack", "github", "harness_comms"])
+        let github = try XCTUnwrap(view.providers.first { $0.provider == "github" })
+        XCTAssertTrue(github.hasOauth)
+        XCTAssertTrue(github.acceptsToken)
+        XCTAssertFalse(github.oauthConfigured)
+        XCTAssertEqual(view.connector(for: "github")?.id, "conn_fixture")
+        XCTAssertEqual(view.connector(for: "github")?.status, .connected)
+
+        let provider = try JSONDecoder().decode(ProviderDto.self, from: try apiFixtureData("provider_json.json"))
+        XCTAssertEqual(ConnectorProvider(dto: provider).connect, "oauth_or_token")
+        XCTAssertFalse(provider.actions.isEmpty)
+
+        let connector = Connector(dto: try JSONDecoder().decode(ConnectorDto.self, from: try apiFixtureData("connector_json.json")))
+        XCTAssertEqual(connector.label, "GitHub · token")
+        XCTAssertNil(connector.lastError)
+        XCTAssertTrue(connector.mock)
+
+        let auth = try JSONDecoder().decode(ConnectConnectorReplyDto.self, from: try apiFixtureData("connect_reply_auth.json"))
+        XCTAssertEqual(auth.state, "oauth_state_fixture")
+        XCTAssertTrue(auth.authUrl?.contains("state=oauth_state_fixture") ?? false)
+        XCTAssertNil(auth.connector)
+
+        let stored = try JSONDecoder().decode(ConnectConnectorReplyDto.self, from: try apiFixtureData("connect_reply_connector.json"))
+        XCTAssertNil(stored.authUrl)
+        XCTAssertEqual(stored.connector?.id, "conn_fixture")
+    }
+
+    func testChannelsSkillsLocalFeedbackFixtures() throws {
+        let overview = try JSONDecoder().decode(ChannelsOverviewDto.self, from: try apiFixtureData("channels_overview.json"))
+        XCTAssertTrue(overview.mock)
+        XCTAssertEqual(overview.platforms.count, 4)
+        XCTAssertEqual(overview.bindings.first?.externalChatId, "tg_chat_fixture")
+        XCTAssertEqual(overview.pairing?.code, "PAIR42")
+
+        let binding = try JSONDecoder().decode(ChannelBindingDto.self, from: try apiFixtureData("channel_binding_json.json"))
+        XCTAssertEqual(binding.projectId, "proj_fixture")
+        XCTAssertEqual(binding.bound_at, 1_700_000_000_000)
+
+        let pair = try JSONDecoder().decode(ChannelPairingDto.self, from: try apiFixtureData("channel_pair_json.json"))
+        XCTAssertEqual(pair.chatId, "chat_primary")
+        XCTAssertEqual(pair.expiresAt, 4_102_444_800_000)
+
+        let skill = try JSONDecoder().decode(SkillDto.self, from: try apiFixtureData("skill_json.json"))
+        XCTAssertEqual(skill.slug, "release-notes")
+        XCTAssertEqual(skill.version, 2)
+        XCTAssertTrue(skill.markdown.hasPrefix("---\nname: \"Release notes\""))
+
+        let devices = try JSONDecoder().decode(LocalDevicesDto.self, from: try apiFixtureData("local_devices.json"))
+        XCTAssertEqual(devices.items.first?.device_id, "ldev_fixture")
+        XCTAssertEqual(devices.items.first?.connected, false)
+
+        let feedback = try JSONDecoder().decode(FeedbackSubmitReplyDto.self, from: try apiFixtureData("feedback_submit_reply.json"))
+        XCTAssertEqual(feedback.id, "fb_fixture")
+        XCTAssertFalse(feedback.has_image)
+        XCTAssertNil(feedback.duplicate)
     }
 }

@@ -14,13 +14,14 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Context as _, Result};
 use arbos_client::room::{self, RoomAction, RoomSession};
 use arbos_core::api::{
-    CallDto, CallEnvelopeDto, CreateChatResponseDto, DecideSecretResponseDto,
-    GetProjectResponseDto, GroupDto, LeaveCallResponseDto, MachineStateDto, MachineStatusDto,
-    MeResponseDto, MeUserResponseDto, ModelListDto, PairResponseDto, PeopleChatDto,
-    ProjectMembersDto, ProjectSecretsDto, PushEventDto, PushItemDto, RoutineDto, RoutineRunDto,
-    SecretEnvelopeDto, SecretRequestsDto, SecretsOverviewDto, StartCallResponseDto,
-    TokenResponseDto, TranscriptionDto, UserCardDto, UsersPageDto, VaultEnvelopeDto,
-    VoiceCatalogDto,
+    CallDto, CallEnvelopeDto, ChannelsOverviewDto, ChatDto, ConnectConnectorReplyDto,
+    ConnectorsCatalogDto, ConnectorsListDto, CreateChatResponseDto, DecideSecretResponseDto,
+    GetProjectResponseDto, GroupDto, LeaveCallResponseDto, LocalDevicesDto, MachineStateDto,
+    MachineStatusDto, MeResponseDto, MeUserResponseDto, ModelListDto, PairResponseDto,
+    PeopleChatDto, ProjectMembersDto, ProjectSecretsDto, PushEventDto, PushItemDto, RoutineDto,
+    RoutineRunDto, SecretEnvelopeDto, SecretRequestsDto, SecretsOverviewDto, SkillDto,
+    StartCallResponseDto, TokenResponseDto, TranscriptionDto, UserCardDto, UsersPageDto,
+    VaultEnvelopeDto, VoiceCatalogDto,
 };
 use arbos_core::doc::{UserAttachment, UserMessageOpts};
 use arbos_core::wire::{BoxState as WireBox, PROJECT_DOC_CHAT_ID};
@@ -42,17 +43,17 @@ use super::diagnostics;
 use super::doc::ChatDoc;
 use super::dto::{
     account_view_from_me, apply_machine_status, chat_from_create, chat_from_dto,
-    chat_from_group_dto, credentials_from_token, model_ids_from_dto, people_space_from,
-    project_from_dto, routine_from_dto, secrets_view_from_dto, transcript_text, voices_from_dto,
+    chat_from_group_dto, connectors_view_from_dto, credentials_from_token, local_view_from_dto,
+    model_ids_from_dto, people_space_from, project_from_dto, routine_from_dto,
+    secrets_view_from_dto, skill_from_dto, transcript_text, voices_from_dto,
 };
 use super::store::{self, Store};
 use super::{ClientCommand, SyncEvent, SyncSource};
 use crate::model::{
     new_id, now_ms, AccountView, Attachment, AttachmentKind, BoxState, Call, CallEnded, CallLeft,
-    CallMissed, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelsView, Chat, Connector,
-    ConnectorProvider, ConnectorsView, Effort, Id, Link, LocalDevice, LocalView, Machine,
-    MachineState, Message, Part, Person, Project, ProjectDocView, ProjectSecrets, Reachable, Role,
-    Routine, RoutineRun, Sender, ServerInfo, Skill, ThreadInfo,
+    CallMissed, ChannelsView, Chat, Effort, Id, Link, Machine, MachineState, Message, Part, Person,
+    Project, ProjectDocView, ProjectSecrets, Reachable, Role, Routine, RoutineRun, Sender,
+    ServerInfo, ThreadInfo,
 };
 use crate::update;
 
@@ -675,16 +676,13 @@ impl SyncSource for RelaySource {
 
 /// `GET /skills` → `SyncEvent::Skills` (F5).
 async fn refresh_skills(shared: &Arc<Shared>) {
-    match shared.get_json("/skills").await {
-        Ok(v) => {
-            let skills: Vec<Skill> = v
-                .as_array()
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|s| serde_json::from_value::<Skill>(s.clone()).ok())
-                        .collect()
-                })
-                .unwrap_or_default();
+    let skills = shared
+        .get_json("/skills")
+        .await
+        .and_then(|v| serde_json::from_value::<Vec<SkillDto>>(v).context("decode GET /skills"));
+    match skills {
+        Ok(list) => {
+            let skills = list.iter().map(skill_from_dto).collect();
             let _ = shared.events.send(SyncEvent::Skills(skills));
         }
         Err(err) => shared.diagnostic("skills", format!("{err:#}")),
@@ -2070,11 +2068,11 @@ async fn migrate_local_archive(shared: &Arc<Shared>, all_chats: &mut [Chat]) {
     }
 }
 
-/// `PUT /chats/{id}/settings {archived}` (§9c). Answers the stored
-/// `archived_at` when the relay echoes the chat; `Ok(None)` when it does not.
+/// `PUT /chats/{id}/settings {archived}` (§9c). The relay echoes a project chat as `ChatDto`
+/// and a people chat as `PeopleChatDto`; answers the stored `archived_at` (None = unarchived).
 async fn set_archived(
     shared: &Arc<Shared>,
-    _project_id: &str,
+    project_id: &str,
     chat_id: &str,
     archived: bool,
 ) -> Result<Option<u64>> {
@@ -2082,10 +2080,17 @@ async fn set_archived(
     let v = shared
         .put_json(&format!("/chats/{chat_id}/settings"), body)
         .await?;
-    Ok(v.get("archived_at")
-        .and_then(Value::as_i64)
-        .filter(|t| *t > 0)
-        .map(|t| t as u64))
+    let at = if shared.is_people(project_id) {
+        serde_json::from_value::<PeopleChatDto>(v)
+            .context("decode people chat")?
+            .archived_at
+    } else {
+        serde_json::from_value::<ChatDto>(v)
+            .context("decode chat")?
+            .archived_at
+            .flatten()
+    };
+    Ok(at.filter(|t| *t > 0).map(|t| t as u64))
 }
 
 fn emit_chats(shared: &Shared) {
@@ -2351,6 +2356,22 @@ fn machine_state_from_word(word: &str) -> MachineState {
         "error" => MachineState::Error,
         _ => MachineState::Unknown,
     }
+}
+
+/// `POST /machine/start|stop` reply → the machine view.
+fn set_machine_from_reply(shared: &Shared, dto: &MachineStateDto) {
+    let state = match dto.state {
+        WireBox::Awake => MachineState::Awake,
+        WireBox::Waking => MachineState::Waking,
+        WireBox::Asleep => MachineState::Asleep,
+        WireBox::Error => MachineState::Error,
+    };
+    set_machine(
+        shared,
+        state,
+        (dto.since > 0).then_some(dto.since as u64),
+        None,
+    );
 }
 
 /// Project doc `status` (D70): `box {state: awake|asleep, since}` is the
@@ -4938,13 +4959,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 }
                 match shared.post_json("/machine/start", json!({})).await {
                     Ok(v) => {
-                        if let Some(word) = v.get("state").and_then(Value::as_str) {
-                            set_machine(
-                                &shared,
-                                machine_state_from_word(word),
-                                v.get("since").and_then(Value::as_u64).filter(|v| *v > 0),
-                                None,
-                            );
+                        if let Ok(dto) = serde_json::from_value::<MachineStateDto>(v) {
+                            set_machine_from_reply(&shared, &dto);
                         }
                     }
                     Err(err) => shared.notice(format!("Machine restart: {err:#}")),
@@ -4973,18 +4989,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 {
                     Ok(v) => {
                         if let Ok(dto) = serde_json::from_value::<MachineStateDto>(v) {
-                            let word = match dto.state {
-                                WireBox::Awake => "awake",
-                                WireBox::Waking => "waking",
-                                WireBox::Asleep => "asleep",
-                                WireBox::Error => "error",
-                            };
-                            set_machine(
-                                &shared,
-                                machine_state_from_word(word),
-                                (dto.since > 0).then_some(dto.since as u64),
-                                None,
-                            );
+                            set_machine_from_reply(&shared, &dto);
                         }
                     }
                     Err(err) => shared.notice(format!("Machine {verb}: {err:#}")),
@@ -5126,21 +5131,31 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .await
                 {
                     Ok(v) => {
-                        if let Some(url) = v.get("authUrl").and_then(Value::as_str) {
-                            let _ = shared.events.send(SyncEvent::ConnectorAuth {
-                                provider: provider.clone(),
-                                auth_url: url.to_string(),
-                            });
-                        } else if let Some(c) = v.get("connector") {
-                            let status = c["status"].as_str().unwrap_or("");
-                            if status == "connected" {
-                                shared.notice(format!("{provider} connected."));
-                            } else {
-                                shared.notice(format!(
-                                    "{provider}: {status} {}",
-                                    c["last_error"].as_str().unwrap_or("")
-                                ));
+                        match serde_json::from_value::<ConnectConnectorReplyDto>(v) {
+                            Ok(ConnectConnectorReplyDto {
+                                auth_url: Some(url),
+                                ..
+                            }) => {
+                                let _ = shared.events.send(SyncEvent::ConnectorAuth {
+                                    provider: provider.clone(),
+                                    auth_url: url,
+                                });
                             }
+                            Ok(ConnectConnectorReplyDto {
+                                connector: Some(c), ..
+                            }) => {
+                                if c.status == "connected" {
+                                    shared.notice(format!("{provider} connected."));
+                                } else {
+                                    shared.notice(format!(
+                                        "{provider}: {} {}",
+                                        c.status,
+                                        c.last_error.as_deref().unwrap_or("")
+                                    ));
+                                }
+                            }
+                            Ok(_) => {}
+                            Err(err) => shared.diagnostic("connectors", format!("{err:#}")),
                         }
                         // The loopback callback lands out of band: poll the list for a while.
                         for wait in [0u64, 4, 8, 15, 30, 60] {
@@ -5680,33 +5695,22 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
 
 /// Settings → Channels: `GET /channels` → one view (F7).
 async fn refresh_channels(shared: &Arc<Shared>) {
-    let v = match shared.get_json("/channels").await {
-        Ok(v) => v,
+    let overview = shared.get_json("/channels").await.and_then(|v| {
+        serde_json::from_value::<ChannelsOverviewDto>(v).context("decode GET /channels")
+    });
+    match overview {
+        Ok(dto) => {
+            let _ = shared
+                .events
+                .send(SyncEvent::Channels(ChannelsView::from(&dto)));
+        }
+        // Older relays have no channels; stay quiet unless it is a real failure.
         Err(err) => {
-            // Older relays have no channels; stay quiet unless it is a real failure.
             if !format!("{err:#}").contains("HTTP 404") {
                 shared.diagnostic("channels", format!("{err:#}"));
             }
-            return;
         }
-    };
-    let list = |key: &str| -> Vec<Value> { v[key].as_array().cloned().unwrap_or_default() };
-    let platforms: Vec<ChannelPlatform> = list("platforms")
-        .into_iter()
-        .filter_map(|p| serde_json::from_value(p).ok())
-        .collect();
-    let bindings: Vec<ChannelBinding> = list("bindings")
-        .into_iter()
-        .filter_map(|b| serde_json::from_value(b).ok())
-        .collect();
-    let pairing: Option<ChannelPairing> = serde_json::from_value(v["pairing"].clone()).ok();
-    let _ = shared.events.send(SyncEvent::Channels(ChannelsView {
-        mock: v["mock"].as_bool().unwrap_or(false),
-        platforms,
-        bindings,
-        pairing,
-        loaded: true,
-    }));
+    }
 }
 
 async fn refresh_routines(shared: &Arc<Shared>, project_id: &str) {
@@ -5762,28 +5766,24 @@ async fn refresh_routine_runs(shared: &Arc<Shared>, project_id: &str, routine_id
 
 /// Settings → This Mac: `GET /local/devices` (F9).
 async fn refresh_local(shared: &Arc<Shared>) {
-    let list = match shared.get_json("/local/devices").await {
-        Ok(v) => v,
+    let devices = shared.get_json("/local/devices").await.and_then(|v| {
+        serde_json::from_value::<LocalDevicesDto>(v).context("decode GET /local/devices")
+    });
+    match devices {
+        Ok(dto) => {
+            let _ = shared
+                .events
+                .send(SyncEvent::LocalDevices(local_view_from_dto(
+                    &dto,
+                    &shared.http_url,
+                )));
+        }
         Err(err) => {
             if !format!("{err:#}").contains("HTTP 404") {
                 shared.diagnostic("local-devices", format!("{err:#}"));
             }
-            return;
         }
-    };
-    let devices: Vec<LocalDevice> = list["items"]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|d| serde_json::from_value(d.clone()).ok())
-                .collect()
-        })
-        .unwrap_or_default();
-    let _ = shared.events.send(SyncEvent::LocalDevices(LocalView {
-        devices,
-        relay_url: shared.http_url.clone(),
-        loaded: true,
-    }));
+    }
 }
 
 /// Settings → Connectors: `GET /connectors/catalog` + `GET /connectors` → one view (F1).
@@ -5792,38 +5792,27 @@ async fn refresh_connectors(shared: &Arc<Shared>) {
         shared.get_json("/connectors/catalog"),
         shared.get_json("/connectors")
     );
-    let (catalog, list) = match (catalog, list) {
-        (Ok(c), Ok(l)) => (c, l),
+    let catalog = catalog.and_then(|v| {
+        serde_json::from_value::<ConnectorsCatalogDto>(v).context("decode GET /connectors/catalog")
+    });
+    let list = list.and_then(|v| {
+        serde_json::from_value::<ConnectorsListDto>(v).context("decode GET /connectors")
+    });
+    match (catalog, list) {
+        (Ok(catalog), Ok(list)) => {
+            let _ = shared
+                .events
+                .send(SyncEvent::Connectors(connectors_view_from_dto(
+                    &catalog, &list,
+                )));
+        }
+        // Older relays have no connectors; stay quiet unless it is a real failure.
         (Err(err), _) | (_, Err(err)) => {
-            // Older relays have no connectors; stay quiet unless it is a real failure.
             if !format!("{err:#}").contains("HTTP 404") {
                 shared.diagnostic("connectors", format!("{err:#}"));
             }
-            return;
         }
-    };
-    let providers: Vec<ConnectorProvider> = catalog["providers"]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|p| serde_json::from_value(p.clone()).ok())
-                .collect()
-        })
-        .unwrap_or_default();
-    let items: Vec<Connector> = list["items"]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|c| serde_json::from_value(c.clone()).ok())
-                .collect()
-        })
-        .unwrap_or_default();
-    let _ = shared.events.send(SyncEvent::Connectors(ConnectorsView {
-        mock: list["mock"].as_bool().unwrap_or(false),
-        providers,
-        items,
-        loaded: true,
-    }));
+    }
 }
 
 /// The relay's `error.message` out of an HTTP error, else the whole chain.

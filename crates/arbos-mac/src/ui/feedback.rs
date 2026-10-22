@@ -13,6 +13,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context as _, Result};
+use arbos_core::api::FeedbackSubmitReplyDto;
 use base64::Engine as _;
 use gpui::{
     actions, div, img, prelude::*, px, App, Context, Div, Entity, FocusHandle, Focusable,
@@ -293,8 +294,14 @@ impl FeedbackSheet {
                     text.chars().take(200).collect::<String>()
                 ));
             }
-            let v: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
-            Ok(v["id"].as_str().unwrap_or("sent").to_string())
+            // The note is stored once the relay answers 2xx, so an unreadable body is not a failure.
+            match serde_json::from_str::<FeedbackSubmitReplyDto>(&text) {
+                Ok(reply) => Ok(reply.id),
+                Err(err) => {
+                    eprintln!("feedback: FeedbackSubmitReplyDto: {err}");
+                    Ok("sent".to_string())
+                }
+            }
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;

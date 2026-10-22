@@ -3,6 +3,6 @@
   "id": "push_machine_ready",
   "kind": "machine_ready",
   "payload": {
-    "message": "Machine is ready"
+    "message": "Your Arbos computer is ready."
   }
 }

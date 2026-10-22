@@ -1,0 +1,17 @@
+{
+  "body": "List merged PRs, group by area, keep it short.",
+  "created_at": 1700000000000,
+  "description": "Draft release notes from merged PRs.",
+  "id": "skill_fixture",
+  "markdown": "---\nname: \"Release notes\"\ndescription: \"Draft release notes from merged PRs.\"\ntags: [\"writing\"]\nwhen_to_use: \"When a release is cut.\"\nversion: 2\n---\n\nList merged PRs, group by area, keep it short.\n",
+  "name": "Release notes",
+  "origin_project_id": "proj_fixture",
+  "shared": true,
+  "slug": "release-notes",
+  "tags": [
+    "writing"
+  ],
+  "updated_at": 1700000000000,
+  "version": 2,
+  "when_to_use": "When a release is cut."
+}

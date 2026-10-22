@@ -20,6 +20,9 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+use arbos_core::api::{
+    ConnectConnectorReplyDto, ConnectorDto, ConnectorsCatalogDto, ConnectorsListDto,
+};
 use arbos_core::ids::{now_ms, ulid};
 
 use crate::auth::Principal;
@@ -51,12 +54,19 @@ fn redirect_uri(state: &AppState) -> String {
 }
 
 /// Client-facing view of a connector: never includes a token.
-pub fn connector_json(c: &Connector, mock: bool) -> Value {
-    json!({
-        "id": c.id, "provider": c.provider, "label": c.label, "scopes": c.scopes, "status": c.status,
-        "config": c.config, "created_at": c.created_at, "last_used_at": c.last_used_at, "last_error": c.last_error,
-        "mock": mock,
-    })
+pub fn connector_dto(c: &Connector, mock: bool) -> ConnectorDto {
+    ConnectorDto {
+        id: c.id.clone(),
+        provider: c.provider.clone(),
+        label: c.label.clone(),
+        scopes: c.scopes.clone(),
+        status: c.status.clone(),
+        config: c.config.clone(),
+        created_at: c.created_at,
+        last_used_at: c.last_used_at,
+        last_error: c.last_error.clone(),
+        mock,
+    }
 }
 
 /// Strip credentials from an upstream reply: known credential keys are blanked and any string
@@ -100,32 +110,34 @@ pub fn redact(v: &mut Value, secrets: &[&str]) {
 
 pub async fn catalog(State(state): State<AppState>, _principal: Principal) -> ApiResult {
     let mock = mock_on(&state);
-    let providers: Vec<Value> = Provider::ALL
+    let providers = Provider::ALL
         .iter()
         .map(|p| {
             let configured = match p.auth() {
                 Auth::Oauth(o) => o.client().is_some(),
                 Auth::Token => true,
             };
-            providers::provider_json(*p, configured, mock)
+            providers::provider_dto(*p, configured, mock)
         })
         .collect();
-    Ok(
-        Json(json!({ "mock": mock, "redirect_uri": redirect_uri(&state), "providers": providers }))
-            .into_response(),
-    )
+    Ok(Json(ConnectorsCatalogDto {
+        mock,
+        redirect_uri: redirect_uri(&state),
+        providers,
+    })
+    .into_response())
 }
 
 pub async fn list(State(state): State<AppState>, _principal: Principal) -> ApiResult {
     let mock = mock_on(&state);
-    let items: Vec<Value> = state
+    let items = state
         .db
         .list_connectors()
         .map_err(internal)?
         .iter()
-        .map(|c| connector_json(c, mock))
+        .map(|c| connector_dto(c, mock))
         .collect();
-    Ok(Json(json!({ "mock": mock, "items": items })).into_response())
+    Ok(Json(ConnectorsListDto { mock, items }).into_response())
 }
 
 /// Mock mode only: what would have been sent.
@@ -279,7 +291,14 @@ pub async fn connect(
                 }
             }
         };
-        return Ok(Json(json!({ "connector": connector_json(&cn, mock) })).into_response());
+        return Ok(Json(ConnectConnectorReplyDto {
+            auth_url: None,
+            state: None,
+            redirect_uri: None,
+            mock: None,
+            connector: Some(connector_dto(&cn, mock)),
+        })
+        .into_response());
     }
 
     // OAuth path.
@@ -361,10 +380,14 @@ pub async fn connect(
             })
             .map_err(internal)?;
     }
-    Ok(
-        Json(json!({ "authUrl": auth_url, "state": st, "redirectUri": redirect, "mock": mock }))
-            .into_response(),
-    )
+    Ok(Json(ConnectConnectorReplyDto {
+        auth_url: Some(auth_url),
+        state: Some(st),
+        redirect_uri: Some(redirect),
+        mock: Some(mock),
+        connector: None,
+    })
+    .into_response())
 }
 
 #[derive(Deserialize)]
@@ -950,7 +973,7 @@ mod tests {
         assert!(!text.contains(secret) && !text.contains(refresh), "{text}");
 
         // 3. The listing.
-        let listing = connector_json(&cn, true).to_string();
+        let listing = serde_json::to_string(&connector_dto(&cn, true)).unwrap();
         assert!(!listing.contains(secret) && !listing.contains(refresh));
 
         // 4. Redaction of an upstream reply that echoes credentials in keys and strings.

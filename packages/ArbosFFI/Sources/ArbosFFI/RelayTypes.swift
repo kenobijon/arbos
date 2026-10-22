@@ -254,6 +254,78 @@ public struct CallStartedPayloadDto: Codable {
 	}
 }
 
+/// One binding on `GET /channels` (`binding_json`). CamelCase keys match today's wire.
+public struct ChannelBindingDto: Codable {
+	public let id: String
+	public let platform: String
+	public let externalChatId: String
+	public let externalUserId: String
+	public let projectId: String
+	public let chatId: String
+	public let label: String
+	public let bound_at: Int64
+
+	public init(id: String, platform: String, externalChatId: String, externalUserId: String, projectId: String, chatId: String, label: String, bound_at: Int64) {
+		self.id = id
+		self.platform = platform
+		self.externalChatId = externalChatId
+		self.externalUserId = externalUserId
+		self.projectId = projectId
+		self.chatId = chatId
+		self.label = label
+		self.bound_at = bound_at
+	}
+}
+
+/// Active pairing code on `GET /channels` / `POST /channels/pair/new` (`pair_json`).
+public struct ChannelPairingDto: Codable {
+	public let code: String
+	public let projectId: String
+	public let chatId: String
+	public let created_at: Int64
+	public let expiresAt: Int64
+
+	public init(code: String, projectId: String, chatId: String, created_at: Int64, expiresAt: Int64) {
+		self.code = code
+		self.projectId = projectId
+		self.chatId = chatId
+		self.created_at = created_at
+		self.expiresAt = expiresAt
+	}
+}
+
+/// One platform row on `GET /channels`.
+public struct ChannelPlatformDto: Codable {
+	public let platform: String
+	public let label: String
+	public let state: String
+	public let detail: String
+	public let inbound: String
+
+	public init(platform: String, label: String, state: String, detail: String, inbound: String) {
+		self.platform = platform
+		self.label = label
+		self.state = state
+		self.detail = detail
+		self.inbound = inbound
+	}
+}
+
+/// `GET /channels` overview body.
+public struct ChannelsOverviewDto: Codable {
+	public let mock: Bool
+	public let platforms: [ChannelPlatformDto]
+	public let bindings: [ChannelBindingDto]
+	public let pairing: ChannelPairingDto?
+
+	public init(mock: Bool, platforms: [ChannelPlatformDto], bindings: [ChannelBindingDto], pairing: ChannelPairingDto?) {
+		self.mock = mock
+		self.platforms = platforms
+		self.bindings = bindings
+		self.pairing = pairing
+	}
+}
+
 /// `chat_archived` payload (`archived_at` is null when un-archiving).
 public struct ChatArchivedPayloadDto: Codable {
 	public let chat_id: String
@@ -440,6 +512,107 @@ public struct ChatMemberDto: Codable {
 		self.description = description
 		self.owner = owner
 		self.owner_handle = owner_handle
+	}
+}
+
+/// Client-facing connector (`connector_json`). Never includes a token.
+public struct ConnectorDto: Codable {
+	public let id: String
+	public let provider: String
+	public let label: String
+	public let scopes: [String]
+	public let status: String
+	public let created_at: Int64
+	public let last_used_at: Int64?
+	public let last_error: String?
+	public let mock: Bool
+
+	public init(id: String, provider: String, label: String, scopes: [String], status: String, created_at: Int64, last_used_at: Int64?, last_error: String?, mock: Bool) {
+		self.id = id
+		self.provider = provider
+		self.label = label
+		self.scopes = scopes
+		self.status = status
+		self.created_at = created_at
+		self.last_used_at = last_used_at
+		self.last_error = last_error
+		self.mock = mock
+	}
+}
+
+/// `POST /connectors/{provider}/connect` reply: OAuth start (`authUrl`) or a stored connector.
+public struct ConnectConnectorReplyDto: Codable {
+	public let authUrl: String?
+	public let state: String?
+	public let redirectUri: String?
+	public let mock: Bool?
+	public let connector: ConnectorDto?
+
+	public init(authUrl: String?, state: String?, redirectUri: String?, mock: Bool?, connector: ConnectorDto?) {
+		self.authUrl = authUrl
+		self.state = state
+		self.redirectUri = redirectUri
+		self.mock = mock
+		self.connector = connector
+	}
+}
+
+/// One action on a connector provider catalog entry.
+public struct ConnectorActionDto: Codable {
+	public let name: String
+	public let kind: String
+	public let description: String
+
+	public init(name: String, kind: String, description: String) {
+		self.name = name
+		self.kind = kind
+		self.description = description
+	}
+}
+
+/// One provider in `GET /connectors/catalog` (`provider_json`).
+public struct ProviderDto: Codable {
+	public let provider: String
+	public let label: String
+	/// `oauth` | `oauth_or_token` | `token`.
+	public let connect: String
+	public let oauth_configured: Bool
+	public let mock: Bool
+	public let scopes: [String]
+	public let actions: [ConnectorActionDto]
+
+	public init(provider: String, label: String, connect: String, oauth_configured: Bool, mock: Bool, scopes: [String], actions: [ConnectorActionDto]) {
+		self.provider = provider
+		self.label = label
+		self.connect = connect
+		self.oauth_configured = oauth_configured
+		self.mock = mock
+		self.scopes = scopes
+		self.actions = actions
+	}
+}
+
+/// `GET /connectors/catalog` body.
+public struct ConnectorsCatalogDto: Codable {
+	public let mock: Bool
+	public let redirect_uri: String
+	public let providers: [ProviderDto]
+
+	public init(mock: Bool, redirect_uri: String, providers: [ProviderDto]) {
+		self.mock = mock
+		self.redirect_uri = redirect_uri
+		self.providers = providers
+	}
+}
+
+/// `GET /connectors` body.
+public struct ConnectorsListDto: Codable {
+	public let mock: Bool
+	public let items: [ConnectorDto]
+
+	public init(mock: Bool, items: [ConnectorDto]) {
+		self.mock = mock
+		self.items = items
 	}
 }
 
@@ -743,6 +916,24 @@ public struct FeedbackCapturePayloadDto: Codable {
 	}
 }
 
+/// `POST /feedback` success body (`id`, `created_at`, `has_image`). Folded repeats may add
+/// `duplicate` / `occurrences`.
+public struct FeedbackSubmitReplyDto: Codable {
+	public let id: String
+	public let created_at: Int64
+	public let has_image: Bool
+	public let duplicate: Bool?
+	public let occurrences: Int64?
+
+	public init(id: String, created_at: Int64, has_image: Bool, duplicate: Bool?, occurrences: Int64?) {
+		self.id = id
+		self.created_at = created_at
+		self.has_image = has_image
+		self.duplicate = duplicate
+		self.occurrences = occurrences
+	}
+}
+
 /// `POST /routines/{rid}/fire` reply.
 public struct FireRoutineResponseDto: Codable {
 	public let run_id: String
@@ -914,6 +1105,40 @@ public struct LeaveCallResponseDto: Codable {
 		self.ended = ended
 		self.duration_s = duration_s
 		self.already_ended = already_ended
+	}
+}
+
+/// One row of `GET /local/devices` (includes live `connected`).
+public struct LocalDeviceDto: Codable {
+	public let device_id: String
+	public let name: String
+	public let hostname: String
+	public let os: String
+	public let home: String
+	public let connected: Bool
+	public let last_seen: Int64?
+	public let first_seen: Int64
+	public let allow_reads: Bool
+
+	public init(device_id: String, name: String, hostname: String, os: String, home: String, connected: Bool, last_seen: Int64?, first_seen: Int64, allow_reads: Bool) {
+		self.device_id = device_id
+		self.name = name
+		self.hostname = hostname
+		self.os = os
+		self.home = home
+		self.connected = connected
+		self.last_seen = last_seen
+		self.first_seen = first_seen
+		self.allow_reads = allow_reads
+	}
+}
+
+/// `GET /local/devices` body.
+public struct LocalDevicesDto: Codable {
+	public let items: [LocalDeviceDto]
+
+	public init(items: [LocalDeviceDto]) {
+		self.items = items
 	}
 }
 
@@ -1940,6 +2165,40 @@ public struct ServerUpdatedPayloadDto: Codable {
 		self.deleted = deleted
 		self.user_id = user_id
 		self.role = role
+	}
+}
+
+/// One skill as `GET /skills` returns it (`skill_json`): core [`crate::skill::Skill`] plus markdown.
+public struct SkillDto: Codable {
+	public let id: String
+	public let slug: String
+	public let name: String
+	public let description: String
+	public let tags: [String]
+	public let when_to_use: String
+	public let body: String
+	public let origin_project_id: String?
+	public let shared: Bool
+	public let version: Int64
+	public let created_at: Int64
+	public let updated_at: Int64
+	/// Markdown document (frontmatter + body) for the client editor.
+	public let markdown: String
+
+	public init(id: String, slug: String, name: String, description: String, tags: [String], when_to_use: String, body: String, origin_project_id: String?, shared: Bool, version: Int64, created_at: Int64, updated_at: Int64, markdown: String) {
+		self.id = id
+		self.slug = slug
+		self.name = name
+		self.description = description
+		self.tags = tags
+		self.when_to_use = when_to_use
+		self.body = body
+		self.origin_project_id = origin_project_id
+		self.shared = shared
+		self.version = version
+		self.created_at = created_at
+		self.updated_at = updated_at
+		self.markdown = markdown
 	}
 }
 

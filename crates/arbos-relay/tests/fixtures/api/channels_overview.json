@@ -1,0 +1,52 @@
+{
+  "bindings": [
+    {
+      "bound_at": 1700000000000,
+      "chatId": "chat_primary",
+      "externalChatId": "tg_chat_fixture",
+      "externalUserId": "tg_user_fixture",
+      "id": "bind_fixture",
+      "label": "Fixture chat",
+      "platform": "telegram",
+      "projectId": "proj_fixture"
+    }
+  ],
+  "mock": true,
+  "pairing": {
+    "chatId": "chat_primary",
+    "code": "PAIR42",
+    "created_at": 1700000000000,
+    "expiresAt": 4102444800000,
+    "projectId": "proj_fixture"
+  },
+  "platforms": [
+    {
+      "detail": "ARBOS_CHANNELS_MOCK=1 · inbound via POST /channels/mock/inbound",
+      "inbound": "POST http://127.0.0.1:7707/channels/slack/events",
+      "label": "Slack",
+      "platform": "slack",
+      "state": "mock"
+    },
+    {
+      "detail": "ARBOS_CHANNELS_MOCK=1 · inbound via POST /channels/mock/inbound",
+      "inbound": "POST http://127.0.0.1:7707/channels/telegram/webhook/<secret> or ARBOS_TELEGRAM_POLL=1",
+      "label": "Telegram",
+      "platform": "telegram",
+      "state": "mock"
+    },
+    {
+      "detail": "ARBOS_CHANNELS_MOCK=1 · inbound via POST /channels/mock/inbound",
+      "inbound": "GET/POST http://127.0.0.1:7707/channels/whatsapp/webhook",
+      "label": "WhatsApp (Cloud API)",
+      "platform": "whatsapp",
+      "state": "mock"
+    },
+    {
+      "detail": "ARBOS_CHANNELS_MOCK=1 · inbound via POST /channels/mock/inbound",
+      "inbound": "relay polls POST /v1/messages/poll",
+      "label": "Beeper (Harness Comms)",
+      "platform": "beeper",
+      "state": "mock"
+    }
+  ]
+}

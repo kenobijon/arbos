@@ -1,6 +1,7 @@
 //! Shared HTTP response shapes for projects, chats, people, me, machine,
 //! unread, calls, goals, routines, secrets, vaults, sign-in, pairing, media,
-//! pushes, and releases (crdt-sync).
+//! pushes, releases, connectors, channels, skills, local devices, and feedback
+//! (crdt-sync).
 //!
 //! No I/O. The relay builds these and serializes them; clients will decode the
 //! same JSON. Regenerate Swift with `./scripts/gen-swift-types.sh`.
@@ -1722,4 +1723,231 @@ pub struct PushRegisterResponseDto {
     pub device_id: String,
     pub environment: String,
     pub push: bool,
+}
+
+// ---- Connectors / channels / skills / local / feedback (step 6b-2d-3) ---------------------------
+//
+// Free-form on the wire (`#[typeshare(skip)]` + `Value`): connector `config`, action `args`.
+// Channel binding / pairing keep camelCase keys via serde renames (wire unchanged).
+
+/// One action on a connector provider catalog entry.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConnectorActionDto {
+    pub name: String,
+    pub kind: String,
+    pub description: String,
+    /// JSON Schema object for the action's args (`type` / `properties` / `required`).
+    #[typeshare(skip)]
+    pub args: Value,
+}
+
+/// One provider in `GET /connectors/catalog` (`provider_json`).
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProviderDto {
+    pub provider: String,
+    pub label: String,
+    /// `oauth` | `oauth_or_token` | `token`.
+    pub connect: String,
+    pub oauth_configured: bool,
+    pub mock: bool,
+    pub scopes: Vec<String>,
+    pub actions: Vec<ConnectorActionDto>,
+}
+
+/// Client-facing connector (`connector_json`). Never includes a token.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConnectorDto {
+    pub id: String,
+    pub provider: String,
+    pub label: String,
+    pub scopes: Vec<String>,
+    pub status: String,
+    /// Provider-specific settings (e.g. `baseUrl`); never secrets.
+    #[typeshare(skip)]
+    pub config: Value,
+    #[typeshare(serialized_as = "I54")]
+    pub created_at: i64,
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub last_used_at: Option<i64>,
+    pub last_error: Option<String>,
+    pub mock: bool,
+}
+
+/// `GET /connectors/catalog` body.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConnectorsCatalogDto {
+    pub mock: bool,
+    pub redirect_uri: String,
+    pub providers: Vec<ProviderDto>,
+}
+
+/// `GET /connectors` body.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConnectorsListDto {
+    pub mock: bool,
+    pub items: Vec<ConnectorDto>,
+}
+
+/// `POST /connectors/{provider}/connect` reply: OAuth start (`authUrl`) or a stored connector.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConnectConnectorReplyDto {
+    #[serde(rename = "authUrl", default, skip_serializing_if = "Option::is_none")]
+    pub auth_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    #[serde(
+        rename = "redirectUri",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub redirect_uri: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mock: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connector: Option<ConnectorDto>,
+}
+
+/// One platform row on `GET /channels`.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChannelPlatformDto {
+    pub platform: String,
+    pub label: String,
+    pub state: String,
+    pub detail: String,
+    pub inbound: String,
+}
+
+/// One binding on `GET /channels` (`binding_json`). CamelCase keys match today's wire.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChannelBindingDto {
+    pub id: String,
+    pub platform: String,
+    #[serde(rename = "externalChatId")]
+    pub external_chat_id: String,
+    #[serde(rename = "externalUserId")]
+    pub external_user_id: String,
+    #[serde(rename = "projectId")]
+    pub project_id: String,
+    #[serde(rename = "chatId")]
+    pub chat_id: String,
+    pub label: String,
+    #[typeshare(serialized_as = "I54")]
+    pub bound_at: i64,
+}
+
+/// Active pairing code on `GET /channels` / `POST /channels/pair/new` (`pair_json`).
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChannelPairingDto {
+    pub code: String,
+    #[serde(rename = "projectId")]
+    pub project_id: String,
+    #[serde(rename = "chatId")]
+    pub chat_id: String,
+    #[typeshare(serialized_as = "I54")]
+    pub created_at: i64,
+    #[serde(rename = "expiresAt")]
+    #[typeshare(serialized_as = "I54")]
+    pub expires_at: i64,
+}
+
+/// `GET /channels` overview body.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChannelsOverviewDto {
+    pub mock: bool,
+    pub platforms: Vec<ChannelPlatformDto>,
+    pub bindings: Vec<ChannelBindingDto>,
+    pub pairing: Option<ChannelPairingDto>,
+}
+
+/// One skill as `GET /skills` returns it (`skill_json`): core [`crate::skill::Skill`] plus markdown.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SkillDto {
+    pub id: String,
+    pub slug: String,
+    pub name: String,
+    pub description: String,
+    pub tags: Vec<String>,
+    pub when_to_use: String,
+    pub body: String,
+    pub origin_project_id: Option<String>,
+    pub shared: bool,
+    #[typeshare(serialized_as = "I54")]
+    pub version: i64,
+    #[typeshare(serialized_as = "I54")]
+    pub created_at: i64,
+    #[typeshare(serialized_as = "I54")]
+    pub updated_at: i64,
+    /// Markdown document (frontmatter + body) for the client editor.
+    pub markdown: String,
+}
+
+impl From<&crate::skill::Skill> for SkillDto {
+    fn from(s: &crate::skill::Skill) -> Self {
+        Self {
+            id: s.id.clone(),
+            slug: s.slug.clone(),
+            name: s.name.clone(),
+            description: s.description.clone(),
+            tags: s.tags.clone(),
+            when_to_use: s.when_to_use.clone(),
+            body: s.body.clone(),
+            origin_project_id: s.origin_project_id.clone(),
+            shared: s.shared,
+            version: s.version,
+            created_at: s.created_at,
+            updated_at: s.updated_at,
+            markdown: s.to_markdown(),
+        }
+    }
+}
+
+/// One row of `GET /local/devices` (includes live `connected`).
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LocalDeviceDto {
+    pub device_id: String,
+    pub name: String,
+    pub hostname: String,
+    pub os: String,
+    pub home: String,
+    pub connected: bool,
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub last_seen: Option<i64>,
+    #[typeshare(serialized_as = "I54")]
+    pub first_seen: i64,
+    pub allow_reads: bool,
+}
+
+/// `GET /local/devices` body.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LocalDevicesDto {
+    pub items: Vec<LocalDeviceDto>,
+}
+
+/// `POST /feedback` success body (`id`, `created_at`, `has_image`). Folded repeats may add
+/// `duplicate` / `occurrences`.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FeedbackSubmitReplyDto {
+    pub id: String,
+    #[typeshare(serialized_as = "I54")]
+    pub created_at: i64,
+    pub has_image: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duplicate: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub occurrences: Option<i64>,
 }

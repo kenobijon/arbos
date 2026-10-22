@@ -136,6 +136,17 @@ final class RelayAPI {
         return (try? JSONSerialization.jsonObject(with: data)) ?? NSNull()
     }
 
+    /// A relay reply decoded as its `crates/arbos-core/src/api.rs` Dto.
+    func decode<T: Decodable>(_ type: T.Type, _ method: String, _ path: String, body: Any? = nil) async throws -> T {
+        let (data, _) = try await request(method, path, body: body)
+        do {
+            return try JSONDecoder().decode(T.self, from: data)
+        } catch {
+            NSLog("\(T.self): \(error)")
+            throw RelayError(status: 0, message: "The relay returned an unreadable \(T.self)")
+        }
+    }
+
     // MARK: Pairing (D35)
 
     func pair(code: String, name: String) async throws -> DeviceCredentials {
@@ -438,8 +449,7 @@ final class RelayAPI {
             body["mime"] = mime
         }
         if let projectId, !projectId.isEmpty { body["project_id"] = projectId }
-        let v = try await json("POST", "/feedback", body: body)
-        return (v as? [String: Any])?["id"] as? String
+        return try await decode(FeedbackSubmitReplyDto.self, "POST", "/feedback", body: body).id
     }
 
     /// `POST /feedback/capture/{id}` (device token): the answer to a `feedback_capture` push from
@@ -765,10 +775,8 @@ final class RelayAPI {
     func setProjectAvatarColorIndex(_ projectId: Id, index: Int?) async throws -> Int? {
         let value: Any = index.map { $0 as Any } ?? NSNull()
         let body: [String: Any] = ["avatar_color_index": value]
-        let v = try await json("PATCH", "/projects/\(projectId)", body: body)
-        let m = v as? [String: Any]
-        let p: [String: Any]? = (m?["project"] as? [String: Any]) ?? m
-        return ((p?["avatar_color_index_effective"] as? NSNumber) ?? (p?["avatar_color_index"] as? NSNumber))?.intValue
+        let p = try await decode(ProjectDto.self, "PATCH", "/projects/\(projectId)", body: body)
+        return Int(p.avatar_color_index_effective)
     }
 
     /// D92 `PATCH /projects/{id} {"avatar_leaf": 0–8|null, "avatar_leaf_color": 0–9|null}` (null = automatic).
@@ -782,10 +790,7 @@ final class RelayAPI {
 
     /// §11 `PATCH /projects/{id} {"vision_enabled": bool}` — may the agent sample the camera on calls.
     func setProjectVision(_ projectId: Id, enabled: Bool) async throws -> Bool? {
-        let v = try await json("PATCH", "/projects/\(projectId)", body: ["vision_enabled": enabled])
-        let m = v as? [String: Any]
-        let p: [String: Any]? = (m?["project"] as? [String: Any]) ?? m
-        return (p?["vision_enabled"] as? NSNumber)?.boolValue
+        try await decode(ProjectDto.self, "PATCH", "/projects/\(projectId)", body: ["vision_enabled": enabled]).vision_enabled
     }
 
     /// §10.3 `PATCH /projects/{id} {"voice": id|null}` (null = the default voice). Returns the
@@ -793,10 +798,7 @@ final class RelayAPI {
     func setProjectVoice(_ projectId: Id, voice: String?) async throws -> String? {
         let value: Any = voice.map { $0 as Any } ?? NSNull()
         let body: [String: Any] = ["voice": value]
-        let v = try await json("PATCH", "/projects/\(projectId)", body: body)
-        let m = v as? [String: Any]
-        let p: [String: Any]? = (m?["project"] as? [String: Any]) ?? m
-        let kept: String? = p?["voice"] as? String
+        let kept = try await decode(ProjectDto.self, "PATCH", "/projects/\(projectId)", body: body).voice
         return kept.flatMap { $0.isEmpty ? nil : $0 }
     }
 
@@ -907,10 +909,10 @@ final class RelayAPI {
     func block(handle: String) async throws { _ = try await request("POST", "/blocks", body: ["handle": handle]) }
     func unblock(userId: String) async throws { _ = try await request("DELETE", "/blocks/\(userId)") }
     func blocks() async throws -> [Person] {
-        let list = (try await json("GET", "/blocks")) as? [Any] ?? []
-        return list.compactMap { raw -> Person? in
-            guard let d = raw as? [String: Any], let id = d["id"] as? String else { return nil }
-            return Person(id: id, handle: d["handle"] as? String ?? "", avatarUrl: d["avatar_url"] as? String, name: nil, status: "blocked")
+        try await decode([UserCardDto].self, "GET", "/blocks").map { card -> Person in
+            var person = Person(dto: card)
+            person.status = "blocked"
+            return person
         }
     }
 
@@ -932,46 +934,16 @@ final class RelayAPI {
 
     /// `GET /connectors/catalog` + `GET /connectors` → one view for Settings.
     func connectors() async throws -> ConnectorsView {
-        let catalog = (try await json("GET", "/connectors/catalog")) as? [String: Any] ?? [:]
-        let list = (try await json("GET", "/connectors")) as? [String: Any] ?? [:]
-        let providers: [ConnectorProvider] = ((catalog["providers"] as? [Any]) ?? []).compactMap { raw in
-            guard let m = raw as? [String: Any], let provider = m["provider"] as? String else { return nil }
-            return ConnectorProvider(
-                provider: provider,
-                label: m["label"] as? String ?? provider,
-                connect: m["connect"] as? String ?? "oauth",
-                // Bool and NSNumber both show up from JSONSerialization.
-                oauthConfigured: (m["oauth_configured"] as? Bool)
-                    ?? (m["oauth_configured"] as? NSNumber)?.boolValue
-                    ?? false
-            )
-        }
-        let items: [Connector] = ((list["items"] as? [Any]) ?? []).compactMap { raw in
-            guard let m = raw as? [String: Any], let id = m["id"] as? String, let provider = m["provider"] as? String else { return nil }
-            return Connector(
-                id: id,
-                provider: provider,
-                label: m["label"] as? String ?? provider,
-                status: ConnectorStatus(wire: m["status"] as? String ?? ""),
-                lastError: m["last_error"] as? String,
-                mock: (m["mock"] as? NSNumber)?.boolValue ?? false
-            )
-        }
-        return ConnectorsView(
-            mock: (list["mock"] as? NSNumber)?.boolValue ?? (catalog["mock"] as? NSNumber)?.boolValue ?? false,
-            providers: providers,
-            items: items,
-            loaded: true
-        )
+        let catalog = try await decode(ConnectorsCatalogDto.self, "GET", "/connectors/catalog")
+        let list = try await decode(ConnectorsListDto.self, "GET", "/connectors")
+        return ConnectorsView(catalog: catalog, list: list)
     }
 
     /// Start OAuth (`authUrl`) or store a pasted token. Google uses OAuth only.
     func connectConnector(provider: String, token: String? = nil) async throws -> String? {
         var body: [String: Any] = [:]
         if let token, !token.isEmpty { body["token"] = token }
-        let v = try await json("POST", "/connectors/\(provider)/connect", body: body)
-        let m = v as? [String: Any]
-        return m?["authUrl"] as? String
+        return try await decode(ConnectConnectorReplyDto.self, "POST", "/connectors/\(provider)/connect", body: body).authUrl
     }
 
     func disconnectConnector(id: String) async throws {
@@ -980,14 +952,12 @@ final class RelayAPI {
 
     // Projects together (step 3)
     func projectMembers(_ projectId: Id) async throws -> [ProjectMember] {
-        let v = try await json("GET", "/projects/\(projectId)/members")
-        let list = (v as? [Any]) ?? ((v as? [String: Any])?["members"] as? [Any]) ?? []
-        return list.compactMap(ProjectMember.parse)
+        try await decode(ProjectMembersDto.self, "GET", "/projects/\(projectId)/members").members.map(ProjectMember.init(dto:))
     }
 
     func addProjectMember(_ projectId: Id, handle: String) async throws -> [ProjectMember] {
-        let v = try await json("POST", "/projects/\(projectId)/members", body: ["handle": handle.trimmingCharacters(in: CharacterSet(charactersIn: "@ "))])
-        return (((v as? [String: Any])?["members"] as? [Any]) ?? []).compactMap(ProjectMember.parse)
+        let body = ["handle": handle.trimmingCharacters(in: CharacterSet(charactersIn: "@ "))]
+        return try await decode(ProjectMembersDto.self, "POST", "/projects/\(projectId)/members", body: body).members.map(ProjectMember.init(dto:))
     }
 
     func removeProjectMember(_ projectId: Id, userId: String) async throws {

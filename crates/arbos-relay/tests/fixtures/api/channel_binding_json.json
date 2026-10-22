@@ -1,0 +1,10 @@
+{
+  "bound_at": 1700000000000,
+  "chatId": "chat_primary",
+  "externalChatId": "tg_chat_fixture",
+  "externalUserId": "tg_user_fixture",
+  "id": "bind_fixture",
+  "label": "Fixture chat",
+  "platform": "telegram",
+  "projectId": "proj_fixture"
+}

@@ -32,7 +32,7 @@ use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use arbos_core::api::{FeedbackCapturePayloadDto, PushEventDto};
+use arbos_core::api::{FeedbackCapturePayloadDto, FeedbackSubmitReplyDto, PushEventDto};
 use arbos_core::ids::{now_ms, ulid};
 
 use crate::auth::Principal;
@@ -434,13 +434,13 @@ pub async fn submit(
         if let Some(existing) = fold_repeat(&state, sig, now).await {
             return (
                 StatusCode::OK,
-                Json(json!({
-                    "id": existing.id,
-                    "created_at": existing.created_at,
-                    "has_image": !existing.file.is_empty(),
-                    "duplicate": true,
-                    "occurrences": existing.occurrences,
-                })),
+                Json(FeedbackSubmitReplyDto {
+                    id: existing.id,
+                    created_at: existing.created_at,
+                    has_image: !existing.file.is_empty(),
+                    duplicate: Some(true),
+                    occurrences: Some(i64::from(existing.occurrences)),
+                }),
             )
                 .into_response();
         }
@@ -510,7 +510,13 @@ pub async fn submit(
     drop(signatures_guard);
     (
         StatusCode::CREATED,
-        Json(json!({ "id": item.id, "created_at": item.created_at, "has_image": !item.file.is_empty() })),
+        Json(FeedbackSubmitReplyDto {
+            id: item.id,
+            created_at: item.created_at,
+            has_image: !item.file.is_empty(),
+            duplicate: None,
+            occurrences: None,
+        }),
     )
         .into_response()
 }

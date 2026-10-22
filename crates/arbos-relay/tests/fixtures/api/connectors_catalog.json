@@ -1,0 +1,600 @@
+{
+  "mock": true,
+  "providers": [
+    {
+      "actions": [
+        {
+          "args": {
+            "properties": {
+              "label": {
+                "description": "Gmail label id, default INBOX",
+                "type": "string"
+              },
+              "max": {
+                "description": "max results, default 20",
+                "type": "integer"
+              }
+            },
+            "required": [],
+            "type": "object"
+          },
+          "description": "Recent Gmail threads (inbox by default).",
+          "kind": "read",
+          "name": "list_threads"
+        },
+        {
+          "args": {
+            "properties": {
+              "max": {
+                "description": "max results, default 20",
+                "type": "integer"
+              },
+              "q": {
+                "description": "Gmail search query, e.g. from:alice is:unread",
+                "type": "string"
+              }
+            },
+            "required": [
+              "q"
+            ],
+            "type": "object"
+          },
+          "description": "Search Gmail with Gmail query syntax.",
+          "kind": "read",
+          "name": "search"
+        },
+        {
+          "args": {
+            "properties": {
+              "id": {
+                "description": "message id",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id"
+            ],
+            "type": "object"
+          },
+          "description": "Read one Gmail message (headers + text body).",
+          "kind": "read",
+          "name": "read_message"
+        },
+        {
+          "args": {
+            "properties": {
+              "body": {
+                "description": "plain-text body",
+                "type": "string"
+              },
+              "subject": {
+                "description": "subject",
+                "type": "string"
+              },
+              "to": {
+                "description": "recipient",
+                "type": "string"
+              }
+            },
+            "required": [
+              "to",
+              "subject",
+              "body"
+            ],
+            "type": "object"
+          },
+          "description": "Create a Gmail draft (not sent).",
+          "kind": "write",
+          "name": "create_draft"
+        },
+        {
+          "args": {
+            "properties": {
+              "body": {
+                "description": "plain-text body",
+                "type": "string"
+              },
+              "subject": {
+                "description": "subject",
+                "type": "string"
+              },
+              "to": {
+                "description": "recipient",
+                "type": "string"
+              }
+            },
+            "required": [
+              "to",
+              "subject",
+              "body"
+            ],
+            "type": "object"
+          },
+          "description": "Send an email from the user's Gmail.",
+          "kind": "send",
+          "name": "send"
+        },
+        {
+          "args": {
+            "properties": {
+              "max": {
+                "description": "max results, default 20",
+                "type": "integer"
+              },
+              "time_min": {
+                "description": "RFC 3339 lower bound, default now",
+                "type": "string"
+              }
+            },
+            "required": [],
+            "type": "object"
+          },
+          "description": "Upcoming events on the primary calendar.",
+          "kind": "read",
+          "name": "list_events"
+        },
+        {
+          "args": {
+            "properties": {
+              "attendees": {
+                "description": "email addresses",
+                "type": "array"
+              },
+              "description": {
+                "description": "description",
+                "type": "string"
+              },
+              "end": {
+                "description": "RFC 3339 end",
+                "type": "string"
+              },
+              "start": {
+                "description": "RFC 3339 start",
+                "type": "string"
+              },
+              "summary": {
+                "description": "title",
+                "type": "string"
+              }
+            },
+            "required": [
+              "summary",
+              "start",
+              "end"
+            ],
+            "type": "object"
+          },
+          "description": "Create a calendar event (attendees are invited).",
+          "kind": "send",
+          "name": "create_event"
+        }
+      ],
+      "connect": "oauth",
+      "label": "Google (Gmail, Calendar)",
+      "mock": true,
+      "oauth_configured": false,
+      "provider": "google",
+      "scopes": [
+        "https://www.googleapis.com/auth/gmail.readonly",
+        "https://www.googleapis.com/auth/gmail.compose",
+        "https://www.googleapis.com/auth/gmail.send",
+        "https://www.googleapis.com/auth/calendar.events"
+      ]
+    },
+    {
+      "actions": [
+        {
+          "args": {
+            "properties": {
+              "limit": {
+                "description": "max results, default 100",
+                "type": "integer"
+              }
+            },
+            "required": [],
+            "type": "object"
+          },
+          "description": "Channels the user is in.",
+          "kind": "read",
+          "name": "list_channels"
+        },
+        {
+          "args": {
+            "properties": {
+              "channel": {
+                "description": "channel id",
+                "type": "string"
+              },
+              "limit": {
+                "description": "max messages, default 50",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "channel"
+            ],
+            "type": "object"
+          },
+          "description": "Recent messages of a channel.",
+          "kind": "read",
+          "name": "read_channel"
+        },
+        {
+          "args": {
+            "properties": {
+              "count": {
+                "description": "max results, default 20",
+                "type": "integer"
+              },
+              "query": {
+                "description": "search query",
+                "type": "string"
+              }
+            },
+            "required": [
+              "query"
+            ],
+            "type": "object"
+          },
+          "description": "Search messages.",
+          "kind": "read",
+          "name": "search"
+        },
+        {
+          "args": {
+            "properties": {
+              "channel": {
+                "description": "channel id",
+                "type": "string"
+              },
+              "text": {
+                "description": "message text",
+                "type": "string"
+              }
+            },
+            "required": [
+              "channel",
+              "text"
+            ],
+            "type": "object"
+          },
+          "description": "Post a message as the user.",
+          "kind": "send",
+          "name": "post_message"
+        }
+      ],
+      "connect": "oauth_or_token",
+      "label": "Slack",
+      "mock": true,
+      "oauth_configured": false,
+      "provider": "slack",
+      "scopes": [
+        "channels:read",
+        "channels:history",
+        "groups:read",
+        "groups:history",
+        "search:read",
+        "chat:write"
+      ]
+    },
+    {
+      "actions": [
+        {
+          "args": {
+            "properties": {
+              "per_page": {
+                "description": "max results, default 30",
+                "type": "integer"
+              }
+            },
+            "required": [],
+            "type": "object"
+          },
+          "description": "Repositories the user can access, most recently updated first.",
+          "kind": "read",
+          "name": "list_repos"
+        },
+        {
+          "args": {
+            "properties": {
+              "repo": {
+                "description": "owner/name",
+                "type": "string"
+              },
+              "state": {
+                "description": "open|closed|all, default open",
+                "type": "string"
+              }
+            },
+            "required": [
+              "repo"
+            ],
+            "type": "object"
+          },
+          "description": "Issues of a repository.",
+          "kind": "read",
+          "name": "list_issues"
+        },
+        {
+          "args": {
+            "properties": {
+              "number": {
+                "description": "issue number",
+                "type": "integer"
+              },
+              "repo": {
+                "description": "owner/name",
+                "type": "string"
+              }
+            },
+            "required": [
+              "repo",
+              "number"
+            ],
+            "type": "object"
+          },
+          "description": "One issue with its body.",
+          "kind": "read",
+          "name": "read_issue"
+        },
+        {
+          "args": {
+            "properties": {
+              "repo": {
+                "description": "owner/name",
+                "type": "string"
+              },
+              "state": {
+                "description": "open|closed|all, default open",
+                "type": "string"
+              }
+            },
+            "required": [
+              "repo"
+            ],
+            "type": "object"
+          },
+          "description": "Pull requests of a repository.",
+          "kind": "read",
+          "name": "list_prs"
+        },
+        {
+          "args": {
+            "properties": {
+              "body": {
+                "description": "Markdown body",
+                "type": "string"
+              },
+              "repo": {
+                "description": "owner/name",
+                "type": "string"
+              },
+              "title": {
+                "description": "title",
+                "type": "string"
+              }
+            },
+            "required": [
+              "repo",
+              "title"
+            ],
+            "type": "object"
+          },
+          "description": "Open a new issue.",
+          "kind": "write",
+          "name": "create_issue"
+        },
+        {
+          "args": {
+            "properties": {
+              "body": {
+                "description": "Markdown body",
+                "type": "string"
+              },
+              "number": {
+                "description": "issue or PR number",
+                "type": "integer"
+              },
+              "repo": {
+                "description": "owner/name",
+                "type": "string"
+              }
+            },
+            "required": [
+              "repo",
+              "number",
+              "body"
+            ],
+            "type": "object"
+          },
+          "description": "Comment on an issue or pull request.",
+          "kind": "send",
+          "name": "comment"
+        }
+      ],
+      "connect": "oauth_or_token",
+      "label": "GitHub",
+      "mock": true,
+      "oauth_configured": false,
+      "provider": "github",
+      "scopes": [
+        "repo",
+        "read:user"
+      ]
+    },
+    {
+      "actions": [
+        {
+          "args": {
+            "properties": {},
+            "required": [],
+            "type": "object"
+          },
+          "description": "Service policy, identity, queue counts.",
+          "kind": "read",
+          "name": "status"
+        },
+        {
+          "args": {
+            "properties": {},
+            "required": [],
+            "type": "object"
+          },
+          "description": "Connected networks and Gmail status.",
+          "kind": "read",
+          "name": "accounts"
+        },
+        {
+          "args": {
+            "properties": {
+              "query": {
+                "description": "e.g. is:unread from:alice",
+                "type": "string"
+              }
+            },
+            "required": [
+              "query"
+            ],
+            "type": "object"
+          },
+          "description": "Search the Gmail inbox (Gmail query syntax).",
+          "kind": "read",
+          "name": "search"
+        },
+        {
+          "args": {
+            "properties": {
+              "uid": {
+                "description": "message uid from search",
+                "type": "string"
+              }
+            },
+            "required": [
+              "uid"
+            ],
+            "type": "object"
+          },
+          "description": "Read one Gmail message by uid.",
+          "kind": "read",
+          "name": "read"
+        },
+        {
+          "args": {
+            "properties": {
+              "query": {
+                "description": "contact or group name",
+                "type": "string"
+              }
+            },
+            "required": [
+              "query"
+            ],
+            "type": "object"
+          },
+          "description": "Find Beeper chats (WhatsApp, Telegram, Discord…) by name.",
+          "kind": "read",
+          "name": "search_conversations"
+        },
+        {
+          "args": {
+            "properties": {
+              "chat_id": {
+                "description": "exact chat id from search_conversations",
+                "type": "string"
+              }
+            },
+            "required": [
+              "chat_id"
+            ],
+            "type": "object"
+          },
+          "description": "Recent messages of one Beeper chat.",
+          "kind": "read",
+          "name": "read_chat"
+        },
+        {
+          "args": {
+            "properties": {
+              "intent": {
+                "description": "one-line intent",
+                "type": "string"
+              },
+              "text": {
+                "description": "message text",
+                "type": "string"
+              }
+            },
+            "required": [
+              "text"
+            ],
+            "type": "object"
+          },
+          "description": "Register a draft (nothing is sent).",
+          "kind": "write",
+          "name": "draft"
+        },
+        {
+          "args": {
+            "properties": {
+              "chat_id": {
+                "description": "Beeper chat id",
+                "type": "string"
+              },
+              "intent": {
+                "description": "one-line intent",
+                "type": "string"
+              },
+              "request_id": {
+                "description": "idempotency key; reuse on retry",
+                "type": "string"
+              },
+              "subject": {
+                "description": "email subject",
+                "type": "string"
+              },
+              "text": {
+                "description": "message text",
+                "type": "string"
+              },
+              "to": {
+                "description": "email recipient",
+                "type": "string"
+              }
+            },
+            "required": [
+              "text"
+            ],
+            "type": "object"
+          },
+          "description": "Queue a send: email (to + subject) or chat (chat_id).",
+          "kind": "send",
+          "name": "send"
+        },
+        {
+          "args": {
+            "properties": {
+              "request_id": {
+                "description": "request id",
+                "type": "string"
+              }
+            },
+            "required": [
+              "request_id"
+            ],
+            "type": "object"
+          },
+          "description": "Delivery state of a queued send.",
+          "kind": "read",
+          "name": "request_status"
+        }
+      ],
+      "connect": "token",
+      "label": "Harness Comms (Beeper + Gmail)",
+      "mock": true,
+      "oauth_configured": true,
+      "provider": "harness_comms",
+      "scopes": []
+    }
+  ],
+  "redirect_uri": "http://127.0.0.1:7707/connectors/oauth/callback"
+}
