@@ -114,6 +114,8 @@ struct ChatView: View {
         calls.isActive && !calls.isPresented && calls.call?.kind == .voice && calls.call?.chatId == chatId
     }
     private var headerExtra: CGFloat { (hasCallBar ? 52 : 0) + (hasInCallBar ? 56 : 0) + (showSearch ? 46 : 0) }
+    /// Member chips under the header: groups only. A 1:1 DM already names the peer in the pill.
+    private var showsMemberChips: Bool { people?.isGroup == true }
 
     private func startCall(_ kind: CallKind) {
         Task { await calls.start(chatId: chatId, projectId: isPeople ? nil : projectId, kind: kind, title: callTitle) }
@@ -262,7 +264,7 @@ struct ChatView: View {
                 headerBlur
                 VStack(spacing: 8) {
                     header
-                    if let people { memberChips(people).padding(.horizontal, 16) }
+                    if let people, showsMemberChips { memberChips(people).padding(.horizontal, 16) }
                     if showSearch {
                         HStack(spacing: 8) {
                             Image(systemName: "magnifyingglass").font(.system(size: 15, weight: .medium)).foregroundStyle(theme.muted)
@@ -555,7 +557,7 @@ struct ChatView: View {
             }
             theme.bg.opacity(theme.isGlass ? 0.78 : 1)
         }
-        .frame(height: (isPeople ? 156 : 118) + headerExtra)
+        .frame(height: (showsMemberChips ? 156 : 118) + headerExtra)
         .mask(LinearGradient(colors: [.black, .black, .clear], startPoint: .top, endPoint: .bottom))
         .ignoresSafeArea(edges: .top)
         .allowsHitTesting(false)
@@ -732,7 +734,7 @@ struct ChatView: View {
                 // bottom safe-area inset, and LazyVStack can drop every visible row
                 // for a white transcript until the next layout pass.
                 VStack(alignment: .leading, spacing: 0) {
-                    Color.clear.frame(height: (isPeople ? 104 : 64) + headerExtra).onAppear { scroller = proxy }
+                    Color.clear.frame(height: (showsMemberChips ? 104 : 64) + headerExtra).onAppear { scroller = proxy }
                     if let banner = machineBannerText {
                         // Grok (Mac refs 69/70): a quiet notice, not a red strip — the
                         // title in the text colour, the reason muted.
