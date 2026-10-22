@@ -117,9 +117,12 @@ fn reduce_motion() -> bool {
 }
 
 /// Hover state per leaf disc (`key` = who + where): hovered now, and a tick
-/// that advances on every hover start so the one-shot ruffle replays.
+/// that advances on every hover start so the one-shot ruffle replays. One map
+/// for the reader and the writer (two function-local statics were two maps,
+/// so the ruffle never showed on the real build).
+static HOVER: OnceLock<Mutex<HashMap<u64, (bool, u64)>>> = OnceLock::new();
+
 fn hover_state(key: u64) -> (bool, u64) {
-    static HOVER: OnceLock<Mutex<HashMap<u64, (bool, u64)>>> = OnceLock::new();
     HOVER
         .get_or_init(Default::default)
         .lock()
@@ -129,13 +132,36 @@ fn hover_state(key: u64) -> (bool, u64) {
 }
 
 fn set_hover_state(key: u64, hovered: bool) {
-    static HOVER: OnceLock<Mutex<HashMap<u64, (bool, u64)>>> = OnceLock::new();
     if let Ok(mut m) = HOVER.get_or_init(Default::default).lock() {
         let e = m.entry(key).or_insert((false, 0));
         if hovered && !e.0 {
             e.1 += 1;
         }
         e.0 = hovered;
+    }
+}
+
+/// Rig: `ARBOS_LEAF_GUST=<project id or name>` holds that avatar hovered and
+/// loops its gust, as if the pointer kept arriving — the screenshot rigs cannot
+/// move the real pointer. Off unless the variable is set.
+fn rig_gust(seed: &str, name: &str, key: u64) {
+    static TARGET: OnceLock<Option<String>> = OnceLock::new();
+    let target = TARGET.get_or_init(|| std::env::var("ARBOS_LEAF_GUST").ok());
+    if target.as_deref() == Some(seed) || target.as_deref() == Some(name) {
+        RIG_GUST.store(true, Ordering::Relaxed);
+        set_hover_state(key, true);
+    }
+}
+
+/// Set once `rig_gust` matched: the gust animation repeats instead of playing once.
+static RIG_GUST: AtomicBool = AtomicBool::new(false);
+
+fn gust_animation(secs: f32) -> Animation {
+    let a = Animation::new(Duration::from_secs_f32(secs));
+    if RIG_GUST.load(Ordering::Relaxed) {
+        a.repeat()
+    } else {
+        a
     }
 }
 
@@ -195,7 +221,7 @@ fn ruffle_glyph(pick: LeafPick, size: f32, tick: u64) -> AnyElement {
                         SharedString::from(format!("leaf-lottie-gust-{}", pick.leaf)),
                         tick,
                     ),
-                    Animation::new(Duration::from_secs_f32(secs)),
+                    gust_animation(secs),
                     move |el, t| {
                         el.child(lottie::frame_element(
                             comp.clone(),
@@ -215,7 +241,7 @@ fn ruffle_glyph(pick: LeafPick, size: f32, tick: u64) -> AnyElement {
                 SharedString::from(format!("leaf-gust-{}-{}", pick.leaf, pick.color)),
                 tick,
             ),
-            Animation::new(Duration::from_secs_f32(leaf::GUST_SECS)),
+            gust_animation(leaf::GUST_SECS),
             move |el, t| {
                 el.with_transformation(sway(pick.leaf, side, leaf::gust_angle(t * leaf::GUST_SECS)))
             },
@@ -338,10 +364,12 @@ pub fn agent(
     theme: &Theme,
 ) -> Div {
     if leaf_avatars_on() {
+        let key = hover_key(seed, size);
+        rig_gust(seed, name, key);
         leaf_hover(
             leaf_pick(seed, leaf_override, leaf_color_override),
             size,
-            hover_key(seed, size),
+            key,
         )
     } else {
         element(seed, name, color_index, size, theme)
