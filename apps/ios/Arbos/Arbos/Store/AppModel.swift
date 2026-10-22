@@ -7,6 +7,7 @@ import Combine
 import SwiftUI
 import UIKit
 import os
+import ArbosFFI
 
 /// Theme choice (D81): System follows the device and is the default; the order
 /// is the Settings order (System first, then Light, then Dark).
@@ -201,7 +202,7 @@ final class AppModel: ObservableObject {
     @Published var path: [Route] = [] {
         didSet {
             // The open chat is loaded first next launch and evicted last.
-            if case .chat(let chatId, _)? = path.last, let store {
+            if case .chat(let chatId, let pid)? = path.last, pid != channelSlot, let store {
                 store.touchDoc(chatId)
                 store.put(StoreKey.lastChat, Data(chatId.utf8))
             }
@@ -214,7 +215,35 @@ final class AppModel: ObservableObject {
 
     enum Route: Hashable {
         case chat(chatId: Id, projectId: Id)
+        /// D88: a server's channel list (the slid-in left pane); its channels open as
+        /// `.chat(chatId: channelId, projectId: channelSlot)` on top of it.
+        case server(serverId: Id)
     }
+
+    // MARK: Servers (D88)
+
+    /// Servers I belong to, from `GET /servers` (names, roles, channels, invite link).
+    /// Empty when the relay has no servers (`GET /me/matrix` → 503 `servers_off`).
+    @Published var servers: [Server] = []
+    /// The relay answers `GET /servers`: the `+` sheet offers "Server" / "Join a server".
+    /// A relay with servers off (503 `servers_off`) shows nothing server-related.
+    @Published var serversAvailable = false
+    /// The shared Matrix client (crates/arbos-matrix through ArbosFFI): the rooms' data plane.
+    var matrixClient: ArbosFFI.MatrixClient?
+    /// Retains the UniFFI foreign listener for the client's lifetime.
+    var matrixListener: MatrixBridgeListener?
+    /// Latest room list from the client: previews, unread and last activity per server/channel.
+    @Published var matrixSnapshot = ArbosFFI.MatrixSnapshot(spaces: [], channels: [])
+    /// The client's link to the homeserver (`onConnection`); false paints "Reconnecting…" in a channel.
+    @Published var matrixConnected = true
+    /// Decoded channel timelines by relay channel id — the rows ChatView renders for a channel.
+    @Published var channelRows: [Id: [Message]] = [:]
+    /// Channels whose room reached the beginning of its history (`loadOlder` → nil).
+    var channelAtStart: Set<Id> = []
+    /// Channels with an `openRoom` / `loadOlder` in flight.
+    var channelLoading: Set<Id> = []
+    /// `matrixStart` in flight (one at a time).
+    var matrixStarting = false
 
     /// Who the call screen shows before anyone joins: the DM peer, or (for a
     /// people group) every other human plus the agents in that chat; for a
@@ -920,6 +949,9 @@ final class AppModel: ObservableObject {
         peopleChats = []
         peopleUnread = []
         unreadCounts = [:]
+        stopMatrix()
+        servers = []
+        serversAvailable = false
         dirtyDocs = []
         flushTask?.cancel()
         flushTask = nil
@@ -966,6 +998,8 @@ final class AppModel: ObservableObject {
                 await self.refreshRegistry()
                 await self.refreshAccount()
                 await self.refreshPeople()
+                await self.refreshServers()
+                await self.startMatrixIfNeeded()
                 await self.drainPushes()
                 await self.refreshUnread()
                 self.retryPendingOpen()
@@ -2438,6 +2472,7 @@ final class AppModel: ObservableObject {
     func drainPushes() async {
         guard credentials != nil, !isFixture, let items = try? await api.pushes(), !items.isEmpty else { return }
         var needChats = false
+        var needServers = false
         for p in items where !notifiedPushIds.contains(p.id) {
             notifiedPushIds.insert(p.id)
             pushLog.notice("push kind=\(p.kind, privacy: .public) keys=\(Array(p.raw.keys).sorted().joined(separator: ","), privacy: .public)")
@@ -2511,11 +2546,15 @@ final class AppModel: ObservableObject {
             case "release_published":
                 // A build is installable (TestFlight processed it): refresh the Update card now.
                 if p.payload["platform"] == "ios" { await checkForUpdate() }
+            case "server_updated", "server_member_joined", "server_member_removed", "server_deleted":
+                // D88: the relay is the control plane for servers — re-read the list.
+                needServers = true
             default:
                 break
             }
         }
         if needChats { await refreshPeople() }
+        if needServers { await refreshServers() }
         if notifiedPushIds.count > 2000 { notifiedPushIds.removeAll() }
     }
 
@@ -2643,7 +2682,8 @@ final class AppModel: ObservableObject {
 
     func chats(of projectId: Id) -> [Chat] { chats[projectId] ?? [] }
 
-    func messages(of chatId: Id) -> [Message] { messages[chatId] ?? [] }
+    /// Room docs first; a server channel (D88) reads its Matrix timeline.
+    func messages(of chatId: Id) -> [Message] { messages[chatId] ?? channelRows[chatId] ?? [] }
 
     /// Add or remove an emoji reaction on a message. Multiple different emojis
     /// can be active on the same message; tapping the same emoji again clears it.
@@ -2765,6 +2805,8 @@ final class AppModel: ObservableObject {
     func isAwaitingReply(_ chatId: Id) -> Bool {
         if isStreaming(chatId) || hasOpenSubagent(chatId) { return false }
         if peopleChat(chatId) != nil { return false }
+        // Nobody "works" in a server channel; a sent line is just a line.
+        if channel(chatId) != nil { return false }
         let list = messages(of: chatId)
         guard let last = list.last, last.role == .user else { return false }
         // Short bridge until the agent opens a streaming row (cold wake).
