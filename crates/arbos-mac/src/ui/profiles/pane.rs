@@ -167,7 +167,9 @@ pub fn render(pane: ProfilePane, shell: &Shell, cx: &mut Context<Shell>) -> Stat
         None => pane.hero.name,
     };
     let subtitle = pane.hero.subtitle.unwrap_or_default();
-    let mut body = div().flex().flex_col().pb(px(16.0)).child(hero(
+    // Hero + tab pill pin under the top bar; the sections scroll beneath them
+    // and fade out at the join (Jacob, Oct 22: sticky header, no hard cut).
+    let mut pinned = div().flex().flex_col().child(hero(
         picture,
         name_el,
         &subtitle,
@@ -175,8 +177,9 @@ pub fn render(pane: ProfilePane, shell: &Shell, cx: &mut Context<Shell>) -> Stat
         &theme,
     ));
     if pane.tabs.len() > 1 {
-        body = body.child(tab_bar(pane.tabs, pane.selected, &theme, cx));
+        pinned = pinned.child(tab_bar(pane.tabs, pane.selected, &theme, cx));
     }
+    let mut body = div().flex().flex_col().pb(px(16.0));
     for part in pane.body {
         body = body.child(section(part, &theme));
     }
@@ -190,6 +193,7 @@ pub fn render(pane: ProfilePane, shell: &Shell, cx: &mut Context<Shell>) -> Stat
     let _ = glass::group;
     pushed_frame(
         &title,
+        Some(pinned),
         body,
         pane.done,
         Some(&shell.profile_scroll),

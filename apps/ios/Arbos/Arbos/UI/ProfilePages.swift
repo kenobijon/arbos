@@ -1604,25 +1604,48 @@ struct ProfilePane: View {
         self.footer = footer
     }
 
+    /// How far the content fades out under the pinned hero + tabs (the chat
+    /// header's treatment, #1336; Jacob Oct 22: sticky header, no hard cut).
+    static let fadeBand: CGFloat = 24
+
     var body: some View {
-        VStack(spacing: 18) {
-            PaneHeader(name: hero.name, subtitle: hero.subtitle, badge: hero.badge) {
-                switch hero.picture {
-                case .image(let v): v
-                case .glyph(let glyph):
-                    RoundedRectangle(cornerRadius: PaneKit.heroAvatar * 0.28, style: .continuous)
-                        .fill(theme.field)
-                        .frame(width: PaneKit.heroAvatar, height: PaneKit.heroAvatar)
-                        .overlay(Image(systemName: glyph).font(.system(size: PaneKit.heroAvatar * 0.42, weight: .medium)).foregroundStyle(theme.text))
+        // Hero + tab pill pin at the top of the scroll view (a pinned section
+        // header); the sections scroll beneath and fade out at the join.
+        LazyVStack(spacing: 18, pinnedViews: [.sectionHeaders]) {
+            Section {
+                ForEach(Array(sections.enumerated()), id: \.offset) { _, s in section(s) }
+                if !footer.isEmpty {
+                    Color.clear.frame(height: 1)
+                    ForEach(Array(footer.enumerated()), id: \.offset) { _, s in section(s) }
                 }
-            }
-            if tabs.count > 1 {
-                ProfileTabs(tabs: tabs, selected: $selected)
-            }
-            ForEach(Array(sections.enumerated()), id: \.offset) { _, s in section(s) }
-            if !footer.isEmpty {
-                Color.clear.frame(height: 1)
-                ForEach(Array(footer.enumerated()), id: \.offset) { _, s in section(s) }
+            } header: {
+                VStack(spacing: 18) {
+                    PaneHeader(name: hero.name, subtitle: hero.subtitle, badge: hero.badge) {
+                        switch hero.picture {
+                        case .image(let v): v
+                        case .glyph(let glyph):
+                            RoundedRectangle(cornerRadius: PaneKit.heroAvatar * 0.28, style: .continuous)
+                                .fill(theme.field)
+                                .frame(width: PaneKit.heroAvatar, height: PaneKit.heroAvatar)
+                                .overlay(Image(systemName: glyph).font(.system(size: PaneKit.heroAvatar * 0.42, weight: .medium)).foregroundStyle(theme.text))
+                        }
+                    }
+                    if tabs.count > 1 {
+                        ProfileTabs(tabs: tabs, selected: $selected)
+                    }
+                }
+                .padding(.bottom, 4)
+                .background(alignment: .bottom) {
+                    // Opaque behind the pinned block, then a fade band below it so
+                    // rows pass under softly.
+                    VStack(spacing: 0) {
+                        theme.bg
+                        LinearGradient(colors: [theme.bg, theme.bg.opacity(0)], startPoint: .top, endPoint: .bottom)
+                            .frame(height: Self.fadeBand)
+                    }
+                    .padding(.bottom, -Self.fadeBand)
+                    .padding(.top, -200)
+                }
             }
         }
     }

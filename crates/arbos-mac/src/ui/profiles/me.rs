@@ -752,6 +752,7 @@ impl Shell {
             return profiles::pane_frame(
                 pane_width,
                 Some((page.title(), back)),
+                None,
                 body,
                 None,
                 Some(&self.settings_scroll),
@@ -910,6 +911,7 @@ impl Shell {
             return profiles::pane_frame(
                 pane_width,
                 None,
+                None,
                 body,
                 None,
                 Some(&self.settings_scroll),
@@ -1036,6 +1038,7 @@ impl Shell {
         }
         profiles::pane_frame(
             pane_width,
+            None,
             None,
             body,
             None,
