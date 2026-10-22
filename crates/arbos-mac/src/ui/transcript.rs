@@ -359,10 +359,10 @@ pub const STICK_THRESHOLD_PX: f32 = 70.0;
 /// How far above the end the user must be before the ↓ button shows.
 const JUMP_BUTTON_AFTER_PX: f32 = 160.0;
 
-/// Right-click on a bubble: the shell opens the react menu there.
+/// Right-click on a bubble: the shell opens the message menu there.
 /// Hover reply: the shell sets the composer's reply target.
 pub enum TranscriptEvent {
-    ReactMenu {
+    MessageMenu {
         chat_id: Id,
         message_id: Id,
         position: gpui::Point<gpui::Pixels>,
@@ -690,7 +690,7 @@ impl Transcript {
             .map(|m| m.plain_text())
     }
 
-    fn copy_message(&mut self, message_id: &Id, cx: &mut Context<Self>) {
+    pub(crate) fn copy_message(&mut self, message_id: &Id, cx: &mut Context<Self>) {
         if let Some(text) = self.message_plain(message_id, cx) {
             if !text.is_empty() {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
@@ -714,8 +714,9 @@ impl Transcript {
         }
     }
 
-    /// Right-click → react menu. Control-click → copy the message text.
-    fn react_target(
+    /// Right-click → the message menu (Copy / Reply / Delete, `message_menu`).
+    /// Control-click → copy the message text.
+    fn menu_target(
         &self,
         el: Stateful<Div>,
         message_id: &Id,
@@ -730,7 +731,7 @@ impl Transcript {
             gpui::MouseButton::Right,
             cx.listener(move |_, event: &gpui::MouseDownEvent, _, cx| {
                 cx.stop_propagation();
-                cx.emit(TranscriptEvent::ReactMenu {
+                cx.emit(TranscriptEvent::MessageMenu {
                     chat_id: right_chat.clone(),
                     message_id: right_msg.clone(),
                     position: event.position,
@@ -962,7 +963,7 @@ impl Transcript {
         });
         let r = px(BUBBLE_RADIUS);
         let bubble = self
-            .react_target(
+            .menu_target(
                 div().id(SharedString::from(format!("{}#bubble", row_id))),
                 message_id,
                 cx,
@@ -995,39 +996,11 @@ impl Transcript {
                 selectable,
             ));
         let (row_el, reveal) = self.hover_row(row_id, now, window, cx);
-        // Hover: reply + copy, then Grok Mac's muted react glyph (opens
-        // the same bar as a right-click).
+        // Hover: reply + copy. The react glyph that opened the emoji bar is
+        // gone with the bar itself (#1370).
         let hover_actions = (last && !live).then(|| {
             let actions = self.hover_reply_copy(row_id, message_id, reveal, theme, cx);
-            let chat_id = self.chat_id.clone();
-            let message_id = message_id.clone();
-            let react = div()
-                .id(SharedString::from(format!("{}#react", row_id)))
-                .size(px(24.0))
-                .flex_shrink_0()
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_full()
-                .cursor_pointer()
-                .opacity(reveal)
-                .hover(|s| s.bg(theme.surface_2))
-                .child(icon("face-smile", 16.0, theme.text_muted))
-                .on_click(cx.listener(move |_, event: &gpui::ClickEvent, _, cx| {
-                    if let Some(chat_id) = chat_id.clone() {
-                        cx.emit(TranscriptEvent::ReactMenu {
-                            chat_id,
-                            message_id: message_id.clone(),
-                            position: event.position(),
-                        });
-                    }
-                }));
-            div()
-                .flex()
-                .items_center()
-                .gap(px(2.0))
-                .child(actions)
-                .child(react)
+            div().flex().items_center().gap(px(2.0)).child(actions)
         });
         // Messages for Mac: the bubble's time shows beside the glyph on hover.
         let hover_time = (last && !live)
@@ -1120,7 +1093,7 @@ impl Transcript {
                 let body =
                     user_message_body(&row.id, &text, text_color, &theme, &bubble_selectable);
                 let bubble = self
-                    .react_target(
+                    .menu_target(
                         div().id(SharedString::from(format!("{}#bubble", row.id))),
                         &row.message_id,
                         cx,

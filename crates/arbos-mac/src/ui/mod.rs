@@ -17,6 +17,7 @@ pub mod icons;
 pub mod local;
 pub mod lottie;
 pub mod markdown;
+pub mod message_menu;
 pub mod motion;
 pub mod notify;
 pub mod onboarding;

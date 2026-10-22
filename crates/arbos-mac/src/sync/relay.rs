@@ -4410,6 +4410,17 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 }
             }
         }
+        ClientCommand::DeleteMessage {
+            chat_id,
+            message_id,
+        } => {
+            let docs = shared.docs.lock().unwrap();
+            if let Some(doc) = docs.get(&chat_id) {
+                if let Err(e) = doc.core.transact(|d| d.delete_message(&message_id)) {
+                    eprintln!("relay: delete message: {e:#}");
+                }
+            }
+        }
         ClientCommand::Approve {
             chat_id,
             approval_id,
