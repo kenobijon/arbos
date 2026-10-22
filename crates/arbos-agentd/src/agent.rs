@@ -549,32 +549,36 @@ impl ProseFilter {
         if body.trim().is_empty() {
             return String::new();
         }
-        let mut sentences: Vec<String> = Vec::new();
+        // Sentences with their end offsets in `body`, so the kept part is cut from the original
+        // text: re-joining trimmed sentences with spaces flattened every paragraph break and list
+        // line into one line (#1356).
+        let mut ends: Vec<(usize, String)> = Vec::new();
+        let mut pos = body.len() - body.trim_start().len();
         let mut rest = body.trim_start();
         while let Some((sentence, after)) = Self::split_first_sentence(rest) {
-            sentences.push(sentence.trim().to_string());
+            pos += sentence.len();
+            ends.push((pos, sentence.trim().to_string()));
+            let skipped = after.len() - after.trim_start().len();
+            pos += skipped;
             rest = after.trim_start();
         }
         if !rest.is_empty() {
-            sentences.push(rest.trim().to_string());
+            ends.push((body.len(), rest.trim().to_string()));
         }
-        while sentences
+        while ends
             .last()
-            .is_some_and(|s| Self::is_boilerplate(s) || Self::is_thought_sentence(s))
+            .is_some_and(|(_, s)| Self::is_boilerplate(s) || Self::is_thought_sentence(s))
         {
-            sentences.pop();
+            ends.pop();
         }
-        if sentences.is_empty() {
+        let Some((end, _)) = ends.last() else {
+            return String::new();
+        };
+        let kept = body[..*end].trim_end();
+        if kept.is_empty() {
             return String::new();
         }
-        let mut out = String::new();
-        for s in sentences {
-            if !out.is_empty() && !out.ends_with([' ', '\n', '\r']) {
-                out.push(' ');
-            }
-            out.push_str(&s);
-        }
-        format!("{out}{nl}")
+        format!("{kept}{nl}")
     }
 
     /// True when `s` is (or is still typing toward) a short tool-narration sentence.
@@ -5747,7 +5751,7 @@ mod tests {
         let cleaned = ProseFilter::clean_prose(raw);
         assert_eq!(
             cleaned.trim(),
-            "Kenobi, 42 nodes on Lium right now. Prices are per GPU per hour. No RTX 5070s listed at the moment. Renting still needs Const's go-ahead since it bills to his account."
+            "Kenobi, 42 nodes on Lium right now. Prices are per GPU per hour.\n\nNo RTX 5070s listed at the moment. Renting still needs Const's go-ahead since it bills to his account."
         );
         assert!(!cleaned.contains("I only need to state"));
         assert!(!cleaned.contains("not treat Arbos"));
@@ -5850,6 +5854,16 @@ mod tests {
             out.push_str(&f.flush());
             assert_eq!(out, text, "chunking {sizes:?}");
         }
+    }
+
+    /// The final bubble keeps its paragraph breaks and list lines; only a trailing narration
+    /// sentence is cut (#1356, second half).
+    #[test]
+    fn clean_prose_keeps_paragraphs_and_lists() {
+        let text = "The logger started at 22:48 UTC.\n\nThe every-minute job exists too.\n- `loop.log`: 7 lines\n- `sched.log`: 2 lines\n\nTell me when to stop it.";
+        assert_eq!(ProseFilter::clean_prose(text), text);
+        let with_tail = format!("{text}\n\nChecking the routine list now.");
+        assert_eq!(ProseFilter::clean_prose(&with_tail), text);
     }
 
     /// Narration is still stripped, and the whitespace rule does not glue what follows it.
