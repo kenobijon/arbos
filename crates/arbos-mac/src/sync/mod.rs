@@ -10,6 +10,7 @@
 pub mod credentials;
 pub mod diagnostics;
 pub mod doc;
+pub mod dto;
 pub mod fixture;
 pub mod relay;
 pub mod store;
