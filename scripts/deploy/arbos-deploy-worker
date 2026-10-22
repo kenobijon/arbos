@@ -620,16 +620,11 @@ start_roll_unit() {
 }
 
 auto_requests() {
-  local kind head deployed enabled
+  local kind head deployed
   head="$(newest_green)"
   [[ -n "$head" ]] || return 0
   for kind in relay voice agentd; do
-    case "$kind" in
-      relay) enabled="$AUTO_DEPLOY_RELAY" ;;
-      voice) enabled="$AUTO_DEPLOY_VOICE" ;;
-      agentd) enabled="$AUTO_DEPLOY_AGENTD" ;;
-    esac
-    [[ "$enabled" == 1 ]] || continue
+    [[ "$(auto_enabled "$kind")" == 1 ]] || continue
     deployed="$(deployed_sha "$kind")"
     [[ -n "$deployed" ]] || continue
     [[ "$deployed" == "$head" ]] && continue
@@ -677,10 +672,28 @@ relay_deploy_held() {
   return 0
 }
 
+# AUTO_DEPLOY_<KIND>=0 in deploy.env pauses that kind: no new requests, and queued ones are held
+# (not dropped) until it is set back to 1.
+auto_enabled() {
+  case "$1" in
+    relay) echo "$AUTO_DEPLOY_RELAY" ;;
+    voice) echo "$AUTO_DEPLOY_VOICE" ;;
+    agentd) echo "$AUTO_DEPLOY_AGENTD" ;;
+  esac
+}
+
 handle_request() {
   local file="$1" kind sha requested first now age_last age_first full state
   kind="$(sed -n 's/^kind=//p' "$file")"
   sha="$(sed -n 's/^sha=//p' "$file")"
+  if [[ "$(auto_enabled "$kind")" != 1 ]]; then
+    if [[ "$(cat "$STATE/$kind.paused-logged" 2>/dev/null || true)" != "$sha" ]]; then
+      echo "$sha" > "$STATE/$kind.paused-logged"
+      log "$kind: AUTO_DEPLOY_${kind^^}=0; holding request $sha"
+    fi
+    return 0
+  fi
+  rm -f "$STATE/$kind.paused-logged"
   requested="$(sed -n 's/^requested_at=//p' "$file")"
   first="$(sed -n 's/^first_requested_at=//p' "$file")"
   now=$(date -u +%s)
@@ -710,7 +723,7 @@ handle_request() {
   # The request is a minimum, not the exact commit: deploy the newest green commit on main that
   # contains it, so a request written late (the poller's, for a merge from half an hour ago) can
   # never point a deploy backwards past what auto_requests already asked for (22:01 Oct 21).
-  local green
+  local green requested_full="$full"
   green="$(newest_green)"
   if [[ -n "$green" && "$green" != "$full" ]] && git -C "$REPO" merge-base --is-ancestor "$full" "$green" 2>/dev/null; then
     log "$kind: request $full is contained in the newest green $green; deploying that"
@@ -730,11 +743,14 @@ handle_request() {
     fi
     log "$kind: retrying $full after a failure"
   fi
+  # Satisfied when the deployed commit contains what was asked for (the minimum), even if newer
+  # green commits exist: a request is a reason to deploy, not a standing order to chase main.
   local deployed
   deployed="$(deployed_sha "$kind")"
   if [[ -n "$deployed" ]] && git -C "$REPO" cat-file -e "$deployed^{commit}" 2>/dev/null \
-     && git -C "$REPO" merge-base --is-ancestor "$full" "$deployed" 2>/dev/null; then
-    log "$kind: $full is already in the deployed $deployed; nothing to do"
+     && { git -C "$REPO" merge-base --is-ancestor "$full" "$deployed" 2>/dev/null \
+          || git -C "$REPO" merge-base --is-ancestor "$requested_full" "$deployed" 2>/dev/null; }; then
+    log "$kind: $requested_full is already in the deployed $deployed; nothing to do"
     rm -f "$file"
     return 0
   fi
