@@ -462,7 +462,7 @@ async fn run(state: &AppState, user_id: &str, target: &str, source: Source) -> R
 /// Daytona-archive every retained sandbox beyond the [`KEEP_UNARCHIVED_RETAINED`] newest (one user, or
 /// all when `user_id` is `None`). Archive, never delete: `start` restores an archived sandbox (slower —
 /// see the runbook); the fallback window and the delete sweeper are unchanged. Returns how many were
-/// archived; a sandbox that is not stopped yet (409) is left for the hourly sweeper.
+/// archived; a sandbox that is still running is stopped and left for the hourly sweeper.
 pub async fn archive_excess_retained(
     state: &AppState,
     dt: &crate::daytona::Daytona,
@@ -482,6 +482,18 @@ pub async fn archive_excess_retained(
             }
             Err(e) if e.to_string().contains("404") => {
                 let _ = state.db.mark_box_history_deleted(&sandbox_id);
+            }
+            // Daytona archives stopped sandboxes only (400 "Sandbox is not stopped"); a retained box
+            // the upgrade left running is stopped here and archived on the next pass.
+            Err(e) if e.to_string().contains("not stopped") => {
+                match dt.stop(&sandbox_id, false).await {
+                    Ok(_) => {
+                        tracing::info!(user = %uid, sandbox = %sandbox_id, "retained box stopped; archived on the next pass")
+                    }
+                    Err(e) => {
+                        tracing::warn!(user = %uid, sandbox = %sandbox_id, error = %e, "retained box stop before archive")
+                    }
+                }
             }
             Err(e) => {
                 tracing::warn!(user = %uid, sandbox = %sandbox_id, error = %e, "retained box archive")
@@ -621,7 +633,7 @@ pub async fn spawn_history_sweeper(state: AppState) {
             let Some(dt) = state.daytona.as_ref() else {
                 return;
             };
-            // Anything the per-upgrade pass could not archive (409: not stopped yet, API hiccup).
+            // Anything the per-upgrade pass could not archive (stopped only on that pass, API hiccup).
             archive_excess_retained(&state, dt, None).await;
             for (user_id, sandbox_id) in state.db.box_history_due().unwrap_or_default() {
                 match dt.delete(&sandbox_id).await {
