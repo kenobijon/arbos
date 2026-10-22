@@ -1246,6 +1246,10 @@ impl AppState {
                 cx.notify();
             }
             SyncEvent::Notice(text) => {
+                // Create/fork failed: stop waiting for a project that will not arrive.
+                if text.starts_with("New project failed") {
+                    self.awaiting_new_project = false;
+                }
                 self.push_notice(text);
                 cx.notify();
             }
