@@ -717,6 +717,19 @@ impl ProseFilter {
         Self::fix_glued_spaces(&without_tail)
     }
 
+    /// Put the whitespace that surrounded `original` back around `cleaned`, so what the filter
+    /// did not strip streams byte for byte. The strippers trim; a delta boundary that falls on
+    /// a space, a line break or a paragraph break must not eat it ("I did not" → "I didnot").
+    fn with_outer_ws(original: &str, cleaned: &str) -> String {
+        let body = cleaned.trim();
+        if body.is_empty() {
+            return String::new();
+        }
+        let lead = &original[..original.len() - original.trim_start().len()];
+        let trail = &original[original.trim_end().len()..];
+        format!("{lead}{body}{trail}")
+    }
+
     fn take_line(&mut self, line: &str) -> Option<String> {
         let t = line.trim_start();
         if self.in_fence {
@@ -742,6 +755,14 @@ impl ProseFilter {
                 Some(line.to_owned())
             };
         }
+        if line.trim().is_empty() {
+            // A blank line inside prose is a paragraph break; before prose starts it is noise.
+            return if self.started {
+                Some(line.to_owned())
+            } else {
+                None
+            };
+        }
         if Self::is_boilerplate(line) {
             return None;
         }
@@ -750,7 +771,7 @@ impl ProseFilter {
             return None;
         }
         self.started = true;
-        Some(cleaned)
+        Some(Self::with_outer_ws(line, &cleaned))
     }
 
     /// Feed a delta; returns the text that may enter the doc now.
@@ -771,11 +792,15 @@ impl ProseFilter {
             // that still looks like tool-narration so "Checking…" never lands mid-stream.
             let raw = std::mem::take(&mut self.pending);
             if let Some((complete, rest)) = Self::split_at_last_sentence_end(&raw) {
-                out.push_str(&Self::clean_prose(complete));
+                if complete.chars().any(char::is_alphabetic) {
+                    out.push_str(&Self::with_outer_ws(complete, &Self::clean_prose(complete)));
+                } else {
+                    out.push_str(complete);
+                }
                 if !rest.is_empty() && Self::could_be_narration_prefix(rest) {
                     self.pending = rest.to_string();
                 } else if !rest.is_empty() {
-                    let rest = Self::fix_glued_spaces(rest.trim_start());
+                    let rest = Self::fix_glued_spaces(rest);
                     if !rest.is_empty() {
                         if !out.is_empty()
                             && !out.ends_with([' ', '\n', '\r'])
@@ -799,12 +824,13 @@ impl ProseFilter {
                 self.pending.clear();
             } else {
                 let cleaned = Self::clean_prose(&self.pending);
+                let kept = Self::with_outer_ws(self.pending.trim_start(), &cleaned);
                 self.pending.clear();
-                if cleaned.trim().is_empty() {
+                if kept.is_empty() {
                     // Entire buffer was thought-aloud / narration; keep waiting for real prose.
                 } else {
                     self.started = true;
-                    out.push_str(&cleaned);
+                    out.push_str(&kept);
                 }
             }
         }
@@ -5753,5 +5779,55 @@ mod tests {
             !flushed.contains("Checking"),
             "flush must not revive narration: {flushed:?}"
         );
+    }
+
+    /// Plain prose must come out byte for byte whatever the delta boundaries: spaces between
+    /// words, line breaks, paragraph breaks and a lone trailing "?" (#1356).
+    #[test]
+    fn feed_preserves_whitespace_across_any_chunking() {
+        let text = "The bug was in `slugify`: it cut the text to `max_len + 1` characters, so one extra character could survive. I changed the slice, with the message \"fix: slugify keeps max_len characters, not max_len+1\". I did not push.\n\nThe four tests pass when run as `python3 -m unittest`. Changed in `cfgapp/`:\n- `cfgapp/loader.py`: the function definition is now `load_config`\n- `cfgapp/app.py`: the import and the call use `load_config`.\n\n```\n3: gamma\n2: beta\n```\n\nShould I add an empty `tests/__init__.py` so your command works?";
+        let chunkings: Vec<Vec<usize>> = vec![
+            vec![1],
+            vec![3],
+            vec![7, 1, 13, 2],
+            vec![40],
+            vec![text.len()],
+        ];
+        for sizes in chunkings {
+            let mut f = ProseFilter::default();
+            let mut out = String::new();
+            let mut i = 0;
+            let mut k = 0;
+            let bytes = text.as_bytes();
+            while i < bytes.len() {
+                let mut end = (i + sizes[k % sizes.len()]).min(bytes.len());
+                while !text.is_char_boundary(end) {
+                    end += 1;
+                }
+                out.push_str(&f.feed(&text[i..end]));
+                i = end;
+                k += 1;
+            }
+            out.push_str(&f.flush());
+            assert_eq!(out, text, "chunking {sizes:?}");
+        }
+    }
+
+    /// Narration is still stripped, and the whitespace rule does not glue what follows it.
+    #[test]
+    fn feed_strips_narration_but_keeps_following_spacing() {
+        let mut f = ProseFilter::default();
+        let mut out = String::new();
+        for d in [
+            "Running the tests…\n",
+            "All four",
+            " tests pass.",
+            " Nothing",
+            " else changed.\n",
+        ] {
+            out.push_str(&f.feed(d));
+        }
+        out.push_str(&f.flush());
+        assert_eq!(out, "All four tests pass. Nothing else changed.\n");
     }
 }
