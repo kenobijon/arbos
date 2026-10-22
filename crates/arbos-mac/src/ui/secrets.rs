@@ -729,31 +729,22 @@ impl SecretsPanel {
         let mut body = div().flex().flex_col().gap(px(18.0));
 
         // Kill switch.
+        // The switch flips at once (optimistic; the relay's answer or the next
+        // refresh puts it back on error) — no inline confirm (Jacob, Oct 21).
         let paused = view.paused;
-        let armed = self.confirm.as_deref() == Some("pause");
         let pause_row = Self::row(
             "secrets-pause",
             "pause",
             "Pause all secrets",
-            armed.then(|| {
-                "Pause all secrets? Every agent loses every secret within seconds. Click again."
-                    .to_string()
-            }),
+            None,
             false,
             theme,
         )
         .border_b_0();
         let pause_row = Self::switch_row("secrets-pause-switch", pause_row, paused, theme)
             .on_click(cx.listener(move |this, _, _, cx| {
-                if paused {
-                    this.confirm = None;
-                    this.state.update(cx, |s, cx| s.secrets_pause(false, cx));
-                } else if this.confirm.as_deref() == Some("pause") {
-                    this.confirm = None;
-                    this.state.update(cx, |s, cx| s.secrets_pause(true, cx));
-                } else {
-                    this.confirm = Some("pause".into());
-                }
+                this.confirm = None;
+                this.state.update(cx, |s, cx| s.secrets_pause(!paused, cx));
                 cx.notify();
             }));
         body = body.child(
