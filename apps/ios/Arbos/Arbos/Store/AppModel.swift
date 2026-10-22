@@ -2351,12 +2351,25 @@ final class AppModel: ObservableObject {
 
     /// The profile page the root view presents (person, group or agent).
     @Published var profile: ProfileTarget?
+    /// People pushed over `profile` (a member tapped on a group's or server's
+    /// page): the sheet is a NavigationStack, the back chevron pops them.
+    @Published var profilePath: [ProfileTarget] = []
     /// A chat the next ChatView should open with its search bar up (profile "search").
     @Published var pendingSearchChat: String?
     /// Last presence time per user id, from room presence frames this session.
     @Published private(set) var lastSeen: [String: Int64] = [:]
 
-    func showProfile(_ target: ProfileTarget) { profile = target }
+    func showProfile(_ target: ProfileTarget) {
+        if let root = profile, root.pushesPeople, case .user = target {
+            // A person opened from a page that is already up is pushed, so
+            // back returns to that page with its tab and scroll untouched.
+            let top = profilePath.last ?? root
+            if top != target { profilePath.append(target) }
+            return
+        }
+        profilePath = []
+        profile = target
+    }
 
     /// A sender avatar was tapped: resolve the handle through the chat's members.
     /// Stable user id for a handle seen in a chat (members first, then the directory); nil when unknown.

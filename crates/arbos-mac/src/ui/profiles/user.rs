@@ -176,5 +176,5 @@ pub(super) fn page(
             )
         })
         .children(block);
-    Some(frame(body, None, None, &theme, cx))
+    Some(frame(body, None, shell, &theme, cx))
 }

@@ -68,6 +68,16 @@ pub enum ServerSheet {
     NewChannel { server_id: Id },
 }
 
+/// A page under the open one in the right pane's stack (a group under the
+/// member opened from it), kept with what `‹` needs to bring it back as it
+/// was: its tab and how far its body was scrolled (px from the top).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProfileFrame {
+    pub page: ProfilePage,
+    pub tab: usize,
+    pub scroll: f32,
+}
+
 /// Which agent-settings row on the agent's profile page is expanded into its
 /// choice list (click to open; see `ui::hoverpick`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -356,6 +366,12 @@ pub struct AppState {
     /// Telegram-style profile sheet (user / group / agent) and its tab.
     pub profile: Option<ProfilePage>,
     pub profile_tab: usize,
+    /// The pages under `profile`, outermost first: a member opened from a
+    /// group's pane sits over that group, and `‹` pops back to it.
+    pub profile_stack: Vec<ProfileFrame>,
+    /// Bumped whenever a different page fills the pane, so the shell starts
+    /// its body at the top (a popped page keeps its saved scroll instead).
+    pub profile_opened: u64,
     /// Agent page: the Appearance (tree + colour) section is unfolded.
     pub profile_picker_open: bool,
     /// Agent page: which settings row (model / reasoning / voice) is dropped down.
@@ -653,6 +669,8 @@ impl AppState {
             notify_prompt: false,
             profile: None,
             profile_tab: 0,
+            profile_stack: Vec::new(),
+            profile_opened: 0,
             profile_picker_open: false,
             agent_pick: None,
             profile_editing_description: false,
@@ -1376,7 +1394,7 @@ impl AppState {
                     }
                     // select_project() keeps the tab within the visible chats.
                     self.select_project(project_id.clone(), cx);
-                    // Rig: `ARBOS_OPEN_PROFILE=agent[:model|reasoning|voice]|group[:library]|user|me`
+                    // Rig: `ARBOS_OPEN_PROFILE=agent[:model|reasoning|voice]|group[:library|:member]|user|me`
                     // opens the right pane for the restored chat (selecting it
                     // closed whatever the shell opened at launch), and
                     // `ARBOS_OPEN_SETTINGS=…` re-opens my pane on its Settings tab.
@@ -1390,12 +1408,33 @@ impl AppState {
                         } else if let Some(rest) = spec.strip_prefix("group") {
                             self.open_profile(
                                 ProfilePage::Group {
-                                    space_id: project_id,
+                                    space_id: project_id.clone(),
                                 },
                                 cx,
                             );
                             if rest == ":library" {
                                 self.set_profile_tab(1, cx);
+                            }
+                            // `:member` lands on the first other member, pushed
+                            // over the group as a click on its row would.
+                            if rest == ":member" {
+                                let me = self.me_handle();
+                                if let Some(handle) = self
+                                    .projects
+                                    .iter()
+                                    .find(|p| p.id == project_id)
+                                    .and_then(|p| p.people.iter().find(|x| x.handle != me))
+                                    .map(|x| x.handle.clone())
+                                {
+                                    self.push_profile(
+                                        ProfilePage::User {
+                                            handle,
+                                            space_id: Some(project_id),
+                                        },
+                                        0.0,
+                                        cx,
+                                    );
+                                }
                             }
                         } else if spec == "user" {
                             if let Some(handle) = self
@@ -3899,7 +3938,43 @@ impl AppState {
         }
     }
 
+    /// Fill the pane with `page`, forgetting whatever was under it.
     pub fn open_profile(&mut self, page: ProfilePage, cx: &mut Context<Self>) {
+        self.profile_stack.clear();
+        self.show_profile(page, cx);
+    }
+
+    /// Push `page` over the open pane — a member from a group's list, the
+    /// owner from an agent — keeping the page underneath with its tab and
+    /// `scroll` so `‹` brings it back as it was. Nothing open: plain open.
+    pub fn push_profile(&mut self, page: ProfilePage, scroll: f32, cx: &mut Context<Self>) {
+        let Some(under) = self.profile.clone() else {
+            self.open_profile(page, cx);
+            return;
+        };
+        if under == page {
+            return;
+        }
+        let tab = self.profile_tab;
+        self.profile_stack.push(ProfileFrame {
+            page: under,
+            tab,
+            scroll,
+        });
+        self.show_profile(page, cx);
+    }
+
+    /// `‹` on a pushed page: the page underneath comes back on its tab; the
+    /// saved scroll is returned for the shell to restore (`None` = the pane
+    /// has nothing under the open page).
+    pub fn pop_profile(&mut self, cx: &mut Context<Self>) -> Option<f32> {
+        let frame = self.profile_stack.pop()?;
+        self.show_profile(frame.page, cx);
+        self.profile_tab = frame.tab;
+        Some(frame.scroll)
+    }
+
+    fn show_profile(&mut self, page: ProfilePage, cx: &mut Context<Self>) {
         self.avatar_picker = match &page {
             ProfilePage::Agent { project_id } => Some(project_id.clone()),
             _ => None,
@@ -3911,6 +3986,7 @@ impl AppState {
             });
         }
         self.profile = Some(page);
+        self.profile_opened = self.profile_opened.wrapping_add(1);
         self.profile_from_name = false;
         self.profile_tab = 0;
         self.profile_picker_open = false;
@@ -4055,6 +4131,7 @@ impl AppState {
         self.avatar_picker = None;
         self.profile_from_name = false;
         self.agent_pick = None;
+        self.profile_stack.clear();
         let was = self.profile.take().is_some();
         if was {
             self.profile_editing_name = false;

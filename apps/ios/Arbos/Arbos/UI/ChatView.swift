@@ -431,6 +431,12 @@ struct ChatView: View {
                     case "edit": showProfile = true
                     case "userprofile": if let c = counterpart { model.showProfile(.user(ProfilePerson(c))) }
                     case "groupprofile": model.showProfile(.group(chatId: chatId, projectId: isPeople ? nil : projectId))
+                    case "member":
+                        // The group page, then its first other member pushed over it (rig).
+                        openHeaderProfile()
+                        if let other = people?.humans.first(where: { $0.id != model.user?.id }) {
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { model.showProfile(.user(ProfilePerson(other))) }
+                        }
                     case "members", "addperson": openHeaderProfile()
                     case "feedback": FeedbackCenter.shared.open(screen: "chat", chatId: chatId, projectId: isPeople ? nil : projectId)
                     case "call":

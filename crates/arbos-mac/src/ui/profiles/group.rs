@@ -208,15 +208,13 @@ pub(super) fn page(
                     .hover(|s| s.bg(theme.surface_2))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         let (handle, sid) = (handle.clone(), sid.clone());
-                        this.state.update(cx, |s, cx| {
-                            s.open_profile(
-                                ProfilePage::User {
-                                    handle,
-                                    space_id: Some(sid),
-                                },
-                                cx,
-                            )
-                        });
+                        this.push_profile(
+                            ProfilePage::User {
+                                handle,
+                                space_id: Some(sid),
+                            },
+                            cx,
+                        );
                     })),
                 );
             }
@@ -263,9 +261,7 @@ pub(super) fn page(
                         .hover(|s| s.bg(theme.surface_2))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             let pid = pid.clone();
-                            this.state.update(cx, |s, cx| {
-                                s.open_profile(ProfilePage::Agent { project_id: pid }, cx)
-                            });
+                            this.push_profile(ProfilePage::Agent { project_id: pid }, cx);
                         })),
                     );
                 }
@@ -293,9 +289,7 @@ pub(super) fn page(
                     .hover(|s| s.bg(theme.surface_2))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         let pid = pid.clone();
-                        this.state.update(cx, |s, cx| {
-                            s.open_profile(ProfilePage::Agent { project_id: pid }, cx)
-                        });
+                        this.push_profile(ProfilePage::Agent { project_id: pid }, cx);
                     })),
                 );
             }
@@ -339,7 +333,7 @@ pub(super) fn page(
         .child(hero)
         .child(tabs)
         .child(body_tab);
-    Some(frame(body, None, None, &theme, cx))
+    Some(frame(body, None, shell, &theme, cx))
 }
 
 /// The hover-only ✕ at a member row's trailing edge; click arms the confirm.

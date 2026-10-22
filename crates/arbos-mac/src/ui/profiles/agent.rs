@@ -265,7 +265,7 @@ pub(super) fn page(
         glass::sheet_button("profile-done", "Done", &theme)
             .on_click(cx.listener(|this, _, window, cx| this.finish_edit_agent(window, cx)))
     });
-    Some(frame(body, done, Some(&shell.profile_scroll), &theme, cx))
+    Some(frame(body, done, shell, &theme, cx))
 }
 
 fn colour_row(project: &Project, theme: &Theme, cx: &mut Context<Shell>) -> Div {
