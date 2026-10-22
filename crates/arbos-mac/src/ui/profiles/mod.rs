@@ -66,13 +66,15 @@ pub(super) fn frame(
     theme: &Theme,
     cx: &mut Context<Shell>,
 ) -> Stateful<Div> {
-    pane_frame(SHEET_WIDTH, None, body, right, scroll, theme, cx)
+    pane_frame(SHEET_WIDTH, None, None, body, right, scroll, theme, cx)
 }
 
 /// A page pushed from another (a sender tapped in a group): the header leads with `‹`
 /// back to the page underneath and `title`.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn pushed_frame(
     title: &str,
+    pinned: Option<Div>,
     body: Div,
     right: Option<Stateful<Div>>,
     scroll: Option<&ScrollHandle>,
@@ -81,7 +83,7 @@ pub(super) fn pushed_frame(
     cx: &mut Context<Shell>,
 ) -> Stateful<Div> {
     if shell.state.read(cx).profile_stack.is_empty() {
-        return pane_frame(SHEET_WIDTH, None, body, right, scroll, theme, cx);
+        return pane_frame(SHEET_WIDTH, None, pinned, body, right, scroll, theme, cx);
     }
     let back = glass::circle("profile-back", 30.0, theme)
         .child(icon("chevron-left", 14.0, theme.text))
@@ -89,6 +91,7 @@ pub(super) fn pushed_frame(
     pane_frame(
         SHEET_WIDTH,
         Some((title, back)),
+        pinned,
         body,
         right,
         scroll,
@@ -98,9 +101,15 @@ pub(super) fn pushed_frame(
 }
 
 /// The pane with a pushed page: `‹` back and the page title lead the header.
+/// The band over which the scrolling body fades out under the pinned block
+/// (the chat header's treatment, #1336; Jacob Oct 22: "no hard cut").
+pub(crate) const PANE_FADE_BAND: f32 = 24.0;
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn pane_frame(
     width: f32,
     back: Option<(&str, Stateful<Div>)>,
+    pinned: Option<Div>,
     body: Div,
     right: Option<Stateful<Div>>,
     scroll: Option<&ScrollHandle>,
@@ -110,10 +119,9 @@ pub(crate) fn pane_frame(
     let close = glass::circle("profile-close", 30.0, theme)
         .child(icon("xmark", 13.0, theme.text))
         .on_click(cx.listener(|this, _, window, cx| this.close_profile(window, cx)));
-    // An opaque bar the body scrolls under; once scrolled it shows its lower
-    // edge, so content passing beneath reads as behind a bar, not clipped by
-    // nothing (Jacob, Oct 21; [feedback mac-collapsed-toggle-inline]).
-    let scrolled = scroll.is_some_and(|h| f32::from(h.offset().y) < -0.5);
+    // The top bar: no hairline under it (Jacob, Oct 22). `pinned` (a page's
+    // hero + tab pill, D93) sits under it and stays while the body scrolls
+    // beneath, fading out over `PANE_FADE_BAND` like the chat under its header.
     let mut header = div()
         .h(px(crate::ui::theme::HEADER_HEIGHT))
         .flex_shrink_0()
@@ -121,8 +129,7 @@ pub(crate) fn pane_frame(
         .items_center()
         .gap(px(6.0))
         .px(px(10.0))
-        .bg(theme.card())
-        .when(scrolled, |el| el.border_b_1().border_color(theme.border));
+        .bg(theme.card());
     if let Some((title, back)) = back {
         header = header.child(back).child(
             div()
@@ -149,16 +156,17 @@ pub(crate) fn pane_frame(
         .border_color(theme.border)
         .bg(theme.pane())
         .child(header)
-        .child(
+        .children(pinned.map(|p| p.flex_shrink_0()))
+        .child(crate::ui::frost::edge_faded(
+            PANE_FADE_BAND,
+            true,
+            false,
             body.id("profile-body")
                 .flex_1()
                 .min_h_0()
                 .overflow_y_scroll()
-                .when_some(scroll, |el, h| el.track_scroll(h))
-                // A wheel tick re-renders the pane so the bar's edge follows the
-                // scroll position (the handle alone does not notify).
-                .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify())),
-        )
+                .when_some(scroll, |el, h| el.track_scroll(h)),
+        ))
         .on_mouse_down(
             gpui::MouseButton::Left,
             cx.listener(|this, _, _, cx| {
