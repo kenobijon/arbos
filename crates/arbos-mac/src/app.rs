@@ -1384,6 +1384,21 @@ impl AppState {
                     }
                     // select_project() keeps the tab within the visible chats.
                     self.select_project(project_id.clone(), cx);
+                    // Rig: `ARBOS_OPEN_NEW_GROUP=1` opens the New group picker with one
+                    // agent and one person already picked (member chips) — here,
+                    // after the fixture's projects exist.
+                    if std::env::var("ARBOS_OPEN_NEW_GROUP").is_ok_and(|v| v == "1") {
+                        self.open_new_chat(cx);
+                        self.open_new_group(cx);
+                        let agent = self.my_projects().next().map(|p| p.id.clone());
+                        let person = self.projects.iter().find_map(|p| p.person().cloned());
+                        if let Some(id) = agent {
+                            self.toggle_group_agent(id, cx);
+                        }
+                        if let Some(person) = person {
+                            self.toggle_group_person(person, cx);
+                        }
+                    }
                     // Rig: `ARBOS_REPLY_TO=1` arms a reply to the restored chat's
                     // last message (the composer's reply preview bar).
                     if std::env::var("ARBOS_REPLY_TO").is_ok_and(|v| v == "1") {
