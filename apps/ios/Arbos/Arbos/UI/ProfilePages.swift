@@ -1558,8 +1558,8 @@ struct ChannelProfileView: View {
                                 )
                         }
                         PaneCard {
-                            if !channel.topic.trimmingCharacters(in: .whitespaces).isEmpty {
-                                PaneRow(title: channel.topic)
+                            if let topic = channel.topic, !topic.trimmingCharacters(in: .whitespaces).isEmpty {
+                                PaneRow(title: topic)
                             }
                             PaneRow(title: "Posting", value: restricted ? "Admins only" : "Everyone")
                         }
