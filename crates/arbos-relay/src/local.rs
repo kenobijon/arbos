@@ -15,9 +15,10 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::json;
 use tokio::sync::{mpsc, oneshot, Mutex};
 
+use arbos_core::api::{LocalDeviceDto, LocalDevicesDto};
 use arbos_core::ids::ulid;
 use arbos_core::local::{
     LocalClientFrame, LocalExecRequest, LocalOp, LocalResult, LocalServerFrame,
@@ -218,18 +219,24 @@ pub async fn exec(
 pub async fn list(State(state): State<AppState>, _principal: Principal) -> ApiResult {
     let devices = state.db.local_devices().map_err(internal)?;
     let online = state.local_conns.lock().await;
-    let items: Vec<Value> = devices
+    let items: Vec<LocalDeviceDto> = devices
         .into_iter()
         .map(|d| {
             let connected = online.contains_key(&d.device_id);
-            json!({
-                "device_id": d.device_id, "name": d.name, "hostname": d.hostname, "os": d.os, "home": d.home,
-                "connected": connected, "last_seen": d.last_seen, "first_seen": d.first_seen,
-                "allow_reads": d.allow_reads,
-            })
+            LocalDeviceDto {
+                device_id: d.device_id,
+                name: d.name,
+                hostname: d.hostname,
+                os: d.os,
+                home: d.home,
+                connected,
+                last_seen: d.last_seen,
+                first_seen: d.first_seen,
+                allow_reads: d.allow_reads,
+            }
         })
         .collect();
-    Ok(Json(json!({ "items": items })).into_response())
+    Ok(Json(LocalDevicesDto { items }).into_response())
 }
 
 #[derive(Deserialize)]

@@ -6,6 +6,7 @@ use base64::Engine;
 use reqwest::Method;
 use serde_json::{json, Value};
 
+use arbos_core::api::{ConnectorActionDto, ProviderDto};
 use arbos_core::ids::now_ms;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -181,7 +182,7 @@ pub struct ActionSpec {
 }
 
 impl ActionSpec {
-    pub fn to_json(&self) -> Value {
+    pub fn to_dto(&self) -> ConnectorActionDto {
         let props: serde_json::Map<String, Value> = self
             .args
             .iter()
@@ -198,12 +199,12 @@ impl ActionSpec {
             .filter(|a| a.required)
             .map(|a| a.name)
             .collect();
-        json!({
-            "name": self.name,
-            "kind": self.kind.as_str(),
-            "description": self.help,
-            "args": { "type": "object", "properties": props, "required": required },
-        })
+        ConnectorActionDto {
+            name: self.name.to_owned(),
+            kind: self.kind.as_str().to_owned(),
+            description: self.help.to_owned(),
+            args: json!({ "type": "object", "properties": props, "required": required }),
+        }
     }
 
     /// Missing required args, by name.
@@ -470,7 +471,7 @@ const HARNESS_ACTIONS: &[ActionSpec] = &[
 ];
 
 /// Everything the catalog endpoint says about one provider.
-pub fn provider_json(p: Provider, configured: bool, mock: bool) -> Value {
+pub fn provider_dto(p: Provider, configured: bool, mock: bool) -> ProviderDto {
     let (connect, scopes): (&str, Vec<&str>) = match p.auth() {
         Auth::Oauth(o) => (
             if o.accepts_token {
@@ -482,15 +483,15 @@ pub fn provider_json(p: Provider, configured: bool, mock: bool) -> Value {
         ),
         Auth::Token => ("token", vec![]),
     };
-    json!({
-        "provider": p.as_str(),
-        "label": p.label(),
-        "connect": connect,
-        "oauth_configured": configured,
-        "mock": mock,
-        "scopes": scopes,
-        "actions": p.actions().iter().map(ActionSpec::to_json).collect::<Vec<_>>(),
-    })
+    ProviderDto {
+        provider: p.as_str().to_owned(),
+        label: p.label().to_owned(),
+        connect: connect.to_owned(),
+        oauth_configured: configured,
+        mock,
+        scopes: scopes.into_iter().map(str::to_owned).collect(),
+        actions: p.actions().iter().map(ActionSpec::to_dto).collect(),
+    }
 }
 
 /// A prepared upstream request; the broker adds the bearer token and executes it.

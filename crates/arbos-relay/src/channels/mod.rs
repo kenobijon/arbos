@@ -21,6 +21,9 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use arbos_core::api::{
+    ChannelBindingDto, ChannelPairingDto, ChannelPlatformDto, ChannelsOverviewDto,
+};
 use arbos_core::ids::{now_ms, ulid};
 
 use crate::auth::Principal;
@@ -419,15 +422,35 @@ fn clip(text: &str) -> String {
 
 // ---- device-facing endpoints --------------------------------------------------------------
 
+pub(crate) fn binding_dto(b: &ChannelBinding) -> ChannelBindingDto {
+    ChannelBindingDto {
+        id: b.id.clone(),
+        platform: b.platform.clone(),
+        external_chat_id: b.external_chat_id.clone(),
+        external_user_id: b.external_user_id.clone(),
+        project_id: b.project_id.clone(),
+        chat_id: b.chat_id.clone(),
+        label: b.label.clone(),
+        bound_at: b.bound_at,
+    }
+}
+
 fn binding_json(b: &ChannelBinding) -> Value {
-    json!({
-        "id": b.id, "platform": b.platform, "externalChatId": b.external_chat_id, "externalUserId": b.external_user_id,
-        "projectId": b.project_id, "chatId": b.chat_id, "label": b.label, "bound_at": b.bound_at,
-    })
+    serde_json::to_value(binding_dto(b)).expect("ChannelBindingDto")
+}
+
+pub(crate) fn pair_dto(c: &ChannelPairCode) -> ChannelPairingDto {
+    ChannelPairingDto {
+        code: c.code.clone(),
+        project_id: c.project_id.clone(),
+        chat_id: c.chat_id.clone(),
+        created_at: c.created_at,
+        expires_at: c.expires_at,
+    }
 }
 
 fn pair_json(c: &ChannelPairCode) -> Value {
-    json!({ "code": c.code, "projectId": c.project_id, "chatId": c.chat_id, "created_at": c.created_at, "expiresAt": c.expires_at })
+    serde_json::to_value(pair_dto(c)).expect("ChannelPairingDto")
 }
 
 /// `GET /channels`: platform states, bindings, the active pairing code.
@@ -435,7 +458,7 @@ pub async fn overview(State(state): State<AppState>, principal: Principal) -> Ap
     if principal.is_box() {
         return Err((StatusCode::FORBIDDEN, "device only".into()));
     }
-    let platforms: Vec<Value> = Platform::ALL
+    let platforms: Vec<ChannelPlatformDto> = Platform::ALL
         .iter()
         .map(|p| {
             let (st, detail) = platform_state(&state, *p);
@@ -446,26 +469,41 @@ pub async fn overview(State(state): State<AppState>, principal: Principal) -> Ap
                     state.cfg.public_url
                 ),
                 Platform::Whatsapp => {
-                    format!("GET/POST {}/channels/whatsapp/webhook", state.cfg.public_url)
+                    format!(
+                        "GET/POST {}/channels/whatsapp/webhook",
+                        state.cfg.public_url
+                    )
                 }
                 Platform::Beeper => "relay polls POST /v1/messages/poll".to_owned(),
             };
-            json!({ "platform": p.as_str(), "label": p.label(), "state": st.as_str(), "detail": detail, "inbound": inbound })
+            ChannelPlatformDto {
+                platform: p.as_str().to_owned(),
+                label: p.label().to_owned(),
+                state: st.as_str().to_owned(),
+                detail,
+                inbound,
+            }
         })
         .collect();
-    let bindings: Vec<Value> = state
+    let bindings: Vec<ChannelBindingDto> = state
         .db
         .list_channel_bindings()
         .map_err(internal)?
         .iter()
-        .map(binding_json)
+        .map(binding_dto)
         .collect();
     let pairing = state
         .db
         .active_channel_pair_code()
         .map_err(internal)?
-        .map(|c| pair_json(&c));
-    Ok(Json(json!({ "mock": mock_on(&state), "platforms": platforms, "bindings": bindings, "pairing": pairing })).into_response())
+        .map(|c| pair_dto(&c));
+    Ok(Json(ChannelsOverviewDto {
+        mock: mock_on(&state),
+        platforms,
+        bindings,
+        pairing,
+    })
+    .into_response())
 }
 
 #[derive(Deserialize)]

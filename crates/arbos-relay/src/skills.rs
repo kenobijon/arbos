@@ -9,6 +9,7 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use arbos_core::api::SkillDto;
 use arbos_core::ids::{now_ms, ulid};
 use arbos_core::skill::{slugify, Skill};
 
@@ -144,10 +145,12 @@ impl SkillBody {
     }
 }
 
+pub(crate) fn skill_dto(s: &Skill) -> SkillDto {
+    SkillDto::from(s)
+}
+
 fn skill_json(s: &Skill) -> Value {
-    let mut v = serde_json::to_value(s).unwrap_or(Value::Null);
-    v["markdown"] = json!(s.to_markdown());
-    v
+    serde_json::to_value(skill_dto(s)).expect("SkillDto")
 }
 
 fn index_json(s: &Skill) -> Value {
