@@ -231,6 +231,9 @@ pub struct Shell {
     /// The row menu's Delete was clicked once: it now shows "Delete …?" with
     /// Cancel / Delete instead of the action list (iPhone confirmationDialog).
     pub(crate) row_delete_armed: bool,
+    /// The agent pane's "Delete agent" was clicked once: the footer row asks
+    /// to confirm (D93 footer, #1318).
+    pub(crate) agent_delete_armed: bool,
     /// Group pane › Members: the row whose ✕ was clicked (`user:<id>` or
     /// `agent:<project>`); it shows "Remove … ?" with Cancel / Remove.
     pub(crate) member_remove_armed: Option<String>,
@@ -653,6 +656,7 @@ impl Shell {
             channel_menu: None,
             channel_delete_armed: false,
             row_delete_armed: false,
+            agent_delete_armed: false,
             member_remove_armed: None,
             chat_menu: None,
             chat_delete_armed: false,
@@ -1278,6 +1282,7 @@ impl Shell {
         self.hide_settings_page(cx);
         self.profile_edit_open = false;
         self.member_remove_armed = None;
+        self.agent_delete_armed = false;
         self.server_member_armed = None;
         self.server_leave_armed = false;
         self.channel_rename = None;
@@ -1695,6 +1700,7 @@ impl Shell {
             self.row_menu = None;
             self.channel_menu = None;
             self.row_delete_armed = false;
+            self.agent_delete_armed = false;
             self.channel_menu = None;
             self.channel_delete_armed = false;
             self.chat_menu = None;

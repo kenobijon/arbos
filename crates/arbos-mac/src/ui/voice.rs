@@ -670,11 +670,6 @@ impl Voice {
 
     // ----- voice mode ---------------------------------------------------------
 
-    pub fn toggle_voice_mode(&mut self, cx: &mut Context<Self>) {
-        let on = !self.voice_mode(cx);
-        self.set_voice_mode(on, cx);
-    }
-
     fn set_voice_mode(&mut self, on: bool, cx: &mut Context<Self>) {
         // Relay kill switch (features.voice_mode): the switch cannot be turned on while off.
         if on && !self.state.read(cx).voice_mode_available() {
