@@ -14,6 +14,7 @@ use gpui::{
 
 use crate::app::SignInMode;
 use crate::app::{AppState, DetailsTarget, ProfilePage, ServerSheet};
+use crate::image_picker;
 use crate::model::{now_ms, CallKind, Link, MachineState};
 use crate::ui::attachments;
 use crate::ui::avatars;
@@ -52,8 +53,11 @@ actions!(
     [CloseTab, NewTab, PrevTab, NextTab, ToggleRail, Escape, Quit]
 );
 
+/// How far the header's window-drag catchment overhangs the transcript (its top fade band).
+const HEADER_DRAG_OVERHANG: f32 = 24.0;
 /// Left inset for the conversation header while the sidebar is hidden: the window's traffic lights.
-const TRAFFIC_LIGHTS_INSET: f32 = 72.0;
+/// The sidebar's collapse control sits at the same inset, so it never moves when the pane folds.
+pub(crate) const TRAFFIC_LIGHTS_INSET: f32 = 72.0;
 
 /// What the shared name field (`agent_name_input`) renames when Return is pressed.
 #[derive(Clone, Copy)]
@@ -217,8 +221,13 @@ pub struct Shell {
     /// Group pane › Members: the row whose ✕ was clicked (`user:<id>` or
     /// `agent:<project>`); it shows "Remove … ?" with Cancel / Remove.
     pub(crate) member_remove_armed: Option<String>,
-    /// Right-click menu on a chat tab or archived chat: the chat and click point.
-    pub(crate) chat_menu: Option<(crate::model::Id, gpui::Point<gpui::Pixels>)>,
+    /// Right-click menu on a session row of the header's tab dropdown: the
+    /// chat whose row carries it (#1256: anchored to the row, the dropdown
+    /// stays open with the row highlighted).
+    pub(crate) chat_menu: Option<crate::model::Id>,
+    /// The session menu's Delete was clicked once: it shows `Delete "title"?`
+    /// with Cancel / Delete instead of the action list.
+    pub(crate) chat_delete_armed: bool,
     /// People chats (D72): the @search field, the header pickers.
     pub people_input: Entity<ComposerInput>,
     /// Agent profile page: inline description editor.
@@ -270,9 +279,14 @@ impl Shell {
     }
 
     pub fn new(state: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let open_settings = std::env::var("ARBOS_OPEN_SETTINGS")
-            .ok()
-            .filter(|v| v == "1" || v == "bottom" || v == "connectors" || v.starts_with("secrets"));
+        let open_settings = std::env::var("ARBOS_OPEN_SETTINGS").ok().filter(|v| {
+            v == "1"
+                || v == "bottom"
+                || v == "connectors"
+                || v == "notifications"
+                || v == "machine"
+                || v.starts_with("secrets")
+        });
         let settings_scroll = ScrollHandle::new();
         if open_settings.as_deref() == Some("bottom") {
             settings_scroll.scroll_to_bottom();
@@ -468,6 +482,8 @@ impl Shell {
             let weak = cx.entity().downgrade();
             people_input.update(cx, |input, _| {
                 input.set_placeholder("Search people");
+                // Grok Mac's search placeholder is ~14 pt (ref 57).
+                input.set_font_size(people::SEARCH_FONT_SIZE);
                 input.on_submit = Some(Rc::new(move |_window, cx| {
                     let _ = weak.update(cx, |this, cx| {
                         let typed = this.people_input.read(cx).text().trim().to_string();
@@ -494,7 +510,12 @@ impl Shell {
         })
         .detach();
         // Rig: `ARBOS_OPEN_NEW_AGENT=1` opens the New Message sheet with the
-        // "New agent" form expanded.
+        // "New agent" form expanded; `ARBOS_OPEN_NEW_CHAT=1` the plain sheet
+        // (`ARBOS_OPEN_NEW_GROUP=1` lives in app.rs: it needs the fixture's
+        // projects to pick members from).
+        if std::env::var("ARBOS_OPEN_NEW_CHAT").is_ok_and(|v| v == "1") {
+            state.update(cx, |s, cx| s.open_new_chat(cx));
+        }
         if std::env::var("ARBOS_OPEN_NEW_AGENT").is_ok_and(|v| v == "1") {
             state.update(cx, |s, cx| {
                 s.open_new_chat(cx);
@@ -598,6 +619,9 @@ impl Shell {
             // that page) — rig; the pane itself is opened below.
             settings_page: match open_settings.as_deref() {
                 Some("connectors") => SettingsPage::Connectors,
+                // Rig: `ARBOS_OPEN_SETTINGS=notifications|machine` — one-row cards.
+                Some("notifications") => SettingsPage::Notifications,
+                Some("machine") => SettingsPage::Machine,
                 Some(v) if v.starts_with("secrets") => SettingsPage::Secrets,
                 _ => SettingsPage::Root,
             },
@@ -606,6 +630,7 @@ impl Shell {
             row_delete_armed: false,
             member_remove_armed: None,
             chat_menu: None,
+            chat_delete_armed: false,
             react_menu: None,
             group_picker_open: false,
             renaming_tab: None,
@@ -1181,20 +1206,13 @@ impl Shell {
         cx.notify();
     }
 
-    /// The crayon on my own picture: pick an image file, `PUT /me/avatar`.
+    /// The crayon on my own picture: pick an image (images only in the panel),
+    /// `PUT /me/avatar`.
     pub(crate) fn pick_my_avatar(&mut self, cx: &mut Context<Self>) {
-        let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: false,
-            prompt: Some("Choose".into()),
-        });
+        let rx = image_picker::pick_image(cx, "Choose");
         let state = self.state.clone();
         cx.spawn(async move |_, cx| {
-            let Ok(Ok(Some(paths))) = rx.await else {
-                return;
-            };
-            let Some(path) = paths.into_iter().next() else {
+            let Ok(Some(path)) = rx.await else {
                 return;
             };
             cx.update(|cx| {
@@ -1204,20 +1222,13 @@ impl Shell {
         .detach();
     }
 
-    /// The crayon on a group's picture: pick an image file, upload it.
+    /// The crayon on a group's picture: pick an image (images only in the
+    /// panel), upload it.
     pub(crate) fn pick_group_image(&mut self, space_id: crate::model::Id, cx: &mut Context<Self>) {
-        let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: false,
-            prompt: Some("Choose".into()),
-        });
+        let rx = image_picker::pick_image(cx, "Choose");
         let state = self.state.clone();
         cx.spawn(async move |_, cx| {
-            let Ok(Ok(Some(paths))) = rx.await else {
-                return;
-            };
-            let Some(path) = paths.into_iter().next() else {
+            let Ok(Some(path)) = rx.await else {
                 return;
             };
             cx.update(|cx| {
@@ -1432,6 +1443,14 @@ impl Shell {
         if self.close_agent_pick(Some(window), cx) {
             return;
         }
+        // A session row's context menu closes alone; the dropdown under it
+        // stays (standard menu behaviour).
+        if self.chat_menu.is_some() {
+            self.chat_menu = None;
+            self.chat_delete_armed = false;
+            cx.notify();
+            return;
+        }
         let floating = self.menu_open
             || self.members_open
             || self.add_agent_open
@@ -1551,6 +1570,19 @@ impl Shell {
             .detach();
     }
 
+    /// Right-click / control-click on a session row of the tab dropdown
+    /// (#1256): its menu opens anchored to that row; the dropdown stays open
+    /// and the row stays highlighted until the menu closes.
+    pub(crate) fn open_chat_menu(&mut self, chat_id: crate::model::Id, cx: &mut Context<Self>) {
+        self.menu_open = false;
+        self.row_menu = None;
+        self.row_delete_armed = false;
+        self.tab_menu_open = true;
+        self.chat_menu = Some(chat_id);
+        self.chat_delete_armed = false;
+        cx.notify();
+    }
+
     /// Everything that floats closes on a click elsewhere.
     pub(crate) fn close_popovers(&mut self, cx: &mut Context<Self>) {
         self.close_agent_pick(None, cx);
@@ -1571,14 +1603,9 @@ impl Shell {
             self.row_menu = None;
             self.row_delete_armed = false;
             self.chat_menu = None;
+            self.chat_delete_armed = false;
             self.react_menu = None;
             cx.notify();
-        }
-        if self.composer.read(cx).open_picker.is_some() {
-            self.composer.update(cx, |c, cx| {
-                c.open_picker = None;
-                cx.notify();
-            });
         }
     }
 
@@ -2111,11 +2138,25 @@ impl Shell {
             // Transcript above, composer pinned at the bottom. On the first
             // send the composer slides down from the centre over 220 ms using
             // a relative `top` inset (GPUI has no transform).
+            // The window-drag catchment reaches 24 pt past the 44 pt header,
+            // over the transcript's top fade (Jacob: the band alone was too
+            // small to grab). The strip arms a move only after the pointer
+            // travels `WINDOW_DRAG_SLOP`, so a click there still lands on the
+            // faded bubble beneath ([feedback mac-collapsed-toggle-inline]).
             let body = div()
                 .flex_1()
                 .min_h_0()
                 .relative()
-                .child(self.transcript.clone());
+                .child(self.transcript.clone())
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .right_0()
+                        .h(px(HEADER_DRAG_OVERHANG))
+                        .window_drag(),
+                );
             if typing.is_some() {
                 PulseClock::request(cx);
             }
@@ -3010,9 +3051,6 @@ impl Render for Shell {
             }
         }
         if let Some(menu) = sidebar::row_menu(self, cx) {
-            root = root.child(menu);
-        }
-        if let Some(menu) = sidebar::chat_menu(self, cx) {
             root = root.child(menu);
         }
         if let Some(menu) = self.react_menu(cx) {

@@ -20,6 +20,7 @@ use crate::ui::composer::ComposerInput;
 use crate::ui::frost::{frosted, MENU_BLUR};
 use crate::ui::glass;
 use crate::ui::icons::icon;
+use crate::ui::profiles::kit;
 use crate::ui::theme::{Theme, PANEL_RADIUS, RAIL_WIDTH, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
 
 pub enum SecretsEvent {
@@ -403,14 +404,14 @@ impl SecretsPanel {
     ) -> Stateful<Div> {
         div()
             .id(id)
+            .relative()
             .flex()
             .items_center()
             .gap(px(10.0))
             .min_h(px(52.0))
             .px(px(16.0))
             .py(px(8.0))
-            .border_b_1()
-            .border_color(theme.border)
+            .child(kit::hairline_below(16.0, theme))
             .child(glass::icon_tile(glyph, theme).when(dim, |el| el.opacity(0.55)))
             .child(
                 div()
@@ -646,8 +647,8 @@ impl SecretsPanel {
                     .gap(px(2.0))
                     .px(px(16.0))
                     .py(px(8.0))
-                    .border_b_1()
-                    .border_color(theme.border)
+                    .relative()
+                    .child(kit::hairline_below(16.0, theme))
                     .child(
                         div()
                             .text_size(px(TEXT_SMALL))
@@ -706,8 +707,8 @@ impl SecretsPanel {
             .gap(px(3.0))
             .px(px(16.0))
             .py(px(10.0))
-            .border_b_1()
-            .border_color(theme.border)
+            .relative()
+            .child(kit::hairline_below(16.0, theme))
             .child(
                 div()
                     .text_size(px(TEXT_BODY))
@@ -729,31 +730,22 @@ impl SecretsPanel {
         let mut body = div().flex().flex_col().gap(px(18.0));
 
         // Kill switch.
+        // The switch flips at once (optimistic; the relay's answer or the next
+        // refresh puts it back on error) — no inline confirm (Jacob, Oct 21).
         let paused = view.paused;
-        let armed = self.confirm.as_deref() == Some("pause");
         let pause_row = Self::row(
             "secrets-pause",
             "pause",
             "Pause all secrets",
-            armed.then(|| {
-                "Pause all secrets? Every agent loses every secret within seconds. Click again."
-                    .to_string()
-            }),
+            None,
             false,
             theme,
         )
         .border_b_0();
         let pause_row = Self::switch_row("secrets-pause-switch", pause_row, paused, theme)
             .on_click(cx.listener(move |this, _, _, cx| {
-                if paused {
-                    this.confirm = None;
-                    this.state.update(cx, |s, cx| s.secrets_pause(false, cx));
-                } else if this.confirm.as_deref() == Some("pause") {
-                    this.confirm = None;
-                    this.state.update(cx, |s, cx| s.secrets_pause(true, cx));
-                } else {
-                    this.confirm = Some("pause".into());
-                }
+                this.confirm = None;
+                this.state.update(cx, |s, cx| s.secrets_pause(!paused, cx));
                 cx.notify();
             }));
         body = body.child(
@@ -970,8 +962,8 @@ impl SecretsPanel {
                 .gap(px(8.0))
                 .px(px(16.0))
                 .py(px(10.0))
-                .border_b_1()
-                .border_color(theme.border);
+                .relative()
+                .child(kit::hairline_below(16.0, theme));
             if s.kind == "login" {
                 form = form
                     .child(Self::field(
@@ -1154,8 +1146,8 @@ impl SecretsPanel {
                     .min_h(px(52.0))
                     .px(px(16.0))
                     .py(px(8.0))
-                    .border_b_1()
-                    .border_color(theme.border)
+                    .relative()
+                    .child(kit::hairline_below(16.0, theme))
                     .cursor_pointer()
                     .hover(|st| st.bg(theme.surface_2))
                     .child(avatar)
@@ -1915,8 +1907,8 @@ impl SecretsPanel {
                     .min_h(px(52.0))
                     .px(px(16.0))
                     .py(px(8.0))
-                    .border_b_1()
-                    .border_color(theme.border)
+                    .relative()
+                    .child(kit::hairline_below(16.0, theme))
                     .cursor_pointer()
                     .hover(|st| st.bg(theme.surface_2))
                     .child(avatar)
@@ -2037,8 +2029,8 @@ impl SecretsPanel {
                     .gap(px(10.0))
                     .px(px(16.0))
                     .py(px(8.0))
-                    .border_b_1()
-                    .border_color(theme.border)
+                    .relative()
+                    .child(kit::hairline_below(16.0, theme))
                     .cursor_pointer()
                     .hover(|s| s.bg(theme.surface_2))
                     .child(

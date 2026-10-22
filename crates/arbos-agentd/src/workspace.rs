@@ -11,6 +11,7 @@ use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, RwLock, Semaphore};
 
+use arbos_core::doc::{encode_vv, ChatDoc, CommandStatus, MessageStatus};
 use arbos_core::wire::PROJECT_DOC_CHAT_ID;
 
 use crate::agent::Agent;
@@ -185,17 +186,30 @@ impl Supervisor {
             axum::serve(stub_l, stub_app).await.ok();
         }));
 
+        let mut forks: Vec<(String, String)> = Vec::new();
         for c in chats {
             if let (Some(id), Some(title)) = (
                 c.get("id").and_then(Value::as_str),
                 c.get("title").and_then(Value::as_str),
             ) {
+                let first_sight = store.chat(id).ok().flatten().is_none();
                 let _ = store.upsert_chat(
                     id,
                     title,
                     c.get("is_pinned").and_then(Value::as_bool).unwrap_or(false),
                     c.get("created_at").and_then(Value::as_i64).unwrap_or(0),
                 );
+                if first_sight {
+                    if let Some(src) = c.get("forked_from").and_then(Value::as_str) {
+                        forks.push((id.to_owned(), src.to_owned()));
+                    }
+                }
+            }
+        }
+        // Forked chats (#1257) seen for the first time at boot: seed before their room opens.
+        for (id, src) in forks {
+            if let Err(e) = seed_forked_chat(&cfg, &store, &sync, &project_id, &id, &src).await {
+                tracing::warn!(error = %e, id, source = src, "fork chat seed");
             }
         }
         let known: Vec<String> = store.chats()?.into_iter().map(|c| c.id).collect();
@@ -501,9 +515,11 @@ impl Supervisor {
 
 impl Workspace {
     /// New chats from the registry get a room; titles land in the local index.
+    /// A chat forked from another (#1257) is seeded from its source first.
     pub async fn sync_chats(&self, chats: &[Value]) {
         for c in chats {
             if let Some(id) = c.get("id").and_then(Value::as_str) {
+                let first_sight = self.store.chat(id).ok().flatten().is_none();
                 let _ = self.store.upsert_chat(
                     id,
                     c.get("title").and_then(Value::as_str).unwrap_or("New chat"),
@@ -511,6 +527,22 @@ impl Workspace {
                     c.get("created_at").and_then(Value::as_i64).unwrap_or(0),
                 );
                 if self.sync.host(id).await.is_none() {
+                    if first_sight {
+                        if let Some(src) = c.get("forked_from").and_then(Value::as_str) {
+                            if let Err(e) = seed_forked_chat(
+                                &self.cfg,
+                                &self.store,
+                                &self.sync,
+                                &self.project_id,
+                                id,
+                                src,
+                            )
+                            .await
+                            {
+                                tracing::warn!(error = %e, id, source = src, "fork chat seed");
+                            }
+                        }
+                    }
                     if let Err(e) = self.sync.open_room(id).await {
                         tracing::warn!(error = %e, id, "open room");
                     }
@@ -518,6 +550,128 @@ impl Workspace {
             }
         }
     }
+}
+
+/// Session fork (#1257): before the new chat's room opens, copy the source
+/// chat's transcript into it (meta rewritten to the new id, commands marked
+/// handled so nothing re-runs, a reply still streaming closed as cancelled)
+/// and give the new chat the source's pi session file (the model's context)
+/// and compaction summary. The room is saved with an empty acked frontier,
+/// so its first sync pushes the whole transcript to the relay and every
+/// device sees the history at once.
+async fn seed_forked_chat(
+    cfg: &Config,
+    store: &Store,
+    sync: &SyncHub,
+    project_id: &str,
+    chat_id: &str,
+    source_id: &str,
+) -> Result<()> {
+    if chat_id == source_id {
+        return Ok(());
+    }
+    let source_room = arbos_core::wire::room_name(project_id, source_id);
+    let snapshot = match sync.host(source_id).await {
+        Some(h) => Some(h.lock().await.doc.snapshot()),
+        None => store
+            .room_doc(&source_room)?
+            .and_then(|(_, snap, _)| snap)
+            .filter(|s| !s.is_empty()),
+    };
+    if let Some(snap) = snapshot {
+        let forked = fork_doc_snapshot(&snap, sync.peer_id, chat_id, project_id)?;
+        let room = arbos_core::wire::room_name(project_id, chat_id);
+        let empty = encode_vv(&loro::VersionVector::default());
+        store.save_room_doc(&room, 0, &forked, &empty)?;
+    }
+    if let Some(src) = store.chat(source_id)? {
+        if let Some(path) = src.pi_session_path.as_deref().map(std::path::Path::new) {
+            if path.exists() {
+                match copy_pi_session(cfg, path, chat_id) {
+                    Ok(new_path) => {
+                        store.set_chat_session_path(chat_id, &new_path.display().to_string())?
+                    }
+                    Err(e) => tracing::warn!(error = %e, chat_id, "fork: pi session copy"),
+                }
+            }
+        }
+        if let (Some(summary), Some(through)) = (src.compaction_summary, src.compacted_through) {
+            store.set_chat_compaction(chat_id, &summary, &through)?;
+        }
+    }
+    tracing::info!(chat_id, source = source_id, "fork chat seeded");
+    Ok(())
+}
+
+/// The forked chat's doc as a snapshot: the source transcript with `meta`
+/// rewritten to the new chat, every command marked done (nothing re-runs in
+/// the fork) and a reply still streaming closed as cancelled.
+fn fork_doc_snapshot(
+    source_snapshot: &[u8],
+    peer: u64,
+    chat_id: &str,
+    project_id: &str,
+) -> Result<Vec<u8>> {
+    let mut doc = ChatDoc::from_snapshot(Some(peer), true, source_snapshot)?;
+    doc.init_meta(chat_id, project_id, 1);
+    for cmd in doc.commands() {
+        if cmd.status != CommandStatus::Done.as_str() {
+            doc.set_command_status(&cmd.id, CommandStatus::Done, None);
+        }
+    }
+    let streaming: Vec<String> = doc
+        .messages()
+        .into_iter()
+        .filter(|m| m.status == "streaming")
+        .map(|m| m.id)
+        .collect();
+    for id in streaming {
+        doc.finish_message(&id, MessageStatus::Cancelled);
+    }
+    Ok(doc.snapshot())
+}
+
+/// A pi session file's text for a forked chat: same entries, the header's
+/// `id` rewritten to the new chat so pi treats it as that chat's session.
+fn fork_session_text(text: &str, chat_id: &str) -> String {
+    let mut lines = text.lines();
+    let mut out = String::with_capacity(text.len());
+    if let Some(first) = lines.next() {
+        let header = match serde_json::from_str::<Value>(first) {
+            Ok(mut v) if v.get("type").and_then(Value::as_str) == Some("session") => {
+                v["id"] = json!(chat_id);
+                v["timestamp"] = json!(chrono::Utc::now().to_rfc3339());
+                v.to_string()
+            }
+            _ => first.to_owned(),
+        };
+        out.push_str(&header);
+        out.push('\n');
+    }
+    for line in lines {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// Copy a pi session file for a forked chat into the sessions dir.
+fn copy_pi_session(
+    cfg: &Config,
+    source: &std::path::Path,
+    chat_id: &str,
+) -> Result<std::path::PathBuf> {
+    let dir = cfg.pi_sessions_dir();
+    std::fs::create_dir_all(&dir)?;
+    let text = std::fs::read_to_string(source).context("read source session")?;
+    let out = fork_session_text(&text, chat_id);
+    let ts = chrono::Utc::now().format("%Y-%m-%dT%H-%M-%S-%3fZ");
+    let path = dir.join(format!("{ts}_{chat_id}.jsonl"));
+    std::fs::write(&path, out).context("write forked session")?;
+    if let Some(ra) = &cfg.run_as {
+        let _ = std::os::unix::fs::chown(&path, Some(ra.uid), Some(ra.gid));
+    }
+    Ok(path)
 }
 
 /// Copy `/work/<source>` into a brand-new fork workspace. Skips when the dest already exists
@@ -602,7 +756,7 @@ pub fn seed_state(cfg: &Config) -> Result<()> {
     let settings = json!({
         "defaultProvider": cfg.pi_provider(), "defaultModel": cfg.talking_model, "defaultThinkingLevel": "off",
         "defaultTools": ["read", "bash", "edit", "write", "codemode"],
-        "compaction": { "enabled": true, "reserveTokens": 16384, "keepRecentTokens": 20000 },
+        "compaction": { "enabled": true, "reserveTokens": 16384, "keepRecentTokens": KEEP_RECENT_TOKENS },
         "hideThinkingBlock": true
     });
     std::fs::write(
@@ -647,7 +801,7 @@ pub fn seed_state(cfg: &Config) -> Result<()> {
 
 /// The context window pi plans against (and compacts under). `ARBOS_CONTEXT_WINDOW_TOKENS_OVERRIDE`
 /// (unset = [`DEFAULT_CONTEXT_WINDOW_TOKENS`]).
-fn context_window_tokens() -> u64 {
+pub fn context_window_tokens() -> u64 {
     std::env::var("ARBOS_CONTEXT_WINDOW_TOKENS_OVERRIDE")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -697,9 +851,32 @@ pub fn write_models_json(cfg: &Config, talking: &str, subagent: &str) -> Result<
     Ok(())
 }
 
-/// Anthropic's standard window. With pi's 16k reserve a chat compacts at ~184k tokens, before the
-/// 1M-tier pricing and the refusals seen past 200k.
-pub const DEFAULT_CONTEXT_WINDOW_TOKENS: u64 = 200_000;
+/// The hard ceiling of a chat's model window (D91). pi plans against it and compacts on its own
+/// at `window − reserve` (≈ 112k), and a provider overflow at this size is answered with a
+/// compact-and-retry — so the window never passes it. Was 200k (#1229, Anthropic's standard
+/// window); 128k halves the worst-case cache write and keeps every call under the 5× Haiku tier.
+/// The usual working window is far smaller: agentd compacts at [`DEFAULT_COMPACT_AT_TOKENS`].
+pub const DEFAULT_CONTEXT_WINDOW_TOKENS: u64 = 128_000;
+
+/// Soft compaction (D91): after a turn that leaves the chat's session above this many tokens,
+/// agentd asks pi to compact — `keepRecentTokens` (20k) of recent turns stay verbatim and the rest
+/// becomes one rolling summary, so the window settles at ≈ 20–30k. Older detail is not lost: it
+/// stays in the memory tree and the walk brings it back when a question needs it.
+/// `ARBOS_CONTEXT_COMPACT_AT_TOKENS` overrides; `0` leaves compaction to pi's hard threshold only.
+pub const DEFAULT_COMPACT_AT_TOKENS: u64 = 64_000;
+
+/// Tokens pi keeps verbatim when it compacts (`compaction.keepRecentTokens` in its settings).
+pub const KEEP_RECENT_TOKENS: u64 = 20_000;
+
+pub fn compact_at_tokens() -> u64 {
+    match std::env::var("ARBOS_CONTEXT_COMPACT_AT_TOKENS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+    {
+        Some(n) => n,
+        None => DEFAULT_COMPACT_AT_TOKENS,
+    }
+}
 
 /// Seed files are the image's: a file is copied when missing **or when its bytes differ** from the
 /// seed, so an image roll updates `arbos-pi-ext` (and every other seed file) in a workspace that
@@ -736,6 +913,17 @@ fn seed_file_differs(seed: &std::path::Path, target: &std::path::Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// D91: the soft threshold reads its override and defaults to the design's 64k.
+    #[test]
+    fn compact_at_tokens_default_and_override() {
+        std::env::remove_var("ARBOS_CONTEXT_COMPACT_AT_TOKENS");
+        assert_eq!(super::compact_at_tokens(), super::DEFAULT_COMPACT_AT_TOKENS);
+        std::env::set_var("ARBOS_CONTEXT_COMPACT_AT_TOKENS", "0");
+        assert_eq!(super::compact_at_tokens(), 0);
+        std::env::set_var("ARBOS_CONTEXT_COMPACT_AT_TOKENS", "90000");
+        assert_eq!(super::compact_at_tokens(), 90_000);
+        std::env::remove_var("ARBOS_CONTEXT_COMPACT_AT_TOKENS");
+    }
     use super::*;
 
     /// An image roll must reach existing workspaces: a seed file whose bytes changed is copied
@@ -770,5 +958,59 @@ mod tests {
             &dst.join("deny.ts")
         ));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #1257: a session fork copies the transcript under the new chat id, leaves nothing for
+    /// the agent loop to re-run, and hands pi the same entries under the new session id.
+    #[test]
+    fn forked_doc_keeps_messages_under_the_new_chat_and_runs_nothing_again() {
+        let src = ChatDoc::new(Some(7), true);
+        src.init_meta("c-unicorns", "p-bob", 1);
+        src.append_user_message(
+            "m1",
+            "hello unicorns",
+            "dev-mac",
+            &arbos_core::doc::UserMessageOpts::default(),
+        )
+        .expect("message");
+        let cmd = src.push_command("send", json!({ "messageId": "m1" }), "dev-mac");
+        let snap = src.snapshot();
+
+        let forked = fork_doc_snapshot(&snap, 9, "c-fork", "p-bob").expect("fork");
+        let doc = ChatDoc::from_snapshot(Some(9), true, &forked).expect("load");
+        assert_eq!(doc.meta()["chatId"], json!("c-fork"));
+        assert_eq!(doc.meta()["projectId"], json!("p-bob"));
+        let msgs = doc.messages();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].text(), "hello unicorns");
+        let cmds = doc.commands();
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0].id, cmd);
+        assert_eq!(
+            cmds[0].status, "done",
+            "the fork never replays the source's commands"
+        );
+        assert!(doc.pending_commands().is_empty());
+        // The source is untouched.
+        assert_eq!(src.meta()["chatId"], json!("c-unicorns"));
+        assert_eq!(src.pending_commands().len(), 1);
+    }
+
+    #[test]
+    fn forked_session_text_renames_only_the_header() {
+        let text = concat!(
+            "{\"type\":\"session\",\"version\":3,\"id\":\"c-unicorns\",\"timestamp\":\"t\",\"cwd\":\"/work\"}\n",
+            "{\"type\":\"message\",\"id\":\"e1\",\"role\":\"user\",\"content\":\"hello\"}\n",
+            "{\"type\":\"message\",\"id\":\"e2\",\"role\":\"assistant\",\"content\":\"hi\"}\n",
+        );
+        let out = fork_session_text(text, "c-fork");
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 3);
+        let header: Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(header["id"], json!("c-fork"));
+        assert_eq!(header["type"], json!("session"));
+        assert_eq!(header["cwd"], json!("/work"));
+        assert_eq!(lines[1], text.lines().nth(1).unwrap());
+        assert_eq!(lines[2], text.lines().nth(2).unwrap());
     }
 }

@@ -455,6 +455,15 @@ pub enum ClientCommand {
         project_id: Id,
         chat_id: Id,
     },
+    /// Session fork (#1257): a new chat of the same project seeded from
+    /// `source_chat_id` (`POST /projects/{id}/chats` with `fork_from`); `chat_id`
+    /// is the client's placeholder until `ChatCreated` brings the relay's.
+    ForkChat {
+        project_id: Id,
+        source_chat_id: Id,
+        chat_id: Id,
+        title: String,
+    },
     /// F6: a group chat hosted by `project_id` with the other `participants`; `chat_id` is the
     /// client's placeholder until `ChatCreated` brings the relay's.
     GroupCreate {

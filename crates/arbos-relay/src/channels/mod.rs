@@ -846,6 +846,7 @@ mod tests {
                 doc_epoch: 1,
                 kind: "chat".into(),
                 participants: Vec::new(),
+                forked_from: None,
             })
             .unwrap();
 

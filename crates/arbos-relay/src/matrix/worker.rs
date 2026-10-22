@@ -633,11 +633,25 @@ impl Worker {
         Ok(())
     }
 
+    /// The receipt goes where the relay's read mark is: on the mirrored event of the message
+    /// at the mark while something is still unread, on the stream-newest event once caught up
+    /// (a live read is always "everything up to now").
     async fn read(&self, chat_id: &str, user_id: &str) -> MxResult<()> {
-        let (Some(room), Some(event)) = (
-            self.state.db.matrix_room(chat_id).ok().flatten(),
-            self.state.db.matrix_latest_event(chat_id).ok().flatten(),
-        ) else {
+        let Some(room) = self.state.db.matrix_room(chat_id).ok().flatten() else {
+            return Ok(());
+        };
+        let newest = self.state.db.matrix_latest_event(chat_id).ok().flatten();
+        let event = match self
+            .state
+            .db
+            .matrix_read_mark(user_id, chat_id)
+            .ok()
+            .flatten()
+        {
+            Some((at_mark, false)) => at_mark,
+            Some((_, true)) | None => newest,
+        };
+        let Some(event) = event else {
             return Ok(());
         };
         let who = self.state.matrix.cfg.user_mxid(user_id);
