@@ -4243,6 +4243,47 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 let _ = refresh_registry(&shared).await;
             });
         }
+        ClientCommand::AddMembers {
+            chat_id,
+            handles,
+            agent_ids,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                // Every add is tried; the first failure is reported once the
+                // rest are done, and the list is refreshed either way so the
+                // pane shows exactly who made it in.
+                let mut failed: Option<String> = None;
+                for handle in handles {
+                    if let Err(err) = shared
+                        .post_json(
+                            &format!("/chats/{chat_id}/members"),
+                            json!({ "handle": handle }),
+                        )
+                        .await
+                    {
+                        failed.get_or_insert(format!("@{handle}: {}", people_error(&err)));
+                    }
+                }
+                for project_id in agent_ids {
+                    if let Err(err) = shared
+                        .post_json(
+                            &format!("/chats/{chat_id}/agents"),
+                            json!({ "project_id": project_id }),
+                        )
+                        .await
+                    {
+                        failed.get_or_insert(format!("agent: {}", people_error(&err)));
+                    }
+                }
+                if let Err(err) = refresh_registry(&shared).await {
+                    shared.diagnostic("refresh", format!("{err:#}"));
+                }
+                if let Some(why) = failed {
+                    shared.notice(format!("Could not add {why}"));
+                }
+            });
+        }
         ClientCommand::RemoveMember { chat_id, user_id } => {
             let shared = shared.clone();
             tokio::spawn(async move {

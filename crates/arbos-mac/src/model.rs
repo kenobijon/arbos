@@ -179,6 +179,54 @@ impl Project {
             .collect::<Vec<_>>()
             .join("-")
     }
+
+    /// Is this person already in the space? Me (`me_handle`) counts as in:
+    /// the relay lists the other members only, not the caller.
+    pub fn has_person(&self, me_handle: &str, person: &Person) -> bool {
+        (!me_handle.is_empty() && person.handle == me_handle)
+            || self
+                .people
+                .iter()
+                .any(|p| p.id == person.id || p.handle == person.handle)
+    }
+
+    /// Is this agent (by its project id) already in the space?
+    pub fn has_agent(&self, project_id: &str) -> bool {
+        self.agents.iter().any(|a| a.project_id == project_id)
+    }
+}
+
+/// The relay calls "Add" makes for one group: new people by handle, new
+/// agents by project id, both on `chat_id`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AddMembersPlan {
+    pub chat_id: Id,
+    pub handles: Vec<String>,
+    pub agent_ids: Vec<Id>,
+}
+
+/// Turn the picker's selection into the calls for `space`: whoever is already
+/// in (people, me, agents) is dropped, so a stale pick never hits the relay's
+/// `already_member` error; the target is always the group the picker opened for.
+pub fn add_members_plan(
+    space: &Project,
+    me_handle: &str,
+    picked: &[Person],
+    picked_agents: &[Id],
+) -> AddMembersPlan {
+    AddMembersPlan {
+        chat_id: space.id.clone(),
+        handles: picked
+            .iter()
+            .filter(|p| !space.has_person(me_handle, p))
+            .map(|p| p.handle.clone())
+            .collect(),
+        agent_ids: picked_agents
+            .iter()
+            .filter(|id| !space.has_agent(id))
+            .cloned()
+            .collect(),
+    }
 }
 
 /// What a rail tile is.
@@ -2511,6 +2559,85 @@ pub fn now_ms() -> u64 {
 
 pub fn new_id() -> Id {
     ulid::Ulid::new().to_string()
+}
+
+#[cfg(test)]
+mod add_members_tests {
+    use super::*;
+
+    fn person(id: &str, handle: &str) -> Person {
+        Person {
+            id: id.into(),
+            handle: handle.into(),
+            status: "member".into(),
+            ..Person::default()
+        }
+    }
+
+    fn agent(project_id: &str) -> AgentMember {
+        AgentMember {
+            project_id: project_id.into(),
+            name: project_id.into(),
+            handle: project_id.into(),
+            ..AgentMember::default()
+        }
+    }
+
+    /// The group "Testing": me (unarbos), allan and const, plus one agent.
+    fn testing_group() -> Project {
+        Project {
+            id: "chat_testing".into(),
+            name: "Testing".into(),
+            kind: SpaceKind::Group,
+            people: vec![person("gh_1", "allan"), person("gh_2", "const")],
+            agents: vec![agent("proj_lium")],
+            ..Project::default()
+        }
+    }
+
+    #[test]
+    fn existing_members_count_as_already_in_the_group() {
+        let g = testing_group();
+        // The picker disables these rows: both humans, me, and the agent.
+        assert!(g.has_person("unarbos", &person("gh_1", "allan")));
+        assert!(g.has_person("unarbos", &person("gh_2", "const")));
+        assert!(g.has_person("unarbos", &person("gh_me", "unarbos")));
+        assert!(g.has_agent("proj_lium"));
+        // A match by handle alone is enough (search results carry no stable id).
+        assert!(g.has_person("unarbos", &person("", "allan")));
+        // Someone new stays pickable.
+        assert!(!g.has_person("unarbos", &person("gh_3", "alice")));
+        assert!(!g.has_agent("proj_other"));
+    }
+
+    #[test]
+    fn add_targets_this_group_and_skips_who_is_in_it() {
+        let g = testing_group();
+        let plan = add_members_plan(
+            &g,
+            "unarbos",
+            &[
+                person("gh_3", "alice"),
+                person("gh_1", "allan"),
+                person("gh_me", "unarbos"),
+            ],
+            &["proj_other".to_string(), "proj_lium".to_string()],
+        );
+        assert_eq!(
+            plan.chat_id, "chat_testing",
+            "adds to THIS group, not a new one"
+        );
+        assert_eq!(plan.handles, vec!["alice".to_string()]);
+        assert_eq!(plan.agent_ids, vec!["proj_other".to_string()]);
+    }
+
+    #[test]
+    fn nothing_new_makes_an_empty_plan() {
+        let g = testing_group();
+        let plan = add_members_plan(&g, "unarbos", &[person("gh_1", "allan")], &[]);
+        assert_eq!(plan.chat_id, "chat_testing");
+        assert!(plan.handles.is_empty() && plan.agent_ids.is_empty());
+    }
 }
 
 #[cfg(test)]

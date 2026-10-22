@@ -319,7 +319,16 @@ impl Shell {
             })
             .detach();
         }
-        cx.observe(&state, |_, _, cx| cx.notify()).detach();
+        cx.observe(&state, |this, state, cx| {
+            // The Add members picker (from a group pane or the rig hook) searches
+            // agents too; Cancel / Add put "Search people" back.
+            if state.read(cx).add_members_target.is_some() {
+                this.people_input
+                    .update(cx, |input, _| input.set_placeholder("Add people or agents"));
+            }
+            cx.notify();
+        })
+        .detach();
         Self::follow_system_appearance(window);
         cx.observe(&voice, |_, _, cx| cx.notify()).detach();
         cx.observe(&composer, |_, _, cx| cx.notify()).detach();

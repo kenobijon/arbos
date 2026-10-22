@@ -333,6 +333,13 @@ pub enum ClientCommand {
         chat_id: Id,
         project_id: Id,
     },
+    /// Group pane "Add members": `POST /chats/{id}/members {handle}` per person,
+    /// `POST /chats/{id}/agents {project_id}` per agent, all on this group.
+    AddMembers {
+        chat_id: Id,
+        handles: Vec<String>,
+        agent_ids: Vec<Id>,
+    },
     /// `DELETE /chats/{id}/members/{user_id}` (chat owner).
     RemoveMember {
         chat_id: Id,

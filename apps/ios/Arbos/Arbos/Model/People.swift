@@ -171,6 +171,18 @@ extension PeopleChat {
         self.muted = dto.me.muted ?? false
     }
 
+    /// Is this person already in the chat? Me (`meId`) counts as in. A handle
+    /// match is enough: search results and roster rows need not share an id.
+    func hasPerson(_ p: Person, meId: String?) -> Bool {
+        if let meId, p.id == meId { return true }
+        return humans.contains { $0.id == p.id || $0.handle.lowercased() == p.handle.lowercased() }
+    }
+
+    /// Is this agent (by project id) already in the chat?
+    func hasAgent(_ projectId: String) -> Bool {
+        agents.contains { $0.id == projectId || $0.project?.id == projectId }
+    }
+
     static func parse(_ raw: Any) -> PeopleChat? {
         guard JSONSerialization.isValidJSONObject(raw),
               let data = try? JSONSerialization.data(withJSONObject: raw) else { return nil }
@@ -181,6 +193,25 @@ extension PeopleChat {
             return nil
         }
     }
+}
+
+/// The relay calls "Add" makes for one group: new people by handle, new agents
+/// by project id, both on `chatId` — never a new group. Whoever is already in
+/// (people, me, agents) is dropped so a stale pick never hits `already_member`.
+struct AddMembersPlan: Equatable {
+    var chatId: String
+    var handles: [String]
+    var agentIds: [String]
+
+    static func make(chat: PeopleChat, meId: String?, picked: [Person], pickedAgents: [Project]) -> AddMembersPlan {
+        AddMembersPlan(
+            chatId: chat.id,
+            handles: picked.filter { !chat.hasPerson($0, meId: meId) }.map(\.handle),
+            agentIds: pickedAgents.map(\.id).filter { !chat.hasAgent($0) }
+        )
+    }
+
+    var isEmpty: Bool { handles.isEmpty && agentIds.isEmpty }
 }
 
 struct ProjectMember: Identifiable, Equatable {
