@@ -400,7 +400,17 @@ pub fn people_chat_dto(
         .iter()
         .filter(|m| m.member.starts_with("user:") && m.member != format!("user:{me}"))
         .collect();
-    let computed = others
+    // Untitled group: the other people's handles — or, with no other human
+    // (a group of my agents), the agents' handles.
+    let named: Vec<&ChatMemberDto> = if others.is_empty() {
+        members
+            .iter()
+            .filter(|m| m.member.starts_with("agent:"))
+            .collect()
+    } else {
+        others.clone()
+    };
+    let computed = named
         .iter()
         .filter_map(|m| m.handle.as_deref())
         .collect::<Vec<_>>()
@@ -427,6 +437,8 @@ pub fn people_chat_dto(
         created_at: cm.chat.created_at,
         title,
         image_key: cm.chat.image_key.clone(),
+        avatar_leaf: cm.chat.avatar_leaf,
+        avatar_leaf_color: cm.chat.avatar_leaf_color,
         pending,
         members,
         room: format!("/room/{PEOPLE_PROJECT}/{}", cm.chat.id),
@@ -642,11 +654,23 @@ pub struct CreateGroupBody {
     pub kind: String,
     /// GitHub handles of the other people (the caller is added as owner).
     pub members: Vec<String>,
+    /// The caller's own projects to add as agents (same rule as `POST /chats/{id}/agents`).
+    /// A group may be people, agents, or both — never nobody.
+    #[serde(default)]
+    pub agent_ids: Vec<String>,
+    /// Create screen (D93): the group's name and its leaf picture; all optional.
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub avatar_leaf: Option<i64>,
+    #[serde(default)]
+    pub avatar_leaf_color: Option<i64>,
 }
 
-/// `POST /chats {kind: "group", members: [handles…]}` — a new people group. The caller is the
-/// owner; each handle becomes a member (invited via GitHub if they are not on Arbos yet). Always
-/// a fresh chat — unlike a DM, it does not reuse an existing 1:1.
+/// `POST /chats {kind: "group", members: [handles…], agent_ids: [project ids…]}` — a new people
+/// group. The caller is the owner; each handle becomes a member (invited via GitHub if they are
+/// not on Arbos yet); each agent id must be one of the caller's own projects. At least one person
+/// or one agent. Always a fresh chat — unlike a DM, it does not reuse an existing 1:1.
 pub async fn chats_create_group(
     State(state): State<AppState>,
     principal: Principal,
@@ -706,11 +730,25 @@ pub async fn chats_create_group(
         }
         other_ids.push(other_id);
     }
-    if other_ids.is_empty() {
+    // Agents are checked before anything is written: a foreign project fails the whole call.
+    let mut agent_projects = Vec::new();
+    for pid in &b.agent_ids {
+        if agent_projects
+            .iter()
+            .any(|p: &crate::db::Project| &p.id == pid)
+        {
+            continue;
+        }
+        match own_project(&state, &me, pid) {
+            Ok(p) => agent_projects.push(p),
+            Err(r) => return *r,
+        }
+    }
+    if other_ids.is_empty() && agent_projects.is_empty() {
         return api_error(
             StatusCode::BAD_REQUEST,
             "need_members",
-            "add at least one other person",
+            "add at least one person or one of your agents",
         );
     }
     let limit = if young_account(&state, &me) {
@@ -722,13 +760,24 @@ pub async fn chats_create_group(
     if state.db.people_chats_created_since(&me, today).unwrap_or(0) >= limit {
         return rate_limited(((today + 86_400_000 - now_ms()) / 1000).max(1));
     }
+    let leaf = match leaf_patch(b.avatar_leaf.map(Some), b.avatar_leaf_color.map(Some)) {
+        Ok(l) => l.flatten(),
+        Err((st, msg)) => return api_error(st, "bad_leaf", msg),
+    };
     let chat = PeopleChat {
         id: ulid(),
         kind: "group".into(),
         created_by: me.clone(),
         created_at: now_ms(),
-        title: None,
+        title: b
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(|t| t.chars().take(80).collect()),
         image_key: None,
+        avatar_leaf: leaf.map(|l| l.0),
+        avatar_leaf_color: leaf.map(|l| l.1),
     };
     if let Err(e) = state.db.insert_people_chat(&chat) {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
@@ -757,7 +806,30 @@ pub async fn chats_create_group(
             Some(&chat.id),
         );
     }
-    tracing::info!(chat = %chat.id, %me, members = other_ids.len(), "people group created");
+    for project in &agent_projects {
+        if let Err(e) = state.db.add_member(
+            &chat.id,
+            &format!("agent:{}", project.id),
+            "agent",
+            &me,
+            &default_agent_settings(),
+        ) {
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
+        }
+        let _ = state.db.enqueue_push(
+            &project.id,
+            "people_agent_added",
+            &json!({ "chat_id": chat.id }),
+        );
+        crate::boxes::ensure_awake(&state, &project.user_id, "people").await;
+    }
+    tracing::info!(
+        chat = %chat.id,
+        %me,
+        members = other_ids.len(),
+        agents = agent_projects.len(),
+        "people group created"
+    );
     state.matrix.touch_chat(&state, &chat.id, None);
     match load_chat(&state, &chat.id) {
         Ok(cm) => Json(chat_json(&state, &cm, &me, &device_of(&principal))).into_response(),
@@ -828,6 +900,8 @@ pub async fn dm_create(
         created_at: now_ms(),
         title: None,
         image_key: None,
+        avatar_leaf: None,
+        avatar_leaf_color: None,
     };
     if let Err(e) = state.db.insert_people_chat(&chat) {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
@@ -904,6 +978,40 @@ pub struct PatchChatBody {
     /// Blob key under `people:{chat}` for the group picture. Empty clears it.
     #[serde(default)]
     pub image_key: Option<String>,
+    /// D92 amendment: the group's leaf picture (0–8) and disc colour (0–9), both or neither;
+    /// `null` for both clears it (back to the member cluster).
+    #[serde(
+        default,
+        deserialize_with = "crate::api::deserialize_double_option_i64"
+    )]
+    pub avatar_leaf: Option<Option<i64>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::api::deserialize_double_option_i64"
+    )]
+    pub avatar_leaf_color: Option<Option<i64>>,
+}
+
+/// `None` = untouched, `Some(None)` = clear, `Some(Some((leaf, colour)))` = set.
+type LeafPatch = Option<Option<(i64, i64)>>;
+
+/// `avatar_leaf` + `avatar_leaf_color` from a body, validated.
+fn leaf_patch(
+    leaf: Option<Option<i64>>,
+    color: Option<Option<i64>>,
+) -> Result<LeafPatch, (StatusCode, String)> {
+    match (leaf, color) {
+        (None, None) => Ok(None),
+        (Some(None), Some(None)) | (Some(None), None) | (None, Some(None)) => Ok(Some(None)),
+        (Some(Some(l)), Some(Some(c))) => {
+            crate::avatar::check_leaf_pick(Some(l), Some(c))?;
+            Ok(Some(Some((l, c))))
+        }
+        _ => Err((
+            StatusCode::BAD_REQUEST,
+            "avatar_leaf and avatar_leaf_color go together".to_owned(),
+        )),
+    }
 }
 
 fn safe_image_key(k: &str) -> bool {
@@ -925,7 +1033,11 @@ pub async fn chat_patch(
         Ok(v) => v,
         Err(r) => return *r,
     };
-    if b.title.is_none() && b.image_key.is_none() {
+    let leaf = match leaf_patch(b.avatar_leaf, b.avatar_leaf_color) {
+        Ok(l) => l,
+        Err((st, msg)) => return api_error(st, "bad_leaf", msg),
+    };
+    if b.title.is_none() && b.image_key.is_none() && leaf.is_none() {
         return Json(chat_json(&state, &cm, &me, &device_of(&principal))).into_response();
     }
     let title = b.title.as_ref().map(|t| {
@@ -962,7 +1074,7 @@ pub async fn chat_patch(
     let image_ref = image_key.as_ref().map(|o| o.as_ref().map(|s| s.as_str()));
     if let Err(e) = state
         .db
-        .update_people_chat_profile(&id, title_ref, image_ref)
+        .update_people_chat_profile(&id, title_ref, image_ref, leaf)
     {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
     }
@@ -2104,6 +2216,8 @@ pub async fn invite_create(
                     created_at: now_ms(),
                     title: None,
                     image_key: None,
+                    avatar_leaf: None,
+                    avatar_leaf_color: None,
                 };
                 if let Err(e) = state.db.insert_people_chat(&chat) {
                     return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
@@ -2679,6 +2793,10 @@ mod agent_tests {
             Json(CreateGroupBody {
                 kind: "group".into(),
                 members: vec!["user32".into(), "@user33".into(), "user32".into()],
+                agent_ids: vec![],
+                title: None,
+                avatar_leaf: None,
+                avatar_leaf_color: None,
             }),
         )
         .await;
@@ -2722,10 +2840,129 @@ mod agent_tests {
             Json(CreateGroupBody {
                 kind: "group".into(),
                 members: vec![],
+                agent_ids: vec![],
+                title: None,
+                avatar_leaf: None,
+                avatar_leaf_color: None,
             }),
         )
         .await;
         assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    }
+}
+
+#[cfg(test)]
+mod create_group_tests {
+    //! `POST /chats {kind: group}`: a group of my agents alone is a group; a group of nobody
+    //! is not; a foreign agent fails before anything is written.
+
+    use axum::extract::State;
+    use axum::http::StatusCode;
+    use axum::Json;
+
+    use super::tests_support::{person, project_of};
+    use super::*;
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    #[tokio::test]
+    async fn agents_alone_make_a_group_titled_after_them() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 1);
+        let bob_proj = project_of(&state, &alice, "Bob");
+        let doug_proj = project_of(&state, &alice, "Doug");
+        let before = state
+            .db
+            .chats_of_member(&format!("user:{alice}"))
+            .unwrap()
+            .len();
+
+        let r = chats_create_group(
+            State(state.clone()),
+            alice_dev.clone(),
+            Json(CreateGroupBody {
+                kind: "group".into(),
+                members: vec![],
+                agent_ids: vec![bob_proj.clone(), doug_proj.clone()],
+                title: None,
+                avatar_leaf: None,
+                avatar_leaf_color: None,
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+
+        let chats = state.db.chats_of_member(&format!("user:{alice}")).unwrap();
+        assert_eq!(chats.len(), before + 1, "exactly one new chat");
+        let cm = chats
+            .iter()
+            .find(|cm| cm.chat.kind == "group" && cm.members.len() == 3)
+            .expect("a group with me and both agents");
+        for pid in [&bob_proj, &doug_proj] {
+            assert!(cm
+                .members
+                .iter()
+                .any(|m| m.project_id() == Some(pid.as_str())));
+            let pushes = state.db.take_pushes(pid).unwrap();
+            assert!(pushes.iter().any(|(_, k, _)| k == "people_agent_added"));
+        }
+        let dto = people_chat_dto(&state, cm, &alice, "dev");
+        let mut names: Vec<&str> = dto.title.split(", ").collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            ["bob", "doug"],
+            "untitled agent groups take the agents' handles"
+        );
+    }
+
+    #[tokio::test]
+    async fn nobody_or_a_foreign_agent_creates_nothing() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 1);
+        let (bob, _) = person(&state, 2);
+        let bobs_proj = project_of(&state, &bob, "Research");
+        let before = state
+            .db
+            .chats_of_member(&format!("user:{alice}"))
+            .unwrap()
+            .len();
+
+        let r = chats_create_group(
+            State(state.clone()),
+            alice_dev.clone(),
+            Json(CreateGroupBody {
+                kind: "group".into(),
+                members: vec![],
+                agent_ids: vec![],
+                title: None,
+                avatar_leaf: None,
+                avatar_leaf_color: None,
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+
+        let r = chats_create_group(
+            State(state.clone()),
+            alice_dev.clone(),
+            Json(CreateGroupBody {
+                kind: "group".into(),
+                members: vec![],
+                agent_ids: vec![bobs_proj],
+                title: None,
+                avatar_leaf: None,
+                avatar_leaf_color: None,
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        let after = state
+            .db
+            .chats_of_member(&format!("user:{alice}"))
+            .unwrap()
+            .len();
+        assert_eq!(after, before, "a refused create leaves no half-made chat");
     }
 }
 
@@ -2852,6 +3089,8 @@ pub(crate) mod tests_support {
             created_at: now_ms(),
             title: None,
             image_key: None,
+            avatar_leaf: None,
+            avatar_leaf_color: None,
         };
         state.db.insert_people_chat(&chat).expect("chat");
         for u in [a, b] {
@@ -2953,6 +3192,8 @@ mod picture_tests {
             Json(PatchChatBody {
                 title: None,
                 image_key: Some(key.to_owned()),
+                avatar_leaf: None,
+                avatar_leaf_color: None,
             }),
         )
         .await
