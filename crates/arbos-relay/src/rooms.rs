@@ -348,6 +348,11 @@ async fn handle_frame(
                             None
                         };
                         if let Some(chat) = chat {
+                            state.matrix.touch_rows(
+                                state,
+                                &chat.chat_id,
+                                chat.project_id.as_deref(),
+                            );
                             crate::notify::on_row_from_device(state, chat, user_id, seq);
                         }
                     }

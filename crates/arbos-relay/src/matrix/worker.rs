@@ -290,6 +290,16 @@ impl Worker {
             }
             Job::SyncServer { server_id } => self.sync_server(server_id).await,
             Job::SyncChannel { channel_id } => self.sync_channel(channel_id).await,
+            Job::Resync {
+                chat_id,
+                project_id,
+            } => {
+                let n = super::backfill::resync_chat(&self.state, chat_id, project_id.as_deref());
+                if n > 0 {
+                    tracing::info!(chat = %chat_id, queued = n, "matrix resync: unannounced rows");
+                }
+                Ok(())
+            }
         }
     }
 

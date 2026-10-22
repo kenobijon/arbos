@@ -36,6 +36,8 @@ use crate::state::AppState;
 
 /// Kill switch: when this file exists the worker pauses (jobs keep queueing).
 pub const DISABLED_FILE: &str = "/etc/arbos/matrix.disabled";
+/// How long a `Resync` waits after the first row of a burst.
+const RESYNC_DELAY_MS: i64 = 4_000;
 
 /// `ARBOS_MATRIX`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -276,6 +278,11 @@ pub enum Job {
     SyncServer { server_id: String },
     /// C1: make a channel room match its row (members, name, posting rule, parent).
     SyncChannel { channel_id: String },
+    /// A device pushed rows: mirror the doc's messages nobody announced (debounced per chat).
+    Resync {
+        chat_id: String,
+        project_id: Option<String>,
+    },
 }
 
 impl Job {
@@ -286,7 +293,8 @@ impl Job {
             | Job::Message { chat_id, .. }
             | Job::Read { chat_id, .. }
             | Job::Archive { chat_id, .. }
-            | Job::CloseRoom { chat_id } => chat_id,
+            | Job::CloseRoom { chat_id }
+            | Job::Resync { chat_id, .. } => chat_id,
             Job::Pushers { user_id, .. } => user_id,
             Job::SyncServer { server_id } => server_id,
             Job::SyncChannel { channel_id } => channel_id,
@@ -316,6 +324,28 @@ impl Matrix {
         match state.db.matrix_enqueue(&job) {
             Ok(_) => self.wake.notify_one(),
             Err(e) => tracing::warn!(error = %e, ?job, "matrix outbox: enqueue failed"),
+        }
+    }
+
+    /// A device pushed a row into a chat. One `Resync` per chat is kept pending, due after
+    /// `RESYNC_DELAY_MS`, so a burst of rows costs one doc rebuild.
+    pub fn touch_rows(&self, state: &AppState, chat_id: &str, project_id: Option<&str>) {
+        if !self.cfg.mode.writes() {
+            return;
+        }
+        if state
+            .db
+            .matrix_pending_kind(chat_id, "resync")
+            .unwrap_or(true)
+        {
+            return;
+        }
+        let job = Job::Resync {
+            chat_id: chat_id.to_owned(),
+            project_id: project_id.map(str::to_owned),
+        };
+        if let Err(e) = state.db.matrix_enqueue_after(&job, RESYNC_DELAY_MS) {
+            tracing::warn!(error = %e, ?job, "matrix outbox: enqueue failed");
         }
     }
 

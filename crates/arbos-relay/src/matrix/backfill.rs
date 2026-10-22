@@ -142,6 +142,88 @@ fn carried_parts(row: &Value) -> Option<Value> {
     (!keep.is_empty()).then_some(Value::Array(keep))
 }
 
+/// Queue a `Message` job for every finished, non-empty row of `doc` whose id is not in `skip`;
+/// returns how many. Oldest first, so the room's stream order follows the chat.
+fn queue_messages(
+    state: &AppState,
+    chat_id: &str,
+    project_id: Option<&str>,
+    owner: Option<&str>,
+    doc: &ChatDoc,
+    skip: &std::collections::HashSet<String>,
+) -> usize {
+    let mut n = 0;
+    for row in doc.projected_rows() {
+        let status = row["status"].as_str().unwrap_or("done");
+        if matches!(status, "queued" | "streaming") {
+            continue;
+        }
+        let Some(id) = row["id"].as_str() else {
+            continue;
+        };
+        if skip.contains(id) {
+            continue;
+        }
+        let text = message_text(&row);
+        let parts = carried_parts(&row);
+        if text.trim().is_empty() && parts.is_none() {
+            continue;
+        }
+        state.matrix.enqueue(
+            state,
+            Job::Message {
+                chat_id: chat_id.to_owned(),
+                project_id: project_id.map(str::to_owned),
+                message_id: id.to_owned(),
+                sender: sender_of(&row, owner, project_id),
+                text,
+                parts,
+                ts: row["createdAt"].as_i64(),
+            },
+        );
+        n += 1;
+    }
+    n
+}
+
+/// A device pushed rows into a chat (the `Resync` job, debounced per chat): rebuild the doc and
+/// queue the messages the relay has not mirrored yet. Covers what nobody announces — a person's
+/// own messages in a solo project chat (`crdt-sync.md` §7c: "solo projects have nobody else to
+/// tell"), rows from older apps. Returns how many were queued.
+pub fn resync_chat(state: &AppState, chat_id: &str, project_id: Option<&str>) -> usize {
+    let Ok(Some(doc)) = load_doc(state, chat_id, project_id) else {
+        return 0;
+    };
+    if doc.projected_rows().is_empty() {
+        return 0;
+    }
+    let owner = project_id.and_then(|p| state.db.project(p).ok().flatten().map(|p| p.user_id));
+    if state
+        .db
+        .matrix_room(chat_id)
+        .ok()
+        .flatten()
+        .is_none_or(|r| r.closed_at.is_some())
+    {
+        state.matrix.touch_chat(state, chat_id, project_id);
+    }
+    let mirrored: std::collections::HashSet<String> = state
+        .db
+        .matrix_events_of(chat_id)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(m, _, _)| m)
+        .collect();
+    queue_messages(
+        state,
+        chat_id,
+        project_id,
+        owner.as_deref(),
+        &doc,
+        &mirrored,
+    )
+}
+
 /// Queue the rooms and history of every chat in `scope`.
 pub fn run(state: &AppState, scope: Scope) -> Report {
     let mut rep = Report::default();
@@ -188,33 +270,14 @@ pub fn run(state: &AppState, scope: Scope) -> Report {
             continue;
         }
         let Some(doc) = doc else { continue };
-        for row in doc.projected_rows() {
-            let status = row["status"].as_str().unwrap_or("done");
-            if matches!(status, "queued" | "streaming") {
-                continue;
-            }
-            let Some(id) = row["id"].as_str() else {
-                continue;
-            };
-            let text = message_text(&row);
-            let parts = carried_parts(&row);
-            if text.trim().is_empty() && parts.is_none() {
-                continue;
-            }
-            state.matrix.enqueue(
-                state,
-                Job::Message {
-                    chat_id: chat_id.clone(),
-                    project_id: project_id.clone(),
-                    message_id: id.to_owned(),
-                    sender: sender_of(&row, owner.as_deref(), project_id.as_deref()),
-                    text,
-                    parts,
-                    ts: row["createdAt"].as_i64(),
-                },
-            );
-            rep.messages_queued += 1;
-        }
+        rep.messages_queued += queue_messages(
+            state,
+            &chat_id,
+            project_id.as_deref(),
+            owner.as_deref(),
+            &doc,
+            &std::collections::HashSet::new(),
+        );
     }
     // Rooms whose chat is gone (a closed project tab, a deleted group) get closed.
     if scope.chat_id.is_none() && scope.user_id.is_none() && scope.project_id.is_none() {
@@ -423,6 +486,80 @@ mod doc_tests {
         };
         assert_eq!(sender, &format!("agent:{project}"));
         assert_eq!(text, "Three steps.");
+    }
+
+    #[test]
+    fn resync_queues_only_unannounced_rows() {
+        let mut state = test_state(AuthMode::Github);
+        dual(&mut state);
+        let (owner, _) = person(&state, 2003);
+        let project = project_of(&state, &owner, "Solo");
+        let chat_id = state.db.list_chats(&project).expect("chats")[0].id.clone();
+        let doc = ChatDoc::new(Some(3), false);
+        doc.init_meta(&chat_id, &project, 1);
+        let first = ulid();
+        doc.append_user_message(&first, "first", "dev1", &UserMessageOpts::default())
+            .expect("user message");
+        let second = ulid();
+        doc.append_user_message(&second, "second", "dev1", &UserMessageOpts::default())
+            .expect("user message");
+        let bytes = doc.export_updates_since(&Default::default());
+        state
+            .db
+            .append_row(
+                &wire::room_name(&project, &chat_id),
+                "dev1",
+                &ulid(),
+                &bytes,
+            )
+            .expect("row");
+        // The room exists and the first message was mirrored (announced earlier).
+        state
+            .db
+            .matrix_insert_room(&chat_id, "!r:arbos.life", Some(&project), "chat")
+            .expect("room");
+        state
+            .db
+            .matrix_insert_event(&chat_id, &first, "$e1", "u", 1)
+            .expect("event");
+
+        // One pending resync per chat, due later.
+        state.matrix.touch_rows(&state, &chat_id, Some(&project));
+        state.matrix.touch_rows(&state, &chat_id, Some(&project));
+        assert!(
+            state.db.matrix_outbox_due(10).expect("due").is_empty(),
+            "debounced"
+        );
+        assert!(state
+            .db
+            .matrix_pending_kind(&chat_id, "resync")
+            .expect("pending"));
+        let n = state.db.with(|c| {
+            c.query_row(
+                "SELECT COUNT(*) FROM matrix_outbox WHERE kind = 'resync'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+        });
+        assert_eq!(n.expect("count"), 1);
+
+        assert_eq!(resync_chat(&state, &chat_id, Some(&project)), 1);
+        let jobs: Vec<Job> = state
+            .db
+            .with(|c| {
+                let mut st =
+                    c.prepare("SELECT payload FROM matrix_outbox WHERE kind = 'message'")?;
+                let rows = st.query_map([], |r| r.get::<_, String>(0))?;
+                rows.collect::<rusqlite::Result<Vec<String>>>()
+            })
+            .expect("payloads")
+            .into_iter()
+            .map(|p| serde_json::from_str::<Job>(&p).expect("job"))
+            .collect();
+        assert_eq!(jobs.len(), 1);
+        assert!(
+            matches!(&jobs[0], Job::Message { message_id, text, .. } if *message_id == second && text == "second")
+        );
     }
 
     #[test]
