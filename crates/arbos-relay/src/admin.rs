@@ -583,3 +583,41 @@ mod day_tests {
         assert!(start <= now && now < start + 86_400_000);
     }
 }
+
+#[derive(serde::Deserialize)]
+pub struct DefaultSnapshotBody {
+    pub snapshot: String,
+}
+
+/// `POST /admin/snapshot/default {"snapshot": "arbos-agent-0.1.72"}` — switch the snapshot new boxes are made
+/// from without restarting the relay. The deploy worker calls this after registering an image (and still
+/// writes `ARBOS_DAYTONA_SNAPSHOT` to relay.env for the next start); before this every image roll did
+/// `systemctl restart arbos-relay`, which dropped every client's websocket (~15 rolls a day).
+pub async fn set_default_snapshot(
+    State(state): State<AppState>,
+    principal: Principal,
+    Json(b): Json<DefaultSnapshotBody>,
+) -> Response {
+    if !matches!(principal, Principal::Admin) {
+        return api_error(StatusCode::FORBIDDEN, "forbidden", "admin token required");
+    }
+    let name = b.snapshot.trim();
+    if name.is_empty()
+        || name.len() > 80
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':' | '/'))
+    {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "bad_snapshot",
+            "snapshot name must be 1-80 chars of [A-Za-z0-9-_.:/]",
+        );
+    }
+    let previous = state.default_snapshot();
+    if let Ok(mut cur) = state.default_snapshot.write() {
+        *cur = name.to_owned();
+    }
+    tracing::info!(from = %previous, to = %name, "default snapshot switched (no restart)");
+    Json(serde_json::json!({ "snapshot": name, "previous": previous })).into_response()
+}

@@ -187,6 +187,23 @@ commit_age_s() {
 # relay / voice
 # ---------------------------------------------------------------------------------------------
 
+relay_connect_probe() {
+  # Post-deploy connect probe: healthz alone said "ok" while clients sat on "Reconnecting…" (2026-10-22).
+  # The room websocket endpoint must answer the upgrade handshake (401 without a token = the route and the
+  # upgrade path work; 404/5xx/timeout = broken), and healthz must report a fresh process and its rooms.
+  local sha="$1" ws hz
+  ws=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 --http1.1 -H "Connection: Upgrade" -H "Upgrade: websocket" \
+       -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" "$RELAY_URL/room/probe/probe" || echo 000)
+  hz=$(curl -fsS --max-time 10 "$RELAY_URL/healthz" 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("uptime_s","?"), d.get("rooms","?"), d.get("snapshot","?"))' 2>/dev/null || echo "? ? ?")
+  if [[ "$ws" == 401 || "$ws" == 101 ]]; then
+    log "relay: connect probe ok — room websocket handshake $ws; healthz uptime/rooms/snapshot: $hz"
+    event relay "$sha" connect_probe_ok "room websocket handshake $ws; uptime/rooms/snapshot $hz"
+  else
+    log "ALERT relay: connect probe FAILED after deploy — room websocket handshake answered $ws (healthz $hz); clients cannot sync"
+    event relay "$sha" connect_probe_failed "room websocket handshake answered $ws; healthz uptime/rooms/snapshot $hz"
+  fi
+}
+
 deploy_relay() {
   local sha="$1" tmp t0
   tmp="$(mktemp -d)"
@@ -205,6 +222,7 @@ deploy_relay() {
     if curl -fsS --max-time 10 "$RELAY_URL/healthz" >/dev/null; then
       log "relay: live on $sha after $(( $(date +%s) - t0 )) s"
       event relay "$sha" deployed "live after $(( $(date +%s) - t0 )) s"
+      relay_connect_probe "$sha"
       return 0
     fi
     record_failure relay "$sha" "deployed but /healthz does not answer"
@@ -559,9 +577,20 @@ roll_image() {
   else
     echo "ARBOS_DAYTONA_SNAPSHOT=$snapshot" >> "$RELAY_ENV"
   fi
-  systemctl restart arbos-relay.service
-  sleep 3
-  curl -fsS --max-time 10 "$RELAY_URL/healthz" >/dev/null || { record_failure agentd "$sha" "relay did not come back after the snapshot switch"; exit 1; }
+  # Switch the running relay's default snapshot hot (POST /admin/snapshot/default); relay.env above is for
+  # the next start. Only a relay too old for the endpoint (404) gets the restart — every restart dropped
+  # every client's websocket, ~15 times a day from rolls alone (2026-10-22 18:5x, "Reconnecting…" banners).
+  code=$(curl -s -o "$STATE/runs/agentd-$version-switch.json" -w '%{http_code}' --max-time 10 -X POST     -H "Authorization: Bearer $(secret_from "$RELAY_ENV" ARBOS_RELAY_ADMIN_TOKEN)" -H "Content-Type: application/json"     -d "{\"snapshot\":\"$snapshot\"}" "$RELAY_URL/admin/snapshot/default" || echo 000)
+  if [[ "$code" == 200 ]]; then
+    log "agentd: relay default switched to $snapshot without a restart"
+  else
+    log "agentd: hot snapshot switch answered HTTP $code; restarting the relay (old relay without the endpoint)"
+    systemctl restart arbos-relay.service
+    sleep 3
+    curl -fsS --max-time 10 "$RELAY_URL/healthz" >/dev/null || { record_failure agentd "$sha" "relay did not come back after the snapshot switch"; exit 1; }
+  fi
+  [[ "$(curl -fsS --max-time 10 "$RELAY_URL/healthz" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("snapshot",""))' 2>/dev/null)" == "$snapshot" ]] \
+    || log "agentd: WARNING healthz.snapshot does not report $snapshot yet"
   log "agentd: relay default is $snapshot; rolling boxes"
   event agentd "$sha" image_registered "image $version, snapshot $snapshot is the relay default"
   # The request is served from here on; a newer request supersedes the retry cadence.
