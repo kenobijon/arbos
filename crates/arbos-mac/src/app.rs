@@ -435,6 +435,8 @@ pub struct AppState {
     pub servers_available: bool,
     /// D88: the servers I am in (`GET /servers`); `members` filled once a detail was fetched.
     pub servers: Vec<ServerInfo>,
+    /// Rig: `ARBOS_OPEN_SERVER` was applied (once, when the registry first lists it).
+    open_server_hook_done: bool,
     /// D88: the room list from the homeserver (previews, unread, `can_post`).
     pub matrix_snapshot: Snapshot,
     pub matrix_connected: bool,
@@ -699,6 +701,7 @@ impl AppState {
             ended_written: HashSet::new(),
             my_call: None,
             servers_available: false,
+            open_server_hook_done: false,
             servers: Vec::new(),
             matrix_snapshot: Snapshot::default(),
             matrix_connected: false,
@@ -3303,7 +3306,49 @@ impl AppState {
         }
         self.want_member_avatars();
         self.resolve_pending_channel(cx);
+        self.apply_open_server_hook(cx);
         cx.notify();
+    }
+
+    /// Rig: `ARBOS_OPEN_SERVER=<name or id>[:<#channel>][:panel]` enters a server once the
+    /// registry lists it (the row click, landing on `#general`), then the named channel, and
+    /// with `panel` its page in the right pane (the server-name click).
+    pub fn apply_open_server_hook(&mut self, cx: &mut Context<Self>) {
+        // A first login still running would select its chat over the server; after it ends.
+        if self.open_server_hook_done || self.onboarding.is_some() {
+            return;
+        }
+        let Ok(spec) = std::env::var("ARBOS_OPEN_SERVER") else {
+            return;
+        };
+        let mut parts = spec.split(':');
+        let key = parts.next().unwrap_or_default();
+        let Some(server) = self
+            .servers
+            .iter()
+            .find(|s| s.id == key || s.name.eq_ignore_ascii_case(key))
+            .cloned()
+        else {
+            return;
+        };
+        self.open_server_hook_done = true;
+        self.enter_server(server.id.clone(), cx);
+        for part in parts {
+            if part == "panel" {
+                self.open_profile(
+                    ProfilePage::Server {
+                        server_id: server.id.clone(),
+                    },
+                    cx,
+                );
+            } else if let Some(channel) = server
+                .channels
+                .iter()
+                .find(|c| c.name == part.trim_start_matches('#'))
+            {
+                self.select_channel(server.id.clone(), channel.id.clone(), cx);
+            }
+        }
     }
 
     /// One server with members (the detail route or a write's answer).

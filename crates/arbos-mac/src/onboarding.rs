@@ -207,6 +207,7 @@ impl AppState {
     pub fn end_onboarding(&mut self, reason: &str, cx: &mut Context<Self>) {
         eprintln!("first login: end ({reason})");
         self.onboarding = None;
+        self.apply_open_server_hook(cx);
         cx.notify();
     }
 

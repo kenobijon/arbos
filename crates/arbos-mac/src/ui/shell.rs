@@ -494,13 +494,15 @@ impl Shell {
         })
         .detach();
         // Rig: `ARBOS_OPEN_NEW_AGENT=1` opens the New Message sheet with the
-        // "New agent" form expanded.
-        if std::env::var("ARBOS_OPEN_NEW_AGENT").is_ok_and(|v| v == "1") {
-            state.update(cx, |s, cx| {
-                s.open_new_chat(cx);
-                s.new_project_open = true;
-                cx.notify();
-            });
+        // "New agent" form expanded; `=sheet` opens it as the `+` does.
+        if let Ok(v) = std::env::var("ARBOS_OPEN_NEW_AGENT") {
+            if v == "1" || v == "sheet" {
+                state.update(cx, |s, cx| {
+                    s.open_new_chat(cx);
+                    s.new_project_open = v == "1";
+                    cx.notify();
+                });
+            }
         }
         let connectors = cx.new(|cx| ConnectorsPanel::new(state.clone(), cx));
         // Rig: `ARBOS_OPEN_SETTINGS=connectors` — the Connectors page inside the sheet.
