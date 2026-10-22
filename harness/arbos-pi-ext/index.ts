@@ -548,8 +548,9 @@ export default function arbosPiExt(pi: ExtensionAPI) {
   });
 
   // Route guard, part 2 (correction): a run that still ends without `route` gets one corrective
-  // continuation when pi allows one (`canContinue`: the run ended on tool calls, not on plain text);
-  // otherwise the miss is logged and agentd retries once in a fresh session (empty no-route settle).
+  // continuation when pi allows one (`canContinue`: the run ended on tool calls, not on plain text).
+  // When pi will not continue, the miss is logged: agentd keeps any prose as `reply`, or — if the
+  // turn produced no words — rebuilds the session and asks once more (empty-answer retry).
   // Await the hook so agentd sees `route_missing` before the turn finalizes.
   pi.on("agent_before_settle", async (event) => {
     if (SESSION_ROLE !== "main" || routed) return undefined;
