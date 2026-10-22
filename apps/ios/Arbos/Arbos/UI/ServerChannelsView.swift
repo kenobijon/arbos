@@ -170,6 +170,10 @@ struct ServerChannelsView: View {
             header
         }
         .toolbar(.hidden, for: .navigationBar)
+        .navigationBarBackButtonHidden(true)
+        // Custom back hides the system edge-swipe; List also eats
+        // InteractivePopGestureEnabler. Same swipe-right → Home as ChatView.
+        .simultaneousGesture(serverBackSwipe)
         .sheet(isPresented: $showNewChannel) {
             NewChannelSheet(serverId: serverId).environmentObject(model).environment(\.theme, theme)
         }
@@ -187,6 +191,21 @@ struct ServerChannelsView: View {
             Text("Deletes the channel and its messages for everyone in the server.")
         }
         // `AppModel.forgetServer` empties the path when the server goes (deleted, left, removed).
+    }
+
+    /// Swipe right pops back to the main chats list (Home). Matches ChatView
+    /// and SettingsPage so the server channel list is not a dead end without
+    /// tapping the back circle.
+    private var serverBackSwipe: some Gesture {
+        DragGesture(minimumDistance: 50, coordinateSpace: .local)
+            .onEnded { value in
+                let dx = value.translation.width
+                let absX = abs(dx), absY = abs(value.translation.height)
+                let vx = value.velocity.width, vy = value.velocity.height
+                if dx > 0, absX > 70, absX > absY * 1.25, abs(vx) >= abs(vy) || absX > 120 {
+                    dismiss()
+                }
+            }
     }
 
     /// Same header as Hidden chats: back circle left, the title pill centred.
