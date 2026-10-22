@@ -30,7 +30,7 @@ PY
 
 DEVICE_TARGET=aarch64-apple-ios
 SIM_TARGET=aarch64-apple-ios-sim
-# Gate / generic simulator destinations include x86_64; loro-swift ships both.
+# Gate / generic simulator destinations include x86_64; the sim slice ships both.
 SIM_X86_TARGET=x86_64-apple-ios
 
 echo "==> rustup targets (${DEVICE_TARGET}, ${SIM_TARGET}, ${SIM_X86_TARGET})"

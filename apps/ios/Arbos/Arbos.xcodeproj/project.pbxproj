@@ -21,7 +21,6 @@
 		A1E51B078F3180B74D6F5A88 /* Fixture.swift in Sources */ = {isa = PBXBuildFile; fileRef = A16FB2CB37599A2DEEA1A19E /* Fixture.swift */; };
 		A10B17B543EDC6C9BAAEDF33 /* PushManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15D0D4E1ADC058D632D0769 /* PushManager.swift */; };
 		A1C76C55AC33FA79D6C27FAA /* Auth.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B646F374BD7AE1F3BE7A4B /* Auth.swift */; };
-		A1B312F5959D92D8D1C90C0D /* Frame.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10ABB7244D9DD1CFA2C11DE /* Frame.swift */; };
 		A14BB8E6904C5D3D5CFFCA56 /* Keychain.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A8BC5FCD045299B0D7D13D /* Keychain.swift */; };
 		A156C11ABF2E8C649148533D /* RelayAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E592B43CC1234959AF2E63 /* RelayAPI.swift */; };
 		A15C00000000000000000009 /* SessionRoom.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15C00000000000000000008 /* SessionRoom.swift */; };
@@ -132,7 +131,6 @@
 		A16FB2CB37599A2DEEA1A19E /* Fixture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Fixture.swift; sourceTree = "<group>"; };
 		A15D0D4E1ADC058D632D0769 /* PushManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushManager.swift; sourceTree = "<group>"; };
 		A1B646F374BD7AE1F3BE7A4B /* Auth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Auth.swift; sourceTree = "<group>"; };
-		A10ABB7244D9DD1CFA2C11DE /* Frame.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Frame.swift; sourceTree = "<group>"; };
 		A1A8BC5FCD045299B0D7D13D /* Keychain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Keychain.swift; sourceTree = "<group>"; };
 		A1E592B43CC1234959AF2E63 /* RelayAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RelayAPI.swift; sourceTree = "<group>"; };
 		A15C00000000000000000008 /* SessionRoom.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionRoom.swift; sourceTree = "<group>"; };
@@ -307,7 +305,6 @@
 			isa = PBXGroup;
 			children = (
 				A1B646F374BD7AE1F3BE7A4B,
-				A10ABB7244D9DD1CFA2C11DE,
 				A1A8BC5FCD045299B0D7D13D,
 				A1E592B43CC1234959AF2E63,
 				A1112911C0D615A9C335C0EF,
@@ -529,7 +526,6 @@
 				A1E51B078F3180B74D6F5A88 /* Fixture.swift in Sources */,
 				A10B17B543EDC6C9BAAEDF33 /* PushManager.swift in Sources */,
 				A1C76C55AC33FA79D6C27FAA /* Auth.swift in Sources */,
-				A1B312F5959D92D8D1C90C0D /* Frame.swift in Sources */,
 				A14BB8E6904C5D3D5CFFCA56 /* Keychain.swift in Sources */,
 				A156C11ABF2E8C649148533D /* RelayAPI.swift in Sources */,
 				A115819FE05076AF542EABF0 /* SecretsAPI.swift in Sources */,

@@ -387,7 +387,7 @@ impl RoomSession {
 
     fn on_ack(&mut self, frame: Frame) {
         // Apply during WaitState / WaitCheckpoint too: a local PUSH can race the
-        // handshake (Swift Room.applyAck while waiting for STATE). Ignoring the
+        // handshake (ACK can arrive while waiting for STATE). Ignoring the
         // ACK until Live leaves the batch in `pending` forever when the only ACK
         // arrived before STATE and a later resend is treated as dup.
         if matches!(self.phase, Phase::Idle | Phase::Closed) {
@@ -425,8 +425,8 @@ impl RoomSession {
             return;
         };
         if header.code == "lagging" {
-            // Live: ask again with the same excludeOwn as finish_handshake /
-            // Swift Room (own rows may exist only on the relay). Mid-handshake
+            // Live: ask again with the same excludeOwn as finish_handshake
+            // (own rows may exist only on the relay). Mid-handshake
             // (WaitState / WaitCheckpoint): ignore — finish_handshake resyncs.
             if self.phase == Phase::Live {
                 let req = RowsReq {
@@ -516,7 +516,7 @@ impl RoomSession {
         if self.phase == Phase::Closed {
             return;
         }
-        // Parity with Mac's old `connected_at.elapsed() > BACKOFF_RESET_AFTER`.
+        // Reset backoff after a healthy open longer than BACKOFF_RESET_AFTER.
         let healthy = match (self.opened_at_ms, now_ms) {
             (Some(since), Some(now)) => {
                 now.saturating_sub(since) > BACKOFF_RESET_AFTER.as_millis() as u64
@@ -738,7 +738,7 @@ mod tests {
         let mut s = RoomSession::new("dev:me", "proj/chat", 0, pending);
         s.on_open(1_000);
         let _ = s.drain_actions();
-        // Still WaitState: ACK must clear pending (Swift Room hello-wait parity).
+        // Still WaitState: ACK must clear pending (hello-wait parity).
         s.on_frame(&ack_frame("batch-early", 1));
         let actions = s.drain_actions();
         assert!(s.pending().is_empty());

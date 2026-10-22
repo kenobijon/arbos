@@ -915,7 +915,7 @@ pub struct FireRoutineResponseDto {
     pub run_id: String,
 }
 
-// ---- Secrets / vaults (step 6b-2c-2) -----------------------------------------------------------
+// ---- Secrets / vaults ---------------------------------------------------------------------------
 //
 // Free-form on the wire (`#[typeshare(skip)]` + `Value`): activity `detail`, vault `items`,
 // vault `external_vaults`. Fixed-key objects the relay builds are real structs.
@@ -1279,7 +1279,7 @@ pub struct VaultItemsEnvelopeDto {
     pub items: Value,
 }
 
-// ---- Sign-in / pairing / media (step 6b-2d-1) ---------------------------------------------------
+// ---- Sign-in / pairing / media ------------------------------------------------------------------
 //
 // Pairing and token replies carry device / access tokens — fixtures use obviously fake values.
 // Upstream passthroughs (`ModelListDto`, `TranscriptionDto`) are read-only; unknown keys ignored.
@@ -1378,7 +1378,7 @@ pub struct TranscriptionDto {
     pub text: String,
 }
 
-// ---- Per-user pushes / releases / push registration (step 6b-2d-2) ------------------------------
+// ---- Per-user pushes / releases / push registration ---------------------------------------------
 //
 // `PushEventDto` is the adjacently tagged `{ kind, payload }` the relay stores and `/me/pushes`
 // returns. `PushItemDto` adds `id` + `created_at` beside it (serde flatten; typeshare skips the
@@ -1725,7 +1725,7 @@ pub struct PushRegisterResponseDto {
     pub push: bool,
 }
 
-// ---- Connectors / channels / skills / local / feedback (step 6b-2d-3) ---------------------------
+// ---- Connectors / channels / skills / local / feedback ------------------------------------------
 //
 // Free-form on the wire (`#[typeshare(skip)]` + `Value`): connector `config`, action `args`.
 // Channel binding / pairing keep camelCase keys via serde renames (wire unchanged).
