@@ -30,7 +30,9 @@ use arbos_core::auth::hash;
 use arbos_core::ids::{now_ms, ulid};
 
 use crate::auth::Principal;
+use crate::blobs::not_an_image;
 use crate::db_accounts::{AuthFlow, GithubIdentity};
+use crate::image_sniff::{check_avatar, ImageKind};
 use crate::state::{AppState, AuthMode};
 
 pub const ACCESS_TTL_S: i64 = 3600;
@@ -677,10 +679,6 @@ fn avatar_file(state: &AppState, user_id: &str) -> std::path::PathBuf {
         .join(format!("{user_id}.jpg"))
 }
 
-fn is_jpeg(bytes: &[u8]) -> bool {
-    bytes.len() >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF
-}
-
 /// `PATCH /me {name?, login?}`: set display name and/or handle. At least one field required.
 #[derive(Deserialize)]
 pub struct PatchMeBody {
@@ -782,18 +780,23 @@ pub async fn put_avatar(
     if !safe_avatar_user_id(&user_id) {
         return api_error(StatusCode::BAD_REQUEST, "bad_user", "bad user id");
     }
-    if let Some(ct) = headers
+    // Header and bytes must both say "image" (the shared gate); the file is then served as
+    // `{user}.jpg`, so of the image types only a JPEG is stored here — the apps re-encode.
+    let content_type = headers
         .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-    {
-        let base = ct.split(';').next().unwrap_or(ct).trim();
-        if !base.eq_ignore_ascii_case("image/jpeg") && !base.eq_ignore_ascii_case("image/jpg") {
+        .and_then(|v| v.to_str().ok());
+    match check_avatar(content_type, &body) {
+        Ok(ImageKind::Jpeg) => {}
+        Ok(other) => {
             return api_error(
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                "bad_mime",
-                "avatar must be image/jpeg",
+                "not_jpeg",
+                format!(
+                    "Profile pictures are stored as JPEG; this is a {other}. Re-encode it first"
+                ),
             );
         }
+        Err(why) => return not_an_image(&why),
     }
     if body.len() > MAX_AVATAR_BYTES {
         return api_error(
@@ -801,9 +804,6 @@ pub async fn put_avatar(
             "too_large",
             "avatar must be at most 2 MB",
         );
-    }
-    if !is_jpeg(&body) {
-        return api_error(StatusCode::BAD_REQUEST, "bad_image", "body is not a JPEG");
     }
     let path = avatar_file(&state, &user_id);
     if let Some(parent) = path.parent() {
@@ -1000,4 +1000,99 @@ pub async fn download_mac(State(state): State<AppState>) -> Response {
     };
     *state.download_cache.lock().await = Some((now, url.clone()));
     found(&url)
+}
+
+#[cfg(test)]
+mod avatar_tests {
+    //! `PUT /me/avatar` takes a JPEG that says it is one; anything else is refused with a
+    //! plain message, whatever the client called the file.
+
+    use axum::extract::State;
+    use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+
+    use super::*;
+    use crate::image_sniff::samples;
+    use crate::people::tests_support::person;
+    use crate::state::test_support::test_state;
+
+    async fn put(state: &AppState, who: &Principal, mime: Option<&str>, bytes: &[u8]) -> Response {
+        let mut headers = HeaderMap::new();
+        if let Some(m) = mime {
+            headers.insert(header::CONTENT_TYPE, HeaderValue::from_str(m).unwrap());
+        }
+        put_avatar(
+            State(state.clone()),
+            who.clone(),
+            headers,
+            Bytes::copy_from_slice(bytes),
+        )
+        .await
+    }
+
+    async fn error_message(r: Response) -> String {
+        let body = axum::body::to_bytes(r.into_body(), 1 << 16).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        v["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    #[tokio::test]
+    async fn profile_picture_must_be_a_jpeg_by_type_and_bytes() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 41);
+
+        // A model file sent with a JPEG header: the bytes are not a picture.
+        let r = put(&state, &alice_dev, Some("image/jpeg"), samples::ONNX).await;
+        assert_eq!(r.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        let msg = error_message(r).await;
+        assert!(msg.contains("not an image"), "{msg}");
+
+        // A model file with its honest type.
+        let r = put(
+            &state,
+            &alice_dev,
+            Some("application/octet-stream"),
+            samples::ONNX,
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+
+        // A JPEG with no Content-Type at all: the type is part of the contract.
+        let r = put(&state, &alice_dev, None, samples::JPEG).await;
+        assert_eq!(r.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+
+        // A real PNG: an image, but this endpoint stores JPEG only (the apps re-encode).
+        let r = put(&state, &alice_dev, Some("image/png"), samples::PNG).await;
+        assert_eq!(r.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        let msg = error_message(r).await;
+        assert!(msg.contains("JPEG"), "{msg}");
+
+        assert!(
+            !avatar_file(&state, &alice).exists(),
+            "nothing was written by the refused uploads"
+        );
+        assert!(state
+            .db
+            .user(&alice)
+            .unwrap()
+            .unwrap()
+            .avatar_url
+            .as_deref()
+            .is_none_or(|u| !u.contains("/avatars/")));
+
+        // A JPEG that says it is one: stored and published.
+        let r = put(&state, &alice_dev, Some("image/jpeg"), samples::JPEG).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert!(avatar_file(&state, &alice).exists());
+        let url = state
+            .db
+            .user(&alice)
+            .unwrap()
+            .unwrap()
+            .avatar_url
+            .unwrap_or_default();
+        assert!(url.contains(&format!("/avatars/{alice}.jpg")), "{url}");
+    }
 }

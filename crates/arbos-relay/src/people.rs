@@ -22,6 +22,7 @@ use arbos_core::ids::{now_ms, ulid};
 use arbos_core::wire;
 
 use crate::auth::Principal;
+use crate::blobs::{no_such_image, not_an_image, stored_image, StoredImage};
 use crate::db_people::{ChatWithMembers, Invite, Membership, PeopleChat};
 use crate::signin::api_error;
 use crate::state::AppState;
@@ -927,6 +928,16 @@ pub async fn chat_patch(
             );
         }
     };
+    // The picture is judged on what was uploaded (Content-Type and bytes), not its name.
+    if let Some(Some(key)) = &image_key {
+        match stored_image(&state, &format!("{PEOPLE_ACL_PREFIX}{id}"), key).await {
+            StoredImage::Image(kind) => {
+                tracing::info!(chat = %id, %key, %kind, "group picture set");
+            }
+            StoredImage::Missing => return no_such_image(),
+            StoredImage::NotAnImage(why) => return not_an_image(&why),
+        }
+    }
     let title_ref = title.as_ref().map(|o| o.as_ref().map(|s| s.as_str()));
     let image_ref = image_key.as_ref().map(|o| o.as_ref().map(|s| s.as_str()));
     if let Err(e) = state
@@ -2848,5 +2859,176 @@ pub(crate) mod tests_support {
             })
             .expect("pinned chat");
         project.id
+    }
+}
+
+#[cfg(test)]
+mod picture_tests {
+    //! A group picture is whatever was uploaded, judged on Content-Type and bytes: a model
+    //! file, a renamed model file, or an upload without a type never becomes the picture.
+
+    use axum::extract::{Path, State};
+    use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+    use axum::Json;
+    use bytes::Bytes;
+
+    use super::tests_support::{dm, person};
+    use super::*;
+    use crate::blobs;
+    use crate::image_sniff::samples;
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    async fn upload(
+        state: &AppState,
+        who: &Principal,
+        chat: &str,
+        key: &str,
+        mime: Option<&str>,
+        bytes: &[u8],
+    ) {
+        let mut headers = HeaderMap::new();
+        if let Some(m) = mime {
+            headers.insert(header::CONTENT_TYPE, HeaderValue::from_str(m).unwrap());
+        }
+        let r = blobs::put(
+            State(state.clone()),
+            who.clone(),
+            Path((format!("{PEOPLE_ACL_PREFIX}{chat}"), key.to_owned())),
+            headers,
+            Bytes::copy_from_slice(bytes),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::NO_CONTENT, "upload of {key}");
+    }
+
+    async fn set_picture(state: &AppState, who: &Principal, chat: &str, key: &str) -> StatusCode {
+        chat_patch(
+            State(state.clone()),
+            who.clone(),
+            Path(chat.to_owned()),
+            Json(PatchChatBody {
+                title: None,
+                image_key: Some(key.to_owned()),
+            }),
+        )
+        .await
+        .status()
+    }
+
+    fn picture_of(state: &AppState, chat: &str) -> Option<String> {
+        state.db.people_chat(chat).unwrap().unwrap().image_key
+    }
+
+    #[tokio::test]
+    async fn group_picture_must_be_an_image_by_type_and_bytes() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 31);
+        let (bob, _) = person(&state, 32);
+        let chat = dm(&state, &alice, &bob);
+
+        // The report: a model file picked in the Mac panel.
+        upload(
+            &state,
+            &alice_dev,
+            &chat,
+            "code_submission_v1.onnx",
+            Some("application/octet-stream"),
+            samples::ONNX,
+        )
+        .await;
+        assert_eq!(
+            set_picture(&state, &alice_dev, &chat, "code_submission_v1.onnx").await,
+            StatusCode::UNSUPPORTED_MEDIA_TYPE
+        );
+        assert_eq!(picture_of(&state, &chat), None);
+
+        // The same bytes renamed and sent as image/png: the bytes decide.
+        upload(
+            &state,
+            &alice_dev,
+            &chat,
+            "group-fake.png",
+            Some("image/png"),
+            samples::ONNX,
+        )
+        .await;
+        assert_eq!(
+            set_picture(&state, &alice_dev, &chat, "group-fake.png").await,
+            StatusCode::UNSUPPORTED_MEDIA_TYPE
+        );
+
+        // Real image bytes sent without a Content-Type: the type is required too.
+        upload(
+            &state,
+            &alice_dev,
+            &chat,
+            "group-untyped.jpg",
+            None,
+            samples::JPEG,
+        )
+        .await;
+        assert_eq!(
+            set_picture(&state, &alice_dev, &chat, "group-untyped.jpg").await,
+            StatusCode::UNSUPPORTED_MEDIA_TYPE
+        );
+
+        // A key nothing was uploaded under.
+        assert_eq!(
+            set_picture(&state, &alice_dev, &chat, "group-missing.png").await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(picture_of(&state, &chat), None);
+
+        // A real picture, typed and shaped like one: accepted.
+        upload(
+            &state,
+            &alice_dev,
+            &chat,
+            "group-real.png",
+            Some("image/png"),
+            samples::PNG,
+        )
+        .await;
+        assert_eq!(
+            set_picture(&state, &alice_dev, &chat, "group-real.png").await,
+            StatusCode::OK
+        );
+        assert_eq!(picture_of(&state, &chat).as_deref(), Some("group-real.png"));
+
+        // HEIC from an iPhone, and a WebP, pass the same gate.
+        upload(
+            &state,
+            &alice_dev,
+            &chat,
+            "group-phone.heic",
+            Some("image/heic"),
+            samples::HEIC,
+        )
+        .await;
+        assert_eq!(
+            set_picture(&state, &alice_dev, &chat, "group-phone.heic").await,
+            StatusCode::OK
+        );
+        upload(
+            &state,
+            &alice_dev,
+            &chat,
+            "group-web.webp",
+            Some("image/webp"),
+            samples::WEBP,
+        )
+        .await;
+        assert_eq!(
+            set_picture(&state, &alice_dev, &chat, "group-web.webp").await,
+            StatusCode::OK
+        );
+
+        // Clearing still works and needs no blob.
+        assert_eq!(
+            set_picture(&state, &alice_dev, &chat, "").await,
+            StatusCode::OK
+        );
+        assert_eq!(picture_of(&state, &chat), None);
     }
 }

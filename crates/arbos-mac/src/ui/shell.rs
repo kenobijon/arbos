@@ -14,6 +14,7 @@ use gpui::{
 
 use crate::app::SignInMode;
 use crate::app::{AppState, DetailsTarget, ProfilePage, ServerSheet};
+use crate::image_picker;
 use crate::model::{now_ms, CallKind, Link, MachineState};
 use crate::ui::attachments;
 use crate::ui::avatars;
@@ -1187,20 +1188,13 @@ impl Shell {
         cx.notify();
     }
 
-    /// The crayon on my own picture: pick an image file, `PUT /me/avatar`.
+    /// The crayon on my own picture: pick an image (images only in the panel),
+    /// `PUT /me/avatar`.
     pub(crate) fn pick_my_avatar(&mut self, cx: &mut Context<Self>) {
-        let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: false,
-            prompt: Some("Choose".into()),
-        });
+        let rx = image_picker::pick_image(cx, "Choose");
         let state = self.state.clone();
         cx.spawn(async move |_, cx| {
-            let Ok(Ok(Some(paths))) = rx.await else {
-                return;
-            };
-            let Some(path) = paths.into_iter().next() else {
+            let Ok(Some(path)) = rx.await else {
                 return;
             };
             cx.update(|cx| {
@@ -1210,20 +1204,13 @@ impl Shell {
         .detach();
     }
 
-    /// The crayon on a group's picture: pick an image file, upload it.
+    /// The crayon on a group's picture: pick an image (images only in the
+    /// panel), upload it.
     pub(crate) fn pick_group_image(&mut self, space_id: crate::model::Id, cx: &mut Context<Self>) {
-        let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: false,
-            prompt: Some("Choose".into()),
-        });
+        let rx = image_picker::pick_image(cx, "Choose");
         let state = self.state.clone();
         cx.spawn(async move |_, cx| {
-            let Ok(Ok(Some(paths))) = rx.await else {
-                return;
-            };
-            let Some(path) = paths.into_iter().next() else {
+            let Ok(Some(path)) = rx.await else {
                 return;
             };
             cx.update(|cx| {
@@ -1601,12 +1588,6 @@ impl Shell {
             self.chat_delete_armed = false;
             self.react_menu = None;
             cx.notify();
-        }
-        if self.composer.read(cx).open_picker.is_some() {
-            self.composer.update(cx, |c, cx| {
-                c.open_picker = None;
-                cx.notify();
-            });
         }
     }
 

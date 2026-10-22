@@ -4,6 +4,7 @@ mod app;
 mod audio;
 mod auth;
 mod calls;
+mod image_picker;
 mod model;
 mod onboarding;
 mod sync;

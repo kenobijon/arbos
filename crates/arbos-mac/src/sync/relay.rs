@@ -3035,6 +3035,48 @@ fn send_wake(shared: &Arc<Shared>, project_id: &str, reason: &'static str) {
 
 /// Any picked image → a JPEG the relay accepts (`PUT /me/avatar`, ≤ 2 MB):
 /// scaled to fit 512 × 512, quality 85.
+/// A picked picture file as the 512 px JPEG the relay stores. PNG, JPEG, GIF and WebP decode
+/// here; HEIC (Photos exports, iPhone shots) goes through macOS's own `sips` first, since
+/// the `image` crate has no HEIF decoder. Anything that is not an image is an error with a
+/// plain message.
+fn picture_jpeg(path: &Path) -> Result<Vec<u8>> {
+    let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    match avatar_jpeg(&bytes) {
+        Ok(jpeg) => Ok(jpeg),
+        Err(err) => match heic_to_jpeg(path) {
+            Some(Ok(converted)) => avatar_jpeg(&converted),
+            Some(Err(conv)) => Err(conv),
+            None => Err(err),
+        },
+    }
+}
+
+/// `sips -s format jpeg` for HEIC/HEIF files on macOS; `None` when the file is not one (or
+/// this is not a Mac), so the original error stands.
+fn heic_to_jpeg(path: &Path) -> Option<Result<Vec<u8>>> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    if !cfg!(target_os = "macos") || !matches!(ext.as_str(), "heic" | "heif") {
+        return None;
+    }
+    let out = std::env::temp_dir().join(format!("arbos-picture-{}.jpg", new_id().to_lowercase()));
+    let run = std::process::Command::new("sips")
+        .args(["-s", "format", "jpeg"])
+        .arg(path)
+        .arg("--out")
+        .arg(&out)
+        .output();
+    let result = match run {
+        Ok(o) if o.status.success() => std::fs::read(&out).context("read converted picture"),
+        Ok(o) => Err(anyhow!(
+            "could not read this HEIC picture: {}",
+            String::from_utf8_lossy(&o.stderr).trim()
+        )),
+        Err(err) => Err(anyhow!("could not convert the HEIC picture: {err}")),
+    };
+    let _ = std::fs::remove_file(&out);
+    Some(result)
+}
+
 fn avatar_jpeg(bytes: &[u8]) -> Result<Vec<u8>> {
     let img = image::load_from_memory(bytes).context("not an image")?;
     let img = img.resize(512, 512, image::imageops::FilterType::Triangle);
@@ -4309,20 +4351,20 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         ClientCommand::SetGroupImage { chat_id, path } => {
             let shared = shared.clone();
             tokio::spawn(async move {
-                let ext = path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .map(|e| e.to_ascii_lowercase())
-                    .unwrap_or_else(|| "png".into());
-                let key = format!("group-{}.{}", new_id().to_lowercase(), ext);
-                let mime = mime_for(&path);
-                let bytes = match tokio::fs::read(&path).await {
-                    Ok(b) => b,
+                // Same shape as the profile picture: a 512 px JPEG, whatever was picked
+                // (HEIC from Photos included), so every client renders it.
+                let jpeg = match tokio::task::spawn_blocking(move || picture_jpeg(&path)).await {
+                    Ok(Ok(j)) => j,
+                    Ok(Err(err)) => {
+                        shared.notice(format!("Group picture: {err:#}"));
+                        return;
+                    }
                     Err(err) => {
                         shared.notice(format!("Group picture: {err}"));
                         return;
                     }
                 };
+                let key = format!("group-{}.jpg", new_id().to_lowercase());
                 let put = shared
                     .http
                     .put(format!(
@@ -4330,8 +4372,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         shared.http_url, chat_id, key
                     ))
                     .bearer_auth(shared.token())
-                    .header("content-type", mime)
-                    .body(bytes)
+                    .header("content-type", "image/jpeg")
+                    .body(jpeg)
                     .send()
                     .await;
                 match put {
@@ -4659,19 +4701,12 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         ClientCommand::SetMyAvatar { path } => {
             let shared = shared.clone();
             tokio::spawn(async move {
-                let bytes = match tokio::fs::read(&path).await {
-                    Ok(b) => b,
-                    Err(err) => {
-                        shared.notice(format!("Picture: {err}"));
-                        return;
-                    }
-                };
                 // The relay takes a JPEG of at most 2 MB: re-encode whatever
                 // was picked, scaled to 512 pt.
-                let jpeg = match tokio::task::spawn_blocking(move || avatar_jpeg(&bytes)).await {
+                let jpeg = match tokio::task::spawn_blocking(move || picture_jpeg(&path)).await {
                     Ok(Ok(j)) => j,
                     Ok(Err(err)) => {
-                        shared.notice(format!("Picture: {err}"));
+                        shared.notice(format!("Picture: {err:#}"));
                         return;
                     }
                     Err(err) => {
