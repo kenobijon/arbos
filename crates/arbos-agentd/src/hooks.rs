@@ -268,19 +268,7 @@ async fn turn_without_route(
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_owned();
-    tracing::warn!(session = %sid, corrected, "turn ended without a route call");
-    let _ = a.store.t3_append(
-        &sid,
-        None,
-        Some(&sid),
-        "route",
-        Some("system"),
-        &format!("turn without route; corrective continuation={corrected}"),
-        None,
-    );
-    if let Some(t) = a.turn.lock().await.as_mut() {
-        t.metrics.route_missing = true;
-    }
+    a.hook_turn_without_route(&sid, corrected).await;
     ok()
 }
 
