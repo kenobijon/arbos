@@ -391,7 +391,9 @@ pub async fn patch(
     // The picture is judged on what was uploaded (Content-Type and bytes), not its name.
     if let Some(Some(key)) = &image {
         match stored_image(&state, &format!("{SERVER_BLOB_PREFIX}{id}"), key).await {
-            StoredImage::Image(_) => {}
+            StoredImage::Image(kind) => {
+                tracing::info!(server = %id, %key, %kind, "server picture set");
+            }
             StoredImage::Missing => return no_such_image(),
             StoredImage::NotAnImage(why) => return not_an_image(&why),
         }

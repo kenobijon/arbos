@@ -10,9 +10,6 @@ use gpui::App;
 /// What a picture may be (the relay refuses anything else by MIME and magic bytes).
 pub const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "heic", "heif", "gif", "webp"];
 
-/// The list as shown to people.
-pub const ALLOWED_LIST: &str = "PNG, JPEG, HEIC, GIF or WebP";
-
 /// Judged on the extension only; the relay judges the bytes.
 pub fn is_image_path(path: &Path) -> bool {
     path.extension()
@@ -64,7 +61,10 @@ mod macos {
         UTType, UTTypeGIF, UTTypeHEIC, UTTypeJPEG, UTTypePNG, UTTypeWebP,
     };
 
-    use super::{is_image_path, ALLOWED_LIST};
+    use super::is_image_path;
+
+    /// The list as shown to people, under the panel's title.
+    const ALLOWED_LIST: &str = "PNG, JPEG, HEIC, GIF or WebP";
 
     /// An `NSOpenPanel` that only lets image files be chosen, as a sheet on the key window
     /// when there is one (the picker the report's screenshot shows), modeless otherwise.

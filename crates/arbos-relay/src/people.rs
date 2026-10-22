@@ -913,7 +913,9 @@ pub async fn chat_patch(
     // The picture is judged on what was uploaded (Content-Type and bytes), not its name.
     if let Some(Some(key)) = &image_key {
         match stored_image(&state, &format!("{PEOPLE_ACL_PREFIX}{id}"), key).await {
-            StoredImage::Image(_) => {}
+            StoredImage::Image(kind) => {
+                tracing::info!(chat = %id, %key, %kind, "group picture set");
+            }
             StoredImage::Missing => return no_such_image(),
             StoredImage::NotAnImage(why) => return not_an_image(&why),
         }

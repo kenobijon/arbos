@@ -15,25 +15,6 @@ pub enum ImageKind {
 }
 
 impl ImageKind {
-    pub const ALL: [ImageKind; 5] = [
-        ImageKind::Png,
-        ImageKind::Jpeg,
-        ImageKind::Gif,
-        ImageKind::Webp,
-        ImageKind::Heic,
-    ];
-
-    /// The canonical MIME type.
-    pub fn mime(self) -> &'static str {
-        match self {
-            ImageKind::Png => "image/png",
-            ImageKind::Jpeg => "image/jpeg",
-            ImageKind::Gif => "image/gif",
-            ImageKind::Webp => "image/webp",
-            ImageKind::Heic => "image/heic",
-        }
-    }
-
     /// The kind a `Content-Type` header names; parameters (`; charset=…`) and case are
     /// ignored, the usual aliases (`image/jpg`, `image/heif`, `image/x-png`) are accepted.
     pub fn from_mime(content_type: &str) -> Option<Self> {
