@@ -282,6 +282,75 @@ else:
 
 relay_db() { sudo -u arbos sqlite3 /var/lib/arbos-relay/relay.db "$@"; }
 
+DAYTONA_API=https://app.daytona.io/api
+DAYTONA_ORG=${DAYTONA_ORG:-72b8ee38-8559-48e8-9535-f40fab6e68cd}
+QUOTA_MIN_FREE_GIB=${QUOTA_MIN_FREE_GIB:-100}     # a box upgrade creates one 10 GiB sandbox before the old one is stopped
+QUOTA_KEEP_RETAINED=${QUOTA_KEEP_RETAINED:-2}     # retained (stopped) old sandboxes kept per user as rollback fallback
+
+daytona_disk_free_gib() {
+  # free GiB in the org's disk quota; empty when the usage endpoint does not answer
+  curl -fsS --max-time 20 -H "Authorization: Bearer $(secret_from "$RELAY_ENV" DAYTONA_API_KEY)" "$DAYTONA_API/organizations/$DAYTONA_ORG/usage" 2>/dev/null \
+    | python3 -c 'import json,sys; r=json.load(sys.stdin)["regionUsage"][0]; print(int(r["totalDiskQuota"])-int(r["currentDiskUsage"]))' 2>/dev/null || true
+}
+
+daytona_archive_retained() {
+  # Archive (never delete — an archived sandbox can be started again) the stopped sandboxes nobody needs
+  # running: every stopped test_ sandbox, and a user's retained old sandboxes beyond the QUOTA_KEEP_RETAINED
+  # newest. 2026-10-22 03:59: 15 rolls a day x 12 boxes had left 450 stopped 10 GiB sandboxes, the org hit
+  # its 5000 GiB disk quota, `daytona create` answered 400 and four real users' boxes went to `error`.
+  local key n=0 id kind
+  key="$(secret_from "$RELAY_ENV" DAYTONA_API_KEY)"
+  while read -r kind id; do
+    [[ -n "$id" ]] || continue
+    if [[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $key" "$DAYTONA_API/sandbox/$id/archive")" =~ ^2 ]]; then
+      n=$((n+1)); log "agentd: archived $kind sandbox $id"
+    fi
+    sleep 0.3
+  done < <(python3 - "$key" "$QUOTA_KEEP_RETAINED" <<'EOF2'
+import json, re, sys, urllib.request, collections
+key, keep = sys.argv[1], int(sys.argv[2])
+items, cur = {}, ""
+for _ in range(20):
+    url = "https://app.daytona.io/api/sandbox?limit=200" + (f"&cursor={cur}" if cur else "")
+    req = urllib.request.Request(url, headers={"Authorization": "Bearer " + key})
+    d = json.load(urllib.request.urlopen(req, timeout=30))
+    for x in d.get("items", []): items[x["id"]] = x
+    cur = d.get("nextCursor") or ""
+    if not cur: break
+per = collections.defaultdict(list)
+for x in items.values():
+    if x.get("state") != "stopped": continue
+    n = x.get("name", "")
+    if n.startswith("arbos-test-"): print("test", x["id"])
+    elif n.startswith(("arbos-gh-", "arbos-01m", "arbos-u-")): per[re.sub(r"-[a-z0-9]{6}$", "", n)].append(x)
+for v in per.values():
+    v.sort(key=lambda x: x.get("createdAt", ""))
+    for x in v[:-keep]: print("user-old", x["id"])
+EOF2
+)
+  log "agentd: archived $n stopped sandbox(es); disk quota free now $(daytona_disk_free_gib) GiB"
+}
+
+quota_headroom_or_wait() {
+  # Before the boxes roll: enough disk quota for the upgrades, else archive retained sandboxes, re-check,
+  # and if still short refuse (ALERT) instead of hammering `daytona create` 400s and racing rollbacks.
+  local free
+  free="$(daytona_disk_free_gib)"
+  [[ -n "$free" ]] || { log "agentd: Daytona usage endpoint did not answer; rolling without a quota check"; return 0; }
+  if (( free < QUOTA_MIN_FREE_GIB )); then
+    log "agentd: Daytona disk quota has only ${free} GiB free (< ${QUOTA_MIN_FREE_GIB}); archiving retained sandboxes first"
+    daytona_archive_retained
+    free="$(daytona_disk_free_gib)"
+  fi
+  if [[ -n "$free" ]] && (( free < QUOTA_MIN_FREE_GIB )); then
+    event agentd "$1" quota_short "Daytona disk quota ${free} GiB free (< ${QUOTA_MIN_FREE_GIB}) after archiving; boxes not rolled"
+    log "ALERT agentd: Daytona disk quota ${free} GiB free after archiving — boxes not rolled; free quota by hand (archive/delete sandboxes) and the roll-continue pass retries"
+    return 1
+  fi
+  log "agentd: Daytona disk quota ${free} GiB free; rolling"
+  return 0
+}
+
 prune_snapshots() {
   # §8b step 4. keep = relay default + every live box's snapshot + this and the two previous versions.
   local cur="$1" api=https://app.daytona.io/api key def live keep all total count
@@ -440,8 +509,10 @@ roll_continue() {
   sha="$(sed -n 's/^sha=//p' "$STATE/agentd.rolling" 2>/dev/null | head -1)"
   snapshot="$(sed -n 's/^snapshot=//p' "$STATE/agentd.rolling" 2>/dev/null | head -1)"
   [[ -n "$sha" && -n "$snapshot" ]] || exit 0
-  roll_pass "$snapshot"
-  sleep 60
+  if quota_headroom_or_wait "$sha"; then
+    roll_pass "$snapshot"
+    sleep 60
+  fi
   finish_roll "$sha" "$snapshot" || true
 }
 
@@ -489,8 +560,10 @@ roll_image() {
   event agentd "$sha" image_registered "image $version, snapshot $snapshot is the relay default"
   # The request is served from here on; a newer request supersedes the retry cadence.
   if [[ "$(sed -n 's/^sha=//p' "$QUEUE/agentd" 2>/dev/null)" == "$sha" ]]; then rm -f "$QUEUE/agentd"; fi
-  roll_boxes "$snapshot" || true
-  sleep 30
+  if quota_headroom_or_wait "$sha"; then
+    roll_boxes "$snapshot" || true
+    sleep 30
+  fi
   finish_roll "$sha" "$snapshot" || true
   log "agentd: image $version from $sha — $(( $(date +%s) - t0 )) s so far"
 }
