@@ -319,6 +319,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         | ClientCommand::ChannelCreate { .. }
         | ClientCommand::ChannelPatch { .. }
         | ClientCommand::ChannelDelete { .. }
+        | ClientCommand::ChannelArchive { .. }
         | ClientCommand::ChannelOpen { .. }
         | ClientCommand::ChannelLoadOlder { .. }
         | ClientCommand::ChannelSend { .. }

@@ -731,6 +731,12 @@ final class RelayAPI {
         _ = try await request("DELETE", "/servers/\(serverId)/channels/\(channelId)")
     }
 
+    /// `POST /servers/{id}/channels/{cid}/archive {archived}` — hide the channel from my list
+    /// (per user; the room's `m.lowpriority` tag on the homeserver) or bring it back.
+    func archiveChannel(serverId: String, channelId: String, archived: Bool) async throws {
+        _ = try await request("POST", "/servers/\(serverId)/channels/\(channelId)/archive", body: ["archived": archived])
+    }
+
     /// `POST /servers/{id}/invite/reset` (owner) → the new `{code, url}`.
     func resetServerInvite(_ id: String) async throws -> ServerInvite {
         guard let inv = ServerInvite.parse(try await json("POST", "/servers/\(id)/invite/reset", body: [String: Any]())) else {

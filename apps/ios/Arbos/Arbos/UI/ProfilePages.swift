@@ -1127,6 +1127,7 @@ struct ServerProfileView: View {
 
     // MARK: Channels
 
+    @ViewBuilder
     private func channelsList(_ server: Server) -> some View {
         ProfileCard(separatorInset: PaneKit.separatorInset(.glyph(""))) {
             if isAdmin {
@@ -1136,8 +1137,26 @@ struct ServerProfileView: View {
                 }
                 .buttonStyle(.plain)
             }
-            ForEach(server.channels) { c in
+            ForEach(server.liveChannels) { c in
                 channelRow(c, in: server)
+            }
+        }
+        if !server.archivedChannels.isEmpty {
+            // Channels I archived (row menu → Archive): Unarchive brings one back to my list.
+            VStack(alignment: .leading, spacing: 8) {
+                PaneSectionTitle("Archived")
+                ProfileCard(separatorInset: PaneKit.separatorInset(.glyph(""))) {
+                    ForEach(server.archivedChannels) { c in
+                        PaneRow(leading: .glyph("archivebox"), title: c.name,
+                                subtitle: model.channelRestricted(c) ? "Admins only post" : nil,
+                                trailing: AnyView(
+                                    Button("Unarchive") { Task { await model.archiveChannel(c, false) } }
+                                        .font(theme.font(Theme.small, weight: .medium))
+                                        .buttonStyle(.bordered)
+                                        .tint(theme.muted)
+                                ))
+                    }
+                }
             }
         }
     }

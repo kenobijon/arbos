@@ -19,6 +19,8 @@ struct ServerChannel: Identifiable, Equatable {
     /// nil for a few seconds after creation while the relay makes the room.
     var roomId: String?
     var createdAt: Int64
+    /// Hidden from my channel list (per user; the server page's Archived group brings it back).
+    var archived: Bool = false
 
     static func parse(_ raw: Any) -> ServerChannel? {
         guard let d = raw as? [String: Any], let id = d["id"] as? String else { return nil }
@@ -30,7 +32,8 @@ struct ServerChannel: Identifiable, Equatable {
             restricted: (d["restricted"] as? NSNumber)?.boolValue ?? false,
             position: (d["position"] as? NSNumber)?.intValue ?? 0,
             roomId: (d["room_id"] as? String).flatMap { $0.isEmpty ? nil : $0 },
-            createdAt: (d["created_at"] as? NSNumber)?.int64Value ?? 0
+            createdAt: (d["created_at"] as? NSNumber)?.int64Value ?? 0,
+            archived: (d["archived"] as? NSNumber)?.boolValue ?? false
         )
     }
 }
@@ -101,6 +104,11 @@ struct Server: Identifiable, Equatable {
     var isAdmin: Bool { myRole == "owner" || myRole == "admin" }
     /// Already in this server (search hits for open servers you are not in have an empty role).
     var isMember: Bool { !myRole.isEmpty }
+
+    /// The channels in my list (not archived), in order.
+    var liveChannels: [ServerChannel] { channels.filter { !$0.archived } }
+    /// The channels I archived, in order.
+    var archivedChannels: [ServerChannel] { channels.filter(\.archived) }
 
     /// Where opening the server lands (rule 3).
     var general: ServerChannel? {

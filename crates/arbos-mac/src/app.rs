@@ -457,6 +457,9 @@ pub struct AppState {
     pub servers: Vec<ServerInfo>,
     /// Rig: `ARBOS_OPEN_SERVER` was applied (once, when the registry first lists it).
     open_server_hook_done: bool,
+    /// Rig: `ARBOS_OPEN_SERVER=…:menu|:menu-delete` — the shell opens the selected channel's
+    /// row menu on its next render (`true` = with the Delete confirmation armed).
+    pub rig_channel_menu: Option<bool>,
     /// D88: the room list from the homeserver (previews, unread, `can_post`).
     pub matrix_snapshot: Snapshot,
     pub matrix_connected: bool,
@@ -724,6 +727,7 @@ impl AppState {
             my_call: None,
             servers_available: false,
             open_server_hook_done: false,
+            rig_channel_menu: None,
             servers: Vec::new(),
             matrix_snapshot: Snapshot::default(),
             matrix_connected: false,
@@ -3142,6 +3146,49 @@ impl AppState {
         cx.notify();
     }
 
+    /// Channel row menu / server page: hide a channel from my list, or bring it back. An
+    /// archived channel that was open gives way to `#general`.
+    pub fn archive_channel(
+        &mut self,
+        server_id: Id,
+        channel_id: Id,
+        archived: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let was_open = self
+            .selected_channel
+            .as_ref()
+            .is_some_and(|c| c.channel_id == channel_id);
+        if let Some(c) = self
+            .servers
+            .iter_mut()
+            .find(|s| s.id == server_id)
+            .and_then(|s| s.channels.iter_mut().find(|c| c.id == channel_id))
+        {
+            c.archived = archived;
+        }
+        self.command(ClientCommand::ChannelArchive {
+            server_id: server_id.clone(),
+            channel_id: channel_id.clone(),
+            archived,
+        });
+        if archived && was_open {
+            match self
+                .server(&server_id)
+                .and_then(|s| s.general())
+                .map(|g| g.id.clone())
+                .filter(|g| *g != channel_id)
+            {
+                Some(general) => {
+                    self.select_channel(server_id, general, cx);
+                    return;
+                }
+                None => self.selected_channel = None,
+            }
+        }
+        cx.notify();
+    }
+
     /// Server page, Channels tab: delete a channel (owner/admin; `#general` refuses).
     pub fn delete_channel(&mut self, server_id: Id, channel_id: Id, cx: &mut Context<Self>) {
         let was_open = self
@@ -3454,6 +3501,12 @@ impl AppState {
                         },
                         cx,
                     );
+                }
+            } else if part == "menu" || part == "menu-delete" {
+                self.rig_channel_menu = Some(part == "menu-delete");
+            } else if part == "archive" {
+                if let Some(c) = self.selected_channel.clone() {
+                    self.archive_channel(c.server_id, c.channel_id, true, cx);
                 }
             } else if let Some(channel) = server
                 .channels

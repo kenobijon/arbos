@@ -219,6 +219,15 @@ pub struct Shell {
     pub(crate) server_leave_armed: bool,
     /// Right-click menu on a sidebar row: the space and where the click landed.
     pub(crate) row_menu: Option<(crate::model::Id, gpui::Point<gpui::Pixels>)>,
+    /// Right-click menu on a channel row of the server's channel list (D88): server, channel,
+    /// and where the click landed. Archive for everyone, Delete for owners/admins.
+    pub(crate) channel_menu: Option<(
+        crate::model::Id,
+        crate::model::Id,
+        gpui::Point<gpui::Pixels>,
+    )>,
+    /// The channel menu's Delete was clicked once: it shows "Delete #name?" with Cancel / Delete.
+    pub(crate) channel_delete_armed: bool,
     /// The row menu's Delete was clicked once: it now shows "Delete …?" with
     /// Cancel / Delete instead of the action list (iPhone confirmationDialog).
     pub(crate) row_delete_armed: bool,
@@ -641,6 +650,8 @@ impl Shell {
             },
             settings_scroll,
             row_menu: None,
+            channel_menu: None,
+            channel_delete_armed: false,
             row_delete_armed: false,
             member_remove_armed: None,
             chat_menu: None,
@@ -929,6 +940,7 @@ impl Shell {
         };
         self.menu_open = false;
         self.row_menu = None;
+        self.channel_menu = None;
         // A pending single-click open of the header name must not land on
         // top of the rename.
         self.name_click_serial = self.name_click_serial.wrapping_add(1);
@@ -1064,6 +1076,7 @@ impl Shell {
         };
         self.menu_open = false;
         self.row_menu = None;
+        self.channel_menu = None;
         self.channel_rename = None;
         self.new_channel_restricted = false;
         self.server_input.update(cx, |input, cx| {
@@ -1176,6 +1189,7 @@ impl Shell {
         };
         self.menu_open = false;
         self.row_menu = None;
+        self.channel_menu = None;
         self.agent_name_input.update(cx, |input, cx| {
             input.set_text_center(true);
             input.set_text(name, cx);
@@ -1635,10 +1649,28 @@ impl Shell {
     pub(crate) fn open_chat_menu(&mut self, chat_id: crate::model::Id, cx: &mut Context<Self>) {
         self.menu_open = false;
         self.row_menu = None;
+        self.channel_menu = None;
         self.row_delete_armed = false;
         self.tab_menu_open = true;
         self.chat_menu = Some(chat_id);
         self.chat_delete_armed = false;
+        cx.notify();
+    }
+
+    /// Right-click / control-click on a channel row (D88): its menu, anchored at the click.
+    pub(crate) fn open_channel_menu(
+        &mut self,
+        server_id: crate::model::Id,
+        channel_id: crate::model::Id,
+        at: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.menu_open = false;
+        self.row_menu = None;
+        self.row_delete_armed = false;
+        self.chat_menu = None;
+        self.channel_menu = Some((server_id, channel_id, at));
+        self.channel_delete_armed = false;
         cx.notify();
     }
 
@@ -1651,6 +1683,7 @@ impl Shell {
             || self.group_picker_open
             || self.tab_menu_open
             || self.row_menu.is_some()
+            || self.channel_menu.is_some()
             || self.chat_menu.is_some()
             || self.react_menu.is_some()
         {
@@ -1660,7 +1693,10 @@ impl Shell {
             self.group_picker_open = false;
             self.tab_menu_open = false;
             self.row_menu = None;
+            self.channel_menu = None;
             self.row_delete_armed = false;
+            self.channel_menu = None;
+            self.channel_delete_armed = false;
             self.chat_menu = None;
             self.chat_delete_armed = false;
             self.react_menu = None;
@@ -3120,6 +3156,17 @@ impl Render for Shell {
             }
         }
         if let Some(menu) = sidebar::row_menu(self, cx) {
+            root = root.child(menu);
+        }
+        // Rig: the hook asked for the selected channel's row menu.
+        if let Some(armed) = self.state.update(cx, |s, _| s.rig_channel_menu.take()) {
+            if let Some(c) = self.state.read(cx).selected_channel.clone() {
+                self.channel_menu =
+                    Some((c.server_id, c.channel_id, gpui::point(px(150.0), px(135.0))));
+                self.channel_delete_armed = armed;
+            }
+        }
+        if let Some(menu) = sidebar::channel_menu(self, cx) {
             root = root.child(menu);
         }
         if let Some(menu) = self.react_menu(cx) {

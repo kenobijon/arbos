@@ -366,6 +366,24 @@ extension AppModel {
         await refreshServers()
     }
 
+    /// Row menu → Archive / Unarchive: hide a channel from my list or bring it back. An archived
+    /// channel that is open gives way to the channel list.
+    func archiveChannel(_ channel: ServerChannel, _ archived: Bool) async {
+        if let si = servers.firstIndex(where: { $0.id == channel.serverId }),
+           let ci = servers[si].channels.firstIndex(where: { $0.id == channel.id }) {
+            servers[si].channels[ci].archived = archived
+        }
+        if archived, case .chat(let id, _)? = path.last, id == channel.id {
+            path = [.server(serverId: channel.serverId)]
+        }
+        do {
+            try await relay.archiveChannel(serverId: channel.serverId, channelId: channel.id, archived: archived)
+        } catch {
+            notice = Notice(text: "Could not \(archived ? "archive" : "unarchive") the channel: \(error.localizedDescription)")
+        }
+        await refreshServers()
+    }
+
     func deleteChannel(_ channel: ServerChannel) async -> Bool {
         do {
             try await relay.deleteChannel(serverId: channel.serverId, channelId: channel.id)
