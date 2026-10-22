@@ -1912,11 +1912,13 @@ impl Render for Composer {
             .unwrap_or_else(|| "Arbos".into());
         let (recording, transcribing, in_call, voice_notice) = {
             let v = self.voice.read(cx);
+            // A note about a reply shows only in that reply's chat.
+            let active_chat = state.active_chat_id();
             (
                 v.is_recording(),
                 v.is_transcribing(),
                 v.in_call(),
-                v.notice().map(str::to_owned),
+                v.notice_for(active_chat.as_deref()).map(str::to_owned),
             )
         };
         let in_livekit = state.my_call.is_some();

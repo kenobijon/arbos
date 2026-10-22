@@ -1094,7 +1094,7 @@ impl Agent {
 
     /// In this Project's own chats: tell the model the owner's display name so it addresses them
     /// by name, not `@handle`. Call only when people/guest preludes did not already run.
-    /// `None` when the message has no `senderName`.
+    /// `None` when the message carries neither a usable `senderName` nor a `senderHandle`.
     pub async fn owner_address_note(
         &self,
         chat_id: &str,
@@ -1105,17 +1105,111 @@ impl Agent {
             return None;
         }
         let msg = host.lock().await.doc.message(user_msg_id)?;
-        let name = msg
-            .rest
-            .get("senderName")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|n| !n.is_empty())?;
-        Some(format!(
-            "[The user is {name}. Address them as {name}, never as an @handle.]\n\n"
-        ))
+        let name = msg.rest.get("senderName").and_then(Value::as_str);
+        let handle = msg.rest.get("senderHandle").and_then(Value::as_str);
+        owner_address_note_text(name, handle, &self.cfg.project_name)
+    }
+}
+
+/// The name the agent should call the user. The display name wins unless it is empty or is
+/// the product's name or the agent's own name (a GitHub profile called "Arbos" produced
+/// "Hello, Arbos" — feedback 2026-10-22); then the bare handle, if any.
+pub fn user_address_name(
+    sender_name: Option<&str>,
+    sender_handle: Option<&str>,
+    agent_name: &str,
+) -> Option<String> {
+    let clean = |s: Option<&str>| {
+        s.map(str::trim)
+            .map(|s| s.trim_start_matches('@'))
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    };
+    let usable =
+        |n: &str| !n.eq_ignore_ascii_case("arbos") && !n.eq_ignore_ascii_case(agent_name.trim());
+    clean(sender_name)
+        .filter(|n| usable(n))
+        .or_else(|| clean(sender_handle).filter(|h| usable(h)))
+}
+
+/// The per-turn identity note for the project owner: who the user is, and that the agent's
+/// name is a name (not a place: "What do you want to work on in Doug?" — same feedback).
+pub fn owner_address_note_text(
+    sender_name: Option<&str>,
+    sender_handle: Option<&str>,
+    agent_name: &str,
+) -> Option<String> {
+    let name = user_address_name(sender_name, sender_handle, agent_name)?;
+    let agent = agent_name.trim();
+    let about_me = if agent.is_empty() || agent.eq_ignore_ascii_case("arbos") {
+        String::new()
+    } else {
+        format!(
+            " You are {agent}; \"{agent}\" is your own name, not a place, workspace or product — never say \"in {agent}\" or \"on {agent}\"."
+        )
+    };
+    Some(format!(
+        "[The user is {name}. Address them as {name}, never as an @handle and never as \"Arbos\" (Arbos is the app).{about_me}]\n\n"
+    ))
+}
+
+#[cfg(test)]
+mod address_tests {
+    use super::*;
+
+    #[test]
+    fn display_name_wins_when_it_is_a_real_name() {
+        assert_eq!(
+            user_address_name(Some("Jacob"), Some("unarbos"), "Doug").as_deref(),
+            Some("Jacob")
+        );
+        let note = owner_address_note_text(Some(" Jacob "), Some("unarbos"), "Doug").unwrap();
+        assert!(note.starts_with("[The user is Jacob. Address them as Jacob"));
+        assert!(note.contains("never as \"Arbos\""));
+        assert!(note.contains("You are Doug; \"Doug\" is your own name, not a place"));
+        assert!(note.ends_with("]\n\n"));
     }
 
+    #[test]
+    fn product_name_as_display_name_falls_back_to_the_handle() {
+        // Jacob's `unarbos` GitHub profile is literally named "Arbos".
+        assert_eq!(
+            user_address_name(Some("Arbos"), Some("unarbos"), "Doug").as_deref(),
+            Some("unarbos")
+        );
+        assert_eq!(
+            user_address_name(Some("arbos"), Some("@unarbos"), "Doug").as_deref(),
+            Some("unarbos")
+        );
+        let note = owner_address_note_text(Some("Arbos"), Some("unarbos"), "Doug").unwrap();
+        assert!(note.contains("The user is unarbos. Address them as unarbos"));
+        assert!(!note.contains("Address them as Arbos"));
+    }
+
+    #[test]
+    fn agent_name_as_display_name_falls_back_too() {
+        assert_eq!(
+            user_address_name(Some("Doug"), Some("jake"), "Doug").as_deref(),
+            Some("jake")
+        );
+        // Neither usable: no note rather than a wrong one.
+        assert_eq!(user_address_name(Some("Arbos"), Some("Doug"), "Doug"), None);
+        assert_eq!(owner_address_note_text(Some("Arbos"), None, "Doug"), None);
+        assert_eq!(user_address_name(None, None, "Doug"), None);
+        assert_eq!(user_address_name(Some("  "), Some(""), "Doug"), None);
+    }
+
+    #[test]
+    fn note_skips_the_self_line_when_the_agent_is_unnamed() {
+        let note = owner_address_note_text(Some("Jacob"), None, "Arbos").unwrap();
+        assert!(note.contains("The user is Jacob"));
+        assert!(!note.contains("You are Arbos"));
+        let note = owner_address_note_text(Some("Jacob"), None, "").unwrap();
+        assert!(!note.contains("You are "));
+    }
+}
+
+impl Agent {
     /// Fields on a reply in a people chat (called right after the assistant message starts).
     pub fn people_reply_fields(&self, chat_id: &str) -> Option<ReplyAttribution> {
         let info = self.people.info(chat_id)?;

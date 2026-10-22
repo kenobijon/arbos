@@ -18,7 +18,17 @@ teardown_sims() {
     grep -qx "$u" <<< "$SIMS_BEFORE" || { xcrun simctl shutdown "$u" >/dev/null 2>&1 && echo "== simulator $u shut down (booted by this run)"; }
   done
 }
-trap teardown_sims EXIT
+teardown() {
+  teardown_sims
+  # Each run leaves a fresh libarbos_ffi-<hash>.a per iOS target under target/*/release/deps (0.2-0.3 GB each;
+  # 77 of them filled 13 GB on 2026-10-22). Keep the newest two per directory, drop the rest.
+  local deps
+  for deps in "$HOME"/arbos-gate/target/*/release/deps; do
+    [ -d "$deps" ] || continue
+    ls -t "$deps"/libarbos_ffi-*.a 2>/dev/null | tail -n +3 | xargs -r rm -f
+  done
+}
+trap teardown EXIT
 cd ~/arbos-gate || exit 2
 git fetch -q origin "+refs/heads/${branch}:refs/remotes/origin/${branch}" || { echo "fetch of ${branch} failed"; exit 2; }
 git checkout -q --detach "$sha" || { echo "checkout of ${sha} failed"; exit 2; }
