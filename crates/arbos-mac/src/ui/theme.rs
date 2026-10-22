@@ -350,17 +350,16 @@ impl Theme {
             pref: AppearancePref::Light,
             glass_opacity: GLASS_ALPHA_LIGHT,
             // Grok Mac light (ref 16/30): chat #FCFCFC, assistant bubble
-            // #F2F2F2, white field with a hairline. The flanks step away
-            // from the chat more than Grok's #F6F6F6 so the three panes read
-            // at a glance (Jacob, 2026-10-21): sidebar #F1F1F1 | chat #FCFCFC
-            // | pane #F5F5F5 with white cards; the assistant bubble sits two
-            // steps under Grok's so it still reads on the white glass chat.
+            // #F2F2F2, white field with a hairline. Jacob (2026-10-22, "strict
+            // Grok"): sidebar and right pane both Grok's #F6F6F6, chat #FCFCFC,
+            // white cards on the pane; the assistant bubble sits two steps
+            // under Grok's so it still reads on the white glass chat.
             // Greys meet WCAG AA on every surface they sit on: muted 5.3:1 on
             // white / 4.7:1 on a bubble, faint 4.6:1 on white, accent 4.8:1 on
             // white (#1084FE was 3.7:1).
             bg: hex(0xfcfcfc),
-            sidebar: hex(0xf1f1f1),
-            pane: hex(0xf5f5f5),
+            sidebar: hex(0xf6f6f6),
+            pane: hex(0xf6f6f6),
             pane_card: grey(1.0),
             surface_1: grey(1.0),
             surface_2: hex(0xe8e8e8),
