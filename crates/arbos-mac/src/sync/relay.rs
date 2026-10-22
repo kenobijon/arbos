@@ -15,6 +15,7 @@ use anyhow::{anyhow, Context as _, Result};
 use arbos_client::room::{self, RoomAction, RoomSession};
 use arbos_core::doc::{UserAttachment, UserMessageOpts};
 use arbos_core::wire::{BoxState as WireBox, PROJECT_DOC_CHAT_ID};
+use arbos_matrix::{Listener as MatrixListener, MatrixClient, MessageRow, Session, Snapshot};
 use futures::future::BoxFuture;
 use futures::{SinkExt, StreamExt};
 use serde_json::{json, Value};
@@ -36,7 +37,7 @@ use crate::model::{
     Chat, ChatKind, Connector, ConnectorProvider, ConnectorsView, Effort, Id, Link, LocalDevice,
     LocalView, Machine, MachineState, Message, Part, Person, Project, ProjectDocView,
     ProjectSecrets, Reachable, ReplyPolicy, Role, Routine, RoutineRun, Secret, SecretActivity,
-    SecretRequest, SecretsView, Sender, Skill, SpaceKind, ThreadInfo, Voice,
+    SecretRequest, SecretsView, Sender, ServerInfo, Skill, SpaceKind, ThreadInfo, Voice,
 };
 use crate::update;
 
@@ -118,6 +119,12 @@ struct Shared {
     dirty: Mutex<HashSet<Id>>,
     /// Silent error reports: one per signature per week (see `diagnostics.rs`).
     diagnostics: diagnostics::Diagnostics,
+    /// D88: the homeserver client for servers and channels; `None` until `GET /me/matrix`
+    /// answered (and when the relay runs without servers).
+    matrix: Mutex<Option<Arc<MatrixClient>>>,
+    /// When the Matrix session was last (re)started: a rejected token restarts it at most
+    /// once a minute.
+    matrix_started_at: Mutex<Option<Instant>>,
 }
 
 /// Blob slot prefix of a people chat (`people:<chat_id>`, people-chats API §2).
@@ -337,9 +344,17 @@ impl Shared {
         Ok(serde_json::from_str(&text).unwrap_or(Value::Null))
     }
 
+    /// Stop the homeserver session (sign-out, revoked token, restart with a fresh token).
+    fn stop_matrix(&self) {
+        if let Some(m) = self.matrix.lock().unwrap().take() {
+            m.stop();
+        }
+    }
+
     /// Forget the tokens and show the sign-in screen.
     fn sign_out_locally(&self) {
         credentials::clear(&self.http_url);
+        self.stop_matrix();
         self.drop_store(true);
         *self.creds.write().unwrap() = None;
         let _ = self.events.send(SyncEvent::Account(None));
@@ -613,6 +628,8 @@ impl SyncSource for RelaySource {
                 store: Mutex::new(None),
                 dirty: Mutex::new(HashSet::new()),
                 diagnostics: diagnostics::Diagnostics::load(),
+                matrix: Mutex::new(None),
+                matrix_started_at: Mutex::new(None),
             });
             let _ = events.send(SyncEvent::Link(Link::Connecting));
 
@@ -846,6 +863,10 @@ fn start_after_pairing(shared: &Arc<Shared>) {
     }
     {
         let shared = shared.clone();
+        tokio::spawn(async move { start_matrix(&shared).await });
+    }
+    {
+        let shared = shared.clone();
         tokio::spawn(async move {
             let mut poll = interval(MACHINE_POLL);
             loop {
@@ -866,6 +887,7 @@ fn start_after_pairing(shared: &Arc<Shared>) {
                 let text = format!("{err:#}");
                 if text.contains("HTTP 401") {
                     // Token revoked or relay re-initialised: pair again.
+                    shared.stop_matrix();
                     shared.drop_store(true);
                     *shared.creds.write().unwrap() = None;
                     let _ = shared.events.send(SyncEvent::NeedsPairing {
@@ -1406,6 +1428,7 @@ async fn poll_me_pushes(shared: &Arc<Shared>) {
         return;
     };
     let mut refresh = false;
+    let mut refresh_servers = false;
     for push in list.as_array().cloned().unwrap_or_default() {
         let kind = push.get("kind").and_then(Value::as_str).unwrap_or("");
         let chat_id = push
@@ -1517,6 +1540,10 @@ async fn poll_me_pushes(shared: &Arc<Shared>) {
                     let _ = shared.events.send(SyncEvent::CallEnded(ended));
                 }
             }
+            "server_updated"
+            | "server_member_joined"
+            | "server_member_removed"
+            | "server_deleted" => refresh_servers = true,
             _ => {}
         }
     }
@@ -1525,6 +1552,441 @@ async fn poll_me_pushes(shared: &Arc<Shared>) {
             shared.diagnostic("refresh", format!("{err:#}"));
         }
     }
+    if refresh_servers {
+        refresh_servers_list(shared).await;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Servers and channels (D88 C1)
+// ---------------------------------------------------------------------------
+
+/// Forwards what the homeserver client learns to the UI as sync events. Handlers run on the
+/// client's sync task, so they only post; a rejected token asks for a fresh session.
+struct MatrixBridge {
+    events: mpsc::UnboundedSender<SyncEvent>,
+    shared: std::sync::Weak<Shared>,
+}
+
+impl MatrixListener for MatrixBridge {
+    fn on_rooms(&self, snapshot: Snapshot) {
+        let _ = self.events.send(SyncEvent::MatrixRooms(snapshot));
+    }
+
+    fn on_timeline(&self, room_id: String, rows: Vec<MessageRow>) {
+        let _ = self
+            .events
+            .send(SyncEvent::MatrixTimeline { room_id, rows });
+    }
+
+    fn on_connection(&self, connected: bool, error: Option<String>) {
+        let rejected = error
+            .as_deref()
+            .is_some_and(|e| e.contains("M_UNKNOWN_TOKEN") || e.contains("401"));
+        let _ = self
+            .events
+            .send(SyncEvent::MatrixConnection { connected, error });
+        if !rejected {
+            return;
+        }
+        let Some(shared) = self.shared.upgrade() else {
+            return;
+        };
+        let due = shared
+            .matrix_started_at
+            .lock()
+            .unwrap()
+            .is_none_or(|t| t.elapsed() > Duration::from_secs(60));
+        if due && shared.creds.read().unwrap().is_some() {
+            tokio::spawn(async move {
+                shared.stop_matrix();
+                start_matrix(&shared).await;
+            });
+        }
+    }
+}
+
+/// `GET /me/matrix` → start the homeserver client; 503 `servers_off` means this relay has no
+/// servers (no rows, no menu items). Then the first `GET /servers`.
+async fn start_matrix(shared: &Arc<Shared>) {
+    *shared.matrix_started_at.lock().unwrap() = Some(Instant::now());
+    let session = match shared.get_json("/me/matrix").await {
+        Ok(v) => match serde_json::from_value::<Session>(v) {
+            Ok(s) => s,
+            Err(err) => {
+                shared.diagnostic("matrix-session", format!("bad /me/matrix: {err}"));
+                return;
+            }
+        },
+        Err(err) => {
+            let text = format!("{err:#}");
+            if text.contains("servers_off") || text.contains("HTTP 503") {
+                let _ = shared.events.send(SyncEvent::ServersAvailable(false));
+            } else if text.contains("HTTP 404") {
+                // Older relay without the route.
+                let _ = shared.events.send(SyncEvent::ServersAvailable(false));
+            } else {
+                shared.diagnostic("matrix-session", text);
+            }
+            return;
+        }
+    };
+    let bridge = Arc::new(MatrixBridge {
+        events: shared.events.clone(),
+        shared: Arc::downgrade(shared),
+    });
+    match MatrixClient::start(session, bridge).await {
+        Ok(client) => {
+            let previous = shared.matrix.lock().unwrap().replace(client);
+            if let Some(p) = previous {
+                p.stop();
+            }
+            let _ = shared.events.send(SyncEvent::ServersAvailable(true));
+        }
+        Err(err) => shared.diagnostic("matrix-start", err.to_string()),
+    }
+    refresh_servers_list(shared).await;
+}
+
+/// `GET /servers` → `SyncEvent::Servers`.
+async fn refresh_servers_list(shared: &Arc<Shared>) {
+    match shared.get_json("/servers").await {
+        Ok(v) => {
+            let servers: Vec<ServerInfo> = v
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|s| serde_json::from_value::<ServerInfo>(s.clone()).ok())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let _ = shared.events.send(SyncEvent::Servers(servers));
+        }
+        Err(err) => {
+            let text = format!("{err:#}");
+            if text.contains("servers_off") || text.contains("HTTP 503") {
+                let _ = shared.events.send(SyncEvent::ServersAvailable(false));
+            } else {
+                shared.diagnostic("servers", text);
+            }
+        }
+    }
+}
+
+fn parse_server(v: Value) -> Result<ServerInfo> {
+    serde_json::from_value::<ServerInfo>(v).context("bad server JSON")
+}
+
+/// A server write failed: the sheet shows it inline and a toast says it too.
+fn server_error(shared: &Arc<Shared>, err: &anyhow::Error) {
+    let text = people_error(err);
+    let _ = shared.events.send(SyncEvent::ServerError(text.clone()));
+    shared.notice(text);
+}
+
+/// The invite code from what the user pasted: a bare code or an `/s/{code}` link.
+fn invite_code(input: &str) -> String {
+    let trimmed = input.trim().trim_end_matches('/');
+    match trimmed.rsplit_once("/s/") {
+        Some((_, code)) => code
+            .split(['?', '#'])
+            .next()
+            .unwrap_or_default()
+            .to_string(),
+        None => trimmed.rsplit('/').next().unwrap_or(trimmed).to_string(),
+    }
+}
+
+fn matrix_client(shared: &Arc<Shared>) -> Option<Arc<MatrixClient>> {
+    shared.matrix.lock().unwrap().clone()
+}
+
+/// Registry and channel commands; each runs on its own task.
+fn handle_server_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
+    match cmd {
+        ClientCommand::ServersRefresh => {
+            let shared = shared.clone();
+            tokio::spawn(async move { refresh_servers_list(&shared).await });
+        }
+        ClientCommand::ServerCreate { name } => {
+            let shared = shared.clone();
+            let name = name.clone();
+            tokio::spawn(async move {
+                match shared
+                    .post_json("/servers", json!({ "name": name }))
+                    .await
+                    .and_then(parse_server)
+                {
+                    Ok(server) => {
+                        let _ = shared.events.send(SyncEvent::ServerOpened(server));
+                        refresh_servers_list(&shared).await;
+                    }
+                    Err(err) => server_error(&shared, &err),
+                }
+            });
+        }
+        ClientCommand::ServerJoin { code } => {
+            let shared = shared.clone();
+            let code = invite_code(code);
+            tokio::spawn(async move {
+                match shared
+                    .post_json("/servers/join", json!({ "code": code }))
+                    .await
+                    .and_then(parse_server)
+                {
+                    Ok(server) => {
+                        let _ = shared.events.send(SyncEvent::ServerOpened(server));
+                        refresh_servers_list(&shared).await;
+                    }
+                    Err(err) => server_error(&shared, &err),
+                }
+            });
+        }
+        ClientCommand::ServerFetch { server_id } => {
+            let shared = shared.clone();
+            let path = format!("/servers/{server_id}");
+            tokio::spawn(async move {
+                match shared.get_json(&path).await.and_then(parse_server) {
+                    Ok(server) => {
+                        let _ = shared.events.send(SyncEvent::ServerDetail(server));
+                    }
+                    Err(err) => shared.diagnostic("server-detail", format!("{err:#}")),
+                }
+            });
+        }
+        ClientCommand::ServerRename { server_id, name } => {
+            let shared = shared.clone();
+            let path = format!("/servers/{server_id}");
+            let name = name.clone();
+            tokio::spawn(async move {
+                match shared
+                    .patch_json(&path, json!({ "name": name }))
+                    .await
+                    .and_then(parse_server)
+                {
+                    Ok(server) => {
+                        let _ = shared.events.send(SyncEvent::ServerDetail(server));
+                    }
+                    Err(err) => server_error(&shared, &err),
+                }
+            });
+        }
+        ClientCommand::ServerDelete { server_id } => {
+            let shared = shared.clone();
+            let path = format!("/servers/{server_id}");
+            tokio::spawn(async move {
+                match shared.delete(&path).await {
+                    Ok(()) => refresh_servers_list(&shared).await,
+                    Err(err) => server_error(&shared, &err),
+                }
+            });
+        }
+        ClientCommand::ServerLeave { server_id } => {
+            let shared = shared.clone();
+            let path = format!("/servers/{server_id}/leave");
+            tokio::spawn(async move {
+                match shared.post_json(&path, json!({})).await {
+                    Ok(_) => refresh_servers_list(&shared).await,
+                    Err(err) => server_error(&shared, &err),
+                }
+            });
+        }
+        ClientCommand::ServerResetInvite { server_id } => {
+            let shared = shared.clone();
+            let server_id = server_id.clone();
+            tokio::spawn(async move {
+                let path = format!("/servers/{server_id}/invite/reset");
+                if let Err(err) = shared.post_json(&path, json!({})).await {
+                    server_error(&shared, &err);
+                    return;
+                }
+                fetch_server_detail(&shared, &server_id).await;
+            });
+        }
+        ClientCommand::ServerSetRole {
+            server_id,
+            user_id,
+            role,
+        } => {
+            let shared = shared.clone();
+            let server_id = server_id.clone();
+            let path = format!("/servers/{server_id}/members/{user_id}");
+            let role = role.clone();
+            tokio::spawn(async move {
+                if let Err(err) = shared.put_json(&path, json!({ "role": role })).await {
+                    server_error(&shared, &err);
+                    return;
+                }
+                fetch_server_detail(&shared, &server_id).await;
+            });
+        }
+        ClientCommand::ServerRemoveMember {
+            server_id,
+            user_id,
+            ban,
+        } => {
+            let shared = shared.clone();
+            let server_id = server_id.clone();
+            let path = if *ban {
+                format!("/servers/{server_id}/members/{user_id}?ban=1")
+            } else {
+                format!("/servers/{server_id}/members/{user_id}")
+            };
+            tokio::spawn(async move {
+                if let Err(err) = shared.delete(&path).await {
+                    server_error(&shared, &err);
+                    return;
+                }
+                fetch_server_detail(&shared, &server_id).await;
+            });
+        }
+        ClientCommand::ChannelCreate {
+            server_id,
+            name,
+            restricted,
+        } => {
+            let shared = shared.clone();
+            let server_id = server_id.clone();
+            let body = json!({ "name": name, "restricted": restricted });
+            tokio::spawn(async move {
+                let path = format!("/servers/{server_id}/channels");
+                if let Err(err) = shared.post_json(&path, body).await {
+                    server_error(&shared, &err);
+                    return;
+                }
+                fetch_server_detail(&shared, &server_id).await;
+            });
+        }
+        ClientCommand::ChannelPatch {
+            server_id,
+            channel_id,
+            name,
+            restricted,
+        } => {
+            let shared = shared.clone();
+            let server_id = server_id.clone();
+            let path = format!("/servers/{server_id}/channels/{channel_id}");
+            let mut body = serde_json::Map::new();
+            if let Some(name) = name {
+                body.insert("name".into(), json!(name));
+            }
+            if let Some(restricted) = restricted {
+                body.insert("restricted".into(), json!(restricted));
+            }
+            tokio::spawn(async move {
+                if let Err(err) = shared.patch_json(&path, Value::Object(body)).await {
+                    server_error(&shared, &err);
+                    return;
+                }
+                fetch_server_detail(&shared, &server_id).await;
+            });
+        }
+        ClientCommand::ChannelDelete {
+            server_id,
+            channel_id,
+        } => {
+            let shared = shared.clone();
+            let server_id = server_id.clone();
+            let path = format!("/servers/{server_id}/channels/{channel_id}");
+            tokio::spawn(async move {
+                if let Err(err) = shared.delete(&path).await {
+                    server_error(&shared, &err);
+                    return;
+                }
+                fetch_server_detail(&shared, &server_id).await;
+            });
+        }
+        ClientCommand::ChannelOpen { room_id } => {
+            let Some(client) = matrix_client(shared) else {
+                return true;
+            };
+            let shared = shared.clone();
+            let room_id = room_id.clone();
+            tokio::spawn(async move {
+                match client.open_room(&room_id).await {
+                    Ok(rows) => {
+                        let _ = shared
+                            .events
+                            .send(SyncEvent::MatrixTimeline { room_id, rows });
+                    }
+                    Err(err) => shared.diagnostic("channel-open", err.to_string()),
+                }
+            });
+        }
+        ClientCommand::ChannelLoadOlder { room_id } => {
+            let Some(client) = matrix_client(shared) else {
+                return true;
+            };
+            let shared = shared.clone();
+            let room_id = room_id.clone();
+            tokio::spawn(async move {
+                match client.load_older(&room_id).await {
+                    Ok(Some(rows)) => {
+                        let _ = shared
+                            .events
+                            .send(SyncEvent::MatrixTimeline { room_id, rows });
+                    }
+                    Ok(None) => {}
+                    Err(err) => shared.diagnostic("channel-history", err.to_string()),
+                }
+            });
+        }
+        ClientCommand::ChannelSend {
+            room_id,
+            local_id,
+            text,
+        } => {
+            let shared = shared.clone();
+            let room_id = room_id.clone();
+            let local_id = local_id.clone();
+            let text = text.clone();
+            let client = matrix_client(&shared);
+            tokio::spawn(async move {
+                let result = match client {
+                    Some(client) => client
+                        .send_text(&room_id, &text, &local_id)
+                        .await
+                        .map(|_| ())
+                        .map_err(|e| e.to_string()),
+                    None => Err("Servers are not connected".to_string()),
+                };
+                if let Err(error) = result {
+                    shared.notice(format!("Message not sent: {error}"));
+                    let _ = shared.events.send(SyncEvent::ChannelSendFailed {
+                        room_id,
+                        local_id,
+                        error,
+                    });
+                }
+            });
+        }
+        ClientCommand::ChannelMarkRead { room_id } => {
+            let Some(client) = matrix_client(shared) else {
+                return true;
+            };
+            let room_id = room_id.clone();
+            tokio::spawn(async move {
+                let _ = client.mark_read(&room_id).await;
+            });
+        }
+        _ => return false,
+    }
+    true
+}
+
+/// `GET /servers/{id}` → `ServerDetail`, then the list (previews, counts, roles).
+async fn fetch_server_detail(shared: &Arc<Shared>, server_id: &str) {
+    match shared
+        .get_json(&format!("/servers/{server_id}"))
+        .await
+        .and_then(parse_server)
+    {
+        Ok(server) => {
+            let _ = shared.events.send(SyncEvent::ServerDetail(server));
+        }
+        Err(err) => shared.diagnostic("server-detail", format!("{err:#}")),
+    }
+    refresh_servers_list(shared).await;
 }
 
 async fn fetch_avatar(shared: Arc<Shared>, url: String) {
@@ -3436,6 +3898,9 @@ async fn speak(shared: Arc<Shared>, project_id: Id, request_id: u64, text: Strin
 }
 
 fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
+    if handle_server_command(shared, &cmd) {
+        return;
+    }
     match cmd {
         ClientCommand::SendVoice {
             chat_id,
@@ -5493,6 +5958,25 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 refresh_channels(&shared).await;
             });
         }
+        // D88: handled by `handle_server_command` above; listed so a new variant still fails
+        // to compile here.
+        ClientCommand::ServersRefresh
+        | ClientCommand::ServerCreate { .. }
+        | ClientCommand::ServerJoin { .. }
+        | ClientCommand::ServerFetch { .. }
+        | ClientCommand::ServerRename { .. }
+        | ClientCommand::ServerDelete { .. }
+        | ClientCommand::ServerLeave { .. }
+        | ClientCommand::ServerResetInvite { .. }
+        | ClientCommand::ServerSetRole { .. }
+        | ClientCommand::ServerRemoveMember { .. }
+        | ClientCommand::ChannelCreate { .. }
+        | ClientCommand::ChannelPatch { .. }
+        | ClientCommand::ChannelDelete { .. }
+        | ClientCommand::ChannelOpen { .. }
+        | ClientCommand::ChannelLoadOlder { .. }
+        | ClientCommand::ChannelSend { .. }
+        | ClientCommand::ChannelMarkRead { .. } => {}
     }
 }
 
