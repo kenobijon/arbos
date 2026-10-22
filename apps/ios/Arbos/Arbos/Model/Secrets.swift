@@ -328,6 +328,31 @@ struct SecretsOverview: Equatable {
     var requests: [SecretRequestItem] = []
     var loaded = true
 
+    /// Memberwise init (kept explicit because `init(dto:)` would suppress synthesis).
+    init(
+        paused: Bool,
+        pausedAt: Int64?,
+        vaults: [ConnectedVault],
+        secrets: [SecretItem],
+        requestsPending: Int,
+        activity: [SecretActivity],
+        providers: [String] = [],
+        vaultConnect: Bool = false,
+        requests: [SecretRequestItem] = [],
+        loaded: Bool = true
+    ) {
+        self.paused = paused
+        self.pausedAt = pausedAt
+        self.vaults = vaults
+        self.secrets = secrets
+        self.requestsPending = requestsPending
+        self.activity = activity
+        self.providers = providers
+        self.vaultConnect = vaultConnect
+        self.requests = requests
+        self.loaded = loaded
+    }
+
     init(dto: SecretsOverviewDto, raw: [String: Any] = [:]) {
         self.paused = dto.paused
         self.pausedAt = dto.paused_at
