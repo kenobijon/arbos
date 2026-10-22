@@ -12,6 +12,7 @@ mod agent;
 mod group;
 pub(crate) mod kit;
 mod me;
+pub(crate) mod pane;
 mod server;
 mod user;
 
@@ -362,7 +363,7 @@ pub(super) fn list_row(
 // ----- content from the chat docs ----------------------------------------------
 
 /// One attachment found in a chat, with where it came from.
-pub(super) struct Found {
+pub(crate) struct Found {
     pub attachment: Attachment,
     /// Who shared it ("Mira", "@sam", "You", the agent's name).
     pub by: String,
