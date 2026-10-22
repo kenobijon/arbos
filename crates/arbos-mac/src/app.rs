@@ -1395,6 +1395,10 @@ impl AppState {
                             if self.agent_pick == Some(AgentPick::Voice) {
                                 self.fetch_voices();
                             }
+                            // `agent:avatar` opens the D92 leaf picker under the hero.
+                            if rest == ":avatar" {
+                                self.profile_picker_open = true;
+                            }
                         } else if let Some(rest) = spec.strip_prefix("group") {
                             self.open_profile(
                                 ProfilePage::Group {
