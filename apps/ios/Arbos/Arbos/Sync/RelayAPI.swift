@@ -3,6 +3,7 @@
 // call time so a re-pair takes effect at once.
 
 import Foundation
+import ArbosFFI
 
 struct RelayError: Error, LocalizedError {
     var status: Int
@@ -48,8 +49,14 @@ struct RelayEndpoint: Equatable {
 }
 
 struct RegistryProject {
-    var project: Project
-    var chats: [Chat]
+    var project: Arbos.Project
+    var chats: [Arbos.Chat]
+}
+
+/// List rows from `GET /projects` may overwrite `owner` with a user-id string; that
+/// fails `ProjectDto` decoding, so we only need the id to fetch the detail.
+private struct ProjectListId: Decodable {
+    var id: String
 }
 
 final class RelayAPI {
@@ -149,89 +156,79 @@ final class RelayAPI {
     func registry() async throws -> [RegistryProject] {
         guard let list = try await json("GET", "/projects") as? [Any] else { return [] }
         var out: [RegistryProject] = []
+        let decoder = JSONDecoder()
         for item in list {
-            guard let item = item as? [String: Any], let id = item["id"] as? String else { continue }
+            guard JSONSerialization.isValidJSONObject(item),
+                  let itemData = try? JSONSerialization.data(withJSONObject: item) else { continue }
+            let id: String
+            if let dto = try? decoder.decode(ProjectDto.self, from: itemData) {
+                id = dto.id
+            } else if let bare = try? decoder.decode(ProjectListId.self, from: itemData) {
+                id = bare.id
+            } else {
+                NSLog("ProjectDto: bad list item")
+                continue
+            }
             // A project the list shows but this user may not open (403) is skipped, not fatal.
-            let detail: [String: Any]
+            let detailRaw: Any
             do {
-                detail = (try await json("GET", "/projects/\(id)")) as? [String: Any] ?? [:]
+                detailRaw = try await json("GET", "/projects/\(id)")
             } catch let e as RelayError where e.status == 403 || e.status == 404 {
                 continue
             }
-            let p = detail["project"] as? [String: Any] ?? item
-            let models = p["models"] as? [String: Any] ?? [:]
-            let talking = models["talking_model"] as? [String: Any] ?? [:]
-            let boxField = (detail["box"] as? String) ?? (item["box"] as? String) ?? ""
-            let owner = p["owner"] as? [String: Any] ?? [:]
-            let machine = p["machine"] as? [String: Any] ?? [:]
-            let primaryChat: String? = ((p["primary_chat"] as? String) ?? (p["primary_chat_id"] as? String) ?? (detail["primary_chat"] as? String)).flatMap { $0.isEmpty ? nil : $0 }
-            let spendToday: Double = (detail["spend_today"] as? NSNumber)?.doubleValue ?? (p["spend_today_usd"] as? NSNumber)?.doubleValue ?? 0
-            let spendCap: Double = (p["spend_cap_usd"] as? NSNumber)?.doubleValue ?? (p["spend_cap_daily"] as? NSNumber)?.doubleValue ?? 25
-            let since: Int64? = (detail["box_since"] as? NSNumber)?.int64Value ?? (p["box_since"] as? NSNumber)?.int64Value
-            var project = Project(
-                id: id,
-                name: p["name"] as? String ?? "Project",
-                icon: p["icon"] as? String ?? "Ω",
-                color: p["color"] as? String ?? "#8b7cf6",
-                state: BoxState.from(state: p["state"] as? String ?? "", box: boxField),
-                stateSince: since,
-                stateDetail: nil,
-                model: talking["id"] as? String ?? "anthropic/claude-haiku-5.5",
-                effort: Effort.from(talking["effort"] as? String),
-                spendTodayUsd: spendToday,
-                spendCapUsd: spendCap
-            )
-            project.shared = p["shared"] as? Bool ?? false
-            project.ownerId = (owner["id"] as? String)
-                ?? (owner["user_id"] as? String)
-                ?? (p["owner_id"] as? String)
-                ?? (p["owner"] as? String)
-            project.ownerHandle = (p["owner_handle"] as? String) ?? (owner["handle"] as? String)
-            project.avatar = (p["avatar"] as? String).flatMap { $0.isEmpty ? nil : $0 }
-            project.avatarColor = (p["avatar_color"] as? String).flatMap { $0.isEmpty ? nil : $0 }
-            project.avatarColorIndex = (p["avatar_color_index"] as? NSNumber)?.intValue
-            project.avatarColorIndexEffective = (p["avatar_color_index_effective"] as? NSNumber)?.intValue
-            project.instructions = (p["instructions"] as? String) ?? ""
-            project.description = (p["description"] as? String) ?? ""
-            project.ownerName = owner["name"] as? String
-            project.ownerAvatarUrl = owner["avatar_url"] as? String
-            project.ownerLastSeenAt = (owner["last_seen_at"] as? NSNumber)?.int64Value
-            project.ownerOnline = (owner["online"] as? NSNumber)?.boolValue ?? false
-            project.machineState = machine["state"] as? String
-            project.machineClass = machine["class"] as? String
-            project.machineSnapshot = machine["snapshot"] as? String
-            project.machineAlwaysOn = (machine["always_on"] as? NSNumber)?.boolValue ?? false
-            project.primaryChatId = primaryChat
-            project.voice = ((p["voice"] as? String) ?? (detail["voice"] as? String)).flatMap { $0.isEmpty ? nil : $0 }
-            project.visionEnabled = ((p["vision_enabled"] as? NSNumber) ?? (detail["vision_enabled"] as? NSNumber))?.boolValue ?? true
-            let chats = ((detail["chats"] as? [Any]) ?? []).compactMap(RelayAPI.parseChat)
+            guard JSONSerialization.isValidJSONObject(detailRaw),
+                  let detailData = try? JSONSerialization.data(withJSONObject: detailRaw) else { continue }
+            let detail: GetProjectResponseDto
+            do {
+                detail = try decoder.decode(GetProjectResponseDto.self, from: detailData)
+            } catch {
+                NSLog("GetProjectResponseDto: \(error)")
+                continue
+            }
+            var project = Arbos.Project(dto: detail.project)
+            // Prefer the detail's live box word when present (same as the old parse).
+            project.state = Arbos.BoxState.from(state: detail.project.state, box: detail.box)
+            project.stateSince = detail.box_since
+            // `models` is free-form JSON (skipped on the Dto); read talking model id + effort only.
+            if let detailMap = detailRaw as? [String: Any] {
+                let p = (detailMap["project"] as? [String: Any]) ?? [:]
+                let models = p["models"] as? [String: Any] ?? [:]
+                let talking = models["talking_model"] as? [String: Any] ?? [:]
+                if let modelId = talking["id"] as? String, !modelId.isEmpty {
+                    project.model = modelId
+                }
+                project.effort = Effort.from(talking["effort"] as? String)
+            }
+            let chats = detail.chats.map { Arbos.Chat(dto: $0) }
             out.append(RegistryProject(project: project, chats: chats))
         }
         return out
     }
 
-    static func parseChat(_ raw: Any) -> Chat? {
-        guard let v = raw as? [String: Any], let id = v["id"] as? String, let pid = v["project_id"] as? String else {
+    static func parseChat(_ raw: Any) -> Arbos.Chat? {
+        guard JSONSerialization.isValidJSONObject(raw),
+              let data = try? JSONSerialization.data(withJSONObject: raw) else { return nil }
+        do {
+            return Arbos.Chat(dto: try JSONDecoder().decode(ChatDto.self, from: data))
+        } catch {
+            NSLog("ChatDto: \(error)")
             return nil
         }
-        return Chat(
-            id: id,
-            projectId: pid,
-            title: v["title"] as? String ?? "New chat",
-            isPinned: v["is_pinned"] as? Bool ?? false,
-            unread: false,
-            lastMessageAt: (v["created_at"] as? NSNumber)?.int64Value ?? 0,
-            kind: v["kind"] as? String ?? "chat",
-            participants: ((v["participants"] as? [Any]) ?? []).compactMap { ($0 as? String) ?? ($0 as? [String: Any])?["project_id"] as? String ?? ($0 as? [String: Any])?["id"] as? String }
-        )
     }
 
-    func createChat(projectId: Id) async throws -> Chat {
+    func createChat(projectId: Id) async throws -> Arbos.Chat {
         let v = try await json("POST", "/projects/\(projectId)/chats", body: ["title": "New chat"])
-        guard let m = v as? [String: Any], let chat = RelayAPI.parseChat(m["chat"] ?? NSNull()) else {
+        guard JSONSerialization.isValidJSONObject(v),
+              let data = try? JSONSerialization.data(withJSONObject: v) else {
             throw RelayError(status: 0, message: "The relay returned no chat")
         }
-        return chat
+        do {
+            let resp = try JSONDecoder().decode(CreateChatResponseDto.self, from: data)
+            return Arbos.Chat(dto: resp.chat)
+        } catch {
+            NSLog("CreateChatResponseDto: \(error)")
+            throw RelayError(status: 0, message: "The relay returned no chat")
+        }
     }
 
 

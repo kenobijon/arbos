@@ -12,7 +12,7 @@ use gpui::{
 };
 
 use crate::app::AppState;
-use crate::model::{Id, MachineState, Message, Project, Role};
+use crate::model::{Id, MachineState, Message, Project, Role, ServerInfo};
 use crate::ui::avatars;
 use crate::ui::composer::{Composer, Picker};
 use crate::ui::frost::edge_faded;
@@ -189,15 +189,91 @@ struct RowView {
     avatar_state: avatars::AvatarState,
 }
 
+/// A server in the chat list (D88 rule 1): the same row as a group — disc, name, preview,
+/// time, unread dot — sorted among the chats by last activity.
+struct ServerRowView {
+    server: ServerInfo,
+    selected: bool,
+    unread: bool,
+    preview: String,
+    time: String,
+}
+
+/// One entry of the left list, chats and servers interleaved.
+enum ListEntry {
+    Chat(Box<RowView>),
+    Server(Box<ServerRowView>),
+}
+
+/// "#general · Sam: hi" for a server row: its newest channel's last line.
+fn server_preview(state: &AppState, server: &ServerInfo) -> String {
+    let newest = state
+        .matrix_snapshot
+        .channels
+        .iter()
+        .filter(|c| c.server_id == server.id && c.last_ts > 0)
+        .max_by_key(|c| c.last_ts);
+    match newest {
+        Some(c) => format!("#{} · {}", c.name, channel_last_line(c)),
+        None => state
+            .space_row(server)
+            .map(|s| s.last_text.clone())
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| "No messages yet".into()),
+    }
+}
+
+/// "Sam: hi" for a channel row.
+fn channel_last_line(row: &arbos_matrix::ChannelRow) -> String {
+    let line = plain(row.last_text.lines().next().unwrap_or_default());
+    if row.last_sender_name.is_empty() {
+        line
+    } else {
+        format!("{}: {line}", row.last_sender_name)
+    }
+}
+
+fn server_matches_query(server: &ServerInfo, query: &str) -> bool {
+    server.name.to_lowercase().contains(query)
+        || server
+            .channels
+            .iter()
+            .any(|c| c.name.to_lowercase().contains(query))
+}
+
 pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
     let theme = Theme::of(cx).clone();
     let state = shell.state.read(cx);
     let selected = state.selected_project.clone();
     let query = shell.search_input.read(cx).text().trim().to_lowercase();
     let machine = state.machine.shown_state();
+    // Inside a server the left pane shows its channels (D88 rule 2).
+    let open_server = state.open_server_info().cloned();
+    let open_server_admin = open_server.as_ref().is_some_and(ServerInfo::can_admin);
     let waitlist_position = state.machine.waitlist_position;
 
-    let mut rows: Vec<(u64, RowView)> = Vec::new();
+    let mut rows: Vec<(u64, ListEntry)> = Vec::new();
+    for s in state.servers.iter() {
+        if !query.is_empty() && !server_matches_query(s, &query) {
+            continue;
+        }
+        let selected = state.open_server.as_deref() == Some(s.id.as_str())
+            || state
+                .selected_channel
+                .as_ref()
+                .is_some_and(|c| c.server_id == s.id);
+        let at = state.server_last_activity(s);
+        rows.push((
+            at,
+            ListEntry::Server(Box::new(ServerRowView {
+                selected,
+                unread: state.space_row(s).is_some_and(|r| r.unread > 0),
+                preview: server_preview(state, s),
+                time: time_label(at),
+                server: s.clone(),
+            })),
+        ));
+    }
     for p in state.projects.iter() {
         // Name, @handle, chat title, or any loaded message text.
         if !query.is_empty() && !state.space_matches_query(p, &query) {
@@ -231,10 +307,10 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
             avatar_state: state.avatar_state(&p.id),
             space: p.clone(),
         };
-        rows.push((last_activity(state, p), row));
+        rows.push((last_activity(state, p), ListEntry::Chat(Box::new(row))));
     }
     rows.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
-    let empty = state.projects.is_empty();
+    let empty = state.projects.is_empty() && state.servers.is_empty();
     let link_connecting = state.link == crate::model::Link::Connecting;
     if machine == MachineState::Waking {
         PulseClock::request(cx);
@@ -276,16 +352,30 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         .hover(|s| s.bg(theme.surface_2))
         .child(icon("plus", 17.0, theme.text_muted))
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .on_click(cx.listener(|this, _, window, cx| {
-            this.menu_open = false;
-            this.people_input.update(cx, |i, cx| {
-                i.clear(cx);
-                i.set_placeholder("Search people");
-            });
-            this.state.update(cx, |s, cx| s.open_new_chat(cx));
-            let handle = this.people_input.read(cx).focus_handle(cx);
-            window.focus(&handle, cx);
-        }));
+        .on_click({
+            let in_server = open_server.as_ref().map(|s| s.id.clone());
+            cx.listener(move |this, _, window, cx| {
+                this.menu_open = false;
+                // Inside a server the "+" makes a channel (D88 rule 7; owner/admin only —
+                // the button is not drawn for members).
+                if let Some(server_id) = in_server.clone() {
+                    this.open_server_sheet(
+                        crate::app::ServerSheet::NewChannel { server_id },
+                        window,
+                        cx,
+                    );
+                    return;
+                }
+                this.people_input.update(cx, |i, cx| {
+                    i.clear(cx);
+                    i.set_placeholder("Search people");
+                });
+                this.state.update(cx, |s, cx| s.open_new_chat(cx));
+                let handle = this.people_input.read(cx).focus_handle(cx);
+                window.focus(&handle, cx);
+            })
+        });
+    let show_plus = open_server.is_none() || open_server_admin;
     // The magnifier shows the search field below (and keeps it while a query
     // is typed); Escape or the clear dot fold it (three-pane rule: the strip
     // holds exactly +, search, minimize).
@@ -336,7 +426,7 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         .justify_end()
         .gap(px(2.0))
         .px(px(12.0))
-        .child(plus)
+        .when(show_plus, |el| el.child(plus))
         .child(search_toggle)
         .child(collapse)
         .window_drag();
@@ -482,8 +572,11 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
                 .child(format!("Nothing matches “{query}”.")),
         );
     }
-    for (_, row) in rows {
-        list = list.child(render_row(row, shell, &theme, cx));
+    for (_, entry) in rows {
+        list = match entry {
+            ListEntry::Chat(row) => list.child(render_row(*row, shell, &theme, cx)),
+            ListEntry::Server(row) => list.child(render_server_row(*row, &theme, cx)),
+        };
     }
 
     // ----- bottom: Update pill (only when a newer build exists) and the account row --
@@ -610,12 +703,12 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         .border_r_1()
         .border_color(theme.border)
         .child(strip)
-        .when(search_shown && shell.server_pane.is_none(), |el| {
-            el.child(search)
-        })
-        .child(match shell.server_pane.as_ref() {
+        .when(search_shown && open_server.is_none(), |el| el.child(search))
+        .child(match open_server.as_ref() {
             // Inside a server the left pane shows its channels (mockup h).
-            Some(server) => edge_faded(14.0, true, true, server_channels(server, &theme, cx)),
+            Some(server) => {
+                edge_faded(14.0, true, true, server_channels(server, shell, &theme, cx))
+            }
             None => edge_faded(14.0, true, true, list),
         });
     if let Some(update) = shell.render_update_button(cx) {
@@ -624,85 +717,154 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
     column.child(account_row)
 }
 
-/// A server as the left pane shows it: the layout hook for servers (which do
-/// not exist yet) — `‹` back to chats, the server's disc and name, then its
-/// channels. `Shell::server_pane` holds the one being shown.
-#[derive(Clone, Debug)]
-pub struct ServerPane {
-    pub id: String,
-    pub name: String,
-    pub channels: Vec<ChannelRow>,
-    /// The channel the centre shows (by `ChannelRow::name`).
-    pub selected: Option<String>,
+/// The D79 disc of a server: initials from its name, the relay's gradient index.
+pub fn server_picture(server: &ServerInfo, size: f32, theme: &Theme) -> Div {
+    avatars::element(
+        &server.id,
+        &server.name,
+        server.avatar_color_index_effective,
+        size,
+        theme,
+    )
 }
 
-#[derive(Clone, Debug)]
-pub struct ChannelRow {
-    pub name: String,
-    /// `announcements`-style read-mostly channel (speaker glyph) vs `#`.
-    pub announcement: bool,
-    pub locked: bool,
-    pub unread: bool,
-    pub preview: String,
-}
-
-impl ServerPane {
-    /// Rig (`ARBOS_SHOW_SERVER=1`): the mockup's sample so the layout can be seen.
-    pub fn demo() -> Self {
-        let ch = |name: &str, announcement: bool, locked: bool, unread: bool, preview: &str| {
-            ChannelRow {
-                name: name.into(),
-                announcement,
-                locked,
-                unread,
-                preview: preview.into(),
-            }
-        };
-        Self {
-            id: "demo".into(),
-            name: "Launch Crew".into(),
-            channels: vec![
-                ch(
-                    "announcements",
-                    true,
-                    false,
-                    false,
-                    "Mira K.: Rules are pinned here.",
-                ),
-                ch(
-                    "general",
-                    false,
-                    false,
-                    false,
-                    "Sam: Hi! Joined from the blog link.",
-                ),
-                ch("design", false, false, true, "Mira K. pinned the roadmap."),
-                ch(
-                    "release-train",
-                    false,
-                    true,
-                    false,
-                    "Tomas: 1.90 cut is tagged",
-                ),
-                ch(
-                    "support",
-                    false,
-                    false,
-                    false,
-                    "Arbos: Fixed. The invite link works again.",
-                ),
-            ],
-            selected: Some("general".into()),
-        }
-    }
-}
-
-/// The server's channel list: back row, then one row per channel.
-fn server_channels(
-    server: &ServerPane,
+/// A server row (D88 rule 1): drawn exactly like a group row — disc, name, time, last line,
+/// unread dot. No badge, no count, no disclosure.
+fn render_server_row(
+    row: ServerRowView,
     theme: &Theme,
     cx: &mut Context<Shell>,
 ) -> gpui::Stateful<Div> {
+    let ServerRowView {
+        server,
+        selected,
+        unread,
+        preview,
+        time,
+    } = row;
+    let id: Id = server.id.clone();
+    div()
+        .id(ElementId::Name(SharedString::from(format!(
+            "row-server-{}",
+            server.id
+        ))))
+        .flex()
+        .items_center()
+        .gap(px(10.0))
+        .px(px(12.0))
+        .py(px(11.0))
+        .rounded(px(PANEL_RADIUS - 4.0))
+        .bg(if selected {
+            theme.surface_2
+        } else {
+            gpui::transparent_black()
+        })
+        .hover(|s| {
+            s.bg(if selected {
+                theme.surface_2
+            } else {
+                Theme::with_alpha(theme.surface_2, 0.55)
+            })
+        })
+        .cursor_pointer()
+        .on_click(cx.listener(move |this, _, window, cx| {
+            this.menu_open = false;
+            this.row_menu = None;
+            this.chat_menu = None;
+            this.state
+                .update(cx, |s, cx| s.enter_server(id.clone(), cx));
+            Composer::focus(&this.composer, window, cx);
+        }))
+        .child(
+            div()
+                .relative()
+                .size(px(AVATAR_ROW))
+                .flex_shrink_0()
+                .child(server_picture(&server, AVATAR_ROW, theme)),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w_0()
+                .gap(px(2.0))
+                .child(
+                    div()
+                        .flex()
+                        .items_baseline()
+                        .gap(px(6.0))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(TEXT_BODY))
+                                .font_weight(if unread {
+                                    FontWeight::SEMIBOLD
+                                } else {
+                                    FontWeight::MEDIUM
+                                })
+                                .text_color(theme.text)
+                                .child(server.name.clone()),
+                        )
+                        .child(div().flex_1())
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .text_size(px(TEXT_TINY))
+                                .text_color(theme.text_muted)
+                                .child(time),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(TEXT_SMALL))
+                                .text_color(theme.text_muted)
+                                .child(preview),
+                        )
+                        .when(unread, |el| {
+                            el.child(div().size(px(8.0)).rounded_full().bg(theme.accent))
+                        }),
+                ),
+        )
+}
+
+/// The server's channel list (D88 rule 2): `‹` back to chats, the server's disc and name
+/// (click → its page in the right pane, rule 5), then one row per channel drawn like a chat
+/// row with `#` in the avatar slot and a small lock on restricted ones.
+fn server_channels(
+    server: &ServerInfo,
+    shell: &Shell,
+    theme: &Theme,
+    cx: &mut Context<Shell>,
+) -> gpui::Stateful<Div> {
+    let state = shell.state.read(cx);
+    let page = crate::app::ProfilePage::Server {
+        server_id: server.id.clone(),
+    };
+    let page_open = state.profile.as_ref() == Some(&page);
+    let selected_channel = state
+        .selected_channel
+        .as_ref()
+        .filter(|c| c.server_id == server.id)
+        .map(|c| c.channel_id.clone());
+    let channels: Vec<(
+        crate::model::ServerChannel,
+        Option<arbos_matrix::ChannelRow>,
+    )> = server
+        .ordered_channels()
+        .into_iter()
+        .map(|c| (c.clone(), state.channel_row(c).cloned()))
+        .collect();
+
     let back = div()
         .id("server-back")
         .flex()
@@ -715,25 +877,35 @@ fn server_channels(
             glass::circle("server-back-circle", 30.0, theme)
                 .child(icon("chevron-left", 14.0, theme.text))
                 .on_click(cx.listener(|this, _, _, cx| {
-                    this.server_pane = None;
-                    cx.notify();
+                    this.state.update(cx, |s, cx| s.close_server_pane(cx));
                 })),
         )
-        .child(avatars::element(
-            &server.id,
-            &server.name,
-            None,
-            26.0,
-            theme,
-        ))
         .child(
             div()
+                .id("server-title")
+                .flex()
+                .items_center()
+                .gap(px(10.0))
                 .min_w_0()
-                .truncate()
-                .text_size(px(TEXT_BODY))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme.text)
-                .child(server.name.clone()),
+                .flex_1()
+                .cursor_pointer()
+                .rounded(px(8.0))
+                .when(page_open, |el| el.bg(theme.surface_2))
+                .child(server_picture(server, 26.0, theme))
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(TEXT_BODY))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.text)
+                        .child(server.name.clone()),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.menu_open = false;
+                    this.state
+                        .update(cx, |s, cx| s.toggle_profile(page.clone(), cx));
+                })),
         );
     let mut list = div()
         .id("channel-list")
@@ -746,7 +918,7 @@ fn server_channels(
         .pb(px(12.0))
         .overflow_y_scroll()
         .child(back);
-    if server.channels.is_empty() {
+    if channels.is_empty() {
         list = list.child(
             div()
                 .pt(px(40.0))
@@ -756,27 +928,46 @@ fn server_channels(
                 .child("No channels yet."),
         );
     }
-    for ch in &server.channels {
-        let selected = server.selected.as_deref() == Some(ch.name.as_str());
-        let name = ch.name.clone();
+    for (ch, room) in channels {
+        let selected = selected_channel.as_deref() == Some(ch.id.as_str());
+        let unread = !selected && room.as_ref().is_some_and(|r| r.unread > 0);
+        let preview = room
+            .as_ref()
+            .filter(|r| r.last_ts > 0)
+            .map(channel_last_line)
+            .unwrap_or_else(|| "No messages yet".into());
+        let time = room
+            .as_ref()
+            .filter(|r| r.last_ts > 0)
+            .map(|r| time_label(r.last_ts as u64))
+            .unwrap_or_default();
+        let locked = ch.restricted || room.as_ref().is_some_and(|r| r.restricted);
+        let server_id = server.id.clone();
+        let channel_id = ch.id.clone();
         list = list.child(
             div()
                 .id(ElementId::Name(SharedString::from(format!(
                     "channel-{}",
-                    ch.name
+                    ch.id
                 ))))
                 .flex()
                 .items_center()
                 .gap(px(10.0))
                 .px(px(12.0))
-                .py(px(9.0))
+                .py(px(11.0))
                 .rounded(px(PANEL_RADIUS - 4.0))
                 .bg(if selected {
                     theme.surface_2
                 } else {
                     gpui::transparent_black()
                 })
-                .hover(|s| s.bg(Theme::with_alpha(theme.surface_2, 0.55)))
+                .hover(|s| {
+                    s.bg(if selected {
+                        theme.surface_2
+                    } else {
+                        Theme::with_alpha(theme.surface_2, 0.55)
+                    })
+                })
                 .cursor_pointer()
                 .child(
                     div()
@@ -787,11 +978,7 @@ fn server_channels(
                         .flex()
                         .items_center()
                         .justify_center()
-                        .child(icon(
-                            if ch.announcement { "waveform" } else { "hash" },
-                            18.0,
-                            theme.text_muted,
-                        )),
+                        .child(icon("hash", 18.0, theme.text_muted)),
                 )
                 .child(
                     div()
@@ -803,14 +990,14 @@ fn server_channels(
                         .child(
                             div()
                                 .flex()
-                                .items_center()
+                                .items_baseline()
                                 .gap(px(6.0))
                                 .child(
                                     div()
                                         .min_w_0()
                                         .truncate()
                                         .text_size(px(TEXT_BODY))
-                                        .font_weight(if ch.unread {
+                                        .font_weight(if unread {
                                             FontWeight::SEMIBOLD
                                         } else {
                                             FontWeight::MEDIUM
@@ -818,27 +1005,41 @@ fn server_channels(
                                         .text_color(theme.text)
                                         .child(ch.name.clone()),
                                 )
-                                .when(ch.locked, |el| {
-                                    el.child(icon("lock", 11.0, theme.text_faint))
-                                }),
+                                .when(locked, |el| el.child(icon("lock", 11.0, theme.text_faint)))
+                                .child(div().flex_1())
+                                .child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .text_size(px(TEXT_TINY))
+                                        .text_color(theme.text_muted)
+                                        .child(time),
+                                ),
                         )
                         .child(
                             div()
-                                .min_w_0()
-                                .truncate()
-                                .text_size(px(TEXT_SMALL))
-                                .text_color(theme.text_muted)
-                                .child(ch.preview.clone()),
+                                .flex()
+                                .items_center()
+                                .gap(px(6.0))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_size(px(TEXT_SMALL))
+                                        .text_color(theme.text_muted)
+                                        .child(preview),
+                                )
+                                .when(unread, |el| {
+                                    el.child(div().size(px(8.0)).rounded_full().bg(theme.accent))
+                                }),
                         ),
                 )
-                .when(ch.unread, |el| {
-                    el.child(div().size(px(8.0)).rounded_full().bg(theme.accent))
-                })
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if let Some(server) = this.server_pane.as_mut() {
-                        server.selected = Some(name.clone());
-                    }
-                    cx.notify();
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.menu_open = false;
+                    this.state.update(cx, |s, cx| {
+                        s.select_channel(server_id.clone(), channel_id.clone(), cx)
+                    });
+                    Composer::focus(&this.composer, window, cx);
                 })),
         );
     }

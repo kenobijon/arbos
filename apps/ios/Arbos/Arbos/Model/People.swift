@@ -2,6 +2,7 @@
 // members. Shapes from internal/people-chats-api.md.
 
 import Foundation
+import ArbosFFI
 
 struct Person: Identifiable, Equatable, Hashable {
     var id: String
@@ -55,33 +56,63 @@ struct ChatMember: Identifiable, Equatable {
 
     var isAgent: Bool { kind == .agent }
     var displayName: String { kind == .agent ? (project?.name ?? handle) : (name?.isEmpty == false ? name! : handle) }
+}
+
+extension ChatMember {
+    /// Maps a relay `ChatMemberDto` the same way the old hand JSON parse did.
+    init(dto: ChatMemberDto) {
+        let isAgent = dto.member.hasPrefix("agent:")
+        let id = dto.member.split(separator: ":", maxSplits: 1).last.map { String($0) } ?? dto.member
+        var project: Arbos.Project? = nil
+        if isAgent, let p = dto.project {
+            let avatarColor = (p.avatar_color.isEmpty ? nil : p.avatar_color)
+                ?? dto.avatar_color.flatMap { $0.isEmpty ? nil : $0 }
+            project = Arbos.Project(
+                id: p.id,
+                name: p.name.isEmpty ? "Agent" : p.name,
+                icon: p.icon.isEmpty ? "A" : p.icon,
+                color: p.color.isEmpty ? "#8b7cf6" : p.color,
+                state: .awake,
+                stateSince: nil,
+                stateDetail: nil,
+                model: "",
+                effort: .low,
+                spendTodayUsd: 0,
+                spendCapUsd: 0,
+                avatar: p.avatar.isEmpty ? nil : p.avatar,
+                avatarColor: avatarColor
+            )
+            project?.avatarColorIndex = p.avatar_color_index.map(Int.init)
+            project?.avatarColorIndexEffective = Int(p.avatar_color_index_effective)
+        }
+        self.id = id
+        self.kind = isAgent ? .agent : .user
+        self.member = dto.member
+        self.role = dto.role.isEmpty ? "member" : dto.role
+        self.handle = dto.handle ?? (isAgent ? "agent" : "someone")
+        self.avatarUrl = dto.avatar_url.flatMap { $0 }
+        self.name = dto.name.flatMap { $0 }
+        self.status = dto.status ?? "member"
+        self.joinedAt = dto.joined_at
+        self.project = project
+        self.ownerId = dto.owner
+        self.ownerHandle = dto.owner_handle.flatMap { $0 }
+        self.replyPolicy = nil
+        self.lastSeenAt = dto.last_seen_at.flatMap { $0 }
+        self.online = dto.online ?? false
+        self.avatarColorIndex = dto.avatar_color_index_effective.map(Int.init)
+        self.description = dto.description ?? dto.project?.description
+    }
 
     static func parse(_ raw: Any) -> ChatMember? {
-        guard let d = raw as? [String: Any], let member = d["member"] as? String else { return nil }
-        let isAgent = member.hasPrefix("agent:")
-        let id = String(member.split(separator: ":", maxSplits: 1).last ?? Substring(member))
-        var project: Project? = nil
-        if isAgent, let p = d["project"] as? [String: Any], let pid = p["id"] as? String {
-            project = Project(id: pid, name: p["name"] as? String ?? "Agent", icon: p["icon"] as? String ?? "A",
-                              color: p["color"] as? String ?? "#8b7cf6", state: .awake, stateSince: nil, stateDetail: nil,
-                              model: "", effort: .low, spendTodayUsd: 0, spendCapUsd: 0,
-                              avatar: (p["avatar"] as? String).flatMap { $0.isEmpty ? nil : $0 },
-                              avatarColor: ((p["avatar_color"] as? String) ?? (d["avatar_color"] as? String)).flatMap { $0.isEmpty ? nil : $0 })
-            project?.avatarColorIndex = (p["avatar_color_index"] as? NSNumber)?.intValue
-            project?.avatarColorIndexEffective = (p["avatar_color_index_effective"] as? NSNumber)?.intValue
+        guard JSONSerialization.isValidJSONObject(raw),
+              let data = try? JSONSerialization.data(withJSONObject: raw) else { return nil }
+        do {
+            return ChatMember(dto: try JSONDecoder().decode(ChatMemberDto.self, from: data))
+        } catch {
+            NSLog("ChatMemberDto: \(error)")
+            return nil
         }
-        let settings = d["settings"] as? [String: Any]
-        let joinedAt = (d["joined_at"] as? NSNumber)?.int64Value ?? (d["joined_at"] as? Int64) ?? 0
-        var m = ChatMember(id: id, kind: isAgent ? .agent : .user, member: member, role: d["role"] as? String ?? "member",
-                          handle: d["handle"] as? String ?? (isAgent ? "agent" : "someone"), avatarUrl: d["avatar_url"] as? String,
-                          name: d["name"] as? String, status: d["status"] as? String ?? "member", joinedAt: joinedAt,
-                          project: project, ownerId: d["owner"] as? String, ownerHandle: d["owner_handle"] as? String,
-                          replyPolicy: settings?["reply_policy"] as? String)
-        m.lastSeenAt = (d["last_seen_at"] as? NSNumber)?.int64Value
-        m.online = (d["online"] as? NSNumber)?.boolValue ?? false
-        m.avatarColorIndex = (d["avatar_color_index_effective"] as? NSNumber)?.intValue
-        m.description = (d["description"] as? String) ?? ((d["project"] as? [String: Any])?["description"] as? String)
-        return m
     }
 }
 
@@ -118,18 +149,37 @@ struct PeopleChat: Identifiable, Equatable {
     var lockLabel: String {
         lockState == "people_only" ? "People only" : "Visible to \(agents.map { "@\($0.ownerHandle ?? "owner")" }.joined(separator: ", "))'s agent"
     }
+}
+
+extension PeopleChat {
+    /// Maps a relay `PeopleChatDto` the same way the old hand JSON parse did.
+    init(dto: PeopleChatDto) {
+        self.id = dto.id
+        self.kind = dto.kind.isEmpty ? "dm" : dto.kind
+        self.createdBy = dto.created_by
+        self.createdAt = dto.created_at
+        self.title = dto.title.isEmpty ? "Chat" : dto.title
+        self.imageKey = dto.image_key.flatMap { $0.isEmpty ? nil : $0 }
+        self.pending = dto.pending
+        self.members = dto.members.map { ChatMember(dto: $0) }
+        self.headSeq = dto.head_seq
+        self.readSeq = dto.read_seq
+        self.unread = dto.unread
+        self.lockState = dto.lock_state.isEmpty ? "people_only" : dto.lock_state
+        self.lastActivityAt = dto.last_activity_at
+        self.myRole = dto.me.role.flatMap { $0 } ?? "member"
+        self.muted = dto.me.muted ?? false
+    }
 
     static func parse(_ raw: Any) -> PeopleChat? {
-        guard let d = raw as? [String: Any], let id = d["id"] as? String else { return nil }
-        let members = ((d["members"] as? [Any]) ?? []).compactMap(ChatMember.parse)
-        let me = d["me"] as? [String: Any]
-        let n = { (k: String) -> Int64 in (d[k] as? NSNumber)?.int64Value ?? 0 }
-        let imageKey = (d["image_key"] as? String).flatMap { $0.isEmpty ? nil : $0 }
-        return PeopleChat(id: id, kind: d["kind"] as? String ?? "dm", createdBy: d["created_by"] as? String ?? "", createdAt: n("created_at"),
-                          title: d["title"] as? String ?? "Chat", imageKey: imageKey, pending: d["pending"] as? Bool ?? false, members: members,
-                          headSeq: n("head_seq"), readSeq: n("read_seq"), unread: d["unread"] as? Bool ?? false,
-                          lockState: d["lock_state"] as? String ?? "people_only", lastActivityAt: n("last_activity_at"),
-                          myRole: me?["role"] as? String ?? "member", muted: me?["muted"] as? Bool ?? false)
+        guard JSONSerialization.isValidJSONObject(raw),
+              let data = try? JSONSerialization.data(withJSONObject: raw) else { return nil }
+        do {
+            return PeopleChat(dto: try JSONDecoder().decode(PeopleChatDto.self, from: data))
+        } catch {
+            NSLog("PeopleChatDto: \(error)")
+            return nil
+        }
     }
 }
 
@@ -144,14 +194,31 @@ struct ProjectMember: Identifiable, Equatable {
     var online: Bool = false
 
     var avatarColorIndex: Int? = nil
+}
+
+extension ProjectMember {
+    /// Maps a relay `ProjectMemberDto` the same way the old hand JSON parse did.
+    init(dto: ProjectMemberDto) {
+        self.id = dto.user_id.isEmpty ? dto.id : dto.user_id
+        self.handle = dto.handle ?? ""
+        self.avatarUrl = dto.avatar_url
+        self.name = dto.name
+        self.status = dto.status.isEmpty ? "member" : dto.status
+        self.role = dto.role.isEmpty ? "member" : dto.role
+        self.lastSeenAt = dto.last_seen_at
+        self.online = dto.online
+        self.avatarColorIndex = Int(dto.avatar_color_index_effective)
+    }
 
     static func parse(_ raw: Any) -> ProjectMember? {
-        guard let d = raw as? [String: Any], let id = (d["user_id"] as? String) ?? (d["id"] as? String) else { return nil }
-        var pm = ProjectMember(id: id, handle: d["handle"] as? String ?? "", avatarUrl: d["avatar_url"] as? String, name: d["name"] as? String,
-                             status: d["status"] as? String ?? "member", role: d["role"] as? String ?? "member",
-                             lastSeenAt: (d["last_seen_at"] as? NSNumber)?.int64Value, online: (d["online"] as? NSNumber)?.boolValue ?? false)
-        pm.avatarColorIndex = (d["avatar_color_index_effective"] as? NSNumber)?.intValue
-        return pm
+        guard JSONSerialization.isValidJSONObject(raw),
+              let data = try? JSONSerialization.data(withJSONObject: raw) else { return nil }
+        do {
+            return ProjectMember(dto: try JSONDecoder().decode(ProjectMemberDto.self, from: data))
+        } catch {
+            NSLog("ProjectMemberDto: \(error)")
+            return nil
+        }
     }
 }
 
