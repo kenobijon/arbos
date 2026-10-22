@@ -4774,6 +4774,38 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 }
             });
         }
+        ClientCommand::ForkChat {
+            project_id,
+            source_chat_id,
+            chat_id: local_id,
+            title,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                match shared
+                    .post_json(
+                        &format!("/projects/{project_id}/chats"),
+                        json!({ "title": title, "fork_from": source_chat_id }),
+                    )
+                    .await
+                {
+                    Ok(v) => {
+                        let Some(chat) = v.get("chat").and_then(parse_chat) else {
+                            shared.notice("Relay returned no chat");
+                            return;
+                        };
+                        shared.chats.lock().unwrap().push(chat.clone());
+                        ensure_room(&shared, &project_id, &chat.id, &chat.id);
+                        let _ = shared.events.send(SyncEvent::ChatCreated {
+                            project_id: project_id.clone(),
+                            local_id,
+                            chat,
+                        });
+                    }
+                    Err(err) => shared.notice(format!("Fork failed: {err:#}")),
+                }
+            });
+        }
         ClientCommand::GroupCreate {
             project_id,
             chat_id: local_id,

@@ -5116,6 +5116,47 @@ impl AppState {
         cx.notify();
     }
 
+    /// Session fork (#1257): a new chat of the **same** agent carrying this
+    /// chat's transcript — never a new project (that is `duplicate_project`,
+    /// reached only from the sidebar's agent row). The copy shows at once
+    /// under a local id and opens; `ChatCreated` swaps the relay's id in and
+    /// the box fills the room with the real history and the model's context.
+    pub fn fork_chat(&mut self, chat_id: Id, cx: &mut Context<Self>) {
+        if !self.multi_chat {
+            return;
+        }
+        let Some(project) = self.project_of_chat(&chat_id).cloned() else {
+            return;
+        };
+        let Some(source) = self
+            .tabs(&project.id)
+            .iter()
+            .find(|c| c.id == chat_id)
+            .cloned()
+        else {
+            return;
+        };
+        let Some(chat) = forked_chat(&source, &project, new_id()) else {
+            return;
+        };
+        let local_id = chat.id.clone();
+        let title = chat.title.clone();
+        let messages = self.messages_of(&chat_id).to_vec();
+        self.chats.entry(project.id.clone()).or_default().push(chat);
+        self.messages.insert(local_id.clone(), messages);
+        self.chat_ui.insert(local_id.clone(), ChatUi::default());
+        self.active_tab.insert(project.id.clone(), local_id.clone());
+        self.last_chats.insert(project.id.clone(), local_id.clone());
+        self.command(ClientCommand::ForkChat {
+            project_id: project.id,
+            source_chat_id: chat_id,
+            chat_id: local_id.clone(),
+            title,
+        });
+        self.command(ClientCommand::OpenChat { chat_id: local_id });
+        cx.notify();
+    }
+
     /// Soft-delete an owned agent from every list (`DELETE /projects/{id}`).
     pub fn delete_project(&mut self, project_id: Id, cx: &mut Context<Self>) {
         let Some(p) = self.project(&project_id) else {
@@ -6528,5 +6569,108 @@ fn device_name() -> String {
         format!("{host} (Mac)")
     } else {
         host.to_string()
+    }
+}
+
+/// The local row of a session fork (#1257): the same project, a plain chat
+/// titled `<title> (fork)`, nothing pinned or shared. `None` when `source`
+/// cannot be forked (groups, system tabs, chats of shared or people spaces).
+pub(crate) fn forked_chat(source: &Chat, project: &Project, id: Id) -> Option<Chat> {
+    if project.shared || project.is_people() {
+        return None;
+    }
+    if source.is_group() || source.is_system || source.kind != ChatKind::Chat {
+        return None;
+    }
+    if source.project_id != project.id {
+        return None;
+    }
+    Some(Chat {
+        id,
+        project_id: project.id.clone(),
+        title: fork_title(&crate::ui::header::tab_title(source, project)),
+        is_pinned: false,
+        is_system: false,
+        kind: ChatKind::Chat,
+        participants: Vec::new(),
+        unread: false,
+        last_message_at: now_ms(),
+        archived_at: None,
+    })
+}
+
+/// `"unicorns"` → `"unicorns (fork)"`; a fork of a fork stays `"… (fork)"`.
+/// Mirrors the relay's default so the row the Mac shows first is the one the
+/// relay returns.
+pub(crate) fn fork_title(source: &str) -> String {
+    let base = source.trim();
+    if base.is_empty() {
+        return "New chat (fork)".into();
+    }
+    if base.ends_with("(fork)") {
+        return base.to_owned();
+    }
+    format!("{base} (fork)")
+}
+
+#[cfg(test)]
+mod fork_tests {
+    //! #1257: a session fork stays inside its agent. It never becomes a project.
+    use super::*;
+
+    fn agent(id: &str, name: &str) -> Project {
+        Project {
+            id: id.into(),
+            name: name.into(),
+            ..Default::default()
+        }
+    }
+
+    fn chat(id: &str, project: &str, title: &str, pinned: bool) -> Chat {
+        Chat {
+            id: id.into(),
+            project_id: project.into(),
+            title: title.into(),
+            is_pinned: pinned,
+            is_system: false,
+            kind: ChatKind::Chat,
+            participants: Vec::new(),
+            unread: false,
+            last_message_at: 0,
+            archived_at: None,
+        }
+    }
+
+    #[test]
+    fn fork_is_a_sibling_chat_not_a_project() {
+        let bob = agent("p-bob", "Bob");
+        let unicorns = chat("c-unicorns", "p-bob", "unicorns", false);
+        let fork = forked_chat(&unicorns, &bob, "c-local".into()).expect("forkable");
+        assert_eq!(fork.project_id, bob.id, "same agent");
+        assert_eq!(fork.title, "unicorns (fork)");
+        assert_eq!(fork.kind, ChatKind::Chat);
+        assert!(!fork.is_pinned);
+        assert_eq!(fork_title(&fork.title), "unicorns (fork)");
+        // The pinned "Main" chat forks under its display name, not the agent's.
+        let main = chat("c-main", "p-bob", "Bob", true);
+        let fork = forked_chat(&main, &bob, "c-local-2".into()).expect("forkable");
+        assert_eq!(fork.title, "Main (fork)");
+    }
+
+    #[test]
+    fn groups_system_tabs_and_shared_spaces_do_not_fork() {
+        let bob = agent("p-bob", "Bob");
+        let mut group = chat("c-g", "p-bob", "Group · Mira", false);
+        group.kind = ChatKind::Group;
+        assert!(forked_chat(&group, &bob, "x".into()).is_none());
+        let mut system = chat("c-s", "p-bob", "Projects ⇄", false);
+        system.is_system = true;
+        assert!(forked_chat(&system, &bob, "x".into()).is_none());
+        let mut shared = agent("p-shared", "Team");
+        shared.shared = true;
+        let c = chat("c-t", "p-shared", "Plan", false);
+        assert!(forked_chat(&c, &shared, "x".into()).is_none());
+        let other = chat("c-o", "p-other", "Elsewhere", false);
+        assert!(forked_chat(&other, &bob, "x".into()).is_none());
     }
 }

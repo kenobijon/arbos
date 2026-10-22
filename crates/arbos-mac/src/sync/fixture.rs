@@ -671,6 +671,43 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 messages: Vec::new(),
             });
         }
+        ClientCommand::ForkChat {
+            project_id,
+            source_chat_id,
+            chat_id,
+            title,
+        } => {
+            // The box's job in production: the new room starts as a copy of the
+            // source transcript under the new chat id.
+            let copy = shared
+                .docs
+                .lock()
+                .unwrap()
+                .get(&source_chat_id)
+                .map(|src| src.core.snapshot());
+            let doc = match copy {
+                Some(snap) => ChatDoc::forked_from_snapshot(&chat_id, &project_id, &snap),
+                None => ChatDoc::new(&chat_id, &project_id),
+            };
+            let messages = doc.read_all();
+            add_doc(shared, doc);
+            shared.chats.lock().unwrap().push(Chat {
+                id: chat_id.clone(),
+                project_id,
+                title,
+                is_pinned: false,
+                is_system: false,
+                kind: ChatKind::Chat,
+                participants: Vec::new(),
+                unread: false,
+                last_message_at: now_ms(),
+                archived_at: None,
+            });
+            emit_chats(shared);
+            let _ = shared
+                .events
+                .send(SyncEvent::ChatSnapshot { chat_id, messages });
+        }
         ClientCommand::GroupCreate {
             project_id,
             chat_id,

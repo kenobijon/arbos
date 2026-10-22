@@ -48,6 +48,19 @@ impl ChatDoc {
         }
     }
 
+    /// Fixture-side session fork (#1257): the source transcript under a new
+    /// chat id. Falls back to an empty doc when the snapshot does not load.
+    pub fn forked_from_snapshot(chat_id: &str, project_id: &str, snapshot: &[u8]) -> Self {
+        let Ok(core) = arbos_core::doc::ChatDoc::from_snapshot(None, false, snapshot) else {
+            return Self::new(chat_id, project_id);
+        };
+        core.init_meta(chat_id, project_id, 1);
+        Self {
+            chat_id: chat_id.to_string(),
+            core,
+        }
+    }
+
     /// A replica with no local `meta`: the box writes it and it arrives by sync.
     pub fn empty(chat_id: &str) -> Self {
         Self {

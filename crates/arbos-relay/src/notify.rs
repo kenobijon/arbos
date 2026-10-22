@@ -865,6 +865,7 @@ mod tests {
                 doc_epoch: 1,
                 kind: "chat".into(),
                 participants: Vec::new(),
+                forked_from: None,
             })
             .expect("chat");
         let bob_tok = register(&state, &bob_dev, &bob);
@@ -1001,6 +1002,7 @@ mod archive_tests {
                 doc_epoch: 1,
                 kind: "chat".into(),
                 participants: Vec::new(),
+                forked_from: None,
             })
             .unwrap();
         for (p, u) in [(&bob_dev, &bob), (&bob_dev2, &bob)] {
