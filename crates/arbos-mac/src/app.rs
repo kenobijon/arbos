@@ -2869,16 +2869,25 @@ impl AppState {
             channel_id: channel_id.clone(),
             room_id: room_id.clone(),
         });
+        // Open only when Matrix already lists the room. A registry room_id alone can
+        // race sliding sync (memory store empty until the next snapshot) or point at a
+        // gone room — both yield "no such room", which is not a product bug.
+        let synced = room_id.as_ref().is_some_and(|rid| {
+            self.matrix_snapshot
+                .channels
+                .iter()
+                .any(|c| c.room_id == *rid)
+        });
         match room_id {
-            Some(room_id) => {
+            Some(room_id) if synced => {
                 self.channel_pending_room = None;
                 self.command(ClientCommand::ChannelOpen {
                     room_id: room_id.clone(),
                 });
                 self.command(ClientCommand::ChannelMarkRead { room_id });
             }
-            // Just created: the room shows up in the next snapshot or registry refresh.
-            None => self.channel_pending_room = Some((server_id, channel_id)),
+            // Just created, or Matrix has not listed the room yet: wait for a snapshot.
+            _ => self.channel_pending_room = Some((server_id, channel_id)),
         }
         self.sync_focus();
         cx.notify();
@@ -2901,7 +2910,13 @@ impl AppState {
             .server(&server_id)
             .and_then(|s| s.channel(&channel_id))
             .and_then(|c| self.room_of_channel(c));
-        if room.is_some() {
+        let synced = room.as_ref().is_some_and(|rid| {
+            self.matrix_snapshot
+                .channels
+                .iter()
+                .any(|c| c.room_id == *rid)
+        });
+        if synced {
             self.select_channel(server_id, channel_id, cx);
         }
     }
