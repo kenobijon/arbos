@@ -922,28 +922,25 @@ struct ServerProfileView: View {
     private var memberCount: Int { max(server?.memberCount ?? 0, server?.members.count ?? 0) }
 
     var body: some View {
+        serverDialogs(memberDialogs(channelDialogs(frame)))
+            .sheet(isPresented: $showNewChannel) {
+                NewChannelSheet(serverId: serverId).environmentObject(model).environment(\.theme, theme)
+            }
+            .task {
+                await model.refreshServer(serverId)
+                loadedMembers = true
+            }
+    }
+
+    /// The page without its dialogs: split out so the compiler type-checks each part alone.
+    private var frame: some View {
         ZStack(alignment: .top) {
             theme.bg.ignoresSafeArea()
             ScrollView {
                 VStack(spacing: 18) {
                     Color.clear.frame(height: 80)
                     if let server {
-                        PaneHeader(name: server.name, subtitle: "\(memberCount) member\(memberCount == 1 ? "" : "s")") {
-                            if isAdmin {
-                                Button {
-                                    renameDraft = server.name
-                                    showRename = true
-                                } label: {
-                                    InitialsAvatar(name: server.name, handle: nil, id: server.id, override: server.avatarColorIndex, size: PaneHeader<EmptyView>.avatarSize)
-                                        .paneCrayon()
-                                        .contentShape(Rectangle())
-                                }
-                                .buttonStyle(.plain)
-                                .accessibilityLabel("Rename server")
-                            } else {
-                                InitialsAvatar(name: server.name, handle: nil, id: server.id, override: server.avatarColorIndex, size: PaneHeader<EmptyView>.avatarSize)
-                            }
-                        }
+                        header(server)
                         ProfileTabs(tabs: ["Channels", "Members"], selected: $tab)
                         if tab == "Channels" {
                             channelsList(server)
@@ -953,19 +950,7 @@ struct ServerProfileView: View {
                         if isAdmin, let invite = server.invite {
                             inviteCard(invite)
                         }
-                        ProfileCard {
-                            if isAdmin {
-                                ProfileLinkRow(title: "Rename server") {
-                                    renameDraft = server.name
-                                    showRename = true
-                                }
-                            }
-                            if isOwner {
-                                ProfileLinkRow(title: "Delete server", destructive: true) { confirmDelete = true }
-                            } else {
-                                ProfileLinkRow(title: "Leave server", destructive: true) { confirmLeave = true }
-                            }
-                        }
+                        actions(server)
                     } else {
                         Text("This server is no longer available.")
                             .font(theme.font(Theme.small)).foregroundStyle(theme.muted)
@@ -976,98 +961,139 @@ struct ServerProfileView: View {
             }
             ProfileTopBar { EmptyView() }
         }
-        .alert("Rename server", isPresented: $showRename) {
-            TextField("Server name", text: $renameDraft)
-            Button("Save") { Task { await model.renameServer(serverId, name: renameDraft) } }
-            Button("Cancel", role: .cancel) { }
-        }
-        .alert("Rename channel", isPresented: Binding(
-            get: { renamingChannel != nil },
-            set: { if !$0 { renamingChannel = nil } }
-        )) {
-            TextField("Channel name", text: $channelDraft)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-            Button("Save") {
-                if let c = renamingChannel { Task { await model.renameChannel(c, name: channelDraft) } }
-                renamingChannel = nil
+    }
+
+    @ViewBuilder
+    private func header(_ server: Server) -> some View {
+        PaneHeader(name: server.name, subtitle: "\(memberCount) member\(memberCount == 1 ? "" : "s")") {
+            if isAdmin {
+                Button {
+                    renameDraft = server.name
+                    showRename = true
+                } label: {
+                    InitialsAvatar(name: server.name, handle: nil, id: server.id, override: server.avatarColorIndex, size: PaneHeader<EmptyView>.avatarSize)
+                        .paneCrayon()
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Rename server")
+            } else {
+                InitialsAvatar(name: server.name, handle: nil, id: server.id, override: server.avatarColorIndex, size: PaneHeader<EmptyView>.avatarSize)
             }
-            Button("Cancel", role: .cancel) { renamingChannel = nil }
-        } message: {
-            Text("Letters, digits and dashes.")
         }
-        .confirmationDialog(
-            deletingChannel.map { "Delete #\($0.name)?" } ?? "Delete channel?",
-            isPresented: Binding(
-                get: { deletingChannel != nil },
-                set: { if !$0 { deletingChannel = nil } }
-            ),
-            titleVisibility: .visible
-        ) {
-            Button("Delete channel", role: .destructive) {
-                if let c = deletingChannel { Task { await model.deleteChannel(c) } }
-                deletingChannel = nil
-            }
-            Button("Cancel", role: .cancel) { deletingChannel = nil }
-        } message: {
-            Text("Its messages go for everyone in the server.")
-        }
-        .confirmationDialog(
-            removingMember.map { "Remove @\($0.handle)?" } ?? "Remove member?",
-            isPresented: Binding(
-                get: { removingMember != nil },
-                set: { if !$0 { removingMember = nil } }
-            ),
-            titleVisibility: .visible
-        ) {
-            Button("Remove", role: .destructive) {
-                if let m = removingMember { Task { await model.removeServerMember(serverId: serverId, userId: m.id, ban: false) } }
-                removingMember = nil
-            }
-            Button("Cancel", role: .cancel) { removingMember = nil }
-        } message: {
-            Text("They can join again with the invite link.")
-        }
-        .confirmationDialog(
-            banningMember.map { "Ban @\($0.handle)?" } ?? "Ban member?",
-            isPresented: Binding(
-                get: { banningMember != nil },
-                set: { if !$0 { banningMember = nil } }
-            ),
-            titleVisibility: .visible
-        ) {
-            Button("Ban", role: .destructive) {
-                if let m = banningMember { Task { await model.removeServerMember(serverId: serverId, userId: m.id, ban: true) } }
-                banningMember = nil
-            }
-            Button("Cancel", role: .cancel) { banningMember = nil }
-        } message: {
-            Text("They are removed and the invite link no longer works for them.")
-        }
-        .confirmationDialog("Leave \(server?.name ?? "this server")?", isPresented: $confirmLeave, titleVisibility: .visible) {
-            Button("Leave", role: .destructive) {
-                Task {
-                    if await model.leaveServer(serverId) { dismiss() }
+    }
+
+    private func actions(_ server: Server) -> some View {
+        ProfileCard {
+            if isAdmin {
+                ProfileLinkRow(title: "Rename server") {
+                    renameDraft = server.name
+                    showRename = true
                 }
             }
-        } message: { Text("You can come back with an invite link.") }
-        .confirmationDialog("Delete \(server?.name ?? "this server")?", isPresented: $confirmDelete, titleVisibility: .visible) {
-            Button("Delete server", role: .destructive) {
-                Task {
-                    if await model.deleteServer(serverId) { dismiss() }
-                }
+            if isOwner {
+                ProfileLinkRow(title: "Delete server", destructive: true) { confirmDelete = true }
+            } else {
+                ProfileLinkRow(title: "Leave server", destructive: true) { confirmLeave = true }
             }
-        } message: { Text("Every channel and message goes, for everyone.") }
-        .confirmationDialog("Reset the invite link?", isPresented: $confirmReset, titleVisibility: .visible) {
-            Button("Reset link", role: .destructive) { Task { await model.resetServerInvite(serverId) } }
-        } message: { Text("The old link stops working. People already in stay.") }
-        .sheet(isPresented: $showNewChannel) {
-            NewChannelSheet(serverId: serverId).environmentObject(model).environment(\.theme, theme)
         }
-        .task {
-            await model.refreshServer(serverId)
-            loadedMembers = true
-        }
+    }
+
+    private func channelDialogs<V: View>(_ v: V) -> some View {
+        v
+            .alert("Rename server", isPresented: $showRename) {
+                TextField("Server name", text: $renameDraft)
+                Button("Save") { Task { await model.renameServer(serverId, name: renameDraft) } }
+                Button("Cancel", role: .cancel) { }
+            }
+            .alert("Rename channel", isPresented: Binding(
+                get: { renamingChannel != nil },
+                set: { if !$0 { renamingChannel = nil } }
+            )) {
+                TextField("Channel name", text: $channelDraft)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                Button("Save") {
+                    if let c = renamingChannel { Task { await model.renameChannel(c, name: channelDraft) } }
+                    renamingChannel = nil
+                }
+                Button("Cancel", role: .cancel) { renamingChannel = nil }
+            } message: {
+                Text("Letters, digits and dashes.")
+            }
+            .confirmationDialog(
+                deletingChannel.map { "Delete #\($0.name)?" } ?? "Delete channel?",
+                isPresented: Binding(
+                    get: { deletingChannel != nil },
+                    set: { if !$0 { deletingChannel = nil } }
+                ),
+                titleVisibility: .visible
+            ) {
+                Button("Delete channel", role: .destructive) {
+                    if let c = deletingChannel { Task { await model.deleteChannel(c) } }
+                    deletingChannel = nil
+                }
+                Button("Cancel", role: .cancel) { deletingChannel = nil }
+            } message: {
+                Text("Its messages go for everyone in the server.")
+            }
+    }
+
+    private func memberDialogs<V: View>(_ v: V) -> some View {
+        v
+            .confirmationDialog(
+                removingMember.map { "Remove @\($0.handle)?" } ?? "Remove member?",
+                isPresented: Binding(
+                    get: { removingMember != nil },
+                    set: { if !$0 { removingMember = nil } }
+                ),
+                titleVisibility: .visible
+            ) {
+                Button("Remove", role: .destructive) {
+                    if let m = removingMember { Task { await model.removeServerMember(serverId: serverId, userId: m.id, ban: false) } }
+                    removingMember = nil
+                }
+                Button("Cancel", role: .cancel) { removingMember = nil }
+            } message: {
+                Text("They can join again with the invite link.")
+            }
+            .confirmationDialog(
+                banningMember.map { "Ban @\($0.handle)?" } ?? "Ban member?",
+                isPresented: Binding(
+                    get: { banningMember != nil },
+                    set: { if !$0 { banningMember = nil } }
+                ),
+                titleVisibility: .visible
+            ) {
+                Button("Ban", role: .destructive) {
+                    if let m = banningMember { Task { await model.removeServerMember(serverId: serverId, userId: m.id, ban: true) } }
+                    banningMember = nil
+                }
+                Button("Cancel", role: .cancel) { banningMember = nil }
+            } message: {
+                Text("They are removed and the invite link no longer works for them.")
+            }
+    }
+
+    private func serverDialogs<V: View>(_ v: V) -> some View {
+        v
+            .confirmationDialog("Leave \(server?.name ?? "this server")?", isPresented: $confirmLeave, titleVisibility: .visible) {
+                Button("Leave", role: .destructive) {
+                    Task {
+                        if await model.leaveServer(serverId) { dismiss() }
+                    }
+                }
+            } message: { Text("You can come back with an invite link.") }
+            .confirmationDialog("Delete \(server?.name ?? "this server")?", isPresented: $confirmDelete, titleVisibility: .visible) {
+                Button("Delete server", role: .destructive) {
+                    Task {
+                        if await model.deleteServer(serverId) { dismiss() }
+                    }
+                }
+            } message: { Text("Every channel and message goes, for everyone.") }
+            .confirmationDialog("Reset the invite link?", isPresented: $confirmReset, titleVisibility: .visible) {
+                Button("Reset link", role: .destructive) { Task { await model.resetServerInvite(serverId) } }
+            } message: { Text("The old link stops working. People already in stay.") }
     }
 
     // MARK: Channels
