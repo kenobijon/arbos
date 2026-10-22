@@ -2,14 +2,15 @@
 //! verifies on request, swaps the bundle, and asks the UI to relaunch. The
 //! UI reads [`UpdateState`] off `AppState` and shows one button in the rail.
 //!
-//! Automatic updates (D85, default on; Settings → Updates): a newer build is
-//! downloaded, verified and installed in the background as soon as the poll
-//! (every 5 min) or the relay's `release_published` push sees it; the app then
-//! relaunches at a safe moment — window not focused or no typing for a while —
-//! and otherwise shows "Restart now" in the rail with a one-minute countdown.
-//! Never during a call or while a key was just pressed. The open chat comes
-//! back after the relaunch (on-device store, `RestoreSelection`). The rail
-//! button stays the manual path (and the only path with the toggle off).
+//! By default (Settings → Updates → Automatic updates Off), a newer build only
+//! lights the rail Update button; the user installs when they choose. Automatic
+//! updates (D85, opt-in): a newer build is downloaded, verified and installed
+//! in the background as soon as the poll (every 5 min) or the relay's
+//! `release_published` push sees it; the app then relaunches at a safe moment
+//! — while Arbos is focused and idle, never while another app has focus, never
+//! during a call or mid-typing — and otherwise shows "Restart now" in the rail
+//! with a one-minute countdown. The open chat comes back after the relaunch
+//! (on-device store, `RestoreSelection`).
 //!
 //! Environment (all optional):
 //!   ARBOS_UPDATE_FEED            feed URL (default: the GitHub release appcast)
@@ -119,7 +120,7 @@ fn read_settings() -> serde_json::Map<String, serde_json::Value> {
         .unwrap_or_default()
 }
 
-/// The Settings → Updates toggle (`auto_update` in `<config>/settings.json`, default on);
+/// The Settings → Updates toggle (`auto_update` in `<config>/settings.json`, default off);
 /// `ARBOS_UPDATE_AUTO` overrides it for one run.
 pub fn auto_update_enabled() -> bool {
     if let Ok(v) = std::env::var("ARBOS_UPDATE_AUTO") {
@@ -128,7 +129,7 @@ pub fn auto_update_enabled() -> bool {
     read_settings()
         .get("auto_update")
         .and_then(|b| b.as_bool())
-        .unwrap_or(true)
+        .unwrap_or(false)
 }
 
 pub fn save_auto_update(enabled: bool) {
@@ -298,12 +299,12 @@ impl UpdateState {
                 let left = deadline_ms.saturating_sub(now_ms()).div_ceil(1000);
                 if left > 0 {
                     format!(
-                        "Arbos {} is installed · restarts in {left}s, or when you pause",
+                        "Arbos {} is installed · restarts in {left}s while you are in Arbos, or when you pause",
                         available.item.version
                     )
                 } else {
                     format!(
-                        "Arbos {} is installed · restarts as soon as you pause",
+                        "Arbos {} is installed · restarts when you pause in Arbos",
                         available.item.version
                     )
                 }
