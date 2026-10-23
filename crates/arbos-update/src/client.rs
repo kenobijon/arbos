@@ -12,8 +12,11 @@ use std::sync::Arc;
 
 use anyhow::{bail, Context};
 use futures::StreamExt as _;
+use reqwest::header::{CONTENT_RANGE, RANGE};
+use reqwest::StatusCode;
 
 use crate::appcast::{Appcast, Item};
+use crate::fetch::{self, DownloadFailed, Retry};
 use crate::sign::PublicKey;
 
 /// Download progress: bytes so far, total when the server says.
@@ -82,26 +85,62 @@ pub fn app_bundle_from_exe(exe: &Path) -> Option<PathBuf> {
         .map(|p| p.to_path_buf())
 }
 
-fn http() -> anyhow::Result<reqwest::Client> {
+/// One client per operation: a 30 s connect timeout (the OS default is ~75 s and the updater used
+/// to wait all of it), a read timeout between bytes, redirects followed (GitHub release assets
+/// 302 to a CDN; the site mirror 302s to GitHub for files it does not hold).
+fn http(retry: &Retry) -> anyhow::Result<reqwest::Client> {
     reqwest::Client::builder()
         .user_agent(format!("Arbos-Updater/{}", env!("CARGO_PKG_VERSION")))
         .redirect(reqwest::redirect::Policy::limited(10))
+        .connect_timeout(retry.connect_timeout)
+        .read_timeout(retry.read_timeout)
         .build()
         .context("http client")
 }
 
-/// Fetch and parse the feed.
+/// Fetch and parse the feed from the first of [`fetch::feed_urls`] that answers.
 pub async fn fetch_appcast(feed_url: &str) -> anyhow::Result<Appcast> {
-    let text = http()?
-        .get(feed_url)
+    fetch_appcast_with(feed_url, &Retry::DEFAULT).await
+}
+
+pub async fn fetch_appcast_with(feed_url: &str, retry: &Retry) -> anyhow::Result<Appcast> {
+    let client = http(retry)?;
+    let mut errors: Vec<anyhow::Error> = Vec::new();
+    for url in fetch::feed_urls(feed_url) {
+        match fetch_feed_once(&client, &url, retry).await {
+            Ok(appcast) => return Ok(appcast),
+            Err(err) => {
+                tracing::warn!(url, error = format!("{err:#}"), "feed fetch failed");
+                errors.push(err);
+            }
+        }
+    }
+    let joined = errors
+        .iter()
+        .map(|e| format!("{e:#}"))
+        .collect::<Vec<_>>()
+        .join("; then ");
+    bail!("{joined}")
+}
+
+async fn fetch_feed_once(
+    client: &reqwest::Client,
+    url: &str,
+    retry: &Retry,
+) -> anyhow::Result<Appcast> {
+    // A feed is a few KB: one deadline for the whole exchange.
+    let text = client
+        .get(url)
+        .timeout(retry.connect_timeout + retry.read_timeout)
         .send()
         .await
-        .with_context(|| format!("GET {feed_url}"))?
+        .with_context(|| format!("GET {url}"))?
         .error_for_status()
-        .with_context(|| format!("GET {feed_url}"))?
+        .with_context(|| format!("GET {url}"))?
         .text()
-        .await?;
-    Appcast::parse(&text)
+        .await
+        .with_context(|| format!("GET {url}"))?;
+    Appcast::parse(&text).with_context(|| format!("GET {url}"))
 }
 
 /// `sw_vers -productVersion` on macOS; `None` elsewhere.
@@ -149,15 +188,46 @@ pub fn updates_dir() -> PathBuf {
     base.join(app).join("updates")
 }
 
+/// A verified payload on disk and where its bytes came from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Downloaded {
+    pub path: PathBuf,
+    /// The URL of the attempt that completed the file.
+    pub url: String,
+    /// Attempts made, counting the successful one.
+    pub attempts: u32,
+}
+
 /// Download the payload to `dir`, check its length and Ed25519 signature,
 /// and return the verified file. A payload that fails verification is
 /// deleted; nothing unverified is left on disk.
+///
+/// The bytes come from [`fetch::download_urls`] (site mirror, then GitHub), with
+/// [`Retry::DEFAULT`] attempts, backoff between them, and the `.part` file resumed
+/// through a `Range` request. After the last failed attempt the error is a
+/// [`DownloadFailed`] whose `Display` is plain words.
 pub async fn download(
     available: &Available,
     key: &PublicKey,
     dir: &Path,
     progress: Option<ProgressFn>,
-) -> anyhow::Result<PathBuf> {
+) -> anyhow::Result<Downloaded> {
+    let urls = fetch::download_urls(&available.url);
+    download_with(available, key, dir, progress, &Retry::DEFAULT, &urls).await
+}
+
+/// [`download`] with the schedule and URL list spelled out (tests, the CLI).
+pub async fn download_with(
+    available: &Available,
+    key: &PublicKey,
+    dir: &Path,
+    progress: Option<ProgressFn>,
+    retry: &Retry,
+    urls: &[String],
+) -> anyhow::Result<Downloaded> {
+    if urls.is_empty() {
+        bail!("no download URL");
+    }
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let name = available
         .url
@@ -167,31 +237,45 @@ pub async fn download(
         .unwrap_or("payload.tar.gz");
     let dest = dir.join(name);
     let partial = dir.join(format!("{name}.part"));
+    // A leftover `.part` larger than the payload cannot be the right bytes: start over.
+    if available.length > 0 && partial_len(&partial) > available.length {
+        let _ = tokio::fs::remove_file(&partial).await;
+    }
 
-    let response = http()?
-        .get(&available.url)
-        .send()
-        .await
-        .with_context(|| format!("GET {}", available.url))?
-        .error_for_status()?;
-    let total = response
-        .content_length()
-        .or_else(|| (available.length > 0).then_some(available.length));
-    let mut file = tokio::fs::File::create(&partial)
-        .await
-        .with_context(|| format!("creating {}", partial.display()))?;
-    let mut stream = response.bytes_stream();
-    let mut got: u64 = 0;
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.context("reading the download")?;
-        tokio::io::AsyncWriteExt::write_all(&mut file, &chunk).await?;
-        got += chunk.len() as u64;
-        if let Some(p) = &progress {
-            p(got, total);
+    let client = http(retry)?;
+    let mut errors: Vec<(String, anyhow::Error)> = Vec::new();
+    let mut served_by = None;
+    for attempt in 1..=retry.attempts.max(1) {
+        let url = &urls[(attempt as usize - 1) % urls.len()];
+        match fetch_into(&client, url, &partial, available.length, progress.as_ref()).await {
+            Ok(()) => {
+                served_by = Some((url.clone(), attempt));
+                break;
+            }
+            Err(failed) => {
+                tracing::warn!(
+                    attempt,
+                    url,
+                    error = format!("{:#}", failed.error),
+                    "download attempt failed"
+                );
+                if !failed.keep_partial {
+                    let _ = tokio::fs::remove_file(&partial).await;
+                }
+                errors.push((url.clone(), failed.error));
+                if attempt < retry.attempts {
+                    tokio::time::sleep(retry.delay(attempt)).await;
+                }
+            }
         }
     }
-    tokio::io::AsyncWriteExt::flush(&mut file).await?;
-    drop(file);
+    let Some((url, attempts)) = served_by else {
+        return Err(DownloadFailed {
+            attempts: errors.len() as u32,
+            errors,
+        }
+        .into());
+    };
 
     let bytes = tokio::fs::read(&partial).await?;
     let verdict = verify_payload(&bytes, available, key);
@@ -200,7 +284,154 @@ pub async fn download(
         return Err(err);
     }
     tokio::fs::rename(&partial, &dest).await?;
-    Ok(dest)
+    Ok(Downloaded {
+        path: dest,
+        url,
+        attempts,
+    })
+}
+
+fn partial_len(partial: &Path) -> u64 {
+    std::fs::metadata(partial).map(|m| m.len()).unwrap_or(0)
+}
+
+/// Why one attempt failed, and whether the bytes it left in the `.part` file are worth resuming
+/// from. They are not when the server never confirmed it was sending our file (no length to
+/// compare with the appcast): a mirror answering a 200 web page must not become the first half
+/// of a payload whose second half then comes from GitHub.
+struct AttemptFailed {
+    error: anyhow::Error,
+    keep_partial: bool,
+}
+
+impl AttemptFailed {
+    fn discard(error: anyhow::Error) -> Self {
+        AttemptFailed {
+            error,
+            keep_partial: false,
+        }
+    }
+}
+
+impl From<anyhow::Error> for AttemptFailed {
+    fn from(error: anyhow::Error) -> Self {
+        AttemptFailed::discard(error)
+    }
+}
+
+/// One attempt: continue `partial` from its current length with a `Range` request (a server
+/// that answers 200 instead of 206 restarts the file), stream the body in, and return once the
+/// response body ended. Whether the file is complete and genuine is the verifier's call.
+async fn fetch_into(
+    client: &reqwest::Client,
+    url: &str,
+    partial: &Path,
+    expected: u64,
+    progress: Option<&ProgressFn>,
+) -> Result<(), AttemptFailed> {
+    let have = partial_len(partial);
+    if expected > 0 && have >= expected {
+        return Ok(());
+    }
+    let mut request = client.get(url);
+    if have > 0 {
+        request = request.header(RANGE, format!("bytes={have}-"));
+    }
+    let response = request
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))
+        .map_err(|e| AttemptFailed {
+            error: e,
+            keep_partial: true,
+        })?;
+    let status = response.status();
+    if have > 0 && status == StatusCode::RANGE_NOT_SATISFIABLE {
+        // The server says the file is not longer than what we hold: let the verifier decide.
+        return Ok(());
+    }
+    let response = response
+        .error_for_status()
+        .with_context(|| format!("GET {url}"))
+        .map_err(|e| AttemptFailed {
+            error: e,
+            keep_partial: true,
+        })?;
+    let resumed = have > 0 && status == StatusCode::PARTIAL_CONTENT;
+    // What the server says the whole file is; a wrong size is not our file.
+    let offered = if resumed {
+        content_range_total(&response).or_else(|| response.content_length().map(|l| have + l))
+    } else {
+        response.content_length()
+    };
+    if let (Some(offered), true) = (offered, expected > 0) {
+        if offered != expected {
+            return Err(AttemptFailed::discard(anyhow::anyhow!(
+                "{url} offers a {offered}-byte file, the appcast says {expected}"
+            )));
+        }
+    }
+    // Resume later only from bytes of a response that declared the right size.
+    let keep_partial = offered.is_some();
+    let total = offered.or_else(|| (expected > 0).then_some(expected));
+    let (mut file, mut got) = if resumed {
+        let file = tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(partial)
+            .await
+            .with_context(|| format!("opening {}", partial.display()))?;
+        (file, have)
+    } else {
+        let file = tokio::fs::File::create(partial)
+            .await
+            .with_context(|| format!("creating {}", partial.display()))?;
+        (file, 0)
+    };
+    if let Some(p) = progress {
+        p(got, total);
+    }
+    let failed = |error: anyhow::Error| AttemptFailed {
+        error,
+        keep_partial,
+    };
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk
+            .with_context(|| format!("reading the download from {url}"))
+            .map_err(failed)?;
+        tokio::io::AsyncWriteExt::write_all(&mut file, &chunk)
+            .await
+            .map_err(|e| failed(e.into()))?;
+        got += chunk.len() as u64;
+        if let Some(p) = progress {
+            p(got, total);
+        }
+    }
+    tokio::io::AsyncWriteExt::flush(&mut file)
+        .await
+        .map_err(|e| failed(e.into()))?;
+    if expected > 0 && got < expected {
+        // A body that ended early without a transport error: the next attempt resumes from here
+        // when the server had declared the right size, else starts over.
+        return Err(failed(anyhow::anyhow!(
+            "{url} sent {got} of {expected} bytes"
+        )));
+    }
+    Ok(())
+}
+
+/// `Content-Range: bytes 100-999/1000` → 1000.
+fn content_range_total(response: &reqwest::Response) -> Option<u64> {
+    response
+        .headers()
+        .get(CONTENT_RANGE)?
+        .to_str()
+        .ok()?
+        .rsplit('/')
+        .next()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 /// Length (when the feed states one) and signature over the bytes.

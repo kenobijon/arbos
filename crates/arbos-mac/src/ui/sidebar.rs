@@ -1911,3 +1911,131 @@ pub fn chat_menu(
     }
     Some(glass::frosted_menu(CHAT_MENU_WIDTH, &theme, body).into_any_element())
 }
+
+#[cfg(test)]
+mod row_bounds_tests {
+    use gpui::{div, prelude::*, px, ScrollHandle, TestAppContext};
+
+    use super::top_strip;
+    use crate::ui::frost::edge_faded;
+
+    const ROWS: usize = 12;
+    const ROW_H: f32 = 58.0;
+
+    /// The sidebar column as `render` builds it: strip, the faded scrolling
+    /// list (the exact wrapper `render` uses), the account row. Twelve rows so
+    /// the list scrolls.
+    struct Column {
+        scroll: ScrollHandle,
+    }
+
+    impl gpui::Render for Column {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let strip = div().h(px(top_strip())).flex_shrink_0();
+            let mut list = div()
+                .id("chat-list")
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .px(px(8.0))
+                .pt(px(6.0))
+                .pb(px(12.0))
+                .overflow_y_scroll()
+                .track_scroll(&self.scroll)
+                .debug_selector(|| "chat-list".into());
+            for i in 0..ROWS {
+                let sel: &'static str = Box::leak(format!("row-{i}").into_boxed_str());
+                list = list.child(
+                    div()
+                        .h(px(ROW_H))
+                        .flex_shrink_0()
+                        .debug_selector(move || sel.into())
+                        .child(format!("Chat {i}")),
+                );
+            }
+            let account = div()
+                .h(px(44.0))
+                .flex_shrink_0()
+                .debug_selector(|| "account-row".into());
+            div()
+                .w(px(280.0))
+                .h(px(520.0))
+                .flex()
+                .flex_col()
+                .child(strip)
+                .child(edge_faded(14.0, true, true, list))
+                .child(account)
+        }
+    }
+
+    /// Jacob (Oct 23, v0.6.180): two chats' titles painted into one slot at
+    /// the list's bottom. The list must keep its bounded height: no row may
+    /// paint past the list (or into the account row), and no two rows may
+    /// share a y-range — at the top and scrolled to the bottom.
+    #[gpui::test]
+    fn rows_stay_inside_the_list_and_never_overlap(cx: &mut TestAppContext) {
+        let scroll = ScrollHandle::new();
+        let (view, vcx) = cx.add_window_view(|_, _| Column {
+            scroll: scroll.clone(),
+        });
+        for pass in ["top", "bottom"] {
+            if pass == "bottom" {
+                scroll.scroll_to_bottom();
+                view.update(vcx, |_, cx| cx.notify());
+            }
+            vcx.run_until_parked();
+            let list = vcx.debug_bounds("chat-list").expect("list");
+            let account = vcx.debug_bounds("account-row").expect("account row");
+            let list_bottom: f32 = list.bottom().into();
+            let account_top: f32 = account.origin.y.into();
+            assert!(
+                list_bottom <= account_top + 0.5,
+                "{pass}: list bottom {list_bottom} runs into the account row at {account_top}"
+            );
+            let mut spans: Vec<(f32, f32)> = Vec::new();
+            for i in 0..ROWS {
+                let sel: &'static str = Box::leak(format!("row-{i}").into_boxed_str());
+                let Some(b) = vcx.debug_bounds(sel) else {
+                    continue;
+                };
+                let (top, bottom): (f32, f32) = (b.origin.y.into(), b.bottom().into());
+                // A row that shows must lie within the list's box (the scroll
+                // clip): nothing paints past the list.
+                if bottom > f32::from(list.origin.y) && top < list_bottom {
+                    spans.push((top, bottom));
+                }
+            }
+            spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+            for w in spans.windows(2) {
+                assert!(
+                    w[1].0 >= w[0].1 - 0.5,
+                    "{pass}: rows overlap ({:?} then {:?})",
+                    w[0],
+                    w[1]
+                );
+            }
+            if pass == "bottom" {
+                let last: &'static str = Box::leak(format!("row-{}", ROWS - 1).into_boxed_str());
+                // Jacob (18:46): "you can't scroll up and down on the chats" —
+                // the list must have scrolled: the last row, off-screen at the
+                // top, is now fully inside the list's box.
+                let b = vcx
+                    .debug_bounds(last)
+                    .expect("last row drawn at scroll-bottom");
+                let (top, bottom): (f32, f32) = (b.origin.y.into(), b.bottom().into());
+                let list_top: f32 = list.origin.y.into();
+                assert!(
+                    top >= list_top && bottom <= list_bottom - 12.0 + 0.5,
+                    "bottom: last row {top}..{bottom} not inside the list {list_top}..{list_bottom}"
+                );
+                let offset: f32 = scroll.offset().y.into();
+                assert!(offset < -(ROW_H * 2.0), "the list scrolled ({offset})");
+            }
+        }
+    }
+}

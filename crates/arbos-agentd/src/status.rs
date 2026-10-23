@@ -592,6 +592,23 @@ impl Agent {
         // chat bubble — the apps already show one quiet working indicator. Queue for the main
         // session; do not mark this wait as noted so a later status question can still answer.
         if kind == SideKind::Task {
+            let _ = self.store.t3_append(
+                chat_id,
+                None,
+                Some(chat_id),
+                "quick_reply",
+                Some("system"),
+                &format!(
+                    "quick reply task (silent): {}model call, {} ms after the grace",
+                    if used_model { "" } else { "no " },
+                    t0.elapsed().as_millis()
+                ),
+                Some(&json!({
+                    "message_id": user_msg_id, "side": "task", "model_call": used_model,
+                    "model": model, "waited_ms": t_wait.elapsed().as_millis() as u64,
+                    "steerable": snap.steerable, "silent": true,
+                })),
+            );
             tracing::info!(
                 chat_id,
                 ms = t0.elapsed().as_millis() as i64,
@@ -606,6 +623,25 @@ impl Agent {
         }
         // Status / guide only: open the row after we know we have a real sentence to post.
         let row_id = ulid();
+        // The decision row for debugging readers (`inspect`, kind `quick_reply`): which side the
+        // model read the message as, whether a model call was made, how long the user waited.
+        let _ = self.store.t3_append(
+            chat_id,
+            None,
+            Some(chat_id),
+            "quick_reply",
+            Some("system"),
+            &format!(
+                "quick reply {}: {}model call, {} ms after the grace",
+                kind.as_str(),
+                if used_model { "" } else { "no " },
+                t0.elapsed().as_millis()
+            ),
+            Some(&json!({
+                "message_id": user_msg_id, "row_id": row_id, "side": kind.as_str(), "model_call": used_model,
+                "model": model, "waited_ms": t_wait.elapsed().as_millis() as u64, "steerable": snap.steerable,
+            })),
+        );
         {
             let h = host.lock().await;
             h.doc
