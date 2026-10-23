@@ -114,12 +114,17 @@ struct HomeView: View {
                                 }
                                 .buttonStyle(.borderless)
                                 .contextMenu {
-                                    // Long-press on an agent (Jacob, #1258): Fork (a new
-                                    // agent) and Delete only — the Mac sidebar menu's Mute,
-                                    // Fork, Delete without Mute, which the iPhone has no
-                                    // per-agent form of. Pin and Archive stay on the swipes,
-                                    // Profile is the chat header, Share is the chat's
-                                    // members sheet.
+                                    // Long-press: Pin (also on leading swipe), then Fork /
+                                    // Delete for owned agents. Archive stays on the trailing
+                                    // swipe; Profile is the chat header.
+                                    Button {
+                                        withAnimation {
+                                            if pinned { model.unpinHome(projectId: project.id) }
+                                            else { model.pinHome(projectId: project.id) }
+                                        }
+                                    } label: {
+                                        Label(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin")
+                                    }
                                     if !project.shared {
                                         Button { model.duplicateProject(project) } label: {
                                             Label("Fork", systemImage: "arrow.triangle.branch")

@@ -366,6 +366,9 @@ final class AppModel: ObservableObject {
 
     // MARK: Home pins (device-local)
 
+    /// How many home rows may sit pinned at once (agents + people chats).
+    static let maxHomePins = 5
+
     /// Home-list keys (`p:<projectId>` / `c:<peopleChatId>`) kept at the top.
     @Published private(set) var pinnedHomeIds: Set<String> = {
         Set(UserDefaults.standard.stringArray(forKey: "pinnedHome") ?? [])
@@ -390,6 +393,11 @@ final class AppModel: ObservableObject {
     private func setHomePinned(_ key: String, _ pinned: Bool) {
         if pinned {
             guard !pinnedHomeIds.contains(key) else { return }
+            // Cap at five so the top of Home stays a short favourites strip.
+            guard pinnedHomeIds.count < Self.maxHomePins else {
+                notice = Notice(text: "You can pin up to five chats.")
+                return
+            }
             pinnedHomeIds.insert(key)
         } else {
             guard pinnedHomeIds.contains(key) else { return }
