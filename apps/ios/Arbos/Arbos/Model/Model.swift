@@ -429,10 +429,42 @@ struct Attachment: Codable, Equatable {
     var blobRef: String?
     /// Producer hint (`image`, `audio`, …); clients may also infer from mime/name.
     var kind: String? = nil
+    /// Size on the relay, when the producer knew it (the file card's "PDF · 1.8 MB").
+    var bytes: Int64? = nil
 
     enum CodingKeys: String, CodingKey {
-        case name, mime, kind
+        case name, mime, kind, bytes
         case blobRef = "ref"
+    }
+
+    /// "1.8 MB" style size, empty when unknown (Mac `size_label`).
+    var sizeLabel: String {
+        guard let b = bytes else { return "" }
+        if b < 1024 { return "\(b) B" }
+        if b < 1024 * 1024 { return "\(b / 1024) KB" }
+        if b < 1024 * 1024 * 1024 { return String(format: "%.1f MB", Double(b) / 1_048_576) }
+        return String(format: "%.2f GB", Double(b) / 1_073_741_824)
+    }
+
+    /// Mac `AttachmentKind::label`: Image, Video, Slides, Document, Spreadsheet, PDF, Audio, File.
+    var kindLabel: String {
+        let ext = (name as NSString).pathExtension.lowercased()
+        let m = mime.lowercased()
+        switch ext {
+        case "png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "heic": return "Image"
+        case "mp4", "mov", "webm", "mkv": return "Video"
+        case "pptx", "ppt", "key", "odp": return "Slides"
+        case "docx", "doc", "odt", "rtf", "md", "txt": return "Document"
+        case "xlsx", "xls", "csv", "ods": return "Spreadsheet"
+        case "pdf": return "PDF"
+        case "mp3", "wav", "m4a", "ogg", "flac": return "Audio"
+        default: break
+        }
+        if m.hasPrefix("image/") { return "Image" }
+        if m.hasPrefix("video/") { return "Video" }
+        if m.hasPrefix("audio/") { return "Audio" }
+        if m == "application/pdf" { return "PDF" }
+        return "File"
     }
 
     /// True for a still image the transcript should show as a tappable preview.
@@ -811,7 +843,8 @@ enum DocJSON {
                     name: str(a["name"]) ?? "attachment",
                     mime: str(a["mime"]) ?? "application/octet-stream",
                     blobRef: str(a["ref"]),
-                    kind: str(a["kind"]).flatMap { $0 == "attachment" ? nil : $0 }
+                    kind: str(a["kind"]).flatMap { $0 == "attachment" ? nil : $0 },
+                    bytes: (a["bytes"] as? NSNumber)?.int64Value
                 )
             )
         case "error":

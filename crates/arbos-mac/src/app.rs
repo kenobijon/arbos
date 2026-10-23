@@ -383,6 +383,9 @@ pub struct AppState {
     pub blobs: HashMap<String, BlobView>,
     /// Decoded inline thumbnails of image attachments, by blob key (F10).
     pub thumbnails: HashMap<String, Arc<RenderImage>>,
+    /// The same pictures with a uniform border trimmed (a screenshot's white
+    /// page margin), for the chat's picture bubbles; absent when nothing to trim.
+    pub thumbnails_trimmed: HashMap<String, Arc<RenderImage>>,
     /// Thumbnail fetches in flight or failed (never asked twice).
     thumbnails_requested: HashSet<String>,
     /// Blob keys whose thumbnail fetch failed: the card says "No preview" instead of loading.
@@ -744,6 +747,7 @@ impl AppState {
             chat_ui: HashMap::new(),
             blobs: HashMap::new(),
             thumbnails: HashMap::new(),
+            thumbnails_trimmed: HashMap::new(),
             thumbnails_requested: HashSet::new(),
             thumbnails_failed: HashSet::new(),
             notices: Vec::new(),
@@ -1337,10 +1341,17 @@ impl AppState {
                 cx.notify();
             }
             SyncEvent::Thumbnail { key, bytes } => {
-                if let Some(image) = decode_image(&bytes) {
-                    let image = Arc::new(image);
+                if let Some((image, trimmed)) = decode_image_pair(&bytes) {
                     self.thumbnails_failed.remove(&key);
-                    self.thumbnails.insert(key, image);
+                    match trimmed {
+                        Some(t) => {
+                            self.thumbnails_trimmed.insert(key.clone(), Arc::new(t));
+                        }
+                        None => {
+                            self.thumbnails_trimmed.remove(&key);
+                        }
+                    }
+                    self.thumbnails.insert(key, Arc::new(image));
                     if let Some(chat_id) = self.active_chat_id() {
                         cx.emit(AppEvent::TranscriptChanged { chat_id });
                     }
@@ -2859,9 +2870,12 @@ impl AppState {
                     title: None,
                 };
                 if probe.is_image() {
-                    if let Some(image) = decode_image(&data) {
+                    if let Some((image, trimmed)) = decode_image_pair(&data) {
                         let key = format!("local:{att_id}");
                         self.thumbnails.insert(key.clone(), Arc::new(image));
+                        if let Some(t) = trimmed {
+                            self.thumbnails_trimmed.insert(key.clone(), Arc::new(t));
+                        }
                         self.thumbnails_requested.insert(key.clone());
                         blob_ref = Some(key);
                     }
@@ -4775,6 +4789,15 @@ impl AppState {
         cx.notify();
     }
 
+    /// The picture a chat bubble shows for blob `key`: the trimmed copy when
+    /// a uniform border was cut, else the full thumbnail.
+    pub fn card_thumbnail(&self, key: &str) -> Option<Arc<RenderImage>> {
+        self.thumbnails_trimmed
+            .get(key)
+            .or_else(|| self.thumbnails.get(key))
+            .cloned()
+    }
+
     // ----- media viewer (feedback media-viewer-2026-10-23) -----------------
 
     /// Every picture and video of `chat_id` in transcript order — the album the
@@ -6469,6 +6492,9 @@ impl AppState {
             match attachment.blob_ref.clone() {
                 Some(new_key) if new_key != old_key => {
                     self.thumbnails.entry(new_key.clone()).or_insert(image);
+                    if let Some(t) = self.thumbnails_trimmed.get(&old_key).cloned() {
+                        self.thumbnails_trimmed.entry(new_key.clone()).or_insert(t);
+                    }
                     self.thumbnails_requested.insert(new_key.clone());
                     self.thumbnails_failed.remove(&new_key);
                 }
@@ -7650,6 +7676,82 @@ pub fn decode_image(bytes: &[u8]) -> Option<RenderImage> {
     decode_rgba(bytes).and_then(bgra_frame)
 }
 
+/// The picture, plus a copy with its uniform border trimmed when there is one
+/// (feedback chat-preview-cards-2026-10-23: a screenshot's empty page margin
+/// must not become a white band in the bubble). The viewer shows the full picture.
+pub fn decode_image_pair(bytes: &[u8]) -> Option<(RenderImage, Option<RenderImage>)> {
+    let rgba = decode_rgba(bytes)?;
+    let trimmed = trim_rect(&rgba)
+        .map(|(x, y, w, h)| image::imageops::crop_imm(&rgba, x, y, w, h).to_image());
+    let full = bgra_frame(rgba)?;
+    Some((full, trimmed.and_then(bgra_frame)))
+}
+
+/// Where the content of `img` sits once a uniform border is removed:
+/// `(x, y, w, h)`, or `None` when there is no border worth trimming. The
+/// border colour is the corner pixel; a row / column counts as border when
+/// every sampled pixel is within 10/255 of it. A 2 % breathing margin is kept,
+/// and the trim only happens when it removes at least 6 % of the area and
+/// leaves at least a quarter of each side — a plain colour swatch stays whole.
+pub fn trim_rect(img: &image::RgbaImage) -> Option<(u32, u32, u32, u32)> {
+    let (w, h) = img.dimensions();
+    if w < 32 || h < 32 {
+        return None;
+    }
+    let bg = *img.get_pixel(0, 0);
+    let near = |p: &image::Rgba<u8>| {
+        p.0.iter()
+            .zip(bg.0.iter())
+            .take(3)
+            .all(|(a, b)| a.abs_diff(*b) <= 10)
+    };
+    let step_x = (w / 160).max(1);
+    let step_y = (h / 160).max(1);
+    let row_is_bg = |y: u32| {
+        (0..w)
+            .step_by(step_x as usize)
+            .all(|x| near(img.get_pixel(x, y)))
+    };
+    let col_is_bg = |x: u32| {
+        (0..h)
+            .step_by(step_y as usize)
+            .all(|y| near(img.get_pixel(x, y)))
+    };
+    let mut top = 0;
+    while top < h && row_is_bg(top) {
+        top += 1;
+    }
+    if top >= h {
+        return None;
+    }
+    let mut bottom = h;
+    while bottom > top && row_is_bg(bottom - 1) {
+        bottom -= 1;
+    }
+    let mut left = 0;
+    while left < w && col_is_bg(left) {
+        left += 1;
+    }
+    let mut right = w;
+    while right > left && col_is_bg(right - 1) {
+        right -= 1;
+    }
+    let (pad_x, pad_y) = ((w as f32 * 0.02) as u32, (h as f32 * 0.02) as u32);
+    let left = left.saturating_sub(pad_x);
+    let top = top.saturating_sub(pad_y);
+    let right = (right + pad_x).min(w);
+    let bottom = (bottom + pad_y).min(h);
+    let (cw, ch) = (right - left, bottom - top);
+    if cw < w / 4 || ch < h / 4 {
+        return None;
+    }
+    let kept = (cw as f64 * ch as f64) / (w as f64 * h as f64);
+    if kept > 0.94 {
+        return None;
+    }
+    Some((left, top, cw, ch))
+}
+
 /// PNG/JPEG/GIF/WebP/ICO → RGBA pixels.
 fn decode_rgba(bytes: &[u8]) -> Option<image::RgbaImage> {
     Some(image::load_from_memory(bytes).ok()?.into_rgba8())
@@ -7943,5 +8045,60 @@ mod fork_tests {
         assert!(forked_chat(&c, &shared, "x".into()).is_none());
         let other = chat("c-o", "p-other", "Elsewhere", false);
         assert!(forked_chat(&other, &bob, "x".into()).is_none());
+    }
+}
+
+#[cfg(test)]
+mod trim_tests {
+    use super::trim_rect;
+    use image::{Rgba, RgbaImage};
+
+    fn page(w: u32, h: u32, top: u32, left: u32) -> RgbaImage {
+        RgbaImage::from_fn(w, h, |x, y| {
+            if x >= left && x < w - left && y >= top && y < h - 40 {
+                Rgba([30, 30, 30, 255])
+            } else {
+                Rgba([255, 255, 255, 255])
+            }
+        })
+    }
+
+    #[test]
+    fn a_white_page_margin_is_trimmed_with_a_small_breathing_pad() {
+        // 640 × 400, content from y 90 and x 40: the big top band goes, 2 % stays.
+        let img = page(640, 400, 90, 40);
+        let (x, y, w, h) = trim_rect(&img).expect("trims");
+        assert_eq!((x, y), (40 - 12, 90 - 8));
+        assert_eq!((w, h), (640 - 2 * 40 + 2 * 12, 400 - 90 - 40 + 2 * 8));
+    }
+
+    #[test]
+    fn a_tight_picture_and_a_plain_swatch_stay_whole() {
+        let tight = RgbaImage::from_fn(320, 200, |x, y| {
+            if (2..318).contains(&x) && (2..198).contains(&y) {
+                Rgba([30, 30, 30, 255])
+            } else {
+                Rgba([255, 255, 255, 255])
+            }
+        });
+        assert!(trim_rect(&tight).is_none(), "nothing to trim");
+        let swatch = RgbaImage::from_pixel(200, 200, Rgba([20, 120, 220, 255]));
+        assert!(
+            trim_rect(&swatch).is_none(),
+            "uniform picture is not cropped away"
+        );
+    }
+
+    #[test]
+    fn a_thin_sliver_of_content_is_not_over_trimmed() {
+        // Content 10 px tall in a 400 px image: the quarter floor keeps the picture.
+        let img = RgbaImage::from_fn(640, 400, |_, y| {
+            if (195..205).contains(&y) {
+                Rgba([0, 0, 0, 255])
+            } else {
+                Rgba([255, 255, 255, 255])
+            }
+        });
+        assert!(trim_rect(&img).is_none());
     }
 }
