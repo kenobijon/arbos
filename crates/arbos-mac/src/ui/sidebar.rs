@@ -1,8 +1,8 @@
-//! The chat list: the iPhone home screen as a Mac sidebar. A top bar with the
-//! collapse control and "+", search, then every agent and person as one row —
-//! avatar, name, time, last line. The account circle (its dot is the machine
-//! state) and gear sit at the bottom; the Update pill only while a newer build
-//! exists.
+//! The chat list: the iPhone home screen as a Mac sidebar. A top bar with an
+//! oval Search field on the left, "+" and the collapse control on the right,
+//! then every agent and person as one row — avatar, name, time, last line.
+//! The account circle (its dot is the machine state) and gear sit at the
+//! bottom; the Update pill only while a newer build exists.
 
 use std::sync::Arc;
 
@@ -41,12 +41,12 @@ impl Render for SidebarResizeDragGhost {
 }
 
 /// The drag strip beside the traffic lights: Grok Mac's 44 pt top band, the
-/// same height as the chat header ([feedback mac-header-height-grok]). The
-/// collapse control sits right of the lights — at the header toggle's exact
-/// spot, so folding the pane never moves it — and + / search keep the right
-/// end. Controls are centred on the lights' line: macOS draws them at 20.75 pt
-/// in this window, so the 44 band is centred 1 pt high (Grok: 21.75 / 21.75)
-/// ([feedback mac-collapsed-toggle-inline]).
+/// same height as the chat header ([feedback mac-header-height-grok]). An oval
+/// Search field sits left of the lights' gap; "+" and the collapse control
+/// sit on the right end of the strip so folding the pane is intuitive
+/// ([feedback app-01M5MWZ5T20MS6KA35CFZY8CTG]). Controls are centred on the
+/// lights' line: macOS draws them at 20.75 pt in this window, so the 44 band
+/// is centred 1 pt high (Grok: 21.75 / 21.75).
 fn top_strip() -> f32 {
     if cfg!(target_os = "macos") {
         HEADER_HEIGHT
@@ -334,9 +334,10 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         PulseClock::request(cx);
     }
 
-    // ----- top: collapse + "+" beside the traffic lights, then search ----------
+    // ----- top: oval Search left, "+" and collapse on the right ---------------
     // Collapse lives here (not the chat header). When the rail is hidden the
     // header still shows an expand control so the list can come back.
+    // ([feedback app-01M5MWZ5T20MS6KA35CFZY8CTG])
     let collapse = div()
         .id("sidebar-collapse")
         .size(px(28.0))
@@ -394,78 +395,31 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
             })
         });
     let show_plus = open_server.is_none() || open_server_admin;
-    // The magnifier shows the search field below (and keeps it while a query
-    // is typed); Escape or the clear dot fold it (three-pane rule: the strip
-    // holds exactly +, search, minimize).
-    let search_shown = shell.search_open || !query.is_empty();
-    let search_toggle = div()
-        .id("sidebar-search-toggle")
-        .size(px(28.0))
-        .flex_shrink_0()
-        .rounded(px(7.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .cursor_pointer()
-        .bg(if search_shown {
-            theme.surface_2
-        } else {
-            gpui::transparent_black()
-        })
-        .hover(|s| s.bg(theme.surface_2))
-        .child(icon(
-            "search",
-            16.0,
-            if search_shown {
-                theme.text
-            } else {
-                theme.text_muted
-            },
-        ))
-        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .on_click(cx.listener(|this, _, window, cx| {
-            this.menu_open = false;
-            if this.search_open {
-                this.search_open = false;
-                this.search_input.update(cx, |i, cx| i.clear(cx));
-                Composer::focus(&this.composer, window, cx);
-            } else {
-                this.search_open = true;
-                let handle = this.search_input.read(cx).focus_handle(cx);
-                window.focus(&handle, cx);
-            }
-            cx.notify();
-        }));
-    let strip = div()
-        .h(px(top_strip()))
-        .flex_shrink_0()
-        .flex()
-        .items_center()
-        .gap(px(2.0))
-        .pl(px(TRAFFIC_LIGHTS_INSET + 12.0))
-        .pr(px(12.0))
-        .pb(px(2.0))
-        .child(collapse)
-        .child(div().flex_1())
-        .when(show_plus, |el| el.child(plus))
-        .child(search_toggle)
-        .window_drag();
+    // Oval Search field in the top strip (magnifier + "Search" placeholder).
+    // Escape or the clear dot empty it; the field stays in the strip.
     let search = div()
         .id("sidebar-search")
-        .mx(px(12.0))
-        .mt(px(6.0))
-        .mb(px(6.0))
-        .h(px(32.0))
-        .px(px(10.0))
+        .flex_1()
+        .min_w_0()
+        .h(px(28.0))
+        .pl(px(9.0))
+        .pr(px(8.0))
         .flex()
         .items_center()
-        .gap(px(7.0))
-        // Grok Mac: a flat tinted field (#F0F0F0 light / #242423 dark), no rim.
-        .rounded(px(8.0))
+        .gap(px(6.0))
+        .rounded_full()
         .bg(theme.surface_2)
         .cursor_text()
-        .child(icon("search", 14.0, theme.text_muted))
-        .child(div().flex_1().min_w_0().child(shell.search_input.clone()))
+        .child(icon("search", 13.0, theme.text_muted))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .flex()
+                .items_center()
+                .child(shell.search_input.clone()),
+        )
         .when(!query.is_empty(), |el| {
             el.child(
                 div()
@@ -480,7 +434,6 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
                     .child(icon("xmark", 8.0, theme.bg))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.search_input.update(cx, |i, cx| i.clear(cx));
-                        this.search_open = false;
                         Composer::focus(&this.composer, window, cx);
                         cx.notify();
                     })),
@@ -489,10 +442,26 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         .on_mouse_down(
             gpui::MouseButton::Left,
             cx.listener(|this, _, window, cx| {
+                this.menu_open = false;
                 let handle = this.search_input.read(cx).focus_handle(cx);
                 window.focus(&handle, cx);
+                cx.stop_propagation();
             }),
         );
+    let strip = div()
+        .h(px(top_strip()))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .gap(px(4.0))
+        .pl(px(TRAFFIC_LIGHTS_INSET + 12.0))
+        .pr(px(12.0))
+        .pb(px(2.0))
+        .when(open_server.is_none(), |el| el.child(search))
+        .when(open_server.is_some(), |el| el.child(div().flex_1()))
+        .when(show_plus, |el| el.child(plus))
+        .child(collapse)
+        .window_drag();
     // ----- rows -------------------------------------------------------------
     let mut list = div()
         .id("chat-list")
@@ -748,7 +717,6 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         .border_r_1()
         .border_color(theme.border)
         .child(strip)
-        .when(search_shown && open_server.is_none(), |el| el.child(search))
         .child(match open_server.as_ref() {
             // Inside a server the left pane shows its channels (mockup h).
             Some(server) => {
@@ -1910,4 +1878,132 @@ pub fn chat_menu(
         return None;
     }
     Some(glass::frosted_menu(CHAT_MENU_WIDTH, &theme, body).into_any_element())
+}
+
+#[cfg(test)]
+mod row_bounds_tests {
+    use gpui::{div, prelude::*, px, ScrollHandle, TestAppContext};
+
+    use super::top_strip;
+    use crate::ui::frost::edge_faded;
+
+    const ROWS: usize = 12;
+    const ROW_H: f32 = 58.0;
+
+    /// The sidebar column as `render` builds it: strip, the faded scrolling
+    /// list (the exact wrapper `render` uses), the account row. Twelve rows so
+    /// the list scrolls.
+    struct Column {
+        scroll: ScrollHandle,
+    }
+
+    impl gpui::Render for Column {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let strip = div().h(px(top_strip())).flex_shrink_0();
+            let mut list = div()
+                .id("chat-list")
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .px(px(8.0))
+                .pt(px(6.0))
+                .pb(px(12.0))
+                .overflow_y_scroll()
+                .track_scroll(&self.scroll)
+                .debug_selector(|| "chat-list".into());
+            for i in 0..ROWS {
+                let sel: &'static str = Box::leak(format!("row-{i}").into_boxed_str());
+                list = list.child(
+                    div()
+                        .h(px(ROW_H))
+                        .flex_shrink_0()
+                        .debug_selector(move || sel.into())
+                        .child(format!("Chat {i}")),
+                );
+            }
+            let account = div()
+                .h(px(44.0))
+                .flex_shrink_0()
+                .debug_selector(|| "account-row".into());
+            div()
+                .w(px(280.0))
+                .h(px(520.0))
+                .flex()
+                .flex_col()
+                .child(strip)
+                .child(edge_faded(14.0, true, true, list))
+                .child(account)
+        }
+    }
+
+    /// Jacob (Oct 23, v0.6.180): two chats' titles painted into one slot at
+    /// the list's bottom. The list must keep its bounded height: no row may
+    /// paint past the list (or into the account row), and no two rows may
+    /// share a y-range — at the top and scrolled to the bottom.
+    #[gpui::test]
+    fn rows_stay_inside_the_list_and_never_overlap(cx: &mut TestAppContext) {
+        let scroll = ScrollHandle::new();
+        let (view, vcx) = cx.add_window_view(|_, _| Column {
+            scroll: scroll.clone(),
+        });
+        for pass in ["top", "bottom"] {
+            if pass == "bottom" {
+                scroll.scroll_to_bottom();
+                view.update(vcx, |_, cx| cx.notify());
+            }
+            vcx.run_until_parked();
+            let list = vcx.debug_bounds("chat-list").expect("list");
+            let account = vcx.debug_bounds("account-row").expect("account row");
+            let list_bottom: f32 = list.bottom().into();
+            let account_top: f32 = account.origin.y.into();
+            assert!(
+                list_bottom <= account_top + 0.5,
+                "{pass}: list bottom {list_bottom} runs into the account row at {account_top}"
+            );
+            let mut spans: Vec<(f32, f32)> = Vec::new();
+            for i in 0..ROWS {
+                let sel: &'static str = Box::leak(format!("row-{i}").into_boxed_str());
+                let Some(b) = vcx.debug_bounds(sel) else {
+                    continue;
+                };
+                let (top, bottom): (f32, f32) = (b.origin.y.into(), b.bottom().into());
+                // A row that shows must lie within the list's box (the scroll
+                // clip): nothing paints past the list.
+                if bottom > f32::from(list.origin.y) && top < list_bottom {
+                    spans.push((top, bottom));
+                }
+            }
+            spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+            for w in spans.windows(2) {
+                assert!(
+                    w[1].0 >= w[0].1 - 0.5,
+                    "{pass}: rows overlap ({:?} then {:?})",
+                    w[0],
+                    w[1]
+                );
+            }
+            if pass == "bottom" {
+                let last: &'static str = Box::leak(format!("row-{}", ROWS - 1).into_boxed_str());
+                // Jacob (18:46): "you can't scroll up and down on the chats" —
+                // the list must have scrolled: the last row, off-screen at the
+                // top, is now fully inside the list's box.
+                let b = vcx
+                    .debug_bounds(last)
+                    .expect("last row drawn at scroll-bottom");
+                let (top, bottom): (f32, f32) = (b.origin.y.into(), b.bottom().into());
+                let list_top: f32 = list.origin.y.into();
+                assert!(
+                    top >= list_top && bottom <= list_bottom - 12.0 + 0.5,
+                    "bottom: last row {top}..{bottom} not inside the list {list_top}..{list_bottom}"
+                );
+                let offset: f32 = scroll.offset().y.into();
+                assert!(offset < -(ROW_H * 2.0), "the list scrolled ({offset})");
+            }
+        }
+    }
 }
