@@ -1704,6 +1704,63 @@ pub fn decode_vv(bytes: &[u8]) -> Option<VersionVector> {
 mod tests {
     use super::*;
 
+    /// Two replicas behind ONE device id (the busy-reply smoke, 2026-10-23): the second replica
+    /// never receives the first one's rows (own-device rows are excluded on the way back), so the
+    /// box's reply — whose ops depend on the user message — is parked by Loro as a pending import
+    /// and the chat reads as empty until those ops arrive. One replica per device, always; the
+    /// smoke now mints one device per client. This pins the mechanism so nobody "fixes" it in agentd.
+    #[test]
+    fn box_rows_stay_pending_until_the_user_message_ops_arrive() {
+        let mut box_doc = ChatDoc::new(Some(1), true);
+        box_doc.init_meta("chat1", "proj1", 1);
+        let snapshot = box_doc.snapshot();
+        let mut sender = ChatDoc::new(Some(2), false);
+        sender.import(&snapshot).unwrap();
+        let mut probe = ChatDoc::new(Some(3), false);
+        probe.import(&snapshot).unwrap();
+
+        let base = sender.oplog_vv();
+        sender.transact(|d| {
+            d.append_user_message("m1", "sleep 90", "dev:shared", &UserMessageOpts::default())
+                .unwrap();
+            d.push_command(
+                "send",
+                serde_json::json!({ "messageId": "m1" }),
+                "dev:shared",
+            );
+        });
+        let user_row = sender.export_updates_since(&base);
+        box_doc.import(&user_row).unwrap();
+        let before = box_doc.oplog_vv();
+        let cmd = box_doc.pending_commands().remove(0);
+        box_doc.set_command_status(&cmd.id, CommandStatus::Taken, None);
+        let part = box_doc.start_assistant_message("m2", "m1", "box:1");
+        box_doc.append_text("m2", &part, "On it.");
+        box_doc.finish_message("m2", MessageStatus::Done);
+        let box_rows = box_doc.export_updates_since(&before);
+
+        // The probe shares the sender's device id and never gets `user_row`: the box rows import
+        // without error but apply nothing.
+        let status = probe.import(&box_rows).unwrap();
+        assert!(
+            status.pending.is_some(),
+            "the box rows wait for the user message ops"
+        );
+        assert!(
+            probe.messages().is_empty(),
+            "nothing to show: {:?}",
+            probe
+                .messages()
+                .iter()
+                .map(|m| m.id.clone())
+                .collect::<Vec<_>>()
+        );
+        // The moment the missing ops land, everything applies.
+        probe.import(&user_row).unwrap();
+        let ids: Vec<String> = probe.messages().into_iter().map(|m| m.id).collect();
+        assert_eq!(ids, vec!["m1", "m2"]);
+    }
+
     /// Doc write rules (crdt-sync §6.2): a user message and its `send` command land in one
     /// commit, streaming appends are RLE text appends, and a second peer converges.
     #[test]
