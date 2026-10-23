@@ -32,7 +32,12 @@ struct Quote: Equatable, Hashable {
     /// The quote for a message that replies to `replyTo`; an original that is not loaded
     /// (older than the snapshot) still gets a header so the reference is never lost.
     static func forReply(_ replyTo: String, in messages: [Message]) -> Quote {
-        let text = messages.first { $0.id == replyTo }.map(Self.text) ?? "Earlier message"
+        forReply(replyTo, in: Transcript.index(messages))
+    }
+
+    /// Same, over a prebuilt id → message index (one lookup per reply, not a scan).
+    static func forReply(_ replyTo: String, in byId: [Id: Message]) -> Quote {
+        let text = byId[replyTo].map(Self.text) ?? "Earlier message"
         return Quote(messageId: replyTo, text: text)
     }
 
@@ -88,16 +93,33 @@ struct Row: Identifiable, Equatable {
     var kind: RowKind
     /// Emoji reactions shown under this bubble (stamped on the last prose/media row of a message).
     var reactions: [MessageReaction] = []
+    /// The message's `createdAt` (ms), so the swipe-revealed time needs no lookup.
+    var createdAt: Int64 = 0
 }
 
 enum Transcript {
+    /// id → message, built once per rebuild; replies and the chat's row lookups use it
+    /// instead of scanning the transcript per row.
+    static func index(_ messages: [Message]) -> [Id: Message] {
+        var byId: [Id: Message] = [:]
+        byId.reserveCapacity(messages.count)
+        for m in messages where byId[m.id] == nil { byId[m.id] = m }
+        return byId
+    }
+
     /// `me` = my `user:<id>` in a people chat; nil in project chats (every user row is mine).
     /// Membership lines ("Jacob added Home, hjkb and Doug") are relay-written system
     /// messages in the doc (#1349); nothing is synthesised here.
     /// `agentNames`: agent project id → display name from the chat's member list, the
     /// fallback when a reply row carries no `senderName` (older boxes).
     static func rows(_ messages: [Message], projectId: Id, subagentNames: [String: String] = [:], me: String? = nil, people: Bool = false, agentNames: [String: String] = [:]) -> [Row] {
+        rows(messages, byId: index(messages), projectId: projectId, subagentNames: subagentNames, me: me, people: people, agentNames: agentNames)
+    }
+
+    /// Same, with the caller's `index(messages)` (the chat keeps it for its own lookups).
+    static func rows(_ messages: [Message], byId: [Id: Message], projectId: Id, subagentNames: [String: String] = [:], me: String? = nil, people: Bool = false, agentNames: [String: String] = [:]) -> [Row] {
         var rows: [Row] = []
+        rows.reserveCapacity(messages.count + messages.count / 8)
         var lastAt: Int64 = 0
         // Who spoke last: a name sits above a bubble only when the sender changed or a date
         // line broke the run (Grok Bot's group style).
@@ -129,7 +151,7 @@ enum Transcript {
                 // row already carries the media. Showing them as a bubble is noise.
                 if !text.isEmpty, !(hasImage && Self.isGenericMediaLabel(text)) {
                     let mine = !people || me == nil || message.sender == me || message.sender == "user"
-                    let quote = message.replyTo.flatMap { $0.isEmpty ? nil : Quote.forReply($0, in: messages) }
+                    let quote = message.replyTo.flatMap { $0.isEmpty ? nil : Quote.forReply($0, in: byId) }
                     if mine {
                         chunk.append(Row(id: "\(message.id)#user", messageId: message.id, role: .user,
                                          kind: .user(text: text, pending: message.pending, quote: quote)))
@@ -169,9 +191,7 @@ enum Transcript {
                     case .text(let id, let text):
                         // Polish on display (Mac parity): glued "findingsDon't" / "have.Checking"
                         // and a trailing tool-narration sentence still read as chat.
-                        let raw = people ? Self.stripAskedPrefix(text) : text
-                        let body = Markdown.polishAssistantProse(raw)
-                        let blocks = Markdown.blocks(body).filter { !Markdown.isJSON($0) }
+                        let blocks = Self.proseBlocks(text, people: people)
                         if blocks.isEmpty { continue }
                         let live = streaming && pix == lastTextPart
                         if people, let h = message.senderHandle {
@@ -253,6 +273,7 @@ enum Transcript {
                 }
             }
             guard !chunk.isEmpty else { continue }
+            for i in chunk.indices { chunk[i].createdAt = message.createdAt }
             if !message.reactions.isEmpty,
                let ix = chunk.lastIndex(where: {
                    switch $0.kind {
@@ -265,7 +286,8 @@ enum Transcript {
             // Date separators when the gap is over an hour (Grok: "Today 8:00 AM").
             if dateBreak {
                 rows.append(Row(id: "\(message.id)#date", messageId: message.id, role: .system,
-                                kind: .system(icon: nil, text: dateLabel(message.createdAt), avatarProject: nil)))
+                                kind: .system(icon: nil, text: dateLabel(message.createdAt), avatarProject: nil),
+                                createdAt: message.createdAt))
             }
             if message.createdAt > 0 { lastAt = message.createdAt }
             rows.append(contentsOf: chunk)
@@ -273,6 +295,31 @@ enum Transcript {
         }
         return Self.mergeHandoffs(rows, handoffs)
     }
+
+    /// Blocks for one text part — polished, split, JSON dropped. Cached by text: a rebuild
+    /// runs for every streaming delta, and re-parsing every finished answer in a long group
+    /// on each one kept the main thread busy. Only the streaming part misses the cache.
+    static func proseBlocks(_ text: String, people: Bool) -> [Block] {
+        let key = (people ? "p\u{1}" : "a\u{1}") + text
+        if let hit = blockCache.object(forKey: key as NSString) { return hit.blocks }
+        let raw = people ? Self.stripAskedPrefix(text) : text
+        let body = Markdown.polishAssistantProse(raw)
+        let blocks = Markdown.blocks(body).filter { !Markdown.isJSON($0) }
+        blockCache.setObject(BlockList(blocks), forKey: key as NSString)
+        return blocks
+    }
+
+    private final class BlockList {
+        let blocks: [Block]
+        init(_ blocks: [Block]) { self.blocks = blocks }
+    }
+
+    /// Bounded (NSCache evicts under memory pressure and past `countLimit`).
+    private static let blockCache: NSCache<NSString, BlockList> = {
+        let cache = NSCache<NSString, BlockList>()
+        cache.countLimit = 6_000
+        return cache
+    }()
 
     /// Consecutive hand-off lines become one: "6 messages with ◉ Kenny, ◉ Tyler and ◉ Jenny".
     private static func mergeHandoffs(_ rows: [Row], _ handoffs: [String: (String, Int)]) -> [Row] {
@@ -650,10 +697,8 @@ struct RowView: View {
     }
 
     private var swipeTimeLabel: String? {
-        guard showsSwipeTime else { return nil }
-        guard let ms = model.messages(of: chatId).first(where: { $0.id == row.messageId })?.createdAt,
-              ms > 0 else { return nil }
-        return Date(timeIntervalSince1970: Double(ms) / 1000)
+        guard showsSwipeTime, row.createdAt > 0 else { return nil }
+        return Date(timeIntervalSince1970: Double(row.createdAt) / 1000)
             .formatted(date: .omitted, time: .shortened)
     }
 
