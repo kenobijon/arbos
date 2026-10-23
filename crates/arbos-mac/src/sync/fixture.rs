@@ -483,6 +483,41 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 .collect();
             send_user(shared, chat_id, message_id, text, attachments, reply_to);
         }
+        ClientCommand::Forward {
+            chat_id,
+            message_id,
+            attachment,
+            text,
+            ..
+        } => {
+            // No blob store to copy between: the row lands in the destination
+            // chat with the same key, so its picture is already cached.
+            send_user(shared, chat_id, message_id, text, vec![attachment], None);
+        }
+        ClientCommand::OpenAttachment {
+            key,
+            name,
+            quick_look,
+            ..
+        } => {
+            let bytes = if key.ends_with(".png") || name.ends_with(".png") {
+                fixture_png(&key)
+            } else {
+                format!("Fixture attachment {name} ({key}).\n").into_bytes()
+            };
+            let dir = std::env::temp_dir().join("arbos-media");
+            let _ = std::fs::create_dir_all(&dir);
+            let path = dir.join(name.replace('/', "_"));
+            match std::fs::write(&path, &bytes) {
+                Ok(()) => crate::ui::attachments::open_with_system(&path, quick_look),
+                Err(err) => {
+                    let _ = shared
+                        .events
+                        .send(SyncEvent::Notice(format!("Could not open {name}: {err}")));
+                }
+            }
+            let _ = shared.events.send(SyncEvent::AttachmentOpened { key });
+        }
         ClientCommand::Steer {
             chat_id,
             message_id,

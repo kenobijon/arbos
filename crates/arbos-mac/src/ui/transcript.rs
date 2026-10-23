@@ -4,6 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::{
@@ -267,10 +268,14 @@ pub enum RowKind {
     /// An image or file in the chat (agent or user). `mine` right-aligns my sends.
     Attachment {
         attachment: Attachment,
+        /// The `parts[]` id: the viewer opens on this picture of the album.
+        part_id: Id,
         mine: bool,
         /// Someone else's (person or agent) in a people chat: keep the
         /// sender's avatar lane free, like the message's bubble.
         lane: bool,
+        /// The message's "Forwarded from …" line, drawn on the card.
+        forwarded_from: Option<String>,
     },
     /// S8: the agent asked a question.
     AskUser {
@@ -1446,8 +1451,10 @@ impl Transcript {
             }
             RowKind::Attachment {
                 attachment,
+                part_id,
                 mine,
                 lane,
+                forwarded_from,
             } => {
                 let preview = match attachment.blob_ref.as_ref() {
                     None => attachments::Preview::Unavailable,
@@ -1462,6 +1469,16 @@ impl Transcript {
                         }
                     }
                 };
+                // Click → the media viewer on this attachment (feedback media-viewer-2026-10-23).
+                let open: Option<attachments::OpenFn> = self.chat_id.clone().map(|chat_id| {
+                    let state = self.state.clone();
+                    let message_id = row.message_id.clone();
+                    Rc::new(move |cx: &mut App| {
+                        state.update(cx, |s, cx| {
+                            s.open_media_in_chat(&chat_id, &message_id, &part_id, cx)
+                        });
+                    }) as attachments::OpenFn
+                });
                 div()
                     .w_full()
                     .py(px(4.0))
@@ -1472,6 +1489,8 @@ impl Transcript {
                         &row.id,
                         &attachment,
                         preview,
+                        forwarded_from.as_deref(),
+                        open,
                         self.state.clone(),
                         &theme,
                     ))
@@ -2058,6 +2077,11 @@ pub fn build_rows(
                 let named = prev_sender.as_deref() != Some(message.sender.as_str());
                 // Image preview / file card rows (same cards as agent attachments).
                 let is_mine = from.is_none();
+                // A forwarded attachment's "Forwarded from …" line is the card's
+                // hint, not a bubble of its own.
+                let forwarded = (!attachment_parts.is_empty())
+                    .then(|| attachments::forwarded_from(&text).map(str::to_owned))
+                    .flatten();
                 for (part_id, attachment) in &attachment_parts {
                     let has_thumb = attachment
                         .blob_ref
@@ -2072,6 +2096,7 @@ pub fn build_rows(
                                 &attachment.blob_ref,
                                 is_mine,
                                 has_thumb,
+                                &forwarded,
                             ),
                             false,
                         ),
@@ -2079,13 +2104,17 @@ pub fn build_rows(
                         message_id: message.id.clone(),
                         kind: RowKind::Attachment {
                             attachment: attachment.clone(),
+                            part_id: part_id.clone(),
                             mine: is_mine,
                             lane: !is_mine,
+                            forwarded_from: forwarded.clone(),
                         },
                     });
                 }
                 // Skip a bare "Image"/"Photo" bubble when the attachment already shows it.
-                let show_text = !text.is_empty() && !(has_image && is_generic_media_label(&text));
+                let show_text = !text.is_empty()
+                    && !(has_image && is_generic_media_label(&text))
+                    && forwarded.is_none();
                 if show_text || attachment_parts.is_empty() {
                     let quote = message
                         .reply_to
@@ -2315,8 +2344,10 @@ pub fn build_rows(
                                 message_id: message.id.clone(),
                                 kind: RowKind::Attachment {
                                     attachment: attachment.clone(),
+                                    part_id: id.clone(),
                                     mine: false,
                                     lane: lane.is_some(),
+                                    forwarded_from: None,
                                 },
                             })
                         }
