@@ -626,9 +626,8 @@ impl ChatDoc {
     /// One projected message row (`project_hidden_parts` + `project_reactions`),
     /// same shape as an element of [`Self::read_rows_json`].
     pub fn read_message_json(&self, index: u64) -> Option<String> {
-        let rows = self.lock_doc().projected_rows();
-        rows.get(index as usize)
-            .map(|row| serde_json::to_string(row).unwrap_or_else(|_| "null".into()))
+        let row = self.lock_doc().projected_row(index as usize)?;
+        Some(serde_json::to_string(&row).unwrap_or_else(|_| "null".into()))
     }
 
     /// JSON object for a root map (`settings`, `meta`, …).
@@ -1195,6 +1194,55 @@ mod tests {
         assert!(
             *listener.saw_rows.lock().unwrap(),
             "listener should have run after commit"
+        );
+    }
+
+    fn long_transcript(rows: usize) -> ChatDoc {
+        let doc = ChatDoc::open();
+        for i in 0..rows {
+            doc.insert_user_message(
+                format!("m{i}"),
+                format!("row {i}: a line of chat with a few words in it"),
+                "dev".into(),
+                UserMessageOptsRecord::default(),
+            )
+            .unwrap();
+        }
+        doc.commit();
+        doc
+    }
+
+    /// Reading a long transcript one row at a time (the iPhone's `readMessage`
+    /// path) must cost about what one `read_rows_json` costs — not rows × that.
+    /// Before 2026-10-23 `read_message_json` projected every row and picked one:
+    /// a 5 000-row group took 86 s per snapshot in release.
+    #[test]
+    fn per_index_reads_stay_linear_in_transcript_length() {
+        let rows = 2_000usize;
+        let doc = long_transcript(rows);
+        assert_eq!(doc.message_count(), rows as u64);
+
+        let started = std::time::Instant::now();
+        let all = doc.read_rows_json();
+        let one_shot = started.elapsed();
+
+        let started = std::time::Instant::now();
+        let mut per_index = Vec::with_capacity(rows);
+        for i in 0..rows as u64 {
+            per_index.push(doc.read_message_json(i).expect("row exists"));
+        }
+        let indexed = started.elapsed();
+
+        let all: Vec<Value> = serde_json::from_str(&all).unwrap();
+        for (row, json) in all.iter().zip(&per_index) {
+            assert_eq!(row, &serde_json::from_str::<Value>(json).unwrap());
+        }
+        // Loose bound: the per-index path pays a lock and a list lookup per row
+        // (a handful of times the one-shot cost); the quadratic path was ~1000×.
+        let budget = one_shot * 25 + std::time::Duration::from_millis(50);
+        assert!(
+            indexed <= budget,
+            "reading {rows} rows by index took {indexed:?}; one-shot read took {one_shot:?} (budget {budget:?})"
         );
     }
 }

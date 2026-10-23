@@ -61,8 +61,15 @@ final class CoreChatDoc {
         return DocJSON.message(json, chatId: key)
     }
 
+    /// The whole transcript in one FFI call and one JSON parse. Reading row by
+    /// row crossed the FFI `count` times; a long group chat paid for that on every
+    /// snapshot (2026-10-23, long-chat-perf).
     func readAll() -> [Message] {
-        (0..<count).compactMap(readMessage)
+        let raw = doc.readRowsJson()
+        guard let data = raw.data(using: .utf8),
+              let rows = (try? JSONSerialization.jsonObject(with: data)) as? [Any]
+        else { return [] }
+        return rows.compactMap { DocJSON.message($0, chatId: key) }
     }
 
     func mapValue(_ name: String) -> [String: Any] {
