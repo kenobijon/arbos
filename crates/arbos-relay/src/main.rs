@@ -18,10 +18,12 @@ mod db;
 mod db_accounts;
 mod db_calls;
 mod db_fleet;
+mod db_inspect;
 mod db_people;
 mod db_push;
 mod db_secrets;
 mod db_voice;
+mod export;
 mod features;
 mod feedback;
 mod fleet;
@@ -29,6 +31,7 @@ mod goals;
 mod groups;
 mod image_sniff;
 mod images;
+mod inspect;
 mod livekit;
 mod local;
 mod matrix;
@@ -378,7 +381,13 @@ async fn main() -> anyhow::Result<()> {
         .route("/auth/token", post(signin::token))
         .route("/auth/refresh", post(signin::refresh))
         .route("/auth/logout", post(signin::logout))
-        .route("/auth/devices", get(signin::devices_list))
+        .route(
+            "/auth/devices",
+            get(signin::devices_list).post(export::mint_reader),
+        )
+        .route("/chats/{id}/export", get(export::export_chat))
+        .route("/chats/{id}/messages", post(export::send_message))
+        .route("/export/blob/{chat}/{key}", get(export::signed_blob))
         .route("/auth/devices/{id}", delete(signin::device_revoke))
         .route("/me", get(signin::me).patch(signin::patch_me))
         .route(
@@ -599,6 +608,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/projects/{id}/history/{chat}", get(api::chat_history))
         .route("/projects/{id}/status", get(api::project_status))
+        .route("/projects/{id}/inspect", get(inspect::project_inspect))
         .route(
             "/projects/{id}/chats",
             get(api::list_chats).post(api::create_chat),
@@ -730,6 +740,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/bootstrap/{file}", get(blobs::bootstrap))
         .route("/proxy/v1/models", get(proxy::openai_models))
         .route("/proxy/v1/images/generations", post(images::generations))
+        .route(
+            "/projects/{id}/avatar/generate",
+            post(images::avatar_generate),
+        )
         .route(
             "/proxy/v1/audio/transcriptions",
             post(proxy::audio_transcriptions),

@@ -27,6 +27,7 @@ use crate::ui::icons::icon;
 use crate::ui::markdown::{
     has_fenced_code, inline_plain, inline_spans, polish_assistant_prose, split_blocks, Block,
 };
+use crate::ui::mention::Mentions;
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
 use crate::ui::select::{BubbleSelectable, Selectable, TextSelection};
@@ -293,8 +294,8 @@ pub enum RowKind {
         /// leaves the avatar lane free and the last one draws the sender's disc
         /// at the bubble's bottom-left (redesign mocks a/f). The sender seed.
         lane: Option<String>,
-        /// People / group reply: quote of the user message this answers (`inReplyTo`).
-        /// Only set on the first block of the bubble.
+        /// People / group reply: quote of the user message this answers
+        /// (`replyTo`, else `inReplyTo`). Only set on the first block of the bubble.
         quote: Option<Quote>,
     },
     /// A finished reply with no words, cards or attachments: one plain line in the
@@ -469,6 +470,9 @@ pub struct Transcript {
     chat_id: Option<Id>,
     list: ListState,
     rows: Vec<Row>,
+    /// Who `@handle` resolves to in this chat's bubbles (mention chips),
+    /// rebuilt with the rows.
+    mentions: Rc<Mentions>,
     /// Whether the right pane was open at the last sync: its opening or
     /// closing changes the column width, and the cached row layouts must go.
     pane_open: bool,
@@ -525,6 +529,7 @@ impl Transcript {
             chat_id: None,
             list,
             rows: Vec::new(),
+            mentions: Mentions::empty(),
             pane_open: false,
             veils: HashMap::new(),
             cards: HashMap::new(),
@@ -686,6 +691,8 @@ impl Transcript {
     }
 
     pub fn sync(&mut self, cx: &mut Context<Self>) {
+        let theme = Theme::of(cx).clone();
+        self.mentions = Mentions::from_state(&self.state, &theme, cx);
         let state = self.state.read(cx);
         let chat_id = state.active_chat_id();
         let chat_changed = chat_id != self.chat_id;
@@ -707,7 +714,14 @@ impl Transcript {
         };
         let me_id = state.me_id();
         let thumb_keys: HashSet<&str> = state.thumbnails.keys().map(|k| k.as_str()).collect();
-        let new_rows = build_rows(&messages, show_details, speech, &me_id, &thumb_keys);
+        let new_rows = build_rows(
+            &messages,
+            show_details,
+            speech,
+            &me_id,
+            &thumb_keys,
+            &self.mentions,
+        );
         // A sender change opens the turn gap. So does every new assistant /
         // project message — consecutive replies from the same agent (quick ack
         // then the answer, or two answers in a row) must not read as one bubble
@@ -1023,6 +1037,7 @@ impl Transcript {
                         a.name.clone(),
                         a.avatar_color_index,
                         (a.avatar_leaf, a.avatar_leaf_color),
+                        a.image_url.clone(),
                     )
                 })
                 .or_else(|| {
@@ -1031,22 +1046,32 @@ impl Transcript {
                             p.name.clone(),
                             p.avatar_color_index,
                             (p.avatar_leaf, p.avatar_leaf_color),
+                            p.image_url.clone(),
                         )
                     })
                 })
         });
         let resolved_name = match &member {
-            Some((n, _, _)) if name == "Agent" || name == "Project" => n.clone(),
+            Some((n, _, _, _)) if name == "Agent" || name == "Project" => n.clone(),
             _ => name.to_string(),
         };
-        let color_index = member.as_ref().and_then(|(_, c, _)| *c);
-        let leaf = member.as_ref().map(|(_, _, l)| *l).unwrap_or((None, None));
+        let color_index = member.as_ref().and_then(|(_, c, _, _)| *c);
+        let leaf = member
+            .as_ref()
+            .map(|(_, _, l, _)| *l)
+            .unwrap_or((None, None));
+        // D92 amendment: the agent's uploaded / generated picture, once the loader has it.
+        let image = member
+            .as_ref()
+            .and_then(|(_, _, _, url)| url.as_deref())
+            .and_then(|url| state.avatar(url));
         let disc_seed = agent_pid.clone().unwrap_or_else(|| seed.to_string());
         AgentIdentity {
             name: resolved_name,
             seed: disc_seed,
             color_index,
             leaf,
+            image,
             project_id: agent_pid,
         }
     }
@@ -1055,6 +1080,19 @@ impl Transcript {
     fn agent_disc(&self, seed: &str, cx: &Context<Self>) -> Div {
         let theme = Theme::of(cx).clone();
         let a = self.agent_identity_full(seed, "Agent", cx);
+        if let Some(image) = a.image {
+            return div()
+                .size(px(SENDER_DISC))
+                .flex_shrink_0()
+                .rounded_full()
+                .overflow_hidden()
+                .child(
+                    gpui::img(image)
+                        .size(px(SENDER_DISC))
+                        .rounded_full()
+                        .object_fit(gpui::ObjectFit::Cover),
+                );
+        }
         avatars::agent(
             &a.seed,
             &a.name,
@@ -1218,7 +1256,11 @@ impl Transcript {
         };
         let theme = Theme::of(cx).clone();
         let now = Instant::now();
-        let selectable = Selectable::new(&self.selection, theme.accent_soft, cx);
+        let selectable = Selectable::new(&self.selection, theme.accent_soft, cx).with_mentions(
+            self.mentions.clone(),
+            theme.accent,
+            Theme::with_alpha(theme.accent, 0.14),
+        );
         let inner: AnyElement = match row.kind {
             RowKind::User {
                 text,
@@ -1987,6 +2029,7 @@ struct AgentIdentity {
     seed: String,
     color_index: Option<u8>,
     leaf: (Option<u8>, Option<u8>),
+    image: Option<std::sync::Arc<gpui::RenderImage>>,
     project_id: Option<Id>,
 }
 
@@ -2098,6 +2141,7 @@ pub fn build_rows(
     speech: SpeechRows<'_>,
     me_id: &str,
     thumb_keys: &HashSet<&str>,
+    mentions: &Mentions,
 ) -> Vec<Row> {
     let mine = |m: &Message| {
         m.sender == "user" || m.sender.is_empty() || m.sender == format!("user:{me_id}")
@@ -2132,7 +2176,9 @@ pub fn build_rows(
         let rows_before_message = rows.len();
         match message.role {
             Role::User => {
-                let text = message.plain_text();
+                // `@handle` → `@Display Name` so the chip shows the name and a copy
+                // carries it (mention chips, Oct 23).
+                let text = mentions.display(&message.plain_text());
                 let attachment_parts: Vec<(String, Attachment)> = message
                     .parts
                     .iter()
@@ -2313,12 +2359,14 @@ pub fn build_rows(
                 let mut sender_row_ix: Option<usize> = None;
                 let in_people =
                     message.sender.starts_with("agent:") && message.asked_by_handle.is_some();
-                // Quote the user message this answers (`inReplyTo`); clients must show it
-                // so consecutive replies do not look like one run (people.rs contract, #1447).
+                // Quote the user message this answers: prefer `replyTo` (platform
+                // reply feature); fall back to `inReplyTo` (turn link / older rows)
+                // so consecutive replies do not look like one run (#1447).
                 let reply_quote = message
-                    .in_reply_to
+                    .reply_to
                     .as_deref()
                     .filter(|id| !id.is_empty())
+                    .or_else(|| message.in_reply_to.as_deref().filter(|id| !id.is_empty()))
                     .map(|id| Quote::for_reply(id, messages));
                 if message.role == Role::Project || in_people {
                     // A people-chat agent (or another Project, F6) speaks in its own lane.
@@ -2375,7 +2423,9 @@ pub fn build_rows(
                     .parts
                     .iter()
                     .filter_map(|p| match p {
-                        Part::Text { id, text } => Some((id.clone(), polish_assistant_prose(text))),
+                        Part::Text { id, text } => {
+                            Some((id.clone(), mentions.display(&polish_assistant_prose(text))))
+                        }
                         _ => None,
                     })
                     .collect();
@@ -2949,7 +2999,9 @@ fn user_message_body(
     let blocks = split_blocks(text);
     let bubble = selectable.bubble(key, bubble_plain(&blocks, true));
     let offsets = block_offsets(&blocks, true);
-    let mut col = div().flex().flex_col().gap(px(6.0)).w_full().min_w_0();
+    // Same as `render_block`: no `min_w_0`, so the quote header above never
+    // sets this column's width.
+    let mut col = div().flex().flex_col().gap(px(6.0)).w_full();
     for (i, block) in blocks.iter().enumerate() {
         let id = format!("{row_id}.u{i}");
         let at = offsets[i];
@@ -3115,9 +3167,16 @@ fn render_block(
     theme: &Theme,
     bubble: &BubbleSelectable,
 ) -> AnyElement {
+    // No `min_w_0` here. Inside a flex-column bubble (a quote header stacked
+    // over the text, #1447) taffy sizes the column from its items, and an
+    // item with `min-width: 0` contributes nothing to that width — the bubble
+    // took the quote header's width and wrapped the body one word per line
+    // (Jacob, 2026-10-23, v0.6.175). With the minimum left auto the text's
+    // unwrapped width sizes the bubble, up to the column cap; it still shrinks
+    // with the bubble (a flex item's automatic minimum is main-axis only, and
+    // the bubble itself keeps `min_w_0`). `layout_tests::a_quoted_bubble_…`.
     let base = div()
         .w_full()
-        .min_w_0()
         .text_color(theme.text)
         .text_size(px(CHAT_BODY))
         .line_height(px(CHAT_LINE_HEIGHT));
@@ -3964,6 +4023,113 @@ mod layout_tests {
         assert!((e.bubble_width - 612.0).abs() <= 1.0, "{}", e.bubble_width);
     }
 
+    /// A quoted agent bubble as `markdown_bubble` builds it: the bubble is a
+    /// flex column (quote header over the text) in the slot, with and without
+    /// the avatar lane.
+    struct QuotedBubble {
+        lane: bool,
+        selection: Entity<TextSelection>,
+    }
+
+    const LONG_BODY: &str = "Here, Arbos. Good to hear the avatar alignment is fixed. Nothing is \
+        running on my side; the ten reports are in. What do you need?";
+
+    impl gpui::Render for QuotedBubble {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let theme = Theme::dark(crate::ui::theme::Surface::Matte);
+            let selectable = Selectable::new(&self.selection, theme.accent_soft, cx);
+            let bubble_sel = selectable.bubble("q#text".to_string(), SharedString::from(LONG_BODY));
+            let quote = div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .min_w_0()
+                .child(div().size(px(12.0)))
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .debug_selector(|| "test-quote".into())
+                        .child("“@doug”"),
+                );
+            let bubble = div()
+                .debug_selector(|| "test-bubble".into())
+                .max_w_full()
+                .min_w_0()
+                .relative()
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
+                .px(px(BUBBLE_PAD_X))
+                .py(px(BUBBLE_PAD_Y))
+                .child(quote)
+                .child(render_block(
+                    "q",
+                    &Block::Paragraph(LONG_BODY.to_string()),
+                    0,
+                    None,
+                    Instant::now(),
+                    &theme,
+                    &bubble_sel,
+                ));
+            let row = div()
+                .w_full()
+                .flex()
+                .items_end()
+                .when(self.lane, |el| {
+                    el.pl(px(AVATAR_COLUMN_INSET))
+                        .gap(px(SENDER_DISC_GAP))
+                        .child(div().size(px(SENDER_DISC)).flex_shrink_0())
+                })
+                .child(assistant_slot(bubble))
+                .into_any_element();
+            div()
+                .w(px(REFERENCE_PANE))
+                .h(px(600.0))
+                .text_size(px(CHAT_BODY))
+                .line_height(px(CHAT_LINE_HEIGHT))
+                .child(column_row(row))
+        }
+    }
+
+    /// Jacob, 2026-10-23 17:09 (v0.6.175, "Doug" in the Arbonites group): an
+    /// incoming bubble with a one-word reply quote collapsed to the quote's
+    /// width and wrapped its body one word per line. The bubble's width is the
+    /// body's (capped by the column), never the quote header's.
+    #[gpui::test]
+    fn a_quoted_bubble_is_as_wide_as_its_body_not_its_quote(cx: &mut TestAppContext) {
+        for lane in [false, true] {
+            let (_view, vcx) = cx.add_window_view(|_, cx| QuotedBubble {
+                lane,
+                selection: cx.new(TextSelection::new),
+            });
+            vcx.run_until_parked();
+            let bubble = vcx.debug_bounds("test-bubble").expect("bubble drawn");
+            let quote = vcx.debug_bounds("test-quote").expect("quote drawn");
+            let slot = vcx.debug_bounds("chat-bubble-slot").expect("slot drawn");
+            let bw: f32 = bubble.size.width.into();
+            let qw: f32 = quote.size.width.into();
+            let cap: f32 = f32::from(slot.size.width) - ASSISTANT_RIGHT_GAP;
+            assert!(
+                qw < 120.0 && bw > qw + 200.0,
+                "lane={lane}: bubble {bw} pt is as narrow as its quote ({qw} pt)"
+            );
+            assert!(
+                (bw - cap).abs() <= 1.0,
+                "lane={lane}: a long body fills the cap: bubble {bw}, cap {cap}"
+            );
+            let bh: f32 = bubble.size.height.into();
+            assert!(
+                bh < 6.0 * CHAT_LINE_HEIGHT,
+                "lane={lane}: the body wraps to a few lines, not one word per line ({bh} pt tall)"
+            );
+        }
+    }
+
     #[test]
     fn the_column_is_the_composers_geometry() {
         let m = [
@@ -4041,7 +4207,14 @@ mod system_line_tests {
             failed: &failed,
             voice_mode: false,
         };
-        let rows = build_rows(&messages, false, speech, "gh_me", &HashSet::new());
+        let rows = build_rows(
+            &messages,
+            false,
+            speech,
+            "gh_me",
+            &HashSet::new(),
+            &Mentions::empty(),
+        );
         let kinds: Vec<&RowKind> = rows.iter().map(|r| &r.kind).collect();
         // Date stamp, Bob (named), the notice, Bob again (named again).
         let bubbles: Vec<(bool, &str)> = kinds
@@ -4091,7 +4264,14 @@ mod system_line_tests {
             failed: &failed,
             voice_mode: false,
         };
-        let rows = build_rows(&messages, false, speech, "gh_jacob", &HashSet::new());
+        let rows = build_rows(
+            &messages,
+            false,
+            speech,
+            "gh_jacob",
+            &HashSet::new(),
+            &Mentions::empty(),
+        );
         let sender_captions: Vec<&str> = rows
             .iter()
             .filter_map(|r| match &r.kind {
@@ -4166,7 +4346,14 @@ mod presence_rows_tests {
             failed: &failed,
             voice_mode: false,
         };
-        build_rows(messages, false, speech, "gh_me", &HashSet::new())
+        build_rows(
+            messages,
+            false,
+            speech,
+            "gh_me",
+            &HashSet::new(),
+            &Mentions::empty(),
+        )
     }
 
     #[test]

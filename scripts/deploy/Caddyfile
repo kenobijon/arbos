@@ -83,6 +83,17 @@ arbos.life {
 	header /apple-touch-icon.png Cache-Control "public, max-age=3600"
 	# same redirect as on the relay, so the button keeps working if the relay is down
 	import /etc/arbos/download.caddy
+	# In-app updates (Mac, stable channel): the newest release's appcast.xml and its
+	# …-macos-universal.tar.gz, mirrored into @WWW_DIR@/updates/mac by arbos-refresh-mac-download
+	# (on every POST /admin/release and every 15 min). A file that is not mirrored (yet) redirects
+	# to the GitHub release asset — the snippet in updates.d names the current tag. The app
+	# verifies the Ed25519 signature over the bytes whichever host served them.
+	handle_path /updates/mac/* {
+		root * @WWW_DIR@/updates/mac
+		header /appcast.xml Cache-Control "no-cache"
+		import /etc/arbos/updates.d/*.caddy
+		file_server
+	}
 	handle_errors {
 		@notfound expression {err.status_code} == 404
 		handle @notfound {

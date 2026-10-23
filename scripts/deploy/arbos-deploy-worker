@@ -150,7 +150,10 @@ deployed_sha() {
 
 paths_of() {
   case "$1" in
-    relay) echo "crates/arbos-relay crates/arbos-core crates/arbosctl scripts/deploy/relay-server.sh scripts/deploy/Caddyfile" ;;
+    # Everything relay-server.sh installs on the host counts as a relay change: the Caddyfile, the
+    # download/update mirror script and its units (#1458 — a change to the mirror alone must reach
+    # /usr/local/bin/arbos-refresh-mac-download), the site sync and the OAuth secret watch.
+    relay) echo "crates/arbos-relay crates/arbos-core crates/arbosctl scripts/deploy/relay-server.sh scripts/deploy/Caddyfile scripts/deploy/refresh-mac-download.sh scripts/deploy/arbos-refresh-mac-download.path scripts/deploy/site-sync.sh scripts/deploy/oauth-secret-watch.sh" ;;
     voice) echo "voice" ;;
     agentd) echo "crates/arbos-agentd image harness" ;;
   esac
