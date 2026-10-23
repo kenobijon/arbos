@@ -25,11 +25,11 @@ use crate::ui::cards;
 use crate::ui::frost::edge_faded;
 use crate::ui::icons::icon;
 use crate::ui::markdown::{
-    has_fenced_code, inline_spans, polish_assistant_prose, split_blocks, Block,
+    has_fenced_code, inline_plain, inline_spans, polish_assistant_prose, split_blocks, Block,
 };
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
-use crate::ui::select::{Selectable, TextSelection};
+use crate::ui::select::{BubbleSelectable, Selectable, TextSelection};
 use crate::ui::theme::{
     Theme, BUBBLE_PAD_X, BUBBLE_PAD_Y, BUBBLE_RADIUS, CHAT_BODY, CHAT_LINE_HEIGHT, COLUMN_MARGIN,
     COMPOSER_WIDTH, LINE_HEIGHT, PLUS_BUTTON, TEXT_SMALL, TEXT_TINY,
@@ -171,16 +171,56 @@ impl Quote {
     }
 }
 
-/// First words of a message for its quote header: the first non-empty line,
-/// whitespace collapsed, cut on a word boundary; attachments name their file.
-pub fn quote_text(message: &Message) -> String {
-    let plain = message.plain_text();
-    let line = plain
-        .lines()
-        .map(str::trim)
-        .find(|l| !l.is_empty())
-        .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
-        .unwrap_or_default();
+/// A whole message on one line, for quote headers and the composer's reply
+/// preview: markdown blocks (headings, bullets, fences, tables) and inline
+/// markers (`**`, `` ` ``, links) are dropped, every newline becomes a space,
+/// whitespace is collapsed. Attachments are not part of it — callers name the
+/// file when there is no prose.
+pub fn one_line(text: &str) -> String {
+    let mut out = String::new();
+    for block in split_blocks(text) {
+        let pieces: Vec<String> = match block {
+            Block::Paragraph(text) | Block::Heading { text, .. } => vec![text],
+            Block::Bullets(items) | Block::Numbered(items) => items,
+            Block::Code { code, .. } => vec![code],
+            Block::Table { header, rows } => header
+                .into_iter()
+                .chain(rows.into_iter().flatten())
+                .collect(),
+        };
+        for piece in pieces {
+            for span in inline_spans(&piece) {
+                for word in span.text.split_whitespace() {
+                    if !out.is_empty() {
+                        out.push(' ');
+                    }
+                    out.push_str(word);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `line` cut to `max_chars` on a word boundary with an ellipsis; shorter
+/// lines come back as they are.
+pub fn first_words(line: &str, max_chars: usize) -> String {
+    if line.chars().count() <= max_chars {
+        return line.to_owned();
+    }
+    let mut cut: String = line.chars().take(max_chars).collect();
+    if let Some(ix) = cut.rfind(' ') {
+        if ix > max_chars / 2 {
+            cut.truncate(ix);
+        }
+    }
+    format!("{}…", cut.trim_end_matches([',', ';', ':', '.']))
+}
+
+/// The message flattened to one line ([`one_line`]) and cut to `max_chars`;
+/// an attachment-only message names its file, an empty one says "Message".
+pub fn message_line(message: &Message, max_chars: usize) -> String {
+    let line = one_line(&message.plain_text());
     let line = if line.is_empty() {
         match message.parts.iter().find_map(|p| match p {
             Part::Attachment { attachment, .. } => Some(attachment.name.clone()),
@@ -192,16 +232,14 @@ pub fn quote_text(message: &Message) -> String {
     } else {
         line
     };
-    if line.chars().count() <= QUOTE_CHARS {
-        return line;
-    }
-    let mut cut: String = line.chars().take(QUOTE_CHARS).collect();
-    if let Some(ix) = cut.rfind(' ') {
-        if ix > QUOTE_CHARS / 2 {
-            cut.truncate(ix);
-        }
-    }
-    format!("{}…", cut.trim_end_matches([',', ';', ':', '.']))
+    first_words(&line, max_chars)
+}
+
+/// First words of a message for its quote header: the whole message on one
+/// line (newlines and markdown flattened), cut on a word boundary; attachments
+/// name their file.
+pub fn quote_text(message: &Message) -> String {
+    message_line(message, QUOTE_CHARS)
 }
 
 #[derive(Clone, Debug)]
@@ -226,6 +264,10 @@ pub enum RowKind {
     Markdown {
         block: Block,
         live: bool,
+        /// The whole bubble's rendered plain text and where this block's text
+        /// starts in it: text selection runs through every block of a message
+        /// as one range (#1389).
+        bubble: BubbleText,
         /// Where this block sits in its message's bubble (first/last round
         /// the corners; `fill` makes a multi-block bubble span the cap width
         /// so every block has the same edge).
@@ -350,6 +392,37 @@ pub struct Row {
     pub kind: RowKind,
 }
 
+/// A block's place in its bubble's plain text (see [`bubble_plain`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BubbleText {
+    /// The bubble's whole rendered plain text, every block in order.
+    pub text: SharedString,
+    /// Byte offset of this block's plain text inside `text`.
+    pub at: usize,
+}
+
+impl BubbleText {
+    /// A bubble made of this one block.
+    pub fn single(text: impl Into<SharedString>) -> Self {
+        Self {
+            text: text.into(),
+            at: 0,
+        }
+    }
+
+    /// One entry per block: the shared bubble text and each block's offset.
+    pub fn for_blocks(blocks: &[Block], literal: bool) -> Vec<Self> {
+        let text: SharedString = bubble_plain(blocks, literal).into();
+        block_offsets(blocks, literal)
+            .into_iter()
+            .map(|at| Self {
+                text: text.clone(),
+                at,
+            })
+            .collect()
+    }
+}
+
 /// Stick-to-bottom velocity spring (zeron-study §4.3). Each frame it moves a
 /// fraction of the remaining distance to the end, damped, so streamed text
 /// glides instead of jumping; a user wheel-up breaks the pin.
@@ -408,6 +481,13 @@ pub struct Transcript {
     turn_starts: HashSet<Id>,
     /// Message whose hover copy glyph is showing a checkmark, and when it started.
     copied_feedback: Option<(Id, Instant)>,
+    /// `ARBOS_RIG_SELECT=all|<from>..<to>|word@<i>|para@<i>` (screenshot rig):
+    /// once the open chat shows a settled agent bubble, select that much of
+    /// the newest one — the drag / double-click / triple-click the EC2 Mac's
+    /// GUI session cannot receive from posted events. Not before
+    /// `ARBOS_RIG_SELECT_AFTER_MS` (so a reply typed over VNC can land
+    /// first). Cleared when applied.
+    rig_select: Option<(String, Instant)>,
 }
 
 impl Transcript {
@@ -448,6 +528,51 @@ impl Transcript {
             selection,
             turn_starts: HashSet::new(),
             copied_feedback: None,
+            rig_select: std::env::var("ARBOS_RIG_SELECT").ok().map(|spec| {
+                let after = std::env::var("ARBOS_RIG_SELECT_AFTER_MS")
+                    .ok()
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(0);
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(after + 50))
+                        .await;
+                    let _ = this.update(cx, |_, cx| cx.notify());
+                })
+                .detach();
+                (spec, Instant::now() + Duration::from_millis(after))
+            }),
+        }
+    }
+
+    /// Apply `ARBOS_RIG_SELECT` to the newest settled agent bubble, once.
+    fn apply_rig_select(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((spec, not_before)) = self.rig_select.clone() else {
+            return;
+        };
+        if Instant::now() < not_before {
+            return;
+        }
+        let target = self.rows.iter().rev().find_map(|row| match &row.kind {
+            RowKind::Markdown {
+                bubble,
+                live: false,
+                ..
+            } => Some((row.message_id.clone(), bubble.text.clone())),
+            _ => None,
+        });
+        let Some((message_id, text)) = target else {
+            return;
+        };
+        self.rig_select = None;
+        let focus = self.selection.read(cx).focus_handle.clone();
+        let applied = self.selection.update(cx, |s, cx| {
+            let ok = s.rig_select(format!("{message_id}#text").into(), text, &spec);
+            cx.notify();
+            ok
+        });
+        if applied {
+            window.focus(&focus, cx);
         }
     }
 
@@ -937,6 +1062,7 @@ impl Transcript {
         row_id: &str,
         message_id: &Id,
         block: Block,
+        bubble_text: BubbleText,
         live: bool,
         first: bool,
         last: bool,
@@ -995,10 +1121,11 @@ impl Transcript {
             .child(render_block(
                 row_id,
                 &block,
+                bubble_text.at,
                 veil.as_ref(),
                 now,
                 theme,
-                selectable,
+                &selectable.bubble(format!("{message_id}#text"), bubble_text.text),
             ));
         let (row_el, reveal) = self.hover_row(row_id, now, window, cx);
         // Hover: reply + copy. The react glyph that opened the emoji bar is
@@ -1262,6 +1389,7 @@ impl Transcript {
             RowKind::Markdown {
                 block,
                 live,
+                bubble,
                 first,
                 last,
                 fill,
@@ -1271,6 +1399,7 @@ impl Transcript {
                 &row.id,
                 &row.message_id,
                 block,
+                bubble,
                 live,
                 first,
                 last,
@@ -1296,11 +1425,13 @@ impl Transcript {
                 } else {
                     resolved
                 };
-                let block = Block::Paragraph(format!("{who} didn't answer. Ask again."));
+                let text = format!("{who} didn't answer. Ask again.");
+                let block = Block::Paragraph(text.clone());
                 self.markdown_bubble(
                     &row.id,
                     &row.message_id,
                     block,
+                    BubbleText::single(text),
                     false,
                     true,
                     true,
@@ -1325,14 +1456,14 @@ impl Transcript {
                 // System / time lines can carry a tracking URL; paint and open
                 // it like a chat link.
                 .child(styled_text(
-                    &format!("{}.s", row.id),
                     &label,
                     theme.text_muted,
                     &theme,
                     None,
                     now,
                     0,
-                    &selectable,
+                    &selectable.bubble(format!("{}.s", row.id), inline_plain(&label)),
+                    0,
                 ))
                 .into_any_element(),
             RowKind::Reactions {
@@ -1813,6 +1944,7 @@ impl Render for Transcript {
         let max = f32::from(self.list.max_offset_for_scrollbar().y);
         let cur = -f32::from(self.list.scroll_px_offset_for_scrollbar().y);
         let show_jump = !self.pinned_to_bottom && max - cur > JUMP_BUTTON_AFTER_PX;
+        self.apply_rig_select(window, cx);
         // A selection lives as long as the transcript keeps keyboard focus:
         // clicking into the composer (or anywhere else) drops the highlight,
         // so a highlight always means ⌘C will copy it.
@@ -2278,6 +2410,14 @@ pub fn build_rows(
                     })
                     .sum();
                 let fill = total_blocks > 1;
+                // Every block of every text part is one bubble for selection.
+                let bubble_blocks: Vec<Block> = polished
+                    .iter()
+                    .flat_map(|(_, text)| {
+                        split_blocks(text).into_iter().filter(|b| !is_json_block(b))
+                    })
+                    .collect();
+                let bubble_texts = BubbleText::for_blocks(&bubble_blocks, false);
                 let mut block_ix = 0usize;
                 let mut had_prose = false;
                 // Error parts wait until the prose is known: under a real answer they stay
@@ -2307,6 +2447,10 @@ pub fn build_rows(
                                 let first = block_ix == 0;
                                 // While streaming, the newest block is the bottom for now.
                                 let last = block_ix + 1 == total_blocks || (live && streaming);
+                                let bubble =
+                                    bubble_texts.get(block_ix).cloned().unwrap_or_else(|| {
+                                        BubbleText::single(block_plain(&block, false))
+                                    });
                                 rows.push(Row {
                                     version: hash_version(&(&block, first, last, fill), live),
                                     id: format!("{}#{}.{}", message.id, id, bix),
@@ -2314,6 +2458,7 @@ pub fn build_rows(
                                     kind: RowKind::Markdown {
                                         block,
                                         live,
+                                        bubble,
                                         first,
                                         last,
                                         fill,
@@ -2474,6 +2619,7 @@ pub fn build_rows(
                         .map(str::to_owned);
                     let kind = match line {
                         Some(line) => RowKind::Markdown {
+                            bubble: BubbleText::single(inline_plain(&line)),
                             block: Block::Paragraph(line),
                             live: false,
                             first: true,
@@ -2627,14 +2773,111 @@ fn sans_font(theme: &Theme) -> gpui::Font {
     }
 }
 
+/// One selectable text element of a block and the non-selectable text the
+/// bubble shows before it: a list marker, a cell separator, the line break
+/// between items. The bubble's plain text is every segment's `lead + text`,
+/// blocks joined by one newline ([`bubble_plain`]); a selection is a byte
+/// range of that text, so copy includes the markers the user dragged over.
+struct Segment {
+    lead: String,
+    text: String,
+}
+
+/// The selectable segments of `block`, in paint order. `literal` renders the
+/// text as typed (user bubbles); otherwise inline markdown markers are
+/// removed, as `styled_text` paints it.
+fn block_segments(block: &Block, literal: bool) -> Vec<Segment> {
+    let inline = |t: &str| {
+        if literal {
+            t.to_string()
+        } else {
+            inline_plain(t)
+        }
+    };
+    let seg = |lead: String, text: String| Segment { lead, text };
+    match block {
+        Block::Paragraph(text) | Block::Heading { text, .. } => {
+            vec![seg(String::new(), inline(text))]
+        }
+        Block::Bullets(items) => items
+            .iter()
+            .enumerate()
+            .map(|(i, item)| {
+                seg(
+                    format!("{}• ", if i == 0 { "" } else { "\n" }),
+                    inline(item),
+                )
+            })
+            .collect(),
+        Block::Numbered(items) => items
+            .iter()
+            .enumerate()
+            .map(|(i, item)| {
+                seg(
+                    format!("{}{}. ", if i == 0 { "" } else { "\n" }, i + 1),
+                    inline(item),
+                )
+            })
+            .collect(),
+        Block::Table { header, rows } => {
+            let cols = header.len().max(1);
+            let mut out = Vec::new();
+            for (ri, row) in std::iter::once(header).chain(rows.iter()).enumerate() {
+                for ci in 0..cols {
+                    let lead = match (ri, ci) {
+                        (0, 0) => "",
+                        (_, 0) => "\n",
+                        _ => " | ",
+                    };
+                    let cell = row.get(ci).map(String::as_str).unwrap_or("");
+                    out.push(seg(lead.to_string(), cell.to_string()));
+                }
+            }
+            out
+        }
+        Block::Code { code, .. } => vec![seg(String::new(), code.clone())],
+    }
+}
+
+/// The rendered plain text of one block (what a full selection of it copies).
+pub fn block_plain(block: &Block, literal: bool) -> String {
+    block_segments(block, literal)
+        .iter()
+        .map(|s| format!("{}{}", s.lead, s.text))
+        .collect()
+}
+
+/// The rendered plain text of a whole bubble: its blocks, one newline apart.
+pub fn bubble_plain(blocks: &[Block], literal: bool) -> String {
+    blocks
+        .iter()
+        .map(|b| block_plain(b, literal))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Byte offset of each block's plain text inside [`bubble_plain`].
+pub fn block_offsets(blocks: &[Block], literal: bool) -> Vec<usize> {
+    let mut at = 0usize;
+    blocks
+        .iter()
+        .map(|b| {
+            let here = at;
+            at += block_plain(b, literal).len() + 1;
+            here
+        })
+        .collect()
+}
+
 /// Selectable user-bubble text: literal (no bold/italic/heading paint) except
 /// bare `http(s)://…` URLs, which get accent + underline and open on click.
+/// `at` is where `text` starts in `bubble`'s plain text.
 fn plain_text(
-    id: &str,
     text: &str,
     color: gpui::Hsla,
     theme: &Theme,
-    selectable: &Selectable,
+    bubble: &BubbleSelectable,
+    at: usize,
 ) -> AnyElement {
     let font = sans_font(theme);
     let mut full = String::new();
@@ -2700,8 +2943,8 @@ fn plain_text(
     }
     flush_plain(&mut plain, &mut full, &mut runs, &font, color);
 
-    selectable
-        .text(id.to_string(), full, runs)
+    bubble
+        .text(at, full, runs)
         .with_links(links)
         .into_any_element()
 }
@@ -2720,68 +2963,61 @@ fn user_message_body(
     theme: &Theme,
     selectable: &Selectable,
 ) -> AnyElement {
+    let key = format!("{row_id}.u");
     if !has_fenced_code(text) {
-        return plain_text(&format!("{row_id}.u"), text, color, theme, selectable);
+        let bubble = selectable.bubble(key, text.to_string());
+        return plain_text(text, color, theme, &bubble, 0);
     }
     let blocks = split_blocks(text);
+    let bubble = selectable.bubble(key, bubble_plain(&blocks, true));
+    let offsets = block_offsets(&blocks, true);
     let mut col = div().flex().flex_col().gap(px(6.0)).w_full().min_w_0();
-    for (i, block) in blocks.into_iter().enumerate() {
+    for (i, block) in blocks.iter().enumerate() {
         let id = format!("{row_id}.u{i}");
+        let at = offsets[i];
         col = match block {
             Block::Code { lang, code } => col.child(code_fence_card(
                 &id,
-                &lang,
-                &code,
+                lang,
+                code,
                 color,
                 theme,
-                selectable,
+                &bubble,
+                at,
                 None,
                 Instant::now(),
             )),
-            Block::Paragraph(t) => col.child(plain_text(&id, &t, color, theme, selectable)),
-            Block::Heading { text: t, .. } => {
-                col.child(plain_text(&id, &t, color, theme, selectable))
-            }
-            Block::Bullets(items) => {
-                let t = items
-                    .iter()
-                    .map(|item| format!("• {item}"))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                col.child(plain_text(&id, &t, color, theme, selectable))
-            }
-            Block::Numbered(items) => {
-                let t = items
-                    .iter()
-                    .enumerate()
-                    .map(|(n, item)| format!("{}. {item}", n + 1))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                col.child(plain_text(&id, &t, color, theme, selectable))
-            }
-            Block::Table { header, rows } => {
-                // Rare in a typed bubble; fall back to a readable plain dump.
-                let mut lines = vec![header.join(" | ")];
-                for row in rows {
-                    lines.push(row.join(" | "));
-                }
-                col.child(plain_text(&id, &lines.join("\n"), color, theme, selectable))
-            }
+            // Prose, lists and tables stay literal in a typed bubble (a
+            // "# heading" is still a "# heading"); one element per block.
+            Block::Paragraph(_)
+            | Block::Heading { .. }
+            | Block::Bullets(_)
+            | Block::Numbered(_)
+            | Block::Table { .. } => col.child(plain_text(
+                &block_plain(block, true),
+                color,
+                theme,
+                &bubble,
+                at,
+            )),
         };
     }
     col.into_any_element()
 }
 
+/// Inline-markdown prose as one selectable element. `veil_offset` is where
+/// `text` starts in the block's source (for the streaming veil); `at` is
+/// where its rendered text starts in `bubble`'s plain text.
 #[allow(clippy::too_many_arguments)]
 fn styled_text(
-    id: &str,
     text: &str,
     base_color: gpui::Hsla,
     theme: &Theme,
     veil: Option<&Veil>,
     now: Instant,
-    offset: usize,
-    selectable: &Selectable,
+    veil_offset: usize,
+    bubble: &BubbleSelectable,
+    at: usize,
 ) -> AnyElement {
     let spans = inline_spans(text);
     let mut full = String::new();
@@ -2832,11 +3068,11 @@ fn styled_text(
         full.push_str(&span.text);
     }
     let runs = match veil {
-        Some(veil) => apply_veil(runs, &veil.spans(now), offset),
+        Some(veil) => apply_veil(runs, &veil.spans(now), veil_offset),
         None => runs,
     };
-    selectable
-        .text(id.to_string(), full, runs)
+    bubble
+        .text(at, full, runs)
         .with_links(links)
         .into_any_element()
 }
@@ -2895,10 +3131,11 @@ fn apply_veil(
 fn render_block(
     row_id: &str,
     block: &Block,
+    at: usize,
     veil: Option<&Veil>,
     now: Instant,
     theme: &Theme,
-    selectable: &Selectable,
+    bubble: &BubbleSelectable,
 ) -> AnyElement {
     let base = div()
         .w_full()
@@ -2906,17 +3143,19 @@ fn render_block(
         .text_color(theme.text)
         .text_size(px(CHAT_BODY))
         .line_height(px(CHAT_LINE_HEIGHT));
+    // Where each selectable element's text starts in the bubble's plain text.
+    let segments = block_segments(block, false);
+    let mut starts = Vec::with_capacity(segments.len());
+    let mut pos = at;
+    for s in &segments {
+        pos += s.lead.len();
+        starts.push(pos);
+        pos += s.text.len();
+    }
     match block {
         Block::Paragraph(text) => base
             .child(styled_text(
-                &format!("{row_id}.p"),
-                text,
-                theme.text,
-                theme,
-                veil,
-                now,
-                0,
-                selectable,
+                text, theme.text, theme, veil, now, 0, bubble, starts[0],
             ))
             .into_any_element(),
         Block::Heading { level, text } => {
@@ -2929,14 +3168,7 @@ fn render_block(
                 .font_weight(FontWeight::SEMIBOLD)
                 .pt(px(6.0))
                 .child(styled_text(
-                    &format!("{row_id}.h"),
-                    text,
-                    theme.text,
-                    theme,
-                    veil,
-                    now,
-                    0,
-                    selectable,
+                    text, theme.text, theme, veil, now, 0, bubble, starts[0],
                 ))
                 .into_any_element()
         }
@@ -2968,14 +3200,7 @@ fn render_block(
                                 .child(marker),
                         )
                         .child(div().flex_1().min_w_0().child(styled_text(
-                            &format!("{row_id}.li{i}"),
-                            item,
-                            theme.text,
-                            theme,
-                            veil,
-                            now,
-                            offset,
-                            selectable,
+                            item, theme.text, theme, veil, now, offset, bubble, starts[i],
                         ))),
                 );
                 offset += item.len() + 1;
@@ -2984,7 +3209,13 @@ fn render_block(
         }
         Block::Table { header, rows } => {
             let cols = header.len().max(1);
-            let cell = |text: &str, head: bool, i: usize| {
+            let font = sans_font(theme);
+            let cell = |text: &str, head: bool, i: usize, start: usize| {
+                let mut font = font.clone();
+                if head {
+                    font.weight = FontWeight::SEMIBOLD;
+                }
+                let color = if head { theme.text } else { theme.text_muted };
                 div()
                     .flex_1()
                     .min_w_0()
@@ -2993,8 +3224,19 @@ fn render_block(
                     .when(i > 0, |el| el.border_l_1().border_color(theme.border))
                     .text_size(px(12.5))
                     .when(head, |el| el.font_weight(FontWeight::SEMIBOLD))
-                    .text_color(if head { theme.text } else { theme.text_muted })
-                    .child(text.to_string())
+                    .text_color(color)
+                    .child(bubble.text(
+                        start,
+                        text.to_string(),
+                        vec![TextRun {
+                            len: text.len(),
+                            font,
+                            color,
+                            background_color: None,
+                            underline: None,
+                            strikethrough: None,
+                        }],
+                    ))
             };
             let mut table = div()
                 .flex()
@@ -3006,7 +3248,7 @@ fn render_block(
                 .overflow_hidden();
             let mut head_row = div().flex().bg(theme.code_bg);
             for (i, h) in header.iter().enumerate() {
-                head_row = head_row.child(cell(h, true, i));
+                head_row = head_row.child(cell(h, true, i, starts[i]));
             }
             table = table.child(head_row);
             for (ri, row) in rows.iter().enumerate() {
@@ -3018,15 +3260,20 @@ fn render_block(
                         el.bg(Theme::with_alpha(theme.code_bg, 0.4))
                     });
                 for i in 0..cols {
-                    r = r.child(cell(row.get(i).map(String::as_str).unwrap_or(""), false, i));
+                    r = r.child(cell(
+                        row.get(i).map(String::as_str).unwrap_or(""),
+                        false,
+                        i,
+                        starts[(ri + 1) * cols + i],
+                    ));
                 }
                 table = table.child(r);
             }
             table.into_any_element()
         }
-        Block::Code { lang, code } => {
-            code_fence_card(row_id, lang, code, theme.text, theme, selectable, veil, now)
-        }
+        Block::Code { lang, code } => code_fence_card(
+            row_id, lang, code, theme.text, theme, bubble, starts[0], veil, now,
+        ),
     }
 }
 
@@ -3038,7 +3285,8 @@ fn code_fence_card(
     code: &str,
     color: gpui::Hsla,
     theme: &Theme,
-    selectable: &Selectable,
+    bubble: &BubbleSelectable,
+    at: usize,
     veil: Option<&Veil>,
     now: Instant,
 ) -> AnyElement {
@@ -3107,9 +3355,217 @@ fn code_fence_card(
             .py(px(8.0))
             .text_size(px(12.5))
             .line_height(px(18.0))
-            .child(selectable.text(format!("{row_id}.code"), code.to_string(), runs)),
+            .child(bubble.text(at, code.to_string(), runs)),
     );
     card.into_any_element()
+}
+
+#[cfg(test)]
+mod selection_tests {
+    //! The bubble's plain text is one string through every block (#1389):
+    //! a drag from the first paragraph to the last selects it end to end,
+    //! and what ⌘C copies is exactly the text the bubble shows.
+    use super::*;
+
+    const REPLY: &str = "I looked at the records.\n\nThe **likeliest** cause is the prompt, not an app bug:\n\n- agents answered at once\n- nobody waited for `everyone`\n\n```sh\narbos replay 12\n```\n\n| who | rolled |\n| --- | --- |\n| Bob | 4 |\n| Sam | 6 |\n\nWant a rule summary before the next round?";
+
+    fn blocks() -> Vec<Block> {
+        split_blocks(REPLY)
+    }
+
+    #[test]
+    fn bubble_plain_is_what_the_bubble_shows() {
+        let text = bubble_plain(&blocks(), false);
+        assert_eq!(
+            text,
+            "I looked at the records.\n\
+             The likeliest cause is the prompt, not an app bug:\n\
+             • agents answered at once\n\
+             • nobody waited for everyone\n\
+             arbos replay 12\n\
+             who | rolled\nBob | 4\nSam | 6\n\
+             Want a rule summary before the next round?"
+        );
+    }
+
+    #[test]
+    fn every_block_starts_where_its_offset_says() {
+        let blocks = blocks();
+        let text = bubble_plain(&blocks, false);
+        let offsets = block_offsets(&blocks, false);
+        assert_eq!(offsets.len(), blocks.len());
+        for (block, at) in blocks.iter().zip(&offsets) {
+            let plain = block_plain(block, false);
+            assert_eq!(&text[*at..*at + plain.len()], plain, "block at {at}");
+        }
+        // The segments the elements are built from tile each block exactly.
+        for block in &blocks {
+            let segs = block_segments(block, false);
+            let joined: String = segs
+                .iter()
+                .map(|s| format!("{}{}", s.lead, s.text))
+                .collect();
+            assert_eq!(joined, block_plain(block, false));
+        }
+    }
+
+    #[test]
+    fn user_bubble_plain_text_is_literal() {
+        let typed = "see **this**\n\n```py\nprint(1)\n```\n\n- a\n- b";
+        let blocks = split_blocks(typed);
+        assert_eq!(
+            bubble_plain(&blocks, true),
+            "see **this**\nprint(1)\n• a\n• b"
+        );
+        let one = split_blocks("# not a heading");
+        assert_eq!(bubble_plain(&one, true), "not a heading");
+    }
+
+    #[test]
+    fn table_cells_pad_to_the_header() {
+        let block = Block::Table {
+            header: vec!["a".into(), "b".into(), "c".into()],
+            rows: vec![
+                vec!["1".into()],
+                vec!["2".into(), "3".into(), "4".into(), "5".into()],
+            ],
+        };
+        assert_eq!(block_plain(&block, false), "a | b | c\n1 |  | \n2 | 3 | 4");
+        assert_eq!(block_segments(&block, false).len(), 9);
+    }
+
+    /// Drag selection across the whole reply and copy: the clipboard text
+    /// (what ⌘C writes, `TextSelection::selected_text`) equals the bubble's
+    /// plain text.
+    #[test]
+    fn copy_of_a_full_drag_equals_the_bubble_plain_text() {
+        let blocks = blocks();
+        let text = bubble_plain(&blocks, false);
+        let shared: SharedString = text.clone().into();
+        let mut sel = crate::ui::select::Model::default();
+        sel.begin("m1#text".into(), shared.clone(), 0, 1, false);
+        sel.extend_to(shared.len());
+        assert!(!sel.finish_drag());
+        assert_eq!(sel.selected_text(), Some(text));
+    }
+
+    /// A drag from inside paragraph one into the list: the paragraph tail, the
+    /// second paragraph and the first bullet (with its marker) come along.
+    #[test]
+    fn drag_across_three_blocks_selects_them_contiguously() {
+        let blocks = blocks();
+        let text = bubble_plain(&blocks, false);
+        let offsets = block_offsets(&blocks, false);
+        let shared: SharedString = text.into();
+        let from = offsets[0] + "I looked ".len();
+        let to = offsets[2] + "• agents".len();
+        let mut sel = crate::ui::select::Model::default();
+        sel.begin("m1#text".into(), shared, from, 1, false);
+        sel.extend_to(to);
+        assert_eq!(
+            sel.selected_text().as_deref(),
+            Some("at the records.\nThe likeliest cause is the prompt, not an app bug:\n• agents")
+        );
+    }
+
+    /// Every block of the reply drawn through `render_block` with the whole
+    /// bubble selected: each element's text must sit at its offset in the
+    /// bubble's plain text (the `debug_assert` in `BubbleSelectable::text`),
+    /// and the elements' heights add up (nothing collapsed or doubled).
+    struct Bubble {
+        selection: Entity<TextSelection>,
+    }
+
+    impl gpui::Render for Bubble {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let theme = Theme::of(cx).clone();
+            let blocks = blocks();
+            let texts = BubbleText::for_blocks(&blocks, false);
+            let selectable = Selectable::new(&self.selection, theme.accent_soft, cx);
+            let bubble = selectable.bubble("m1#text", texts[0].text.clone());
+            let mut col = div().w(px(600.0)).flex().flex_col();
+            for (i, block) in blocks.iter().enumerate() {
+                col = col.child(
+                    div()
+                        .debug_selector(move || format!("test-block-{i}"))
+                        .child(render_block(
+                            &format!("m1#t.{i}"),
+                            block,
+                            texts[i].at,
+                            None,
+                            Instant::now(),
+                            &theme,
+                            &bubble,
+                        )),
+                );
+            }
+            col
+        }
+    }
+
+    #[gpui::test]
+    fn every_block_renders_at_its_offset_with_the_bubble_selected(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let theme = crate::ui::theme::Theme::for_pref(
+                crate::ui::theme::AppearancePref::Dark,
+                crate::ui::theme::Surface::Matte,
+                cx,
+            );
+            cx.set_global(theme);
+        });
+        let text: SharedString = bubble_plain(&blocks(), false).into();
+        let (_view, vcx) = cx.add_window_view(|_, cx| {
+            let selection = cx.new(TextSelection::new);
+            selection.update(cx, |s, _| {
+                let m = s.model_for_tests();
+                m.begin("m1#text".into(), text.clone(), 0, 1, false);
+                m.extend_to(text.len());
+                m.finish_drag();
+            });
+            Bubble { selection }
+        });
+        vcx.run_until_parked();
+        let n = blocks().len();
+        let mut bottom = 0.0f32;
+        for i in 0..n {
+            let selector: &'static str = Box::leak(format!("test-block-{i}").into_boxed_str());
+            let b = vcx
+                .debug_bounds(selector)
+                .unwrap_or_else(|| panic!("block {i} drawn"));
+            assert!(f32::from(b.origin.y) >= bottom - 0.5, "block {i} overlaps");
+            assert!(f32::from(b.size.height) > 0.0, "block {i} has height");
+            bottom = f32::from(b.origin.y + b.size.height);
+        }
+    }
+
+    /// Triple-click on the second paragraph takes that paragraph only; a
+    /// double-click on a bullet takes its word.
+    #[test]
+    fn triple_and_double_click_in_a_multi_block_bubble() {
+        let blocks = blocks();
+        let text = bubble_plain(&blocks, false);
+        let offsets = block_offsets(&blocks, false);
+        let shared: SharedString = text.into();
+        let mut sel = crate::ui::select::Model::default();
+        sel.begin("m1#text".into(), shared.clone(), offsets[1] + 4, 3, false);
+        assert_eq!(
+            sel.selected_text().as_deref(),
+            Some("The likeliest cause is the prompt, not an app bug:")
+        );
+        sel.finish_drag();
+        sel.begin(
+            "m1#text".into(),
+            shared,
+            offsets[2] + "• agents ".len() + 2,
+            2,
+            false,
+        );
+        assert_eq!(sel.selected_text().as_deref(), Some("answered"));
+    }
 }
 
 #[cfg(test)]

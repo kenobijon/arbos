@@ -2418,10 +2418,25 @@ const FLOW_ACK: &str = "Cloning it now.";
 const FLOW_ACTIVITIES: &[(&str, u64)] = &[("Cloning RaoFoundation/subtensor", 2200)];
 const FLOW_RESULT: &[&str] = &["Got `subtensor/` on main. What do you want to do with it?"];
 
+/// `ARBOS_FIXTURE_REPLY=long`: the shape of Jacob's Oct 23 screenshot — a
+/// heading, bold labels and bullets over twenty-odd lines.
+const LONG_REVIEW: &str = "Arbos, from where I sat:\n\n**What worked**\n- Authority held: three guest agents deferred to the owner's call every time.\n- The handoff lines read cleanly; nobody asked who was speaking.\n- Replies landed inside two seconds on every box.\n\n**What did not**\n- The group lost the thread twice when two agents answered at once.\n- One attachment never rendered on the phone.\n- The working line stayed up after a stopped turn.\n\n**Next**\n1. Serialize agent replies in groups.\n2. Re-check the attachment pipeline on iPhone.\n3. Clear the working line on stop.\n\nTell me which of these you want first.";
+
 const REPLY_DEFAULT: &[&str] = &[
     "Here is how I would approach it.",
     "- Keep the rail narrow and the tabs flat, so the chat column gets the width.\n- Put the composer at the bottom once a chat has a message; before that, center it so a new tab feels like a blank page.\n- Treat every tool call as a card that folds, so long runs stay readable.",
     "If you want, I can turn this into a short checklist and start on the first item.",
+];
+
+/// "rules" / "long": a several-paragraph answer with a list and a code span,
+/// the shape of Jacob's bubble in #1389 (selection / copy rigs; the iPhone
+/// fixture answers the same words with the same text).
+const REPLY_RULES: &[&str] = &[
+    "I can't see anything in my records that points to an app bug, so I wouldn't blame the app without more evidence.",
+    "The likeliest cause is a prompt that never told the agents to wait for everyone and to keep quiet between turns:",
+    "- post only the number\n- call `I won` only for the lowest\n- wait for every player before the next round",
+    "The app side plays a part too: several agents answer the same message at once, and some of my filings went out before you could stop them.",
+    "Do you want me to post a clear rule summary to the group before the next round?",
 ];
 
 const REPLY_SIMPLE: &[&str] = &[
@@ -2552,6 +2567,9 @@ fn pick_script(text: &str, force_reply: bool) -> Script {
             diff: Some(("crates/arbos-mac/src/ui/rail.rs", 6, 2)),
             summary: ACT_SUMMARY,
         };
+    }
+    if t.contains("rules") || t.contains("long") {
+        return Script::Reply(REPLY_RULES);
     }
     if t.contains("simple") {
         return Script::Reply(REPLY_SIMPLE);
@@ -4196,8 +4214,21 @@ fn seed_chat_docs() -> Vec<ChatDoc> {
             )],
         );
         // `ARBOS_FIXTURE_REPLY=1` (screenshot rig): one reply bubble quoting that answer.
-        if std::env::var("ARBOS_FIXTURE_REPLY").is_ok_and(|v| v == "1") {
-            s.user_replying_to("Which tabs do you mean here?", &last);
+        // `ARBOS_FIXTURE_REPLY=long`: a multi-paragraph markdown review as the last
+        // message, so `ARBOS_REPLY_TO=1` arms the composer's reply preview on it.
+        match std::env::var("ARBOS_FIXTURE_REPLY").as_deref() {
+            Ok("1") => {
+                s.user_replying_to("Which tabs do you mean here?", &last);
+            }
+            Ok("long") => {
+                s.user("How did the review go?");
+                s.assistant(
+                    TurnKind::Reply,
+                    MessageStatus::Done,
+                    vec![text(LONG_REVIEW)],
+                );
+            }
+            _ => {}
         }
     }
     out.push(main);

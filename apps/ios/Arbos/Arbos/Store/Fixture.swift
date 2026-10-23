@@ -92,6 +92,11 @@ extension AppModel {
         ]
         chats = allChats
         messages = allMessages
+        // `ARBOS_FIXTURE_LONG_REPLY=1`: the opened chat ends with a several-block
+        // agent reply, the shape of Jacob's bubble in #1389 (selection / copy rigs).
+        if DebugHooks.fixtureLongReply, let c = DebugHooks.openChat {
+            messages[c, default: []].append(assistant("fx-long", c, Self.longReply, at: now - 60_000))
+        }
         machine = Machine(state: .awake, since: now - 3_600_000, spec: "Daytona · 4 vCPU · 8 GiB · 10 GiB disk · arbos-agent-0.2.0",
                           provider: "daytona", sandboxId: "fixture-box", spendTodayUsd: 1.6, spendCapUsd: 25,
                           workspaces: Dictionary(uniqueKeysWithValues: list.map { ($0.id, $0.id == "fx-comms" ? WorkspaceState.active : .idle) }),
@@ -254,6 +259,41 @@ extension AppModel {
         Task { await fixtureReply(chatId: chatId) }
     }
 
+    /// Rig (`ARBOS_SHOW=reply-long`): one finished agent reply appended as the chat's last
+    /// message, so the composer's reply preview can be armed on a long one.
+    func fixtureAppendAssistant(chatId: Id, text: String) {
+        var list = messages[chatId] ?? []
+        if let i = list.lastIndex(where: { $0.isStreaming }) {
+            list[i].status = .done
+            list[i].parts = [.text(id: "\(list[i].id)-t", text: "Got it.")]
+        }
+        list.append(assistant(newId(), chatId, text, at: nowMs()))
+        messages[chatId] = list
+    }
+
+    /// The shape of Jacob's Oct 23 screenshot — a heading, bold labels and bullets over
+    /// twenty-odd lines (the Mac fixture's `ARBOS_FIXTURE_REPLY=long` carries the same text).
+    static let longReview = """
+    Arbos, from where I sat:
+
+    **What worked**
+    - Authority held: three guest agents deferred to the owner's call every time.
+    - The handoff lines read cleanly; nobody asked who was speaking.
+    - Replies landed inside two seconds on every box.
+
+    **What did not**
+    - The group lost the thread twice when two agents answered at once.
+    - One attachment never rendered on the phone.
+    - The working line stayed up after a stopped turn.
+
+    **Next**
+    1. Serialize agent replies in groups.
+    2. Re-check the attachment pipeline on iPhone.
+    3. Clear the working line on stop.
+
+    Tell me which of these you want first.
+    """
+
     /// Grok Bot reply flow for a cloning exercise: one short ack, a working
     /// line, then a conversational result — no thoughts, no milestone boilerplate.
     private func fixtureReply(chatId: Id) async {
@@ -305,6 +345,22 @@ extension AppModel {
             : "Done. Short replies from now on, and I'll keep anything that goes out on Discord to one or two casual lines in your voice."
         append(bubble(resultText))
     }
+
+    /// A several-paragraph agent answer with a list and a code span — the shape
+    /// of Jacob's bubble in #1389 (`ARBOS_FIXTURE_LONG_REPLY`, tests).
+    static let longReply = """
+    I can't see anything in my records that points to an app bug, so I wouldn't blame the app without more evidence.
+
+    The likeliest cause is a prompt that never told the agents to wait for everyone and to keep quiet between turns:
+
+    - post only the number
+    - call `I won` only for the lowest
+    - wait for every player before the next round
+
+    The app side plays a part too: several agents answer the same message at once, and some of my filings went out before you could stop them.
+
+    Do you want me to post a clear rule summary to the group before the next round?
+    """
 
     private func user(_ id: Id, _ chat: Id, _ text: String, at: Int64) -> Message {
         Message(id: id, chatId: chat, role: .user, sender: "user", status: .done, turn: nil, decision: nil, subagentId: nil,

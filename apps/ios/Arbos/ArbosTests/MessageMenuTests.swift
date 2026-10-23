@@ -25,4 +25,22 @@ final class MessageMenuTests: XCTestCase {
     func testNonMessageRowsCopyOnly() {
         XCTAssertEqual(MessageMenu.items(forMessage: false), [.copy])
     }
+
+    /// #1389: a long-press on any block of a bubble reaches the one menu, and
+    /// its Copy is the whole message — every paragraph, the list, the code
+    /// span — not the block under the finger. The fixture's "rules" reply is
+    /// the shape of Jacob's bubble: five blocks, one text part.
+    @MainActor func testCopyOfAMultiBlockBubbleIsTheWholeMessage() {
+        let text = AppModel.longReply
+        let blocks = Markdown.blocks(text)
+        XCTAssertGreaterThanOrEqual(blocks.count, 5, "the fixture reply must span several blocks")
+        XCTAssertTrue(blocks.contains { if case .bullets = $0 { return true } else { return false } })
+        let m = Message(id: "m1", chatId: "c1", role: .assistant, sender: "agent", status: .done, turn: .reply, decision: nil,
+                        subagentId: nil, subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: 0,
+                        completedAt: 0, pending: false, parts: [.text(id: "m1-t", text: text)], hiddenCount: 0)
+        XCTAssertEqual(m.plainText, text)
+        for case .paragraph(let p) in blocks {
+            XCTAssertTrue(m.plainText.contains(p), "copy misses paragraph: \(p)")
+        }
+    }
 }

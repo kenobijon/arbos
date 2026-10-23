@@ -107,6 +107,14 @@ struct Theme {
     /// Picture → name in the chat header pill: Grok Bot's title measures 5 pt ink to ink
     /// (Mac ref 57); the Mac's `identity::HEADER_GAP` + side bearing.
     static let headerPillGap: CGFloat = 5
+    /// The composer's reply preview is always this tall — one row: glyph, "Replying to
+    /// @handle", one truncated line of the quoted message, × — whatever the original's
+    /// length (Jacob, Oct 23; same on the Mac). 16 pt line + 2 × 8 pt.
+    static let replyPreviewHeight: CGFloat = 32
+    /// A quoted picture shows as a square thumbnail this big, inside the row.
+    static let replyPreviewThumb: CGFloat = 20
+    /// The quoted line is pre-cut to this many characters; the row's own ellipsis trims it.
+    static let replyPreviewChars = 160
     /// Composer side inset: Grok uses 31 pt with the keyboard down, 19 pt with it up.
     static let composerInset: CGFloat = 31
     static let composerInsetKeyboard: CGFloat = 19
