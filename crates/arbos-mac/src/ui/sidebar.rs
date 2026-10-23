@@ -2021,14 +2021,20 @@ mod row_bounds_tests {
             }
             if pass == "bottom" {
                 let last: &'static str = Box::leak(format!("row-{}", ROWS - 1).into_boxed_str());
+                // Jacob (18:46): "you can't scroll up and down on the chats" —
+                // the list must have scrolled: the last row, off-screen at the
+                // top, is now fully inside the list's box.
                 let b = vcx
                     .debug_bounds(last)
                     .expect("last row drawn at scroll-bottom");
-                let bottom: f32 = b.bottom().into();
+                let (top, bottom): (f32, f32) = (b.origin.y.into(), b.bottom().into());
+                let list_top: f32 = list.origin.y.into();
                 assert!(
-                    bottom <= list_bottom - 12.0 + 0.5,
-                    "bottom: last row ends at {bottom}, list ends at {list_bottom}"
+                    top >= list_top && bottom <= list_bottom - 12.0 + 0.5,
+                    "bottom: last row {top}..{bottom} not inside the list {list_top}..{list_bottom}"
                 );
+                let offset: f32 = scroll.offset().y.into();
+                assert!(offset < -(ROW_H * 2.0), "the list scrolled ({offset})");
             }
         }
     }
