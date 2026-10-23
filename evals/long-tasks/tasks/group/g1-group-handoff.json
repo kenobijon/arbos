@@ -1,0 +1,30 @@
+{
+  "id": "g1-group-handoff",
+  "lane": "a",
+  "category": "group",
+  "title": "Two agents in one group: host asks the other to compute, then confirms",
+  "turns": [
+    {
+      "prompt": "lane-b, please compute the SHA-256 hex digest of the exact word acacia and post it here. lane-a, once lane-b has posted, check it against your own computation and say whether they match.",
+      "group": true,
+      "wait_s": 180,
+      "expect_other_agent": "lane-b",
+      "reply_regex": "8106ef383a52f7a9",
+      "rubric": {
+        "criteria": "Both agents took part: lane-b posted a SHA-256 (8106ef383a52…), lane-a confirmed the match (or a mismatch, honestly). No agent claims to be the other.",
+        "min": 3
+      },
+      "timeout_s": 400
+    }
+  ],
+  "setup_actions": [
+    {
+      "kind": "group_create",
+      "with": [
+        "lane-b"
+      ],
+      "title": "eval handoff"
+    }
+  ],
+  "regression": "F6 group chats: cross-agent handoff"
+}

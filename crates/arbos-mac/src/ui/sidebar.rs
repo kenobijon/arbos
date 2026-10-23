@@ -7,8 +7,8 @@
 use std::sync::Arc;
 
 use gpui::{
-    div, prelude::*, px, Context, Div, ElementId, Focusable as _, FontWeight, RenderImage,
-    SharedString,
+    div, prelude::*, px, Context, CursorStyle, Div, DragMoveEvent, ElementId, Focusable as _,
+    FontWeight, MouseButton, Render, RenderImage, SharedString, Window,
 };
 
 use crate::app::AppState;
@@ -24,8 +24,21 @@ use crate::ui::motion::PulseClock;
 use crate::ui::people;
 use crate::ui::shell::{Shell, TRAFFIC_LIGHTS_INSET};
 use crate::ui::theme::{
-    Theme, AVATAR_ROW, HEADER_HEIGHT, PANEL_RADIUS, SIDEBAR_WIDTH, TEXT_BODY, TEXT_SMALL, TEXT_TINY,
+    Theme, AVATAR_ROW, HEADER_HEIGHT, PANEL_RADIUS, SIDEBAR_RESIZE_HANDLE, TEXT_BODY, TEXT_SMALL,
+    TEXT_TINY,
 };
+
+/// Drag payload for the chat-list column's right-edge resize handle.
+#[derive(Clone)]
+struct SidebarResizeDrag;
+
+struct SidebarResizeDragGhost;
+
+impl Render for SidebarResizeDragGhost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
 
 /// The drag strip beside the traffic lights: Grok Mac's 44 pt top band, the
 /// same height as the chat header ([feedback mac-header-height-grok]). The
@@ -251,6 +264,7 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
     let selected = state.selected_project.clone();
     let query = shell.search_input.read(cx).text().trim().to_lowercase();
     let machine = state.machine.shown_state();
+    let sidebar_width = state.sidebar_width;
     // Inside a server the left pane shows its channels (D88 rule 2).
     let open_server = state.open_server_info().cloned();
     let open_server_admin = open_server.as_ref().is_some_and(ServerInfo::can_admin);
@@ -698,10 +712,35 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
             }),
         );
 
+    // Drag handle on the right edge: a slim hit target (col-resize cursor) that
+    // lets the user make the chat list slimmer or wider
+    // ([feedback app-01M5MJ9Y91W9ZET71KTCE7PS65]).
+    let resize = div()
+        .id("sidebar-resize")
+        .absolute()
+        .top_0()
+        .right_0()
+        .h_full()
+        .w(px(SIDEBAR_RESIZE_HANDLE))
+        .cursor(CursorStyle::ResizeColumn)
+        .hover(|s| s.bg(Theme::with_alpha(theme.primary, 0.45)))
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_drag(SidebarResizeDrag, |_, _, _, cx| {
+            cx.new(|_| SidebarResizeDragGhost)
+        })
+        .on_drag_move(
+            cx.listener(|this, ev: &DragMoveEvent<SidebarResizeDrag>, _, cx| {
+                // The column docks at the window's left, so mouse x is the width.
+                let width = f32::from(ev.event.position.x);
+                this.state
+                    .update(cx, |s, cx| s.set_sidebar_width(width, cx));
+            }),
+        );
+
     let mut column = div()
         .relative()
         .h_full()
-        .w(px(SIDEBAR_WIDTH))
+        .w(px(sidebar_width))
         .flex_shrink_0()
         .flex()
         .flex_col()
@@ -720,7 +759,7 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
     if let Some(update) = shell.render_update_button(cx) {
         column = column.child(div().px(px(12.0)).pb(px(8.0)).child(update));
     }
-    column.child(account_row)
+    column.child(account_row).child(resize)
 }
 
 /// A server's picture: the leaf picked on its Create screen (D92 amendment),

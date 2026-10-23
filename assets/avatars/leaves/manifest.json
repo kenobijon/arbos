@@ -4,7 +4,7 @@
   "leaf_color": "#F6F0E8",
   "avatar": {
     "viewBox": "0 0 100 100",
-    "leaf_fraction_of_circle": 0.62,
+    "leaf_fraction_of_circle": 1.0,
     "circle_drawn_by_app": true
   },
   "lottie": {

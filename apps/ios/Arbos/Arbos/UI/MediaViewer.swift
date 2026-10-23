@@ -724,6 +724,8 @@ struct BlobImage: View {
 enum FixtureMedia {
     static func bytes(ref: String, item: MediaItem) -> (Data, String)? {
         switch item.kind {
+        case .image where item.name.contains("Screenshot"):
+            return pagePNG().map { ($0, "image/png") }
         case .image:
             return png(seed: ref).map { ($0, "image/png") }
         case .file:
@@ -749,6 +751,24 @@ enum FixtureMedia {
             cg.setStrokeColor(UIColor(white: 0.96, alpha: 1).cgColor)
             cg.setLineWidth(12)
             cg.stroke(CGRect(x: 0, y: 0, width: w, height: hgt))
+        }
+        return img.pngData()
+    }
+
+    /// A 640 × 400 "page screenshot": white, empty top 22 %, title bar, line, blue
+    /// button, short line — the shape of Jacob's shot (the Mac fixture's `fixture_page_png`).
+    private static func pagePNG() -> Data? {
+        let (w, h) = (640, 400)
+        let img = UIGraphicsImageRenderer(size: CGSize(width: w, height: h), format: {
+            let f = UIGraphicsImageRendererFormat(); f.scale = 1; return f
+        }()).image { ctx in
+            let cg = ctx.cgContext
+            cg.setFillColor(UIColor.white.cgColor); cg.fill(CGRect(x: 0, y: 0, width: w, height: h))
+            cg.setFillColor(UIColor(white: 0.09, alpha: 1).cgColor); cg.fill(CGRect(x: 40, y: 88, width: 260, height: 28))
+            cg.setFillColor(UIColor(white: 0.38, alpha: 1).cgColor); cg.fill(CGRect(x: 40, y: 134, width: 290, height: 12))
+            cg.setFillColor(UIColor(red: 26 / 255, green: 115 / 255, blue: 232 / 255, alpha: 1).cgColor)
+            cg.fill(CGRect(x: 40, y: 176, width: 140, height: 40))
+            cg.setFillColor(UIColor(white: 0.38, alpha: 1).cgColor); cg.fill(CGRect(x: 40, y: 240, width: 150, height: 12))
         }
         return img.pngData()
     }

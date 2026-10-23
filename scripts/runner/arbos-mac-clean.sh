@@ -96,6 +96,16 @@ if [ "$(free_gb)" -lt "$MIN_FREE_GB" ] && ! pgrep -qx xcodebuild; then
   done
 fi
 
+# The release lane's smoke step (`cargo test -p arbos-mac enter_tests`, #1215) builds the debug profile
+# into the persistent release target dir; its debug/ tree reached 34 GB in one day (2026-10-23 15:20,
+# 15 GB free on the volume). The release/ and per-arch trees are what keeps releases warm; debug/ is only
+# the smoke test's cache, rebuilt in a few minutes. Dropped when space is short and no cargo runs.
+RELEASE_DEBUG=/Users/arbosgui/arbos-release-target/debug
+if [ "$(free_gb)" -lt "$MIN_FREE_GB" ] && [ -d "$RELEASE_DEBUG" ] && ! pgrep -qx cargo && ! pgrep -qx rustc; then
+  sz=$(du -sg "$RELEASE_DEBUG" 2>/dev/null | cut -f1)
+  rm -rf "$RELEASE_DEBUG" && say "removed the release lane's debug target tree (${sz:-?} GB; the smoke test rebuilds it)"
+fi
+
 FREE=$(free_gb)
 say "done free=${FREE}G"
 if [ "$FREE" -lt "$MIN_FREE_GB" ]; then

@@ -27,8 +27,10 @@ pub const LEAF_COUNT: u8 = 9;
 pub const COLOR_COUNT: u8 = 10;
 /// The leaf's ink on every disc colour.
 pub const LEAF_INK: Rgb = Rgb(0xF6, 0xF0, 0xE8);
-/// The leaf's span as a share of the disc diameter (the SVG box is 100 × 100).
-pub const LEAF_SCALE: f32 = 0.62;
+/// The SVG box as a share of the disc diameter. The path inside already spans
+/// about 62 of the box's 100 units, so 1.0 puts the cream leaf at ~62% of the
+/// disc (0.62 was applying that fraction twice and left the leaf too small).
+pub const LEAF_SCALE: f32 = 1.0;
 /// Bump when the index rule changes, so clients can refresh cached defaults.
 pub const LEAF_RULE_VERSION: u32 = 1;
 

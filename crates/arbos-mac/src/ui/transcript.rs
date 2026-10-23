@@ -1616,8 +1616,8 @@ impl Transcript {
                     None => attachments::Preview::Unavailable,
                     Some(k) => {
                         let state = self.state.read(cx);
-                        match state.thumbnails.get(k) {
-                            Some(image) => attachments::Preview::Ready(image.clone()),
+                        match state.card_thumbnail(k) {
+                            Some(image) => attachments::Preview::Ready(image),
                             None if state.thumbnails_failed.contains(k) => {
                                 attachments::Preview::Unavailable
                             }

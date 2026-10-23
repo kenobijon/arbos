@@ -86,6 +86,11 @@ extension AppModel {
             assistant("a5", a, "Pulled and added.", at: a0 - 9 * 60_000),
             attachment("a6", a, name: "Q3 board deck v5.pdf", mime: "application/pdf", at: a0 - 9 * 60_000 + 5_000),
             attachment("a7", a, name: "Walkthrough.m4a", mime: "audio/m4a", at: a0 - 8 * 60_000),
+            // Jacob's case (chat-preview-cards-2026-10-23): a screenshot of the small
+            // page the agent made — white, with its own empty top margin.
+            user("a7b", a, "Make me a small page with a button that counts clicks.", at: a0 - 6 * 60_000),
+            assistant("a7c", a, "Here it is — a small page with a counter button.", at: a0 - 5 * 60_000),
+            attachment("a7d", a, name: "Screenshot 2026-10-23 at 7.55.41.png", mime: "image/png", at: a0 - 5 * 60_000 + 3_000),
             question("a8", a, "Send the deck to the whole team or just the board list?",
                      options: ["Whole team", "Board list only", "Hold off for now"], at: a0 - 2 * 60_000),
             stopped("a9", a, at: a0),
@@ -387,7 +392,8 @@ extension AppModel {
     private func attachment(_ id: Id, _ chat: Id, name: String, mime: String, at: Int64) -> Message {
         Message(id: id, chatId: chat, role: .assistant, sender: "agent", status: .done, turn: .reply, decision: "reply", subagentId: nil,
                 subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: at, completedAt: at, pending: false,
-                parts: [.attachment(id: "\(id)-a", attachment: Attachment(name: name, mime: mime, blobRef: "fixture-\(id)"))], hiddenCount: 0)
+                parts: [.attachment(id: "\(id)-a", attachment: Attachment(name: name, mime: mime, blobRef: "fixture-\(id)",
+                                                                       bytes: mime == "application/pdf" ? 1_840_000 : nil))], hiddenCount: 0)
     }
 
     /// As agentd writes it: a `question` part with a choice widget plus the legacy

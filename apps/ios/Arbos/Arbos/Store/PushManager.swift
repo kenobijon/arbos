@@ -36,8 +36,9 @@ final class PushManager: NSObject, ObservableObject, UNUserNotificationCenterDel
     /// D78: an agent's hidden plain chats (not its one chat) never show a banner here.
     var isHiddenChat: (String) -> Bool = { _ in false }
     private var registeredToken: String?
-    /// chat_id → when a local `/me/pushes` banner was posted; swallows a matching
-    /// APNs alert that lands a moment later for the same chat.
+    /// chat_id → when a banner was shown (local post or APNs willPresent); swallows
+    /// a matching APNs twin that lands a moment later for the same chat. Local
+    /// willPresent must still present after postMessage claims this slot.
     private var localBannerAt: [String: CFAbsoluteTime] = [:]
     private static let localBannerDedupe: CFAbsoluteTime = 8
 
@@ -169,11 +170,18 @@ final class PushManager: NSObject, ObservableObject, UNUserNotificationCenterDel
             return []
         }
         let chatId = info["chat_id"] as? String
+        // Local requests have a nil trigger; remote APNs use UNPushNotificationTrigger.
+        // postMessage claims localBannerAt before add(), so only skip that slot for the
+        // APNs twin — otherwise the local banner itself is swallowed in the foreground
+        // (other chats while one chat is open never notify).
+        let isRemote = notification.request.trigger is UNPushNotificationTrigger
         let silent = await MainActor.run { () -> Bool in
             guard let chatId else { return false }
             if chatId == visibleChatId() || isHiddenChat(chatId) { return true }
             // Local `/me/pushes` banner already shown for this chat — skip the APNs twin.
-            if let at = localBannerAt[chatId], CFAbsoluteTimeGetCurrent() - at < PushManager.localBannerDedupe {
+            if isRemote,
+               let at = localBannerAt[chatId],
+               CFAbsoluteTimeGetCurrent() - at < PushManager.localBannerDedupe {
                 return true
             }
             // Claim the slot so a later local postMessage does not double-banner.
