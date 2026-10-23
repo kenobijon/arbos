@@ -5011,6 +5011,36 @@ fn seed_people_chat_docs() -> Vec<ChatDoc> {
         text_part("Deck, dashboard and the press kit for the run-through."),
     ];
     insert_message_via_core(&group, &shared_files);
+    // Jacob's case (chat-preview-cards-2026-10-23): the agent screenshots the
+    // small page it made — a white page with its own empty top margin.
+    insert_message_via_core(
+        &group,
+        &human_message(
+            GROUP_LAUNCH,
+            &sam(),
+            "@arbos make me a small page with a button that counts clicks.",
+            base + 385_000,
+        ),
+    );
+    let mut page = human_message(GROUP_LAUNCH, &sam(), "", base + 390_000);
+    page.role = Role::Assistant;
+    page.sender = format!("agent:{PROJECT_ARBOS}");
+    page.sender_name = Some("Arbos".into());
+    page.sender_handle = Some("arbos".into());
+    page.sender_avatar = None;
+    page.asked_by_handle = Some("sam".into());
+    page.owner_handle = Some(ME_HANDLE.into());
+    page.parts = vec![
+        text_part("Here it is — a small page with a counter button."),
+        attachment(
+            "Screenshot 2026-10-23 at 7.55.41.png",
+            "image/png",
+            AttachmentKind::Image,
+            "Screenshot 2026-10-23 at 7.55.41.png",
+            212_000,
+        ),
+    ];
+    insert_message_via_core(&group, &page);
     insert_message_via_core(
         &group,
         &human_message(
@@ -6002,6 +6032,8 @@ mod seed_parity_tests {
             "User Done user:gh_456 name=Some(\"Sam Rivera\") h=Some(\"sam\") asked=None turn=None wa=false [text] hidden=[] text=71 r=0 dt=30000 ct=Some(0)",
             "Assistant Done agent:01J9ARBOS00000000000000000 name=Some(\"Arbos\") h=Some(\"arbos\") asked=Some(\"sam\") turn=None wa=false [text] hidden=[] text=96 r=0 dt=60000 ct=Some(0)",
             "User Done user:gh_457 name=Some(\"Samir Haddad\") h=Some(\"samir\") asked=None turn=None wa=false [attachment:Slide 4 · signups:Some(212000):Image,attachment:Launch dashboard:Some(348000):Image,attachment:Launch day, the team:Some(1204000):Image,attachment:Signup funnel:Some(156000):Image,attachment:Press kit v3:Some(1840000):Pdf,attachment:Launch teaser:Some(6420000):Video,text] hidden=[] text=54 r=0 dt=80000 ct=Some(0)",
+            "User Done user:gh_456 name=Some(\"Sam Rivera\") h=Some(\"sam\") asked=None turn=None wa=false [text] hidden=[] text=61 r=0 dt=85000 ct=Some(0)",
+            "Assistant Done agent:01J9ARBOS00000000000000000 name=Some(\"Arbos\") h=Some(\"arbos\") asked=Some(\"sam\") turn=None wa=false [text,attachment:Screenshot 2026-10-23 at 7.55.41.png:Some(212000):Image] hidden=[] text=48 r=0 dt=90000 ct=Some(0)",
             "User Done user:gh_458 name=Some(\"Sara Lind\") h=Some(\"sara\") asked=None turn=None wa=false [text] hidden=[] text=64 r=0 dt=100000 ct=Some(0)",
             "User Done user:gh_458 name=Some(\"Sara Lind\") h=Some(\"sara\") asked=None turn=None wa=false [text] hidden=[] text=55 r=0 dt=120000 ct=Some(0)",
             "Assistant Error agent:01J9ARBOS00000000000000000 name=Some(\"Arbos\") h=Some(\"arbos\") asked=Some(\"sara\") turn=None wa=false [text,error] hidden=[] text=0 r=0 dt=125000 ct=Some(0)",
