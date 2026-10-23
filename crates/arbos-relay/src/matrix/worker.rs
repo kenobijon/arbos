@@ -290,6 +290,11 @@ impl Worker {
             }
             Job::SyncServer { server_id } => self.sync_server(server_id).await,
             Job::SyncChannel { channel_id } => self.sync_channel(channel_id).await,
+            Job::ChannelNotice {
+                channel_id,
+                text,
+                notice_id,
+            } => self.channel_notice(channel_id, text, notice_id).await,
             Job::Resync {
                 chat_id,
                 project_id,

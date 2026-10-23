@@ -233,19 +233,9 @@ struct ChatView: View {
         }
     }
 
-    /// Rebuild transcript rows, including "@handle joined" lines for people-chat members.
+    /// Rebuild transcript rows. Membership lines ("Jacob added Home, hjkb and Doug",
+    /// "Alice left") are system messages the relay writes into the doc (#1349).
     private func refreshRows() {
-        // Agents are always added after the chat exists (never founders), so every agent
-        // gets a centred "@handle joined" line at its membership time. Humans who join
-        // later (after create) get the same line; founders (joined_at ≈ created_at) do not.
-        let createdAt = people?.createdAt ?? 0
-        let joins: [Transcript.Join] = (people?.members ?? []).compactMap { m in
-            guard m.joinedAt > 0 else { return nil }
-            if !m.isAgent, m.joinedAt <= createdAt + 5_000 { return nil }
-            let handle = m.isAgent ? mentionSlug(m.project?.name ?? m.handle) : m.handle
-            guard !handle.isEmpty else { return nil }
-            return Transcript.Join(id: m.id, handle: handle, at: m.joinedAt)
-        }
         // A channel is a people-style transcript: my lines right, everyone else by name.
         let slot = isPeople ? "\(peopleSlot):\(chatId)" : isChannel ? "\(channelSlot):\(chatId)" : projectId
         var agentNames: [String: String] = [:]
@@ -255,7 +245,7 @@ struct ChatView: View {
         }
         rows = Transcript.rows(messages, projectId: slot,
                                me: isChannel ? model.channelMe : model.myUserId,
-                               people: isPeople || isChannel, joins: joins, agentNames: agentNames)
+                               people: isPeople || isChannel, agentNames: agentNames)
     }
 
     var body: some View {

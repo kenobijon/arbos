@@ -4029,6 +4029,32 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         } => {
             let shared = shared.clone();
             tokio::spawn(async move {
+                // One call for the whole batch (#1349): the relay adds everyone
+                // and writes one "<me> added A, B and C" line in the chat. A
+                // relay that only knows `{handle}` answers 4xx; then every add
+                // is tried on its own as before.
+                let batch = shared
+                    .post_json(
+                        &format!("/chats/{chat_id}/members"),
+                        json!({ "handles": handles, "agent_ids": agent_ids }),
+                    )
+                    .await;
+                let retry_singly = match &batch {
+                    Ok(_) => false,
+                    Err(err) => match err.downcast_ref::<RelayError>() {
+                        Some(e) => matches!(e.status, 400 | 404 | 415 | 422),
+                        None => false,
+                    },
+                };
+                if !retry_singly {
+                    if let Err(err) = refresh_registry(&shared).await {
+                        shared.diagnostic("refresh", format!("{err:#}"));
+                    }
+                    if let Err(err) = batch {
+                        shared.notice(format!("Could not add members: {}", people_error(&err)));
+                    }
+                    return;
+                }
                 // Every add is tried; the first failure is reported once the
                 // rest are done, and the list is refreshed either way so the
                 // pane shows exactly who made it in.

@@ -122,6 +122,16 @@ fn server_name(name: &str) -> Option<String> {
     (!n.is_empty() && n.chars().count() <= NAME_MAX).then_some(n)
 }
 
+/// Membership notice (#1349) in the server's first channel — the one everyone lands in —
+/// "Jacob added Doug", "Doug joined", "Jacob removed Doug", "Doug left".
+fn server_notice(state: &AppState, server_id: &str, text: &str) {
+    let mut channels = state.db.channels_of_server(server_id).unwrap_or_default();
+    channels.sort_by_key(|c| c.position);
+    if let Some(first) = channels.first() {
+        crate::notices::post_channel_notice(state, &first.id, text);
+    }
+}
+
 fn handle_of(state: &AppState, user_id: &str) -> String {
     state
         .db
@@ -987,6 +997,12 @@ pub async fn member_add(
         handle: handle_of(&state, &user_id),
     });
     notify_server_members(&state, &s.id, &me, &joined);
+    if let Some(line) = crate::notices::added_line(
+        &crate::notices::person_name(&state, &me),
+        &[crate::notices::person_name(&state, &user_id)],
+    ) {
+        server_notice(&state, &s.id, &line);
+    }
     // The newcomer's own devices learn about the server right away.
     let _ = state.db.push_user_event(
         &user_id,
@@ -1116,6 +1132,11 @@ pub async fn join(
             user_id: me.clone(),
             handle: handle_of(&state, &me),
         }),
+    );
+    server_notice(
+        &state,
+        &s.id,
+        &format!("{} joined", crate::notices::person_name(&state, &me)),
     );
     match load(&state, &me, &s.id) {
         Ok((s, m)) => Json(server_json(&state, &s, &m, true)).into_response(),
@@ -1386,6 +1407,12 @@ pub async fn member_remove(
     });
     let _ = state.db.push_user_event(&uid, &event, None);
     notify_server_members(&state, &id, &me, &event);
+    if let Some(line) = crate::notices::removed_line(
+        &crate::notices::person_name(&state, &me),
+        &[crate::notices::person_name(&state, &uid)],
+    ) {
+        server_notice(&state, &id, &line);
+    }
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -1425,6 +1452,11 @@ pub async fn leave(
             banned: None,
             handle: Some(handle_of(&state, &me)),
         }),
+    );
+    server_notice(
+        &state,
+        &id,
+        &crate::notices::left_line(&crate::notices::person_name(&state, &me)),
     );
     StatusCode::NO_CONTENT.into_response()
 }

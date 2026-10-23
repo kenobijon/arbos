@@ -933,6 +933,14 @@ final class RelayAPI {
         return try await peopleChat(chatId)
     }
 
+    /// One call for a batch of people and agents: the relay writes one membership notice (#1349).
+    func addMembers(chatId: String, handles: [String], agentIds: [Id]) async throws -> PeopleChat {
+        let cleaned = handles.map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "@ ")) }.filter { !$0.isEmpty }
+        let v = try await json("POST", "/chats/\(chatId)/members", body: ["handles": cleaned, "agent_ids": agentIds])
+        if let chat = PeopleChat.parse(v) { return chat }
+        return try await peopleChat(chatId)
+    }
+
     func removeMember(chatId: String, userId: String) async throws {
         _ = try await request("DELETE", "/chats/\(chatId)/members/\(userId)")
     }

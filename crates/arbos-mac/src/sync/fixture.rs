@@ -3285,6 +3285,32 @@ async fn stream_blocks(
     true
 }
 
+/// The signed-in fixture user as a notice names them.
+const ME_NAME: &str = "Jacob Steeves";
+
+/// "Jacob Steeves added A, B and C" — empty when nobody was new.
+fn added_line_text(names: &[String]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => format!("{ME_NAME} added {one}"),
+        [a, b] => format!("{ME_NAME} added {a} and {b}"),
+        [init @ .., last] => format!("{ME_NAME} added {} and {last}", init.join(", ")),
+    }
+}
+
+/// What the relay writes on a membership change (#1349): one centred system line in
+/// the group's chat, as device `relay`.
+fn membership_notice(shared: &Arc<Shared>, chat_id: &str, text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    with_doc(shared, chat_id, |doc| {
+        doc.core.transact(|d| {
+            let _ = d.append_system_line(&new_id(), text, "relay", None);
+        });
+    });
+}
+
 fn with_doc<R>(shared: &Arc<Shared>, chat_id: &str, f: impl FnOnce(&ChatDoc) -> R) -> Option<R> {
     let docs = shared.docs.lock().unwrap();
     docs.get(chat_id).map(f)
@@ -5249,11 +5275,23 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             chat_id,
             project_id,
         } => {
-            {
+            let removed = {
                 let mut projects = shared.projects.lock().unwrap();
-                if let Some(space) = projects.iter_mut().find(|p| p.id == *chat_id) {
-                    space.agents.retain(|a| a.project_id != *project_id);
-                }
+                projects
+                    .iter_mut()
+                    .find(|p| p.id == *chat_id)
+                    .and_then(|space| {
+                        let gone = space
+                            .agents
+                            .iter()
+                            .find(|a| a.project_id == *project_id)
+                            .map(|a| a.name.clone());
+                        space.agents.retain(|a| a.project_id != *project_id);
+                        gone
+                    })
+            };
+            if let Some(name) = removed {
+                membership_notice(shared, chat_id, &format!("{} removed {name}", ME_NAME));
             }
             emit_projects(shared);
             true
@@ -5290,6 +5328,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                         })
                 })
                 .collect();
+            let mut names: Vec<String> = Vec::new();
             if let Some(space) = projects.iter_mut().find(|p| p.id == *chat_id) {
                 for raw in handles {
                     let handle = raw.trim().trim_start_matches('@').to_lowercase();
@@ -5297,25 +5336,41 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                         continue;
                     };
                     if !space.people.iter().any(|x| x.id == other.id) {
+                        names.push(other.display_name());
                         space.people.push(other);
                     }
                 }
                 for agent in agents {
                     if !space.has_agent(&agent.project_id) {
+                        names.push(agent.name.clone());
                         space.agents.push(agent);
                     }
                 }
             }
             drop(projects);
+            // Like the relay (#1349): one "<me> added A, B and C" line per batch.
+            membership_notice(shared, chat_id, &added_line_text(&names));
             emit_projects(shared);
             true
         }
         ClientCommand::RemoveMember { chat_id, user_id } => {
-            {
+            let removed = {
                 let mut projects = shared.projects.lock().unwrap();
-                if let Some(p) = projects.iter_mut().find(|p| p.id == *chat_id) {
-                    p.people.retain(|x| x.id != *user_id);
-                }
+                projects
+                    .iter_mut()
+                    .find(|p| p.id == *chat_id)
+                    .and_then(|p| {
+                        let gone = p
+                            .people
+                            .iter()
+                            .find(|x| x.id == *user_id)
+                            .map(|x| x.display_name());
+                        p.people.retain(|x| x.id != *user_id);
+                        gone
+                    })
+            };
+            if let Some(name) = removed {
+                membership_notice(shared, chat_id, &format!("{} removed {name}", ME_NAME));
             }
             emit_projects(shared);
             true

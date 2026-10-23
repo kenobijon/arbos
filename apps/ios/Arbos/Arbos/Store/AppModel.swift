@@ -2283,6 +2283,19 @@ final class AppModel: ObservableObject {
     /// `POST /chats/{id}/members`, agents by `POST /chats/{id}/agents`. All are
     /// tried; the first failure is reported once and the call returns false.
     func addMembers(chatId: String, handles: [String], agentIds: [Id]) async -> Bool {
+        // One call for the batch (#1349): the relay adds everyone and writes one
+        // "<me> added A, B and C" line. A relay that only knows `{handle}` answers 4xx;
+        // then every add is tried on its own as before.
+        do {
+            let chat = try await api.addMembers(chatId: chatId, handles: handles, agentIds: agentIds)
+            if let i = peopleChats.firstIndex(where: { $0.id == chatId }) { peopleChats[i] = chat }
+            return true
+        } catch let e as RelayError where [400, 404, 415, 422].contains(e.status) {
+            // fall through to the per-item adds
+        } catch {
+            notice = Notice(text: "Could not add members: \(error.localizedDescription)")
+            return false
+        }
         var failure: String?
         for handle in handles {
             do {
@@ -2308,23 +2321,16 @@ final class AppModel: ObservableObject {
         return true
     }
 
-    /// Owner/admin removes a person from a people chat (`DELETE /chats/{id}/members/{userId}`).
-    /// Writes a centred "@handle left" system line (same shape as "@handle joined") so the
-    /// transcript keeps a chat event after the member is gone from the roster.
+    /// Owner/admin removes a person from a people chat (`DELETE /chats/{id}/members/{userId}`);
+    /// the relay writes the "<me> removed @handle" line (#1349).
     func removeMember(chatId: String, userId: String) {
         Task {
             do {
-                let handle = peopleChat(chatId)?.members.first { !$0.isAgent && $0.id == userId }?.handle
                 try await api.removeMember(chatId: chatId, userId: userId)
                 if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
                     peopleChats[i].members.removeAll { !$0.isAgent && $0.id == userId }
                 }
-                if let handle, !handle.isEmpty {
-                    // Remover writes once; other members see it via room sync (they get the
-                    // people_member_removed push but are not told to write — avoids duplicates).
-                    writeSystemLine(chatId: chatId, projectId: peopleSlot,
-                                    text: "@\(handle) left", callId: "member-left-\(chatId)-\(userId)")
-                }
+                // The relay writes "<me> removed @handle" into the chat (#1349).
             } catch {
                 let e = error as? RelayError
                 notice = Notice(text: e?.type == "owner_only" ? "Only an owner can remove people."
