@@ -25,6 +25,44 @@ const ROWS_BATCH: i64 = 256;
 /// How long live rows are held for a socket that has not finished (or started) its catch-up.
 const CATCHUP_HOLD: Duration = Duration::from_secs(10);
 
+/// A device may push back history the relay lacks once per connection (`PushHeader.heal`).
+const HEALS_PER_CONNECTION: u32 = 1;
+
+/// Encoded version vector of the room's stored doc (checkpoint ∪ rows), cached on the room by
+/// head so a reconnect storm rebuilds it once per head change, not once per socket.
+fn room_version_vector(
+    state: &AppState,
+    room: &crate::state::Room,
+    room_name: &str,
+) -> anyhow::Result<Vec<u8>> {
+    use arbos_core::doc::{encode_vv, ChatDoc};
+    let head = state.db.room_state(room_name)?.head;
+    if let Some((h, vv)) = room.vv_cache.lock().unwrap().as_ref() {
+        if *h == head {
+            return Ok(vv.clone());
+        }
+    }
+    let mut doc = match state.db.checkpoint_bytes(room_name)? {
+        Some((_, bytes)) => ChatDoc::from_snapshot(None, false, &bytes)?,
+        None => ChatDoc::new(None, false),
+    };
+    let mut after = 0;
+    loop {
+        let rows = state.db.rows_after(room_name, after, None, ROWS_BATCH)?;
+        let n = rows.len() as i64;
+        for r in rows {
+            after = r.seq;
+            let _ = doc.import(&r.bytes);
+        }
+        if n < ROWS_BATCH {
+            break;
+        }
+    }
+    let vv = encode_vv(&doc.oplog_vv());
+    *room.vv_cache.lock().unwrap() = Some((head, vv.clone()));
+    Ok(vv)
+}
+
 /// Per-socket row ordering (see `run`).
 struct Delivery {
     /// True from connect / HELLO until this socket's ROWS_REQ reply ended with ROWS_DONE.
@@ -33,6 +71,8 @@ struct Delivery {
     last_sent_seq: i64,
     /// Live rows that arrived while catching up, in arrival (= seq) order.
     held: Vec<RoomBroadcast>,
+    /// History-heal pushes accepted on this socket (`PushHeader.heal`); one per connection.
+    heals: u32,
 }
 
 impl Default for Delivery {
@@ -41,6 +81,7 @@ impl Default for Delivery {
             catching_up: true,
             last_sent_seq: 0,
             held: Vec::new(),
+            heals: 0,
         }
     }
 }
@@ -328,10 +369,14 @@ async fn handle_frame(
             // a row appended between the store read and now is broadcast live and arrives next,
             // and a client must not move its cursor beyond what it has been sent.
             delivery.catching_up = false;
+            // The payload is the relay's version vector for the room (checkpoint ∪ rows): a
+            // device compares it with its own doc and pushes back what the relay lacks
+            // (`PushHeader.heal`), so one complete device heals a room whose rows were lost.
+            let relay_vv = room_version_vector(state, room, room_name).unwrap_or_default();
             sink.send(frame(
                 FrameType::RowsDone,
                 json!({ "headSeq": after }),
-                Bytes::new(),
+                Bytes::from(relay_vv),
             ))
             .await?;
         }
@@ -341,6 +386,19 @@ async fn handle_frame(
                 sink.send(error_frame("too_large", "row exceeds 1 MiB"))
                     .await?;
                 return Ok(());
+            }
+            if p.heal {
+                if delivery.heals >= HEALS_PER_CONNECTION {
+                    tracing::warn!(%room_name, %device, "history heal refused: one per connection");
+                    sink.send(error_frame("heal_limit", "one history heal per connection"))
+                        .await?;
+                    return Ok(());
+                }
+                delivery.heals += 1;
+                tracing::info!(
+                    %room_name, %device, bytes = f.payload.len(), batch_id = %p.batch_id,
+                    "history heal: a device pushed ops the relay lacked"
+                );
             }
             let mut wake_owners = Vec::new();
             if let Some(chat_id) = room_name.strip_prefix(&format!("{}/", people::PEOPLE_PROJECT)) {
@@ -547,6 +605,24 @@ pub async fn post_checkpoint(
         .and_then(|s| hex::decode(s).ok())
         .unwrap_or_default();
     let room_name = wire::room_name(&project_id, &chat_id);
+    let device = principal.device_name();
+    match checkpoint_covers_store(&state.db, &room_name, seq_covered, &body) {
+        Ok(CheckpointVerdict::Covers) => {}
+        Ok(CheckpointVerdict::Incomplete(why)) => {
+            tracing::warn!(
+                %room_name, %device, seq_covered, %why,
+                "checkpoint refused: the snapshot lacks ops the relay holds"
+            );
+            return (
+                StatusCode::CONFLICT,
+                format!("checkpoint_incomplete: {why}"),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+        }
+    }
     match state
         .db
         .put_checkpoint(&room_name, seq_covered, &frontier, &body)
@@ -555,6 +631,93 @@ pub async fn post_checkpoint(
         Ok(false) => (StatusCode::CONFLICT, "seqCovered below floor").into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
+}
+
+/// Outcome of [`checkpoint_covers_store`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum CheckpointVerdict {
+    /// The snapshot holds every op the relay has for `seq <= seq_covered`.
+    Covers,
+    /// It does not; the reason names what is missing.
+    Incomplete(String),
+}
+
+/// A checkpoint replaces the rows it covers, so it must contain every op in them. Boxes posted
+/// snapshots of incomplete replicas (two agents of one owner share a device id, so each replica
+/// skipped the other's rows — #1409) and the relay deleted 194 messages of a 446-message group
+/// chat on 2026-10-23 (Arbonites). The relay can parse the doc (`load_doc` does for export and
+/// the Matrix mirror), so it checks before it deletes anything:
+///
+/// 1. `seq_covered` may not exceed the room head (nothing can cover rows that do not exist);
+/// 2. the candidate must contain the previous checkpoint's version vector;
+/// 3. importing every stored row with `seq <= seq_covered` into the candidate must apply nothing
+///    new and park nothing as pending — i.e. the candidate already had every op, with its deps.
+pub fn checkpoint_covers_store(
+    db: &crate::db::Db,
+    room: &str,
+    seq_covered: i64,
+    snapshot: &[u8],
+) -> anyhow::Result<CheckpointVerdict> {
+    use arbos_core::doc::ChatDoc;
+
+    let st = db.room_state(room)?;
+    if seq_covered > st.head {
+        return Ok(CheckpointVerdict::Incomplete(format!(
+            "seqCovered {seq_covered} is above the room head {}",
+            st.head
+        )));
+    }
+    let mut candidate = match ChatDoc::from_snapshot(None, false, snapshot) {
+        Ok(d) => d,
+        Err(e) => {
+            return Ok(CheckpointVerdict::Incomplete(format!(
+                "snapshot does not load: {e}"
+            )))
+        }
+    };
+    let mut after = 0;
+    if let Some((prev_seq, prev_bytes)) = db.checkpoint_bytes(room)? {
+        let prev = ChatDoc::from_snapshot(None, false, &prev_bytes)?;
+        if !candidate.contains_vv(&prev.oplog_vv()) {
+            return Ok(CheckpointVerdict::Incomplete(format!(
+                "missing ops of the current checkpoint (seq {prev_seq})"
+            )));
+        }
+        after = prev_seq;
+    }
+    let mut before = candidate.oplog_vv();
+    let mut missing_rows = 0usize;
+    let mut first_missing: Option<i64> = None;
+    loop {
+        let rows = db.rows_between(room, after, seq_covered, ROWS_BATCH)?;
+        let n = rows.len() as i64;
+        for row in rows {
+            after = row.seq;
+            let applied_or_parked = match candidate.import(&row.bytes) {
+                Ok(status) => {
+                    let now = candidate.oplog_vv();
+                    let applied = now != before;
+                    before = now;
+                    status.pending.is_some() || applied
+                }
+                Err(_) => true,
+            };
+            if applied_or_parked {
+                missing_rows += 1;
+                first_missing.get_or_insert(row.seq);
+            }
+        }
+        if n < ROWS_BATCH {
+            break;
+        }
+    }
+    if missing_rows > 0 {
+        return Ok(CheckpointVerdict::Incomplete(format!(
+            "{missing_rows} stored row(s) from seq {} are not in the snapshot",
+            first_missing.unwrap_or_default()
+        )));
+    }
+    Ok(CheckpointVerdict::Covers)
 }
 
 /// `GET /room/{project}/{chat}/stats`.
@@ -884,5 +1047,562 @@ mod ordering_tests {
             other => panic!("late socket: expected 1012, got {other:?}"),
         }
         assert_eq!(state.restart.open_sockets.load(Ordering::Relaxed), 0);
+    }
+}
+
+#[cfg(test)]
+mod history_tests {
+    //! Arbonites, 2026-10-23 (#1518): a fresh device must get the whole history of a long chat —
+    //! from the checkpoint plus the rows after it — through a graceful 1012 restart in the middle
+    //! of its backfill, and when it reuses a device id that wrote rows before. And the relay must
+    //! refuse a checkpoint whose snapshot lacks rows it holds, because storing one deletes them.
+
+    use axum::routing::get;
+    use axum::Router;
+    use futures::{SinkExt, StreamExt};
+    use serde_json::json;
+    use std::net::SocketAddr;
+    use std::time::Duration;
+    use tokio_tungstenite::tungstenite::Message as TMsg;
+
+    use arbos_core::doc::{ChatDoc, UserMessageOpts};
+    use arbos_core::ids::{now_ms, ulid};
+    use arbos_core::wire::{Frame, FrameType};
+
+    use super::{checkpoint_covers_store, CheckpointVerdict};
+    use crate::people::tests_support::{person, project_of};
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+    use crate::{db::Chat, state::AppState};
+
+    const ROWS: usize = 700;
+
+    async fn serve(state: AppState) -> SocketAddr {
+        let app = Router::new()
+            .route("/room/{project}/{chat}", get(super::ws_room))
+            .route(
+                "/room/{project}/{chat}/checkpoint",
+                get(super::get_checkpoint),
+            )
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        addr
+    }
+
+    fn device_token(state: &AppState, user: &str) -> String {
+        let token = format!("adv_{}", ulid().to_ascii_lowercase());
+        state
+            .db
+            .insert_device(
+                &ulid(),
+                "t",
+                &arbos_core::auth::hash(&token),
+                user,
+                "paircode",
+            )
+            .unwrap();
+        token
+    }
+
+    fn new_chat(state: &AppState, project: &str) -> String {
+        let chat = ulid();
+        state
+            .db
+            .insert_chat(&Chat {
+                id: chat.clone(),
+                project_id: project.to_owned(),
+                title: "t".into(),
+                is_pinned: false,
+                position: 0,
+                created_at: now_ms(),
+                doc_epoch: 1,
+                kind: "chat".into(),
+                participants: Vec::new(),
+                forked_from: None,
+            })
+            .unwrap();
+        chat
+    }
+
+    /// Write `n` user messages as `n` rows under `device`, the way an app does (one commit, one
+    /// PUSH each). Returns the writer's doc.
+    fn write_rows(state: &AppState, room: &str, device: &str, n: usize) -> ChatDoc {
+        let doc = ChatDoc::new(Some(7), false);
+        let base = doc.oplog_vv();
+        doc.init_meta("c", "p", 1);
+        state
+            .db
+            .append_row(room, device, "meta", &doc.export_updates_since(&base))
+            .unwrap();
+        for i in 0..n {
+            let before = doc.oplog_vv();
+            doc.append_user_message(
+                &format!("m{i}"),
+                &format!("message {i}"),
+                device,
+                &UserMessageOpts::default(),
+            )
+            .unwrap();
+            let bytes = doc.export_updates_since(&before);
+            state
+                .db
+                .append_row(room, device, &format!("b{i}"), &bytes)
+                .unwrap();
+        }
+        doc
+    }
+
+    fn decode(m: TMsg) -> Option<Frame> {
+        match m {
+            TMsg::Binary(b) => Frame::decode(b).ok().flatten(),
+            _ => None,
+        }
+    }
+
+    /// A device's sync, as the apps do it (arbos-client `RoomSession`, which the relay may not
+    /// depend on): HELLO with the saved cursor, fetch the checkpoint when the local doc does not
+    /// contain its frontier, ROWS_REQ after the cursor with `excludeOwn:false`, cursor moves on
+    /// each applied ROW and on ROWS_DONE. `restart_after` rows into the first backfill the relay
+    /// restarts gracefully (1012); the device reconnects from its saved cursor.
+    struct Device {
+        doc: ChatDoc,
+        cursor: i64,
+        device: String,
+        /// Bytes this device pushed back as history heals.
+        healed_bytes: usize,
+    }
+
+    impl Device {
+        fn fresh(device: &str) -> Self {
+            Self {
+                doc: ChatDoc::new(Some(9), false),
+                cursor: 0,
+                device: device.to_owned(),
+                healed_bytes: 0,
+            }
+        }
+
+        /// A device that already holds `doc` (it was live when the rows were written).
+        fn holding(device: &str, doc: ChatDoc, cursor: i64) -> Self {
+            Self {
+                doc,
+                cursor,
+                device: device.to_owned(),
+                healed_bytes: 0,
+            }
+        }
+
+        /// One connection: returns true when ROWS_DONE was reached, false on a close.
+        async fn connect_once(
+            &mut self,
+            addr: SocketAddr,
+            room: &str,
+            token: &str,
+            state: &AppState,
+            restart_after: Option<usize>,
+        ) -> bool {
+            let url = format!("ws://{addr}/room/{room}?token={token}");
+            let (ws, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+            let (mut sink, mut stream) = ws.split();
+            sink.send(TMsg::Binary(
+                Frame::new(
+                    FrameType::Hello,
+                    json!({ "cursor": self.cursor, "device": self.device, "room": room, "proto": arbos_core::PROTO_VERSION }),
+                    bytes::Bytes::new(),
+                )
+                .encode(),
+            ))
+            .await
+            .unwrap();
+            let mut rows_this_session = 0usize;
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+            loop {
+                let m = tokio::time::timeout_at(deadline, stream.next())
+                    .await
+                    .expect("relay answers in time");
+                let Some(Ok(m)) = m else { return false };
+                if let TMsg::Close(_) = m {
+                    return false;
+                }
+                let Some(f) = decode(m) else { continue };
+                match f.ty {
+                    FrameType::State => {
+                        let cp = f.header["checkpointSeq"].as_i64().unwrap_or(0);
+                        if cp > 0 && !self.doc.contains_frontier(&f.payload) {
+                            let res = reqwest::Client::new()
+                                .get(format!("http://{addr}/room/{room}/checkpoint"))
+                                .bearer_auth(token)
+                                .send()
+                                .await
+                                .unwrap();
+                            let seq: i64 = res.headers()["x-arbos-checkpoint-seq"]
+                                .to_str()
+                                .unwrap()
+                                .parse()
+                                .unwrap();
+                            let bytes = res.bytes().await.unwrap();
+                            self.doc.import(&bytes).unwrap();
+                            self.cursor = self.cursor.max(seq);
+                        }
+                        sink.send(TMsg::Binary(
+                            Frame::new(
+                                FrameType::RowsReq,
+                                json!({ "after": self.cursor, "excludeOwn": false }),
+                                bytes::Bytes::new(),
+                            )
+                            .encode(),
+                        ))
+                        .await
+                        .unwrap();
+                    }
+                    FrameType::Row => {
+                        let seq = f.header["seq"].as_i64().unwrap();
+                        self.doc.import(&f.payload).unwrap();
+                        self.cursor = self.cursor.max(seq);
+                        rows_this_session += 1;
+                        if restart_after.is_some_and(|n| rows_this_session == n) {
+                            // The relay goes down gracefully mid-stream: 1012 to every socket.
+                            // Whatever was still in flight on the wire is gone with the process;
+                            // the device keeps the cursor of the last row it applied.
+                            crate::restart::close_and_drain(state, Duration::from_secs(3)).await;
+                            return false;
+                        }
+                    }
+                    FrameType::RowsDone => {
+                        let head = f.header["headSeq"].as_i64().unwrap();
+                        self.cursor = self.cursor.max(head);
+                        // History heal: push what this replica holds beyond the relay's vv.
+                        if let Some(relay_vv) = arbos_core::doc::decode_vv(&f.payload) {
+                            let missing = self.doc.updates_beyond(&relay_vv);
+                            if !missing.is_empty() {
+                                self.healed_bytes += missing.len();
+                                sink.send(TMsg::Binary(
+                                    Frame::new(
+                                        FrameType::Push,
+                                        json!({ "batchId": format!("heal-{}", ulid()), "heal": true }),
+                                        bytes::Bytes::from(missing),
+                                    )
+                                    .encode(),
+                                ))
+                                .await
+                                .unwrap();
+                                // Wait for the ACK so the test knows the row is stored.
+                                loop {
+                                    let m = tokio::time::timeout_at(deadline, stream.next())
+                                        .await
+                                        .expect("ack in time");
+                                    let Some(Ok(m)) = m else { return false };
+                                    if let Some(f) = decode(m) {
+                                        if f.ty == FrameType::Ack {
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        return true;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        async fn sync(
+            &mut self,
+            addr: SocketAddr,
+            room: &str,
+            token: &str,
+            state: &AppState,
+            restart_after: Option<usize>,
+        ) -> usize {
+            let mut reconnects = 0;
+            let mut restart_after = restart_after;
+            loop {
+                let done = self
+                    .connect_once(addr, room, token, state, restart_after.take())
+                    .await;
+                if done {
+                    return reconnects;
+                }
+                // "systemctl restart": the new process serves sockets again.
+                state.restart.closing.send_replace(false);
+                reconnects += 1;
+                assert!(reconnects < 5, "device could not finish its backfill");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+
+        fn message_ids(&self) -> Vec<String> {
+            self.doc.messages().into_iter().map(|m| m.id).collect()
+        }
+    }
+
+    fn expected_ids(n: usize) -> Vec<String> {
+        (0..n).map(|i| format!("m{i}")).collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn fresh_device_gets_all_700_rows_through_a_graceful_restart_mid_backfill() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let project = project_of(&state, &alice, "History");
+        let chat = new_chat(&state, &project);
+        let room = format!("{project}/{chat}");
+        let token = device_token(&state, &alice);
+        write_rows(&state, &room, "dev:phone", ROWS);
+        let addr = serve(state.clone()).await;
+
+        // A brand-new Mac: cursor 0, empty doc. The relay restarts after 300 rows; the device
+        // redials from its saved cursor and finishes.
+        let mut mac = Device::fresh("dev:mac");
+        let reconnects = mac.sync(addr, &room, &token, &state, Some(300)).await;
+        assert_eq!(reconnects, 1, "one 1012 close, one redial");
+        assert_eq!(mac.message_ids(), expected_ids(ROWS));
+        assert_eq!(mac.cursor, ROWS as i64 + 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn same_device_id_relogin_gets_its_own_rows_back() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let project = project_of(&state, &alice, "Relogin");
+        let chat = new_chat(&state, &project);
+        let room = format!("{project}/{chat}");
+        let token = device_token(&state, &alice);
+        // Every row was written under the id the device reconnects with (#1409: the own-row
+        // exclusion would hide the whole chat from a re-login or a second replica).
+        write_rows(&state, &room, "dev:mac", ROWS);
+        let addr = serve(state.clone()).await;
+
+        let mut again = Device::fresh("dev:mac");
+        again.sync(addr, &room, &token, &state, None).await;
+        assert_eq!(again.message_ids(), expected_ids(ROWS));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn fresh_device_after_a_checkpoint_gets_checkpoint_plus_rows() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let project = project_of(&state, &alice, "Checkpointed");
+        let chat = new_chat(&state, &project);
+        let room = format!("{project}/{chat}");
+        let token = device_token(&state, &alice);
+        let writer = write_rows(&state, &room, "dev:phone", ROWS);
+        // A complete replica checkpoints the first 500 rows (seq 1 is the meta row).
+        let head_500 = 501;
+        let snapshot_500 = {
+            let mut d = ChatDoc::new(None, false);
+            for r in state.db.rows_between(&room, 0, head_500, 1000).unwrap() {
+                d.import(&r.bytes).unwrap();
+            }
+            d.snapshot()
+        };
+        assert_eq!(
+            checkpoint_covers_store(&state.db, &room, head_500, &snapshot_500).unwrap(),
+            CheckpointVerdict::Covers
+        );
+        assert!(state
+            .db
+            .put_checkpoint(&room, head_500, &[], &snapshot_500)
+            .unwrap());
+        assert_eq!(state.db.room_state(&room).unwrap().floor, head_500);
+        let _ = writer;
+        let addr = serve(state.clone()).await;
+
+        let mut mac = Device::fresh("dev:mac");
+        mac.sync(addr, &room, &token, &state, Some(100)).await;
+        assert_eq!(mac.message_ids(), expected_ids(ROWS));
+    }
+
+    /// The Arbonites failure: a replica that skipped another writer's rows (and so parks every
+    /// dependant as pending) posts its snapshot as the checkpoint. The relay must refuse it and
+    /// keep its rows; a complete snapshot is accepted.
+    #[tokio::test]
+    async fn incomplete_snapshot_is_refused_and_rows_stay() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let project = project_of(&state, &alice, "Guard");
+        let chat = new_chat(&state, &project);
+        let room = format!("{project}/{chat}");
+        // Phone writes 300 rows; a second writer that has them all writes 10 more (its ops
+        // depend on the phone's); the phone then writes 10 more on top of both.
+        let mut phone = write_rows(&state, &room, "dev:phone", 300);
+        let mut agent = ChatDoc::new(Some(8), false);
+        agent.import(&phone.snapshot()).unwrap();
+        for i in 0..10 {
+            let before = agent.oplog_vv();
+            agent
+                .append_user_message(
+                    &format!("a{i}"),
+                    "agent",
+                    "box:1",
+                    &UserMessageOpts::default(),
+                )
+                .unwrap();
+            state
+                .db
+                .append_row(
+                    &room,
+                    "box:1",
+                    &format!("a{i}"),
+                    &agent.export_updates_since(&before),
+                )
+                .unwrap();
+        }
+        phone.import(&agent.snapshot()).unwrap();
+        for i in 300..310 {
+            let before = phone.oplog_vv();
+            phone
+                .append_user_message(
+                    &format!("m{i}"),
+                    "late",
+                    "dev:phone",
+                    &UserMessageOpts::default(),
+                )
+                .unwrap();
+            state
+                .db
+                .append_row(
+                    &room,
+                    "dev:phone",
+                    &format!("b{i}"),
+                    &phone.export_updates_since(&before),
+                )
+                .unwrap();
+        }
+        let head = state.db.room_state(&room).unwrap().head;
+        assert_eq!(head, 1 + 300 + 10 + 10);
+
+        // A replica behind the agent's device id never received the agent's rows ("own") and
+        // parked the phone's last 10 as pending: its snapshot has 300 messages, not 320.
+        let mut frozen = ChatDoc::new(Some(5), false);
+        for r in state.db.rows_between(&room, 0, head, 1000).unwrap() {
+            if r.device != "box:1" {
+                frozen.import(&r.bytes).unwrap();
+            }
+        }
+        assert_eq!(frozen.messages().len(), 300);
+        let verdict = checkpoint_covers_store(&state.db, &room, head, &frozen.snapshot()).unwrap();
+        assert!(
+            matches!(&verdict, CheckpointVerdict::Incomplete(why) if why.contains("stored row")),
+            "{verdict:?}"
+        );
+        assert_eq!(
+            state.db.room_state(&room).unwrap().row_count,
+            head,
+            "nothing deleted"
+        );
+
+        // Above the head: refused too.
+        assert!(matches!(
+            checkpoint_covers_store(&state.db, &room, head + 1, &phone.snapshot()).unwrap(),
+            CheckpointVerdict::Incomplete(_)
+        ));
+
+        // The complete replica's snapshot covers everything and compacts the room.
+        assert_eq!(
+            checkpoint_covers_store(&state.db, &room, head, &phone.snapshot()).unwrap(),
+            CheckpointVerdict::Covers
+        );
+        assert!(state
+            .db
+            .put_checkpoint(&room, head, &[], &phone.snapshot())
+            .unwrap());
+        let st = state.db.room_state(&room).unwrap();
+        assert_eq!((st.floor, st.row_count), (head, 0));
+
+        // A later snapshot that drops the checkpoint's own ops is refused as well.
+        let mut partial = ChatDoc::new(Some(6), false);
+        partial.import(&frozen.snapshot()).unwrap();
+        assert!(matches!(
+            checkpoint_covers_store(&state.db, &room, head, &partial.snapshot()).unwrap(),
+            CheckpointVerdict::Incomplete(why) if why.contains("current checkpoint")
+        ));
+    }
+
+    /// The Arbonites recovery (#1518 follow-up): the relay's history was cut to a stale
+    /// checkpoint (rows deleted, later rows parked as pending); a device that was live and still
+    /// holds every op reconnects, gets the relay's version vector in ROWS_DONE, pushes the
+    /// difference back as one `heal` row, and a brand-new device then sees the whole chat.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn live_device_heals_a_relay_that_lost_rows_and_a_fresh_device_converges() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let project = project_of(&state, &alice, "Heal");
+        let chat = new_chat(&state, &project);
+        let room = format!("{project}/{chat}");
+        let token = device_token(&state, &alice);
+        // The phone writes 700 rows; the relay then gets a stale checkpoint covering 400 of them
+        // but built from a replica that only had the first 100 (what the old relay accepted),
+        // so 300 rows' ops are gone from the relay and the remaining 300 rows are pending.
+        let mut phone = write_rows(&state, &room, "dev:phone", ROWS);
+        let head_400 = 401;
+        let stale = {
+            let mut d = ChatDoc::new(None, false);
+            for r in state.db.rows_between(&room, 0, 101, 1000).unwrap() {
+                d.import(&r.bytes).unwrap();
+            }
+            d.snapshot()
+        };
+        assert!(state
+            .db
+            .put_checkpoint(&room, head_400, &[], &stale)
+            .unwrap());
+        let addr = serve(state.clone()).await;
+
+        // Before the heal: a fresh device gets 100 messages (the rest are parked).
+        let mut probe = Device::fresh("dev:probe");
+        probe.sync(addr, &room, &token, &state, None).await;
+        assert_eq!(
+            probe.message_ids().len(),
+            100,
+            "damaged relay shows 100 of 700"
+        );
+
+        // The phone (holding everything) reconnects and heals the relay with one row.
+        let phone_vv_before = phone.oplog_vv();
+        let mut live = Device::holding(
+            "dev:phone",
+            std::mem::replace(&mut phone, ChatDoc::new(None, false)),
+            ROWS as i64 + 1,
+        );
+        live.sync(addr, &room, &token, &state, None).await;
+        assert!(live.healed_bytes > 0, "the live device pushed a heal row");
+        assert_eq!(
+            live.doc.oplog_vv(),
+            phone_vv_before,
+            "heal adds nothing to the healer"
+        );
+        let st = state.db.room_state(&room).unwrap();
+        let extra: Vec<(i64, String, usize)> = state
+            .db
+            .rows_between(&room, ROWS as i64 + 1, st.head, 100)
+            .unwrap()
+            .into_iter()
+            .map(|r| (r.seq, r.device, r.bytes.len()))
+            .collect();
+        assert_eq!(
+            st.head,
+            ROWS as i64 + 2,
+            "exactly one heal row stored; extra rows {extra:?}; probe healed {}",
+            probe.healed_bytes
+        );
+
+        // After the heal: a brand-new device gets all 700.
+        let mut mac = Device::fresh("dev:mac");
+        mac.sync(addr, &room, &token, &state, None).await;
+        assert_eq!(mac.message_ids(), expected_ids(ROWS));
+        // And the probe, reconnecting, catches up to the full chat too.
+        probe.sync(addr, &room, &token, &state, None).await;
+        assert_eq!(probe.message_ids(), expected_ids(ROWS));
+        // A second connect of the healer finds nothing to heal (relay vv now covers it).
+        let healed_before = live.healed_bytes;
+        live.sync(addr, &room, &token, &state, None).await;
+        assert_eq!(
+            live.healed_bytes, healed_before,
+            "no second heal once the relay is whole"
+        );
     }
 }

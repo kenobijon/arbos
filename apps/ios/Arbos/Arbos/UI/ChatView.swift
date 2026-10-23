@@ -10,6 +10,13 @@ import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
+/// Long-press → Forward payload for the chat picker sheet.
+private struct PendingForward: Identifiable, Equatable {
+    let id = UUID()
+    let text: String
+    let from: String
+}
+
 struct ChatView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
@@ -48,11 +55,15 @@ struct ChatView: View {
     @State private var showFiles = false
     @State private var showAttach = false
     @State private var scroller: ScrollViewProxy?
-    /// Scrolled more than ~120 pt above the end: show Grok's round chevron.
+    /// Scrolled more than ~120 pt above the end: show Grok's round chevron
+    /// (or the new-messages pill when rows landed below).
     @State private var awayFromBottom = false
     /// Follow the end as rows stream / grow. Cleared when the user scrolls up;
-    /// restored when they return near the end or tap the chevron (Mac stick pin).
+    /// restored when they return near the end or tap the chevron / pill (Mac stick pin).
     @State private var pinnedToBottom = true
+    /// Rows that arrived while the reader was away from the end — drives the
+    /// "New messages" pill. Cleared when they re-pin or jump to the latest.
+    @State private var newBelowCount = 0
     @State private var demoRan = false
     @State private var demoQueue: [String] = []
     @StateObject private var recorder = MemoRecorder()
@@ -77,6 +88,8 @@ struct ChatView: View {
     @State private var timeRevealLocked = false
     /// True while a message's swipe-right-to-reply is locked — blocks swipe-right-to-Home.
     @State private var replySwipeActive = false
+    /// Long-press → Forward: the text to send and who wrote it (Forward sheet).
+    @State private var pendingForward: PendingForward?
 
     /// Rows after the in-chat search filter (profile "search").
     private var visibleRows: [Row] {
@@ -330,9 +343,12 @@ struct ChatView: View {
         }
         let list = messages
         let byId = Transcript.index(list)
+        // Sender names inside the bubbles: groups and channels only — never a 1:1 chat.
+        let multiParty = isChannel || (people?.isGroup ?? false)
         let next = Transcript.rows(list, byId: byId, projectId: slot,
                                    me: isChannel ? model.channelMe : model.myUserId,
-                                   people: isPeople || isChannel, agentNames: agentNames)
+                                   people: isPeople || isChannel, agentNames: agentNames,
+                                   multiParty: multiParty)
         // Rows appended after the last one we had (new messages) join the window, so the
         // oldest row on screen does not fall out of the view tree when a new one lands.
         // History that arrives above it — the first snapshot, a backfill, an older
@@ -393,15 +409,23 @@ struct ChatView: View {
                 }
             }
         }
-        .overlay(alignment: .bottomTrailing) {
-            if awayFromBottom {
-                scrollToBottomButton
-                    .padding(.trailing, composerSideInset)
+        .overlay(alignment: .bottom) {
+            if newBelowCount > 0 {
+                newMessagesPill
                     .padding(.bottom, 10)
-                    .transition(.opacity.combined(with: .scale(scale: 0.8)))
+                    .transition(.opacity.combined(with: .scale(scale: 0.92)))
+            } else if awayFromBottom {
+                HStack {
+                    Spacer(minLength: 0)
+                    scrollToBottomButton
+                        .padding(.trailing, composerSideInset)
+                }
+                .padding(.bottom, 10)
+                .transition(.opacity.combined(with: .scale(scale: 0.8)))
             }
         }
         .animation(.easeOut(duration: 0.2), value: awayFromBottom)
+        .animation(.easeOut(duration: 0.2), value: newBelowCount > 0)
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 0) {
                 presenceRow
@@ -458,6 +482,17 @@ struct ChatView: View {
         }
         .sheet(isPresented: $showProfile) {
             AgentEditSheet(projectId: projectId).environmentObject(model).environment(\.theme, theme)
+        }
+        .sheet(item: $pendingForward) { pending in
+            ForwardSheet(fromName: pending.from) { target in
+                pendingForward = nil
+                model.forwardText(pending.text, to: target)
+                model.notice = Notice(text: "Forwarded to \(target.title)")
+            }
+            .environmentObject(model)
+            .environment(\.theme, theme)
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
         }
         .task {
             guard DebugHooks.liveDemo, !model.demoStarted, DebugHooks.openChat == chatId || DebugHooks.openChat == nil, let text = DebugHooks.autoSend else { return }
@@ -836,14 +871,18 @@ struct ChatView: View {
         composerFocused ? Theme.composerInsetKeyboard : Theme.composerInset
     }
 
+    /// Jump to the latest row and resume stick-to-bottom.
+    private func jumpToLatest() {
+        pinnedToBottom = true
+        awayFromBottom = false
+        newBelowCount = 0
+        withAnimation(.easeOut(duration: 0.3)) { scroller?.scrollTo("bottom", anchor: .bottom) }
+    }
+
     /// Grok's scroll-to-bottom control: a 36 pt field-coloured circle with a
     /// chevron, right-aligned with the composer, 18 pt above it.
     private var scrollToBottomButton: some View {
-        Button {
-            pinnedToBottom = true
-            awayFromBottom = false
-            withAnimation(.easeOut(duration: 0.3)) { scroller?.scrollTo("bottom", anchor: .bottom) }
-        } label: {
+        Button(action: jumpToLatest) {
             ZStack {
                 Circle().fill(theme.field)
                 Circle().strokeBorder(theme.fieldBorder, lineWidth: 1)
@@ -856,6 +895,28 @@ struct ChatView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Scroll to bottom")
+    }
+
+    /// Shown when rows land below while the reader is up in history — tap jumps
+    /// to the end (iMessage / Slack style; Grok's bare chevron stays for scroll-up alone).
+    private var newMessagesPill: some View {
+        Button(action: jumpToLatest) {
+            HStack(spacing: 6) {
+                Image(systemName: "chevron.down")
+                    .font(theme.font(13, weight: .semibold))
+                Text(newBelowCount == 1 ? "New message" : "New messages")
+                    .font(theme.font(Theme.small, weight: .semibold))
+            }
+            .foregroundStyle(theme.text)
+            .padding(.horizontal, 14)
+            .frame(height: Theme.voiceButton)
+            .background(Capsule().fill(theme.field))
+            .overlay(Capsule().strokeBorder(theme.fieldBorder, lineWidth: 1))
+            .contentShape(Capsule().inset(by: -4))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("New messages")
+        .accessibilityHint("Scrolls to the latest message")
     }
 
     // MARK: Chat navigation swipes
@@ -1034,10 +1095,18 @@ struct ChatView: View {
                 if old == nil {
                     settleToBottom(proxy)
                 } else if pinnedToBottom {
+                    // Stick only while the reader is following the end.
                     if old?.id != new?.id {
                         withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("bottom", anchor: .bottom) }
                     } else {
                         proxy.scrollTo("bottom", anchor: .bottom)
+                    }
+                } else if let new, old?.id != new.id {
+                    // Reading history: a newer end row (not an older-page prepend) → pill.
+                    if let oldId = old?.id, let ix = rows.lastIndex(where: { $0.id == oldId }) {
+                        newBelowCount += max(0, rows.count - 1 - ix)
+                    } else {
+                        newBelowCount += 1
                     }
                 }
             }
@@ -1057,9 +1126,14 @@ struct ChatView: View {
                 guard focused else { return }
                 pinnedToBottom = true
                 awayFromBottom = false
+                newBelowCount = 0
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
                     withAnimation(.easeOut(duration: 0.25)) { proxy.scrollTo("bottom", anchor: .bottom) }
                 }
+            }
+            .onChange(of: awayFromBottom) { _, away in
+                // Reader scrolled back to the end by hand — clear the pill.
+                if !away { newBelowCount = 0 }
             }
         }
     }
@@ -1070,6 +1144,7 @@ struct ChatView: View {
     private func settleToBottom(_ proxy: ScrollViewProxy) {
         pinnedToBottom = true
         awayFromBottom = false
+        newBelowCount = 0
         proxy.scrollTo("bottom", anchor: .bottom)
         DispatchQueue.main.async { proxy.scrollTo("bottom", anchor: .bottom) }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { proxy.scrollTo("bottom", anchor: .bottom) }
@@ -1105,8 +1180,8 @@ struct ChatView: View {
     }
 
     /// A real message in the shared chat doc (the full menu: Copy, Reply,
-    /// Delete) — not a date / join / system line. Channels carry no replies
-    /// or deletes yet (C1 scope): Copy only.
+    /// Forward, Delete) — not a date / join / system line. Channels carry no
+    /// replies or deletes yet (C1 scope): Copy only.
     private func isMessageRow(_ row: Row) -> Bool {
         if isChannel { return false }
         switch row.kind {
@@ -1119,16 +1194,27 @@ struct ChatView: View {
 
     /// The long-press menu's actions (`MessageMenu`): Copy the text, Reply
     /// (in a people chat the agent that wrote it becomes the recipient),
-    /// Delete for everyone.
+    /// Forward to another chat, Delete for everyone.
     private func runMessageMenu(_ item: MessageMenuItem, row: Row) {
         switch item {
         case .copy:
             UIPasteboard.general.string = m_text(row)
         case .reply:
             beginReply(to: row)
+        case .forward:
+            beginForward(row)
         case .delete:
             model.deleteMessage(chatId: chatId, messageId: row.messageId)
         }
+    }
+
+    /// Long-press → Forward: open the chat picker with this row's text.
+    private func beginForward(_ row: Row) {
+        guard let m = messageById[row.messageId] else { return }
+        let text = m.plainText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        let from = MediaAlbum.senderName(m) { model.project($0)?.name }
+        pendingForward = PendingForward(text: text, from: from)
     }
 
     /// Reply to this row: composer preview + focus (people chats also address the agent).
@@ -1816,6 +1902,7 @@ struct ChatView: View {
         // A send means follow the reply: re-pin even if the reader had scrolled up.
         pinnedToBottom = true
         awayFromBottom = false
+        newBelowCount = 0
         if isChannel {
             // Rule 3/9: the composer sends through the shared client's `sendText`.
             guard !text.isEmpty else { return }
@@ -2100,9 +2187,11 @@ private struct NearTopReporter: ViewModifier {
 }
 
 /// Reports when the scroll view sits more than 120 pt above its end (iOS 18+;
-/// earlier systems never show the chevron). While `pinned` is true, content
+/// earlier systems never show the chevron / pill). While `pinned` is true, content
 /// growth (streaming row height, a new row) must not look like a user scroll-up:
 /// re-stick instead of flipping `away` and leaving the transcript stranded.
+/// While unpinned, growth must not re-pin either — a bottom scroll anchor can
+/// briefly shrink distance and would yank the reader out of history.
 private struct AwayFromBottomReporter: ViewModifier {
     @Binding var away: Bool
     @Binding var pinned: Bool
@@ -2122,9 +2211,14 @@ private struct AwayFromBottomReporter: ViewModifier {
                 )
             } action: { old, new in
                 let grew = new.height > old.height + 0.5
-                if pinned && grew {
-                    away = false
-                    onStick()
+                if grew {
+                    if pinned {
+                        away = false
+                        onStick()
+                    } else {
+                        // Keep history put; distance may dip from layout / bottom anchor.
+                        away = true
+                    }
                     return
                 }
                 let isAway = new.distance > 120

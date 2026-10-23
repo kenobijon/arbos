@@ -23,6 +23,8 @@ mod db_people;
 mod db_push;
 mod db_secrets;
 mod db_voice;
+mod debug_api;
+mod diag;
 mod export;
 mod features;
 mod feedback;
@@ -63,6 +65,8 @@ use axum::routing::{delete, get, post, put};
 use axum::Router;
 use clap::{Parser, Subcommand};
 use tokio::sync::{Mutex, RwLock};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::state::{AppState, AuthMode, Config};
 
@@ -144,11 +148,13 @@ enum Cmd {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
+    tracing_subscriber::registry()
+        .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "info,loro_internal=warn,arbos_relay=debug".into()),
         )
+        .with(tracing_subscriber::fmt::layer())
+        .with(diag::WarnRing)
         .init();
     let args = Args::parse();
     let db = db::Db::open(&args.data.join("relay.db"))?;
@@ -560,7 +566,10 @@ async fn main() -> anyhow::Result<()> {
             "/chats/{id}/agents/{project_id}/settings",
             axum::routing::put(people::agent_settings),
         )
-        .route("/chats/{id}/members", post(people::member_add))
+        .route(
+            "/chats/{id}/members",
+            get(debug_api::chat_members).post(people::member_add),
+        )
         .route(
             "/chats/{id}/members/{user_id}",
             delete(people::member_remove),
@@ -609,6 +618,12 @@ async fn main() -> anyhow::Result<()> {
         .route("/projects/{id}/history/{chat}", get(api::chat_history))
         .route("/projects/{id}/status", get(api::project_status))
         .route("/projects/{id}/inspect", get(inspect::project_inspect))
+        // Read-only debugging for an account's own devices (debug_api.rs).
+        .route("/me/devices", get(debug_api::me_devices))
+        .route("/me/feedback", get(debug_api::me_feedback))
+        .route("/me/relay-errors", get(debug_api::me_relay_errors))
+        .route("/machine/debug", get(debug_api::machine_debug))
+        .route("/chats/{id}/reads", get(debug_api::chat_reads))
         .route(
             "/projects/{id}/chats",
             get(api::list_chats).post(api::create_chat),

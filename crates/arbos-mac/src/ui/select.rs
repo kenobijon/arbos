@@ -328,6 +328,8 @@ pub struct BubbleSelectable {
 /// bytes), what it shows and where a click goes.
 pub struct Chip {
     pub range: Range<usize>,
+    /// Bytes of the picture cell at the start of the run (`@` or `@` + hair space).
+    pub cell: usize,
     pub mention: Rc<Mention>,
     pub mentions: Rc<Mentions>,
     pub pill: Hsla,
@@ -357,9 +359,15 @@ impl BubbleSelectable {
         let mut chips = Vec::with_capacity(found.len());
         let mut runs = runs;
         for (range, mention) in found {
-            runs = chip_runs(runs, range.clone(), accent);
+            let cell = if text[range.clone()].starts_with(mention::CELL) {
+                mention::CELL.len()
+            } else {
+                1
+            };
+            runs = chip_runs(runs, range.clone(), cell, accent);
             chips.push(Chip {
                 range,
+                cell,
                 mention,
                 mentions: self.mentions.clone(),
                 pill,
@@ -383,10 +391,15 @@ impl BubbleSelectable {
 
 /// Recolour the `@Name` run for a chip: the `@` (first byte) transparent, the
 /// name in `accent`, no underline; everything else untouched.
-pub fn chip_runs(runs: Vec<TextRun>, range: Range<usize>, accent: Hsla) -> Vec<TextRun> {
+pub fn chip_runs(
+    runs: Vec<TextRun>,
+    range: Range<usize>,
+    cell: usize,
+    accent: Hsla,
+) -> Vec<TextRun> {
     let mut out = Vec::with_capacity(runs.len() + 3);
     let mut pos = 0usize;
-    let at_end = range.start + 1;
+    let at_end = range.start + cell;
     for run in runs {
         let run_end = pos + run.len;
         let mut cursor = pos;
@@ -800,16 +813,17 @@ fn paint_chip_picture(layout: &TextLayout, chip: &Chip, window: &mut Window, cx:
     let Some(at) = layout.position_for_index(chip.range.start) else {
         return;
     };
-    let Some(after_at) = layout.position_for_index(chip.range.start + 1) else {
+    let Some(after_at) = layout.position_for_index(chip.range.start + chip.cell) else {
         return;
     };
     if after_at.y != at.y {
         return;
     }
-    let cell_w = after_at.x - at.x;
     let line_h = layout.line_height();
-    let d = px(mention::PICTURE).min(cell_w).min(line_h);
-    let origin = point(at.x + (cell_w - d) / 2.0, at.y + (line_h - d) / 2.0);
+    // The disc fills the cell's height budget and sits at the cell's left;
+    // the hair space after `@` keeps a gap to the name.
+    let d = px(mention::PICTURE).min(line_h);
+    let origin = point(at.x, at.y + (line_h - d) / 2.0);
     let bounds = Bounds::new(origin, size(d, d));
     let radii = Corners::all(d / 2.0);
     match &chip.mention.picture {
@@ -1197,16 +1211,20 @@ mod tests {
 
     #[test]
     fn chip_runs_hide_the_at_and_colour_the_name() {
-        let runs = chip_runs(vec![run(14)], 0..6, gpui::blue());
+        let runs = chip_runs(vec![run(14)], 0..6, 1, gpui::blue());
         let lens: Vec<usize> = runs.iter().map(|r| r.len).collect();
         assert_eq!(lens, vec![1, 5, 8]);
         assert_eq!(runs[0].color, gpui::transparent_black());
         assert_eq!(runs[1].color, gpui::blue());
         assert_eq!(runs[2].color, Hsla::default());
         // A chip in the middle of a run keeps the text before it.
-        let runs = chip_runs(vec![run(20)], 4..10, gpui::blue());
+        let runs = chip_runs(vec![run(20)], 4..10, 1, gpui::blue());
         let lens: Vec<usize> = runs.iter().map(|r| r.len).collect();
         assert_eq!(lens, vec![4, 1, 5, 10]);
+        // With the hair-space cell (4 bytes), the transparent run is 4 long.
+        let runs = chip_runs(vec![run(20)], 0..9, 4, gpui::blue());
+        let lens: Vec<usize> = runs.iter().map(|r| r.len).collect();
+        assert_eq!(lens, vec![4, 5, 11]);
     }
 
     #[test]
