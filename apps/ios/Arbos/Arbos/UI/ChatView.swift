@@ -575,8 +575,13 @@ struct ChatView: View {
         .onChange(of: model.pendingSearchChat) { _, _ in openPendingSearchIfNeeded() }
         .onChange(of: messages, initial: true) { old, new in
             refreshRows()
-            model.markRead(chatId: chatId)
-            if isPeople { model.markPeopleRead(chatId) }
+            // Streaming tokens reassign `messages` with the same last id — do not
+            // mark-read on every delta. Initial call (`old == new`) and a new last
+            // row still mark; AppModel also skips/throttles the PUT.
+            if old.last?.id != new.last?.id || old == new {
+                model.markRead(chatId: chatId)
+                if isPeople { model.markPeopleRead(chatId) }
+            }
             // A channel's read marker moves when a new row lands while it is on screen.
             if isChannel, old.last?.id != new.last?.id { model.markChannelRead(chatId) }
         }

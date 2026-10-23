@@ -676,4 +676,33 @@ final class CoreFixturesTests: XCTestCase {
         XCTAssertFalse(feedback.has_image)
         XCTAssertNil(feedback.duplicate)
     }
+
+    /// Notification open must wait for store docs when a store is open and not loaded yet.
+    func testShouldDeferRoomOpen() {
+        XCTAssertTrue(AppModel.shouldDeferRoomOpen(hasStore: true, storeDocsLoaded: false))
+        XCTAssertFalse(AppModel.shouldDeferRoomOpen(hasStore: true, storeDocsLoaded: true))
+        XCTAssertFalse(AppModel.shouldDeferRoomOpen(hasStore: false, storeDocsLoaded: false))
+        XCTAssertFalse(AppModel.shouldDeferRoomOpen(hasStore: false, storeDocsLoaded: true))
+    }
+
+    /// Mark-read PUT: skip same value, send after the window, delay inside it.
+    func testReadPutPlan() {
+        let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+        XCTAssertEqual(AppModel.readPutPlan(lastSent: nil, lastSentAt: nil, value: 1, now: t0), .send)
+        XCTAssertEqual(AppModel.readPutPlan(lastSent: 5, lastSentAt: t0, value: 5, now: t0.addingTimeInterval(10)), .skip)
+        XCTAssertEqual(
+            AppModel.readPutPlan(lastSent: 5, lastSentAt: t0, value: 6, now: t0.addingTimeInterval(AppModel.readPutThrottleSeconds)),
+            .send
+        )
+        XCTAssertEqual(
+            AppModel.readPutPlan(lastSent: 5, lastSentAt: t0, value: 6, now: t0.addingTimeInterval(AppModel.readPutThrottleSeconds + 0.1)),
+            .send
+        )
+        switch AppModel.readPutPlan(lastSent: 5, lastSentAt: t0, value: 6, now: t0.addingTimeInterval(0.5)) {
+        case .delay(let seconds):
+            XCTAssertEqual(seconds, AppModel.readPutThrottleSeconds - 0.5, accuracy: 0.000_1)
+        case .send, .skip:
+            XCTFail("expected delay inside the throttle window")
+        }
+    }
 }
