@@ -293,8 +293,8 @@ pub enum RowKind {
         /// leaves the avatar lane free and the last one draws the sender's disc
         /// at the bubble's bottom-left (redesign mocks a/f). The sender seed.
         lane: Option<String>,
-        /// People / group reply: quote of the user message this answers (`inReplyTo`).
-        /// Only set on the first block of the bubble.
+        /// People / group reply: quote of the user message this answers
+        /// (`replyTo`, else `inReplyTo`). Only set on the first block of the bubble.
         quote: Option<Quote>,
     },
     /// A finished reply with no words, cards or attachments: one plain line in the
@@ -2313,12 +2313,14 @@ pub fn build_rows(
                 let mut sender_row_ix: Option<usize> = None;
                 let in_people =
                     message.sender.starts_with("agent:") && message.asked_by_handle.is_some();
-                // Quote the user message this answers (`inReplyTo`); clients must show it
-                // so consecutive replies do not look like one run (people.rs contract, #1447).
+                // Quote the user message this answers: prefer `replyTo` (platform
+                // reply feature); fall back to `inReplyTo` (turn link / older rows)
+                // so consecutive replies do not look like one run (#1447).
                 let reply_quote = message
-                    .in_reply_to
+                    .reply_to
                     .as_deref()
                     .filter(|id| !id.is_empty())
+                    .or_else(|| message.in_reply_to.as_deref().filter(|id| !id.is_empty()))
                     .map(|id| Quote::for_reply(id, messages));
                 if message.role == Role::Project || in_people {
                     // A people-chat agent (or another Project, F6) speaks in its own lane.
