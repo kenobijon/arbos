@@ -387,10 +387,20 @@ pub fn people_chat_dto(
         .db
         .room_activity(&room_of(&cm.chat.id))
         .unwrap_or((0, 0));
-    let (read_seq, _) = state
+    // One read cursor per user (every device advances it); the older per-device mark still
+    // counts so a cursor written before this relay does not read as "unread again".
+    let (device_seq, _) = state
         .db
         .read_mark(&cm.chat.id, device_id)
         .unwrap_or((0, false));
+    let read_seq = state
+        .db
+        .user_cursor(me, &cm.chat.id)
+        .unwrap_or(0)
+        .max(device_seq);
+    // Unread is what someone else announced after the user's read mark — never their own rows
+    // (from any device), never system lines, never a row nobody announced.
+    let unread = state.db.unread_in_chat(me, &cm.chat.id).unwrap_or(0) > 0;
     // Drop soft-deleted agent memberships from the client roster (purge clears the rows later).
     let live: Vec<&Membership> = cm
         .members
@@ -451,7 +461,7 @@ pub fn people_chat_dto(
             cm.chat.created_at
         },
         read_seq,
-        unread: head_seq > read_seq,
+        unread,
         lock_state: if has_agent {
             "visible_to_agents".into()
         } else {
@@ -1100,7 +1110,8 @@ pub struct ReadBody {
     pub seq: i64,
 }
 
-/// `PUT /chats/{id}/read {"seq"}` — this device has seen rows up to `seq`.
+/// `PUT /chats/{id}/read {"seq"}` — the user has seen rows up to `seq` (on this device; the
+/// cursor is per user, so their other devices read it too).
 pub async fn chat_read(
     State(state): State<AppState>,
     principal: Principal,
@@ -1131,7 +1142,11 @@ pub async fn chat_read(
             return api_error(StatusCode::FORBIDDEN, "not_member", "not your chat");
         }
     }
-    if let Err(e) = state.db.mark_chat_read(&me, &id) {
+    if let Err(e) = state
+        .db
+        .mark_chat_read(&me, &id)
+        .and_then(|()| state.db.advance_user_cursor(&me, &id, b.seq.max(0)))
+    {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
     }
     state.matrix.read(&state, &id, &me);
@@ -3122,6 +3137,136 @@ mod membership_notice_tests {
         assert!(rows
             .iter()
             .all(|r| r.device == crate::notices::RELAY_DEVICE));
+    }
+}
+
+#[cfg(test)]
+mod read_cursor_tests {
+    //! #1438: one read cursor per user. A chat is unread only for announced messages someone
+    //! else wrote after the user's read mark — never for the user's own rows (from any of their
+    //! devices), never for system lines or rows nobody announced; reading on one device clears
+    //! it on every device, and writing in a chat counts as reading it.
+
+    use axum::extract::{Path, State};
+    use axum::http::StatusCode;
+    use axum::Json;
+
+    use super::tests_support::{dm, person};
+    use super::*;
+    use crate::notify::{notify_people_chat, NotifyBody};
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    fn second_device(state: &AppState, user: &str) -> Principal {
+        let id = ulid();
+        state
+            .db
+            .insert_device(&id, "d2", &ulid(), user, "github")
+            .expect("device");
+        Principal::Device {
+            id,
+            token: String::new(),
+            user_id: user.to_owned(),
+        }
+    }
+
+    fn dto(state: &AppState, chat: &str, me: &str, dev: &Principal) -> PeopleChatDto {
+        let Ok(cm) = load_chat(state, chat) else {
+            panic!("chat {chat} not found");
+        };
+        people_chat_dto(state, &cm, me, &device_of(dev))
+    }
+
+    async fn say(state: &AppState, dev: &Principal, chat: &str, text: &str) {
+        let r = notify_people_chat(
+            State(state.clone()),
+            dev.clone(),
+            Path(chat.to_owned()),
+            Json(NotifyBody {
+                message_id: ulid(),
+                text: text.into(),
+                project_id: None,
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+    }
+
+    async fn read(state: &AppState, dev: &Principal, chat: &str, seq: i64) {
+        let r = chat_read(
+            State(state.clone()),
+            dev.clone(),
+            Path(chat.to_owned()),
+            Json(ReadBody { seq }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn own_message_is_never_unread_and_reading_syncs_across_devices() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_mac) = person(&state, 1);
+        let alice_phone = second_device(&state, &alice);
+        let (bob, bob_dev) = person(&state, 2);
+        let chat = dm(&state, &alice, &bob);
+
+        // Alice writes from her Mac: nothing is unread for her — on the Mac or the phone.
+        say(&state, &alice_mac, &chat, "we dont have one yet").await;
+        assert!(!dto(&state, &chat, &alice, &alice_mac).unread);
+        assert!(!dto(&state, &chat, &alice, &alice_phone).unread);
+        // Bob has genuine unseen content.
+        assert!(dto(&state, &chat, &bob, &bob_dev).unread);
+        assert_eq!(state.db.unread_in_chat(&bob, &chat).unwrap(), 1);
+
+        // Bob reads on one device: his cursor is per user, so a second device of his is clear
+        // too and sees the same cursor.
+        let bob_phone = second_device(&state, &bob);
+        read(&state, &bob_dev, &chat, 7).await;
+        let on_phone = dto(&state, &chat, &bob, &bob_phone);
+        assert!(!on_phone.unread);
+        assert_eq!(on_phone.read_seq, 7);
+        assert_eq!(state.db.unread_total(&bob).unwrap(), 0);
+
+        // A system line nobody announced (a membership notice) moves the room head but is not
+        // unread for anyone.
+        let (seq, _) = state
+            .db
+            .append_row(&room_of(&chat), crate::notices::RELAY_DEVICE, &ulid(), b"x")
+            .unwrap();
+        let after_notice = dto(&state, &chat, &bob, &bob_dev);
+        assert!(after_notice.head_seq >= seq);
+        assert!(!after_notice.unread);
+        assert!(!dto(&state, &chat, &alice, &alice_mac).unread);
+
+        // Alice writes again after Bob read: genuine unread for Bob, on every device.
+        say(&state, &alice_mac, &chat, "ok").await;
+        assert!(dto(&state, &chat, &bob, &bob_dev).unread);
+        assert!(dto(&state, &chat, &bob, &bob_phone).unread);
+
+        // Bob answers without an explicit read: writing is reading. Alice now has Bob's line
+        // unread until she reads or writes.
+        say(&state, &bob_dev, &chat, "fine").await;
+        assert!(!dto(&state, &chat, &bob, &bob_dev).unread);
+        assert!(!dto(&state, &chat, &bob, &bob_phone).unread);
+        assert!(dto(&state, &chat, &alice, &alice_phone).unread);
+        say(&state, &alice_phone, &chat, "👍").await;
+        assert!(!dto(&state, &chat, &alice, &alice_mac).unread);
+        assert!(!dto(&state, &chat, &alice, &alice_phone).unread);
+    }
+
+    #[test]
+    fn a_persons_own_row_advances_their_cursor_not_others() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let (bob, _) = person(&state, 2);
+        let chat = dm(&state, &alice, &bob);
+        state.db.advance_user_cursor(&alice, &chat, 12).unwrap();
+        assert_eq!(state.db.user_cursor(&alice, &chat).unwrap(), 12);
+        assert_eq!(state.db.user_cursor(&bob, &chat).unwrap(), 0);
+        // Never backwards.
+        state.db.advance_user_cursor(&alice, &chat, 3).unwrap();
+        assert_eq!(state.db.user_cursor(&alice, &chat).unwrap(), 12);
     }
 }
 

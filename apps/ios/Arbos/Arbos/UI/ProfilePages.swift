@@ -715,6 +715,8 @@ struct GroupProfileView: View {
     @State private var showEdit = false
     @State private var pendingRemoveId: String?
     @State private var pendingRemoveName: String?
+    /// Human member (not you) whose row was tapped: offer View profile / Send private message.
+    @State private var memberActions: ProfilePerson?
 
     private var people: PeopleChat? { model.peopleChat(chatId) }
     private var project: Project? { projectId.flatMap { model.project($0) } }
@@ -823,6 +825,27 @@ struct GroupProfileView: View {
                 pendingRemoveName = nil
             }
         }
+        .confirmationDialog(
+            memberActions.map { $0.displayName } ?? "Member",
+            isPresented: Binding(
+                get: { memberActions != nil },
+                set: { if !$0 { memberActions = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Send private message") {
+                guard let handle = memberActions?.handle else { return }
+                memberActions = nil
+                Task {
+                    if await model.openDM(handle: handle) != nil { dismiss() }
+                }
+            }
+            Button("View profile") {
+                if let p = memberActions { model.showProfile(.user(p)) }
+                memberActions = nil
+            }
+            Button("Cancel", role: .cancel) { memberActions = nil }
+        }
         .sheet(isPresented: $showAdd) {
             if let project {
                 ProjectMembersSheet(project: project).environmentObject(model).environment(\.theme, theme)
@@ -928,16 +951,32 @@ struct GroupProfileView: View {
         // borderless (not .plain): .plain steals long-press on recent iOS,
         // so the remove context menu never appears (same as HomeView rows).
         return Button {
-            if let a = r.agent { model.showProfile(.agent(projectId: a.id)) } else { model.showProfile(.user(r.person)) }
+            if let a = r.agent {
+                model.showProfile(.agent(projectId: a.id))
+            } else if isMe {
+                model.showProfile(.user(r.person))
+            } else {
+                // Offer Send private message alongside View profile (#1455).
+                memberActions = r.person
+            }
         } label: {
             PaneRow(leading: .avatar(avatar), title: title, subtitle: memberSubtitle(r), trailing: remove)
         }
         .buttonStyle(.borderless)
         // Long-press (Jacob, 2026-10-22; the Mac's Shift-/right-click menu): View profile,
-        // and for whoever may remove this member a divider and Remove from group — which
-        // asks first (the confirm above) and then lets the relay write "<me> removed X".
-        // Your own row never offers Remove; leaving is the chat list's Delete.
+        // Send private message (other people), and for whoever may remove this member a
+        // divider and Remove from group — which asks first (the confirm above) and then
+        // lets the relay write "<me> removed X". Your own row never offers Remove;
+        // leaving is the chat list's Delete.
         .contextMenu {
+            if r.agent == nil && !isMe {
+                Button {
+                    let handle = r.person.handle
+                    Task {
+                        if await model.openDM(handle: handle) != nil { dismiss() }
+                    }
+                } label: { Label("Send private message", systemImage: "bubble.left") }
+            }
             Button {
                 if let a = r.agent { model.showProfile(.agent(projectId: a.id)) } else { model.showProfile(.user(r.person)) }
             } label: { Label("View profile", systemImage: "person.crop.circle") }

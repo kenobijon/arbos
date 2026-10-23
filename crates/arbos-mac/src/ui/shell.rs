@@ -8,8 +8,7 @@ use std::time::Duration;
 
 use gpui::{
     actions, div, prelude::*, px, Animation, AnimationExt, AnyElement, App, Context, Div, Entity,
-    ExternalPaths, FocusHandle, Focusable, FontWeight, Render, ScrollHandle, SharedString,
-    Stateful, Window,
+    FocusHandle, Focusable, FontWeight, Render, ScrollHandle, SharedString, Stateful, Window,
 };
 
 use crate::app::SignInMode;
@@ -24,6 +23,7 @@ use crate::ui::channels::{ChannelsEvent, ChannelsPanel};
 use crate::ui::composer::{Composer, ComposerEvent, ComposerInput};
 use crate::ui::connectors::{ConnectorsEvent, ConnectorsPanel};
 use crate::ui::create_entity::{self, Kind as CreateKind};
+use crate::ui::dropzone;
 use crate::ui::feedback::{FeedbackSheet, SendFeedback};
 use crate::ui::frost::{frosted, MENU_BLUR, PANEL_BLUR};
 use crate::ui::glass::{self, WindowDrag};
@@ -212,6 +212,13 @@ pub struct Shell {
     pub(crate) channels: Entity<ChannelsPanel>,
     pub(crate) secrets: Entity<SecretsPanel>,
     shake_started_at: Option<u64>,
+    /// A Finder drag is over the chat pane: the whole pane lights up
+    /// (`ui::dropzone`). Set from the pane's own drag-move bounds check, so it
+    /// does not depend on GPUI hover state; cleared on drop, exit and release.
+    file_drop_over: bool,
+    /// Rig: `ARBOS_FIXTURE_DRAG_OVER=1` holds the highlight on without a real
+    /// drag (synthetic pointer events do not reach the GUI session).
+    fixture_drag_over: bool,
     /// True while the sign-in screen is up; its clearing focuses the composer.
     signing_in: bool,
     /// Flag of the header's former "…" menu (removed, feedback
@@ -773,6 +780,8 @@ impl Shell {
             channels,
             secrets,
             shake_started_at: None,
+            file_drop_over: false,
+            fixture_drag_over: std::env::var("ARBOS_FIXTURE_DRAG_OVER").is_ok_and(|v| v == "1"),
             signing_in: false,
             menu_open: false,
             search_open: false,
@@ -2347,13 +2356,19 @@ impl Shell {
                     .and_then(|p| state.avatar(&p.avatar_url)),
             )
         });
-        let typing = chat_id.as_deref().and_then(|id| state.typing_in(id));
+        // The one presence row over the composer: who is typing (people) or
+        // working (agents), pictures + one line, left-bound in the chat column
+        // ([feedback typing-indicator-left-2026-10-23]).
+        let presence = chat_id
+            .as_deref()
+            .zip(project.as_ref())
+            .and_then(|(id, space)| crate::ui::presence::gather(state, id, space, &theme));
         // D88: a channel in the centre — the same transcript, the unified pill with the
         // server's disc and `# name`, and the composer (or rule 9's one quiet line).
         let channel = state
             .selected_channel_info()
             .map(|(server, ch)| (server.clone(), ch.clone(), state.channel_can_post()));
-        if animating || shake.is_some() {
+        if animating || shake.is_some() || presence.is_some() {
             PulseClock::request(cx);
         }
 
@@ -2418,20 +2433,14 @@ impl Shell {
                         .child("Only admins post here"),
                 )
             };
-            return Self::chat_frame(
+            let column = Self::chat_frame(
                 column,
                 header_bar,
                 pre,
                 self.transcript.clone().into_any_element(),
                 vec![bottom.into_any_element()],
-            )
-            .group("chat-drop")
-            .can_drop(|dragged, _, _| dragged.is::<ExternalPaths>())
-            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
-                this.composer.update(cx, |c, cx| {
-                    c.add_paths(paths.paths().iter().cloned(), cx);
-                });
-            }));
+            );
+            return self.file_drop_target(column, &theme, cx);
         }
 
         let Some(space) = project else {
@@ -2593,9 +2602,8 @@ impl Shell {
             // Transcript above, composer pinned at the bottom. On the first
             // send the composer slides down from the centre over 220 ms using
             // a relative `top` inset (GPUI has no transform).
-            if typing.is_some() {
-                PulseClock::request(cx);
-            }
+            let presence_row = presence
+                .map(|p| column_row(crate::ui::presence::row(p, &theme, cx).into_any_element()));
             let composer_row = div()
                 .w_full()
                 .flex()
@@ -2603,11 +2611,7 @@ impl Shell {
                 .items_center()
                 .pb(px(COMPOSER_BOTTOM))
                 .pt(px(6.0))
-                .when_some(typing, |el, handle| {
-                    el.child(column_row(
-                        people::typing_line(&handle, &theme).into_any_element(),
-                    ))
-                })
+                .children(presence_row)
                 .child(composer_block);
             let composer_row = if animating {
                 composer_row
@@ -2633,17 +2637,39 @@ impl Shell {
                 vec![self.voice.clone().into_any_element(), composer_row],
             );
         }
-        // Accept Finder / file drops anywhere over the conversation (transcript,
-        // empty hero, or composer) — not only the input field. The composer
-        // field uses `group_drag_over("chat-drop")` for the accent highlight.
-        column
-            .group("chat-drop")
-            .can_drop(|dragged, _, _| dragged.is::<ExternalPaths>())
-            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+        self.file_drop_target(column, &theme, cx)
+    }
+
+    /// Finder / file drops land anywhere over the conversation (transcript,
+    /// empty hero, header or composer — the sidebar and right pane are not
+    /// part of it), and the whole pane lights up while the drag is over it
+    /// ([feedback chat-drop-highlight-2026-10-23], `ui::dropzone`).
+    fn file_drop_target(
+        &self,
+        column: Stateful<Div>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let over = self.fixture_drag_over || (self.file_drop_over && cx.has_active_drag());
+        dropzone::target(
+            column,
+            over,
+            theme,
+            cx,
+            Self::set_file_drop_over,
+            |this, paths, _, cx| {
                 this.composer.update(cx, |c, cx| {
                     c.add_paths(paths.paths().iter().cloned(), cx);
                 });
-            }))
+            },
+        )
+    }
+
+    fn set_file_drop_over(&mut self, over: bool, cx: &mut Context<Self>) {
+        if self.file_drop_over != over {
+            self.file_drop_over = over;
+            cx.notify();
+        }
     }
 
     fn render_details(&self, target: &DetailsTarget, cx: &mut Context<Self>) -> impl IntoElement {
