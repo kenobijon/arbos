@@ -85,6 +85,12 @@ jobs:
             test -f /etc/arbos/pi-seed/extensions/arbos-pi-ext/index.ts
             arbos-agentd --version
             [ "$(id -u)" = 1000 ]
+            # Self-reference checkout: present, at this commit, readable, not writable by a non-root user.
+            [ "$(git -C /opt/arbos/src rev-parse HEAD)" = "${{ github.sha }}" ]
+            test -f /opt/arbos/src/docs/self-host.md && test -f /opt/arbos/src/crates/arbos-agentd/prompts/core.md
+            ! touch /opt/arbos/src/.write-probe 2>/dev/null
+            [ "$(stat -c %U:%a /opt/arbos/src)" = root:555 ]
+            ! find /opt/arbos/src -name '.env' -o -name '*.p8' -o -name '*.p12' -o -name '*.pem' | grep -q .
             ! env | grep -E "KEY|TOKEN"
           '
 
