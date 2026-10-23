@@ -979,8 +979,13 @@ impl AppState {
                 }
                 // A quiet "Retry" in the rail is not enough: say what went wrong and offer the
                 // download page.
+                let next = if message.ends_with('.') {
+                    " Press Retry"
+                } else {
+                    " — press Retry"
+                };
                 self.push_notice(format!(
-                    "Update failed: {message} — press Retry, or get the newest version from {}.",
+                    "Update failed: {message}{next}, or get the newest version from {}.",
                     update::DOWNLOAD_URL
                 ));
                 self.update.phase = UpdatePhase::Failed {
