@@ -610,7 +610,7 @@ pub async fn reply(
         .project(&id)
         .map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
-    if !principal.can_access_project(&p.id) {
+    if !state.allows(&principal, &p.id) {
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
     let binding = state
@@ -972,5 +972,135 @@ mod tests {
         assert_eq!(pair_code_in("PAIR 123-456"), Some("123456".into()));
         assert_eq!(pair_code_in("/pair 12345"), None);
         assert_eq!(pair_code_in("pairing is fun"), None);
+    }
+
+    /// `reply` must use `state.allows` (owner + invited members), not `can_access_project` with a
+    /// project id. The agent box is `Principal::Box { user_id }`; comparing that user id to the
+    /// project id always 403'd and channel replies never reached the platform.
+    #[tokio::test]
+    async fn reply_allows_owner_and_invited_member() {
+        let state = test_state();
+        let project = Project {
+            id: "proj_a".into(),
+            name: "Comms".into(),
+            icon: "Co".into(),
+            instructions: String::new(),
+            models: json!({}),
+            state: "awake".into(),
+            created_at: 0,
+            last_active_at: 0,
+            spend_cap_daily: 25.0,
+            color: "#000".into(),
+            user_id: "user_a".into(),
+            workspace_state: "stopped".into(),
+            avatar: None,
+            avatar_color: None,
+            description: String::new(),
+            primary_chat_id: None,
+            avatar_color_index: None,
+            avatar_leaf: None,
+            avatar_leaf_color: None,
+        };
+        state.db.insert_project(&project).unwrap();
+        let binding = ChannelBinding {
+            id: "bind_1".into(),
+            platform: "telegram".into(),
+            external_chat_id: "tg-chat".into(),
+            external_user_id: "tg-user".into(),
+            project_id: "proj_a".into(),
+            chat_id: "c1".into(),
+            label: "Telegram · test".into(),
+            bound_at: 0,
+        };
+        state.db.upsert_channel_binding(&binding).unwrap();
+
+        let body = |text: &str| {
+            Json(ReplyBody {
+                binding_id: "bind_1".into(),
+                text: text.into(),
+                request_id: None,
+            })
+        };
+        let project_path = || Path("proj_a".to_owned());
+
+        let box_a = Principal::Box {
+            user_id: "user_a".into(),
+        };
+        let r = reply(
+            State(state.clone()),
+            box_a,
+            project_path(),
+            body("from box A"),
+        )
+        .await
+        .expect("owner box");
+        assert_eq!(r.status(), StatusCode::OK);
+        let out = state.db.channel_outbox(10).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["text"], "from box A");
+
+        let device_a = Principal::Device {
+            id: "dev_a".into(),
+            token: "tok_a".into(),
+            user_id: "user_a".into(),
+        };
+        let r = reply(
+            State(state.clone()),
+            device_a,
+            project_path(),
+            body("from device A"),
+        )
+        .await
+        .expect("owner device");
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(state.db.channel_outbox(10).unwrap().len(), 2);
+
+        let before = state.db.channel_outbox(10).unwrap().len();
+        let box_b = Principal::Box {
+            user_id: "user_b".into(),
+        };
+        let err = reply(
+            State(state.clone()),
+            box_b,
+            project_path(),
+            body("from box B"),
+        )
+        .await
+        .expect_err("other box");
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+        assert_eq!(state.db.channel_outbox(10).unwrap().len(), before);
+
+        let device_b = Principal::Device {
+            id: "dev_b".into(),
+            token: "tok_b".into(),
+            user_id: "user_b".into(),
+        };
+        let err = reply(
+            State(state.clone()),
+            device_b.clone(),
+            project_path(),
+            body("from device B"),
+        )
+        .await
+        .expect_err("other device");
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+        assert_eq!(state.db.channel_outbox(10).unwrap().len(), before);
+
+        state
+            .db
+            .add_project_member("proj_a", "user_b", "user_a")
+            .unwrap();
+        let r = reply(
+            State(state.clone()),
+            device_b,
+            project_path(),
+            body("from invited B"),
+        )
+        .await
+        .expect("invited member");
+        assert_eq!(r.status(), StatusCode::OK);
+        let out = state.db.channel_outbox(10).unwrap();
+        assert_eq!(out.len(), before + 1);
+        assert_eq!(out[0]["text"], "from invited B");
     }
 }
