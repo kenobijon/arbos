@@ -180,6 +180,7 @@ struct NewChatSheet: View {
                     Color.clear.frame(height: 40)
                 }
             }
+            .scrollIndicators(.visible)
             .scrollDismissesKeyboard(.interactively)
             .background(theme.bg)
             .navigationTitle("New Message")
