@@ -255,6 +255,9 @@ impl From<&CallDto> for Call {
             reason: c.reason.clone(),
             participants: c.participants.iter().map(Sender::from).collect(),
             agents: c.agents.iter().map(Sender::from).collect(),
+            speak_mode: c.speak_mode.clone(),
+            invited_speakers: c.invited_speakers.iter().map(Sender::from).collect(),
+            can_speak: c.can_speak,
         }
     }
 }

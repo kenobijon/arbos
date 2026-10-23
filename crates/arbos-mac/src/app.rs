@@ -7606,6 +7606,10 @@ impl AppState {
 
     pub fn toggle_call_mute(&mut self, cx: &mut Context<Self>) {
         if let Some(c) = self.my_call.as_mut() {
+            // Hosted group calls: listen-only until the host invites you to speak.
+            if c.call.can_speak == Some(false) {
+                return;
+            }
             c.muted = !c.muted;
             let _ = self.call_commands.send(CallCmd::SetMuted(c.muted));
             cx.notify();
@@ -7681,10 +7685,11 @@ impl AppState {
             cx.notify();
             return;
         };
+        let listen_only = call.can_speak == Some(false);
         let active = self.my_call.get_or_insert_with(|| ActiveCall {
             call: call.clone(),
             status: CallStatus::Connecting,
-            muted: false,
+            muted: listen_only,
             camera,
             participants: Vec::new(),
             local_video: None,
@@ -7697,6 +7702,9 @@ impl AppState {
         });
         active.call = call.clone();
         active.status = CallStatus::Connecting;
+        if listen_only {
+            active.muted = true;
+        }
         if created {
             active.outgoing = true;
             active.reachable = reachable_line(&reachable);
@@ -7706,6 +7714,9 @@ impl AppState {
             token,
             camera,
         });
+        if listen_only {
+            let _ = self.call_commands.send(CallCmd::SetMuted(true));
+        }
         self.incoming_call = None;
         self.sync_tones();
         cx.notify();

@@ -773,6 +773,15 @@ pub struct CallDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[typeshare(serialized_as = "Option<I54>")]
     pub token_expires_at: Option<i64>,
+    /// `"open"` = anyone may speak; `"hosted"` = only the host and invited speakers (bigger groups).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speak_mode: Option<String>,
+    /// People the host invited to speak. The host is `started_by` and is not listed here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub invited_speakers: Vec<SenderDto>,
+    /// Whether the requesting user may publish audio (set when a join token is minted).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub can_speak: Option<bool>,
 }
 
 /// `POST …/calls` success: new call (201) or join the live one (200).
