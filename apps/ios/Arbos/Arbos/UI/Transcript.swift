@@ -714,7 +714,6 @@ enum Markdown {
 struct RowView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
-    @ObservedObject private var accents = SenderAccents.shared
     let row: Row
     let chatId: Id
     let width: CGFloat
@@ -832,12 +831,12 @@ struct RowView: View {
                     .padding(.horizontal, Theme.bubbleHPad)
                     .padding(.vertical, Theme.bubbleVPad)
                     .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
-                    .senderBar(personAccent(handle: handle, avatar: avatar))
+                    .modifier(LiveSenderBar(url: avatar, seed: model.personId(handle: handle) ?? handle))
                 }
                 .frame(maxWidth: maxBubble - 34, alignment: .leading)
                 Spacer(minLength: 0)
             }
-            .task(id: avatar) { accents.load(url: avatar) }
+            .task(id: avatar) { SenderAccents.shared.load(url: avatar) }
         case .member(let blocks, let live, let handle, let avatar, let named, let agentId):
             let openMember = {
                 if let agentId { model.showProfile(.agent(projectId: agentId)) }
@@ -857,20 +856,22 @@ struct RowView: View {
                         }
                         .buttonStyle(.plain)
                     }
-                    VStack(alignment: .leading, spacing: 8) {
-                        ForEach(Array(blocks.enumerated()), id: \.offset) { i, block in
-                            BlockView(block: block, live: live && i == blocks.count - 1)
+                    memberBubble(
+                        handle: handle,
+                        avatar: avatar,
+                        content: VStack(alignment: .leading, spacing: 8) {
+                            ForEach(Array(blocks.enumerated()), id: \.offset) { i, block in
+                                BlockView(block: block, live: live && i == blocks.count - 1)
+                            }
                         }
-                    }
-                    .padding(.horizontal, Theme.bubbleHPad)
-                    .padding(.vertical, Theme.bubbleVPad)
-                    .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
-                    .senderBar(memberAccent(handle: handle, avatar: avatar))
+                    )
                 }
                 .frame(maxWidth: maxBubble - 34, alignment: .leading)
                 Spacer(minLength: 0)
             }
-            .task(id: avatar) { if memberProject(handle: handle) == nil { accents.load(url: avatar) } }
+            .task(id: avatar) {
+                if memberProject(handle: handle) == nil { SenderAccents.shared.load(url: avatar) }
+            }
         case .assistant(let blocks, let live, let caption):
             HStack {
                 VStack(alignment: .leading, spacing: 8) {
@@ -1022,20 +1023,31 @@ struct RowView: View {
         }
     }
 
-    /// The bar colour on a person's bubble: their picture's dominant colour,
-    /// else the D79 colour of the same disc `PersonAvatar` draws (`id ?? handle`).
-    private func personAccent(handle: String, avatar: String?) -> Color {
-        accents.color(url: avatar, seed: model.personId(handle: handle) ?? handle, dark: theme.isDark)
-    }
-
     /// Mac parity: an agent's bubbles in a people chat carry its disc colour
-    /// (the leaf's disc under D92, the D79 gradient midpoint otherwise).
-    private func memberAccent(handle: String, avatar: String?) -> Color {
-        if let project = memberProject(handle: handle) {
-            if LeafAvatarsFlag.shared.on { return LeafArt.accent(project, dark: theme.isDark) }
-            return accents.color(url: nil, seed: project.id, override: project.effectiveAvatarColorIndex, dark: theme.isDark)
+    /// (the leaf's disc under D92, the D79 gradient midpoint otherwise). Accent
+    /// observation stays in `LiveSenderBar` so one new colour does not rebuild
+    /// every bubble in a group chat.
+    @ViewBuilder
+    private func memberBubble<Content: View>(handle: String, avatar: String?, content: Content) -> some View {
+        if let project = memberProject(handle: handle), LeafAvatarsFlag.shared.on {
+            content
+                .padding(.horizontal, Theme.bubbleHPad)
+                .padding(.vertical, Theme.bubbleVPad)
+                .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
+                .senderBar(LeafArt.accent(project, dark: theme.isDark))
+        } else if let project = memberProject(handle: handle) {
+            content
+                .padding(.horizontal, Theme.bubbleHPad)
+                .padding(.vertical, Theme.bubbleVPad)
+                .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
+                .modifier(LiveSenderBar(url: nil, seed: project.id, override: project.effectiveAvatarColorIndex))
+        } else {
+            content
+                .padding(.horizontal, Theme.bubbleHPad)
+                .padding(.vertical, Theme.bubbleVPad)
+                .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
+                .modifier(LiveSenderBar(url: avatar, seed: model.personId(handle: handle) ?? handle))
         }
-        return personAccent(handle: handle, avatar: avatar)
     }
 
     /// Grok Bot's quote header at the top of a reply bubble: speech-bubble glyph, then the
@@ -1250,16 +1262,35 @@ final class SenderAccents: ObservableObject {
     }
 }
 
+/// Observes `SenderAccents` for one bubble only — a new colour must not rebuild
+/// every `RowView` in a group chat (that made scrolling feel sticky).
+private struct LiveSenderBar: ViewModifier {
+    @ObservedObject private var accents = SenderAccents.shared
+    @Environment(\.theme) private var theme
+    let url: String?
+    let seed: String
+    var override: Int? = nil
+
+    func body(content: Content) -> some View {
+        content.senderBar(accents.color(url: url, seed: seed, override: override, dark: theme.isDark))
+    }
+}
+
 /// Decoded people pictures for the launch, keyed by URL. A picture that is here
 /// paints on the first frame of any row that shows it (`PersonAvatar` reads it
 /// synchronously); `warm` fetches the New Message directory's pictures ahead of
 /// the sheet, so its rows never flash initials and then the photo.
+///
+/// Not an `ObservableObject`: one finished download must not invalidate every
+/// avatar on screen (group-chat scroll lag). Each `PersonAvatar` holds its own
+/// `@State` and awaits `load`.
 @MainActor
-final class AvatarImageCache: ObservableObject {
+final class AvatarImageCache {
     static let shared = AvatarImageCache()
 
-    @Published private(set) var images: [String: UIImage] = [:]
+    private(set) var images: [String: UIImage] = [:]
     private var requested: Set<String> = []
+    private var waiters: [String: [CheckedContinuation<UIImage?, Never>]] = [:]
 
     func image(for url: String?) -> UIImage? {
         url.flatMap { images[$0] }
@@ -1273,20 +1304,38 @@ final class AvatarImageCache: ObservableObject {
 
     /// Start fetching the first `warmLimit` URLs not seen this launch (through the shared URLCache).
     func warm(urls: [String?]) {
-        for case let url? in urls.prefix(AvatarImageCache.warmLimit) { fetch(url) }
+        for case let url? in urls.prefix(AvatarImageCache.warmLimit) {
+            Task { _ = await load(url) }
+        }
     }
 
+    /// Fire-and-forget fetch (directory warm / legacy callers).
     func fetch(_ url: String) {
-        guard url.contains("://"), let u = URL(string: url), !requested.contains(url) else { return }
-        requested.insert(url)
-        Task.detached(priority: .userInitiated) { [weak self] in
-            guard let (data, _) = try? await URLSession.shared.data(from: u),
-                  let img = AvatarImageCache.decode(data) else {
-                await MainActor.run { self?.requested.remove(url) }
-                return
+        Task { _ = await load(url) }
+    }
+
+    /// Shared download per URL; waiters resume together when the picture lands.
+    func load(_ url: String) async -> UIImage? {
+        if let img = images[url] { return img }
+        if requested.contains(url) {
+            return await withCheckedContinuation { cont in
+                waiters[url, default: []].append(cont)
             }
-            await MainActor.run { self?.images[url] = img }
         }
+        guard url.contains("://"), let u = URL(string: url) else { return nil }
+        requested.insert(url)
+        let img: UIImage? = await Task.detached(priority: .userInitiated) {
+            guard let (data, _) = try? await URLSession.shared.data(from: u) else { return nil }
+            return AvatarImageCache.decode(data)
+        }.value
+        if let img {
+            images[url] = img
+        } else {
+            requested.remove(url)
+        }
+        let pending = waiters.removeValue(forKey: url) ?? []
+        for cont in pending { cont.resume(returning: img) }
+        return img
     }
 
     /// Downsampled decode through ImageIO: a 460 px GitHub picture never sits in memory at full size.
@@ -1308,25 +1357,42 @@ final class AvatarImageCache: ObservableObject {
 /// the colour is derived from; without it the handle stands in.
 struct PersonAvatar: View {
     @Environment(\.theme) private var theme
-    @ObservedObject private var cache = AvatarImageCache.shared
     let url: String?
     let handle: String
     var size: CGFloat = 40
     var name: String? = nil
     var id: String? = nil
     var colorIndex: Int? = nil
+    @State private var image: UIImage?
+
+    /// Warm cache hits paint on the first frame (no initials flash); `@State`
+    /// covers pictures that finish loading after appear — without observing the
+    /// whole shared dictionary.
+    private var displayed: UIImage? {
+        image ?? AvatarImageCache.shared.image(for: url)
+    }
 
     var body: some View {
         ZStack {
-            if let img = cache.image(for: url) {
-                Image(uiImage: img).resizable().scaledToFill()
+            if let displayed {
+                Image(uiImage: displayed).resizable().scaledToFill()
             } else {
                 initials
             }
         }
         .frame(width: size, height: size)
         .clipShape(Circle())
-        .onAppear { if let url { cache.fetch(url) } }
+        .task(id: url) {
+            guard let url else {
+                image = nil
+                return
+            }
+            if let cached = AvatarImageCache.shared.image(for: url) {
+                image = cached
+                return
+            }
+            image = await AvatarImageCache.shared.load(url)
+        }
     }
 
     private var initials: some View {
