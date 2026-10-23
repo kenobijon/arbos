@@ -12,6 +12,7 @@ mod groups;
 mod harness;
 mod hooks;
 mod http;
+mod identity;
 mod isolation;
 mod llm;
 mod local;
