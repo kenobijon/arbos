@@ -402,9 +402,12 @@ struct ChatView: View {
             }
         }
         .animation(.easeOut(duration: 0.2), value: awayFromBottom)
+        .environment(\.composerInset, composerSideInset)
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 0) {
                 presenceRow
+                    .environment(\.composerInset, composerSideInset)
+                    .animation(.easeOut(duration: 0.25), value: composerFocused)
                 Group {
                     if isChannel, !model.channelCanPost(chatId) {
                         // Rule 9: a restricted channel I cannot post in — one quiet line, no composer.
@@ -990,6 +993,8 @@ struct ChatView: View {
                     Color.clear.frame(height: 28).id("bottom")
                 }
                 .padding(.horizontal, 16)
+                // The avatar column follows the `+` as the composer inset animates with the keyboard.
+                .animation(.easeOut(duration: 0.25), value: composerFocused)
                 // Short threads: fill the viewport and pin rows to the bottom so
                 // two bubbles cannot float mid-screen (scroll-anchor alone was
                 // centering them on iOS 26). Empty-state copy keeps its own

@@ -723,6 +723,7 @@ enum Markdown {
 struct RowView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
+    @Environment(\.composerInset) private var composerInset
     let row: Row
     let chatId: Id
     let width: CGFloat
@@ -881,7 +882,7 @@ struct RowView: View {
                     PersonAvatar(url: avatar, handle: handle, size: Theme.memberAvatar, name: model.personName(handle: handle), id: model.personId(handle: handle))
                 }
                 .buttonStyle(.plain)
-                .padding(.leading, Theme.avatarColumnInset)
+                .padding(.leading, Theme.avatarColumnInset(composerInset: composerInset))
                 .accessibilityLabel("@\(handle), profile")
                 VStack(alignment: .leading, spacing: 3) {
                     if named {
@@ -908,7 +909,7 @@ struct RowView: View {
                     .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
                     .modifier(LiveSenderBar(url: avatar, seed: model.personId(handle: handle) ?? handle))
                 }
-                .frame(maxWidth: maxBubble - Theme.memberLane, alignment: .leading)
+                .frame(maxWidth: maxBubble - Theme.memberLane(composerInset: composerInset), alignment: .leading)
                 Spacer(minLength: 0)
             }
             .task(id: avatar) { SenderAccents.shared.load(url: avatar) }
@@ -919,7 +920,7 @@ struct RowView: View {
             }
             HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
                 Button(action: openMember) { peopleAvatar(handle: handle, avatar: avatar) }
-                    .padding(.leading, Theme.avatarColumnInset)
+                    .padding(.leading, Theme.avatarColumnInset(composerInset: composerInset))
                     .buttonStyle(.plain)
                     .accessibilityLabel("@\(handle), profile")
                 VStack(alignment: .leading, spacing: 3) {
@@ -945,7 +946,7 @@ struct RowView: View {
                         }
                     )
                 }
-                .frame(maxWidth: maxBubble - Theme.memberLane, alignment: .leading)
+                .frame(maxWidth: maxBubble - Theme.memberLane(composerInset: composerInset), alignment: .leading)
                 Spacer(minLength: 0)
             }
             .task(id: avatar) {
@@ -1080,7 +1081,7 @@ struct RowView: View {
     /// Match the avatar offset used by people-chat bubbles (26 pt + 8 pt gap).
     private var reactionLeading: CGFloat {
         switch row.kind {
-        case .other, .member: return Theme.memberLane
+        case .other, .member: return Theme.memberLane(composerInset: composerInset)
         default: return 0
         }
     }
