@@ -293,6 +293,9 @@ pub enum RowKind {
         /// leaves the avatar lane free and the last one draws the sender's disc
         /// at the bubble's bottom-left (redesign mocks a/f). The sender seed.
         lane: Option<String>,
+        /// People / group reply: quote of the user message this answers (`inReplyTo`).
+        /// Only set on the first block of the bubble.
+        quote: Option<Quote>,
     },
     /// A finished reply with no words, cards or attachments: one plain line in the
     /// agent's bubble. `name` is the row's `senderName`; the agent id in `seed` resolves
@@ -302,6 +305,8 @@ pub enum RowKind {
         name: Option<String>,
         time: Option<String>,
         lane: Option<String>,
+        /// People / group reply: quote of the user message this would have answered.
+        quote: Option<Quote>,
     },
     /// Centered muted time line ("Today 9:39 PM").
     Stamp {
@@ -703,9 +708,16 @@ impl Transcript {
         let me_id = state.me_id();
         let thumb_keys: HashSet<&str> = state.thumbnails.keys().map(|k| k.as_str()).collect();
         let new_rows = build_rows(&messages, show_details, speech, &me_id, &thumb_keys);
+        // A sender change opens the turn gap. So does every new assistant /
+        // project message — consecutive replies from the same agent (quick ack
+        // then the answer, or two answers in a row) must not read as one bubble
+        // (#1447 / doug-merged-reply-bubbles).
         self.turn_starts = messages
             .windows(2)
-            .filter(|w| (w[0].role, &w[0].sender) != (w[1].role, &w[1].sender))
+            .filter(|w| {
+                (w[0].role, &w[0].sender) != (w[1].role, &w[1].sender)
+                    || matches!(w[1].role, Role::Assistant | Role::Project)
+            })
             .map(|w| w[1].id.clone())
             .collect();
 
@@ -1068,6 +1080,7 @@ impl Transcript {
         fill: bool,
         time: Option<String>,
         lane: Option<String>,
+        quote: Option<Quote>,
         now: Instant,
         theme: &Theme,
         selectable: &Selectable,
@@ -1092,6 +1105,9 @@ impl Transcript {
             avatars::agent_accent(&a.seed, a.color_index, a.leaf.0, a.leaf.1, theme)
         });
         let r = px(BUBBLE_RADIUS);
+        let quote_header = quote
+            .filter(|_| first)
+            .map(|q| self.quote_header(row_id, q, theme.text));
         let bubble = self
             .menu_target(
                 div().id(SharedString::from(format!("{}#bubble", row_id))),
@@ -1108,6 +1124,9 @@ impl Transcript {
             .min_w_0()
             .relative()
             .when(fill, |el| el.w_full())
+            .when(quote_header.is_some(), |el| {
+                el.flex().flex_col().gap(px(6.0))
+            })
             .px(px(BUBBLE_PAD_X))
             .when(first, |el| el.pt(px(BUBBLE_PAD_Y)).rounded_t(r))
             .when(!first, |el| el.pt(px(3.0)))
@@ -1117,6 +1136,7 @@ impl Transcript {
             .when_some(agent_accent, |el, color| {
                 el.border_l_2().border_color(Theme::with_alpha(color, 0.7))
             })
+            .children(quote_header)
             .child(render_block(
                 row_id,
                 &block,
@@ -1397,6 +1417,7 @@ impl Transcript {
                 fill,
                 time,
                 lane,
+                quote,
             } => self.markdown_bubble(
                 &row.id,
                 &row.message_id,
@@ -1408,6 +1429,7 @@ impl Transcript {
                 fill,
                 time,
                 lane,
+                quote,
                 now,
                 &theme,
                 &selectable,
@@ -1419,6 +1441,7 @@ impl Transcript {
                 name,
                 time,
                 lane,
+                quote,
             } => {
                 let hint = name.as_deref().unwrap_or("Agent");
                 let (resolved, _, _, _) = self.agent_identity(&seed, hint, cx);
@@ -1440,6 +1463,7 @@ impl Transcript {
                     false,
                     time,
                     lane,
+                    quote,
                     now,
                     &theme,
                     &selectable,
@@ -2289,13 +2313,23 @@ pub fn build_rows(
                 let mut sender_row_ix: Option<usize> = None;
                 let in_people =
                     message.sender.starts_with("agent:") && message.asked_by_handle.is_some();
+                // Quote the user message this answers (`inReplyTo`); clients must show it
+                // so consecutive replies do not look like one run (people.rs contract, #1447).
+                let reply_quote = message
+                    .in_reply_to
+                    .as_deref()
+                    .filter(|id| !id.is_empty())
+                    .map(|id| Quote::for_reply(id, messages));
                 if message.role == Role::Project || in_people {
-                    // A people-chat agent (or another Project, F6) speaks in its own lane. The
-                    // name sits above the bubble only when the sender changed (Grok Bot's group
-                    // style); the disc on the last block names it otherwise. No meta line —
+                    // A people-chat agent (or another Project, F6) speaks in its own lane.
+                    // Each reply names its sender (#1447): consecutive answers from the same
+                    // agent must not merge into one unnamed run. No meta line —
                     // "answering @x · owned by @y" moved to the profile pane (Jacob, 2026-10-22).
                     lane = Some(message.sender.clone());
-                    if prev_sender.as_deref() != Some(message.sender.as_str()) {
+                    let name_this = in_people
+                        || message.role == Role::Project
+                        || prev_sender.as_deref() != Some(message.sender.as_str());
+                    if name_this {
                         let fallback = if message.role == Role::Project {
                             message
                                 .sender
@@ -2397,7 +2431,10 @@ pub fn build_rows(
                                         BubbleText::single(block_plain(&block, false))
                                     });
                                 rows.push(Row {
-                                    version: hash_version(&(&block, first, last, fill), live),
+                                    version: hash_version(
+                                        &(&block, first, last, fill, &reply_quote),
+                                        live,
+                                    ),
                                     id: format!("{}#{}.{}", message.id, id, bix),
                                     message_id: message.id.clone(),
                                     kind: RowKind::Markdown {
@@ -2409,6 +2446,7 @@ pub fn build_rows(
                                         fill,
                                         time: clock_label(message.created_at),
                                         lane: lane.clone(),
+                                        quote: if first { reply_quote.clone() } else { None },
                                     },
                                 });
                                 block_ix += 1;
@@ -2572,12 +2610,14 @@ pub fn build_rows(
                             fill: false,
                             time: clock_label(message.created_at),
                             lane: lane.clone(),
+                            quote: reply_quote.clone(),
                         },
                         None => RowKind::NoAnswer {
                             seed: message.sender.clone(),
                             name: message.sender_name.clone().filter(|n| !n.trim().is_empty()),
                             time: clock_label(message.created_at),
                             lane: lane.clone(),
+                            quote: reply_quote.clone(),
                         },
                     };
                     rows.push(Row {
@@ -2586,6 +2626,7 @@ pub fn build_rows(
                                 &message.sender,
                                 &message.sender_name,
                                 errors.first().map(|(_, _, text)| text),
+                                &reply_quote,
                             ),
                             false,
                         ),
@@ -3962,6 +4003,23 @@ mod system_line_tests {
         .expect("message")
     }
 
+    fn agent_reply(id: &str, text: &str, in_reply_to: &str, at: u64) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "chatId": "chat_group",
+            "role": "assistant",
+            "sender": "agent:doug",
+            "senderName": "Doug",
+            "senderHandle": "doug",
+            "askedByHandle": "jacob",
+            "inReplyTo": in_reply_to,
+            "status": "done",
+            "createdAt": at,
+            "parts": [{ "id": format!("p-{id}"), "kind": "text", "text": text }],
+        }))
+        .expect("agent reply")
+    }
+
     #[test]
     fn membership_notice_is_a_centred_stamp_that_breaks_the_sender_run() {
         let t = 1_700_000_000_000u64;
@@ -4008,6 +4066,63 @@ mod system_line_tests {
         assert!(
             rows.iter().all(|r| r.id != "m-1700000001000#user"),
             "no bubble for the system row"
+        );
+    }
+
+    /// #1447: consecutive people-chat replies from the same agent each get a sender
+    /// caption and a quote of the message they answer — not one merged run.
+    #[test]
+    fn consecutive_agent_replies_each_name_and_quote() {
+        let t = 1_700_000_000_000u64;
+        let user_a = message("user", "user:gh_jacob", "first ask", t);
+        let user_b = message("user", "user:gh_jacob", "second ask", t + 1_000);
+        let messages = [
+            user_a,
+            agent_reply("a1", "quick ack", "m-1700000000000", t + 2_000),
+            agent_reply("a2", "full answer", "m-1700000000000", t + 3_000),
+            user_b,
+            agent_reply("a3", "answer two", "m-1700000001000", t + 4_000),
+        ];
+        let spoken = HashSet::new();
+        let failed = HashMap::new();
+        let speech = SpeechRows {
+            enabled: false,
+            spoken: &spoken,
+            failed: &failed,
+            voice_mode: false,
+        };
+        let rows = build_rows(&messages, false, speech, "gh_jacob", &HashSet::new());
+        let sender_captions: Vec<&str> = rows
+            .iter()
+            .filter_map(|r| match &r.kind {
+                RowKind::Sender { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            sender_captions,
+            ["Doug", "Doug", "Doug"],
+            "each agent reply names the sender: {sender_captions:?}"
+        );
+        let quotes: Vec<(&str, &str)> = rows
+            .iter()
+            .filter_map(|r| match &r.kind {
+                RowKind::Markdown {
+                    quote: Some(q),
+                    first: true,
+                    ..
+                } => Some((q.message_id.as_str(), q.text.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            quotes,
+            [
+                ("m-1700000000000", "first ask"),
+                ("m-1700000000000", "first ask"),
+                ("m-1700000001000", "second ask"),
+            ],
+            "each reply quotes the message it answers: {quotes:?}"
         );
     }
 }

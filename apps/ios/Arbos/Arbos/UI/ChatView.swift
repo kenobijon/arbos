@@ -1102,14 +1102,20 @@ struct ChatView: View {
         }
     }
 
-    /// Spacing: 8 pt between bubbles of one sender, 24 pt around sender changes
-    /// and system lines (measured on the references).
+    /// Spacing: 8 pt between blocks of one message, 24 pt around sender changes,
+    /// system lines, and each new agent reply (quick ack vs main answer must not
+    /// look merged — #1447). Measured on the references.
     private func gap(before i: Int, in shown: [Row]) -> CGFloat {
         guard i > 0, i < shown.count else { return 0 }
         let prev = shown[i - 1], cur = shown[i]
         if case .system = prev.kind { return 20 }
         if case .system = cur.kind { return 20 }
-        return prev.role == cur.role ? 8 : 24
+        if prev.role != cur.role { return 24 }
+        // Same role: still open the turn gap when an agent starts a new message.
+        if prev.messageId != cur.messageId && (cur.role == .assistant || cur.role == .project) {
+            return 24
+        }
+        return 8
     }
 
     /// The machine's notice (waking / can't reach). The link has no line here:
