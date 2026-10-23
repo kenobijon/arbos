@@ -69,13 +69,13 @@ pub fn leaf_pick(seed: &str, leaf_override: Option<u8>, color_override: Option<u
     leaf::pick_for(seed, leaf_override, color_override)
 }
 
-/// The cream leaf ink.
-pub fn leaf_ink() -> Hsla {
-    let Rgb(r, g, b) = leaf::LEAF_INK;
+/// The leaf ink on disc colour `index`: the darker same hue (v2 rule).
+pub fn leaf_ink(index: u8) -> Hsla {
+    let Rgb(r, g, b) = leaf::COLORS[(index % leaf::COLOR_COUNT) as usize].ink;
     rgb([r, g, b])
 }
 
-/// Disc colour `index` of the autumn palette.
+/// Disc colour `index`: the pastel of that hue.
 pub fn leaf_disc(index: u8) -> Hsla {
     let Rgb(r, g, b) = leaf::COLORS[(index % leaf::COLOR_COUNT) as usize].rgb;
     rgb([r, g, b])
@@ -98,16 +98,21 @@ pub fn leaf_asset_bytes(path: &str) -> Option<&'static [u8]> {
         .map(|l| l.svg.as_bytes())
 }
 
-/// The leaf glyph alone (cream, `LEAF_SCALE` of `size`), optionally swayed:
+/// The leaf glyph alone (the hue's ink, `LEAF_SCALE` of `size`), optionally swayed:
 /// `angle` in radians about the stem, i.e. the bottom centre of the glyph.
 pub fn leaf_glyph(pick: LeafPick, size: f32, angle: f32) -> Svg {
+    leaf_glyph_inked(pick.leaf, size, angle, leaf_ink(pick.color))
+}
+
+/// The leaf glyph in any ink (the picker draws unselected leaves in a neutral grey).
+pub fn leaf_glyph_inked(leaf_index: u8, size: f32, angle: f32, ink: Hsla) -> Svg {
     let side = size * leaf::LEAF_SCALE;
     svg()
-        .path(leaf_asset(pick.leaf))
+        .path(leaf_asset(leaf_index))
         .size(px(side))
         .flex_shrink_0()
-        .text_color(leaf_ink())
-        .with_transformation(sway(pick.leaf, side, angle))
+        .text_color(ink)
+        .with_transformation(sway(leaf_index, side, angle))
 }
 
 /// Reduce Motion (macOS Accessibility), read once: no sway, no ruffle.
@@ -212,7 +217,7 @@ fn ruffle_glyph(pick: LeafPick, size: f32, tick: u64) -> AnyElement {
     if leaf_lottie_on() {
         if let Some(comp) = lottie::composition(pick.leaf, lottie::Clip::Gust) {
             let secs = lottie::duration_secs(&comp);
-            let ink = leaf_ink();
+            let ink = leaf_ink(pick.color);
             return div()
                 .size(px(size * leaf::LEAF_SCALE))
                 .flex_shrink_0()
@@ -256,7 +261,7 @@ fn sway_glyph(pick: LeafPick, size: f32) -> AnyElement {
     if leaf_lottie_on() {
         if let Some(comp) = lottie::composition(pick.leaf, lottie::Clip::Idle) {
             let secs = lottie::duration_secs(&comp);
-            let ink = leaf_ink();
+            let ink = leaf_ink(pick.color);
             return div()
                 .size(px(size * leaf::LEAF_SCALE))
                 .flex_shrink_0()

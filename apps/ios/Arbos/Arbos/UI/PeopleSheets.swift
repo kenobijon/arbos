@@ -566,8 +566,8 @@ struct CreateEntityView: View {
                                 .font(.system(size: 13)).foregroundStyle(theme.danger)
                                 .multilineTextAlignment(.center).padding(.horizontal, 24).padding(.top, 8)
                         }
-                        leafGrid.padding(.top, 244 - 218)
-                        colourGrid.padding(.top, 370 - 340)
+                        leafGrid.padding(.top, 246 - 218)
+                        colourGrid.padding(.top, 450 - 426)
                     }
                 }
                 .padding(.bottom, 24)
@@ -621,15 +621,16 @@ struct CreateEntityView: View {
             .padding(.horizontal, 16.5)
     }
 
-    /// Nine leaves, 5 / 4, on a 56 pt pitch: 33 pt discs on the chosen colour, a 40 pt ring on the pick.
+    /// The sixteen leaves (v2) as their 4 × 4 sheet on a 48 pt pitch: 30 pt discs on the chosen
+    /// hue, a 36 pt ring on the pick.
     private var leafGrid: some View {
-        VStack(spacing: 56 - 40) {
-            ForEach([Array(0..<5), Array(5..<9)], id: \.self) { row in
-                HStack(spacing: 56 - 40) {
-                    ForEach(row, id: \.self) { i in
+        VStack(spacing: 48 - 36) {
+            ForEach(0..<4, id: \.self) { r in
+                HStack(spacing: 48 - 36) {
+                    ForEach(r * 4..<r * 4 + 4, id: \.self) { i in
                         Button { pickedLeaf = i } label: {
-                            LeafAvatar(pick: LeafPick(leaf: UInt8(i), color: pick.color), size: 33)
-                                .frame(width: 40, height: 40)
+                            LeafAvatar(pick: LeafPick(leaf: UInt8(i), color: pick.color), size: 30)
+                                .frame(width: 36, height: 36)
                                 .overlay(Circle().strokeBorder(Int(pick.leaf) == i ? ring : .clear, lineWidth: 1))
                                 .contentShape(Circle())
                         }
