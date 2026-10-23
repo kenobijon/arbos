@@ -255,6 +255,37 @@ final class CoreFixturesTests: XCTestCase {
 
     // MARK: Calls
 
+    func testCallKitUUIDStablePerCallId() {
+        let a1 = callKitUUID(forCallId: "call_fixture")
+        let a2 = callKitUUID(forCallId: "call_fixture")
+        let b = callKitUUID(forCallId: "call_other")
+        XCTAssertEqual(a1, a2)
+        XCTAssertNotEqual(a1, b)
+    }
+
+    func testVoipPlanIdleRingDuplicateAndBusy() {
+        XCTAssertEqual(
+            voipPlan(isActive: false, incomingCallId: nil, currentCallId: nil, newCallId: "c1"),
+            .ring
+        )
+        XCTAssertEqual(
+            voipPlan(isActive: false, incomingCallId: "c1", currentCallId: nil, newCallId: "c1"),
+            .reportDuplicate
+        )
+        XCTAssertEqual(
+            voipPlan(isActive: true, incomingCallId: nil, currentCallId: "c1", newCallId: "c1"),
+            .reportDuplicate
+        )
+        XCTAssertEqual(
+            voipPlan(isActive: true, incomingCallId: nil, currentCallId: "c1", newCallId: "c2"),
+            .reportAndEnd
+        )
+        XCTAssertEqual(
+            voipPlan(isActive: false, incomingCallId: "c1", currentCallId: nil, newCallId: "c2"),
+            .reportAndEnd
+        )
+    }
+
     func testCallParseFixtures() throws {
         let live = try XCTUnwrap(Call.parse(try apiFixtureJSON("call_live_with_token.json")))
         XCTAssertEqual(live.callId, "call_fixture")
