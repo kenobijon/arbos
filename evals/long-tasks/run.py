@@ -250,6 +250,8 @@ class Lane(threading.Thread):
             "success": not reasons,
             "reasons": reasons,
             "ttfr_s": turns_out[0]["ttfr_s"] if turns_out else None,
+            # the first turn's route decides the cost shape: `new` = a Sonnet helper (≈ 5× an `act` turn on Haiku)
+            "route_t1": (turns_out[0].get("routes") or [None])[0] if turns_out else None,
             "ttfr_all_s": [t["ttfr_s"] for t in turns_out],
             "total_s": round(time.time() - t_task0, 1),
             "tool_errors": sum(t["tool_errors"] or 0 for t in turns_out),
