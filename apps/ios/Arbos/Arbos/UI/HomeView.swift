@@ -273,12 +273,15 @@ struct HomeView: View {
                 .listStyle(.plain)
                 .scrollContentBackground(.hidden)
                 .background(theme.bg)
-                .mask {
-                    VStack(spacing: 0) {
-                        LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom).frame(height: 100)
-                        Color.black
-                    }
-                    .ignoresSafeArea()
+                // Fade under the top bar as an overlay — a List `.mask` clips the
+                // system scroll indicator on the right edge (feedback
+                // app-01M5MY2Y9HTFR019WAEPPDCNYS). Same treatment as ChatView's
+                // headerBlur: keep the soft edge, leave the scroller free.
+                .scrollIndicators(.visible)
+                .overlay(alignment: .top) {
+                    LinearGradient(colors: [theme.bg, theme.bg.opacity(0)], startPoint: .top, endPoint: .bottom)
+                        .frame(height: 100)
+                        .allowsHitTesting(false)
                 }
                 .refreshable { await model.refreshRegistry() }
                 topBar
@@ -1050,6 +1053,7 @@ struct HiddenChatsView: View {
             .listStyle(.plain)
             .scrollContentBackground(.hidden)
             .background(theme.bg)
+            .scrollIndicators(.visible)
             // Grok page header: back circle left, title centred in a pill.
             HStack {
                 Button { dismiss() } label: {
