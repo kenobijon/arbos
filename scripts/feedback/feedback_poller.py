@@ -176,6 +176,9 @@ class Config:
     github_repo: str
     priority: set[str]
     blocklist: set[str]
+    # Priority testers who nevertheless keep the malicious-intent screen (owner decision 2026-10-23 23:47 for
+    # @dawizzaa: first in line and no daily cap, screen unchanged).
+    screen_always: set[str]
     relay_url: str
     relay_admin_token: str
     openrouter_key: str
@@ -218,6 +221,7 @@ class Config:
         priority = listed("FEEDBACK_PRIORITY", "FEEDBACK_PRIORITY_FILE", "/etc/arbos/feedback-priority.txt")
         priority |= listed("FEEDBACK_ALLOWLIST", "FEEDBACK_ALLOWLIST_FILE", "/etc/arbos/feedback-allowlist.txt")
         blocklist = listed("FEEDBACK_BLOCKLIST", "FEEDBACK_BLOCKLIST_FILE", "/etc/arbos/feedback-blocklist.txt")
+        screen_always = listed("FEEDBACK_SCREEN_ALWAYS", "FEEDBACK_SCREEN_ALWAYS_FILE", "/etc/arbos/feedback-screen-always.txt")
         # Internal testers (owner decision 2026-10-21: Jacob, Ken, Robert, Etienne) get a higher daily launch cap.
         internal = listed("FEEDBACK_INTERNAL", "FEEDBACK_INTERNAL_FILE", "/etc/arbos/feedback-internal.txt")
         # Deferred product areas: "<regex> :: <comment>" per line; matching feedback gets its issue,
@@ -261,6 +265,7 @@ class Config:
             github_repo=env.get("GITHUB_REPO", "unarbos/arbos"),
             priority=priority,
             blocklist=blocklist,
+            screen_always=screen_always,
             relay_url=env.get("ARBOS_RELAY_URL", "").rstrip("/"),
             relay_admin_token=env.get("ARBOS_RELAY_ADMIN_TOKEN", ""),
             openrouter_key=env.get("OPENROUTER_API_KEY", ""),
@@ -1268,7 +1273,12 @@ class Loop:
         2026-10-22 07:18 CR after the word filter had caught three of Ken's long technical reports (#1175,
         #1178, #1300), each costing a resubmission; their intent is not in question. Everyone else: the
         pattern check, then the model."""
-        if tier == "priority":
+        keys = {self.tester_key(info)}
+        if info.get("handle"):
+            keys.add("@" + info["handle"].lower())
+        if info.get("email"):
+            keys.add(info["email"].lower())
+        if tier == "priority" and not keys & self.cfg.screen_always:
             return "ok", "priority tester — intent screen exempt (owner decision 2026-10-22)"
         text = (info.get("comment") or "").strip()
         # The submit_feedback tool appends "— filed by the user's agent <name> …": boilerplate, not the user's
