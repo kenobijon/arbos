@@ -367,6 +367,8 @@ class Lane(threading.Thread):
                     hits = [t[:80] for t in checks["texts_after_rename"] if re.search(rx, t, re.I)]
                     if hits:
                         reasons.append(f"a bubble after the rename still says it is {old_name!r}: {hits[:2]}")
+            if dc.get("agent_replies_carry_reply_to") and checks["unquoted_replies"]:
+                reasons.append(f"{len(checks['unquoted_replies'])} agent reply row(s) without replyTo = the asking message (#1521): {checks['unquoted_replies'][:3]}")
             if dc.get("forbid_text_regex"):
                 hits = [t[:80] for t in checks["texts"] if re.search(dc["forbid_text_regex"], t, re.I)]
                 if hits:
@@ -420,7 +422,7 @@ class Lane(threading.Thread):
 def doc_checks(docs, after_ms=None):
     """Whole-transcript checks over every chat doc a task touched (rows are deduplicated by id)."""
     handoffs = 0
-    dups, repeated, texts, truncated, texts_after = [], [], [], [], []
+    dups, repeated, texts, truncated, texts_after, unquoted = [], [], [], [], [], []
     empty_result_rows = 0
     seen_rows = set()
     for doc in docs:
@@ -440,6 +442,10 @@ def doc_checks(docs, after_ms=None):
                     seen.add(key)
             text = dr.text_of(m)
             tools = [p for p in m.get("parts", []) if p.get("kind") == "tool"]
+            # #1521: a finished reply with words that answers a user row carries the platform
+            # reply (`replyTo` = that row) so the bubble quotes the question (groups: always).
+            if text and m.get("status") == "done" and m.get("inReplyTo") and m.get("replyTo") != m.get("inReplyTo") and m.get("turnRole") != "ack":
+                unquoted.append(m.get("id"))
             if text:
                 texts.append(text)
                 if after_ms and (m.get("createdAt") or 0) >= after_ms:
@@ -454,7 +460,7 @@ def doc_checks(docs, after_ms=None):
                         repeated.append(x[:60])
             elif tools and m.get("turnRole") != "ack" and m.get("status") == "done":
                 empty_result_rows += 1
-    return {"handoffs": handoffs, "dup_status": dups, "empty_result_rows": empty_result_rows, "repeated_sentences": repeated, "texts": texts, "truncated": truncated, "texts_after_rename": texts_after}
+    return {"handoffs": handoffs, "dup_status": dups, "empty_result_rows": empty_result_rows, "repeated_sentences": repeated, "texts": texts, "truncated": truncated, "texts_after_rename": texts_after, "unquoted_replies": unquoted}
 
 
 def main():

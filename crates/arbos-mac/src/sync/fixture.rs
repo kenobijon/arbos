@@ -4402,6 +4402,29 @@ impl Seeder<'_> {
         });
     }
 
+    /// An answer to the user message two rows back: `replyTo` set (the quote header) when
+    /// `quoted`, else the plain bubble (#1521 before/after).
+    fn assistant_replying_to(&mut self, quoted: bool, text: &str) -> Id {
+        let target = self
+            .doc
+            .read_all()
+            .into_iter()
+            .filter(|m| m.role == Role::User)
+            .rev()
+            .nth(1)
+            .map(|m| m.id);
+        let id = self.assistant(TurnKind::Reply, MessageStatus::Done, vec![text_part(text)]);
+        if let Some(target) = target {
+            self.doc.core.transact(|d| {
+                d.set_message_fields(&id, &[("inReplyTo", json!(target))]);
+                if quoted {
+                    d.set_message_fields(&id, &[("replyTo", json!(target))]);
+                }
+            });
+        }
+        id
+    }
+
     /// The reply that went back to that agent ("Replied to ◉ X").
     fn assistant_replying_to_agent(&mut self, to_name: &str, text: &str) -> Id {
         let id = self.assistant(TurnKind::Reply, MessageStatus::Done, vec![text_part(text)]);
@@ -4888,6 +4911,18 @@ fn seed_chat_docs() -> Vec<ChatDoc> {
             comms,
             "Announcement draft is written. I need the final build number from Arbos before I schedule it.",
         );
+        // `ARBOS_FIXTURE_REPLY_TO=1` (screenshot rig, #1521): a question asked two messages
+        // back, then the agent's answer carrying `replyTo` = that question — the bubble shows
+        // the quote header. `=0` writes the same rows without `replyTo` (the before-shot).
+        if let Ok(v) = std::env::var("ARBOS_FIXTURE_REPLY_TO") {
+            s.user("Arbos, what is the final build number for the beta?");
+            s.user("And Affine, is the export behind a flag?");
+            s.project(affine, "Yes — `canvas_export`, on by default in the beta.");
+            s.assistant_replying_to(
+                v == "1",
+                "The beta ships as build 0.6.184; Comms, that is the number for the announcement.",
+            );
+        }
     }
     out.push(group);
 
