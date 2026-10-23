@@ -330,12 +330,23 @@ fn t3_events(w: &Workspace, q: &Query) -> Vec<Event> {
         .t3_after(q.since, q.chat.as_deref(), (q.limit + 1) as i64)
         .unwrap_or_default()
         .into_iter()
-        .map(|r| {
+        .map(|(r, mut source)| {
             let max = if r.kind == "tool_output" {
                 TOOL_OUTPUT_CHARS
             } else {
                 TEXT_CHARS
             };
+            // The row's `source` column holds the structured facts (gate reason, quick-reply
+            // side, tool name, message ids); the subagent id rides along when present.
+            if let Some(sub) = r.subagent_id {
+                let d = source.get_or_insert_with(|| json!({}));
+                if let Some(o) = d.as_object_mut() {
+                    o.insert("subagent_id".into(), json!(sub));
+                }
+            }
+            if let Some(d) = source.as_mut() {
+                scrub_value(d);
+            }
             Event {
                 id: r.id,
                 at: r.at,
@@ -343,7 +354,7 @@ fn t3_events(w: &Workspace, q: &Query) -> Vec<Event> {
                 chat_id: Some(r.thread_id),
                 role: r.role,
                 text: scrub(&clip(r.text.trim(), max)),
-                data: r.subagent_id.map(|s| json!({ "subagent_id": s })),
+                data: source,
                 source: "t3",
             }
         })
