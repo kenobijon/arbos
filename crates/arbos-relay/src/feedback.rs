@@ -559,6 +559,30 @@ pub async fn admin_list(
     Json(json!({ "items": items })).into_response()
 }
 
+/// Items of one account after `since`, oldest first, at most `limit` (`GET /me/feedback`): what
+/// this user, their apps (`submitted_by: "app"` diagnostics) and their agents filed. Same
+/// directory scan as the admin list; the store is files.
+pub(crate) async fn items_of_user(
+    state: &AppState,
+    user_id: &str,
+    since: i64,
+    limit: usize,
+) -> Vec<Item> {
+    let mut items: Vec<Item> = Vec::new();
+    if let Ok(mut rd) = tokio::fs::read_dir(root(state)).await {
+        while let Ok(Some(entry)) = rd.next_entry().await {
+            if let Some(item) = read_meta(&entry.path()).await {
+                if item.user_id == user_id && item.created_at > since {
+                    items.push(item);
+                }
+            }
+        }
+    }
+    items.sort_by_key(|i| i.created_at);
+    items.truncate(limit.clamp(1, 500));
+    items
+}
+
 /// `GET /admin/feedback/{id}/image`: the stored screenshot bytes.
 pub async fn admin_image(
     State(state): State<AppState>,

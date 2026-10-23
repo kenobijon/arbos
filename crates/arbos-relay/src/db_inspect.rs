@@ -3,7 +3,7 @@
 //! `at > after_ms` and `LIMIT`, on an indexed column, oldest first.
 
 use anyhow::Result;
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
 
 use crate::db::Db;
@@ -81,6 +81,104 @@ impl Db {
                 }))
             })?;
             rows.collect()
+        })
+    }
+
+    /// Newest app version seen per device of a user (`device_versions`): `device_id →
+    /// {platform, app_version, build, first_seen_at, last_seen_at}`.
+    pub fn device_versions_of_user(&self, user_id: &str) -> Result<Vec<Value>> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT device_id, platform, app_version, build, first_seen_at, last_seen_at FROM device_versions
+                 WHERE user_id = ?1 ORDER BY last_seen_at DESC",
+            )?;
+            let rows = st.query_map(params![user_id], |r| {
+                Ok(json!({
+                    "device_id": r.get::<_, String>(0)?, "platform": r.get::<_, String>(1)?,
+                    "app_version": r.get::<_, String>(2)?, "build": r.get::<_, String>(3)?,
+                    "first_seen_at": r.get::<_, i64>(4)?, "last_seen_at": r.get::<_, i64>(5)?,
+                }))
+            })?;
+            rows.collect()
+        })
+    }
+
+    /// Device ids of a user with a message-push registration, and with a VoIP one.
+    pub fn push_registrations_of_user(&self, user_id: &str) -> Result<(Vec<String>, Vec<String>)> {
+        self.with(|c| {
+            let mut st = c.prepare("SELECT device_id FROM push_tokens WHERE user_id = ?1")?;
+            let push: Vec<String> = st
+                .query_map(params![user_id], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            let mut st = c.prepare("SELECT device_id FROM voip_tokens WHERE user_id = ?1")?;
+            let voip: Vec<String> = st
+                .query_map(params![user_id], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok((push, voip))
+        })
+    }
+
+    /// The read-cursor facts of one user in one chat (#1438): the per-user row cursor
+    /// (`chat_user_cursor`), the per-user event mark unread is counted from (`chat_user_reads`),
+    /// and every device's older per-device mark (`people_reads`).
+    pub fn read_state(&self, user_id: &str, chat_id: &str, device_ids: &[String]) -> Result<Value> {
+        self.with(|c| {
+            let cursor: Option<(i64, i64)> = c
+                .query_row(
+                    "SELECT seq, at FROM chat_user_cursor WHERE user_id = ?1 AND chat_id = ?2",
+                    params![user_id, chat_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            let read: Option<(i64, i64)> = c
+                .query_row(
+                    "SELECT event_id, at FROM chat_user_reads WHERE user_id = ?1 AND chat_id = ?2",
+                    params![user_id, chat_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            let mut st = c.prepare(
+                "SELECT device_id, seq, at, hidden FROM people_reads WHERE chat_id = ?1",
+            )?;
+            let devices: Vec<Value> = st
+                .query_map(params![chat_id], |r| {
+                    Ok(json!({
+                        "device_id": r.get::<_, String>(0)?, "seq": r.get::<_, i64>(1)?,
+                        "at": r.get::<_, i64>(2)?, "hidden": r.get::<_, i64>(3)? != 0,
+                    }))
+                })?
+                .filter_map(|r| r.ok())
+                .filter(|v| {
+                    device_ids
+                        .iter()
+                        .any(|d| v["device_id"].as_str() == Some(d.as_str()))
+                })
+                .collect();
+            Ok(json!({
+                "user_cursor": cursor.map(|(seq, at)| json!({ "seq": seq, "at": at })),
+                "read_mark": read.map(|(event_id, at)| json!({ "event_id": event_id, "at": at })),
+                "device_marks": devices,
+            }))
+        })
+    }
+
+    /// The last `limit` announced message events of a chat (what unread is counted over).
+    pub fn chat_events_tail(&self, chat_id: &str, limit: i64) -> Result<Vec<Value>> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT id, message_id, sender_user, created_at, project_id FROM chat_events WHERE chat_id = ?1 ORDER BY id DESC LIMIT ?2",
+            )?;
+            let mut rows: Vec<Value> = st
+                .query_map(params![chat_id, limit], |r| {
+                    Ok(json!({
+                        "event_id": r.get::<_, i64>(0)?, "message_id": r.get::<_, String>(1)?,
+                        "sender_user": r.get::<_, Option<String>>(2)?, "created_at": r.get::<_, i64>(3)?,
+                        "project_id": r.get::<_, Option<String>>(4)?,
+                    }))
+                })?
+                .collect::<rusqlite::Result<_>>()?;
+            rows.reverse();
+            Ok(rows)
         })
     }
 

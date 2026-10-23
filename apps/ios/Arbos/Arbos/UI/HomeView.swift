@@ -1,7 +1,7 @@
 // Home, Grok Bot layout: top bar with the account circle (GitHub avatar, left)
-// and search + "+" circles (right), then the chat list (avatar, name, time,
-// preview) — nothing between the bar and the list. One machine: its state is
-// the small dot on the account circle; the machine details live in Settings.
+// and search + "+" circles (right), then All | Agents | People and the chat
+// list (avatar, name, time, preview). One machine: its state is the small dot
+// on the account circle; the machine details live in Settings.
 
 import ArbosFFI
 import SwiftUI
@@ -27,6 +27,9 @@ struct HomeView: View {
     /// Goals list (long-running objectives) from the home sidebar section.
     @State private var showGoals = false
     @State private var openGoalId: String?
+    /// Home list scope: All mixes agents, people and servers; Agents is your
+    /// own agents only (no people chats / other users); People is DMs and groups.
+    @State private var listFilter: HomeListFilter = .all
 
     private var hiddenProjects: [Project] {
         model.projects.filter { model.isArchived($0.id) }.sorted { lastActivity($0) > lastActivity($1) }
@@ -39,6 +42,14 @@ struct HomeView: View {
 
     private var hiddenCount: Int { hiddenProjects.count + hiddenPeople.count }
     @FocusState private var searchFocused: Bool
+
+    /// Selection above the home list (All | Agents | People).
+    private enum HomeListFilter: String, CaseIterable, Identifiable {
+        case all = "All"
+        case agents = "Agents"
+        case people = "People"
+        var id: String { rawValue }
+    }
 
     /// Folded query (case + diacritics, leading `@` stripped) so "@robert" and "Zoe" find their rows.
     private var searchQuery: String { HomeSearch.normalizeQuery(query) }
@@ -58,8 +69,12 @@ struct HomeView: View {
                             .listRowInsets(EdgeInsets())
                             .listRowSeparator(.hidden)
                             .listRowBackground(Color.clear)
-                    } else if homeRows.isEmpty, !searchQuery.isEmpty {
-                        Text("No conversations match \"\(query.trimmingCharacters(in: .whitespaces))\"")
+                    } else if homeRows.isEmpty {
+                        listFilterBar
+                            .listRowInsets(EdgeInsets(top: 4, leading: 20, bottom: 8, trailing: 20))
+                            .listRowSeparator(.hidden)
+                            .listRowBackground(theme.bg)
+                        Text(homeEmptyCopy)
                             .font(theme.font(Theme.small))
                             .foregroundStyle(theme.muted)
                             .frame(maxWidth: .infinity)
@@ -67,8 +82,12 @@ struct HomeView: View {
                             .listRowInsets(EdgeInsets())
                             .listRowSeparator(.hidden)
                             .listRowBackground(Color.clear)
-                            .accessibilityIdentifier("home-search-empty")
+                            .accessibilityIdentifier(searchQuery.isEmpty ? "home-filter-empty" : "home-search-empty")
                     } else {
+                        listFilterBar
+                            .listRowInsets(EdgeInsets(top: 4, leading: 20, bottom: 8, trailing: 20))
+                            .listRowSeparator(.hidden)
+                            .listRowBackground(theme.bg)
                         if searchQuery.isEmpty {
                             if let update = model.availableUpdate {
                                 UpdateCard(update: update)
@@ -101,12 +120,17 @@ struct HomeView: View {
                                 }
                                 .buttonStyle(.borderless)
                                 .contextMenu {
-                                    // Long-press on an agent (Jacob, #1258): Fork (a new
-                                    // agent) and Delete only — the Mac sidebar menu's Mute,
-                                    // Fork, Delete without Mute, which the iPhone has no
-                                    // per-agent form of. Pin and Archive stay on the swipes,
-                                    // Profile is the chat header, Share is the chat's
-                                    // members sheet.
+                                    // Long-press: Pin (also on leading swipe), then Fork /
+                                    // Delete for owned agents. Archive stays on the trailing
+                                    // swipe; Profile is the chat header.
+                                    Button {
+                                        withAnimation {
+                                            if pinned { model.unpinHome(projectId: project.id) }
+                                            else { model.pinHome(projectId: project.id) }
+                                        }
+                                    } label: {
+                                        Label(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin")
+                                    }
                                     if !project.shared {
                                         Button { model.duplicateProject(project) } label: {
                                             Label("Fork", systemImage: "arrow.triangle.branch")
@@ -652,25 +676,34 @@ struct HomeView: View {
     /// newest activity. With one: people (display name / @handle) first, then rows
     /// matched by title, then by a member, then by a message — newest first inside
     /// each group; a hit beyond the row's own name is explained on its second line.
+    /// `listFilter` can hide people (Agents) or agents/servers (People).
     private var homeRows: [HomeEntry] {
         let q = searchQuery
         var rows: [(HomeSearch.Kind, Bool, Int64, HomeEntry)] = []
-        for p in model.projects {
-            // Archived agents stay out of the home list until search (or open).
-            if q.isEmpty && model.isArchived(p.id) { continue }
-            guard let hit = projectHit(p, q: q) else { continue }
-            rows.append((hit.kind, model.isHomePinned(projectId: p.id), lastActivity(p), HomeEntry(row: .project(p), hit: hit)))
+        if listFilter != .people {
+            for p in model.projects {
+                // Agents: my agents only (`!shared`) — no shared-in agents.
+                if listFilter == .agents && p.shared { continue }
+                // Archived agents stay out of the home list until search (or open).
+                if q.isEmpty && model.isArchived(p.id) { continue }
+                guard let hit = projectHit(p, q: q) else { continue }
+                rows.append((hit.kind, model.isHomePinned(projectId: p.id), lastActivity(p), HomeEntry(row: .project(p), hit: hit)))
+            }
         }
-        for c in model.peopleChats {
-            // Archived people stay out of the home list until search (or open).
-            if q.isEmpty && model.isArchived(peopleChatId: c.id) { continue }
-            guard let hit = peopleHit(c, q: q) else { continue }
-            rows.append((hit.kind, model.isHomePinned(peopleChatId: c.id), peopleActivity(c), HomeEntry(row: .people(c), hit: hit)))
+        if listFilter != .agents {
+            for c in model.peopleChats {
+                // Archived people stay out of the home list until search (or open).
+                if q.isEmpty && model.isArchived(peopleChatId: c.id) { continue }
+                guard let hit = peopleHit(c, q: q) else { continue }
+                rows.append((hit.kind, model.isHomePinned(peopleChatId: c.id), peopleActivity(c), HomeEntry(row: .people(c), hit: hit)))
+            }
         }
-        // D88: servers sort among the chats by last activity (rule 1).
-        for s in model.servers {
-            guard let hit = HomeSearch.serverHit(name: s.name, channels: s.channels.map(\.name), q: q) else { continue }
-            rows.append((hit.kind, false, model.serverActivity(s), HomeEntry(row: .server(s), hit: hit)))
+        if listFilter == .all {
+            // D88: servers sort among the chats by last activity (rule 1).
+            for s in model.servers {
+                guard let hit = HomeSearch.serverHit(name: s.name, channels: s.channels.map(\.name), q: q) else { continue }
+                rows.append((hit.kind, false, model.serverActivity(s), HomeEntry(row: .server(s), hit: hit)))
+            }
         }
         return rows.sorted {
             if $0.0 != $1.0 { return $0.0 < $1.0 }
@@ -710,6 +743,35 @@ struct HomeView: View {
             model.searchableMessages(of: chatId).map {
                 HomeSearch.MessageText(chatId: chatId, messageId: $0.id, createdAt: $0.createdAt, text: $0.plainText)
             }
+        }
+    }
+
+    /// All | Agents | People — same capsule pill as profile panes (`PaneTabs`).
+    private var listFilterBar: some View {
+        let selected = Binding(
+            get: { listFilter.rawValue },
+            set: { raw in
+                guard let next = HomeListFilter(rawValue: raw) else { return }
+                Haptics.pick()
+                withAnimation(.snappy(duration: 0.2)) { listFilter = next }
+            }
+        )
+        return PaneTabs(tabs: HomeListFilter.allCases.map(\.rawValue), selected: selected)
+            .accessibilityIdentifier("home-list-filter")
+    }
+
+    /// Empty copy when the current filter (or search) has no rows.
+    private var homeEmptyCopy: String {
+        if !searchQuery.isEmpty {
+            return "No conversations match \"\(query.trimmingCharacters(in: .whitespaces))\""
+        }
+        switch listFilter {
+        case .all:
+            return "No conversations yet"
+        case .agents:
+            return "No agents yet"
+        case .people:
+            return "No people chats yet"
         }
     }
 
