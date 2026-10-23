@@ -391,3 +391,230 @@ pub async fn generations(
     )
         .into_response()
 }
+
+// ---- avatar generation (D92 amendment: the avatar picker's Generate tab) --------------------
+
+/// Pictures the picker may generate per project per UTC day (`ARBOS_AVATAR_GEN_DAILY`, default 20):
+/// one `gpt-image-1` square at low quality is $0.011, so a day of taps costs cents.
+fn avatar_gen_daily_cap() -> i64 {
+    std::env::var("ARBOS_AVATAR_GEN_DAILY")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(20)
+}
+
+const AVATAR_GEN_MODEL: &str = "gpt-image-1";
+const AVATAR_GEN_SIZE: &str = "1024x1024";
+const AVATAR_GEN_QUALITY: &str = "low";
+/// The stored picture: a 512 px JPEG, like the pictures the apps upload themselves.
+const AVATAR_SIDE: u32 = 512;
+
+fn avatar_error(status: StatusCode, kind: &str, message: impl Into<String>) -> Response {
+    (
+        status,
+        Json(json!({ "error": { "type": kind, "message": message.into() } })),
+    )
+        .into_response()
+}
+
+/// PNG (or anything `image` decodes) → 512 px JPEG q85 for the blob store.
+pub fn avatar_jpeg(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let img = image::load_from_memory(bytes).map_err(|e| format!("decode: {e}"))?;
+    let img = img.resize(
+        AVATAR_SIDE,
+        AVATAR_SIDE,
+        image::imageops::FilterType::Triangle,
+    );
+    let rgb = image::DynamicImage::ImageRgb8(img.to_rgb8());
+    let mut out = Vec::new();
+    let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 85);
+    enc.encode_image(&rgb).map_err(|e| format!("encode: {e}"))?;
+    Ok(out)
+}
+
+#[derive(serde::Deserialize)]
+pub struct AvatarGenerateBody {
+    pub prompt: String,
+}
+
+/// `POST /projects/{id}/avatar/generate {prompt}` — one square picture for the agent from a short
+/// prompt, through the relay's OpenAI key, stored in the project's blob slot and **not yet set**:
+/// the answer is `{image_key}` for the picker's preview, and "Set avatar" makes it the picture via
+/// `PATCH /projects/{id} {image_key}`. Metered like `/proxy/v1/images/generations` (usage row,
+/// credits, the project's daily spend cap) plus a per-project daily count cap. `ARBOS_IMAGE_MOCK=1`
+/// answers with the labelled placeholder.
+pub async fn avatar_generate(
+    State(state): State<AppState>,
+    principal: Principal,
+    axum::extract::Path(project_id): axum::extract::Path<String>,
+    Json(body): Json<AvatarGenerateBody>,
+) -> Response {
+    let Ok(Some(project)) = state.db.project(&project_id) else {
+        return avatar_error(StatusCode::NOT_FOUND, "no_such_project", "no such project");
+    };
+    if !state.owns(&principal, &project.id) {
+        return avatar_error(StatusCode::FORBIDDEN, "forbidden", "not your project");
+    }
+    let prompt: String = body.prompt.trim().chars().take(400).collect();
+    if prompt.is_empty() {
+        return avatar_error(StatusCode::BAD_REQUEST, "bad_prompt", "prompt is required");
+    }
+    let since = crate::proxy::start_of_utc_day_ms();
+    let made_today = state
+        .db
+        .usage_count_since(&project.id, "openai-images", "avatar:", since)
+        .unwrap_or(0);
+    if made_today >= avatar_gen_daily_cap() {
+        return avatar_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "avatar_gen_cap",
+            format!(
+                "{} generated pictures today is the limit for one agent; try again tomorrow or upload one",
+                avatar_gen_daily_cap()
+            ),
+        );
+    }
+    let model = format!("avatar:{AVATAR_GEN_MODEL}");
+    let t0 = Instant::now();
+    let png: Vec<u8> = if state.cfg.image_mock {
+        let _ = state.db.record_usage(
+            &project.id,
+            "openai-images",
+            &format!("mock:{model}"),
+            0,
+            0,
+            0,
+            0,
+            0.0,
+            t0.elapsed().as_millis() as i64,
+            None,
+        );
+        mock_png(&prompt, AVATAR_GEN_SIZE)
+    } else {
+        let Some(key) = state.cfg.openai_key.clone() else {
+            return avatar_error(
+                StatusCode::BAD_GATEWAY,
+                "no_image_key",
+                "the relay has no OPENAI_API_KEY for picture generation",
+            );
+        };
+        if let Err(r) = crate::credits::check_call(&state, &principal, &project.id) {
+            return crate::credits::refused_response(&r);
+        }
+        let today = state
+            .db
+            .usage_since(&project.id, since)
+            .map(|u| u.usd)
+            .unwrap_or(0.0);
+        if today >= project.spend_cap_daily {
+            return avatar_error(
+                StatusCode::PAYMENT_REQUIRED,
+                "spend_cap",
+                format!("daily spend cap ${:.2} reached", project.spend_cap_daily),
+            );
+        }
+        let url = format!(
+            "{}/images/generations",
+            state.cfg.openai_images_base.trim_end_matches('/')
+        );
+        let request = json!({
+            "model": AVATAR_GEN_MODEL,
+            "prompt": format!("A profile picture for an assistant: {prompt}. Centred subject, simple background, no text."),
+            "size": AVATAR_GEN_SIZE,
+            "quality": AVATAR_GEN_QUALITY,
+            "n": 1,
+        });
+        let upstream = match state
+            .http
+            .post(&url)
+            .bearer_auth(&key)
+            .json(&request)
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                return avatar_error(
+                    StatusCode::BAD_GATEWAY,
+                    "upstream",
+                    format!("upstream: {e}"),
+                )
+            }
+        };
+        let status = upstream.status();
+        let bytes = upstream.bytes().await.unwrap_or_default();
+        if !status.is_success() {
+            let message = serde_json::from_slice::<Value>(&bytes)
+                .ok()
+                .and_then(|v| {
+                    v.pointer("/error/message")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .unwrap_or_else(|| format!("upstream HTTP {status}"));
+            return avatar_error(StatusCode::BAD_GATEWAY, "upstream", message);
+        }
+        let parsed: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        let Some(b64) = parsed.pointer("/data/0/b64_json").and_then(Value::as_str) else {
+            return avatar_error(
+                StatusCode::BAD_GATEWAY,
+                "upstream",
+                "no picture in the answer",
+            );
+        };
+        let Ok(png) = base64::engine::general_purpose::STANDARD.decode(b64) else {
+            return avatar_error(
+                StatusCode::BAD_GATEWAY,
+                "upstream",
+                "picture was not base64",
+            );
+        };
+        let (input, output) = parsed
+            .get("usage")
+            .map(|u| {
+                (
+                    u.get("input_tokens").and_then(Value::as_i64).unwrap_or(0),
+                    u.get("output_tokens").and_then(Value::as_i64).unwrap_or(0),
+                )
+            })
+            .unwrap_or((0, 0));
+        let usd = price(AVATAR_GEN_MODEL, AVATAR_GEN_SIZE, AVATAR_GEN_QUALITY);
+        let _ = state.db.record_usage(
+            &project.id,
+            "openai-images",
+            &model,
+            input,
+            output,
+            0,
+            0,
+            usd,
+            t0.elapsed().as_millis() as i64,
+            None,
+        );
+        crate::credits::charge_call(
+            &state,
+            &principal,
+            &project.id,
+            usd,
+            "inference",
+            Some(&model),
+        );
+        png
+    };
+    let jpeg = match avatar_jpeg(&png) {
+        Ok(j) => j,
+        Err(e) => return avatar_error(StatusCode::BAD_GATEWAY, "upstream", e),
+    };
+    let image_key = format!("avatar-gen-{}.jpg", arbos_core::ids::ulid().to_lowercase());
+    if let Err(e) = crate::blobs::store(&state, &project.id, &image_key, "image/jpeg", &jpeg).await
+    {
+        return avatar_error(StatusCode::INTERNAL_SERVER_ERROR, "store", e);
+    }
+    Json(json!({
+        "image_key": image_key,
+        "mock": state.cfg.image_mock,
+        "made_today": made_today + 1,
+        "daily_cap": avatar_gen_daily_cap(),
+    }))
+    .into_response()
+}

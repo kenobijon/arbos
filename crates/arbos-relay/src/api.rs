@@ -320,6 +320,7 @@ pub async fn create_project(
         avatar_color_index: b.avatar_color_index,
         avatar_leaf: b.avatar_leaf,
         avatar_leaf_color: b.avatar_leaf_color,
+        image_key: None,
     };
     if state
         .db
@@ -552,6 +553,10 @@ pub struct PatchProjectBody {
     /// Leaf avatar disc colour (D92): 0–9, or `null` to go back to the derived colour.
     #[serde(default, deserialize_with = "deserialize_double_option_i64")]
     pub avatar_leaf_color: Option<Option<i64>>,
+    /// D92 amendment: an uploaded / generated picture — a blob name in the project's own slot
+    /// (`PUT /blob/{project}/{key}` or `POST /projects/{id}/avatar/generate`); `null` clears it.
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub image_key: Option<Option<String>>,
 }
 
 fn deserialize_double_option<'de, D>(d: D) -> Result<Option<Option<String>>, D::Error>
@@ -657,6 +662,31 @@ pub async fn patch_project(
         }
     }
     crate::avatar::check_leaf_pick(b.avatar_leaf.flatten(), b.avatar_leaf_color.flatten())?;
+    if let Some(image) = &b.image_key {
+        let key = image.as_deref().map(str::trim).filter(|k| !k.is_empty());
+        if let Some(k) = key {
+            match crate::blobs::stored_image(&state, &p.id, k).await {
+                crate::blobs::StoredImage::Image(_) => {}
+                crate::blobs::StoredImage::Missing => {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        "image_key: upload the picture first, then set image_key to its name"
+                            .into(),
+                    ))
+                }
+                crate::blobs::StoredImage::NotAnImage(_) => {
+                    return Err((
+                        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                        "image_key: that upload is not a picture".into(),
+                    ))
+                }
+            }
+        }
+        state
+            .db
+            .set_project_image_key(&p.id, key)
+            .map_err(internal)?;
+    }
     if let Some(voice) = &b.voice {
         let voice = voice.as_deref().map(str::trim).filter(|v| !v.is_empty());
         if let Some(v) = voice {
@@ -863,6 +893,7 @@ pub(crate) async fn project_dto(state: &AppState, p: &Project) -> ProjectDto {
         avatar_leaf_color: p.avatar_leaf_color,
         avatar_leaf_effective: Some(i64::from(leaf.leaf)),
         avatar_leaf_color_effective: Some(i64::from(leaf.color)),
+        image_key: p.image_key.clone(),
         primary_chat_id: primary_chat_id(state, p),
         owner: project_owner_dto(state, &p.user_id),
         model: p

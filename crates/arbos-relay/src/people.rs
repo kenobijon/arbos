@@ -325,6 +325,7 @@ pub(crate) fn member_dto(state: &AppState, m: &Membership) -> ChatMemberDto {
                 avatar_leaf_color: p.avatar_leaf_color,
                 avatar_leaf_effective: Some(i64::from(leaf.leaf)),
                 avatar_leaf_color_effective: Some(i64::from(leaf.color)),
+                image_key: p.image_key.clone(),
                 description: p.description.clone(),
                 model: p
                     .models
@@ -3396,6 +3397,7 @@ pub(crate) mod tests_support {
             avatar_color_index: None,
             avatar_leaf: None,
             avatar_leaf_color: None,
+            image_key: None,
         };
         state.db.insert_project(&project).expect("project");
         state
