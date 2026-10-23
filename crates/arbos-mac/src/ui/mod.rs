@@ -1,5 +1,6 @@
 pub mod approve;
 pub mod attachments;
+pub mod avatar_picker;
 pub mod avatars;
 pub mod callview;
 pub mod cards;

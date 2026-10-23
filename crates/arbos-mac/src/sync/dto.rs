@@ -774,7 +774,7 @@ pub(crate) fn chat_from_create(dto: &CreateChatResponseDto) -> Chat {
     chat_from_dto(&dto.chat)
 }
 
-fn agent_from_member(m: &ChatMemberDto, pid: &str) -> AgentMember {
+fn agent_from_member(m: &ChatMemberDto, pid: &str, http_url: &str, token: &str) -> AgentMember {
     let project = m.project.as_ref();
     let name = project
         .map(|p| p.name.as_str())
@@ -833,6 +833,10 @@ fn agent_from_member(m: &ChatMemberDto, pid: &str) -> AgentMember {
             .and_then(|p| p.avatar_leaf_color_effective)
             .or(m.avatar_leaf_color_effective)
             .and_then(leaf_index),
+        image_url: project
+            .and_then(|p| p.image_key.as_deref())
+            .and_then(non_empty)
+            .map(|k| format!("{http_url}/blob/{pid}/{k}?token={token}")),
     }
 }
 
@@ -870,7 +874,7 @@ pub(crate) fn people_space_from(
                 avatar_color_index: m.avatar_color_index_effective.map(color_index),
             });
         } else if let Some(pid) = m.member.strip_prefix("agent:") {
-            agents.push(agent_from_member(m, pid));
+            agents.push(agent_from_member(m, pid, http_url, token));
         }
     }
     let people_owner: Option<String> = people
