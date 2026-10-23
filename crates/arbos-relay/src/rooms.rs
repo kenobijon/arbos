@@ -547,6 +547,24 @@ pub async fn post_checkpoint(
         .and_then(|s| hex::decode(s).ok())
         .unwrap_or_default();
     let room_name = wire::room_name(&project_id, &chat_id);
+    let device = principal.device_name();
+    match checkpoint_covers_store(&state.db, &room_name, seq_covered, &body) {
+        Ok(CheckpointVerdict::Covers) => {}
+        Ok(CheckpointVerdict::Incomplete(why)) => {
+            tracing::warn!(
+                %room_name, %device, seq_covered, %why,
+                "checkpoint refused: the snapshot lacks ops the relay holds"
+            );
+            return (
+                StatusCode::CONFLICT,
+                format!("checkpoint_incomplete: {why}"),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+        }
+    }
     match state
         .db
         .put_checkpoint(&room_name, seq_covered, &frontier, &body)
@@ -555,6 +573,93 @@ pub async fn post_checkpoint(
         Ok(false) => (StatusCode::CONFLICT, "seqCovered below floor").into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
+}
+
+/// Outcome of [`checkpoint_covers_store`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum CheckpointVerdict {
+    /// The snapshot holds every op the relay has for `seq <= seq_covered`.
+    Covers,
+    /// It does not; the reason names what is missing.
+    Incomplete(String),
+}
+
+/// A checkpoint replaces the rows it covers, so it must contain every op in them. Boxes posted
+/// snapshots of incomplete replicas (two agents of one owner share a device id, so each replica
+/// skipped the other's rows — #1409) and the relay deleted 194 messages of a 446-message group
+/// chat on 2026-10-23 (Arbonites). The relay can parse the doc (`load_doc` does for export and
+/// the Matrix mirror), so it checks before it deletes anything:
+///
+/// 1. `seq_covered` may not exceed the room head (nothing can cover rows that do not exist);
+/// 2. the candidate must contain the previous checkpoint's version vector;
+/// 3. importing every stored row with `seq <= seq_covered` into the candidate must apply nothing
+///    new and park nothing as pending — i.e. the candidate already had every op, with its deps.
+pub fn checkpoint_covers_store(
+    db: &crate::db::Db,
+    room: &str,
+    seq_covered: i64,
+    snapshot: &[u8],
+) -> anyhow::Result<CheckpointVerdict> {
+    use arbos_core::doc::ChatDoc;
+
+    let st = db.room_state(room)?;
+    if seq_covered > st.head {
+        return Ok(CheckpointVerdict::Incomplete(format!(
+            "seqCovered {seq_covered} is above the room head {}",
+            st.head
+        )));
+    }
+    let mut candidate = match ChatDoc::from_snapshot(None, false, snapshot) {
+        Ok(d) => d,
+        Err(e) => {
+            return Ok(CheckpointVerdict::Incomplete(format!(
+                "snapshot does not load: {e}"
+            )))
+        }
+    };
+    let mut after = 0;
+    if let Some((prev_seq, prev_bytes)) = db.checkpoint_bytes(room)? {
+        let prev = ChatDoc::from_snapshot(None, false, &prev_bytes)?;
+        if !candidate.contains_vv(&prev.oplog_vv()) {
+            return Ok(CheckpointVerdict::Incomplete(format!(
+                "missing ops of the current checkpoint (seq {prev_seq})"
+            )));
+        }
+        after = prev_seq;
+    }
+    let mut before = candidate.oplog_vv();
+    let mut missing_rows = 0usize;
+    let mut first_missing: Option<i64> = None;
+    loop {
+        let rows = db.rows_between(room, after, seq_covered, ROWS_BATCH)?;
+        let n = rows.len() as i64;
+        for row in rows {
+            after = row.seq;
+            let applied_or_parked = match candidate.import(&row.bytes) {
+                Ok(status) => {
+                    let now = candidate.oplog_vv();
+                    let applied = now != before;
+                    before = now;
+                    status.pending.is_some() || applied
+                }
+                Err(_) => true,
+            };
+            if applied_or_parked {
+                missing_rows += 1;
+                first_missing.get_or_insert(row.seq);
+            }
+        }
+        if n < ROWS_BATCH {
+            break;
+        }
+    }
+    if missing_rows > 0 {
+        return Ok(CheckpointVerdict::Incomplete(format!(
+            "{missing_rows} stored row(s) from seq {} are not in the snapshot",
+            first_missing.unwrap_or_default()
+        )));
+    }
+    Ok(CheckpointVerdict::Covers)
 }
 
 /// `GET /room/{project}/{chat}/stats`.
