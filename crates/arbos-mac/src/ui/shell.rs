@@ -37,6 +37,7 @@ use crate::ui::motion::{ease_out_cubic, PulseClock, COMPOSER_DROP_MS, SHAKE_MS};
 use crate::ui::onboarding;
 use crate::ui::people;
 use crate::ui::profiles;
+use crate::ui::react_menu;
 use crate::ui::routines::{RoutinesEvent, RoutinesPanel};
 use crate::ui::secrets::{SecretsEvent, SecretsPanel};
 use crate::ui::servers;
@@ -203,6 +204,12 @@ pub struct Shell {
         crate::model::Id,
         gpui::Point<gpui::Pixels>,
     )>,
+    /// The quick-react emoji bar (`react_menu`): (chat, message, the click).
+    pub(crate) react_menu: Option<(
+        crate::model::Id,
+        crate::model::Id,
+        gpui::Point<gpui::Pixels>,
+    )>,
     /// `ARBOS_RIG_MESSAGE_MENU=x,y` (screenshot rig): opens the menu once the
     /// open chat has a message; cleared when it has.
     rig_message_menu: Option<gpui::Point<gpui::Pixels>>,
@@ -345,6 +352,15 @@ impl Shell {
                 } => {
                     this.close_popovers(cx);
                     this.message_menu = Some((chat_id.clone(), message_id.clone(), *position));
+                    cx.notify();
+                }
+                TranscriptEvent::ReactMenu {
+                    chat_id,
+                    message_id,
+                    position,
+                } => {
+                    this.close_popovers(cx);
+                    this.react_menu = Some((chat_id.clone(), message_id.clone(), *position));
                     cx.notify();
                 }
                 TranscriptEvent::Reply {
@@ -767,6 +783,7 @@ impl Shell {
             chat_menu: None,
             chat_delete_armed: false,
             message_menu: None,
+            react_menu: None,
             rig_message_menu: message_menu::rig_anchor(),
             renaming_tab: None,
             tab_rename_input,
@@ -1885,7 +1902,8 @@ impl Shell {
             || self.tab_menu_open
             || self.row_menu.is_some()
             || self.chat_menu.is_some()
-            || self.message_menu.is_some();
+            || self.message_menu.is_some()
+            || self.react_menu.is_some();
         self.close_popovers(cx);
         if floating {
             return;
@@ -2041,6 +2059,7 @@ impl Shell {
         self.channel_menu = None;
         self.chat_menu = None;
         self.message_menu = None;
+        self.react_menu = None;
         self.member_remove_armed = None;
         self.member_menu = Some(member_menu::MemberMenu { space_id, key, at });
         cx.notify();
@@ -2057,6 +2076,7 @@ impl Shell {
             || self.channel_menu.is_some()
             || self.chat_menu.is_some()
             || self.message_menu.is_some()
+            || self.react_menu.is_some()
             || self.member_menu.is_some()
         {
             self.menu_open = false;
@@ -2073,6 +2093,7 @@ impl Shell {
             self.chat_menu = None;
             self.chat_delete_armed = false;
             self.message_menu = None;
+            self.react_menu = None;
             cx.notify();
         }
     }
@@ -3557,6 +3578,9 @@ impl Render for Shell {
             }
         }
         if let Some(menu) = message_menu::render(self, window, cx) {
+            root = root.child(menu);
+        }
+        if let Some(menu) = react_menu::render(self, window, cx) {
             root = root.child(menu);
         }
         // Rig: the hook asked for the first other member's row menu on the group pane.

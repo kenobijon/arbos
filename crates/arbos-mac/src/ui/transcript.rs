@@ -450,9 +450,16 @@ pub const STICK_THRESHOLD_PX: f32 = 70.0;
 const JUMP_BUTTON_AFTER_PX: f32 = 160.0;
 
 /// Right-click on a bubble: the shell opens the message menu there.
+/// Hover face-smile: the shell opens the quick-react emoji bar there.
 /// Hover reply: the shell sets the composer's reply target.
 pub enum TranscriptEvent {
     MessageMenu {
+        chat_id: Id,
+        message_id: Id,
+        position: gpui::Point<gpui::Pixels>,
+    },
+    /// Hover react glyph → the six-emoji bar (`react_menu`).
+    ReactMenu {
         chat_id: Id,
         message_id: Id,
         position: gpui::Point<gpui::Pixels>,
@@ -939,8 +946,9 @@ impl Transcript {
             })
     }
 
-    /// Hover-only reply + copy glyphs beside a bubble (fade with the row).
-    /// After a successful copy the glyph becomes a checkmark for a moment.
+    /// Hover-only reply · copy · react glyphs beside a bubble (fade with the
+    /// row). After a successful copy the glyph becomes a checkmark for a
+    /// moment. The face-smile opens the six-emoji bar (`react_menu`).
     fn hover_reply_copy(
         &self,
         row_id: &str,
@@ -952,6 +960,8 @@ impl Transcript {
         let chat_id = self.chat_id.clone();
         let reply_msg = message_id.clone();
         let copy_msg = message_id.clone();
+        let react_chat = self.chat_id.clone();
+        let react_msg = message_id.clone();
         let just_copied = self.copied_feedback.as_ref().is_some_and(|(id, at)| {
             id == message_id && at.elapsed() < Duration::from_millis(COPY_FEEDBACK_MS)
         });
@@ -1005,6 +1015,25 @@ impl Transcript {
                     copy_color,
                 )
                 .on_click(cx.listener(move |this, _, _, cx| this.copy_message(&copy_msg, cx))),
+            )
+            .child(
+                btn(
+                    SharedString::from(format!("{row_id}#react")),
+                    "face-smile",
+                    opacity,
+                    theme.text_muted,
+                )
+                .on_click(cx.listener(
+                    move |_, event: &gpui::ClickEvent, _, cx| {
+                        if let Some(chat_id) = react_chat.clone() {
+                            cx.emit(TranscriptEvent::ReactMenu {
+                                chat_id,
+                                message_id: react_msg.clone(),
+                                position: event.position(),
+                            });
+                        }
+                    },
+                )),
             )
     }
 
@@ -1185,8 +1214,7 @@ impl Transcript {
                 &selectable.bubble(format!("{message_id}#text"), bubble_text.text),
             ));
         let (row_el, reveal) = self.hover_row(row_id, now, window, cx);
-        // Hover: reply + copy. The react glyph that opened the emoji bar is
-        // gone with the bar itself (#1370).
+        // Hover: reply · copy · react (face-smile opens the emoji bar).
         let hover_actions = (last && !live).then(|| {
             let actions = self.hover_reply_copy(row_id, message_id, reveal, theme, cx);
             div().flex().items_center().gap(px(2.0)).child(actions)
