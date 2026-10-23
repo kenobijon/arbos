@@ -114,7 +114,9 @@ enum RowKind: Equatable {
     case system(icon: String?, text: String, avatarProject: Id?)
     /// Grok Bot question card: bold question, × top-right, lettered answer rows.
     /// `questionId` is nil for a legacy `waiting_user` status line (no `question` part).
-    case question(questionId: String?, text: String, options: [ChoiceOption], multi: Bool, picked: [String], open: Bool)
+    /// `lane`: in a people chat the card sits after the sender's avatar lane, like the bubble it
+    /// belongs to (#1440 follow-up: the card must share the bubble's left edge and cap width).
+    case question(questionId: String?, text: String, options: [ChoiceOption], multi: Bool, picked: [String], open: Bool, lane: Bool)
     /// A file card; tap opens the media viewer on it (Open → Quick Look).
     case file(item: MediaItem, subtitle: String)
     case voiceMemo(name: String, projectId: Id, ref: String?, fromUser: Bool)
@@ -273,12 +275,14 @@ enum Transcript {
                         // agentd writes a `question` part and this status line; the part wins.
                         if message.questions.isEmpty {
                             chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
-                                             kind: .question(questionId: nil, text: text, options: [], multi: false, picked: [], open: true)))
+                                             kind: .question(questionId: nil, text: text, options: [], multi: false, picked: [], open: true,
+                                                             lane: people && message.senderHandle != nil)))
                         }
                     case .question(let id, let q):
                         chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
                                          kind: .question(questionId: q.questionId, text: q.question, options: q.options,
-                                                         multi: q.multi, picked: q.answer, open: q.open)))
+                                                         multi: q.multi, picked: q.answer, open: q.open,
+                                                         lane: people && message.senderHandle != nil)))
                     case .status(let id, .handoff, let text):
                         // Legacy status line; the turn-based row above already covers it.
                         if handoffName == nil {
@@ -754,8 +758,12 @@ enum Markdown {
 
 // MARK: - Row views
 
-struct RowView: View {
-    @EnvironmentObject private var model: AppModel
+struct RowView: View, Equatable {
+    /// Held without `@EnvironmentObject` / `@ObservedObject` so presence, typing
+    /// and the other ~60 `@Published` AppModel fields do not invalidate every
+    /// bubble. ChatView still observes the model and rebuilds rows when the
+    /// transcript changes; actions call through this reference.
+    let model: AppModel
     @Environment(\.theme) private var theme
     let row: Row
     let chatId: Id
@@ -771,8 +779,8 @@ struct RowView: View {
     var onReply: (() -> Void)? = nil
     /// ChatView sets this while a reply swipe is locked so swipe-right-to-back does not fire.
     var replySwipeActive: Binding<Bool> = .constant(false)
-    /// Mention chips (Oct 23): who `@handle` resolves to.
-    private var mentions: MentionTable { MentionTable(model: model, theme: theme) }
+    /// Shared mention table from ChatView (built once per directory sync).
+    let mentions: MentionTable
 
     /// Trailing column width for swipe-revealed times (fits "12:59 PM").
     static let timeRevealWidth: CGFloat = 56
@@ -781,6 +789,18 @@ struct RowView: View {
 
     @State private var replyDrag: CGFloat = 0
     @State private var replyLocked = false
+
+    /// Skip re-drawing when the parent re-evaluates for an unrelated reason
+    /// (composer keystrokes, presence ticks). Closures / the swipe binding are
+    /// not compared — they stay valid for the open chat.
+    static func == (lhs: RowView, rhs: RowView) -> Bool {
+        lhs.row == rhs.row
+            && lhs.chatId == rhs.chatId
+            && lhs.width == rhs.width
+            && lhs.timeReveal == rhs.timeReveal
+            && lhs.highlighted == rhs.highlighted
+            && lhs.mentions === rhs.mentions
+    }
 
     private var maxBubble: CGFloat { max(200, width - Theme.bubbleInset) }
 
@@ -989,7 +1009,7 @@ struct RowView: View {
                                         .tint(theme.accent)
                                         .textSelection(.enabled)
                                 } else {
-                                    BlockView(block: block, live: live && i == blocks.count - 1)
+                                    BlockView(block: block, live: live && i == blocks.count - 1, mentions: mentions)
                                 }
                             }
                             if let time, lastParagraph == nil {
@@ -1013,7 +1033,7 @@ struct RowView: View {
                             .foregroundStyle(theme.muted)
                     }
                     ForEach(Array(blocks.enumerated()), id: \.offset) { i, block in
-                        BlockView(block: block, live: live && i == blocks.count - 1)
+                        BlockView(block: block, live: live && i == blocks.count - 1, mentions: mentions)
                     }
                 }
                 .padding(.horizontal, Theme.bubbleHPad)
@@ -1044,11 +1064,14 @@ struct RowView: View {
             .foregroundStyle(theme.muted)
             .frame(maxWidth: .infinity)
             .multilineTextAlignment(.center)
-        case .question(let questionId, let text, let options, let multi, let picked, let open):
-            HStack {
+        case .question(let questionId, let text, let options, let multi, let picked, let open, let lane):
+            // The card is a transcript row like a bubble: the same left edge (after the avatar
+            // lane in a people chat) and the same cap width as an incoming bubble.
+            HStack(spacing: 0) {
+                if lane { Color.clear.frame(width: Theme.memberLane, height: 1) }
                 QuestionCard(rowId: row.id, chatId: chatId, questionId: questionId, title: text, options: options,
                              multi: multi, picked: picked, open: open)
-                    .frame(maxWidth: maxBubble, alignment: .leading)
+                    .frame(maxWidth: lane ? maxBubble - Theme.memberLane : maxBubble, alignment: .leading)
                 Spacer(minLength: 0)
             }
         case .file(let item, let subtitle):
@@ -1134,6 +1157,7 @@ struct RowView: View {
     private var reactionLeading: CGFloat {
         switch row.kind {
         case .other, .member: return Theme.memberLane
+        case .question(_, _, _, _, _, _, let lane): return lane ? Theme.memberLane : 0
         default: return 0
         }
     }
@@ -1289,12 +1313,11 @@ struct RowView: View {
 }
 
 struct BlockView: View {
-    @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
     let block: Block
     let live: Bool
-    /// Mention chips (Oct 23): who `@handle` resolves to.
-    private var mentions: MentionTable { MentionTable(model: model, theme: theme) }
+    /// Shared mention table from the row (built once per directory sync).
+    let mentions: MentionTable
 
     var body: some View {
         switch block {

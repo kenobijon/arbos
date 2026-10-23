@@ -1936,22 +1936,23 @@ class Loop:
             bounced = self.release_bounced_pins()
             if bounced:
                 log(f"Gate: pinned item(s) {', '.join(bounced)} are back with their owner; pin released, the pool runs on")
-        while plan and not members:
-            half = plan.pop(0)
-            # Match by item, gate at its CURRENT head: a bisected item whose owner pushed a repair meanwhile keeps
-            # its place in the queue instead of dropping to the back.
-            members = self.compatible_batch([(f, st) for f, st in ready if f in half])
         if not members:
             # Fairness (2026-10-23 22:2x): a branch bumped twice for sibling conflicts gets a batch of the
-            # deferred items only, ahead of the pool — oldest-deferred first, so inside that batch the older
-            # one merges and the newer one is bumped. Without it #1532/#1534/#1543 sat behind older siblings
-            # that touch the same files (sidebar.rs, HomeView.swift) for three rounds while the pool kept
-            # re-merging the same conflicts.
+            # deferred items only, right after the current run — ahead of bisect / plan halves AND the pool
+            # (23:10: a leftover bisect half of 15 went first and the 14 deferred items waited another round).
+            # Oldest-deferred first, so inside that batch the older one merges and the newer one is bumped.
+            # Without it #1532/#1534/#1543 sat behind older siblings that touch the same files (sidebar.rs,
+            # HomeView.swift) for three rounds while the pool kept re-merging the same conflicts.
             deferred = sorted(((f, st) for f, st in ready if (st.get("sibling_conflicts") or 0) >= self.DEFER_AFTER),
                               key=lambda fs: (-(fs[1].get("sibling_conflicts") or 0), fs[1].get("created") or ""))
             if deferred:
                 members = self.compatible_batch(deferred)
                 log(f"Gate: deferred-fairness batch of {len(members)} (bumped ≥ {self.DEFER_AFTER}× for sibling conflicts): " + ", ".join(members))
+        while plan and not members:
+            half = plan.pop(0)
+            # Match by item, gate at its CURRENT head: a bisected item whose owner pushed a repair meanwhile keeps
+            # its place in the queue instead of dropping to the back.
+            members = self.compatible_batch([(f, st) for f, st in ready if f in half])
         if not members:
             members = self.compatible_batch(list(ready))
         cur["rust_gate_plan"] = plan
@@ -3497,16 +3498,16 @@ class Loop:
             if members:
                 print(f"  pinned batch {i}: " + ", ".join(tag(f) for f in members))
                 queued |= set(members)
+        deferred = [fid for fid, st in ready if fid not in queued and (st.get("sibling_conflicts") or 0) >= self.DEFER_AFTER]
+        if deferred:
+            print(f"  deferred-fairness batch (bumped ≥{self.DEFER_AFTER}× by sibling conflicts; next after the pins, {len(deferred)}): " + ", ".join(tag(f) for f in deferred))
+            queued |= set(deferred)
         planned = [b for b in (cur.get("rust_gate_plan") or []) if b not in pinned_batches]
         for b in planned:
             members = [f for f in b if f in gating and f not in queued]
             if members:
                 print("  planned batch (bisect half / operator plan): " + ", ".join(tag(f) for f in members))
                 queued |= set(members)
-        deferred = [fid for fid, st in ready if fid not in queued and (st.get("sibling_conflicts") or 0) >= self.DEFER_AFTER]
-        if deferred:
-            print(f"  deferred-fairness batch (bumped ≥{self.DEFER_AFTER}× by sibling conflicts; runs before the pool, {len(deferred)}): " + ", ".join(tag(f) for f in deferred))
-            queued |= set(deferred)
         pool = [fid for fid, _ in ready if fid not in queued]
         if pool:
             print(f"  pool (next batch after the pins, oldest first, {len(pool)}): " + ", ".join(tag(f) for f in pool))
