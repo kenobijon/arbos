@@ -64,6 +64,7 @@ impl Shell {
         let profile_tab = state.profile_tab;
         let custom_avatar = state.has_custom_avatar();
         let notify_on = state.notifier.enabled;
+        let read_receipts = state.read_receipts;
         let secrets_value = if state.secrets.loaded {
             state.secrets.row_value()
         } else {
@@ -523,29 +524,53 @@ impl Shell {
 
         // ----- Notifications page body -------------------------------------------
         let notifications_body = {
-            let group = settings_group(&theme).child(seg_row(
-                "Notifications",
-                div()
-                    .flex()
-                    .gap(px(2.0))
-                    .child(
-                        glass::segment("notify-on", "On", notify_on, &theme).on_click(cx.listener(
-                            |this, _, _, cx| {
-                                this.state
-                                    .update(cx, |s, cx| s.set_notifications_enabled(true, cx));
-                            },
-                        )),
-                    )
-                    .child(
-                        glass::segment("notify-off", "Off", !notify_on, &theme).on_click(
-                            cx.listener(|this, _, _, cx| {
-                                this.state
-                                    .update(cx, |s, cx| s.set_notifications_enabled(false, cx));
-                            }),
+            let group = settings_group(&theme)
+                .child(seg_row(
+                    "Notifications",
+                    div()
+                        .flex()
+                        .gap(px(2.0))
+                        .child(
+                            glass::segment("notify-on", "On", notify_on, &theme).on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.state
+                                        .update(cx, |s, cx| s.set_notifications_enabled(true, cx));
+                                }),
+                            ),
+                        )
+                        .child(
+                            glass::segment("notify-off", "Off", !notify_on, &theme).on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.state.update(cx, |s, cx| {
+                                        s.set_notifications_enabled(false, cx);
+                                    });
+                                }),
+                            ),
                         ),
-                    ),
-                &theme,
-            ));
+                    &theme,
+                ))
+                .child(seg_row(
+                    "Read receipts",
+                    div()
+                        .flex()
+                        .gap(px(2.0))
+                        .child(
+                            glass::segment("receipts-on", "On", read_receipts, &theme).on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.state.update(cx, |s, cx| s.set_read_receipts(true, cx));
+                                }),
+                            ),
+                        )
+                        .child(
+                            glass::segment("receipts-off", "Off", !read_receipts, &theme).on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.state
+                                        .update(cx, |s, cx| s.set_read_receipts(false, cx));
+                                }),
+                            ),
+                        ),
+                    &theme,
+                ));
             div()
                 .flex()
                 .flex_col()
@@ -553,7 +578,9 @@ impl Shell {
                 .child(group)
                 .child(footnote(
                 "A banner with the sender's picture when an agent finishes or a person writes, \
-                     only while you are not looking."
+                     only while you are not looking. Read receipts show a Seen line under your \
+                     last message in a people chat when someone has opened it — turn them off to \
+                     stop sending and seeing that mark."
                     .into(),
                 &theme,
             ))

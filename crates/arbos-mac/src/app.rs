@@ -127,6 +127,10 @@ fn muted_path() -> PathBuf {
     crate::sync::credentials::config_dir().join("muted.json")
 }
 
+fn read_receipts_path() -> PathBuf {
+    crate::sync::credentials::config_dir().join("read_receipts.json")
+}
+
 /// Multi-chat (several chats per agent: tabs, "+", ⌘T, archive) is on by
 /// default. `ARBOS_MULTI_CHAT=0` or `{"multi_chat": false}` in
 /// `<config>/settings.json` turns it off (one chat per agent).
@@ -154,6 +158,20 @@ fn save_muted(muted: &HashSet<Id>) {
     if let Ok(json) = serde_json::to_string(&muted.iter().collect::<Vec<_>>()) {
         let _ = std::fs::write(muted_path(), json);
     }
+}
+
+/// Settings → Notifications "Read receipts" (default on, matching the relay).
+fn load_read_receipts() -> bool {
+    std::fs::read_to_string(read_receipts_path())
+        .ok()
+        .and_then(|s| serde_json::from_str::<bool>(&s).ok())
+        .unwrap_or(true)
+}
+
+fn save_read_receipts(enabled: bool) {
+    let dir = crate::sync::credentials::config_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(read_receipts_path(), if enabled { "true" } else { "false" });
 }
 
 /// "3 min ago", "2 h ago", "yesterday", "5 days ago".
@@ -497,6 +515,11 @@ pub struct AppState {
     pub renaming_project: Option<Id>,
     /// Spaces whose notifications are muted (`<config>/muted.json`).
     pub muted: HashSet<Id>,
+    /// Settings → Notifications: send and show Presence `{seen}` read receipts
+    /// (`<config>/read_receipts.json`, default on).
+    pub read_receipts: bool,
+    /// People-chat read receipts: chat id → (peer handle → last seen message id).
+    pub message_receipts: HashMap<Id, HashMap<String, Id>>,
     /// Last presence frame seen per handle (ms): "online" while fresh.
     pub presence_seen: HashMap<String, u64>,
     /// Answered this session: never re-arm it on a later sync, even when the
@@ -814,6 +837,8 @@ impl AppState {
             profile_editing_name: false,
             renaming_project: None,
             muted: load_muted(),
+            read_receipts: load_read_receipts(),
+            message_receipts: HashMap::new(),
             presence_seen: HashMap::new(),
             notify_prompt_answered: false,
             focus_sent: None,
@@ -1198,6 +1223,13 @@ impl AppState {
                 if self.account.is_some() {
                     self.maybe_prompt_notifications();
                     self.prefetch_directory();
+                    // Align the sync source with the saved Settings → Notifications
+                    // preference (Shared defaults to on); no PUT on every launch.
+                    let enabled = self.read_receipts;
+                    self.command(ClientCommand::SetReadReceipts {
+                        enabled,
+                        persist: false,
+                    });
                 }
                 if let Some(url) = self.account.as_ref().map(|a| a.avatar_url.clone()) {
                     self.want_avatar(url);
@@ -1279,9 +1311,19 @@ impl AppState {
                     self.group_created(chat_id, cx);
                 }
             }
-            SyncEvent::Presence { handle } => {
-                self.presence_seen.insert(handle, now_ms());
-                if self.profile.is_some() {
+            SyncEvent::Presence {
+                handle,
+                chat_id,
+                seen,
+            } => {
+                self.presence_seen.insert(handle.clone(), now_ms());
+                if let (Some(chat_id), Some(seen)) = (chat_id, seen) {
+                    self.message_receipts
+                        .entry(chat_id)
+                        .or_default()
+                        .insert(handle, seen);
+                    cx.notify();
+                } else if self.profile.is_some() {
                     cx.notify();
                 }
             }
@@ -5737,6 +5779,23 @@ impl AppState {
 
     pub fn set_notifications_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
         self.notifier.enabled = enabled;
+        cx.notify();
+    }
+
+    /// Settings → Notifications "Read receipts": Presence `{seen}` on/off.
+    pub fn set_read_receipts(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.read_receipts == enabled {
+            return;
+        }
+        self.read_receipts = enabled;
+        save_read_receipts(enabled);
+        if !enabled {
+            self.message_receipts.clear();
+        }
+        self.command(ClientCommand::SetReadReceipts {
+            enabled,
+            persist: true,
+        });
         cx.notify();
     }
 
