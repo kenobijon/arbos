@@ -2,8 +2,8 @@ import XCTest
 @testable import Arbos
 
 /// Jacob, 2026-10-23 (feedback `sender-name-in-bubble-2026-10-23`): the sender's name sits
-/// inside the bubble in group chats and server channels — people and agents alike, when the
-/// sender changed — and a 1:1 chat (me ↔ person, me ↔ agent) labels nobody. Own messages
+/// inside the bubble in group chats and server channels — people when the sender changed,
+/// agents on every reply (#1447) — and a 1:1 chat (me ↔ person, me ↔ agent) labels nobody. Own messages
 /// never carry a name.
 final class SenderNameRowTests: XCTestCase {
     private let chat = "fx-group-launch"
@@ -48,7 +48,8 @@ final class SenderNameRowTests: XCTestCase {
         let rows = Transcript.rows(messages, projectId: "people:\(chat)", me: "user:fx-me", people: true, multiParty: true)
         let got = names(rows)
         XCTAssertEqual(got.map(\.0), ["hi all", "second", "mine", "agent", "agent"])
-        XCTAssertEqual(got.map(\.1), [true, false, false, true, false], "named on the first bubble of a run, never on mine")
+        // People: the first bubble of a run; agents: every reply (#1447); mine: never.
+        XCTAssertEqual(got.map(\.1), [true, false, false, true, true], "named on the first bubble of a run (every agent reply), never on mine")
         XCTAssertEqual(got.map(\.2), [true, true, false, true, true], "others' bubbles carry the time after the text")
     }
 
