@@ -74,6 +74,8 @@ struct ChatView: View {
     @State private var timeReveal: CGFloat = 0
     /// Once the pan is more horizontal-left than vertical, lock so scroll does not steal it.
     @State private var timeRevealLocked = false
+    /// True while a message's swipe-right-to-reply is locked — blocks swipe-right-to-Home.
+    @State private var replySwipeActive = false
 
     /// Rows after the in-chat search filter (profile "search").
     private var visibleRows: [Row] {
@@ -859,6 +861,8 @@ struct ChatView: View {
         // Selecting or dragging in the focused composer is a horizontal pan;
         // do not treat it as swipe-right → Home.
         guard !composerFocused else { return }
+        // A message reply swipe owns this drag; do not leave the chat.
+        guard !replySwipeActive else { return }
         let dx = value.translation.width
         let absX = abs(dx), absY = abs(value.translation.height)
         let vx = value.velocity.width, vy = value.velocity.height
@@ -949,14 +953,17 @@ struct ChatView: View {
                     }
                     let shown = windowedRows
                     ForEach(Array(shown.enumerated()), id: \.element.id) { i, row in
+                        let canReply = isMessageRow(row)
                         RowView(row: row, chatId: chatId, width: width, timeReveal: timeReveal,
                                 onQuoteTap: { revealQuoted($0) },
-                                highlighted: highlightedMessage == row.messageId)
+                                highlighted: highlightedMessage == row.messageId,
+                                onReply: canReply ? { beginReply(to: row) } : nil,
+                                replySwipeActive: $replySwipeActive)
                             .padding(.top, gap(before: i, in: shown))
                             .id(row.id)
                             .onAppear { LaunchClock.mark("chat-first-row", detail: "shown=\(shown.count) rows=\(rows.count) messages=\(messages.count)") }
                             .contextMenu {
-                                MessageMenuContent(items: MessageMenu.items(forMessage: isMessageRow(row))) { item in
+                                MessageMenuContent(items: MessageMenu.items(forMessage: canReply)) { item in
                                     runMessageMenu(item, row: row)
                                 }
                             }
@@ -1109,15 +1116,21 @@ struct ChatView: View {
         case .copy:
             UIPasteboard.general.string = m_text(row)
         case .reply:
-            guard let m = messageById[row.messageId] else { return }
-            replyTo = m
-            if isPeople, let member = agentMember(for: m)?.member {
-                talkTo = [member]
-            }
-            composerFocused = true
+            beginReply(to: row)
         case .delete:
             model.deleteMessage(chatId: chatId, messageId: row.messageId)
         }
+    }
+
+    /// Reply to this row: composer preview + focus (people chats also address the agent).
+    /// Shared by the long-press Reply item and swipe-right-to-reply on the bubble.
+    private func beginReply(to row: Row) {
+        guard let m = messageById[row.messageId] else { return }
+        replyTo = m
+        if isPeople, let member = agentMember(for: m)?.member {
+            talkTo = [member]
+        }
+        composerFocused = true
     }
 
     /// Spacing: 8 pt between blocks of one message, 24 pt around sender changes,

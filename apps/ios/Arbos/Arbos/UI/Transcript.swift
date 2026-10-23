@@ -733,9 +733,19 @@ struct RowView: View {
     var onQuoteTap: ((Id) -> Void)? = nil
     /// Briefly tinted after a quote tap landed on this row's message.
     var highlighted: Bool = false
+    /// Swipe right on this bubble → reply (same as the long-press Reply item).
+    /// Nil on system / channel / non-message rows.
+    var onReply: (() -> Void)? = nil
+    /// ChatView sets this while a reply swipe is locked so swipe-right-to-back does not fire.
+    var replySwipeActive: Binding<Bool> = .constant(false)
 
     /// Trailing column width for swipe-revealed times (fits "12:59 PM").
     static let timeRevealWidth: CGFloat = 56
+    /// How far a right swipe pulls the bubble before reply arms (Telegram-style).
+    static let replySwipeWidth: CGFloat = 56
+
+    @State private var replyDrag: CGFloat = 0
+    @State private var replyLocked = false
 
     private var maxBubble: CGFloat { max(200, width - Theme.bubbleInset) }
 
@@ -773,8 +783,8 @@ struct RowView: View {
                 .padding(-4)
         )
         .animation(.easeInOut(duration: 0.35), value: highlighted)
-        // iMessage: drag left → whole row slides; time sits on the trailing edge.
-        .offset(x: -timeReveal)
+        // iMessage: drag left → times; Telegram: drag right → reply. Mutually exclusive.
+        .offset(x: replyDrag - timeReveal)
         .overlay(alignment: .trailing) {
             if let time = swipeTimeLabel, timeReveal > 0.5 {
                 Text(time)
@@ -787,6 +797,59 @@ struct RowView: View {
                     .accessibilityHidden(timeReveal < 12)
             }
         }
+        .overlay(alignment: .leading) {
+            if onReply != nil, replyDrag > 0.5 {
+                Image(systemName: "arrowshape.turn.up.left")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(theme.accent)
+                    .frame(width: Self.replySwipeWidth, alignment: .leading)
+                    .offset(x: replyDrag - Self.replySwipeWidth)
+                    .opacity(Double(min(1, replyDrag / (Self.replySwipeWidth * 0.55))))
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(replyDrag < 12)
+            }
+        }
+        .simultaneousGesture(replySwipeGesture)
+    }
+
+    /// Drag right on a message to reply. Locks only after a clear horizontal-right
+    /// pan so vertical scroll and swipe-left time reveal stay free.
+    private var replySwipeGesture: some Gesture {
+        DragGesture(minimumDistance: 12, coordinateSpace: .local)
+            .onChanged { value in
+                guard onReply != nil else { return }
+                let dx = value.translation.width
+                let dy = value.translation.height
+                if !replyLocked {
+                    guard abs(dx) + abs(dy) >= 12 else { return }
+                    // Vertical scroll or swipe-left time peek: do not steal.
+                    guard dx > 0, abs(dx) > abs(dy) * 1.15 else { return }
+                    replyLocked = true
+                    replySwipeActive.wrappedValue = true
+                }
+                let raw = max(0, dx)
+                let w = Self.replySwipeWidth
+                let reveal = raw <= w ? raw : w + min(24, (raw - w) * 0.2)
+                var t = Transaction()
+                t.disablesAnimations = true
+                withTransaction(t) { replyDrag = reveal }
+            }
+            .onEnded { _ in
+                let triggered = replyLocked && replyDrag >= Self.replySwipeWidth * 0.7
+                replyLocked = false
+                withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
+                    replyDrag = 0
+                }
+                if triggered {
+                    Haptics.pick()
+                    onReply?()
+                }
+                // Keep the back-swipe suppress flag until after ChatView's simultaneous
+                // swipe-right-to-Home onEnded has run (same drag).
+                DispatchQueue.main.async {
+                    replySwipeActive.wrappedValue = false
+                }
+            }
     }
 
     @ViewBuilder
