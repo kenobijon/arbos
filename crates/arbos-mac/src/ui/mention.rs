@@ -31,13 +31,16 @@ use crate::ui::theme::Theme;
 pub const PILL_PAD_X: f32 = 4.0;
 pub const PILL_PAD_Y: f32 = 1.0;
 pub const PILL_RADIUS: f32 = 6.0;
-/// The picture disc; the `@` plus the hair space after it is its cell, so
-/// the disc never crowds the name (Grok: a clear gap between icon and name).
+/// The picture disc, at most; it shrinks to its cell so it never touches
+/// the name (Grok: a clear gap between icon and name).
 pub const PICTURE: f32 = 15.0;
-/// What the rewrite puts after `@`: a hair space, so the picture cell is one
-/// wide glyph box and the name starts a step later. Copies carry it
-/// invisibly; `find` expects it.
-pub const CELL: &str = "@\u{200A}";
+/// The gap the disc keeps to the name, inside the cell.
+pub const PICTURE_GAP: f32 = 3.0;
+/// What the rewrite puts after `@`: a three-per-em space, so the picture
+/// cell is `@` + ⅓ em wide — room for a 15 pt disc and the gap at body size,
+/// a smaller disc at smaller sizes. Copies carry it as a thin space; `find`
+/// expects it.
+pub const CELL: &str = "@\u{2004}";
 
 /// What the chip paints in the `@` cell.
 #[derive(Clone)]

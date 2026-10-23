@@ -32,7 +32,7 @@ final class MentionTable {
     /// The chip's geometry (Grok Bot's mention chip): picture `picture` pt in a
     /// cap `capWidth` wide; the pill rises `padY` over the glyph box.
     static let picture: CGFloat = 16
-    static let capWidth: CGFloat = 22
+    static let capWidth: CGFloat = 23
     static let padY: CGFloat = 2
     static let radius: CGFloat = 7
 
