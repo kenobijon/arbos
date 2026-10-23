@@ -149,11 +149,24 @@ final class AppModel: ObservableObject {
     }
     /// Scene is `.active`. Focus and in-app banner suppression only apply then.
     private var appActive = true
+    /// True once the scene has been `.background` since the last `.active`.
+    /// Unlock goes background → inactive → active; the immediate previous phase
+    /// on unlock is `.inactive`, so we cannot key the redial off that alone.
+    private var wasBackgrounded = false
 
-    /// Called from the root scene: leaving `.active` drops `focused_chat` on
-    /// the relay (and stops swallowing banners) so APNs can fire.
-    func setAppActive(_ active: Bool) {
-        guard appActive != active else { return }
+    /// Called from the root scene on every `scenePhase` change.
+    /// Leaving `.active` drops `focused_chat` on the relay (and stops swallowing
+    /// banners) so APNs can fire. Returning to `.active` after `.background`
+    /// redials rooms ([feedback app-01M5MVNNNBZHJWSRCZ81S04C8E]).
+    func noteScenePhase(_ phase: ScenePhase) {
+        if phase == .background { wasBackgrounded = true }
+        let active = phase == .active
+        let resumeRooms = active && wasBackgrounded
+        if active { wasBackgrounded = false }
+
+        let becameActive = active && !appActive
+        let becameInactive = !active && appActive
+        guard becameActive || becameInactive else { return }
         appActive = active
         if let id = visibleChatId {
             rooms[id]?.focused = active
@@ -165,13 +178,24 @@ final class AppModel: ObservableObject {
             }
         }
         // Leaving the foreground is the last safe moment to write before a kill.
-        if !active { flushStore(all: true) }
-        // Foreground again: clear the 403/404 backoff so listed rooms can dial.
-        if active {
+        if becameInactive { flushStore(all: true) }
+        // Foreground again: clear the 403/404 backoff so listed rooms can dial,
+        // create any that are missing, and — after a real background — redial
+        // sockets iOS left half-dead.
+        if becameActive {
             roomUnavailableFailures = [:]
             roomUnavailableAt = [:]
+            let existing = Array(rooms.values)
             recreateListedRooms()
+            if resumeRooms {
+                for room in existing { room.resumeAfterForeground() }
+            }
         }
+    }
+
+    /// Test / call-site alias: only flips the active bit (no background redial).
+    func setAppActive(_ active: Bool) {
+        noteScenePhase(active ? .active : .inactive)
     }
 
     /// Chat on screen *and* the app is in the foreground — the only case where
