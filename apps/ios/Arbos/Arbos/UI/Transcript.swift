@@ -1147,12 +1147,16 @@ struct BlockView: View {
                             .font(theme.font(Theme.body))
                             .foregroundStyle(theme.text)
                             .frame(minWidth: 16, alignment: .trailing)
+                        // HStack otherwise gives the text a single-line width
+                        // proposal and it truncates with "…"; grow vertically.
                         if live && i == items.count - 1 {
                             StreamingText(text: item, font: .system(size: Theme.body), color: theme.text)
+                                .fixedSize(horizontal: false, vertical: true)
                         } else {
                             Text(Markdown.inline(item, color: theme.text, link: theme.accent, codeChip: theme.codeChip))
                                 .font(theme.font(Theme.body))
                                 .tint(theme.accent)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
                     }
                 }
