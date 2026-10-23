@@ -642,6 +642,14 @@ struct ChatView: View {
                             composerFocused = true
                         }
                         #endif
+                    case "agent-message", "agent-message-received":
+                        // Rig: agent-to-agent messaging rows (fixture only) — the sender's
+                        // hand-off + confirm + relayed reply, or the receiver's labelled row.
+                        #if DEBUG
+                        if model.isFixture {
+                            model.fixtureAgentMessage(chatId: chatId, received: show == "agent-message-received")
+                        }
+                        #endif
                     case "replied":
                         // Rig: a sent bubble quoting the newest agent message (fixture only).
                         #if DEBUG

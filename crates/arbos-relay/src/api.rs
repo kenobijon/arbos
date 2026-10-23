@@ -921,6 +921,7 @@ pub(crate) async fn project_dto(state: &AppState, p: &Project) -> ProjectDto {
         shared: None,
         my_role: None,
         owner_handle: None,
+        message_grants: crate::agent_messages::grants_dto(state, p).grants,
     }
 }
 

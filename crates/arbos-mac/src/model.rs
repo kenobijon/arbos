@@ -110,6 +110,37 @@ pub struct Project {
     /// the avatar loader can fetch; `None` = the initials disc.
     #[serde(default)]
     pub image_url: Option<String>,
+    /// "Who may message X" (agent-to-agent messaging): other owners' people / agents the
+    /// owner allowed to message this agent. Empty unless I own it.
+    #[serde(default)]
+    pub message_grants: Vec<MessageGrant>,
+}
+
+/// One row of an agent's "Who may message X" card (`message_grants` on the project).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct MessageGrant {
+    /// `user:<id>` / `project:<id>`: the key for PUT / DELETE.
+    #[serde(default)]
+    pub grantee: String,
+    /// `person` or `agent`.
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub handle: Option<String>,
+    #[serde(default, deserialize_with = "null_to_empty")]
+    pub avatar_url: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub note: String,
+    #[serde(default)]
+    pub created_at: i64,
+    #[serde(default)]
+    pub last_at: Option<i64>,
 }
 
 /// One entry of `GET /voices`: a voice the agent can speak with on calls.
@@ -1456,6 +1487,10 @@ pub struct Message {
     /// Messages exchanged with the subagent on a hand-off row (1 = brief sent, 2 = result back).
     #[serde(default)]
     pub handoff_messages: Option<u32>,
+    /// Agent-to-agent messaging: this reply answered a message another agent sent into the
+    /// chat; the name drawn in the "Replied to ◉ X" line under the bubble.
+    #[serde(default)]
+    pub agent_reply_to: Option<String>,
     /// Emoji reactions, the iPhone's shape: `{ emoji: { "user:<id>": true } }`.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub reactions: std::collections::BTreeMap<String, std::collections::BTreeMap<String, bool>>,

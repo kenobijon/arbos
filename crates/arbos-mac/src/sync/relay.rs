@@ -4664,6 +4664,48 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 }
             });
         }
+        ClientCommand::SetMessageGrant {
+            project_id,
+            grantee,
+            enabled,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                match shared
+                    .put_json(
+                        &format!("/projects/{project_id}/message-access"),
+                        json!({ "grantee": grantee, "enabled": enabled }),
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        let _ = refresh_registry(&shared).await;
+                    }
+                    Err(err) => {
+                        let _ = shared
+                            .events
+                            .send(SyncEvent::PeopleError(people_error(&err)));
+                    }
+                }
+            });
+        }
+        ClientCommand::RemoveMessageGrant {
+            project_id,
+            grantee,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Err(err) = shared
+                    .delete(&format!("/projects/{project_id}/message-access/{grantee}"))
+                    .await
+                {
+                    let _ = shared
+                        .events
+                        .send(SyncEvent::PeopleError(people_error(&err)));
+                }
+                let _ = refresh_registry(&shared).await;
+            });
+        }
         ClientCommand::RemoveProjectMember {
             project_id,
             user_id,

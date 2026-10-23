@@ -258,6 +258,13 @@ enum Transcript {
                                                            agentId: agentId,
                                                            quote: pix == firstTextPart ? replyQuote : nil,
                                                            time: pix == lastTextPart ? inlineTime : nil)))
+                        } else if message.role == .project, let from = Self.projectSender(message) {
+                            // Another agent wrote into this chat (agent-to-agent messaging):
+                            // the group member bubble — its avatar, its colour, its name above.
+                            chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
+                                             kind: .member(blocks: blocks, live: live, handle: from.handle,
+                                                           avatar: nil, named: pix == firstTextPart, agentId: from.projectId,
+                                                           quote: nil, time: pix == lastTextPart ? inlineTime : nil)))
                         } else {
                             chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
                                              kind: .assistant(blocks: blocks, live: live, caption: nil)))
@@ -331,6 +338,12 @@ enum Transcript {
                         chunk.append(Row(id: "\(message.id)#\(e.id)", messageId: message.id, role: .assistant, kind: .error(code: e.code, message: e.text)))
                     }
                 }
+            }
+            // Agent-to-agent messaging: the reply went back to the agent that wrote in.
+            if !streaming, let to = message.agentReplyTo?.trimmingCharacters(in: .whitespaces), !to.isEmpty,
+               message.role == .assistant {
+                chunk.append(Row(id: "\(message.id)#replied", messageId: message.id, role: .system,
+                                 kind: .system(icon: nil, text: "Replied to \u{FFFC}\(to)", avatarProject: nil)))
             }
             guard !chunk.isEmpty else { continue }
             for i in chunk.indices { chunk[i].createdAt = message.createdAt }
@@ -414,6 +427,15 @@ enum Transcript {
         }
         flush()
         return out
+    }
+
+    /// `sender: project:<id>` plus the row's `senderHandle` (or a slug of `senderName`): the
+    /// handle the member bubble is drawn with and the agent id its tap opens.
+    static func projectSender(_ message: Message) -> (handle: String, projectId: String)? {
+        guard message.sender.hasPrefix("project:") else { return nil }
+        let pid = String(message.sender.dropFirst("project:".count))
+        let handle = message.senderHandle ?? message.senderName.map { mentionSlug($0) } ?? pid
+        return (handle, pid)
     }
 
     /// Grok's wording: "Messaged ◉ A" (brief only), "Messaged ◉ A and ◉ B", or
