@@ -187,6 +187,15 @@ struct EmojiKeyboardField: UIViewRepresentable {
             parent.text = field.text ?? ""
             parent.onChange(parent.text)
         }
+        // The emoji keyboard's insert arrives here first; `editingChanged` does
+        // not always follow for a non-text key.
+        func textField(_ textField: UITextField, shouldChangeCharactersIn range: NSRange, replacementString string: String) -> Bool {
+            if !string.isEmpty {
+                parent.text = string
+                parent.onChange(string)
+            }
+            return true
+        }
     }
 }
 
