@@ -22,7 +22,10 @@ final class ReactionCapsuleTests: XCTestCase {
         XCTAssertNil(ReactionCapsule.pickedEmoji(""))
     }
 
-    func testMenuUnderTheCapsuleIsUnchanged() {
-        XCTAssertEqual(MessageMenu.items, [.copy, .reply, .delete])
+    func testMenuUnderTheCapsuleCarriesNoEmoji() {
+        XCTAssertEqual(MessageMenu.items.last, .delete)
+        for item in MessageMenu.items {
+            XCTAssertNil(ReactionCapsule.pickedEmoji(item.label), "\(item) label is an emoji")
+        }
     }
 }

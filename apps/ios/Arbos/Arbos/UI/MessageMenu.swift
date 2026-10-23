@@ -1,9 +1,9 @@
 import SwiftUI
 
-/// The message bubble's long-press menu: **Copy, Reply, Forward, Delete**
-/// (Jacob, #1370; the emoji reaction row is gone, not moved). Forward opens
-/// the same chat picker the media viewer uses. SwiftUI places a `.contextMenu`
-/// itself, always on screen, so only the item set lives here.
+/// The message bubble's menu under the reaction capsule (`MessageActions.swift`):
+/// **Copy, Reply, Forward, Delete**; reactions live in the capsule, never here
+/// (Jacob, #1370 then 2026-10-23). Forward opens the same chat picker the media
+/// viewer uses. Non-message rows get `copyOnly` as a plain `.contextMenu`.
 enum MessageMenuItem: CaseIterable, Equatable {
     case copy
     case reply
