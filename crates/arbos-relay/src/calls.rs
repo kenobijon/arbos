@@ -1146,7 +1146,7 @@ mod tests {
     use arbos_core::api::PushItemDto;
 
     use super::*;
-    use crate::people::tests_support::{dm, person};
+    use crate::people::tests_support::{dm, person, project_of};
     use crate::state::test_support::test_state;
     use crate::state::AuthMode;
 
@@ -1175,6 +1175,126 @@ mod tests {
             .into_iter()
             .map(|(_, kind, payload, _)| (kind, payload))
             .collect()
+    }
+
+    /// #1430 (Jacob, 2026-10-23, group "Arbonites"): a voice call into a group rings every
+    /// other member (one `call_started` each), dispatches the group's agents, and writes
+    /// **nothing** into the chat — the "started a voice call" line is the starter's client's,
+    /// and the agent's greeting / join / leave notes stay in the call (`voice::chat_rows_of`).
+    #[tokio::test]
+    async fn group_call_rings_every_member_and_writes_no_chat_row() {
+        let mut state = test_state(AuthMode::Github);
+        with_livekit(&mut state);
+        let (alice, alice_dev) = person(&state, 1);
+        let (_bob, bob_dev) = person(&state, 2);
+        let (_carol, carol_dev) = person(&state, 3);
+        let (_dave, dave_dev) = person(&state, 4);
+        let home = project_of(&state, &alice, "Home");
+        let r = crate::people::chats_create_group(
+            State(state.clone()),
+            alice_dev.clone(),
+            Json(crate::people::CreateGroupBody {
+                kind: "group".into(),
+                members: vec!["user2".into(), "user3".into(), "user4".into()],
+                agent_ids: vec![home.clone()],
+                title: Some("Arbonites".into()),
+                avatar_leaf: None,
+                avatar_leaf_color: None,
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let chat = state
+            .db
+            .chats_of_member(&format!("user:{alice}"))
+            .unwrap()
+            .into_iter()
+            .find(|cm| cm.chat.kind == "group")
+            .expect("the group")
+            .chat
+            .id;
+        // Creating the group pushed `people_chat_updated`; only the call's pushes count below.
+        for d in [&bob_dev, &carol_dev, &dave_dev, &alice_dev] {
+            pushes_of(&state, d);
+        }
+
+        let r = start_people_call(
+            State(state.clone()),
+            alice_dev.clone(),
+            Path(chat.clone()),
+            HeaderMap::new(),
+            Some(Json(StartBody {
+                kind: Some("voice".into()),
+            })),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::CREATED);
+        let v = body_json(r).await;
+        let call_id = v["call"]["call_id"].as_str().unwrap().to_owned();
+        // The group's agent belongs to the call (dispatch itself needs a LiveKit server).
+        let agents = v["call"]["agents"].as_array().unwrap();
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0]["id"], home);
+        assert_eq!(agents[0]["kind"], "agent");
+        // Every other member is rung exactly once; the starter is not.
+        for (who, d) in [
+            ("bob", &bob_dev),
+            ("carol", &carol_dev),
+            ("dave", &dave_dev),
+        ] {
+            let pushes = pushes_of(&state, d);
+            let rings: Vec<_> = pushes.iter().filter(|(k, _)| k == "call_started").collect();
+            assert_eq!(rings.len(), 1, "{who} rings once: {pushes:?}");
+            assert_eq!(rings[0].1["call"]["call_id"], call_id);
+        }
+        assert!(pushes_of(&state, &alice_dev)
+            .iter()
+            .all(|(k, _)| k != "call_started"));
+        // Starting the call wrote no chat row (the relay neither posts a line nor wakes
+        // anyone; the starter's client writes "<me> started a voice call").
+        let room = arbos_core::wire::room_name(people::PEOPLE_PROJECT, &chat);
+        assert!(state.db.rows_after(&room, 0, None, 10).unwrap().is_empty());
+        assert!(crate::matrix::backfill::load_doc(&state, &chat, None)
+            .unwrap()
+            .is_none());
+
+        // The worker's first events: joined, the join note and the greeting. None is a chat row;
+        // the agent is in the call.
+        let r = crate::voice::call_events(
+            State(state.clone()),
+            Principal::Admin,
+            Path(call_id.clone()),
+            Json(crate::voice::EventsBody {
+                project_id: Some(home.clone()),
+                events: vec![
+                    json!({ "kind": "joined", "mode": "duplex" }),
+                    json!({ "kind": "call_note", "text": "Home joined the call" }),
+                    json!({ "kind": "transcript", "speaker": { "kind": "agent" }, "text": "Hey — Home here. What do you need?" }),
+                ],
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let v = body_json(r).await;
+        assert_eq!(v["accepted"], 3);
+        assert_eq!(v["forwarded"], false, "no rows for the box");
+        assert_eq!(
+            state.db.call_agents_live(&call_id).unwrap(),
+            vec![home.clone()]
+        );
+        assert!(state.db.rows_after(&room, 0, None, 10).unwrap().is_empty());
+        // The pushes carry the agent too, so the callees' screens can show it.
+        let r = get_call(
+            State(state.clone()),
+            bob_dev.clone(),
+            Path(call_id.clone()),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let v = body_json(r).await;
+        assert_eq!(v["call"]["agents"].as_array().unwrap().len(), 1);
+        assert_eq!(v["call"]["participants"].as_array().unwrap().len(), 2);
     }
 
     #[tokio::test]

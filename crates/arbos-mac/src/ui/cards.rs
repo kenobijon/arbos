@@ -6,7 +6,7 @@ use gpui::{div, prelude::*, px, App, Div, FontWeight, SharedString, Stateful};
 
 use crate::model::StatusKind;
 use crate::ui::motion::PulseClock;
-use crate::ui::theme::{Theme, PANEL_RADIUS, TEXT_SMALL};
+use crate::ui::theme::{Theme, PANEL_RADIUS};
 
 pub fn spinner(theme: &Theme, cx: &App) -> Div {
     let phase = PulseClock::phase(cx, 900);
@@ -40,38 +40,6 @@ pub fn indicator(queued: bool, theme: &Theme, cx: &App) -> Div {
                 .w(px(28.0 + 36.0 * phase))
                 .rounded_full()
                 .bg(Theme::with_alpha(base, 0.25 + 0.35 * (1.0 - phase))),
-        )
-}
-
-/// Grok's one working line: the worker's picture, "<name> is working", and a
-/// soft pulse. Amber while the message is queued for a sleeping box.
-pub fn working_line(
-    name: &str,
-    picture: Option<Div>,
-    queued: bool,
-    activity: Option<&str>,
-    theme: &Theme,
-    cx: &App,
-) -> Div {
-    let phase = PulseClock::phase(cx, 1100);
-    let text = match (queued, activity) {
-        (true, _) => format!("{name} is waiting for the machine"),
-        (false, Some(a)) => a.to_string(),
-        (false, None) => format!("{name} is working"),
-    };
-    div()
-        .w_full()
-        .py(px(8.0))
-        .flex()
-        .items_center()
-        .gap(px(8.0))
-        .children(picture)
-        .child(
-            div()
-                .text_size(px(TEXT_SMALL))
-                .text_color(theme.text_muted)
-                .opacity(0.55 + 0.45 * phase)
-                .child(text),
         )
 }
 

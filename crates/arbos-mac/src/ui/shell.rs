@@ -2197,13 +2197,19 @@ impl Shell {
                     .and_then(|p| state.avatar(&p.avatar_url)),
             )
         });
-        let typing = chat_id.as_deref().and_then(|id| state.typing_in(id));
+        // The one presence row over the composer: who is typing (people) or
+        // working (agents), pictures + one line, left-bound in the chat column
+        // ([feedback typing-indicator-left-2026-10-23]).
+        let presence = chat_id
+            .as_deref()
+            .zip(project.as_ref())
+            .and_then(|(id, space)| crate::ui::presence::gather(state, id, space, &theme));
         // D88: a channel in the centre — the same transcript, the unified pill with the
         // server's disc and `# name`, and the composer (or rule 9's one quiet line).
         let channel = state
             .selected_channel_info()
             .map(|(server, ch)| (server.clone(), ch.clone(), state.channel_can_post()));
-        if animating || shake.is_some() {
+        if animating || shake.is_some() || presence.is_some() {
             PulseClock::request(cx);
         }
 
@@ -2437,9 +2443,8 @@ impl Shell {
             // Transcript above, composer pinned at the bottom. On the first
             // send the composer slides down from the centre over 220 ms using
             // a relative `top` inset (GPUI has no transform).
-            if typing.is_some() {
-                PulseClock::request(cx);
-            }
+            let presence_row = presence
+                .map(|p| column_row(crate::ui::presence::row(p, &theme, cx).into_any_element()));
             let composer_row = div()
                 .w_full()
                 .flex()
@@ -2447,11 +2452,7 @@ impl Shell {
                 .items_center()
                 .pb(px(COMPOSER_BOTTOM))
                 .pt(px(6.0))
-                .when_some(typing, |el, handle| {
-                    el.child(column_row(
-                        people::typing_line(&handle, &theme).into_any_element(),
-                    ))
-                })
+                .children(presence_row)
                 .child(composer_block);
             let composer_row = if animating {
                 composer_row

@@ -104,10 +104,12 @@ enum RowKind: Equatable {
     /// and `time` follows the text (Jacob, 2026-10-23).
     case other(text: String, handle: String, avatar: String?, named: Bool, quote: Quote?, time: String?)
     case assistant(blocks: [Block], live: Bool, caption: String?)
-    /// Shared agent in a people chat: same shape as `.other` (avatar + bubble, name on sender
-    /// change). No "answering @x · owned by @y" meta — ownership lives in the profile pane
+    /// Shared agent in a people chat: same shape as `.other` (avatar + bubble, name on each
+    /// reply — consecutive answers from the same agent must not merge, #1447). No
+    /// "answering @x · owned by @y" meta — ownership lives in the profile pane
     /// (Jacob, 2026-10-22). `agentId` opens that pane from the avatar / name.
-    case member(blocks: [Block], live: Bool, handle: String, avatar: String?, named: Bool, agentId: String?, time: String?)
+    /// `quote` is the user message this answers (`inReplyTo`).
+    case member(blocks: [Block], live: Bool, handle: String, avatar: String?, named: Bool, agentId: String?, quote: Quote?, time: String?)
     /// Centred muted line: hand-offs ("Messaged ◉ Affine"), stops, dates.
     case system(icon: String?, text: String, avatarProject: Id?)
     /// Grok Bot question card: bold question, × top-right, lettered answer rows.
@@ -160,8 +162,8 @@ enum Transcript {
         var rows: [Row] = []
         rows.reserveCapacity(messages.count + messages.count / 8)
         var lastAt: Int64 = 0
-        // Who spoke last: a bubble carries its sender's name only when the sender changed or
-        // a date line broke the run (Grok Bot's group style) — and only in a multi-party chat.
+        // Who spoke last: a name sits above a bubble only when the sender changed or a date
+        // line broke the run (Grok Bot's group style).
         var prevSender: String? = nil
         /// Hand-off rows by id (name, messages exchanged), merged into one line when consecutive.
         var handoffs: [String: (String, Int)] = [:]
@@ -175,7 +177,10 @@ enum Transcript {
             var chunk: [Row] = []
             let streaming = message.isStreaming
             let dateBreak = message.createdAt > 0 && (lastAt == 0 || message.createdAt - lastAt > 3_600_000)
-            let named = multiParty && (dateBreak || prevSender != message.sender)
+            // People-chat agent replies always name the sender (#1447): two answers in a
+            // row from the same agent must not look like one run.
+            let agentInPeople = people && (message.role == .assistant || message.role == .project)
+            let named = multiParty && (dateBreak || prevSender != message.sender || agentInPeople)
             let inlineTime = multiParty ? Self.clockLabel(message.createdAt) : nil
             switch message.role {
             case .user:
@@ -232,6 +237,8 @@ enum Transcript {
                 let lastTextPart = message.parts.lastIndex { $0.textValue != nil }
                 let firstTextPart = message.parts.firstIndex { $0.textValue != nil }
                 let agentId: String? = message.sender.hasPrefix("agent:") ? String(message.sender.dropFirst(6)) : nil
+                // Quote the user message this answers (`inReplyTo`); same chip as a human reply.
+                let replyQuote = message.inReplyTo.flatMap { $0.isEmpty ? nil : Quote.forReply($0, in: byId) }
                 // Error parts wait until the prose is known: under a real answer they stay the
                 // chip with Retry; on an answer with no words they become the words.
                 var errors: [(id: Id, code: String, text: String)] = []
@@ -248,7 +255,9 @@ enum Transcript {
                             chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
                                              kind: .member(blocks: blocks, live: live, handle: h,
                                                            avatar: message.senderAvatar, named: named && pix == firstTextPart,
-                                                           agentId: agentId, time: pix == lastTextPart ? inlineTime : nil)))
+                                                           agentId: agentId,
+                                                           quote: pix == firstTextPart ? replyQuote : nil,
+                                                           time: pix == lastTextPart ? inlineTime : nil)))
                         } else {
                             chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
                                              kind: .assistant(blocks: blocks, live: live, caption: nil)))
@@ -311,7 +320,8 @@ enum Transcript {
                     if people, let h = message.senderHandle {
                         chunk.append(Row(id: "\(message.id)#failed", messageId: message.id, role: .assistant,
                                          kind: .member(blocks: blocks, live: false, handle: h,
-                                                       avatar: message.senderAvatar, named: named, agentId: agentId, time: inlineTime)))
+                                                       avatar: message.senderAvatar, named: named, agentId: agentId,
+                                                       quote: replyQuote, time: inlineTime)))
                     } else {
                         chunk.append(Row(id: "\(message.id)#failed", messageId: message.id, role: .assistant,
                                          kind: .assistant(blocks: blocks, live: false, caption: nil)))
@@ -815,11 +825,12 @@ struct RowView: View {
             }
         case .other(let text, let handle, let avatar, let named, let quote, let time):
             let openPerson = { model.openPersonProfile(handle: handle, avatarUrl: avatar, chatId: chatId) }
-            HStack(alignment: .bottom, spacing: 8) {
+            HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
                 Button(action: openPerson) {
-                    PersonAvatar(url: avatar, handle: handle, size: 26, name: model.personName(handle: handle), id: model.personId(handle: handle))
+                    PersonAvatar(url: avatar, handle: handle, size: Theme.memberAvatar, name: model.personName(handle: handle), id: model.personId(handle: handle))
                 }
                 .buttonStyle(.plain)
+                .padding(.leading, Theme.avatarColumnInset)
                 .accessibilityLabel("@\(handle), profile")
                 // Group / channel: the name inside the bubble, in the sender's colour,
                 // then the reply quote, then the text with the time after it.
@@ -846,11 +857,11 @@ struct RowView: View {
                 .padding(.vertical, Theme.bubbleVPad)
                 .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
                 .senderBar(personAccent(handle: handle, avatar: avatar))
-                .frame(maxWidth: maxBubble - 34, alignment: .leading)
+                .frame(maxWidth: maxBubble - Theme.memberLane, alignment: .leading)
                 Spacer(minLength: 0)
             }
             .task(id: avatar) { accents.load(url: avatar) }
-        case .member(let blocks, let live, let handle, let avatar, let named, let agentId, let time):
+        case .member(let blocks, let live, let handle, let avatar, let named, let agentId, let quote, let time):
             let openMember = {
                 if let agentId { model.showProfile(.agent(projectId: agentId)) }
                 else { model.openPersonProfile(handle: handle, avatarUrl: avatar, chatId: chatId) }
@@ -862,8 +873,9 @@ struct RowView: View {
                 if !live, case .paragraph(let t)? = blocks.last { return t }
                 return nil
             }()
-            HStack(alignment: .bottom, spacing: 8) {
+            HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
                 Button(action: openMember) { peopleAvatar(handle: handle, avatar: avatar) }
+                    .padding(.leading, Theme.avatarColumnInset)
                     .buttonStyle(.plain)
                     .accessibilityLabel("@\(handle), profile")
                 VStack(alignment: .leading, spacing: 0) {
@@ -875,6 +887,10 @@ struct RowView: View {
                         .buttonStyle(.plain)
                         .padding(.bottom, Self.nameToTextGap)
                         .accessibilityIdentifier("bubble-name")
+                    }
+                    if let quote {
+                        quoteHeader(quote, color: theme.text)
+                            .padding(.bottom, Self.quoteToTextGap)
                     }
                     VStack(alignment: .leading, spacing: 8) {
                         ForEach(Array(blocks.enumerated()), id: \.offset) { i, block in
@@ -897,7 +913,7 @@ struct RowView: View {
                 .padding(.vertical, Theme.bubbleVPad)
                 .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
                 .senderBar(accent)
-                .frame(maxWidth: maxBubble - 34, alignment: .leading)
+                .frame(maxWidth: maxBubble - Theme.memberLane, alignment: .leading)
                 Spacer(minLength: 0)
             }
             .task(id: avatar) { if memberProject(handle: handle) == nil { accents.load(url: avatar) } }
@@ -1030,7 +1046,7 @@ struct RowView: View {
     /// Match the avatar offset used by people-chat bubbles (26 pt + 8 pt gap).
     private var reactionLeading: CGFloat {
         switch row.kind {
-        case .other, .member: return 34
+        case .other, .member: return Theme.memberLane
         default: return 0
         }
     }
@@ -1044,11 +1060,11 @@ struct RowView: View {
     @ViewBuilder
     private func peopleAvatar(handle: String, avatar: String?) -> some View {
         if let project = memberProject(handle: handle) {
-            AgentAvatar(project: project, theme: theme, size: 26, still: true)
+            AgentAvatar(project: project, theme: theme, size: Theme.memberAvatar, still: true)
         } else if let avatar, avatar.contains("://") {
-            PersonAvatar(url: avatar, handle: handle, size: 26, name: model.personName(handle: handle), id: model.personId(handle: handle))
+            PersonAvatar(url: avatar, handle: handle, size: Theme.memberAvatar, name: model.personName(handle: handle), id: model.personId(handle: handle))
         } else {
-            PersonAvatar(url: nil, handle: handle, size: 26, name: model.personName(handle: handle), id: model.personId(handle: handle))
+            PersonAvatar(url: nil, handle: handle, size: Theme.memberAvatar, name: model.personName(handle: handle), id: model.personId(handle: handle))
         }
     }
 

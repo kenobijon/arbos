@@ -12,7 +12,7 @@ use gpui::{
 };
 
 use crate::app::{ActiveCall, CallParticipant, CallStatus};
-use crate::model::{now_ms, Call, CallKind, Project, Sender};
+use crate::model::{self, now_ms, Call, CallKind, Project, Sender};
 use crate::ui::avatars;
 use crate::ui::glass::{self, WindowDrag};
 use crate::ui::icons::icon;
@@ -209,6 +209,29 @@ pub fn screen(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> Di
         .iter()
         .map(|p| (p.clone(), state.avatar(&p.sender.avatar_url)))
         .collect();
+    // Who was rung and has not joined yet (#1430): a greyed tile each, "Ringing…", so a group
+    // call shows the whole group while only the agent has picked up.
+    let ringing: Vec<(Sender, Option<Arc<RenderImage>>)> =
+        if active.call.is_live() && active.status == CallStatus::Connected {
+            let expected = state
+                .project(active.call.space_id())
+                .map(|p| model::call_people(p, &state.me_id(), &active.call.agents))
+                .unwrap_or_else(|| active.call.agents.clone());
+            let in_room: Vec<String> = active
+                .participants
+                .iter()
+                .map(|p| p.identity.clone())
+                .collect();
+            model::still_ringing(&expected, &in_room)
+                .into_iter()
+                .map(|s| {
+                    let image = state.avatar(&s.avatar_url);
+                    (s, image)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
     let my_image = state.avatar(&me.avatar_url);
     let me_tile = CallParticipant {
         identity: "local".into(),
@@ -217,7 +240,7 @@ pub fn screen(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> Di
         muted: active.muted,
         video: active.local_video.clone(),
     };
-    let n = remote.len();
+    let n = remote.len() + ringing.len();
     let big = n <= 1;
     let mut grid = div()
         .flex()
@@ -240,6 +263,32 @@ pub fn screen(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> Di
             big,
             &theme,
         ));
+    }
+    for (i, (s, image)) in ringing.iter().enumerate() {
+        let caption = if s.kind == "agent" {
+            "Joining…"
+        } else {
+            "Ringing…"
+        };
+        let ghost = CallParticipant {
+            identity: s.identity(),
+            sender: s.clone(),
+            speaking: false,
+            muted: false,
+            video: None,
+        };
+        grid = grid.child(
+            tile(
+                ElementId::Name(SharedString::from(format!("tile-ringing-{i}"))),
+                &ghost,
+                image.clone(),
+                None,
+                format!("{} · {caption}", s.display_name()),
+                big,
+                &theme,
+            )
+            .opacity(0.55),
+        );
     }
     let seeing_agent = active
         .agent_seeing
@@ -398,6 +447,7 @@ pub fn screen(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> Di
         let name = remote
             .first()
             .map(|(p, _)| p.sender.display_name())
+            .or_else(|| ringing.first().map(|(s, _)| s.display_name()))
             .unwrap_or_else(|| "You".into());
         column = column.child(
             div()
@@ -408,12 +458,20 @@ pub fn screen(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> Di
                 .child(name),
         );
     }
+    let humans_ringing: Vec<String> = ringing
+        .iter()
+        .filter(|(s, _)| s.kind != "agent")
+        .map(|(s, _)| s.display_name())
+        .collect();
     let sub = if let Some(notice) = active.notice.clone() {
         Some(notice)
-    } else if n == 0 && active.reachable.is_some() {
+    } else if !humans_ringing.is_empty() && active.reachable.is_some() {
         // "Robert's Arbos isn't open — they'll see a missed call" / "Ringing
-        // Robert's iPhone" (contract §8, same words as the iPhone app).
+        // Robert's iPhone" (contract §8, same words as the iPhone app) — kept while
+        // anyone is still being rung, not only while the room is empty.
         active.reachable.clone()
+    } else if !humans_ringing.is_empty() {
+        Some(ringing_line(&humans_ringing))
     } else if waiting {
         Some("Waiting for others to join…".into())
     } else if let CallStatus::Failed(_) = active.status {
@@ -872,6 +930,16 @@ pub fn join_bar(call: &Call, cx: &mut Context<Shell>) -> Div {
                     this.state.update(cx, |s, cx| s.join_call(id, cx));
                 })),
         )
+}
+
+/// "Ringing Bob and Carol…" / "Ringing Bob, Carol and 2 more…".
+pub fn ringing_line(names: &[String]) -> String {
+    match names {
+        [] => String::new(),
+        [a] => format!("Ringing {a}…"),
+        [a, b] => format!("Ringing {a} and {b}…"),
+        [a, b, rest @ ..] => format!("Ringing {a}, {b} and {} more…", rest.len()),
+    }
 }
 
 /// Ringing card (top-right): caller, "Incoming video call", Decline / Accept.
