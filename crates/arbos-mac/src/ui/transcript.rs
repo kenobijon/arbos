@@ -3414,10 +3414,18 @@ const QUOTE_TO_TEXT_GAP: f32 = 6.0;
 /// The inside of a bubble, in this order: sender name (group / channel,
 /// someone else) → reply quote header → the text, with the time after it.
 /// A short text keeps the time on its line; a wrapped one pushes it to the
-/// right of the next line. No `min_w_0` on the column or its items: taffy
-/// sizes a flex column from its items, and an item with `min-width: 0`
-/// contributes nothing, so the bubble would take the name's or the quote's
-/// width and wrap the body one word per line (bubble-quote-width-2026-10-23).
+/// right of the next line.
+///
+/// Width rules (bubble-quote-width-2026-10-23 + quoted-body overflow):
+/// - The column and the text+time row are `w_full` so they take the bubble's
+///   content box when the bubble is capped — the body can wrap at that edge.
+/// - No `min_w_0` on the column or the text+time row: taffy sizes a flex
+///   column from its items, and an item with `min-width: 0` contributes
+///   nothing, so the bubble would take the name's or the quote's width and
+///   wrap the body one word per line.
+/// - The text wrapper alone keeps `min_w_0` so, once the row has a definite
+///   width, the body shrinks and soft-wraps instead of running past the
+///   bubble's right edge (app-01M5N8R9VYF64GWW8TVXW8HFX9).
 fn sender_bubble_column(
     name: Option<AnyElement>,
     quote: Option<AnyElement>,
@@ -3427,6 +3435,7 @@ fn sender_bubble_column(
     div()
         .flex()
         .flex_col()
+        .w_full()
         .children(name.map(|n| {
             div()
                 .pb(px(NAME_TO_TEXT_GAP))
@@ -3444,7 +3453,13 @@ fn sender_bubble_column(
                 .flex()
                 .flex_wrap()
                 .items_end()
-                .child(div().debug_selector(|| "bubble-text".into()).child(body))
+                .w_full()
+                .child(
+                    div()
+                        .min_w_0()
+                        .debug_selector(|| "bubble-text".into())
+                        .child(body),
+                )
                 .children(time.map(|t| {
                     div()
                         .ml_auto()
@@ -4171,9 +4186,8 @@ mod layout_tests {
         );
     }
 
-    /// A quoted agent bubble as `markdown_bubble` builds it: the bubble is a
-    /// flex column (quote header over the text) in the slot, with and without
-    /// the avatar lane.
+    /// A quoted agent bubble as `markdown_bubble` builds it: `sender_bubble_column`
+    /// (name → quote → body) in the slot, with and without the avatar lane.
     struct QuotedBubble {
         lane: bool,
         selection: Entity<TextSelection>,
@@ -4209,20 +4223,21 @@ mod layout_tests {
                 .max_w_full()
                 .min_w_0()
                 .relative()
-                .flex()
-                .flex_col()
-                .gap(px(6.0))
                 .px(px(BUBBLE_PAD_X))
                 .py(px(BUBBLE_PAD_Y))
-                .child(quote)
-                .child(render_block(
-                    "q",
-                    &Block::Paragraph(LONG_BODY.to_string()),
-                    0,
+                .child(sender_bubble_column(
                     None,
-                    Instant::now(),
-                    &theme,
-                    &bubble_sel,
+                    Some(quote.into_any_element()),
+                    render_block(
+                        "q",
+                        &Block::Paragraph(LONG_BODY.to_string()),
+                        0,
+                        None,
+                        Instant::now(),
+                        &theme,
+                        &bubble_sel,
+                    ),
+                    None,
                 ));
             let row = div()
                 .w_full()
@@ -4248,6 +4263,10 @@ mod layout_tests {
     /// incoming bubble with a one-word reply quote collapsed to the quote's
     /// width and wrapped its body one word per line. The bubble's width is the
     /// body's (capped by the column), never the quote header's.
+    ///
+    /// 2026-10-23 20:55 (v0.6.185): after sender_bubble_column dropped
+    /// `min_w_0` on the text wrapper, a long quoted body ran past the bubble's
+    /// right edge instead of wrapping — assert the text stays inside.
     #[gpui::test]
     fn a_quoted_bubble_is_as_wide_as_its_body_not_its_quote(cx: &mut TestAppContext) {
         for lane in [false, true] {
@@ -4258,9 +4277,13 @@ mod layout_tests {
             vcx.run_until_parked();
             let bubble = vcx.debug_bounds("test-bubble").expect("bubble drawn");
             let quote = vcx.debug_bounds("test-quote").expect("quote drawn");
+            let text = vcx.debug_bounds("bubble-text").expect("body drawn");
             let slot = vcx.debug_bounds("chat-bubble-slot").expect("slot drawn");
             let bw: f32 = bubble.size.width.into();
             let qw: f32 = quote.size.width.into();
+            let tw: f32 = text.size.width.into();
+            let tx: f32 = text.origin.x.into();
+            let bx: f32 = bubble.origin.x.into();
             let cap: f32 = f32::from(slot.size.width) - ASSISTANT_RIGHT_GAP;
             assert!(
                 qw < 120.0 && bw > qw + 200.0,
@@ -4274,6 +4297,16 @@ mod layout_tests {
             assert!(
                 bh < 6.0 * CHAT_LINE_HEIGHT,
                 "lane={lane}: the body wraps to a few lines, not one word per line ({bh} pt tall)"
+            );
+            let text_right = tx + tw;
+            let bubble_inner_right = bx + bw - BUBBLE_PAD_X;
+            assert!(
+                text_right <= bubble_inner_right + 1.0,
+                "lane={lane}: body runs past the bubble (text right {text_right}, inner {bubble_inner_right})"
+            );
+            assert!(
+                bh > 2.0 * CHAT_LINE_HEIGHT,
+                "lane={lane}: a long body must wrap to more than one line ({bh} pt tall)"
             );
         }
     }
