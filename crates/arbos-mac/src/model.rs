@@ -1633,7 +1633,12 @@ impl Message {
     /// else the newest `Working` / `Step` status message (visible or hidden).
     /// Generic placeholders ("Working…", "thinking") fall through so the line
     /// reads "<name> is working" — same rule as the iPhone (`AppModel.currentActivity`).
+    /// A pending approval card wins over a stale tool label ("Removing files" while
+    /// nothing has run yet).
     pub fn current_activity(&self) -> Option<String> {
+        if self.waiting_approval || self.pending_approvals().next().is_some() {
+            return Some("Waiting for approval".to_string());
+        }
         if let Some(a) = self
             .activity
             .as_deref()
