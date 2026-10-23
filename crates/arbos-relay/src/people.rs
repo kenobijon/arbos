@@ -3170,7 +3170,9 @@ mod read_cursor_tests {
     }
 
     fn dto(state: &AppState, chat: &str, me: &str, dev: &Principal) -> PeopleChatDto {
-        let cm = load_chat(state, chat).ok().expect("chat");
+        let Ok(cm) = load_chat(state, chat) else {
+            panic!("chat {chat} not found");
+        };
         people_chat_dto(state, &cm, me, &device_of(dev))
     }
 
