@@ -1032,27 +1032,29 @@ struct ChatView: View {
                         emptyHint
                     }
                     let shown = windowedRows
-                    ForEach(Array(shown.enumerated()), id: \.element.id) { i, row in
-                        let canReply = isMessageRow(row)
-                        RowView(row: row, chatId: chatId, width: width, timeReveal: timeReveal,
-                                onQuoteTap: { revealQuoted($0) },
-                                highlighted: highlightedMessage == row.messageId,
-                                onReply: canReply ? { beginReply(to: row) } : nil,
-                                replySwipeActive: $replySwipeActive)
-                            .padding(.top, gap(before: i, in: shown))
-                            .id(row.id)
-                            .onAppear {
-                                // Once per open — not on every row (group chats fire this dozens of times).
-                                if i == 0 {
-                                    LaunchClock.mark("chat-first-row", detail: "shown=\(shown.count) rows=\(rows.count) messages=\(messages.count)")
-                                }
-                            }
-                            .contextMenu {
-                                MessageMenuContent(items: MessageMenu.items(forMessage: canReply)) { item in
-                                    runMessageMenu(item, row: row)
-                                }
-                            }
-                    }
+                    // One MentionTable for every bubble (Mac builds Mentions once per
+                    // sync). Per-row rebuilds were the main group-chat lag on iPhone.
+                    let mentions = MentionTable.Cache.shared.table(model: model, theme: theme)
+                    // Equatable host: composer keystrokes re-evaluate ChatView but
+                    // skip the ForEach when the transcript inputs are unchanged.
+                    TranscriptRows(
+                        model: model,
+                        mentions: mentions,
+                        shown: shown,
+                        chatId: chatId,
+                        width: width,
+                        timeReveal: timeReveal,
+                        highlightedMessage: highlightedMessage,
+                        rowsCount: rows.count,
+                        messagesCount: messages.count,
+                        replySwipeActive: $replySwipeActive,
+                        canReply: { isMessageRow($0) },
+                        onQuoteTap: { revealQuoted($0) },
+                        onReply: { beginReply(to: $0) },
+                        onMenu: { runMessageMenu($0, row: $1) },
+                        gapBefore: { gap(before: $0, in: $1) }
+                    )
+                    .equatable()
                     // Who is working is the presence row over the composer
                     // (`PresenceRow`), not a transcript row.
                     // Clears the 24 pt fade above the composer, so the last row
@@ -2194,6 +2196,64 @@ struct ModelPickerView: View {
             .onAppear { effort = current.effort }
         }
         .presentationDetents([.medium, .large])
+    }
+}
+
+/// The visible transcript rows. Equatable so a composer keystroke (ChatView's
+/// `draft` `@State`) or an AppModel presence tick that re-evaluates ChatView
+/// does not rebuild every bubble when the row list is unchanged.
+private struct TranscriptRows: View, Equatable {
+    let model: AppModel
+    let mentions: MentionTable
+    let shown: [Row]
+    let chatId: Id
+    let width: CGFloat
+    let timeReveal: CGFloat
+    let highlightedMessage: Id?
+    let rowsCount: Int
+    let messagesCount: Int
+    var replySwipeActive: Binding<Bool>
+    let canReply: (Row) -> Bool
+    let onQuoteTap: (Id) -> Void
+    let onReply: (Row) -> Void
+    let onMenu: (MessageMenuItem, Row) -> Void
+    let gapBefore: (Int, [Row]) -> CGFloat
+
+    static func == (lhs: TranscriptRows, rhs: TranscriptRows) -> Bool {
+        lhs.shown == rhs.shown
+            && lhs.chatId == rhs.chatId
+            && lhs.width == rhs.width
+            && lhs.timeReveal == rhs.timeReveal
+            && lhs.highlightedMessage == rhs.highlightedMessage
+            && lhs.mentions === rhs.mentions
+            && lhs.rowsCount == rhs.rowsCount
+            && lhs.messagesCount == rhs.messagesCount
+    }
+
+    var body: some View {
+        ForEach(Array(shown.enumerated()), id: \.element.id) { i, row in
+            let reply = canReply(row)
+            RowView(model: model, row: row, chatId: chatId, width: width, timeReveal: timeReveal,
+                    onQuoteTap: onQuoteTap,
+                    highlighted: highlightedMessage == row.messageId,
+                    onReply: reply ? { onReply(row) } : nil,
+                    replySwipeActive: replySwipeActive,
+                    mentions: mentions)
+                .equatable()
+                .padding(.top, gapBefore(i, shown))
+                .id(row.id)
+                .onAppear {
+                    // Once per open — not on every row (group chats fire this dozens of times).
+                    if i == 0 {
+                        LaunchClock.mark("chat-first-row", detail: "shown=\(shown.count) rows=\(rowsCount) messages=\(messagesCount)")
+                    }
+                }
+                .contextMenu {
+                    MessageMenuContent(items: MessageMenu.items(forMessage: reply)) { item in
+                        onMenu(item, row)
+                    }
+                }
+        }
     }
 }
 
