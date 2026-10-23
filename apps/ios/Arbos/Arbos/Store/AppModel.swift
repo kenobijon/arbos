@@ -262,6 +262,9 @@ final class AppModel: ObservableObject {
             }
         }
     }
+    /// Telegram-style root tab (Contacts · Calls · Chats · Settings). Opening a
+    /// chat from Contacts/Calls switches to Chats so `path` lands on HomeView's stack.
+    @Published var mainTab: MainTab = .chats
     /// True when the Debug fixture replaced the relay (screenshots).
     var isFixture = false
     /// Debug demo tours run once per process, whichever view instance starts them.
