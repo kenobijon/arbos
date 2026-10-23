@@ -4147,6 +4147,9 @@ fn attachment(name: &str, mime: &str, kind: AttachmentKind, title: &str, bytes: 
 
 /// A 320×200 PNG (diagonal gradient tinted from the key) for fixture thumbnails and downloads.
 fn fixture_png(key: &str) -> Vec<u8> {
+    if key.contains("Screenshot") {
+        return fixture_page_png();
+    }
     let seed = key.bytes().fold(0x811c_9dc5u32, |a, b| {
         (a ^ b as u32).wrapping_mul(0x0100_0193)
     });
@@ -4162,6 +4165,29 @@ fn fixture_png(key: &str) -> Vec<u8> {
             image::Rgb([245, 245, 245])
         } else {
             image::Rgb([r as u8, g as u8, b as u8])
+        }
+    });
+    let mut out = std::io::Cursor::new(Vec::new());
+    let _ = img.write_to(&mut out, image::ImageFormat::Png);
+    out.into_inner()
+}
+
+/// A 640×400 "page screenshot": white, empty top 22 %, a dark title bar, a
+/// grey line, a blue button, a short grey line — the shape of Jacob's shot.
+fn fixture_page_png() -> Vec<u8> {
+    let (w, h) = (640u32, 400u32);
+    let img = image::RgbImage::from_fn(w, h, |x, y| {
+        let inside = |x0: u32, y0: u32, x1: u32, y1: u32| x >= x0 && x < x1 && y >= y0 && y < y1;
+        if inside(40, 88, 300, 116) {
+            image::Rgb([24, 24, 24])
+        } else if inside(40, 134, 330, 146) {
+            image::Rgb([96, 96, 96])
+        } else if inside(40, 176, 180, 216) {
+            image::Rgb([26, 115, 232])
+        } else if inside(40, 240, 190, 252) {
+            image::Rgb([96, 96, 96])
+        } else {
+            image::Rgb([255, 255, 255])
         }
     });
     let mut out = std::io::Cursor::new(Vec::new());
@@ -4473,6 +4499,23 @@ fn seed_chat_docs() -> Vec<ChatDoc> {
                 attachment("q3-voiceover.mp3", "audio/mpeg", AttachmentKind::Audio, "Voice-over · 1:12", 1_120_000),
                 attachment("q3-sources.zip", "application/zip", AttachmentKind::File, "Source data and scripts", 3_300_000),
                 text("The deck follows last quarter's structure; the budget sheet has a variance column and a chart on the second tab."),
+            ],
+        );
+        // Jacob's case (chat-preview-cards-2026-10-23): the agent screenshots the
+        // small page it made — a white page with its own empty top margin.
+        s.user("Make me a small page with a button that counts clicks.");
+        s.assistant(
+            TurnKind::Reply,
+            MessageStatus::Done,
+            vec![
+                text("Here it is — a small page with a counter button."),
+                attachment(
+                    "Screenshot 2026-10-23 at 7.55.41.png",
+                    "image/png",
+                    AttachmentKind::Image,
+                    "Screenshot 2026-10-23 at 7.55.41.png",
+                    212_000,
+                ),
             ],
         );
     }
@@ -5029,6 +5072,36 @@ fn seed_people_chat_docs() -> Vec<ChatDoc> {
     silent.owner_handle = Some(ME_HANDLE.into());
     silent.parts = vec![text_part("")];
     insert_message_via_core(&group, &silent);
+    // Jacob's case (chat-preview-cards-2026-10-23): the agent screenshots the
+    // small page it made — a white page with its own empty top margin.
+    insert_message_via_core(
+        &group,
+        &human_message(
+            GROUP_LAUNCH,
+            &sam(),
+            "@arbos make me a small page with a button that counts clicks.",
+            base + 440_000,
+        ),
+    );
+    let mut page = human_message(GROUP_LAUNCH, &sam(), "", base + 445_000);
+    page.role = Role::Assistant;
+    page.sender = format!("agent:{PROJECT_ARBOS}");
+    page.sender_name = Some("Arbos".into());
+    page.sender_handle = Some("arbos".into());
+    page.sender_avatar = None;
+    page.asked_by_handle = Some("sam".into());
+    page.owner_handle = Some(ME_HANDLE.into());
+    page.parts = vec![
+        text_part("Here it is — a small page with a counter button."),
+        attachment(
+            "Screenshot 2026-10-23 at 7.55.41.png",
+            "image/png",
+            AttachmentKind::Image,
+            "Screenshot 2026-10-23 at 7.55.41.png",
+            212_000,
+        ),
+    ];
+    insert_message_via_core(&group, &page);
     out.push(group);
     out
 }
@@ -5924,6 +5997,8 @@ mod seed_parity_tests {
         ("01J9CHAT0MEDIA000000000000", &[
             "User Done user name=None h=None asked=None turn=None wa=false [text] hidden=[] text=126 r=0 dt=0 ct=Some(0)",
             "Assistant Done agent name=None h=None asked=None turn=Some(Act) wa=false [text,attachment:Q3 cover image:Some(418000):Image,attachment:Q3 review deck · 12 slides:Some(2310000):Slides,attachment:Q3 budget vs. actuals:Some(61000):Sheet,attachment:One-pager for the board:Some(48500):Doc,attachment:Deck, exported as PDF:Some(1540000):Pdf,attachment:Teaser clip · 0:24:Some(9800000):Video,attachment:Voice-over · 1:12:Some(1120000):Audio,attachment:Source data and scripts:Some(3300000):File,text] hidden=[] text=172 r=0 dt=20000 ct=Some(9000)",
+            "User Done user name=None h=None asked=None turn=None wa=false [text] hidden=[] text=54 r=0 dt=65000 ct=Some(0)",
+            "Assistant Done agent name=None h=None asked=None turn=Some(Reply) wa=false [text,attachment:Screenshot 2026-10-23 at 7.55.41.png:Some(212000):Image] hidden=[] text=48 r=0 dt=85000 ct=Some(9000)",
         ]),
         ("01J9CHAT0VOICE000000000000", &[
             "User Done user name=None h=None asked=None turn=None wa=false [attachment:voice-memo.wav:None:Audio,text] hidden=[] text=39 r=0 dt=0 ct=Some(0)",
@@ -5962,6 +6037,8 @@ mod seed_parity_tests {
             "Assistant Error agent:01J9ARBOS00000000000000000 name=Some(\"Arbos\") h=Some(\"arbos\") asked=Some(\"sara\") turn=None wa=false [text,error] hidden=[] text=0 r=0 dt=125000 ct=Some(0)",
             "User Done user:gh_457 name=Some(\"Samir Haddad\") h=Some(\"samir\") asked=None turn=None wa=false [text] hidden=[] text=42 r=0 dt=130000 ct=Some(0)",
             "Assistant Error agent:01J9ARBOS00000000000000000 name=None h=Some(\"arbos\") asked=Some(\"samir\") turn=None wa=false [text] hidden=[] text=0 r=0 dt=133000 ct=Some(0)",
+            "User Done user:gh_456 name=Some(\"Sam Rivera\") h=Some(\"sam\") asked=None turn=None wa=false [text] hidden=[] text=61 r=0 dt=140000 ct=Some(0)",
+            "Assistant Done agent:01J9ARBOS00000000000000000 name=Some(\"Arbos\") h=Some(\"arbos\") asked=Some(\"sam\") turn=None wa=false [text,attachment:Screenshot 2026-10-23 at 7.55.41.png:Some(212000):Image] hidden=[] text=48 r=0 dt=145000 ct=Some(0)",
         ]),
         
     ];

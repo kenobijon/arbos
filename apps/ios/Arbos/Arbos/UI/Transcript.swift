@@ -440,11 +440,10 @@ enum Transcript {
         return t == "image" || t == "photo" || t == "video" || t == "attachment" || t == "(attachment)"
     }
 
+    /// Grok's doc card subline: "PDF · 1.8 MB" (the kind alone when the size is unknown).
     private static func subtitle(for a: Attachment) -> String {
-        if let dot = a.name.lastIndex(of: ".") {
-            return String(a.name[a.name.index(after: dot)...]).uppercased() + " file"
-        }
-        return a.mime
+        let size = a.sizeLabel
+        return size.isEmpty ? a.kindLabel : "\(a.kindLabel) · \(size)"
     }
 
     /// "Handed to subagent itsdangerous-tests" → "Messaged ◉ itsdangerous-tests".
@@ -1402,9 +1401,10 @@ struct AvatarCluster: View {
     }
 }
 
-/// Inline image attachment: loads with the device bearer (same as voice memos),
-/// tappable for the media viewer at its place in the chat's album. AsyncImage
-/// alone cannot send `Authorization` and often stays blank on people-chat blob URLs.
+/// Inline picture (feedback chat-preview-cards-2026-10-23, Grok-black): the
+/// picture is its own bubble — uniform margins trimmed, aspect-fit at the
+/// bubble radius, no frame and no footer (Download / Forward live in the viewer
+/// it opens). Loaded with the device bearer (same as voice memos).
 struct ImageBubble: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
@@ -1417,8 +1417,29 @@ struct ImageBubble: View {
     @State private var failed = false
     @State private var viewer: MediaViewerState?
 
-    private var width: CGFloat { min(240, maxWidth) }
+    /// Mac `picture_size`: fill the bubble width unless the picture is tall.
+    static let maxHeight: CGFloat = 320
+    static let minWidth: CGFloat = 120
+    static let placeholder = CGSize(width: 240, height: 160)
+
+    private var bubbleWidth: CGFloat { min(280, maxWidth) }
     private var fill: Color { fromUser ? theme.bubbleUser : theme.bubbleAssistant }
+
+    private var size: CGSize {
+        guard let image, image.size.width > 0, image.size.height > 0 else { return Self.placeholder }
+        return Self.fit(image.size, maxWidth: bubbleWidth)
+    }
+
+    static func fit(_ natural: CGSize, maxWidth: CGFloat) -> CGSize {
+        let scale = min(maxWidth / natural.width, maxHeight / natural.height)
+        var w = min(natural.width * scale, maxWidth)
+        var h = min(natural.height * scale, maxHeight)
+        if w < minWidth {
+            h = min(h * minWidth / w, maxHeight)
+            w = minWidth
+        }
+        return CGSize(width: w.rounded(), height: h.rounded())
+    }
 
     var body: some View {
         Button { viewer = MediaOpen.state(for: item, chatId: chatId, model: model) } label: {
@@ -1427,7 +1448,7 @@ struct ImageBubble: View {
                 if let image {
                     Image(uiImage: image)
                         .resizable()
-                        .scaledToFill()
+                        .scaledToFit()
                 } else if failed || item.blobRef == nil {
                     Image(systemName: "photo")
                         .font(theme.font(28))
@@ -1436,7 +1457,7 @@ struct ImageBubble: View {
                     ProgressView().tint(fromUser ? theme.userText.opacity(0.7) : theme.muted)
                 }
             }
-            .frame(width: width, height: 180)
+            .frame(width: size.width, height: size.height)
             .clipShape(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous))
         }
         .buttonStyle(.plain)
@@ -1451,11 +1472,65 @@ struct ImageBubble: View {
 
     private func load() async {
         if let (data, _) = await MediaFetch.bytes(for: item, model: model), let img = UIImage(data: data) {
-            image = img
+            image = ImageTrim.trimmed(img)
             failed = false
         } else {
             failed = true
         }
+    }
+}
+
+/// Trim a uniform border (a screenshot's empty page margin) off a picture —
+/// the Mac's `trim_rect`: border colour = the corner pixel, a row / column is
+/// border when every sampled pixel is within 10/255 of it, 2 % breathing pad,
+/// and only when it removes ≥ 6 % of the area and keeps a quarter of each side.
+enum ImageTrim {
+    static func trimmed(_ image: UIImage) -> UIImage {
+        guard let cg = image.cgImage, let rect = trimRect(cg) else { return image }
+        guard let cropped = cg.cropping(to: rect) else { return image }
+        return UIImage(cgImage: cropped, scale: image.scale, orientation: image.imageOrientation)
+    }
+
+    static func trimRect(_ cg: CGImage) -> CGRect? {
+        let w = cg.width, h = cg.height
+        guard w >= 32, h >= 32 else { return nil }
+        // Sample on a ≤ 160 × 160 grid: draw into a small RGBA buffer.
+        let sw = min(w, 160), sh = min(h, 160)
+        var buf = [UInt8](repeating: 0, count: sw * sh * 4)
+        guard let ctx = CGContext(data: &buf, width: sw, height: sh, bitsPerComponent: 8, bytesPerRow: sw * 4,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        ctx.interpolationQuality = .none
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: sw, height: sh))
+        func px(_ x: Int, _ y: Int) -> (UInt8, UInt8, UInt8) {
+            let i = (y * sw + x) * 4
+            return (buf[i], buf[i + 1], buf[i + 2])
+        }
+        // Bitmap contexts keep row 0 at the top of the picture.
+        let bg = px(0, 0)
+        func near(_ p: (UInt8, UInt8, UInt8)) -> Bool {
+            abs(Int(p.0) - Int(bg.0)) <= 10 && abs(Int(p.1) - Int(bg.1)) <= 10 && abs(Int(p.2) - Int(bg.2)) <= 10
+        }
+        func rowIsBg(_ y: Int) -> Bool { (0..<sw).allSatisfy { near(px($0, y)) } }
+        func colIsBg(_ x: Int) -> Bool { (0..<sh).allSatisfy { near(px(x, $0)) } }
+        var top = 0
+        while top < sh, rowIsBg(top) { top += 1 }
+        if top >= sh { return nil }
+        var bottom = sh
+        while bottom > top, rowIsBg(bottom - 1) { bottom -= 1 }
+        var left = 0
+        while left < sw, colIsBg(left) { left += 1 }
+        var right = sw
+        while right > left, colIsBg(right - 1) { right -= 1 }
+        // Back to image pixels, with the breathing pad.
+        let fx = Double(w) / Double(sw), fy = Double(h) / Double(sh)
+        let padX = Double(w) * 0.02, padY = Double(h) * 0.02
+        let x0 = max(0, Double(left) * fx - padX), y0 = max(0, Double(top) * fy - padY)
+        let x1 = min(Double(w), Double(right) * fx + padX), y1 = min(Double(h), Double(bottom) * fy + padY)
+        let cw = x1 - x0, ch = y1 - y0
+        if cw < Double(w) / 4 || ch < Double(h) / 4 { return nil }
+        if (cw * ch) / (Double(w) * Double(h)) > 0.94 { return nil }
+        return CGRect(x: x0.rounded(), y: y0.rounded(), width: cw.rounded(), height: ch.rounded())
     }
 }
 
@@ -1532,7 +1607,7 @@ struct FileCard: View {
             // text 16 pt after the icon, 17 pt title over a 15 pt muted subtitle.
             HStack(spacing: 14) {
                 RoundedRectangle(cornerRadius: 5, style: .continuous)
-                    .fill(Color(hex: "#FFB000")!)
+                    .fill(FileCard.kindColor(item, theme: theme))
                     .frame(width: 21, height: 27)
                     .overlay(Image(systemName: item.kind == .video ? "play.fill" : "doc.text").font(.system(size: 12, weight: .bold)).foregroundStyle(.black))
                 VStack(alignment: .leading, spacing: 2) {
@@ -1553,6 +1628,19 @@ struct FileCard: View {
             MediaViewer(album: v.items, index: v.index, onClose: { viewer = nil })
                 .environmentObject(model)
                 .environment(\.theme, theme)
+        }
+    }
+
+    /// The doc glyph's colour by kind (Mac `kind_color`): Grok's Docs yellow for
+    /// documents, PDF red, Sheets green, Slides orange; the rest neutral.
+    static func kindColor(_ item: MediaItem, theme: Theme) -> Color {
+        let ext = (item.name as NSString).pathExtension.lowercased()
+        switch ext {
+        case "pdf": return Color(hex: "#E53E3E")!
+        case "docx", "doc", "odt", "rtf", "md", "txt": return Color(hex: "#FFB000")!
+        case "xlsx", "xls", "csv", "ods": return Color(hex: "#2EB86A")!
+        case "pptx", "ppt", "key", "odp": return Color(hex: "#F28B2E")!
+        default: return item.mime == "application/pdf" ? Color(hex: "#E53E3E")! : theme.muted
         }
     }
 }

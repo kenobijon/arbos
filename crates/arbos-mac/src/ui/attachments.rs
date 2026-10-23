@@ -1,6 +1,8 @@
-//! Attachment cards (F10, D38): a file the agent produced, blob-backed. Icon by kind, title,
-//! size, an inline thumbnail for images, and Download → `~/Downloads/<name>` then reveal.
-//! Clicking the picture or the card opens the media viewer (`ui::media_viewer`).
+//! Attachment cards (feedback chat-preview-cards-2026-10-23, Grok-black): a
+//! **picture is its own bubble** — the trimmed image, aspect-fit, bubble radius,
+//! no frame and no footer (a ↓ disc appears on hover; the viewer has Download
+//! and Forward). A **file** is Grok's doc card (web-08): kind-coloured doc
+//! glyph, name, "PDF · 1.8 MB". Clicking either opens the media viewer.
 
 use std::path::Path;
 use std::process::Command;
@@ -8,51 +10,103 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    div, img, prelude::*, px, AnyElement, App, Entity, FontWeight, Hsla, ObjectFit, RenderImage,
-    SharedString,
+    div, img, prelude::*, px, AnyElement, App, Div, Entity, FontWeight, Hsla, ObjectFit,
+    RenderImage, SharedString,
 };
 
 use crate::app::{AppState, FORWARDED_FROM_PREFIX};
 use crate::model::{Attachment, AttachmentKind};
-use crate::ui::theme::{Appearance, Theme};
+use crate::ui::icons::icon;
+use crate::ui::theme::{Theme, BUBBLE_RADIUS};
 
 /// What a card click does: open the media viewer on this attachment.
 pub type OpenFn = Rc<dyn Fn(&mut App)>;
 
+/// Widest a picture bubble or a file card gets (the old card's width).
 pub const CARD_WIDTH: f32 = 360.0;
-/// Fixed, so a row's height does not change when the thumbnail arrives.
-pub const THUMB_HEIGHT: f32 = 200.0;
+/// Tallest a picture bubble gets; wider-than-tall pictures stop at `CARD_WIDTH`.
+pub const PICTURE_MAX_HEIGHT: f32 = 420.0;
+/// Narrowest a picture bubble gets (a tiny icon still reads as a bubble).
+pub const PICTURE_MIN_WIDTH: f32 = 120.0;
+/// The placeholder while the bytes load (or when there are none).
+pub const PICTURE_PLACEHOLDER: (f32, f32) = (280.0, 180.0);
+/// Grok's doc card (web-08): 61 pt on the iPhone's 17 pt text; 56 on the Mac's 13 pt.
+pub const FILE_CARD_HEIGHT: f32 = 56.0;
+pub const FILE_CARD_RADIUS: f32 = 14.0;
+/// The doc glyph: 20 × 27 (Grok 21 × 27).
+const DOC_W: f32 = 20.0;
+const DOC_H: f32 = 27.0;
+/// The hover ↓ disc.
+const DISC: f32 = 28.0;
 
-/// Glyph and tint for the kind badge.
-pub fn badge(kind: AttachmentKind, theme: &Theme) -> (&'static str, Hsla) {
-    let tint = |h: f32| Hsla {
-        h,
-        s: 0.55,
-        l: match theme.appearance {
-            Appearance::Dark => 0.62,
-            Appearance::Light => 0.42,
-        },
+/// The doc glyph's colour by kind: Grok's Docs yellow for documents, PDF red,
+/// Sheets green, Slides orange; media and the rest stay neutral.
+pub fn kind_color(kind: AttachmentKind, theme: &Theme) -> Hsla {
+    let rgb = |r: u8, g: u8, b: u8| gpui::Rgba {
+        r: r as f32 / 255.0,
+        g: g as f32 / 255.0,
+        b: b as f32 / 255.0,
         a: 1.0,
     };
     match kind {
-        AttachmentKind::Image => ("▧", tint(0.78)),
-        AttachmentKind::Video => ("▶", tint(0.95)),
-        AttachmentKind::Slides => ("▣", tint(0.07)),
-        AttachmentKind::Doc => ("≣", tint(0.60)),
-        AttachmentKind::Sheet => ("▦", tint(0.38)),
-        AttachmentKind::Pdf => ("▤", tint(0.0)),
-        AttachmentKind::Audio => ("♪", tint(0.50)),
-        AttachmentKind::File => ("⬚", theme.text_muted),
+        AttachmentKind::Pdf => rgb(0xE5, 0x3E, 0x3E).into(),
+        AttachmentKind::Doc => rgb(0xFF, 0xB0, 0x00).into(),
+        AttachmentKind::Sheet => rgb(0x2E, 0xB8, 0x6A).into(),
+        AttachmentKind::Slides => rgb(0xF2, 0x8B, 0x2E).into(),
+        AttachmentKind::Image
+        | AttachmentKind::Video
+        | AttachmentKind::Audio
+        | AttachmentKind::File => theme.text_muted,
     }
 }
 
-/// What the image strip of a card shows.
+/// What the picture bubble shows.
 pub enum Preview {
     /// The thumbnail bytes are on their way.
     Loading,
     Ready(Arc<RenderImage>),
     /// No blob, or the fetch failed: the file is still listed and downloadable.
     Unavailable,
+}
+
+/// The size a picture bubble takes for an image of `w × h` device pixels:
+/// aspect-fit inside `CARD_WIDTH × PICTURE_MAX_HEIGHT`, never narrower than
+/// `PICTURE_MIN_WIDTH` (a tall sliver keeps its ratio inside that width).
+pub fn picture_size(w: f32, h: f32) -> (f32, f32) {
+    if w <= 0.0 || h <= 0.0 {
+        return PICTURE_PLACEHOLDER;
+    }
+    // Fill the bubble width (Grok's pictures run to the bubble's width) unless
+    // the picture is tall — then its height caps it and the width follows.
+    let scale = (CARD_WIDTH / w).min(PICTURE_MAX_HEIGHT / h);
+    let mut dw = (w * scale).min(CARD_WIDTH);
+    let mut dh = (h * scale).min(PICTURE_MAX_HEIGHT);
+    if dw < PICTURE_MIN_WIDTH {
+        let s = PICTURE_MIN_WIDTH / dw;
+        dw = PICTURE_MIN_WIDTH;
+        dh = (dh * s).min(PICTURE_MAX_HEIGHT);
+    }
+    (dw.round(), dh.round())
+}
+
+/// The ↓ disc: 28 pt, black 55 %, white glyph; the caller shows it on hover.
+fn download_disc(id: SharedString, muted: bool, theme: &Theme) -> gpui::Stateful<Div> {
+    let (bg, fg) = if muted {
+        (theme.surface_2, theme.text_muted)
+    } else {
+        (Theme::with_alpha(gpui::black(), 0.55), gpui::white())
+    };
+    div()
+        .id(id)
+        .size(px(DISC))
+        .rounded_full()
+        .bg(bg)
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .hover(|s| s.bg(Theme::with_alpha(gpui::black(), 0.75)))
+        .child(icon("arrow-down", 12.0, fg))
 }
 
 /// The card element for one attachment row. `forwarded_from` is the message's
@@ -66,17 +120,140 @@ pub fn card(
     state: Entity<AppState>,
     theme: &Theme,
 ) -> AnyElement {
-    let kind = attachment.kind();
-    let (glyph, tint) = badge(kind, theme);
+    if attachment.kind() == AttachmentKind::Image {
+        picture_bubble(
+            row_id,
+            attachment,
+            preview,
+            forwarded_from,
+            open,
+            state,
+            theme,
+        )
+    } else {
+        file_card(row_id, attachment, forwarded_from, open, state, theme)
+    }
+}
+
+/// A picture: aspect-fit at its own ratio, bubble radius, no chrome. Hover shows
+/// the ↓ disc top-right; the whole bubble opens the viewer.
+fn picture_bubble(
+    row_id: &str,
+    attachment: &Attachment,
+    preview: Preview,
+    forwarded_from: Option<&str>,
+    open: Option<OpenFn>,
+    state: Entity<AppState>,
+    theme: &Theme,
+) -> AnyElement {
     let key = attachment.blob_ref.clone();
     let name = attachment.name.clone();
-    let title = attachment.title().to_owned();
-    let size = attachment.size_label();
-    let mut subtitle = kind.label().to_owned();
-    if title != name {
-        subtitle.push_str(" · ");
-        subtitle.push_str(&name);
+    let group = SharedString::from(format!("{row_id}-picture"));
+    let (w, h) = match &preview {
+        Preview::Ready(image) => {
+            let size = image.size(0);
+            picture_size(size.width.0 as f32, size.height.0 as f32)
+        }
+        _ => PICTURE_PLACEHOLDER,
+    };
+    let mut bubble = div()
+        .id(SharedString::from(row_id.to_owned()))
+        .group(group.clone())
+        .relative()
+        .w(px(w))
+        .h(px(h))
+        .max_w_full()
+        .rounded(px(BUBBLE_RADIUS))
+        .overflow_hidden()
+        .bg(theme.bubble_assistant)
+        .flex()
+        .items_center()
+        .justify_center();
+    bubble = match preview {
+        Preview::Ready(image) => bubble.child(
+            img(image)
+                .w(px(w))
+                .h(px(h))
+                .rounded(px(BUBBLE_RADIUS))
+                .object_fit(ObjectFit::Contain),
+        ),
+        Preview::Loading => bubble.child(
+            div()
+                .text_size(px(11.0))
+                .text_color(theme.text_faint)
+                .child("Loading…"),
+        ),
+        Preview::Unavailable => bubble.child(
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(px(6.0))
+                .child(icon("photo", 22.0, theme.text_faint))
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(theme.text_faint)
+                        .child(name.clone()),
+                ),
+        ),
+    };
+    if let Some(open) = open {
+        bubble = bubble.cursor_pointer().on_click(move |_, _, cx| open(cx));
     }
+    // The ↓ disc fades in with the hover; a click saves without opening the viewer.
+    if let Some(key) = key.filter(|k| !k.starts_with("local:")) {
+        let state = state.clone();
+        bubble = bubble.child(
+            div()
+                .absolute()
+                .top(px(8.0))
+                .right(px(8.0))
+                .opacity(0.0)
+                .group_hover(group, |s| s.opacity(1.0))
+                .child(
+                    download_disc(
+                        SharedString::from(format!("{row_id}-download")),
+                        false,
+                        theme,
+                    )
+                    .on_click(move |_, _, cx| {
+                        cx.stop_propagation();
+                        let (key, name) = (key.clone(), name.clone());
+                        state.update(cx, |s, cx| s.download_attachment(key, name, cx));
+                    }),
+                ),
+        );
+    }
+    let mut out = div().flex().flex_col().gap(px(4.0)).child(bubble);
+    if let Some(from) = forwarded_from {
+        out = out.child(
+            div()
+                .pl(px(6.0))
+                .text_size(px(11.0))
+                .text_color(theme.text_muted)
+                .child(from.to_owned()),
+        );
+    }
+    out.into_any_element()
+}
+
+/// Grok's doc card (web-08): kind-coloured doc glyph, name, "PDF · 1.8 MB";
+/// no Download pill — the ↓ disc appears on hover, the viewer has the rest.
+fn file_card(
+    row_id: &str,
+    attachment: &Attachment,
+    forwarded_from: Option<&str>,
+    open: Option<OpenFn>,
+    state: Entity<AppState>,
+    theme: &Theme,
+) -> AnyElement {
+    let kind = attachment.kind();
+    let key = attachment.blob_ref.clone();
+    let name = attachment.name.clone();
+    let group = SharedString::from(format!("{row_id}-file"));
+    let mut subtitle = kind.label().to_owned();
+    let size = attachment.size_label();
     if !size.is_empty() {
         subtitle.push_str(" · ");
         subtitle.push_str(&size);
@@ -84,144 +261,93 @@ pub fn card(
     if let Some(from) = forwarded_from {
         subtitle = format!("{from} · {subtitle}");
     }
-
-    let download = {
-        let state = state.clone();
-        let key = key.clone();
-        let name = name.clone();
-        div()
-            .id(SharedString::from(format!("{row_id}-download")))
-            .flex_shrink_0()
-            .px(px(10.0))
-            .py(px(4.0))
-            .rounded(px(6.0))
-            .border_1()
-            .border_color(theme.border)
-            .text_size(px(11.5))
-            .text_color(if key.is_some() {
-                theme.accent
-            } else {
-                theme.text_faint
-            })
-            .when(key.is_some(), |el| {
-                el.cursor_pointer()
-                    .hover(|s| s.bg(theme.accent_soft).border_color(theme.border_strong))
-            })
-            .child("Download")
-            .on_click(move |_, _, cx| {
-                cx.stop_propagation();
-                if let Some(key) = key.clone() {
-                    let name = name.clone();
-                    state.update(cx, |s, cx| s.download_attachment(key, name, cx));
-                }
-            })
-    };
-
-    let header = div()
+    let glyph = div()
+        .flex_shrink_0()
+        .w(px(DOC_W))
+        .h(px(DOC_H))
+        .rounded(px(5.0))
+        .bg(kind_color(kind, theme))
         .flex()
         .items_center()
-        .gap(px(10.0))
-        .px(px(10.0))
-        .py(px(8.0))
-        .child(
-            div()
-                .flex_shrink_0()
-                .size(px(30.0))
-                .rounded(px(7.0))
-                .bg(Theme::with_alpha(tint, 0.16))
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_size(px(15.0))
-                .text_color(tint)
-                .child(glyph),
-        )
+        .justify_center()
+        .child(icon(
+            match kind {
+                AttachmentKind::Video => "play",
+                AttachmentKind::Audio => "waveform",
+                _ => "doc",
+            },
+            11.0,
+            gpui::black(),
+        ));
+    let mut card = div()
+        .id(SharedString::from(row_id.to_owned()))
+        .group(group.clone())
+        .w(px(CARD_WIDTH))
+        .max_w_full()
+        .h(px(FILE_CARD_HEIGHT))
+        .rounded(px(FILE_CARD_RADIUS))
+        .bg(theme.bubble_assistant)
+        .flex()
+        .items_center()
+        .gap(px(14.0))
+        .pl(px(15.0))
+        .pr(px(12.0))
+        .child(glyph)
         .child(
             div()
                 .flex_1()
                 .min_w_0()
                 .flex()
                 .flex_col()
-                .gap(px(1.0))
+                .gap(px(2.0))
                 .child(
                     div()
-                        .text_size(px(12.5))
+                        .text_size(px(13.0))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme.text)
                         .overflow_hidden()
                         .text_ellipsis()
                         .whitespace_nowrap()
-                        .child(title),
+                        .child(attachment.title().to_owned()),
                 )
                 .child(
                     div()
-                        .text_size(px(11.0))
+                        .text_size(px(11.5))
                         .text_color(theme.text_muted)
                         .overflow_hidden()
                         .text_ellipsis()
                         .whitespace_nowrap()
                         .child(subtitle),
                 ),
-        )
-        .child(download);
-
-    let mut card = div()
-        .id(SharedString::from(row_id.to_owned()))
-        .w(px(CARD_WIDTH))
-        .max_w_full()
-        .flex()
-        .flex_col()
-        .rounded(px(10.0))
-        .bg(theme.card())
-        .border_1()
-        .border_color(theme.border)
-        .overflow_hidden();
-
-    if kind == AttachmentKind::Image {
-        let strip = div()
-            .id(SharedString::from(format!("{row_id}-preview")))
-            .w_full()
-            .h(px(THUMB_HEIGHT))
-            .bg(Theme::with_alpha(tint, 0.08))
-            .flex()
-            .items_center()
-            .justify_center()
-            .border_b_1()
-            .border_color(theme.border);
-        let strip = match preview {
-            Preview::Ready(image) => {
-                strip.child(img(image).w_full().h_full().object_fit(ObjectFit::Contain))
-            }
-            Preview::Loading => strip.child(
-                div()
-                    .text_size(px(11.0))
-                    .text_color(theme.text_faint)
-                    .child("Loading preview…"),
-            ),
-            Preview::Unavailable => strip.child(
-                div()
-                    .text_size(px(11.0))
-                    .text_color(theme.text_faint)
-                    .child("No preview"),
-            ),
-        };
-        let strip = match open.clone() {
-            Some(open) => strip.cursor_pointer().on_click(move |_, _, cx| open(cx)),
-            None => strip,
-        };
-        card = card.child(strip);
+        );
+    if let Some(key) = key.filter(|k| !k.starts_with("local:")) {
+        let state = state.clone();
+        card = card.child(
+            div()
+                .flex_shrink_0()
+                .opacity(0.0)
+                .group_hover(group, |s| s.opacity(1.0))
+                .child(
+                    download_disc(
+                        SharedString::from(format!("{row_id}-download")),
+                        true,
+                        theme,
+                    )
+                    .on_click(move |_, _, cx| {
+                        cx.stop_propagation();
+                        let (key, name) = (key.clone(), name.clone());
+                        state.update(cx, |s, cx| s.download_attachment(key, name, cx));
+                    }),
+                ),
+        );
     }
-    // The header opens the viewer too (files have no picture to click); the
-    // Download button inside it stops the click.
-    let header = match open {
-        Some(open) => header
-            .id(SharedString::from(format!("{row_id}-open")))
+    if let Some(open) = open {
+        card = card
             .cursor_pointer()
-            .on_click(move |_, _, cx| open(cx))
-            .into_any_element(),
-        None => header.into_any_element(),
-    };
-    card.child(header).into_any_element()
+            .hover(|s| s.bg(theme.surface_2))
+            .on_click(move |_, _, cx| open(cx));
+    }
+    card.into_any_element()
 }
 
 /// The "Forwarded from <name>" line of a message, when its text is one.
@@ -270,5 +396,30 @@ pub fn open_with_system(path: &Path, quick_look: bool) {
     };
     if let Err(err) = spawned {
         eprintln!("open {}: {err}", path.display());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pictures_fit_the_bubble_at_their_own_ratio() {
+        // Wide: full width, height follows.
+        assert_eq!(picture_size(1200.0, 750.0), (360.0, 225.0));
+        // Tall: height caps it, width follows.
+        assert_eq!(picture_size(750.0, 1200.0), (263.0, 420.0));
+        // A sliver keeps the minimum width.
+        let (w, h) = picture_size(100.0, 1000.0);
+        assert_eq!(w, PICTURE_MIN_WIDTH);
+        assert!(h <= PICTURE_MAX_HEIGHT);
+        // Unknown size → the placeholder.
+        assert_eq!(picture_size(0.0, 0.0), PICTURE_PLACEHOLDER);
+    }
+
+    #[test]
+    fn file_card_matches_groks_doc_card() {
+        assert_eq!(FILE_CARD_HEIGHT, 56.0);
+        assert_eq!((DOC_W, DOC_H), (20.0, 27.0));
     }
 }
