@@ -1037,6 +1037,7 @@ impl Transcript {
                         a.name.clone(),
                         a.avatar_color_index,
                         (a.avatar_leaf, a.avatar_leaf_color),
+                        a.image_url.clone(),
                     )
                 })
                 .or_else(|| {
@@ -1045,22 +1046,32 @@ impl Transcript {
                             p.name.clone(),
                             p.avatar_color_index,
                             (p.avatar_leaf, p.avatar_leaf_color),
+                            p.image_url.clone(),
                         )
                     })
                 })
         });
         let resolved_name = match &member {
-            Some((n, _, _)) if name == "Agent" || name == "Project" => n.clone(),
+            Some((n, _, _, _)) if name == "Agent" || name == "Project" => n.clone(),
             _ => name.to_string(),
         };
-        let color_index = member.as_ref().and_then(|(_, c, _)| *c);
-        let leaf = member.as_ref().map(|(_, _, l)| *l).unwrap_or((None, None));
+        let color_index = member.as_ref().and_then(|(_, c, _, _)| *c);
+        let leaf = member
+            .as_ref()
+            .map(|(_, _, l, _)| *l)
+            .unwrap_or((None, None));
+        // D92 amendment: the agent's uploaded / generated picture, once the loader has it.
+        let image = member
+            .as_ref()
+            .and_then(|(_, _, _, url)| url.as_deref())
+            .and_then(|url| state.avatar(url));
         let disc_seed = agent_pid.clone().unwrap_or_else(|| seed.to_string());
         AgentIdentity {
             name: resolved_name,
             seed: disc_seed,
             color_index,
             leaf,
+            image,
             project_id: agent_pid,
         }
     }
@@ -1069,6 +1080,19 @@ impl Transcript {
     fn agent_disc(&self, seed: &str, cx: &Context<Self>) -> Div {
         let theme = Theme::of(cx).clone();
         let a = self.agent_identity_full(seed, "Agent", cx);
+        if let Some(image) = a.image {
+            return div()
+                .size(px(SENDER_DISC))
+                .flex_shrink_0()
+                .rounded_full()
+                .overflow_hidden()
+                .child(
+                    gpui::img(image)
+                        .size(px(SENDER_DISC))
+                        .rounded_full()
+                        .object_fit(gpui::ObjectFit::Cover),
+                );
+        }
         avatars::agent(
             &a.seed,
             &a.name,
@@ -2005,6 +2029,7 @@ struct AgentIdentity {
     seed: String,
     color_index: Option<u8>,
     leaf: (Option<u8>, Option<u8>),
+    image: Option<std::sync::Arc<gpui::RenderImage>>,
     project_id: Option<Id>,
 }
 

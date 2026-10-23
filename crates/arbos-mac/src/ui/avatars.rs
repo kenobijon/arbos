@@ -559,20 +559,6 @@ pub fn person(p: &Person, size: f32, theme: &Theme) -> Div {
     element(person_seed(p), &p.display_name(), None, size, theme)
 }
 
-/// A picker swatch: the plain gradient disc, no letters.
-pub fn swatch(index: u8, size: f32, theme: &Theme) -> Div {
-    let (top, bottom) = gradient(index, theme);
-    div()
-        .size(px(size))
-        .flex_shrink_0()
-        .rounded_full()
-        .bg(linear_gradient(
-            180.0,
-            linear_color_stop(top, 0.0),
-            linear_color_stop(bottom, 1.0),
-        ))
-}
-
 // ----- notification attachment --------------------------------------------------
 
 fn fonts() -> &'static Mutex<(cosmic_text::FontSystem, cosmic_text::SwashCache)> {

@@ -731,6 +731,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/proxy/v1/models", get(proxy::openai_models))
         .route("/proxy/v1/images/generations", post(images::generations))
         .route(
+            "/projects/{id}/avatar/generate",
+            post(images::avatar_generate),
+        )
+        .route(
             "/proxy/v1/audio/transcriptions",
             post(proxy::audio_transcriptions),
         )
