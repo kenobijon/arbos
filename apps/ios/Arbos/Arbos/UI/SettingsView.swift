@@ -72,6 +72,7 @@ struct SettingsView: View {
                         Color.clear.frame(height: 40)
                     }
                 }
+                .scrollIndicators(.visible)
                 ProfileTopBar { EmptyView() }
             }
             .toolbar(.hidden, for: .navigationBar)
@@ -533,6 +534,7 @@ struct SettingsPage<Content: View>: View {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { proxy.scrollTo(anchor, anchor: .top) }
                 }
             }
+            .scrollIndicators(.visible)
             // Apple Account pull-down: frosted fade under the title so the
             // avatar softens as it scrolls / rubber-bands into the header.
             headerBlur

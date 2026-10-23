@@ -644,6 +644,7 @@ struct UserProfileView: View {
                     Color.clear.frame(height: 40)
                 }
             }
+            .scrollIndicators(.visible)
             ProfileTopBar { EmptyView() }
         }
         .confirmationDialog("Block @\(person.handle)?", isPresented: $confirmBlock, titleVisibility: .visible) {

@@ -13,6 +13,7 @@ use gpui::{
 
 use crate::app::AppState;
 use crate::model::{Id, MachineState, Message, Project, Role, ServerInfo};
+use crate::search;
 use crate::ui::avatars;
 use crate::ui::composer::Composer;
 use crate::ui::frost::edge_faded;
@@ -250,19 +251,17 @@ fn channel_last_line(row: &arbos_matrix::ChannelRow) -> String {
     }
 }
 
-fn server_matches_query(server: &ServerInfo, query: &str) -> bool {
-    server.name.to_lowercase().contains(query)
-        || server
-            .channels
-            .iter()
-            .any(|c| c.name.to_lowercase().contains(query))
-}
+/// Sort key of a search result: the kind of hit first (people, titles,
+/// members, messages — `search::HitKind` order), newest activity inside a kind.
+/// Without a query every row is a `Title` hit, so the list is by activity.
+type RowKey = (search::HitKind, std::cmp::Reverse<u64>);
 
 pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
     let theme = Theme::of(cx).clone();
     let state = shell.state.read(cx);
     let selected = state.selected_project.clone();
-    let query = shell.search_input.read(cx).text().trim().to_lowercase();
+    let typed = shell.search_input.read(cx).text().trim().to_string();
+    let query = search::normalize_query(&typed);
     let machine = state.machine.shown_state();
     let sidebar_width = state.sidebar_width;
     // Inside a server the left pane shows its channels (D88 rule 2).
@@ -275,11 +274,11 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
     let hidden_mode = shell.hidden_open && query.is_empty();
     let hidden_count = state.archived_space_count();
     let shows = |archived: bool| hidden_mode == archived || !query.is_empty();
-    let mut rows: Vec<(u64, ListEntry)> = Vec::new();
+    let mut rows: Vec<(RowKey, ListEntry)> = Vec::new();
     for s in state.servers.iter() {
-        if !query.is_empty() && !server_matches_query(s, &query) {
+        let Some(hit) = search::server_hit(s, &query) else {
             continue;
-        }
+        };
         if !shows(s.archived_at.is_some()) {
             continue;
         }
@@ -290,21 +289,23 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
                 .is_some_and(|c| c.server_id == s.id);
         let at = state.server_last_activity(s);
         rows.push((
-            at,
+            (hit.kind, std::cmp::Reverse(at)),
             ListEntry::Server(Box::new(ServerRowView {
                 selected,
                 unread: state.space_row(s).is_some_and(|r| r.unread > 0),
-                preview: server_preview(state, s),
+                preview: hit.reason.unwrap_or_else(|| server_preview(state, s)),
                 time: time_label(at),
                 server: s.clone(),
             })),
         ));
     }
     for p in state.projects.iter() {
-        // Name, @handle, chat title, or any loaded message text.
-        if !query.is_empty() && !state.space_matches_query(p, &query) {
+        // Display name / @handle, title, a member, a chat title, or a loaded
+        // message — ranked in that order; a hit beyond the row's own name is
+        // explained on the second line.
+        let Some(hit) = state.space_search_hit(p, &query) else {
             continue;
-        }
+        };
         if !shows(p.archived_at.is_some()) {
             continue;
         }
@@ -323,7 +324,7 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
             streaming,
             unread: state.project_unread(&p.id) > 0,
             typing: !state.typing_in(&p.id).is_empty(),
-            preview: preview(state, p),
+            preview: hit.reason.unwrap_or_else(|| preview(state, p)),
             time: time_label(last_activity(state, p)),
             person_image: p.person().and_then(|x| state.avatar(&x.avatar_url)),
             guests: shown_people
@@ -336,9 +337,12 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
             avatar_state: state.avatar_state(&p.id),
             space: p.clone(),
         };
-        rows.push((last_activity(state, p), ListEntry::Chat(Box::new(row))));
+        rows.push((
+            (hit.kind, std::cmp::Reverse(last_activity(state, p))),
+            ListEntry::Chat(Box::new(row)),
+        ));
     }
-    rows.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
+    rows.sort_by_key(|(key, _)| *key);
     let empty = state.projects.is_empty() && state.servers.is_empty();
     let link_connecting = state.link == crate::model::Link::Connecting;
     if machine == MachineState::Waking {
@@ -569,7 +573,7 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
                 .text_center()
                 .text_size(px(TEXT_SMALL))
                 .text_color(theme.text_muted)
-                .child(format!("Nothing matches “{query}”.")),
+                .child(format!("Nothing matches “{typed}”.")),
         );
     }
     if hidden_mode {

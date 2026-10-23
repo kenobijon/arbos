@@ -882,7 +882,7 @@ fn paint_chip_picture(layout: &TextLayout, chip: &Chip, window: &mut Window, cx:
                 avatars::leaf_asset(pick.leaf),
                 None,
                 TransformationMatrix::unit(),
-                avatars::leaf_ink(),
+                avatars::leaf_ink(pick.color),
                 cx,
             );
         }

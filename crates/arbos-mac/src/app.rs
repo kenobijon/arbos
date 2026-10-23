@@ -25,6 +25,7 @@ use crate::model::{
     RoutineRun, RoutineTrigger, SecretDirector, SecretScope, SecretsView, ServerInfo, Skill,
     StatusKind,
 };
+use crate::search;
 use crate::sign_in;
 use crate::sync::{ClientCommand, SyncEvent, SyncSource};
 use crate::ui::notify::{self, Gate, Notifier, NotifyEvent, NotifyKind};
@@ -2634,7 +2635,7 @@ impl AppState {
     /// Home-search row click: open the chat that holds the matching message and
     /// ask the transcript to scroll to it. Name-only matches open normally.
     pub fn open_from_home_search(&mut self, project_id: Id, query: &str, cx: &mut Context<Self>) {
-        let q = query.trim().to_lowercase();
+        let q = search::normalize_query(query);
         let hit = if q.is_empty() {
             None
         } else {
@@ -2695,60 +2696,54 @@ impl AppState {
         .detach();
     }
 
-    /// Newest user/assistant/project message whose prose contains `query`
-    /// (already lowercased). Searches every chat under the space.
+    /// The message a `Message` search hit points at: newest user/assistant/
+    /// project message under the space whose prose contains `query`
+    /// (already normalized). Name / title / member hits carry no message.
     fn find_message_match(&self, project_id: &str, query: &str) -> Option<(Id, Id)> {
-        let mut best: Option<(u64, Id, Id)> = None;
+        let space = self.project(project_id)?;
+        self.space_search_hit(space, query)?.message
+    }
+
+    /// Every user/assistant/project message with prose under the space, as
+    /// the search module reads them (system lines never count).
+    fn searchable_messages(&self, project_id: &str) -> Vec<search::MessageText> {
+        let mut out = Vec::new();
         for chat in self.tabs(project_id) {
             for m in self.messages_of(&chat.id) {
                 match m.role {
                     Role::User | Role::Assistant | Role::Project => {}
                     Role::System => continue,
                 }
-                let text = m.plain_text();
-                if text.trim().is_empty() {
+                let text = crate::ui::sidebar::plain(&m.plain_text());
+                if text.is_empty() {
                     continue;
                 }
-                if !text.to_lowercase().contains(query) {
-                    continue;
-                }
-                let better = best
-                    .as_ref()
-                    .map(|(at, _, _)| m.created_at >= *at)
-                    .unwrap_or(true);
-                if better {
-                    best = Some((m.created_at, chat.id.clone(), m.id.clone()));
-                }
+                out.push(search::MessageText {
+                    chat_id: chat.id.clone(),
+                    message_id: m.id.clone(),
+                    created_at: m.created_at,
+                    text,
+                });
             }
         }
-        best.map(|(_, chat, msg)| (chat, msg))
+        out
     }
 
-    /// Whether the space name, a chat title, or any loaded message matches `query`.
-    pub fn space_matches_query(&self, space: &Project, query: &str) -> bool {
-        let q = query.trim().to_lowercase();
-        if q.is_empty() {
-            return true;
-        }
-        let hay = format!(
-            "{} {}",
-            space.name.to_lowercase(),
-            space
-                .person()
-                .map(|x| x.handle.to_lowercase())
-                .unwrap_or_default()
-        );
-        if hay.contains(&q) {
-            return true;
-        }
-        if self
-            .tabs(&space.id)
-            .iter()
-            .any(|c| c.title.to_lowercase().contains(&q))
-        {
-            return true;
-        }
-        self.find_message_match(&space.id, &q).is_some()
+    /// How the sidebar row for `space` matches `query` (`search::normalize_query`
+    /// output): the person's display name / @handle, the title, a member, a
+    /// chat title, or a loaded message — `None` when it does not match at all.
+    pub fn space_search_hit(&self, space: &Project, query: &str) -> Option<search::SearchHit> {
+        let me = self.me_handle();
+        search::space_hit(
+            space,
+            &me,
+            self.tabs(&space.id)
+                .iter()
+                .filter(|c| !c.is_system)
+                .map(|c| (c.id.as_str(), c.title.as_str())),
+            || self.searchable_messages(&space.id),
+            query,
+        )
     }
 
     pub fn select_tab(&mut self, chat_id: Id, cx: &mut Context<Self>) {
