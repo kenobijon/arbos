@@ -170,16 +170,56 @@ impl Quote {
     }
 }
 
-/// First words of a message for its quote header: the first non-empty line,
-/// whitespace collapsed, cut on a word boundary; attachments name their file.
-pub fn quote_text(message: &Message) -> String {
-    let plain = message.plain_text();
-    let line = plain
-        .lines()
-        .map(str::trim)
-        .find(|l| !l.is_empty())
-        .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
-        .unwrap_or_default();
+/// A whole message on one line, for quote headers and the composer's reply
+/// preview: markdown blocks (headings, bullets, fences, tables) and inline
+/// markers (`**`, `` ` ``, links) are dropped, every newline becomes a space,
+/// whitespace is collapsed. Attachments are not part of it — callers name the
+/// file when there is no prose.
+pub fn one_line(text: &str) -> String {
+    let mut out = String::new();
+    for block in split_blocks(text) {
+        let pieces: Vec<String> = match block {
+            Block::Paragraph(text) | Block::Heading { text, .. } => vec![text],
+            Block::Bullets(items) | Block::Numbered(items) => items,
+            Block::Code { code, .. } => vec![code],
+            Block::Table { header, rows } => header
+                .into_iter()
+                .chain(rows.into_iter().flatten())
+                .collect(),
+        };
+        for piece in pieces {
+            for span in inline_spans(&piece) {
+                for word in span.text.split_whitespace() {
+                    if !out.is_empty() {
+                        out.push(' ');
+                    }
+                    out.push_str(word);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `line` cut to `max_chars` on a word boundary with an ellipsis; shorter
+/// lines come back as they are.
+pub fn first_words(line: &str, max_chars: usize) -> String {
+    if line.chars().count() <= max_chars {
+        return line.to_owned();
+    }
+    let mut cut: String = line.chars().take(max_chars).collect();
+    if let Some(ix) = cut.rfind(' ') {
+        if ix > max_chars / 2 {
+            cut.truncate(ix);
+        }
+    }
+    format!("{}…", cut.trim_end_matches([',', ';', ':', '.']))
+}
+
+/// The message flattened to one line ([`one_line`]) and cut to `max_chars`;
+/// an attachment-only message names its file, an empty one says "Message".
+pub fn message_line(message: &Message, max_chars: usize) -> String {
+    let line = one_line(&message.plain_text());
     let line = if line.is_empty() {
         match message.parts.iter().find_map(|p| match p {
             Part::Attachment { attachment, .. } => Some(attachment.name.clone()),
@@ -191,16 +231,14 @@ pub fn quote_text(message: &Message) -> String {
     } else {
         line
     };
-    if line.chars().count() <= QUOTE_CHARS {
-        return line;
-    }
-    let mut cut: String = line.chars().take(QUOTE_CHARS).collect();
-    if let Some(ix) = cut.rfind(' ') {
-        if ix > QUOTE_CHARS / 2 {
-            cut.truncate(ix);
-        }
-    }
-    format!("{}…", cut.trim_end_matches([',', ';', ':', '.']))
+    first_words(&line, max_chars)
+}
+
+/// First words of a message for its quote header: the whole message on one
+/// line (newlines and markdown flattened), cut on a word boundary; attachments
+/// name their file.
+pub fn quote_text(message: &Message) -> String {
+    message_line(message, QUOTE_CHARS)
 }
 
 #[derive(Clone, Debug)]

@@ -35,20 +35,38 @@ struct Quote: Equatable, Hashable {
         return Quote(messageId: replyTo, text: text)
     }
 
-    /// First words of a message: its first non-empty line, whitespace collapsed, cut on a word
-    /// boundary; an attachment-only message names its file.
+    /// First words of a message: the whole message on one line (newlines and markdown
+    /// flattened), cut on a word boundary; an attachment-only message names its file.
     static func text(of message: Message) -> String {
-        var line = message.plainText
-            .split(separator: "\n")
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .first { !$0.isEmpty }
-            .map { $0.split(whereSeparator: \.isWhitespace).joined(separator: " ") } ?? ""
-        if line.isEmpty {
-            for part in message.parts {
-                if case .attachment(_, let a) = part { line = a.name; break }
+        line(of: message, maxChars: maxChars)
+    }
+
+    /// A whole message on one line, for quote headers and the composer's reply preview:
+    /// markdown blocks (headings, bullets, fences, tables) and inline markers (`**`, `` ` ``,
+    /// links) dropped, every newline a space, whitespace collapsed. Attachments are not part
+    /// of it — callers name the file when there is no prose.
+    static func oneLine(_ text: String) -> String {
+        var words: [Substring] = []
+        for block in Markdown.blocks(text) {
+            let pieces: [String]
+            switch block {
+            case .paragraph(let t), .heading(_, let t): pieces = [t]
+            case .bullets(let items), .numbered(let items): pieces = items
+            case .code(_, let code): pieces = [code]
+            case .table(let rows): pieces = rows.map { $0.replacingOccurrences(of: "|", with: " ") }
+            }
+            for piece in pieces {
+                let plain = (try? AttributedString(markdown: piece, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
+                    .map { String($0.characters) } ?? piece
+                words.append(contentsOf: plain.split(whereSeparator: \.isWhitespace))
             }
         }
-        if line.isEmpty { return "Message" }
+        return words.joined(separator: " ")
+    }
+
+    /// `line` cut to `maxChars` on a word boundary with an ellipsis; shorter lines come back
+    /// as they are.
+    static func firstWords(_ line: String, maxChars: Int) -> String {
         guard line.count > maxChars else { return line }
         var cut = String(line.prefix(maxChars))
         if let space = cut.lastIndex(of: " "), cut.distance(from: cut.startIndex, to: space) > maxChars / 2 {
@@ -56,6 +74,19 @@ struct Quote: Equatable, Hashable {
         }
         while let last = cut.last, ",;:.".contains(last) { cut.removeLast() }
         return cut + "…"
+    }
+
+    /// The message flattened to one line (`oneLine`) and cut to `maxChars`; an attachment-only
+    /// message names its file, an empty one says "Message".
+    static func line(of message: Message, maxChars: Int) -> String {
+        var line = oneLine(message.plainText)
+        if line.isEmpty {
+            for part in message.parts {
+                if case .attachment(_, let a) = part { line = a.name; break }
+            }
+        }
+        if line.isEmpty { return "Message" }
+        return firstWords(line, maxChars: maxChars)
     }
 }
 
@@ -1308,6 +1339,43 @@ struct ImageBubble: View {
         } catch {
             failed = true
         }
+    }
+}
+
+/// The composer reply preview's picture: a fixed square thumbnail of the quoted image,
+/// loaded with the device bearer like `ImageBubble` (URLSession caches the bytes, so a
+/// picture already in the transcript costs nothing). A blank tile until it arrives — the
+/// row's height never depends on it.
+struct ReplyThumb: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.theme) private var theme
+    let projectId: Id
+    let blobRef: String
+
+    @State private var image: UIImage?
+
+    var body: some View {
+        ZStack {
+            theme.field
+            if let image {
+                Image(uiImage: image).resizable().scaledToFill()
+            } else {
+                Image(systemName: "photo").font(.system(size: 10)).foregroundStyle(theme.muted)
+            }
+        }
+        .frame(width: Theme.replyPreviewThumb, height: Theme.replyPreviewThumb)
+        .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+        .accessibilityHidden(true)
+        .task(id: blobRef) { await load() }
+    }
+
+    private func load() async {
+        guard let url = model.blobURL(projectId: projectId, key: blobRef) else { return }
+        var req = URLRequest(url: url)
+        for (k, v) in model.authHeaders { req.setValue(v, forHTTPHeaderField: k) }
+        guard let (data, response) = try? await URLSession.shared.data(for: req),
+              let http = response as? HTTPURLResponse, (200..<400).contains(http.statusCode) else { return }
+        image = UIImage(data: data)
     }
 }
 

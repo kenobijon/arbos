@@ -461,6 +461,16 @@ struct ChatView: View {
                         // Rig: the composer's reply preview on the newest agent message.
                         replyTo = messages.last { $0.role == .assistant && !$0.isStreaming }
                         composerFocused = true
+                    case "reply-long":
+                        // Rig: the preview on a multi-paragraph markdown reply (the shape of
+                        // Jacob's Oct 23 screenshot; fixture only).
+                        #if DEBUG
+                        if model.isFixture {
+                            model.fixtureAppendAssistant(chatId: chatId, text: AppModel.longReview)
+                            replyTo = model.messages[chatId]?.last { $0.role == .assistant }
+                            composerFocused = true
+                        }
+                        #endif
                     case "replied":
                         // Rig: a sent bubble quoting the newest agent message (fixture only).
                         #if DEBUG
@@ -1110,24 +1120,50 @@ struct ChatView: View {
 
     // MARK: Composer
 
+    /// The reply preview above the field: one fixed-height row — glyph, "Replying to
+    /// @handle", one truncated line of the quoted message (newlines and markdown
+    /// flattened), × — whatever the original's length ([feedback
+    /// reply-preview-fixed-height]; same bar on the Mac). A quoted picture adds a small
+    /// square thumbnail inside the row.
+    private func replyPreview(_ r: Message) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "arrowshape.turn.up.left").font(.system(size: 12)).foregroundStyle(theme.muted)
+            Text("Replying to \(replyLabel(for: r))").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
+                .lineLimit(1).fixedSize()
+            if let ref = quotedImageRef(r) {
+                ReplyThumb(projectId: projectId, blobRef: ref)
+            }
+            Text(Quote.line(of: r, maxChars: Theme.replyPreviewChars))
+                .font(theme.font(Theme.tiny)).foregroundStyle(theme.text)
+                .lineLimit(1).truncationMode(.tail)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button { replyTo = nil } label: { Image(systemName: "xmark").font(.system(size: 11, weight: .bold)).foregroundStyle(theme.muted) }
+                .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 14)
+        // Full composer width: the same edges as the message field (Jacob, Oct 21).
+        .frame(maxWidth: .infinity)
+        .frame(height: Theme.replyPreviewHeight)
+        .clipped()
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(theme.bubbleAssistant))
+        .accessibilityElement(children: .combine)
+    }
+
+    /// The blob of the first picture on the quoted message, for the preview's thumbnail.
+    private func quotedImageRef(_ m: Message) -> String? {
+        for part in m.parts {
+            if case .attachment(_, let a) = part, a.isImage, let ref = a.blobRef { return ref }
+        }
+        return nil
+    }
+
     private var composer: some View {
         VStack(spacing: 8) {
             if let q = mentionQuery, isPeople, let people {
                 mentionList(people, query: q)
             }
             if let r = replyTo {
-                HStack(spacing: 8) {
-                    Image(systemName: "arrowshape.turn.up.left").font(.system(size: 12)).foregroundStyle(theme.muted)
-                    Text("Replying to \(replyLabel(for: r))").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
-                        .lineLimit(1).fixedSize()
-                    Text(Quote.text(of: r)).font(theme.font(Theme.tiny)).foregroundStyle(theme.text).lineLimit(1)
-                    Spacer()
-                    Button { replyTo = nil } label: { Image(systemName: "xmark").font(.system(size: 11, weight: .bold)).foregroundStyle(theme.muted) }
-                        .buttonStyle(.plain)
-                }
-                .padding(.horizontal, 14).padding(.vertical, 8)
-                // Full composer width: the same edges as the message field (Jacob, Oct 21).
-                .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(theme.bubbleAssistant))
+                replyPreview(r)
             }
             if !pending.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {

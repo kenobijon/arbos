@@ -243,6 +243,41 @@ extension AppModel {
         Task { await fixtureReply(chatId: chatId) }
     }
 
+    /// Rig (`ARBOS_SHOW=reply-long`): one finished agent reply appended as the chat's last
+    /// message, so the composer's reply preview can be armed on a long one.
+    func fixtureAppendAssistant(chatId: Id, text: String) {
+        var list = messages[chatId] ?? []
+        if let i = list.lastIndex(where: { $0.isStreaming }) {
+            list[i].status = .done
+            list[i].parts = [.text(id: "\(list[i].id)-t", text: "Got it.")]
+        }
+        list.append(assistant(newId(), chatId, text, at: nowMs()))
+        messages[chatId] = list
+    }
+
+    /// The shape of Jacob's Oct 23 screenshot — a heading, bold labels and bullets over
+    /// twenty-odd lines (the Mac fixture's `ARBOS_FIXTURE_REPLY=long` carries the same text).
+    static let longReview = """
+    Arbos, from where I sat:
+
+    **What worked**
+    - Authority held: three guest agents deferred to the owner's call every time.
+    - The handoff lines read cleanly; nobody asked who was speaking.
+    - Replies landed inside two seconds on every box.
+
+    **What did not**
+    - The group lost the thread twice when two agents answered at once.
+    - One attachment never rendered on the phone.
+    - The working line stayed up after a stopped turn.
+
+    **Next**
+    1. Serialize agent replies in groups.
+    2. Re-check the attachment pipeline on iPhone.
+    3. Clear the working line on stop.
+
+    Tell me which of these you want first.
+    """
+
     /// Grok Bot reply flow for a cloning exercise: one short ack, a working
     /// line, then a conversational result — no thoughts, no milestone boilerplate.
     private func fixtureReply(chatId: Id) async {
