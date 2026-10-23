@@ -314,6 +314,10 @@ impl Shell {
                 || v == "connectors"
                 || v == "notifications"
                 || v == "machine"
+                || v == "updates"
+                || v == "about"
+                || v == "appearance"
+                || v == "credits"
                 || v.starts_with("secrets")
         });
         let settings_scroll = ScrollHandle::new();
@@ -690,9 +694,14 @@ impl Shell {
             // that page) — rig; the pane itself is opened below.
             settings_page: match open_settings.as_deref() {
                 Some("connectors") => SettingsPage::Connectors,
-                // Rig: `ARBOS_OPEN_SETTINGS=notifications|machine` — one-row cards.
+                // Rig: `ARBOS_OPEN_SETTINGS=notifications|machine|updates|about|appearance|credits`
+                // lands on that subpage.
                 Some("notifications") => SettingsPage::Notifications,
                 Some("machine") => SettingsPage::Machine,
+                Some("updates") => SettingsPage::Updates,
+                Some("about") => SettingsPage::About,
+                Some("appearance") => SettingsPage::Appearance,
+                Some("credits") => SettingsPage::Credits,
                 Some(v) if v.starts_with("secrets") => SettingsPage::Secrets,
                 _ => SettingsPage::Root,
             },
