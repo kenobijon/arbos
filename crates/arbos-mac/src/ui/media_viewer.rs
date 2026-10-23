@@ -27,8 +27,11 @@ const BACKDROP: f32 = 0.88;
 pub const CONTROL: f32 = 36.0;
 /// Download / Forward pills: 34 pt tall, 13 pt medium text.
 pub const PILL_HEIGHT: f32 = 34.0;
-/// Inset from the window edge to the controls and the caption.
+/// Inset from the window edge to the controls.
 const EDGE: f32 = 28.0;
+/// The caption starts clear of the window's traffic lights (which macOS draws
+/// over the overlay): the header's `TRAFFIC_LIGHTS_INSET` plus the edge gap.
+const CAPTION_LEFT: f32 = crate::ui::shell::TRAFFIC_LIGHTS_INSET + 12.0;
 /// The picture's room: top bar and bottom pills stay clear of it.
 const PICTURE_TOP: f32 = 70.0;
 const PICTURE_BOTTOM: f32 = 90.0;
@@ -152,7 +155,7 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
     let caption = div()
         .absolute()
         .top(px(22.0))
-        .left(px(EDGE))
+        .left(px(CAPTION_LEFT))
         .flex()
         .flex_col()
         .gap(px(3.0))
