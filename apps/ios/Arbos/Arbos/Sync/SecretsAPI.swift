@@ -1,6 +1,7 @@
 // Relay `/secrets` routes (D83 §10.1). Values travel one way: in a create or replace body,
 // never back. Errors are the relay's `{"error":{"type","message"}}` through `RelayError`.
 
+import ArbosFFI
 import Foundation
 
 extension RelayAPI {
