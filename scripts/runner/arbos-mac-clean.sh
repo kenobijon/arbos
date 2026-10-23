@@ -79,7 +79,8 @@ for d in /Users/ec2-user/arbos-*; do
     *-dd-*) rm -rf "$d" && say "removed worker derived data $b (${gb:-?} GB, idle > 2 h)"; continue ;;
   esac
   for a in target build apps/ios/Arbos/build; do
-    [ -d "$d/$a" ] && rm -rf "$d/$a" && say "removed $b/$a (idle > 2 h)"
+    # ${d:?} so an empty checkout path can never turn this into `rm -rf /…` (SC2115).
+    [ -d "${d:?}/$a" ] && rm -rf "${d:?}/$a" && say "removed $b/$a (idle > 2 h)"
   done
 done
 
