@@ -2650,6 +2650,13 @@ mod reply_preview_tests {
         let short = ReplyPreview::for_message(&message(ONE_LINE), &HashMap::new());
         assert_eq!(short.line, ONE_LINE);
         assert!(short.thumb.is_none());
+
+        // Inline markers go, and punctuation glued to a code span stays glued.
+        let code = ReplyPreview::for_message(
+            &message("The draft lives in `site/launch/`; **ask** [Sam](https://x.ai) first."),
+            &HashMap::new(),
+        );
+        assert_eq!(code.line, "The draft lives in site/launch/; ask Sam first.");
     }
 
     #[test]

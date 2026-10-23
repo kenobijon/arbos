@@ -188,13 +188,14 @@ pub fn one_line(text: &str) -> String {
                 .collect(),
         };
         for piece in pieces {
-            for span in inline_spans(&piece) {
-                for word in span.text.split_whitespace() {
-                    if !out.is_empty() {
-                        out.push(' ');
-                    }
-                    out.push_str(word);
+            // Spans are joined before splitting so "`site/launch/`;" stays one
+            // word — a span boundary is a style change, not a space.
+            let plain: String = inline_spans(&piece).into_iter().map(|s| s.text).collect();
+            for word in plain.split_whitespace() {
+                if !out.is_empty() {
+                    out.push(' ');
                 }
+                out.push_str(word);
             }
         }
     }
