@@ -963,6 +963,58 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// #1481: renaming an agent already in a people group refreshes the cached @slug and
+    /// member handle so @newname still wakes it (no remove/re-add).
+    #[tokio::test]
+    async fn renamed_agent_keeps_people_group_handle() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTPEOPLERENAME000001";
+        let me = format!("agent:{}", agent.cfg.project_id);
+        agent.people.test_insert(
+            chat,
+            crate::people::PeopleChatInfo {
+                members: vec![serde_json::json!({
+                    "member": me,
+                    "handle": "doug",
+                    "name": "Doug",
+                    "project": { "name": "Doug" },
+                })],
+                slug: "doug".into(),
+                kind: "group".into(),
+                ..Default::default()
+            },
+        );
+        let r = agent.identity.observe("FeedbackGuy").expect("renamed");
+        agent.on_renamed(&r).await;
+        let info = agent.people.info(chat).expect("people chat");
+        assert_eq!(info.slug, "feedbackguy");
+        let mine = info
+            .members
+            .iter()
+            .find(|m| m["member"].as_str() == Some(&format!("agent:{}", agent.cfg.project_id)))
+            .expect("member");
+        assert_eq!(mine["handle"].as_str(), Some("feedbackguy"));
+        assert_eq!(mine["project"]["name"].as_str(), Some("FeedbackGuy"));
+        assert!(crate::people::addressed(
+            &arbos_core::doc::MessageView {
+                id: "m1".into(),
+                role: "user".into(),
+                status: "done".into(),
+                parts: vec![serde_json::json!({
+                    "kind": "text",
+                    "text": "@feedbackguy you alive?"
+                })],
+                rest: serde_json::json!({ "sender": "user:u1" }),
+            },
+            &agent.cfg.project_id,
+            &info.slug,
+            false,
+            false,
+            false,
+        ));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[tokio::test]
     async fn busy_agent_acknowledges_a_new_task_and_still_queues_it() {
         let (agent, root) = test_agent().await;
