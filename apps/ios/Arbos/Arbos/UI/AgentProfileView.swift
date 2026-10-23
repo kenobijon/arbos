@@ -278,6 +278,7 @@ struct AgentProfileView: View {
         .sheet(item: $showAvatarPicker) { initial in
             AvatarPickerSheet(target: .agent(projectId), initialTab: initial).environmentObject(model).environment(\.theme, theme)
         }
+        .task(id: projectId) { await model.refreshShellGrants(projectId) }
         .onAppear {
             if isMine, let show = DebugHooks.show, show.hasPrefix("avatarpicker") {
                 let tab: AvatarPickerTab = show.hasSuffix("generate") ? .generate : (show.hasSuffix("upload") ? .upload : .bot)
@@ -342,7 +343,41 @@ struct AgentProfileView: View {
                     .disabled(!isMine)
                 ),
             ]
-            return [.card(rows)]
+            guard isMine else { return [.card(rows)] }
+            // Permissions · Shell approvals (#1544): the standing choices made on
+            // destructive-shell cards, one switch each; off = revoked, the agent asks again.
+            let grants = model.shellGrants[project.id] ?? []
+            var out: [PaneSection] = [
+                .card(rows),
+                .title("Permissions"),
+                .card([AnyView(
+                    PaneRow(leading: .tile("terminal"), title: "Shell approvals", value: ShellGrant.summary(grants))
+                        .accessibilityIdentifier("shell-approvals-row")
+                )]),
+                .footnote("\(project.name) asks before destructive shell commands outside /work/tmp. Standing answers from the cards land here."),
+            ]
+            if !grants.isEmpty {
+                out.append(.title("Shell approvals · \(project.name)"))
+                out.append(.card(grants.map { g in
+                    AnyView(
+                        PaneRow(
+                            leading: .glyph("terminal"),
+                            title: g.label,
+                            subtitle: g.ruleClass + " · " + g.detail + (g.chatId == nil ? "" : " · this chat only"),
+                            trailing: AnyView(
+                                Toggle("", isOn: Binding(get: { true }, set: { on in
+                                    if !on { model.revokeShellGrant(projectId: project.id, grantId: g.id) }
+                                }))
+                                .labelsHidden().tint(theme.online)
+                                .accessibilityLabel("\(g.label) allowed")
+                                .accessibilityIdentifier("shell-grant-\(g.id)")
+                            )
+                        )
+                    )
+                }))
+                out.append(.footnote("Turn one off and \(project.name) asks again next time. Every allowed run is in Activity."))
+            }
+            return out
         case "Library":
             // Everything the agent's chats hold — images, files, voice memos, links
             // — in sections (the group pane's Library, plus links).
