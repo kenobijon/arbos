@@ -2625,6 +2625,7 @@ impl AppState {
             .find(|c| c.id == chat_id)
         {
             chat.unread = false;
+            chat.unread_count = 0;
         }
         self.command(ClientCommand::OpenChat {
             chat_id: chat_id.clone(),
@@ -2745,6 +2746,7 @@ impl AppState {
             .find(|c| c.id == chat_id)
         {
             chat.unread = false;
+            chat.unread_count = 0;
         }
         self.sync_badge();
         self.command(ClientCommand::MarkRead {
@@ -2787,6 +2789,7 @@ impl AppState {
                 kind: ChatKind::Chat,
                 participants: Vec::new(),
                 unread: false,
+                unread_count: 0,
                 last_message_at: now_ms(),
                 archived_at: None,
             });
@@ -5329,6 +5332,7 @@ impl AppState {
     }
 
     /// Light the unread dot (and Dock badge) until the next refresh confirms.
+    /// Until `GET /me/unread` returns, count at least one missed message (same as iOS).
     fn mark_chat_unread(&mut self, chat_id: &str) {
         if let Some(chat) = self
             .chats
@@ -5337,6 +5341,7 @@ impl AppState {
             .find(|c| c.id == chat_id)
         {
             chat.unread = true;
+            chat.unread_count = chat.unread_count.max(1);
         }
         self.sync_badge();
     }
@@ -5665,14 +5670,14 @@ impl AppState {
         cx.activate(true);
     }
 
-    /// Dock badge = chats with something unread (cleared as they are read).
+    /// Dock badge = unread messages across chats (from `GET /me/unread`; cleared as they are read).
     pub fn sync_badge(&self) {
         let total = self
             .chats
             .values()
             .flat_map(|v| v.iter())
-            .filter(|c| c.unread)
-            .count();
+            .map(Chat::missed_count)
+            .sum();
         notify::set_badge(total);
     }
 
@@ -8024,6 +8029,7 @@ pub(crate) fn forked_chat(source: &Chat, project: &Project, id: Id) -> Option<Ch
         kind: ChatKind::Chat,
         participants: Vec::new(),
         unread: false,
+        unread_count: 0,
         last_message_at: now_ms(),
         archived_at: None,
     })
@@ -8176,6 +8182,7 @@ mod fork_tests {
             kind: ChatKind::Chat,
             participants: Vec::new(),
             unread: false,
+            unread_count: 0,
             last_message_at: 0,
             archived_at: None,
         }
