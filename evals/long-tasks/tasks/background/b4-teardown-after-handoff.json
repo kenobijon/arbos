@@ -50,7 +50,8 @@
   ],
   "doc_checks": {
     "max_handoffs": 1,
-    "no_duplicate_status": true
+    "no_duplicate_status": true,
+    "no_truncated_reply": true
   },
   "categories": [
     "background",

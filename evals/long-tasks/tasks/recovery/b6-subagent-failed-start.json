@@ -26,7 +26,8 @@
     "failure_lines_exactly": 1,
     "no_repeated_sentence": true,
     "no_duplicate_status": true,
-    "max_handoffs": 0
+    "max_handoffs": 0,
+    "no_truncated_reply": true
   },
   "cleanup": "rm -f {P}/.arbos/home/.local/bin/prime-agent; pkill -f 'sleep 600' 2>/dev/null; echo cleaned",
   "regression": "subagent failed start: plain line, kill stuck child, result turn replies only (bc-d117b386, #1349)"
