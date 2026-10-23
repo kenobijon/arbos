@@ -508,6 +508,8 @@ pub struct AppState {
     /// message, never shown as an app-wide banner.
     pub speech_failed: HashMap<Id, String>,
     awaiting_new_project: bool,
+    /// Rig: `ARBOS_OPEN_SPACE` applied once.
+    rig_space_opened: bool,
     /// Calls v1: live calls I know about per chat (the "On a call · Join" bar).
     pub calls_in_chat: HashMap<Id, Call>,
     /// Someone is calling me (ringing): the call and who started it.
@@ -804,6 +806,7 @@ impl AppState {
             spoken: HashSet::new(),
             speech_failed: HashMap::new(),
             awaiting_new_project: false,
+            rig_space_opened: false,
             commands: command_tx,
             update_commands: update_command_tx,
             call_commands: call_command_tx,
@@ -1479,6 +1482,18 @@ impl AppState {
                     }
                 }
                 self.projects = projects;
+                // Rig (live relay): `ARBOS_OPEN_SPACE=<project or people chat id>` opens that
+                // space once it is listed — the fixture's `ARBOS_FIXTURE_OPEN` has no live twin,
+                // and a people group cannot be reached by any other launch hook.
+                if !self.rig_space_opened {
+                    if let Some(id) = std::env::var("ARBOS_OPEN_SPACE")
+                        .ok()
+                        .filter(|id| self.projects.iter().any(|p| p.id == *id))
+                    {
+                        self.rig_space_opened = true;
+                        self.select_project(id, cx);
+                    }
+                }
                 // Nothing in the centre yet: pick an agent. A channel open in the centre
                 // (D88) has no selected project on purpose and stays.
                 if self.selected_project.is_none() && self.selected_channel.is_none() {
