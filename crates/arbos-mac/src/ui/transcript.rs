@@ -632,9 +632,15 @@ impl Transcript {
     /// and let the next frame (`step_spring`) read pixel offsets.
     fn handle_scroll(&mut self, event: &ListScrollEvent) {
         // `is_scrolled == false` means the bottom-aligned list snapped to its
-        // end: the user is back at the tail. Direction is handled by the
-        // wheel listener; this callback never re-pins on its own otherwise.
-        if !event.is_scrolled {
+        // end: the user is back at the tail. `is_scrolled == true` means they
+        // left that natural end (wheel, trackpad, or scrollbar). Unpin so a
+        // new incoming row cannot spring them back while they read history —
+        // the parent wheel listener alone was not enough (scrollbar / list
+        // scroll paths never cleared the pin).
+        if event.is_scrolled {
+            self.pinned_to_bottom = false;
+            self.spring.velocity = 0.0;
+        } else {
             self.pinned_to_bottom = true;
             self.spring.velocity = 0.0;
         }
@@ -805,6 +811,14 @@ impl Transcript {
         let old_len = self.rows.len();
         self.rows = new_rows;
         self.list.splice(prefix..old_len, self.rows.len() - prefix);
+        // Reading history: a stale pin (scrollbar / list scroll that never
+        // cleared it) must not spring to the new end when rows land below.
+        let max = f32::from(self.list.max_offset_for_scrollbar().y);
+        let cur = -f32::from(self.list.scroll_px_offset_for_scrollbar().y);
+        if max - cur > STICK_THRESHOLD_PX {
+            self.pinned_to_bottom = false;
+            self.spring.velocity = 0.0;
+        }
         self.reveal_hit(cx);
         // While pinned the spring glides to the new end on the next frames.
         cx.notify();
