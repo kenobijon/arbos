@@ -7,9 +7,9 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashMap};
 
 use loro::event::DiffEvent;
+pub use loro::VersionVector;
 use loro::{
-    Container, ExportMode, Index, LoroDoc, LoroList, LoroMap, LoroText, LoroValue,
-    ValueOrContainer, VersionVector,
+    Container, ExportMode, Index, LoroDoc, LoroList, LoroMap, LoroText, LoroValue, ValueOrContainer,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -509,6 +509,16 @@ impl ChatDoc {
             return Vec::new();
         }
         self.export_updates_since(theirs)
+    }
+
+    /// True when every op in `update` is already covered by `vv` (e.g. the room's stored doc).
+    /// Uses Loro's import-blob metadata so the relay can ACK a resent push without storing or
+    /// gating it. Undecodable bytes are not covered.
+    pub fn update_covered_by(update: &[u8], vv: &VersionVector) -> bool {
+        match LoroDoc::decode_import_blob_meta(update, true) {
+            Ok(meta) => vv.includes_vv(&meta.partial_end_vv),
+            Err(_) => false,
+        }
     }
 
     /// True when every op in `vv` is already in this doc (checkpoint containment check, crdt-sync §7.3).
@@ -1715,9 +1725,50 @@ pub fn decode_vv(bytes: &[u8]) -> Option<VersionVector> {
     VersionVector::decode(bytes).ok()
 }
 
+/// True when every op in `update` is already covered by `vv`. See [`ChatDoc::update_covered_by`].
+pub fn update_covered_by(update: &[u8], vv: &VersionVector) -> bool {
+    ChatDoc::update_covered_by(update, vv)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_covered_by_when_vv_includes_the_blob() {
+        let doc = ChatDoc::new(Some(1), false);
+        let base = doc.oplog_vv();
+        doc.append_user_message("m1", "hi", "dev", &UserMessageOpts::default())
+            .unwrap();
+        let update = doc.export_updates_since(&base);
+        let vv = doc.oplog_vv();
+        assert!(
+            ChatDoc::update_covered_by(&update, &vv),
+            "the doc's own vv covers the update it just exported"
+        );
+    }
+
+    #[test]
+    fn update_covered_by_false_when_vv_lacks_ops() {
+        let doc = ChatDoc::new(Some(2), false);
+        let empty = doc.oplog_vv();
+        doc.append_user_message("m1", "hi", "dev", &UserMessageOpts::default())
+            .unwrap();
+        let update = doc.export_updates_since(&empty);
+        assert!(
+            !ChatDoc::update_covered_by(&update, &empty),
+            "an empty vv does not cover new ops"
+        );
+    }
+
+    #[test]
+    fn update_covered_by_false_when_undecodable() {
+        let vv = ChatDoc::new(Some(3), false).oplog_vv();
+        assert!(
+            !ChatDoc::update_covered_by(b"not-a-loro-blob", &vv),
+            "garbage bytes are not covered"
+        );
+    }
 
     /// Two replicas behind ONE device id (the busy-reply smoke, 2026-10-23): the second replica
     /// never receives the first one's rows (own-device rows are excluded on the way back), so the
