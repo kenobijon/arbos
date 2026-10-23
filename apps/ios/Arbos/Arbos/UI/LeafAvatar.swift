@@ -53,11 +53,12 @@ enum LeafLottie {
 /// A `LottieAnimationView` playing one clip: the idle file loops, the gust plays once and
 /// settles on its rest pose. Core Animation drives it (no per-frame SwiftUI work); it pauses
 /// when the app goes to the background and when the view leaves the window. The fill is
-/// recoloured through the keypath `**.leaf.Color` (cream, like the static leaf).
+/// recoloured through the keypath `**.leaf.Color` (the hue's ink, like the static leaf).
 struct LeafLottieView: UIViewRepresentable {
     let leaf: Int
     let clip: LeafClip
-    var color: UIColor = UIColor(hexString: leafInkHex()) ?? .white
+    /// The leaf's ink: the darker same hue of its disc (v2 rule).
+    var color: UIColor
 
     func makeUIView(context: Context) -> LottieAnimationView {
         let view = LottieAnimationView()
@@ -110,9 +111,13 @@ enum LeafArt {
     static let colorCount = Int(leafColorCount())
     static let names: [String] = leafNames()
     static let colorNames: [String] = leafColorNames()
-    static let ink = Color(uiColor: UIColor(hexString: leafInkHex()) ?? .white)
     static let scale = CGFloat(leafScale())
+    /// The pastel discs, index order.
     static let colors: [Color] = (0..<colorCount).map { Color(uiColor: UIColor(hexString: leafColorHex(index: UInt8($0))) ?? .gray) }
+    /// The leaf inks on those discs (darker, same hue), index order.
+    static let inks: [Color] = (0..<colorCount).map { Color(uiColor: UIColor(hexString: leafInkHex(index: UInt8($0))) ?? .white) }
+    static let inkUIColors: [UIColor] = (0..<colorCount).map { UIColor(hexString: leafInkHex(index: UInt8($0))) ?? .white }
+    static func ink(_ color: UInt8) -> Color { inks[Int(color) % max(colorCount, 1)] }
     private static var paths: [Int: Path] = [:]
     private static var pivots: [Int: UnitPoint] = [:]
 
@@ -192,7 +197,7 @@ struct LeafAvatar: View {
             if animated, LeafAvatarsFlag.shared.lottie {
                 // The committed Lottie: the gust while one runs (one play, back to rest), else
                 // the idle loop; the view is keyed so a new gust restarts the clip.
-                LeafLottieView(leaf: leaf, clip: gustStart != nil ? .gust : .idle)
+                LeafLottieView(leaf: leaf, clip: gustStart != nil ? .gust : .idle, color: LeafArt.inkUIColors[Int(pick.color) % max(LeafArt.colorCount, 1)])
                     .id("\(leaf)-\(gustStart?.timeIntervalSinceReferenceDate ?? 0)")
                     .frame(width: size * LeafArt.scale, height: size * LeafArt.scale)
                     .accessibilityHidden(true)
@@ -219,7 +224,7 @@ struct LeafAvatar: View {
 
     private var glyph: some View {
         LeafShape(index: leaf)
-            .fill(LeafArt.ink, style: FillStyle(eoFill: true))
+            .fill(LeafArt.ink(pick.color), style: FillStyle(eoFill: true))
             .frame(width: size * LeafArt.scale, height: size * LeafArt.scale)
     }
 

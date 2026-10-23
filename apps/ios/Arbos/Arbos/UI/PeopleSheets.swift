@@ -180,6 +180,7 @@ struct NewChatSheet: View {
                     Color.clear.frame(height: 40)
                 }
             }
+            .scrollIndicators(.visible)
             .scrollDismissesKeyboard(.interactively)
             .background(theme.bg)
             .navigationTitle("New Message")
@@ -566,8 +567,8 @@ struct CreateEntityView: View {
                                 .font(.system(size: 13)).foregroundStyle(theme.danger)
                                 .multilineTextAlignment(.center).padding(.horizontal, 24).padding(.top, 8)
                         }
-                        leafGrid.padding(.top, 244 - 218)
-                        colourGrid.padding(.top, 370 - 340)
+                        leafGrid.padding(.top, 246 - 218)
+                        colourGrid.padding(.top, 450 - 426)
                     }
                 }
                 .padding(.bottom, 24)
@@ -621,15 +622,16 @@ struct CreateEntityView: View {
             .padding(.horizontal, 16.5)
     }
 
-    /// Nine leaves, 5 / 4, on a 56 pt pitch: 33 pt discs on the chosen colour, a 40 pt ring on the pick.
+    /// The sixteen leaves (v2) as their 4 × 4 sheet on a 48 pt pitch: 30 pt discs on the chosen
+    /// hue, a 36 pt ring on the pick.
     private var leafGrid: some View {
-        VStack(spacing: 56 - 40) {
-            ForEach([Array(0..<5), Array(5..<9)], id: \.self) { row in
-                HStack(spacing: 56 - 40) {
-                    ForEach(row, id: \.self) { i in
+        VStack(spacing: 48 - 36) {
+            ForEach(0..<4, id: \.self) { r in
+                HStack(spacing: 48 - 36) {
+                    ForEach(r * 4..<r * 4 + 4, id: \.self) { i in
                         Button { pickedLeaf = i } label: {
-                            LeafAvatar(pick: LeafPick(leaf: UInt8(i), color: pick.color), size: 33)
-                                .frame(width: 40, height: 40)
+                            LeafAvatar(pick: LeafPick(leaf: UInt8(i), color: pick.color), size: 30)
+                                .frame(width: 36, height: 36)
                                 .overlay(Circle().strokeBorder(Int(pick.leaf) == i ? ring : .clear, lineWidth: 1))
                                 .contentShape(Circle())
                         }
@@ -724,6 +726,9 @@ struct NewGroupView: View {
     var addTo: String? = nil
     /// Server id to add to (D88 Members › Add members): people only, members greyed.
     var addToServer: String? = nil
+    /// Secret id whose People list the picks join (Secret page › "Give a person access…",
+    /// spec §7.7): people only, listed people greyed.
+    var addToSecret: String? = nil
     /// D93 step 1's name + leaf picture (nil when opened as Add members).
     var draft: GroupDraft? = nil
     @State private var query = ""
@@ -740,7 +745,7 @@ struct NewGroupView: View {
     /// Empty query hides archived agents; a search finds them again — archived agents still
     /// exist and can join groups unless deleted (home archive is hide-only).
     private var agentCandidates: [Project] {
-        if addToServer != nil { return [] }
+        if addToServer != nil || addToSecret != nil { return [] }
         let q = trimmed.lowercased()
         let base = model.projects.filter { !$0.shared && (q.isEmpty ? !model.isArchived($0.id) : true) }
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
@@ -758,8 +763,10 @@ struct NewGroupView: View {
 
     private var addToChat: PeopleChat? { addTo.flatMap { model.peopleChat($0) } }
     private var server: Server? { addToServer.flatMap { model.server($0) } }
-    private var adding: Bool { addTo != nil || addToServer != nil }
+    private var secret: SecretItem? { addToSecret.flatMap { id in model.secrets?.secrets.first { $0.id == id } } }
+    private var adding: Bool { addTo != nil || addToServer != nil || addToSecret != nil }
     private var title: String {
+        if secret != nil { return "Give a person access" }
         if let s = server { return "Add members to \(s.name)" }
         return addToChat.map { "Add members to \($0.title)" } ?? (adding ? "Add members" : "New group")
     }
@@ -769,6 +776,9 @@ struct NewGroupView: View {
     private var canSubmit: Bool { !(picked.isEmpty && pickedAgents.isEmpty) }
 
     private func isIn(_ p: Person) -> Bool {
+        if let secret {
+            return p.id == model.user?.id || secret.directors.contains { $0.userId == p.id || $0.handle.caseInsensitiveCompare(p.handle) == .orderedSame }
+        }
         if let s = server {
             return p.id == model.user?.id || s.members.contains { $0.id == p.id || $0.handle.caseInsensitiveCompare(p.handle) == .orderedSame }
         }
@@ -806,7 +816,7 @@ struct NewGroupView: View {
             }
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass").font(.system(size: SheetSearchField.iconSize, weight: .medium)).foregroundStyle(theme.muted)
-                TextField("", text: $query, prompt: Text("Add people or agents").foregroundStyle(theme.placeholder))
+                TextField("", text: $query, prompt: Text(addToSecret != nil ? "Search people" : "Add people or agents").foregroundStyle(theme.placeholder))
                     .textInputAutocapitalization(.never).autocorrectionDisabled()
                     .font(theme.font(Theme.body)).foregroundStyle(theme.text)
             }
@@ -920,8 +930,24 @@ struct NewGroupView: View {
         errorText = nil
     }
 
-    /// Add members: every pick goes to the group — or server — this picker was opened for.
+    /// Add members: every pick goes to the group — or server, or secret — this picker was opened for.
     private func add() {
+        if let secret {
+            let new = picked.filter { !isIn($0) }
+            guard !new.isEmpty else { errorText = "Pick someone who is not on the list yet"; return }
+            creating = true
+            errorText = nil
+            Task {
+                if await model.addSecretPeople(secretId: secret.id, handles: new.map(\.handle)) {
+                    onDone()
+                } else {
+                    errorText = model.notice?.text ?? "Could not add them."
+                    model.notice = nil
+                }
+                creating = false
+            }
+            return
+        }
         if let s = server {
             let new = picked.filter { !isIn($0) }
             guard !new.isEmpty else { errorText = "Pick someone who is not in the server yet"; return }

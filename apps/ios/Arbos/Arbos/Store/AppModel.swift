@@ -149,11 +149,24 @@ final class AppModel: ObservableObject {
     }
     /// Scene is `.active`. Focus and in-app banner suppression only apply then.
     private var appActive = true
+    /// True once the scene has been `.background` since the last `.active`.
+    /// Unlock goes background → inactive → active; the immediate previous phase
+    /// on unlock is `.inactive`, so we cannot key the redial off that alone.
+    private var wasBackgrounded = false
 
-    /// Called from the root scene: leaving `.active` drops `focused_chat` on
-    /// the relay (and stops swallowing banners) so APNs can fire.
-    func setAppActive(_ active: Bool) {
-        guard appActive != active else { return }
+    /// Called from the root scene on every `scenePhase` change.
+    /// Leaving `.active` drops `focused_chat` on the relay (and stops swallowing
+    /// banners) so APNs can fire. Returning to `.active` after `.background`
+    /// redials rooms ([feedback app-01M5MVNNNBZHJWSRCZ81S04C8E]).
+    func noteScenePhase(_ phase: ScenePhase) {
+        if phase == .background { wasBackgrounded = true }
+        let active = phase == .active
+        let resumeRooms = active && wasBackgrounded
+        if active { wasBackgrounded = false }
+
+        let becameActive = active && !appActive
+        let becameInactive = !active && appActive
+        guard becameActive || becameInactive else { return }
         appActive = active
         if let id = visibleChatId {
             rooms[id]?.focused = active
@@ -165,13 +178,24 @@ final class AppModel: ObservableObject {
             }
         }
         // Leaving the foreground is the last safe moment to write before a kill.
-        if !active { flushStore(all: true) }
-        // Foreground again: clear the 403/404 backoff so listed rooms can dial.
-        if active {
+        if becameInactive { flushStore(all: true) }
+        // Foreground again: clear the 403/404 backoff so listed rooms can dial,
+        // create any that are missing, and — after a real background — redial
+        // sockets iOS left half-dead.
+        if becameActive {
             roomUnavailableFailures = [:]
             roomUnavailableAt = [:]
+            let existing = Array(rooms.values)
             recreateListedRooms()
+            if resumeRooms {
+                for room in existing { room.resumeAfterForeground() }
+            }
         }
+    }
+
+    /// Test / call-site alias: only flips the active bit (no background redial).
+    func setAppActive(_ active: Bool) {
+        noteScenePhase(active ? .active : .inactive)
     }
 
     /// Chat on screen *and* the app is in the foreground — the only case where
@@ -238,6 +262,9 @@ final class AppModel: ObservableObject {
             }
         }
     }
+    /// Telegram-style root tab (Contacts · Calls · Chats · Settings). Opening a
+    /// chat from Contacts/Calls switches to Chats so `path` lands on HomeView's stack.
+    @Published var mainTab: MainTab = .chats
     /// True when the Debug fixture replaced the relay (screenshots).
     var isFixture = false
     /// Debug demo tours run once per process, whichever view instance starts them.
@@ -366,6 +393,9 @@ final class AppModel: ObservableObject {
 
     // MARK: Home pins (device-local)
 
+    /// How many home rows may sit pinned at once (agents + people chats).
+    static let maxHomePins = 5
+
     /// Home-list keys (`p:<projectId>` / `c:<peopleChatId>`) kept at the top.
     @Published private(set) var pinnedHomeIds: Set<String> = {
         Set(UserDefaults.standard.stringArray(forKey: "pinnedHome") ?? [])
@@ -390,6 +420,11 @@ final class AppModel: ObservableObject {
     private func setHomePinned(_ key: String, _ pinned: Bool) {
         if pinned {
             guard !pinnedHomeIds.contains(key) else { return }
+            // Cap at five so the top of Home stays a short favourites strip.
+            guard pinnedHomeIds.count < Self.maxHomePins else {
+                notice = Notice(text: "You can pin up to five chats.")
+                return
+            }
             pinnedHomeIds.insert(key)
         } else {
             guard pinnedHomeIds.contains(key) else { return }
@@ -3351,9 +3386,10 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Lowercased blob of every loaded message in a chat (for home search).
-    /// Falls back to a one-shot doc read when the published array is still nil.
-    func searchableMessageText(of chatId: Id) -> String {
+    /// Every loaded user / assistant / project message with prose in a chat
+    /// (home search; system lines never count). Falls back to a one-shot doc
+    /// read when the published array is still nil.
+    func searchableMessages(of chatId: Id) -> [Message] {
         let list: [Message]
         if let published = messages[chatId] {
             list = published
@@ -3362,7 +3398,7 @@ final class AppModel: ObservableObject {
         } else {
             list = []
         }
-        return list.map(\.plainText).joined(separator: "\n").lowercased()
+        return list.filter { $0.role != .system && !$0.plainText.isEmpty }
     }
 
     /// S8: the last assistant message asked a question and nothing was sent since.

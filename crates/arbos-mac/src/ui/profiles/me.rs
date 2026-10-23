@@ -615,28 +615,34 @@ impl Shell {
                         ),
                     &theme,
                 ))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(10.0))
-                        .min_h(px(44.0))
-                        .px(px(16.0))
-                        .py(px(10.0))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .text_size(px(TEXT_BODY))
-                                .text_color(if update_failed {
-                                    theme.danger
-                                } else {
-                                    theme.text
-                                })
-                                .child(update.status_line()),
-                        )
-                        .child(actions),
-                );
+                .child({
+                    // A failure row carries a sentence and two actions; side by side in a 280 pt
+                    // pane the sentence got ~40 pt and wrapped one word per line. Stack it.
+                    let status = div()
+                        .min_w_0()
+                        .text_size(px(TEXT_BODY))
+                        .text_color(if update_failed {
+                            theme.danger
+                        } else {
+                            theme.text
+                        })
+                        .child(update.status_line());
+                    let row = div().min_h(px(44.0)).px(px(16.0)).py(px(10.0));
+                    if update_failed {
+                        row.flex()
+                            .flex_col()
+                            .items_start()
+                            .gap(px(8.0))
+                            .child(status.w_full())
+                            .child(actions)
+                    } else {
+                        row.flex()
+                            .items_center()
+                            .gap(px(10.0))
+                            .child(status.flex_1())
+                            .child(actions)
+                    }
+                });
             div()
                 .flex()
                 .flex_col()

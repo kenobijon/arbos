@@ -31,7 +31,13 @@ use crate::ui::theme::Theme;
 pub const PILL_PAD_X: f32 = 4.0;
 pub const PILL_PAD_Y: f32 = 1.0;
 pub const PILL_RADIUS: f32 = 6.0;
-pub const PICTURE: f32 = 14.0;
+/// The picture disc; the `@` plus the hair space after it is its cell, so
+/// the disc never crowds the name (Grok: a clear gap between icon and name).
+pub const PICTURE: f32 = 15.0;
+/// What the rewrite puts after `@`: a hair space, so the picture cell is one
+/// wide glyph box and the name starts a step later. Copies carry it
+/// invisibly; `find` expects it.
+pub const CELL: &str = "@\u{200A}";
 
 /// What the chip paints in the `@` cell.
 #[derive(Clone)]
@@ -224,7 +230,7 @@ impl Mentions {
             if starts_token && handle_len > 0 {
                 let handle = &from_at[1..1 + handle_len];
                 if let Some(m) = self.by_handle.get(&handle.to_lowercase()) {
-                    out.push('@');
+                    out.push_str(CELL);
                     out.push_str(&m.name);
                     rest = &from_at[1 + handle_len..];
                     continue;
@@ -250,7 +256,14 @@ impl Mentions {
                 .chars()
                 .last()
                 .is_none_or(|c| !c.is_alphanumeric() && c != '@');
-            let after = &text[at + 1..];
+            // The rewrite leaves `@` + hair space before a resolved name; a
+            // plain `@Name` typed by hand also counts.
+            let cell = if text[at..].starts_with(CELL) {
+                CELL.len()
+            } else {
+                1
+            };
+            let after = &text[at + cell..];
             let hit = starts_token
                 .then(|| {
                     self.names.iter().find(|(name, _)| {
@@ -264,8 +277,8 @@ impl Mentions {
                 .flatten();
             match hit {
                 Some((name, m)) => {
-                    out.push((at..at + 1 + name.len(), m.clone()));
-                    i = at + 1 + name.len();
+                    out.push((at..at + cell + name.len(), m.clone()));
+                    i = at + cell + name.len();
                 }
                 None => i = at + 1,
             }
@@ -417,7 +430,7 @@ pub(crate) mod tests {
         let text = m.display("ask @comms, @sam, @launch-week and @Launch-Crew.");
         assert_eq!(
             text,
-            "ask @Comms, @Sam Rivera, @Launch week and @Launch Crew."
+            format!("ask {CELL}Comms, {CELL}Sam Rivera, {CELL}Launch week and {CELL}Launch Crew.")
         );
         let chips = m.find(&text);
         let pages: Vec<&ProfilePage> = chips.iter().map(|(_, m)| &m.page).collect();
@@ -428,7 +441,7 @@ pub(crate) mod tests {
         assert!(matches!(pages[3], ProfilePage::Server { server_id } if server_id == "s-lc"));
         // Each range covers "@" + the display name, and nothing else.
         for (range, mention) in &chips {
-            assert_eq!(&text[range.clone()], format!("@{}", mention.name));
+            assert_eq!(&text[range.clone()], format!("{CELL}{}", mention.name));
         }
     }
 
@@ -445,9 +458,10 @@ pub(crate) mod tests {
     #[test]
     fn trailing_punctuation_and_case_do_not_matter() {
         let m = four();
-        assert_eq!(m.display("(@Comms)."), "(@Comms).");
-        assert_eq!(m.display("@sam."), "@Sam Rivera.");
-        assert_eq!(m.display("@SAM!"), "@Sam Rivera!");
+        assert_eq!(m.display("(@Comms)."), format!("({CELL}Comms)."));
+        assert_eq!(m.display("@sam."), format!("{CELL}Sam Rivera."));
+        assert_eq!(m.display("@SAM!"), format!("{CELL}Sam Rivera!"));
+        // Typed by hand, no hair space: still a chip.
         let chips = m.find("@Sam Rivera!");
         assert_eq!(chips.len(), 1);
         assert_eq!(chips[0].0, 0.."@Sam Rivera".len());
@@ -472,11 +486,11 @@ pub(crate) mod tests {
             ),
         ]);
         let text = m.display("@launch-week and @launch");
-        assert_eq!(text, "@Launch week and @Launch");
+        assert_eq!(text, format!("{CELL}Launch week and {CELL}Launch"));
         let chips = m.find(&text);
         assert_eq!(chips.len(), 2);
-        assert_eq!(&text[chips[0].0.clone()], "@Launch week");
-        assert_eq!(&text[chips[1].0.clone()], "@Launch");
+        assert_eq!(&text[chips[0].0.clone()], format!("{CELL}Launch week"));
+        assert_eq!(&text[chips[1].0.clone()], format!("{CELL}Launch"));
     }
 
     #[test]

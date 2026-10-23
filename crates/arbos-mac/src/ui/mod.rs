@@ -31,6 +31,7 @@ pub mod onboarding;
 pub mod people;
 pub mod presence;
 pub mod profiles;
+pub mod react_menu;
 pub mod routines;
 pub mod secrets;
 pub mod select;
