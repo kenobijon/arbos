@@ -43,6 +43,9 @@ pub struct DocHost {
     pub room: String,
     pub doc: ChatDoc,
     pub cursor: i64,
+    /// Lowest row seq Loro parked as pending (deps missing); the persisted cursor stays below
+    /// it so a restart re-requests the row (parked ops live only in memory).
+    pub first_pending_seq: Option<i64>,
     acked_vv: VersionVector,
     inflight: Option<(String, VersionVector)>,
     pub caught_up: bool,
@@ -89,6 +92,14 @@ impl DocHost {
 
     fn clear_inflight(&mut self) {
         self.inflight = None;
+    }
+
+    /// The cursor to persist and resume from: held below the first parked row.
+    pub fn resume_cursor(&self) -> i64 {
+        match self.first_pending_seq {
+            Some(p) => self.cursor.min(p - 1),
+            None => self.cursor,
+        }
     }
 
     /// A command this box wrote itself (routine, channel, cross-project message) and will run
@@ -252,6 +263,7 @@ impl SyncHub {
             room: room.clone(),
             doc,
             cursor,
+            first_pending_seq: None,
             acked_vv,
             inflight: None,
             caught_up: false,
@@ -327,7 +339,8 @@ impl SyncHub {
         let h = host.lock().await;
         let snap = h.doc.snapshot();
         let acked = encode_vv(&h.acked_vv);
-        self.store.save_room_doc(&h.room, h.cursor, &snap, &acked)
+        self.store
+            .save_room_doc(&h.room, h.resume_cursor(), &snap, &acked)
     }
 
     pub async fn persist_all(&self) {
@@ -405,7 +418,7 @@ impl SyncHub {
     async fn room_session(&self, host: &SharedHost) -> Result<()> {
         let (room, cursor) = {
             let h = host.lock().await;
-            (h.room.clone(), h.cursor)
+            (h.room.clone(), h.resume_cursor())
         };
         let ws_url = format!(
             "{}/room/{}?token={}",
@@ -471,7 +484,10 @@ impl SyncHub {
                                     let mut h = host.lock().await;
                                     let _ = h.doc.import(&bytes);
                                     h.cursor = h.cursor.max(st.checkpoint_seq);
-                                    after = h.cursor;
+                                    if h.first_pending_seq.is_some_and(|p| p <= st.checkpoint_seq) {
+                                        h.first_pending_seq = None;
+                                    }
+                                    after = h.resume_cursor();
                                 }
                             }
                             after = after.max(st.checkpoint_seq.min(cursor));
@@ -491,7 +507,11 @@ impl SyncHub {
                                 // Imported whatever device the header names (see the ROWS_REQ note).
                                 match h.doc.import(&f.payload) {
                                     Ok(status) if status.pending.is_none() => {}
-                                    Ok(_) => imports_clean = false,
+                                    Ok(_) => {
+                                        imports_clean = false;
+                                        h.first_pending_seq =
+                                            Some(h.first_pending_seq.map_or(rh.seq, |p| p.min(rh.seq)));
+                                    }
                                     Err(e) => {
                                         imports_clean = false;
                                         tracing::warn!(room = %room, seq = rh.seq, error = %e, "row import failed");
@@ -534,7 +554,11 @@ impl SyncHub {
                                     h.ever_caught_up = true;
                                 }
                                 h.cursor = h.cursor.max(head);
-                                (h.cursor, h.new_pending())
+                                if imports_clean {
+                                    // The walk re-covered any parked range and parked nothing.
+                                    h.first_pending_seq = None;
+                                }
+                                (h.resume_cursor(), h.new_pending())
                             };
                             let _ = self.persist(host).await;
                             let _ = self.incoming.send(Incoming::CaughtUp { chat_id: chat_id.clone(), head_seq: head }).await;
@@ -647,6 +671,7 @@ mod tests {
             room: "people/c1".into(),
             doc,
             cursor: 0,
+            first_pending_seq: None,
             acked_vv: VersionVector::default(),
             inflight: None,
             caught_up: true,

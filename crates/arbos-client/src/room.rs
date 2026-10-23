@@ -152,6 +152,13 @@ pub struct RoomSession {
     /// A history heal was pushed on this connection (one per connection; reset by
     /// `prepare_reconnect`).
     healed: bool,
+    /// Lowest row seq whose import Loro parked as *pending* (its dependencies are not in the
+    /// doc yet). Parked ops live only in memory: a relaunch loses them, so the persisted cursor
+    /// never passes this row and the next catch-up re-requests it (Loro drops what it already
+    /// has). Cleared when a catch-up finishes with no pending import or a checkpoint covers it.
+    first_pending_seq: Option<i64>,
+    /// An import was parked during this connection.
+    pending_this_session: bool,
 }
 
 impl RoomSession {
@@ -178,6 +185,8 @@ impl RoomSession {
             held_wake: None,
             held_presence: None,
             healed: false,
+            first_pending_seq: None,
+            pending_this_session: false,
         }
     }
 
@@ -185,8 +194,18 @@ impl RoomSession {
         &self.room
     }
 
+    /// The cursor to persist and to resume from: the last row walked, held back to just below
+    /// the first row whose import is still pending (see `first_pending_seq`).
     pub fn cursor(&self) -> i64 {
-        self.cursor
+        match self.first_pending_seq {
+            Some(p) => self.cursor.min(p - 1),
+            None => self.cursor,
+        }
+    }
+
+    /// Lowest row seq still parked by Loro, if any (diagnostics / health).
+    pub fn first_pending_seq(&self) -> Option<i64> {
+        self.first_pending_seq
     }
 
     pub fn pending(&self) -> &[(String, Vec<u8>)] {
@@ -228,8 +247,9 @@ impl RoomSession {
         self.opened_at_ms = Some(now_ms);
         self.last_now_ms = now_ms;
         self.live_since_ms = None;
+        self.pending_this_session = false;
         let hello = Hello {
-            cursor: self.cursor,
+            cursor: self.cursor(),
             device: self.device_id.clone(),
             room: self.room.clone(),
             proto: PROTO_VERSION,
@@ -305,7 +325,8 @@ impl RoomSession {
         }
         self.cursor = self.cursor.max(self.checkpoint_seq);
         self.cursor_before_apply = self.cursor;
-        self.push(RoomAction::Cursor(self.cursor));
+        self.release_pending_below(self.checkpoint_seq);
+        self.push(RoomAction::Cursor(self.cursor()));
         self.finish_handshake();
     }
 
@@ -318,8 +339,33 @@ impl RoomSession {
         }
         self.cursor = self.cursor.max(seq.max(self.checkpoint_seq));
         self.cursor_before_apply = self.cursor;
-        self.push(RoomAction::Cursor(self.cursor));
+        // The checkpoint is a whole doc up to its seq: whatever was parked below it is in it.
+        self.release_pending_below(seq.max(self.checkpoint_seq));
+        self.push(RoomAction::Cursor(self.cursor()));
         self.finish_handshake();
+    }
+
+    fn release_pending_below(&mut self, seq: i64) {
+        if self.first_pending_seq.is_some_and(|p| p <= seq) {
+            self.first_pending_seq = None;
+        }
+    }
+
+    /// Host: the import of the [`RoomAction::ApplyBytes`] just handled was parked by Loro as
+    /// pending (its dependencies are missing). The row counts as walked but not as applied: the
+    /// persisted cursor stays below it (a corrective [`RoomAction::Cursor`] follows) and the
+    /// next catch-up asks for it again. Nothing reconnects — the deps may arrive live.
+    pub fn apply_pending(&mut self) {
+        if matches!(self.phase, Phase::Idle | Phase::Closed) {
+            return;
+        }
+        let seq = self.cursor;
+        self.first_pending_seq = Some(match self.first_pending_seq {
+            Some(p) => p.min(seq),
+            None => seq,
+        });
+        self.pending_this_session = true;
+        self.push(RoomAction::Cursor(self.cursor()));
     }
 
     /// Host could not fetch/import the checkpoint; continue with RowsReq anyway
@@ -336,7 +382,7 @@ impl RoomSession {
         // Own rows are requested too: a row pushed by this device but saved
         // before its ACK is only on the relay. Loro drops duplicates.
         let req = RowsReq {
-            after: self.cursor,
+            after: self.cursor(),
             exclude_own: false,
         };
         let header = serde_json::to_value(&req).expect("rows_req");
@@ -389,7 +435,7 @@ impl RoomSession {
         // if import fails, restoring `cursor_before_apply`.
         self.cursor_before_apply = self.cursor;
         self.cursor = self.cursor.max(header.seq);
-        self.push(RoomAction::Cursor(self.cursor));
+        self.push(RoomAction::Cursor(self.cursor()));
     }
 
     fn on_rows_done(&mut self, frame: Frame) {
@@ -403,7 +449,11 @@ impl RoomSession {
             .unwrap_or(self.cursor);
         self.cursor = self.cursor.max(head_seq);
         self.cursor_before_apply = self.cursor;
-        self.push(RoomAction::Cursor(self.cursor));
+        // A catch-up that re-walked the parked range and parked nothing has applied it all.
+        if !self.pending_this_session {
+            self.first_pending_seq = None;
+        }
+        self.push(RoomAction::Cursor(self.cursor()));
         self.push(RoomAction::LinkLive);
         if !frame.payload.is_empty() && !self.healed {
             self.push(RoomAction::HealCheck {
@@ -487,7 +537,7 @@ impl RoomSession {
             // (WaitState / WaitCheckpoint): ignore — finish_handshake resyncs.
             if self.phase == Phase::Live {
                 let req = RowsReq {
-                    after: self.cursor,
+                    after: self.cursor(),
                     exclude_own: false,
                 };
                 let h = serde_json::to_value(&req).expect("rows_req");
@@ -1241,6 +1291,97 @@ mod tests {
             .drain_actions()
             .iter()
             .any(|a| matches!(a, RoomAction::HealCheck { .. })));
+    }
+
+    /// A parked row (deps missing) never moves the persisted cursor past itself: a relaunch
+    /// would lose Loro's in-memory pending ops and the row would never be asked for again
+    /// (the per-device holes behind the Mac-vs-iPhone divergence, Oct 23). The hole is
+    /// re-requested on reconnect; a clean catch-up or a covering checkpoint releases it.
+    #[test]
+    fn pending_row_holds_the_persisted_cursor_until_the_hole_is_covered() {
+        let mut s = RoomSession::new("dev:me", "proj/chat", 10, Vec::new());
+        s.on_open(1_000);
+        let _ = s.drain_actions();
+        s.on_frame(&state_frame(0, Vec::new()));
+        let _ = s.drain_actions();
+
+        s.on_frame(&row_frame(11, b"ok".to_vec()));
+        let _ = s.drain_actions();
+        assert_eq!(s.cursor(), 11);
+        // Row 12 is parked by the host's Loro import.
+        s.on_frame(&row_frame(12, b"parked".to_vec()));
+        let a = s.drain_actions();
+        assert!(
+            a.iter().any(|x| matches!(x, RoomAction::Cursor(12))),
+            "tentative"
+        );
+        s.apply_pending();
+        let a = s.drain_actions();
+        assert!(
+            a.iter().any(|x| matches!(x, RoomAction::Cursor(11))),
+            "corrected: {a:?}"
+        );
+        assert_eq!(s.cursor(), 11);
+        assert_eq!(s.first_pending_seq(), Some(12));
+        // Later rows apply, but the persisted cursor stays below the hole.
+        s.on_frame(&row_frame(13, b"ok".to_vec()));
+        let a = s.drain_actions();
+        assert!(a.iter().any(|x| matches!(x, RoomAction::Cursor(11))));
+        s.on_frame(&rows_done(13));
+        let a = s.drain_actions();
+        assert!(a.iter().any(|x| matches!(x, RoomAction::Cursor(11))));
+        assert_eq!(s.cursor(), 11);
+
+        // Reconnect: HELLO and ROWS_REQ resume from below the hole.
+        s.on_close(2_000);
+        let _ = s.drain_actions();
+        s.prepare_reconnect();
+        s.on_open(3_000);
+        let sends = take_sends(&s.drain_actions());
+        assert_eq!(
+            sends[0].header.get("cursor").and_then(Value::as_i64),
+            Some(11)
+        );
+        s.on_frame(&state_frame(0, Vec::new()));
+        let sends = take_sends(&s.drain_actions());
+        let req = sends.iter().find(|f| f.ty == FrameType::RowsReq).unwrap();
+        assert_eq!(req.header.get("after").and_then(Value::as_i64), Some(11));
+        // This time rows 12 and 13 apply cleanly (their deps arrived): the hole is released.
+        s.on_frame(&row_frame(12, b"ok".to_vec()));
+        s.on_frame(&row_frame(13, b"ok".to_vec()));
+        let _ = s.drain_actions();
+        s.on_frame(&rows_done(13));
+        let a = s.drain_actions();
+        assert!(a.iter().any(|x| matches!(x, RoomAction::Cursor(13))));
+        assert_eq!(s.cursor(), 13);
+        assert_eq!(s.first_pending_seq(), None);
+    }
+
+    #[test]
+    fn checkpoint_covering_the_hole_releases_it() {
+        let mut s = RoomSession::new("dev:me", "proj/chat", 10, Vec::new());
+        s.on_open(1_000);
+        let _ = s.drain_actions();
+        s.on_frame(&state_frame(0, Vec::new()));
+        let _ = s.drain_actions();
+        s.on_frame(&row_frame(12, b"parked".to_vec()));
+        let _ = s.drain_actions();
+        s.apply_pending();
+        let _ = s.drain_actions();
+        assert_eq!(s.cursor(), 11);
+        s.on_close(2_000);
+        let _ = s.drain_actions();
+        s.prepare_reconnect();
+        s.on_open(3_000);
+        let _ = s.drain_actions();
+        // The relay now has a checkpoint at 20: a whole doc up to there.
+        s.on_frame(&state_frame(20, b"frontier".to_vec()));
+        let _ = s.drain_actions();
+        s.on_checkpoint(20);
+        let a = s.drain_actions();
+        assert!(a.iter().any(|x| matches!(x, RoomAction::Cursor(20))));
+        assert_eq!(s.cursor(), 20);
+        assert_eq!(s.first_pending_seq(), None);
     }
 
     #[test]
