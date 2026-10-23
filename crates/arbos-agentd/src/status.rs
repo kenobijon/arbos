@@ -60,8 +60,9 @@ impl SideKind {
     }
 }
 
-/// Output cap of the quick call: a few sentences.
-pub const QUICK_MAX_TOKENS: u32 = 220;
+/// Output cap of the quick call: a few sentences (reasoning is off for the call, so the whole
+/// budget is visible text).
+pub const QUICK_MAX_TOKENS: u32 = 320;
 /// Model calls per chat per minute before quick replies fall back to the canned line.
 pub const QUICK_CALLS_PER_MINUTE: usize = 6;
 /// Characters of the user's message the quick call sees.
@@ -99,6 +100,45 @@ pub fn parse_tagged_reply(text: &str) -> (SideKind, String) {
         }
     }
     (SideKind::Task, t.to_owned())
+}
+
+/// A quick reply must never land as a fragment. `truncated` = the provider hit the token cap.
+/// Returns the text when it ends a sentence; when it does not (cap hit, or the text simply
+/// stops mid-sentence), the text cut back to its last full sentence if that keeps at least
+/// half of it; else `None` (the caller writes the canned line).
+pub fn finish_cleanly(text: &str, truncated: bool) -> Option<String> {
+    let t = text.trim();
+    if t.is_empty() {
+        return None;
+    }
+    let ends_sentence = |s: &str| {
+        s.trim_end_matches(['"', '”', '’', ')', '*', '_'])
+            .ends_with(['.', '!', '?', '…', ':'])
+    };
+    if !truncated && ends_sentence(t) {
+        return Some(t.to_owned());
+    }
+    if truncated && ends_sentence(t) && t.chars().count() > 20 {
+        return Some(t.to_owned());
+    }
+    // Cut back to the last sentence end followed by whitespace (or the very end).
+    let chars: Vec<char> = t.chars().collect();
+    let mut cut = None;
+    for i in (0..chars.len()).rev() {
+        if matches!(chars[i], '.' | '!' | '?' | '…')
+            && (i + 1 == chars.len() || chars[i + 1].is_whitespace())
+        {
+            cut = Some(i + 1);
+            break;
+        }
+    }
+    let cut = cut?;
+    if cut * 2 < chars.len() {
+        return None;
+    }
+    let kept: String = chars[..cut].iter().collect();
+    let kept = kept.trim();
+    (!kept.is_empty()).then(|| kept.to_owned())
 }
 
 /// What the running work looks like, for the quick call.
@@ -463,24 +503,40 @@ impl Agent {
             let system = quick_system_prompt(&self.cfg.project_name, address.as_deref());
             let user = snap.render(&user_text);
             let llm = self.llm.with_purpose("quick-reply");
+            // No hidden reasoning on this call: with it on, the model's thinking counted
+            // against `max_tokens` and the visible sentence was cut at the cap (#1411).
+            let extra = json!({ "reasoning": { "enabled": false } });
             match tokio::time::timeout(
                 quick_reply_timeout(),
-                llm.complete(&model, &system, &user, QUICK_MAX_TOKENS),
+                llm.complete_full(&model, &system, &user, QUICK_MAX_TOKENS, Some(&extra)),
             )
             .await
             {
-                Ok(Ok((answer, ms))) => {
-                    let (kind, text) = parse_tagged_reply(&answer);
+                Ok(Ok(c)) => {
+                    let (kind, text) = parse_tagged_reply(&c.text);
+                    let truncated = c.truncated();
                     tracing::info!(
                         chat_id,
                         kind = kind.as_str(),
-                        ms,
+                        ms = c.latency_ms,
+                        truncated,
+                        output_tokens = c
+                            .usage
+                            .get("completion_tokens")
+                            .and_then(serde_json::Value::as_i64),
                         "quick reply from the model"
                     );
-                    if text.trim().is_empty() {
-                        (SideKind::Task, snap.canned_line())
-                    } else {
-                        (kind, text)
+                    match finish_cleanly(&text, truncated) {
+                        Some(clean) => (kind, clean),
+                        None => {
+                            tracing::warn!(
+                                chat_id,
+                                truncated,
+                                chars = text.chars().count(),
+                                "quick reply did not end a sentence; canned line"
+                            );
+                            (SideKind::Task, snap.canned_line())
+                        }
                     }
                 }
                 Ok(Err(e)) => {
@@ -610,6 +666,36 @@ mod tests {
         );
     }
 
+    /// #1411: "When I last reported, the 15-second UTC logger had started at 04:15:49Z with 3
+    /// lines written," landed as a done bubble — the token cap had cut it (reasoning tokens ate
+    /// the budget). Fragments are cut back to the last full sentence or replaced.
+    #[test]
+    fn fragments_never_land_as_a_reply() {
+        let frag = "When I last reported, the 15-second UTC logger had started at 04:15:49Z with 3 lines written,";
+        assert_eq!(finish_cleanly(frag, true), None);
+        assert_eq!(
+            finish_cleanly(frag, false),
+            None,
+            "a comma ending is a fragment, cap or not"
+        );
+        let two = "Both are running. The UTC logger started at 04:15:49Z and the per-minute routine has already appended a tick. The next";
+        assert_eq!(
+            finish_cleanly(two, true).as_deref(),
+            Some("Both are running. The UTC logger started at 04:15:49Z and the per-minute routine has already appended a tick.")
+        );
+        // Too little left after the cut: better the canned line than one stub sentence.
+        assert_eq!(finish_cleanly("Yes. The logger started at 04:15:49Z and has been writing a line every fifteen seconds since, with", true), None);
+        assert_eq!(
+            finish_cleanly("Yes, I'm here.", false).as_deref(),
+            Some("Yes, I'm here.")
+        );
+        assert_eq!(
+            finish_cleanly("Still on it (about a minute in).", true).as_deref(),
+            Some("Still on it (about a minute in).")
+        );
+        assert_eq!(finish_cleanly("   ", false), None);
+    }
+
     #[test]
     fn canned_line_names_the_activity_or_the_other_chat() {
         let s = BusySnapshot {
@@ -674,13 +760,26 @@ mod tests {
     async fn mock_quick(axum::Json(body): axum::Json<Value>) -> axum::Json<Value> {
         tokio::time::sleep(Duration::from_millis(300)).await;
         let user = body["messages"][1]["content"].as_str().unwrap_or("");
-        let content = if user.contains("what is going on") {
-            "[status]\nThe benchmark is still running, about a minute in; nothing has failed."
+        let (content, finish) = if user.contains("did the logger") {
+            ("[status]\nWhen I last reported, the 15-second UTC logger had started at 04:15:49Z with 3 lines written,", "length")
+        } else if user.contains("what is going on") {
+            (
+                "[status]\nThe benchmark is still running, about a minute in; nothing has failed.",
+                "stop",
+            )
         } else {
-            "[task]\nNoted; I'll add that right after the current step."
+            (
+                "[task]\nNoted; I'll add that right after the current step.",
+                "stop",
+            )
         };
+        assert_eq!(
+            body["reasoning"]["enabled"],
+            json!(false),
+            "reasoning is off for quick calls"
+        );
         axum::Json(json!({
-            "choices": [{ "message": { "role": "assistant", "content": content } }],
+            "choices": [{ "message": { "role": "assistant", "content": content }, "finish_reason": finish }],
             "usage": { "prompt_tokens": 400, "completion_tokens": 30 }
         }))
     }
@@ -944,6 +1043,32 @@ mod tests {
             );
             assert!(t.route_reply_text.is_none());
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #1411 end to end: the model's answer comes back cut by the cap; the bubble gets the
+    /// canned line, marked done, never the fragment.
+    #[tokio::test]
+    async fn capped_quick_reply_lands_as_the_canned_line() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUICKREPLY000005";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        let (msg_id, cmd) = send_cmd(&host, "did the logger finish? what did it print?");
+        let a2 = agent.clone();
+        let chat2 = chat.to_owned();
+        let waiting = tokio::spawn(async move { a2.handle_command(&chat2, cmd).await });
+        let text = loop {
+            let rows = reply_rows(&host, &msg_id);
+            if let Some(r) = rows.iter().find(|r| !r.text().trim().is_empty()) {
+                break r.text();
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        assert!(text.starts_with("Still on it:"), "{text}");
+        assert!(!text.contains("3 lines written,"));
+        assert!(text.trim_end().ends_with('.'));
+        waiting.abort();
         let _ = std::fs::remove_dir_all(&root);
     }
 
