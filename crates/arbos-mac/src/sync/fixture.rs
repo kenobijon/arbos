@@ -5170,6 +5170,18 @@ fn seed_people_chat_docs() -> Vec<ChatDoc> {
         text_part("Deck, dashboard and the press kit for the run-through."),
     ];
     insert_message_via_core(&group, &shared_files);
+    // Two shared links, as in the iPhone fixture: the group Library's Links
+    // section ([feedback group-library-links-2026-10-23]) and the link-open
+    // confirm have something to show.
+    insert_message_via_core(
+        &group,
+        &human_message(
+            GROUP_LAUNCH,
+            &samir,
+            "Launch checklist is here: https://notion.so/arbos/launch-week — and the signup form: https://arbos.life/i/launch",
+            base + 390_000,
+        ),
+    );
     insert_message_via_core(
         &group,
         &human_message(
