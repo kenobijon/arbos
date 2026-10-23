@@ -389,6 +389,16 @@ impl Agent {
                 }
             }
         }
+        // A pending approval card is not running work: never report the gated tool's label.
+        let turn_chat = {
+            let tl = self.turn.lock().await;
+            tl.as_ref().map(|t| t.chat_id.clone())
+        };
+        if let Some(tc) = turn_chat {
+            if self.approval_pending_for(&tc).await {
+                snap.activity = Some("Waiting for approval".into());
+            }
+        }
         let live: std::collections::HashSet<String> =
             self.subagent_msgs.lock().await.keys().cloned().collect();
         for s in self.store.subagents().unwrap_or_default() {
@@ -773,6 +783,16 @@ pub(crate) mod tests {
         assert!(s
             .canned_line()
             .starts_with("Still on it: finishing something in another conversation, 2 min in."));
+        let s = BusySnapshot {
+            same_chat: true,
+            activity: Some("Waiting for approval".into()),
+            elapsed_s: 600,
+            ..Default::default()
+        };
+        assert_eq!(
+            s.canned_line(),
+            "Still on it: Waiting for approval, 10 min in. I'll pick this up right after."
+        );
     }
 
     #[test]
