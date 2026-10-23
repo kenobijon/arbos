@@ -343,9 +343,12 @@ struct ChatView: View {
         }
         let list = messages
         let byId = Transcript.index(list)
+        // Sender names inside the bubbles: groups and channels only — never a 1:1 chat.
+        let multiParty = isChannel || (people?.isGroup ?? false)
         let next = Transcript.rows(list, byId: byId, projectId: slot,
                                    me: isChannel ? model.channelMe : model.myUserId,
-                                   people: isPeople || isChannel, agentNames: agentNames)
+                                   people: isPeople || isChannel, agentNames: agentNames,
+                                   multiParty: multiParty)
         // Rows appended after the last one we had (new messages) join the window, so the
         // oldest row on screen does not fall out of the view tree when a new one lands.
         // History that arrives above it — the first snapshot, a backfill, an older
@@ -567,7 +570,7 @@ struct ChatView: View {
                 }
             }
             if let show = DebugHooks.show {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(DebugHooks.showDelayMs)) {
                     switch show {
                     case "keyboard": composerFocused = true
                     case "settings": showSettings = true
