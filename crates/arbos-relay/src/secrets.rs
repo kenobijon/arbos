@@ -3269,6 +3269,7 @@ mod tests {
                 avatar_color_index: None,
                 avatar_leaf: None,
                 avatar_leaf_color: None,
+                image_key: None,
             })
             .unwrap();
         state

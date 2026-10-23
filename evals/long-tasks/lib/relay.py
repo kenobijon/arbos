@@ -212,3 +212,41 @@ def pinned_chat(project):
         if c.get("is_pinned") or c.get("pinned"):
             return c["id"]
     return None
+
+
+def patch_project(project, body):
+    return relay("PATCH", f"/projects/{project}", body)
+
+
+def project_name(project):
+    st, v = relay("GET", f"/projects/{project}")
+    return ((v or {}).get("project") or v or {}).get("name") if st == 200 else None
+
+
+def create_secret(name, value, note=""):
+    return relay("POST", "/secrets", {"name": name, "value": value, "note": note, "agents": []})
+
+
+def delete_secret(secret_id):
+    return relay("DELETE", f"/secrets/{secret_id}")
+
+
+def project_secret_requests(project):
+    st, v = relay("GET", f"/projects/{project}/secrets")
+    return [r for r in ((v or {}).get("requests") or []) if r.get("status") == "pending"] if st == 200 else []
+
+
+def decide_secret_request(request_id, decision="once"):
+    return relay("POST", f"/secrets/requests/{request_id}/decide", {"decision": decision})
+
+
+def group_create(host, with_names, title):
+    code, out, err = ctl("group", "create", "--host", host, "--with", ",".join(with_names), "--title", title)
+    if code != 0:
+        raise RuntimeError(f"group create: {err[-300:]}")
+    return out.strip().splitlines()[0].split()[0]
+
+
+def group_send(host, chat_id, text, wait_s=120):
+    code, out, err = ctl("group", "send", host, chat_id, text, "--stream", "--wait", str(wait_s), timeout=wait_s + 700)
+    return out + "\n" + err

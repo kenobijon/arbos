@@ -6,8 +6,8 @@
   "avatar_color_index_effective": 3,
   "avatar_leaf": null,
   "avatar_leaf_color": null,
-  "avatar_leaf_effective": 7,
   "avatar_leaf_color_effective": 5,
+  "avatar_leaf_effective": 7,
   "box": "asleep",
   "box_since": 0,
   "color": "#8b7cf6",
@@ -15,6 +15,7 @@
   "description": "A fixture agent",
   "icon": "Ab",
   "id": "proj_fixture",
+  "image_key": null,
   "instructions": "be helpful",
   "last_active_at": 1700000000000,
   "machine": {

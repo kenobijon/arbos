@@ -173,6 +173,8 @@ pub fn render(
         } else {
             name_label(space.name.clone(), &theme).into_any_element()
         };
+        // D92 amendment: the picture built before the clock takes `cx`.
+        let picture_disc = groups::picture(space, state, AVATAR_HEADER, &theme);
         if avatar_state != avatars::AvatarState::Idle {
             PulseClock::request(cx);
         }
@@ -186,7 +188,7 @@ pub fn render(
             .relative()
             .size(px(AVATAR_HEADER))
             .flex_shrink_0()
-            .child(avatars::project(space, AVATAR_HEADER, &theme))
+            .child(picture_disc)
             .child(
                 div()
                     .absolute()

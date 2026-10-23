@@ -130,6 +130,7 @@ fn insert_project(
         avatar_color_index,
         avatar_leaf: None,
         avatar_leaf_color: None,
+        image_key: None,
     };
     state.db.insert_project(&p).unwrap();
     state

@@ -33,11 +33,13 @@ def rows_after(doc, user_msg_id):
     return out
 
 
-def pending_approvals(doc):
+def pending_approvals(doc, skip_secret_cards=False):
     out = []
     for m in doc.get("messages", []):
         for p in m.get("parts", []):
             if p.get("kind") == "approval" and (p.get("state") in (None, "pending")) and not p.get("decision") and not p.get("decidedBy"):
+                if skip_secret_cards and ("secretRequestId" in json.dumps(p) or "secret" in str(p.get("title") or "").lower()):
+                    continue  # a secret access card: the task decides it through the API
                 out.append(p.get("approvalId") or p.get("id"))
     return [a for a in out if a]
 
@@ -94,7 +96,7 @@ class StreamWatcher(threading.Thread):
             self.lines.append(buf)
 
 
-def send_turn(project, chat_id, prompt, timeout_s, reject_approvals=True, on_rows=None, until_first_reply=False):
+def send_turn(project, chat_id, prompt, timeout_s, reject_approvals=True, on_rows=None, until_first_reply=False, on_poll=None, skip_secret_cards=False):
     """until_first_reply: for background tasks — return once the agent has answered (ack or text)
     and the ack row has settled, without waiting for the background result."""
     t0 = time.time()
@@ -127,10 +129,12 @@ def send_turn(project, chat_id, prompt, timeout_s, reject_approvals=True, on_row
             first_row_at = time.time() - t0
         if on_rows:
             on_rows(rows)
+        if on_poll:
+            on_poll()
         if reject_approvals:
             for cid in {chat_id, pinned} - {None}:
                 cdoc = doc if cid == chat_id else rl.chat_dump(project, cid)
-                for aid in pending_approvals(cdoc):
+                for aid in pending_approvals(cdoc, skip_secret_cards=skip_secret_cards):
                     if aid not in rejected:
                         rl.ctl("chat", "reject", project, cid, aid, "--reason", "eval driver: not approved")
                         rejected.append(aid)

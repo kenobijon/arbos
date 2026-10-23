@@ -8,20 +8,22 @@ use std::time::Duration;
 
 use gpui::{
     actions, div, prelude::*, px, Animation, AnimationExt, AnyElement, App, Context, Div, Entity,
-    ExternalPaths, FocusHandle, Focusable, FontWeight, Render, ScrollHandle, SharedString,
-    Stateful, Window,
+    FocusHandle, Focusable, FontWeight, Render, ScrollHandle, SharedString, Stateful, Window,
 };
 
 use crate::app::SignInMode;
 use crate::app::{AppState, DetailsTarget, ProfilePage, ServerSheet};
 use crate::image_picker;
 use crate::model::{now_ms, CallKind, MachineState};
-use crate::ui::avatars;
+use crate::sync::PictureSource;
+use crate::ui::avatar_picker;
+use crate::ui::avatars::{self, leaf, LeafPick};
 use crate::ui::callview;
 use crate::ui::channels::{ChannelsEvent, ChannelsPanel};
 use crate::ui::composer::{Composer, ComposerEvent, ComposerInput};
 use crate::ui::connectors::{ConnectorsEvent, ConnectorsPanel};
 use crate::ui::create_entity::{self, Kind as CreateKind};
+use crate::ui::dropzone;
 use crate::ui::feedback::{FeedbackSheet, SendFeedback};
 use crate::ui::frost::{frosted, MENU_BLUR, PANEL_BLUR};
 use crate::ui::glass::{self, WindowDrag};
@@ -175,6 +177,11 @@ pub struct Shell {
     pub(crate) create_leaf_color: Option<u8>,
     /// Create group, step 1 (picture + name) showing over the New Message backdrop.
     pub(crate) create_group_open: bool,
+    /// The avatar picker sheet (D92 amendment) while it is open: whose picture, which tab,
+    /// the pending choice.
+    pub(crate) avatar_picker: Option<avatar_picker::Picker>,
+    /// The Generate tab's prompt.
+    pub(crate) avatar_prompt_input: Entity<ComposerInput>,
     /// Sidebar search field.
     pub(crate) search_input: Entity<ComposerInput>,
     /// The media viewer's Forward picker search field (feedback media-viewer-2026-10-23).
@@ -205,6 +212,13 @@ pub struct Shell {
     pub(crate) channels: Entity<ChannelsPanel>,
     pub(crate) secrets: Entity<SecretsPanel>,
     shake_started_at: Option<u64>,
+    /// A Finder drag is over the chat pane: the whole pane lights up
+    /// (`ui::dropzone`). Set from the pane's own drag-move bounds check, so it
+    /// does not depend on GPUI hover state; cleared on drop, exit and release.
+    file_drop_over: bool,
+    /// Rig: `ARBOS_FIXTURE_DRAG_OVER=1` holds the highlight on without a real
+    /// drag (synthetic pointer events do not reach the GUI session).
+    fixture_drag_over: bool,
     /// True while the sign-in screen is up; its clearing focuses the composer.
     signing_in: bool,
     /// Flag of the header's former "…" menu (removed, feedback
@@ -370,6 +384,30 @@ impl Shell {
                 this.server_input
                     .update(cx, |input, cx| input.set_text(code, cx));
             }
+            // The avatar picker: a rig request to open it, and the Generate tab's answer.
+            if let Some((target, tab)) = state.update(cx, |s, _| s.avatar_picker_request.take()) {
+                this.open_avatar_picker(target, cx);
+                if let Some(pk) = this.avatar_picker.as_mut() {
+                    pk.tab = tab;
+                }
+            }
+            if let Some(done) = state.update(cx, |s, _| s.avatar_generated.take()) {
+                if let Some(pk) = this.avatar_picker.as_mut() {
+                    if pk.target.id() == &done.project_id {
+                        pk.generating = false;
+                        match (done.image_key, done.url) {
+                            (Some(key), Some(url)) => {
+                                pk.generated = Some((key, url));
+                                pk.error = None;
+                            }
+                            _ => {
+                                pk.error =
+                                    done.error.or_else(|| Some("No picture came back".into()))
+                            }
+                        }
+                    }
+                }
+            }
             let st = state.read(cx);
             if st.add_members_secret.is_some() {
                 this.people_input
@@ -439,6 +477,18 @@ impl Shell {
                 }));
             });
         }
+        let avatar_prompt_input = cx.new(ComposerInput::new);
+        {
+            let weak = cx.weak_entity();
+            avatar_prompt_input.update(cx, |input, _| {
+                input.set_placeholder("A fox reading by a lamp");
+                input.on_submit = Some(Rc::new(move |_, cx| {
+                    let _ = weak.update(cx, |this, cx| this.generate_avatar(cx));
+                }));
+            });
+        }
+        cx.observe(&avatar_prompt_input, |_, _, cx| cx.notify())
+            .detach();
         let search_input = cx.new(ComposerInput::new);
         search_input.update(cx, |input, _| input.set_placeholder("Search"));
         let viewer_search = cx.new(ComposerInput::new);
@@ -683,6 +733,8 @@ impl Shell {
             create_leaf: None,
             create_leaf_color: None,
             create_group_open,
+            avatar_picker: None,
+            avatar_prompt_input,
             search_input,
             viewer_search,
             viewer_focus: cx.focus_handle(),
@@ -731,6 +783,8 @@ impl Shell {
             channels,
             secrets,
             shake_started_at: None,
+            file_drop_over: false,
+            fixture_drag_over: std::env::var("ARBOS_FIXTURE_DRAG_OVER").is_ok_and(|v| v == "1"),
             signing_in: false,
             menu_open: false,
             search_open: false,
@@ -1053,6 +1107,136 @@ impl Shell {
             CreateKind::Agent | CreateKind::Group => self.close_new_chat_sheet(window, cx),
             CreateKind::Server => self.close_server_sheet(window, cx),
         }
+    }
+
+    /// The avatar picker (D92 amendment) over the window, for an agent or a group I can edit.
+    pub(crate) fn open_avatar_picker(
+        &mut self,
+        target: avatar_picker::Target,
+        cx: &mut Context<Self>,
+    ) {
+        self.avatar_prompt_input
+            .update(cx, |input, cx| input.set_text(String::new(), cx));
+        self.avatar_picker = Some(avatar_picker::Picker::new(target));
+        cx.notify();
+    }
+
+    pub(crate) fn close_avatar_picker(&mut self, cx: &mut Context<Self>) {
+        self.avatar_picker = None;
+        cx.notify();
+    }
+
+    /// Generate tab: ask the relay for a picture from the prompt (preview only; Set applies).
+    pub(crate) fn generate_avatar(&mut self, cx: &mut Context<Self>) {
+        let prompt = self.avatar_prompt_input.read(cx).text().trim().to_string();
+        let Some(pk) = self.avatar_picker.as_mut() else {
+            return;
+        };
+        if prompt.is_empty() || pk.generating {
+            return;
+        }
+        let avatar_picker::Target::Agent(project_id) = pk.target.clone() else {
+            return;
+        };
+        pk.generating = true;
+        pk.error = None;
+        pk.reset = false;
+        self.state.update(cx, |s, cx| {
+            s.generate_project_image(project_id, prompt, cx);
+        });
+        cx.notify();
+    }
+
+    /// Upload tab: the image-only panel; the choice previews until Set.
+    pub(crate) fn choose_avatar_file(&mut self, cx: &mut Context<Self>) {
+        let rx = image_picker::pick_image(cx, "Choose");
+        cx.spawn(async move |this, cx| {
+            let Ok(Some(path)) = rx.await else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
+                if let Some(pk) = this.avatar_picker.as_mut() {
+                    pk.upload = Some(path);
+                    pk.reset = false;
+                    pk.error = None;
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// "Set avatar": apply the sheet's pending choice and close it.
+    pub(crate) fn set_avatar(&mut self, cx: &mut Context<Self>) {
+        let Some(pk) = self.avatar_picker.take() else {
+            return;
+        };
+        let id = pk.target.id().clone();
+        self.state.update(cx, |s, cx| match &pk.target {
+            avatar_picker::Target::Agent(_) => {
+                if pk.reset {
+                    s.set_avatar_leaf(id, None, None, cx);
+                } else {
+                    match pk.tab {
+                        avatar_picker::Tab::Bot => {
+                            let current = s
+                                .projects
+                                .iter()
+                                .find(|p| p.id == id)
+                                .map(crate::ui::avatars::project_leaf)
+                                .unwrap_or_else(|| leaf::pick_for(&id, None, None));
+                            s.set_avatar_leaf(
+                                id,
+                                Some(pk.leaf.unwrap_or(current.leaf)),
+                                Some(pk.color.unwrap_or(current.color)),
+                                cx,
+                            );
+                        }
+                        avatar_picker::Tab::Generate => {
+                            if let Some((key, _)) = pk.generated {
+                                s.set_project_image(id, PictureSource::Key(key), cx);
+                            }
+                        }
+                        avatar_picker::Tab::Upload => {
+                            if let Some(path) = pk.upload {
+                                s.set_project_image(id, PictureSource::File(path), cx);
+                            }
+                        }
+                    }
+                }
+            }
+            avatar_picker::Target::Group(_) => {
+                if pk.reset {
+                    s.set_group_leaf(id, None, cx);
+                } else {
+                    match pk.tab {
+                        avatar_picker::Tab::Bot => {
+                            let current = s
+                                .projects
+                                .iter()
+                                .find(|p| p.id == id)
+                                .map(crate::ui::avatars::project_leaf)
+                                .unwrap_or_else(|| leaf::pick_for(&id, None, None));
+                            s.set_group_leaf(
+                                id,
+                                Some(LeafPick {
+                                    leaf: pk.leaf.unwrap_or(current.leaf),
+                                    color: pk.color.unwrap_or(current.color),
+                                }),
+                                cx,
+                            );
+                        }
+                        avatar_picker::Tab::Upload => {
+                            if let Some(path) = pk.upload {
+                                s.set_group_image(id, path, cx);
+                            }
+                        }
+                        avatar_picker::Tab::Generate => {}
+                    }
+                }
+            }
+        });
+        cx.notify();
     }
 
     /// Double-click an agent's name: load it into the rename field and focus.
@@ -1421,22 +1605,6 @@ impl Shell {
             };
             cx.update(|cx| {
                 state.update(cx, |s, cx| s.set_my_avatar(path, cx));
-            });
-        })
-        .detach();
-    }
-
-    /// The crayon on a group's picture: pick an image (images only in the
-    /// panel), upload it.
-    pub(crate) fn pick_group_image(&mut self, space_id: crate::model::Id, cx: &mut Context<Self>) {
-        let rx = image_picker::pick_image(cx, "Choose");
-        let state = self.state.clone();
-        cx.spawn(async move |_, cx| {
-            let Ok(Some(path)) = rx.await else {
-                return;
-            };
-            cx.update(|cx| {
-                state.update(cx, |s, cx| s.set_group_image(space_id, path, cx));
             });
         })
         .detach();
@@ -2191,13 +2359,19 @@ impl Shell {
                     .and_then(|p| state.avatar(&p.avatar_url)),
             )
         });
-        let typing = chat_id.as_deref().and_then(|id| state.typing_in(id));
+        // The one presence row over the composer: who is typing (people) or
+        // working (agents), pictures + one line, left-bound in the chat column
+        // ([feedback typing-indicator-left-2026-10-23]).
+        let presence = chat_id
+            .as_deref()
+            .zip(project.as_ref())
+            .and_then(|(id, space)| crate::ui::presence::gather(state, id, space, &theme));
         // D88: a channel in the centre — the same transcript, the unified pill with the
         // server's disc and `# name`, and the composer (or rule 9's one quiet line).
         let channel = state
             .selected_channel_info()
             .map(|(server, ch)| (server.clone(), ch.clone(), state.channel_can_post()));
-        if animating || shake.is_some() {
+        if animating || shake.is_some() || presence.is_some() {
             PulseClock::request(cx);
         }
 
@@ -2262,20 +2436,14 @@ impl Shell {
                         .child("Only admins post here"),
                 )
             };
-            return Self::chat_frame(
+            let column = Self::chat_frame(
                 column,
                 header_bar,
                 pre,
                 self.transcript.clone().into_any_element(),
                 vec![bottom.into_any_element()],
-            )
-            .group("chat-drop")
-            .can_drop(|dragged, _, _| dragged.is::<ExternalPaths>())
-            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
-                this.composer.update(cx, |c, cx| {
-                    c.add_paths(paths.paths().iter().cloned(), cx);
-                });
-            }));
+            );
+            return self.file_drop_target(column, &theme, cx);
         }
 
         let Some(space) = project else {
@@ -2437,9 +2605,8 @@ impl Shell {
             // Transcript above, composer pinned at the bottom. On the first
             // send the composer slides down from the centre over 220 ms using
             // a relative `top` inset (GPUI has no transform).
-            if typing.is_some() {
-                PulseClock::request(cx);
-            }
+            let presence_row = presence
+                .map(|p| column_row(crate::ui::presence::row(p, &theme, cx).into_any_element()));
             let composer_row = div()
                 .w_full()
                 .flex()
@@ -2447,11 +2614,7 @@ impl Shell {
                 .items_center()
                 .pb(px(COMPOSER_BOTTOM))
                 .pt(px(6.0))
-                .when_some(typing, |el, handle| {
-                    el.child(column_row(
-                        people::typing_line(&handle, &theme).into_any_element(),
-                    ))
-                })
+                .children(presence_row)
                 .child(composer_block);
             let composer_row = if animating {
                 composer_row
@@ -2477,17 +2640,39 @@ impl Shell {
                 vec![self.voice.clone().into_any_element(), composer_row],
             );
         }
-        // Accept Finder / file drops anywhere over the conversation (transcript,
-        // empty hero, or composer) — not only the input field. The composer
-        // field uses `group_drag_over("chat-drop")` for the accent highlight.
-        column
-            .group("chat-drop")
-            .can_drop(|dragged, _, _| dragged.is::<ExternalPaths>())
-            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+        self.file_drop_target(column, &theme, cx)
+    }
+
+    /// Finder / file drops land anywhere over the conversation (transcript,
+    /// empty hero, header or composer — the sidebar and right pane are not
+    /// part of it), and the whole pane lights up while the drag is over it
+    /// ([feedback chat-drop-highlight-2026-10-23], `ui::dropzone`).
+    fn file_drop_target(
+        &self,
+        column: Stateful<Div>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let over = self.fixture_drag_over || (self.file_drop_over && cx.has_active_drag());
+        dropzone::target(
+            column,
+            over,
+            theme,
+            cx,
+            Self::set_file_drop_over,
+            |this, paths, _, cx| {
                 this.composer.update(cx, |c, cx| {
                     c.add_paths(paths.paths().iter().cloned(), cx);
                 });
-            }))
+            },
+        )
+    }
+
+    fn set_file_drop_over(&mut self, over: bool, cx: &mut Context<Self>) {
+        if self.file_drop_over != over {
+            self.file_drop_over = over;
+            cx.notify();
+        }
     }
 
     fn render_details(&self, target: &DetailsTarget, cx: &mut Context<Self>) -> impl IntoElement {
@@ -3457,6 +3642,9 @@ impl Render for Shell {
             if let Some(space) = selected.as_ref().filter(|s| !s.is_people()) {
                 root = root.child(voicepicker::sheet(self, space, cx));
             }
+        }
+        if let Some(picker) = self.avatar_picker.clone() {
+            root = root.child(avatar_picker::sheet(self, &picker, cx));
         }
         if new_chat_open {
             // D93: "New agent" / "New group" open the Create screen over the same backdrop

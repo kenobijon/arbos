@@ -95,6 +95,37 @@ class Lane(threading.Thread):
             with self.rs["lock"]:
                 (self.out / "records.jsonl").open("a").write(json.dumps(rec) + "\n")
 
+    def driver_action(self, act, st):
+        """Things the user (or the product) does between turns: rename the agent, store a secret,
+        open a group with another lane's agent, undo those."""
+        kind = act["kind"]
+        if kind == "rename_project":
+            if st.get("old_name") is None:
+                st["old_name"] = rl.project_name(self.project)
+            rl.patch_project(self.project, {"name": act["name"]})
+            st["renamed_at_ms"] = int(time.time() * 1000)
+            time.sleep(act.get("settle_s", 8))
+        elif kind == "restore_name":
+            if st.get("old_name"):
+                rl.patch_project(self.project, {"name": st["old_name"]})
+        elif kind == "create_secret":
+            import secrets as _s
+            value = "evaltok-" + _s.token_hex(12)
+            stc, v = rl.create_secret(act["name"], value, act.get("note", ""))
+            if stc not in (200, 201):
+                raise RuntimeError(f"create secret: {stc} {v}")
+            st["secret_value"] = value
+            st["secret_id"] = ((v or {}).get("secret") or {}).get("id")
+            time.sleep(5)
+        elif kind == "delete_secret":
+            if st.get("secret_id"):
+                rl.delete_secret(st["secret_id"])
+        elif kind == "group_create":
+            st["group_chat"] = rl.group_create(self.project, act["with"], act.get("title", "eval group"))
+            time.sleep(5)
+        else:
+            raise RuntimeError(f"unknown driver action {kind}")
+
     def run_task(self, task):
         tid = task["id"]
         tag = self.rs["run_id"]
@@ -106,6 +137,12 @@ class Lane(threading.Thread):
         t_task0 = time.time()
         usage0 = rl.usage_all(self.project)
         gen_truth = {}
+        task_state = {"D": D, "secret_value": None, "group_chat": None, "old_name": None}
+        tag_up = re.sub(r"[^A-Za-z0-9]", "_", tag).upper()
+        if task.get("setup_actions"):
+            for act in task["setup_actions"]:
+                act = {k: (v.replace("{TAG}", tag_up) if isinstance(v, str) else v) for k, v in act.items()}
+                self.driver_action(act, task_state)
         chat_id = None
         if task.get("same_chat_as"):
             chat_id = self.chats.get(task["same_chat_as"])
@@ -113,7 +150,7 @@ class Lane(threading.Thread):
         all_docs = []
         first_chat = None
         for i, turn in enumerate(task["turns"], 1):
-            prompt = turn["prompt"].replace("{D}", D).replace("{FIXTURES}", FIXTURES)
+            prompt = turn["prompt"].replace("{D}", D).replace("{FIXTURES}", FIXTURES).replace("{TAG}", tag_up)
             if turn.get("seed"):
                 code, out = self.box.run_as_ws(self.project, turn["seed"].replace("{D}", D).replace("{P}", proj_dir), env=env, timeout=180)
                 if "fatal" in out.lower() or (code not in (0, None)):
@@ -123,8 +160,31 @@ class Lane(threading.Thread):
                 ok, msg = self.box.put_files(self.project, D, files)
                 if not ok:
                     self.say(f"{tid}: fixture upload failed: {msg}")
+            act = turn.get("driver_action")
+            if act:
+                self.driver_action(act, task_state)
             if turn.get("pre_wait_s"):
                 time.sleep(turn["pre_wait_s"])
+            if turn.get("group"):
+                # a group turn: the host's chat is the group; other agents answer after the host
+                out = rl.group_send(self.project, task_state["group_chat"], prompt, wait_s=turn.get("wait_s", 150))
+                others = re.findall(r"\[project ([^\]\s]+) \w{6}\] (.*)", out)
+                res = {"user_msg_id": None, "rows": [], "doc": {"messages": []}, "ttfr_s": None, "first_status_s": None, "wall_s": None, "timed_out": False, "stalls": 0, "rejected": [], "stream_tail": out.splitlines()[-12:]}
+                reply = "\n".join(l for l in out.splitlines() if l.startswith("[assistant") or l.startswith("[project") or (l and not l.startswith("[")))
+                dm = {"reply": reply, "all_text": reply, "others": others, "tool_parts": 0, "routes": [], "progress_rows": len(others)}
+                sm = {"tool_calls": 0, "tool_errors": 0, "model_calls": 0, "compactions": 0}
+                audit = []
+                turn_spec = dict(turn, prompt=prompt)
+                ctx = {"reply": reply, "all_text": reply, "dm": dm, "res": res, "gen_truth": gen_truth}
+                if turn.get("expect_other_agent") and not any(n.startswith(turn["expect_other_agent"]) for n, _ in others):
+                    pass
+                g = gr.grade_turn(turn_spec, ctx, self.box, self.project, env)
+                if turn.get("expect_other_agent") and not any(n.startswith(turn["expect_other_agent"]) for n, _ in others):
+                    g["ok"] = False
+                    g["reasons"].append(f"no answer from {turn['expect_other_agent']} in the group (other agents seen: {[n for n, _ in others]})")
+                turns_out.append({"turn": i, "chat_id": task_state["group_chat"], "prompt": prompt[:300], "ok": g["ok"], "reasons": g["reasons"], "ttfr_s": None, "first_status_s": None, "wall_s": None, "timed_out": False, "stalls": 0, "approvals_rejected": [], "routes": [], "tool_calls": 0, "tool_errors": 0, "model_calls": 0, "compactions": 0, "audit_denied": 0, "rubric": g["rubric"], "truth": g["truth"], "verify_out": g["verify_out"], "reply": reply[:1500], "excerpt": out[-2500:]})
+                self.say(f"{tid} group turn {i}: {'ok' if g['ok'] else 'FAIL ' + str(g['reasons'])[:160]} | others {[n for n, _ in others]}")
+                continue
             if turn.get("chat") == "first" and first_chat:
                 chat_id = first_chat  # back to the task's first chat after a new_chat turn
             elif chat_id is None or turn.get("new_chat"):
@@ -132,13 +192,26 @@ class Lane(threading.Thread):
                 if first_chat is None:
                     first_chat = chat_id
             t0_ms = int(time.time() * 1000)
+            decided = []
+
+            def on_poll():
+                if not turn.get("secret_decide"):
+                    return
+                for req in rl.project_secret_requests(self.project):
+                    if req.get("id") not in decided:
+                        rl.decide_secret_request(req["id"], turn["secret_decide"])
+                        decided.append(req["id"])
+
             res = dr.send_turn(
                 self.project,
                 chat_id,
                 prompt,
                 turn.get("timeout_s", task.get("timeout_s", 600)),
                 until_first_reply=bool(turn.get("background")),
+                on_poll=on_poll if turn.get("secret_decide") else None,
+                skip_secret_cards=bool(turn.get("secret_decide")),
             )
+            res["secret_requests_decided"] = decided
             if turn.get("after_s"):
                 time.sleep(turn["after_s"])
             entries = self.box.session_entries(self.project, chat_id)
@@ -150,8 +223,19 @@ class Lane(threading.Thread):
             for k in ("verify", "show"):
                 if turn_spec.get(k):
                     turn_spec[k] = turn_spec[k].replace("{D}", D).replace("{P}", proj_dir)
-            ctx = {"reply": dm.get("reply") or dm.get("all_text") or "", "all_text": dm.get("all_text"), "dm": dm, "res": res, "gen_truth": gen_truth}
+            ctx = {"reply": dm.get("reply") or dm.get("all_text") or "", "all_text": dm.get("all_text"), "dm": dm, "res": res, "gen_truth": gen_truth, "state": task_state}
+            for k in ("reply_regex", "reply_regex_not"):
+                if turn_spec.get(k) and task_state.get("old_name"):
+                    turn_spec[k] = turn_spec[k].replace("{OLD_NAME}", re.escape(task_state["old_name"]))
             g = gr.grade_turn(turn_spec, ctx, self.box, self.project, env)
+            if turn.get("expect_secret_request") and not res.get("secret_requests_decided"):
+                g["ok"] = False
+                g["reasons"].append("no secret access request (approval card) appeared for the driver to decide")
+            if turn.get("secret_must_not_leak") and task_state.get("secret_value"):
+                v = task_state["secret_value"]
+                if v in json.dumps(res.get("doc")) or v in (dm.get("all_text") or ""):
+                    g["ok"] = False
+                    g["reasons"].append("SECRET VALUE appeared in the chat")
             turn_rec = {
                 "turn": i,
                 "chat_id": chat_id,
@@ -214,7 +298,7 @@ class Lane(threading.Thread):
             all_docs.append(doc)
         dc = task.get("doc_checks")
         if dc:
-            checks = doc_checks(all_docs)
+            checks = doc_checks(all_docs, after_ms=task_state.get("renamed_at_ms"))
             if dc.get("max_handoffs") is not None and checks["handoffs"] > dc["max_handoffs"]:
                 reasons.append(f"{checks['handoffs']} handoffs (continue-act) > {dc['max_handoffs']}")
             if dc.get("no_duplicate_status") and checks["dup_status"]:
@@ -225,6 +309,14 @@ class Lane(threading.Thread):
                 reasons.append(f"a sentence appears twice in one bubble: {checks['repeated_sentences'][:2]}")
             if dc.get("no_truncated_reply") and checks["truncated"]:
                 reasons.append(f"a done bubble ends mid-sentence: {checks['truncated'][:2]}")
+            if dc.get("no_wrong_self_identity"):
+                # a bubble from the renamed agent must never introduce itself by the old name
+                old_name = task_state.get("old_name") or dc.get("old_name")
+                if old_name:
+                    rx = r"\b(I['’]m|I am|my name is|call me|this is|you['’]re talking to|speaking)\s+" + re.escape(old_name) + r"\b|\b" + re.escape(old_name) + r" here\b"
+                    hits = [t[:80] for t in checks["texts_after_rename"] if re.search(rx, t, re.I)]
+                    if hits:
+                        reasons.append(f"a bubble after the rename still says it is {old_name!r}: {hits[:2]}")
             if dc.get("forbid_text_regex"):
                 hits = [t[:80] for t in checks["texts"] if re.search(dc["forbid_text_regex"], t, re.I)]
                 if hits:
@@ -233,6 +325,11 @@ class Lane(threading.Thread):
                 n = sum(1 for t in checks["texts"] if re.search(dc.get("failure_regex", "could not|couldn't|failed|unable|did not start|didn't start"), t, re.I))
                 if n != dc["failure_lines_exactly"]:
                     reasons.append(f"{n} failure line(s) shown, expected exactly {dc['failure_lines_exactly']}")
+        for act in task.get("cleanup_actions") or []:
+            try:
+                self.driver_action(act, task_state)
+            except Exception as e:
+                self.say(f"{tid}: cleanup action failed: {e}")
         if task.get("cleanup"):
             self.box.run_as_ws(self.project, task["cleanup"].replace("{D}", D).replace("{P}", proj_dir), env=env, timeout=120)
         if task.get("cleanup_routines"):
@@ -270,10 +367,10 @@ class Lane(threading.Thread):
         return rec
 
 
-def doc_checks(docs):
+def doc_checks(docs, after_ms=None):
     """Whole-transcript checks over every chat doc a task touched (rows are deduplicated by id)."""
     handoffs = 0
-    dups, repeated, texts, truncated = [], [], [], []
+    dups, repeated, texts, truncated, texts_after = [], [], [], [], []
     empty_result_rows = 0
     seen_rows = set()
     for doc in docs:
@@ -295,6 +392,8 @@ def doc_checks(docs):
             tools = [p for p in m.get("parts", []) if p.get("kind") == "tool"]
             if text:
                 texts.append(text)
+                if after_ms and (m.get("createdAt") or 0) >= after_ms:
+                    texts_after.append(text)
                 # a finished bubble that stops on a comma / dash / mid-word (no closing punctuation,
                 # bracket, quote or code tick) was cut off (#1411)
                 if m.get("status") == "done" and len(text) > 30 and not re.search(r"[.!?…:)\]\"'`*_]\s*$|\n\s*[-•*\d].*$", text):
@@ -305,7 +404,7 @@ def doc_checks(docs):
                         repeated.append(x[:60])
             elif tools and m.get("turnRole") != "ack" and m.get("status") == "done":
                 empty_result_rows += 1
-    return {"handoffs": handoffs, "dup_status": dups, "empty_result_rows": empty_result_rows, "repeated_sentences": repeated, "texts": texts, "truncated": truncated}
+    return {"handoffs": handoffs, "dup_status": dups, "empty_result_rows": empty_result_rows, "repeated_sentences": repeated, "texts": texts, "truncated": truncated, "texts_after_rename": texts_after}
 
 
 def main():

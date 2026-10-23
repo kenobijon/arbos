@@ -1,0 +1,19 @@
+{
+  "id": "l4-media-pipeline",
+  "lane": "d",
+  "category": "long",
+  "title": "Audio file: convert, measure, draw a waveform, report",
+  "turns": [
+    {
+      "prompt": "{D}/tone.wav is a 90-second stereo recording. Convert it to Ogg Vorbis as {D}/tone.ogg, render a waveform image of it to {D}/waveform.png, and write {D}/media-report.md with the duration in seconds (one decimal), the sample rate, the channel count and the output file sizes. Then give me the duration and sample rate.",
+      "seed": "mkdir -p {D} && python3 - <<'EOF'\nimport math, struct, wave\nw = wave.open('{D}/tone.wav', 'wb'); w.setnchannels(2); w.setsampwidth(2); w.setframerate(22050)\nn = 22050 * 90\nfr = bytearray()\nfor i in range(n):\n    v = int(12000 * math.sin(2 * math.pi * 440 * i / 22050) * (0.5 + 0.5 * math.sin(2 * math.pi * i / (22050 * 6))))\n    fr += struct.pack('<hh', v, -v)\nw.writeframes(bytes(fr)); w.close()\nEOF",
+      "verify": "cd {D}; test -f tone.ogg || { echo FAIL: no tone.ogg; exit 0; }; test -f waveform.png || { echo FAIL: no waveform.png; exit 0; }; test -f media-report.md || { echo FAIL: no report; exit 0; }; d=$(ffprobe -v error -show_entries format=duration -of csv=p=0 tone.ogg 2>/dev/null | cut -c1-5); m=$(head -c 8 waveform.png | od -An -tx1 | tr -d ' \\n'); echo \"SHOW ogg_duration=$d png_magic=$m\"; sed 's/^/SHOW /' media-report.md | head -20; case $d in 89.*|90.*) ok=1;; *) ok=0;; esac; if [ $ok = 1 ] && [ \"$m\" = 89504e470d0a1a0a ]; then echo PASS; else echo FAIL: duration=$d png=$m; fi",
+      "reply_regex": "90\\.?\\d*\\s*s|90 seconds|89\\.\\d",
+      "rubric": {
+        "criteria": "Report states ≈ 90.0 s, 22050 Hz, 2 channels and the output sizes; the reply gives the duration and sample rate.",
+        "min": 3
+      },
+      "timeout_s": 900
+    }
+  ]
+}

@@ -17,7 +17,10 @@ set -u
 LOG=/var/log/arbos-mac-clean.log
 # `--if-low`: the opportunistic mode (launchd sh.arbos.mac-clean-low every 30 min, and the Rust gate when it
 # refuses a build): do nothing unless the data volume has less than LOW_FREE_GB free.
-LOW_FREE_GB=${LOW_FREE_GB:-10}
+# 15 GB (was 10): the Rust gate refuses a release build at 4 GB and a Mac release build needs ~10 GB
+# of scratch, so at 10 GB the 30-min pass came too late (2026-10-23 16:50: 8 GB free, a gate build
+# refused that hour while the release lane's debug tree held 36 GB).
+LOW_FREE_GB=${LOW_FREE_GB:-15}
 if [ "${1:-}" = "--if-low" ]; then
   f=$(df -g /System/Volumes/Data | awk 'NR==2 {print $4}')
   [ "${f:-99}" -lt "$LOW_FREE_GB" ] || exit 0
@@ -101,7 +104,9 @@ fi
 # 15 GB free on the volume). The release/ and per-arch trees are what keeps releases warm; debug/ is only
 # the smoke test's cache, rebuilt in a few minutes. Dropped when space is short and no cargo runs.
 RELEASE_DEBUG=/Users/arbosgui/arbos-release-target/debug
-if [ "$(free_gb)" -lt "$MIN_FREE_GB" ] && [ -d "$RELEASE_DEBUG" ] && ! pgrep -qx cargo && ! pgrep -qx rustc; then
+# Only the release lane's own cargo (user arbosgui) can hold this tree; the gate's builds run as
+# ec2-user in other target dirs and must not keep it alive (they almost always run).
+if [ "$(free_gb)" -lt "$MIN_FREE_GB" ] && [ -d "$RELEASE_DEBUG" ] && ! pgrep -u arbosgui -qx cargo && ! pgrep -u arbosgui -qx rustc; then
   sz=$(du -sg "$RELEASE_DEBUG" 2>/dev/null | cut -f1)
   rm -rf "$RELEASE_DEBUG" && say "removed the release lane's debug target tree (${sz:-?} GB; the smoke test rebuilds it)"
 fi

@@ -102,10 +102,12 @@ enum RowKind: Equatable {
     /// only when the sender changed (`named`, Grok Bot's group style).
     case other(text: String, handle: String, avatar: String?, named: Bool, quote: Quote?)
     case assistant(blocks: [Block], live: Bool, caption: String?)
-    /// Shared agent in a people chat: same shape as `.other` (avatar + bubble, name on sender
-    /// change). No "answering @x · owned by @y" meta — ownership lives in the profile pane
+    /// Shared agent in a people chat: same shape as `.other` (avatar + bubble, name on each
+    /// reply — consecutive answers from the same agent must not merge, #1447). No
+    /// "answering @x · owned by @y" meta — ownership lives in the profile pane
     /// (Jacob, 2026-10-22). `agentId` opens that pane from the avatar / name.
-    case member(blocks: [Block], live: Bool, handle: String, avatar: String?, named: Bool, agentId: String?)
+    /// `quote` is the user message this answers (`inReplyTo`).
+    case member(blocks: [Block], live: Bool, handle: String, avatar: String?, named: Bool, agentId: String?, quote: Quote?)
     /// Centred muted line: hand-offs ("Messaged ◉ Affine"), stops, dates.
     case system(icon: String?, text: String, avatarProject: Id?)
     /// Grok Bot question card: bold question, × top-right, lettered answer rows.
@@ -171,7 +173,10 @@ enum Transcript {
             var chunk: [Row] = []
             let streaming = message.isStreaming
             let dateBreak = message.createdAt > 0 && (lastAt == 0 || message.createdAt - lastAt > 3_600_000)
-            let named = dateBreak || prevSender != message.sender
+            // People-chat agent replies always name the sender (#1447): two answers in a
+            // row from the same agent must not look like one run.
+            let agentInPeople = people && (message.role == .assistant || message.role == .project)
+            let named = dateBreak || prevSender != message.sender || agentInPeople
             switch message.role {
             case .user:
                 var hasImage = false
@@ -227,6 +232,8 @@ enum Transcript {
                 let lastTextPart = message.parts.lastIndex { $0.textValue != nil }
                 let firstTextPart = message.parts.firstIndex { $0.textValue != nil }
                 let agentId: String? = message.sender.hasPrefix("agent:") ? String(message.sender.dropFirst(6)) : nil
+                // Quote the user message this answers (`inReplyTo`); same chip as a human reply.
+                let replyQuote = message.inReplyTo.flatMap { $0.isEmpty ? nil : Quote.forReply($0, in: byId) }
                 // Error parts wait until the prose is known: under a real answer they stay the
                 // chip with Retry; on an answer with no words they become the words.
                 var errors: [(id: Id, code: String, text: String)] = []
@@ -243,7 +250,8 @@ enum Transcript {
                             chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
                                              kind: .member(blocks: blocks, live: live, handle: h,
                                                            avatar: message.senderAvatar, named: named && pix == firstTextPart,
-                                                           agentId: agentId)))
+                                                           agentId: agentId,
+                                                           quote: pix == firstTextPart ? replyQuote : nil)))
                         } else {
                             chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
                                              kind: .assistant(blocks: blocks, live: live, caption: nil)))
@@ -306,7 +314,8 @@ enum Transcript {
                     if people, let h = message.senderHandle {
                         chunk.append(Row(id: "\(message.id)#failed", messageId: message.id, role: .assistant,
                                          kind: .member(blocks: blocks, live: false, handle: h,
-                                                       avatar: message.senderAvatar, named: named, agentId: agentId)))
+                                                       avatar: message.senderAvatar, named: named, agentId: agentId,
+                                                       quote: replyQuote)))
                     } else {
                         chunk.append(Row(id: "\(message.id)#failed", messageId: message.id, role: .assistant,
                                          kind: .assistant(blocks: blocks, live: false, caption: nil)))
@@ -714,7 +723,6 @@ enum Markdown {
 struct RowView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
-    @ObservedObject private var accents = SenderAccents.shared
     let row: Row
     let chatId: Id
     let width: CGFloat
@@ -724,9 +732,21 @@ struct RowView: View {
     var onQuoteTap: ((Id) -> Void)? = nil
     /// Briefly tinted after a quote tap landed on this row's message.
     var highlighted: Bool = false
+    /// Swipe right on this bubble → reply (same as the long-press Reply item).
+    /// Nil on system / channel / non-message rows.
+    var onReply: (() -> Void)? = nil
+    /// ChatView sets this while a reply swipe is locked so swipe-right-to-back does not fire.
+    var replySwipeActive: Binding<Bool> = .constant(false)
+    /// Mention chips (Oct 23): who `@handle` resolves to.
+    private var mentions: MentionTable { MentionTable(model: model, theme: theme) }
 
     /// Trailing column width for swipe-revealed times (fits "12:59 PM").
     static let timeRevealWidth: CGFloat = 56
+    /// How far a right swipe pulls the bubble before reply arms (Telegram-style).
+    static let replySwipeWidth: CGFloat = 56
+
+    @State private var replyDrag: CGFloat = 0
+    @State private var replyLocked = false
 
     private var maxBubble: CGFloat { max(200, width - Theme.bubbleInset) }
 
@@ -764,8 +784,8 @@ struct RowView: View {
                 .padding(-4)
         )
         .animation(.easeInOut(duration: 0.35), value: highlighted)
-        // iMessage: drag left → whole row slides; time sits on the trailing edge.
-        .offset(x: -timeReveal)
+        // iMessage: drag left → times; Telegram: drag right → reply. Mutually exclusive.
+        .offset(x: replyDrag - timeReveal)
         .overlay(alignment: .trailing) {
             if let time = swipeTimeLabel, timeReveal > 0.5 {
                 Text(time)
@@ -778,6 +798,59 @@ struct RowView: View {
                     .accessibilityHidden(timeReveal < 12)
             }
         }
+        .overlay(alignment: .leading) {
+            if onReply != nil, replyDrag > 0.5 {
+                Image(systemName: "arrowshape.turn.up.left")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(theme.accent)
+                    .frame(width: Self.replySwipeWidth, alignment: .leading)
+                    .offset(x: replyDrag - Self.replySwipeWidth)
+                    .opacity(Double(min(1, replyDrag / (Self.replySwipeWidth * 0.55))))
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(replyDrag < 12)
+            }
+        }
+        .simultaneousGesture(replySwipeGesture)
+    }
+
+    /// Drag right on a message to reply. Locks only after a clear horizontal-right
+    /// pan so vertical scroll and swipe-left time reveal stay free.
+    private var replySwipeGesture: some Gesture {
+        DragGesture(minimumDistance: 12, coordinateSpace: .local)
+            .onChanged { value in
+                guard onReply != nil else { return }
+                let dx = value.translation.width
+                let dy = value.translation.height
+                if !replyLocked {
+                    guard abs(dx) + abs(dy) >= 12 else { return }
+                    // Vertical scroll or swipe-left time peek: do not steal.
+                    guard dx > 0, abs(dx) > abs(dy) * 1.15 else { return }
+                    replyLocked = true
+                    replySwipeActive.wrappedValue = true
+                }
+                let raw = max(0, dx)
+                let w = Self.replySwipeWidth
+                let reveal = raw <= w ? raw : w + min(24, (raw - w) * 0.2)
+                var t = Transaction()
+                t.disablesAnimations = true
+                withTransaction(t) { replyDrag = reveal }
+            }
+            .onEnded { _ in
+                let triggered = replyLocked && replyDrag >= Self.replySwipeWidth * 0.7
+                replyLocked = false
+                withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
+                    replyDrag = 0
+                }
+                if triggered {
+                    Haptics.pick()
+                    onReply?()
+                }
+                // Keep the back-swipe suppress flag until after ChatView's simultaneous
+                // swipe-right-to-Home onEnded has run (same drag).
+                DispatchQueue.main.async {
+                    replySwipeActive.wrappedValue = false
+                }
+            }
     }
 
     @ViewBuilder
@@ -790,7 +863,7 @@ struct RowView: View {
                     if let quote {
                         quoteHeader(quote, color: theme.userText)
                     }
-                    Text(Markdown.inline(text, color: theme.userText, link: theme.accent, codeChip: theme.userCodeChip))
+                    Markdown.inlineText(text, color: theme.userText, link: theme.accent, codeChip: theme.userCodeChip, mentions: mentions)
                         .font(theme.font(Theme.body))
                         .lineSpacing(Theme.bodyLineSpacing)
                         .tint(theme.accent)
@@ -803,11 +876,12 @@ struct RowView: View {
                 .opacity(pending ? 0.6 : 1)
             }
         case .other(let text, let handle, let avatar, let named, let quote):
-            HStack(alignment: .bottom, spacing: 8) {
+            HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
                 Button { model.openPersonProfile(handle: handle, avatarUrl: avatar, chatId: chatId) } label: {
-                    PersonAvatar(url: avatar, handle: handle, size: 26, name: model.personName(handle: handle), id: model.personId(handle: handle))
+                    PersonAvatar(url: avatar, handle: handle, size: Theme.memberAvatar, name: model.personName(handle: handle), id: model.personId(handle: handle))
                 }
                 .buttonStyle(.plain)
+                .padding(.leading, Theme.avatarColumnInset)
                 .accessibilityLabel("@\(handle), profile")
                 VStack(alignment: .leading, spacing: 3) {
                     if named {
@@ -823,7 +897,7 @@ struct RowView: View {
                         if let quote {
                             quoteHeader(quote, color: theme.text)
                         }
-                        Text(Markdown.inline(text, color: theme.text, link: theme.accent, codeChip: theme.codeChip))
+                        Markdown.inlineText(text, color: theme.text, link: theme.accent, codeChip: theme.codeChip, mentions: mentions)
                             .font(theme.font(Theme.body))
                             .lineSpacing(Theme.bodyLineSpacing)
                             .tint(theme.accent)
@@ -832,19 +906,20 @@ struct RowView: View {
                     .padding(.horizontal, Theme.bubbleHPad)
                     .padding(.vertical, Theme.bubbleVPad)
                     .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
-                    .senderBar(personAccent(handle: handle, avatar: avatar))
+                    .modifier(LiveSenderBar(url: avatar, seed: model.personId(handle: handle) ?? handle))
                 }
-                .frame(maxWidth: maxBubble - 34, alignment: .leading)
+                .frame(maxWidth: maxBubble - Theme.memberLane, alignment: .leading)
                 Spacer(minLength: 0)
             }
-            .task(id: avatar) { accents.load(url: avatar) }
-        case .member(let blocks, let live, let handle, let avatar, let named, let agentId):
+            .task(id: avatar) { SenderAccents.shared.load(url: avatar) }
+        case .member(let blocks, let live, let handle, let avatar, let named, let agentId, let quote):
             let openMember = {
                 if let agentId { model.showProfile(.agent(projectId: agentId)) }
                 else { model.openPersonProfile(handle: handle, avatarUrl: avatar, chatId: chatId) }
             }
-            HStack(alignment: .bottom, spacing: 8) {
+            HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
                 Button(action: openMember) { peopleAvatar(handle: handle, avatar: avatar) }
+                    .padding(.leading, Theme.avatarColumnInset)
                     .buttonStyle(.plain)
                     .accessibilityLabel("@\(handle), profile")
                 VStack(alignment: .leading, spacing: 3) {
@@ -857,20 +932,25 @@ struct RowView: View {
                         }
                         .buttonStyle(.plain)
                     }
-                    VStack(alignment: .leading, spacing: 8) {
-                        ForEach(Array(blocks.enumerated()), id: \.offset) { i, block in
-                            BlockView(block: block, live: live && i == blocks.count - 1)
+                    memberBubble(
+                        handle: handle,
+                        avatar: avatar,
+                        content: VStack(alignment: .leading, spacing: 8) {
+                            if let quote {
+                                quoteHeader(quote, color: theme.text)
+                            }
+                            ForEach(Array(blocks.enumerated()), id: \.offset) { i, block in
+                                BlockView(block: block, live: live && i == blocks.count - 1)
+                            }
                         }
-                    }
-                    .padding(.horizontal, Theme.bubbleHPad)
-                    .padding(.vertical, Theme.bubbleVPad)
-                    .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
-                    .senderBar(memberAccent(handle: handle, avatar: avatar))
+                    )
                 }
-                .frame(maxWidth: maxBubble - 34, alignment: .leading)
+                .frame(maxWidth: maxBubble - Theme.memberLane, alignment: .leading)
                 Spacer(minLength: 0)
             }
-            .task(id: avatar) { if memberProject(handle: handle) == nil { accents.load(url: avatar) } }
+            .task(id: avatar) {
+                if memberProject(handle: handle) == nil { SenderAccents.shared.load(url: avatar) }
+            }
         case .assistant(let blocks, let live, let caption):
             HStack {
                 VStack(alignment: .leading, spacing: 8) {
@@ -1000,7 +1080,7 @@ struct RowView: View {
     /// Match the avatar offset used by people-chat bubbles (26 pt + 8 pt gap).
     private var reactionLeading: CGFloat {
         switch row.kind {
-        case .other, .member: return 34
+        case .other, .member: return Theme.memberLane
         default: return 0
         }
     }
@@ -1014,28 +1094,39 @@ struct RowView: View {
     @ViewBuilder
     private func peopleAvatar(handle: String, avatar: String?) -> some View {
         if let project = memberProject(handle: handle) {
-            AgentAvatar(project: project, theme: theme, size: 26, still: true)
+            AgentAvatar(project: project, theme: theme, size: Theme.memberAvatar, still: true)
         } else if let avatar, avatar.contains("://") {
-            PersonAvatar(url: avatar, handle: handle, size: 26, name: model.personName(handle: handle), id: model.personId(handle: handle))
+            PersonAvatar(url: avatar, handle: handle, size: Theme.memberAvatar, name: model.personName(handle: handle), id: model.personId(handle: handle))
         } else {
-            PersonAvatar(url: nil, handle: handle, size: 26, name: model.personName(handle: handle), id: model.personId(handle: handle))
+            PersonAvatar(url: nil, handle: handle, size: Theme.memberAvatar, name: model.personName(handle: handle), id: model.personId(handle: handle))
         }
-    }
-
-    /// The bar colour on a person's bubble: their picture's dominant colour,
-    /// else the D79 colour of the same disc `PersonAvatar` draws (`id ?? handle`).
-    private func personAccent(handle: String, avatar: String?) -> Color {
-        accents.color(url: avatar, seed: model.personId(handle: handle) ?? handle, dark: theme.isDark)
     }
 
     /// Mac parity: an agent's bubbles in a people chat carry its disc colour
-    /// (the leaf's disc under D92, the D79 gradient midpoint otherwise).
-    private func memberAccent(handle: String, avatar: String?) -> Color {
-        if let project = memberProject(handle: handle) {
-            if LeafAvatarsFlag.shared.on { return LeafArt.accent(project, dark: theme.isDark) }
-            return accents.color(url: nil, seed: project.id, override: project.effectiveAvatarColorIndex, dark: theme.isDark)
+    /// (the leaf's disc under D92, the D79 gradient midpoint otherwise). Accent
+    /// observation stays in `LiveSenderBar` so one new colour does not rebuild
+    /// every bubble in a group chat.
+    @ViewBuilder
+    private func memberBubble<Content: View>(handle: String, avatar: String?, content: Content) -> some View {
+        if let project = memberProject(handle: handle), LeafAvatarsFlag.shared.on {
+            content
+                .padding(.horizontal, Theme.bubbleHPad)
+                .padding(.vertical, Theme.bubbleVPad)
+                .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
+                .senderBar(LeafArt.accent(project, dark: theme.isDark))
+        } else if let project = memberProject(handle: handle) {
+            content
+                .padding(.horizontal, Theme.bubbleHPad)
+                .padding(.vertical, Theme.bubbleVPad)
+                .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
+                .modifier(LiveSenderBar(url: nil, seed: project.id, override: project.effectiveAvatarColorIndex))
+        } else {
+            content
+                .padding(.horizontal, Theme.bubbleHPad)
+                .padding(.vertical, Theme.bubbleVPad)
+                .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
+                .modifier(LiveSenderBar(url: avatar, seed: model.personId(handle: handle) ?? handle))
         }
-        return personAccent(handle: handle, avatar: avatar)
     }
 
     /// Grok Bot's quote header at the top of a reply bubble: speech-bubble glyph, then the
@@ -1116,9 +1207,12 @@ struct RowView: View {
 }
 
 struct BlockView: View {
+    @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
     let block: Block
     let live: Bool
+    /// Mention chips (Oct 23): who `@handle` resolves to.
+    private var mentions: MentionTable { MentionTable(model: model, theme: theme) }
 
     var body: some View {
         switch block {
@@ -1127,7 +1221,7 @@ struct BlockView: View {
                 StreamingText(text: text, font: .system(size: Theme.body), color: theme.text)
                     .lineSpacing(Theme.bodyLineSpacing)
             } else {
-                Text(Markdown.inline(text, color: theme.text, link: theme.accent, codeChip: theme.codeChip))
+                Markdown.inlineText(text, color: theme.text, link: theme.accent, codeChip: theme.codeChip, mentions: mentions)
                     .font(theme.font(Theme.body))
                     .lineSpacing(Theme.bodyLineSpacing)
                     .tint(theme.accent)
@@ -1152,7 +1246,7 @@ struct BlockView: View {
                             StreamingText(text: item, font: .system(size: Theme.body), color: theme.text)
                                 .fixedSize(horizontal: false, vertical: true)
                         } else {
-                            Text(Markdown.inline(item, color: theme.text, link: theme.accent, codeChip: theme.codeChip))
+                            Markdown.inlineText(item, color: theme.text, link: theme.accent, codeChip: theme.codeChip, mentions: mentions)
                                 .font(theme.font(Theme.body))
                                 .tint(theme.accent)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -1250,16 +1344,35 @@ final class SenderAccents: ObservableObject {
     }
 }
 
+/// Observes `SenderAccents` for one bubble only — a new colour must not rebuild
+/// every `RowView` in a group chat (that made scrolling feel sticky).
+private struct LiveSenderBar: ViewModifier {
+    @ObservedObject private var accents = SenderAccents.shared
+    @Environment(\.theme) private var theme
+    let url: String?
+    let seed: String
+    var override: Int? = nil
+
+    func body(content: Content) -> some View {
+        content.senderBar(accents.color(url: url, seed: seed, override: override, dark: theme.isDark))
+    }
+}
+
 /// Decoded people pictures for the launch, keyed by URL. A picture that is here
 /// paints on the first frame of any row that shows it (`PersonAvatar` reads it
 /// synchronously); `warm` fetches the New Message directory's pictures ahead of
 /// the sheet, so its rows never flash initials and then the photo.
+///
+/// Not an `ObservableObject`: one finished download must not invalidate every
+/// avatar on screen (group-chat scroll lag). Each `PersonAvatar` holds its own
+/// `@State` and awaits `load`.
 @MainActor
-final class AvatarImageCache: ObservableObject {
+final class AvatarImageCache {
     static let shared = AvatarImageCache()
 
-    @Published private(set) var images: [String: UIImage] = [:]
+    private(set) var images: [String: UIImage] = [:]
     private var requested: Set<String> = []
+    private var waiters: [String: [CheckedContinuation<UIImage?, Never>]] = [:]
 
     func image(for url: String?) -> UIImage? {
         url.flatMap { images[$0] }
@@ -1273,20 +1386,38 @@ final class AvatarImageCache: ObservableObject {
 
     /// Start fetching the first `warmLimit` URLs not seen this launch (through the shared URLCache).
     func warm(urls: [String?]) {
-        for case let url? in urls.prefix(AvatarImageCache.warmLimit) { fetch(url) }
+        for case let url? in urls.prefix(AvatarImageCache.warmLimit) {
+            Task { _ = await load(url) }
+        }
     }
 
+    /// Fire-and-forget fetch (directory warm / legacy callers).
     func fetch(_ url: String) {
-        guard url.contains("://"), let u = URL(string: url), !requested.contains(url) else { return }
-        requested.insert(url)
-        Task.detached(priority: .userInitiated) { [weak self] in
-            guard let (data, _) = try? await URLSession.shared.data(from: u),
-                  let img = AvatarImageCache.decode(data) else {
-                await MainActor.run { self?.requested.remove(url) }
-                return
+        Task { _ = await load(url) }
+    }
+
+    /// Shared download per URL; waiters resume together when the picture lands.
+    func load(_ url: String) async -> UIImage? {
+        if let img = images[url] { return img }
+        if requested.contains(url) {
+            return await withCheckedContinuation { cont in
+                waiters[url, default: []].append(cont)
             }
-            await MainActor.run { self?.images[url] = img }
         }
+        guard url.contains("://"), let u = URL(string: url) else { return nil }
+        requested.insert(url)
+        let img: UIImage? = await Task.detached(priority: .userInitiated) {
+            guard let (data, _) = try? await URLSession.shared.data(from: u) else { return nil }
+            return AvatarImageCache.decode(data)
+        }.value
+        if let img {
+            images[url] = img
+        } else {
+            requested.remove(url)
+        }
+        let pending = waiters.removeValue(forKey: url) ?? []
+        for cont in pending { cont.resume(returning: img) }
+        return img
     }
 
     /// Downsampled decode through ImageIO: a 460 px GitHub picture never sits in memory at full size.
@@ -1308,25 +1439,42 @@ final class AvatarImageCache: ObservableObject {
 /// the colour is derived from; without it the handle stands in.
 struct PersonAvatar: View {
     @Environment(\.theme) private var theme
-    @ObservedObject private var cache = AvatarImageCache.shared
     let url: String?
     let handle: String
     var size: CGFloat = 40
     var name: String? = nil
     var id: String? = nil
     var colorIndex: Int? = nil
+    @State private var image: UIImage?
+
+    /// Warm cache hits paint on the first frame (no initials flash); `@State`
+    /// covers pictures that finish loading after appear — without observing the
+    /// whole shared dictionary.
+    private var displayed: UIImage? {
+        image ?? AvatarImageCache.shared.image(for: url)
+    }
 
     var body: some View {
         ZStack {
-            if let img = cache.image(for: url) {
-                Image(uiImage: img).resizable().scaledToFill()
+            if let displayed {
+                Image(uiImage: displayed).resizable().scaledToFill()
             } else {
                 initials
             }
         }
         .frame(width: size, height: size)
         .clipShape(Circle())
-        .onAppear { if let url { cache.fetch(url) } }
+        .task(id: url) {
+            guard let url else {
+                image = nil
+                return
+            }
+            if let cached = AvatarImageCache.shared.image(for: url) {
+                image = cached
+                return
+            }
+            image = await AvatarImageCache.shared.load(url)
+        }
     }
 
     private var initials: some View {

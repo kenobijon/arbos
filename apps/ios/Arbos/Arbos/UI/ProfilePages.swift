@@ -715,6 +715,8 @@ struct GroupProfileView: View {
     @State private var showEdit = false
     @State private var pendingRemoveId: String?
     @State private var pendingRemoveName: String?
+    /// Human member (not you) whose row was tapped: offer View profile / Send private message.
+    @State private var memberActions: ProfilePerson?
 
     private var people: PeopleChat? { model.peopleChat(chatId) }
     private var project: Project? { projectId.flatMap { model.project($0) } }
@@ -823,6 +825,27 @@ struct GroupProfileView: View {
                 pendingRemoveName = nil
             }
         }
+        .confirmationDialog(
+            memberActions.map { $0.displayName } ?? "Member",
+            isPresented: Binding(
+                get: { memberActions != nil },
+                set: { if !$0 { memberActions = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Send private message") {
+                guard let handle = memberActions?.handle else { return }
+                memberActions = nil
+                Task {
+                    if await model.openDM(handle: handle) != nil { dismiss() }
+                }
+            }
+            Button("View profile") {
+                if let p = memberActions { model.showProfile(.user(p)) }
+                memberActions = nil
+            }
+            Button("Cancel", role: .cancel) { memberActions = nil }
+        }
         .sheet(isPresented: $showAdd) {
             if let project {
                 ProjectMembersSheet(project: project).environmentObject(model).environment(\.theme, theme)
@@ -928,16 +951,32 @@ struct GroupProfileView: View {
         // borderless (not .plain): .plain steals long-press on recent iOS,
         // so the remove context menu never appears (same as HomeView rows).
         return Button {
-            if let a = r.agent { model.showProfile(.agent(projectId: a.id)) } else { model.showProfile(.user(r.person)) }
+            if let a = r.agent {
+                model.showProfile(.agent(projectId: a.id))
+            } else if isMe {
+                model.showProfile(.user(r.person))
+            } else {
+                // Offer Send private message alongside View profile (#1455).
+                memberActions = r.person
+            }
         } label: {
             PaneRow(leading: .avatar(avatar), title: title, subtitle: memberSubtitle(r), trailing: remove)
         }
         .buttonStyle(.borderless)
         // Long-press (Jacob, 2026-10-22; the Mac's Shift-/right-click menu): View profile,
-        // and for whoever may remove this member a divider and Remove from group — which
-        // asks first (the confirm above) and then lets the relay write "<me> removed X".
-        // Your own row never offers Remove; leaving is the chat list's Delete.
+        // Send private message (other people), and for whoever may remove this member a
+        // divider and Remove from group — which asks first (the confirm above) and then
+        // lets the relay write "<me> removed X". Your own row never offers Remove;
+        // leaving is the chat list's Delete.
         .contextMenu {
+            if r.agent == nil && !isMe {
+                Button {
+                    let handle = r.person.handle
+                    Task {
+                        if await model.openDM(handle: handle) != nil { dismiss() }
+                    }
+                } label: { Label("Send private message", systemImage: "bubble.left") }
+            }
             Button {
                 if let a = r.agent { model.showProfile(.agent(projectId: a.id)) } else { model.showProfile(.user(r.person)) }
             } label: { Label("View profile", systemImage: "person.crop.circle") }
@@ -1526,9 +1565,7 @@ struct GroupEditSheet: View {
     @Environment(\.dismiss) private var dismiss
     let chatId: String
     @State private var name = ""
-    @State private var photoItem: PhotosPickerItem?
-    @State private var preview: UIImage?
-    @State private var jpegData: Data?
+    @State private var showAvatarPicker = false
     @State private var saving = false
     @FocusState private var nameFocused: Bool
 
@@ -1549,17 +1586,12 @@ struct GroupEditSheet: View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 22) {
-                    PhotosPicker(selection: $photoItem, matching: .images) {
+                    // The picture: the avatar picker sheet (D92 amendment — Bot = the group's
+                    // leaf, Upload = a photo; changes apply on Set avatar).
+                    Button { showAvatarPicker = true } label: {
                         ZStack(alignment: .bottomTrailing) {
-                            if let preview {
-                                Image(uiImage: preview)
-                                    .resizable().scaledToFill()
-                                    .frame(width: 112, height: 112)
-                                    .clipShape(Circle())
-                            } else {
-                                AvatarCluster(members: clusterMembers, size: 72, imageUrl: existingImageURL)
-                                    .frame(width: 112, height: 112)
-                            }
+                            AvatarCluster(members: clusterMembers, size: 72, imageUrl: existingImageURL, leaf: people?.leafPick)
+                                .frame(width: 112, height: 112)
                             GlassCircle(size: 36) {
                                 Image(systemName: "camera.fill")
                                     .font(theme.font(14, weight: .semibold))
@@ -1569,7 +1601,7 @@ struct GroupEditSheet: View {
                         }
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("Choose group image")
+                    .accessibilityLabel("Change group picture")
 
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Group name").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
@@ -1621,15 +1653,8 @@ struct GroupEditSheet: View {
                 name = people?.title ?? ""
                 nameFocused = true
             }
-            .onChange(of: photoItem) { _, item in
-                guard let item else { return }
-                Task {
-                    guard let data = try? await item.loadTransferable(type: Data.self),
-                          let img = UIImage(data: data) else { return }
-                    let square = Self.square(img, side: 512)
-                    preview = square
-                    jpegData = square.jpegData(compressionQuality: 0.85)
-                }
+            .sheet(isPresented: $showAvatarPicker) {
+                AvatarPickerSheet(target: .group(chatId)).environmentObject(model).environment(\.theme, theme)
             }
         }
     }
@@ -1637,27 +1662,9 @@ struct GroupEditSheet: View {
     private func save() async {
         saving = true
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        var ok = await model.patchPeopleChat(chatId, title: trimmed)
-        if ok, let jpegData {
-            ok = await model.setGroupImage(chatId: chatId, jpeg: jpegData)
-        }
+        let ok = await model.patchPeopleChat(chatId, title: trimmed)
         saving = false
         if ok { dismiss() }
-    }
-
-    /// Centre-crop to a square and resize.
-    private static func square(_ image: UIImage, side: CGFloat) -> UIImage {
-        let s = min(image.size.width, image.size.height)
-        let rect = CGRect(x: (image.size.width - s) / 2, y: (image.size.height - s) / 2, width: s, height: s)
-        let renderer = UIGraphicsImageRenderer(size: CGSize(width: side, height: side))
-        return renderer.image { _ in
-            guard let cg = image.cgImage?.cropping(to: rect) else {
-                image.draw(in: CGRect(origin: .zero, size: CGSize(width: side, height: side)))
-                return
-            }
-            UIImage(cgImage: cg, scale: image.scale, orientation: image.imageOrientation)
-                .draw(in: CGRect(origin: .zero, size: CGSize(width: side, height: side)))
-        }
     }
 }
 

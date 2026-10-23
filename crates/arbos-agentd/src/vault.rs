@@ -392,6 +392,67 @@ fn policy_line(use_notes: &[String]) -> String {
     }
 }
 
+/// True when a reply *promises* a secret request or an approval card instead of making the
+/// call — "I'll request it now and you'll get an approval card…". A stated request must be a
+/// `secrets_request` tool call, never prose alone (#1440: the card never existed).
+pub fn promises_secret_request(text: &str) -> bool {
+    let t = text.to_lowercase();
+    let about_secret = [
+        "secret",
+        "credential",
+        "api key",
+        "key from your vault",
+        "the vault",
+        "your vault",
+        "stored key",
+        "token",
+    ]
+    .iter()
+    .any(|w| t.contains(w));
+    if !about_secret {
+        return false;
+    }
+    [
+        "approval card",
+        "card to approve",
+        "approve in the chat",
+        "approve it in",
+        "once you approve",
+        "when you approve",
+        "after you approve",
+        "needs your approval",
+        "need your approval",
+        "requires your approval",
+        "i'll request",
+        "i will request",
+        "i’ll request",
+        "request it now",
+        "requesting it now",
+        "requesting the",
+        "request access",
+        "ask for access",
+        "ask you for access",
+        "settings → vault",
+        "settings -> vault",
+        "settings → secrets",
+    ]
+    .iter()
+    .any(|w| t.contains(w))
+}
+
+/// Env names of the secrets this project may use right now (enabled grants), for the route
+/// guard's message to the model.
+pub fn enabled_grant_names(project_id: &str) -> Vec<String> {
+    state()
+        .lock()
+        .expect("secrets state")
+        .grants
+        .iter()
+        .filter(|g| g.project_id == project_id)
+        .map(|g| g.name.clone())
+        .collect()
+}
+
 // ---- real values in the environment -------------------------------------------------------------
 
 /// The file a workspace's shells source: `<state>/secrets.env`.
@@ -1627,6 +1688,30 @@ mod tests {
         );
         let described = g.describe("allowed").to_string();
         assert!(described.contains("$STRIPE_KEY") && !described.contains("sk-"));
+    }
+
+    /// #1440: "I'll request it now and you'll get an approval card" with no tool call.
+    #[test]
+    fn prose_that_promises_a_secret_request_is_caught() {
+        assert!(promises_secret_request(
+            "Arbos, I can make that inference call, but I need the Engy key from your vault first. Using a stored credential needs your approval, so I'll request it now and you'll get an approval card to approve in the chat or in Settings → Vault."
+        ));
+        assert!(promises_secret_request(
+            "Requesting the API key from your vault now."
+        ));
+        assert!(promises_secret_request(
+            "I'll ask for access to the Stripe secret."
+        ));
+        // Doing it, or talking about something else, is fine.
+        assert!(!promises_secret_request(
+            "The inference call worked; the model replied hello."
+        ));
+        assert!(!promises_secret_request(
+            "I'll request the weather forecast and get back to you."
+        ));
+        assert!(!promises_secret_request(
+            "You can approve the design in the chat."
+        ));
     }
 
     /// The file every shell sources: the real value for a switched-on grant, the placeholder for

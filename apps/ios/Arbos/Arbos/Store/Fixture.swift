@@ -121,8 +121,15 @@ extension AppModel {
         var meOwner = meMember; meOwner.role = "owner"
         let commsAgent = ChatMember(id: "fx-comms", kind: .agent, member: "agent:fx-comms", role: "agent", handle: "comms", avatarUrl: nil, name: "Comms", status: "member",
                                     joinedAt: now - 86_400_000, project: list.first { $0.id == "fx-comms" }, ownerId: "fx-me", ownerHandle: "jacob", replyPolicy: "mention")
+        // `ARBOS_FIXTURE_WORKING=<n>` (presence-row rig): the group holds n agents so the
+        // row over the composer can show several working at once.
+        var groupAgents = [commsAgent]
+        for p in list.dropFirst().prefix(max(0, DebugHooks.fixtureWorking - 1)) {
+            groupAgents.append(ChatMember(id: p.id, kind: .agent, member: "agent:\(p.id)", role: "agent", handle: mentionSlug(p.name), avatarUrl: nil,
+                                          name: p.name, status: "member", joinedAt: now - 86_400_000, project: p, ownerId: "fx-me", ownerHandle: "jacob", replyPolicy: "mention"))
+        }
         let group = PeopleChat(id: "fx-group-launch", kind: "group", createdBy: "fx-me", createdAt: now - 3 * 86_400_000, title: "Launch week",
-                               pending: false, members: [meOwner, unconst, mira, sam, commsAgent], headSeq: 40, readSeq: 40, unread: false,
+                               pending: false, members: [meOwner, unconst, mira, sam] + groupAgents, headSeq: 40, readSeq: 40, unread: false,
                                lockState: "visible_to_agents", lastActivityAt: now - 50 * 60_000, myRole: "owner", muted: false)
         peopleChats = [group, PeopleChat(id: "fx-dm-unconst", kind: "dm", createdBy: "gh_32490803", createdAt: now - 40 * 60_000, title: "@unconst",
                                   pending: false, members: [unconst, meMember], headSeq: 12, readSeq: 9, unread: true,
@@ -159,6 +166,32 @@ extension AppModel {
         if let rows = DebugHooks.fixtureLongRows, rows > 0 {
             messages["fx-group-launch"] = Self.longGroupTranscript(rows: rows, before: now - 4 * 3_600_000)
                 + (messages["fx-group-launch"] ?? [])
+        }
+        // `ARBOS_FIXTURE_WORKING=<n>`: the first n agents of the group (and the opened
+        // agent chat's one agent) stream a row with no words yet — "<name> is working".
+        if DebugHooks.fixtureWorking > 0 {
+            for (i, a) in groupAgents.prefix(DebugHooks.fixtureWorking).enumerated() {
+                var m = streaming("fx-working-\(i)", "fx-group-launch", at: now - 5_000 + Int64(i))
+                m.sender = a.member
+                m.senderHandle = a.handle
+                m.senderName = a.name
+                messages["fx-group-launch", default: []].append(m)
+            }
+            if let c = DebugHooks.openChat, c != "fx-group-launch", c != "fx-dm-unconst" {
+                messages[c, default: []].append(streaming("fx-working-agent", c, at: now - 5_000))
+            }
+        }
+        // `ARBOS_FIXTURE_TYPING=1|<handle>[,<handle>…]`: those people type in every fixture
+        // people chat for the whole launch (`1` = the DM's other person / the group's first).
+        if let spec = DebugHooks.fixtureTyping {
+            for chat in peopleChats {
+                let handles: [String] = spec == "1"
+                    ? [chat.members.first { !$0.isAgent && $0.id != "fx-me" }?.handle].compactMap { $0 }
+                    : spec.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+                var marks: [String: Int64] = [:]
+                for (i, h) in handles.enumerated() { marks[h] = now + 3_600_000 - Int64(i) }
+                if !marks.isEmpty { typing[chat.id] = marks }
+            }
         }
         caughtUp.insert("fx-group-launch")
         directory = [

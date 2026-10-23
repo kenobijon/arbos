@@ -24,14 +24,15 @@ struct ChatView: View {
     /// How many of the newest rows are in the view tree. The transcript is a plain
     /// VStack (see `transcript`), so every row it holds is built and laid out at once;
     /// a long group chat put thousands in it and the open took seconds (long-chat-perf,
-    /// 2026-10-23). Older rows join as the user nears the top (`growWindow`).
+    /// 2026-10-23). Cap stays modest so finger-scrolling stays smooth; older rows join
+    /// as the user nears the top (`growWindow`).
     @State private var windowCount = ChatView.windowInitial
     /// iOS 17 has no scroll-geometry callback to grow the window with, so it keeps every row.
     static let windowInitial: Int = {
-        if #available(iOS 18, *) { return 160 }
+        if #available(iOS 18, *) { return 80 }
         return Int.max
     }()
-    static let windowStep = 120
+    static let windowStep = 60
     @State private var showModelPicker = false
     /// Rig: the media viewer opened by `ARBOS_SHOW=media…` (media-viewer-2026-10-23).
     @State private var rigViewer: MediaViewerState?
@@ -49,6 +50,9 @@ struct ChatView: View {
     @State private var scroller: ScrollViewProxy?
     /// Scrolled more than ~120 pt above the end: show Grok's round chevron.
     @State private var awayFromBottom = false
+    /// Follow the end as rows stream / grow. Cleared when the user scrolls up;
+    /// restored when they return near the end or tap the chevron (Mac stick pin).
+    @State private var pinnedToBottom = true
     @State private var demoRan = false
     @State private var demoQueue: [String] = []
     @StateObject private var recorder = MemoRecorder()
@@ -71,6 +75,8 @@ struct ChatView: View {
     @State private var timeReveal: CGFloat = 0
     /// Once the pan is more horizontal-left than vertical, lock so scroll does not steal it.
     @State private var timeRevealLocked = false
+    /// True while a message's swipe-right-to-reply is locked — blocks swipe-right-to-Home.
+    @State private var replySwipeActive = false
 
     /// Rows after the in-chat search filter (profile "search").
     private var visibleRows: [Row] {
@@ -196,10 +202,49 @@ struct ChatView: View {
         if let chat, chat.isSystem { return "\(project?.name ?? "Arbos") · Projects" }
         return project?.name ?? "Arbos"
     }
-    /// Who is working: the streaming agent's handle in a people chat.
-    private var workingName: String {
-        if isPeople, let m = messages.last(where: { $0.role == .assistant && $0.isStreaming }), let h = m.senderHandle { return h }
-        return name
+    /// Everyone on the presence row over the composer, newest first: people
+    /// typing (room presence) and agents working (a fresh stream or an open
+    /// hand-off, one entry per agent) — [feedback typing-indicator-left-2026-10-23].
+    private var presenceParticipants: [PresenceParticipant] {
+        var out: [PresenceParticipant] = []
+        for handle in model.typingHandles(in: chatId) {
+            let m = people?.members.first { !$0.isAgent && $0.handle == handle }
+            out.append(PresenceParticipant(
+                id: "typing:\(handle)",
+                name: m?.name.flatMap { $0.isEmpty ? nil : $0 } ?? "@\(handle)",
+                activity: .typing,
+                picture: AnyView(PersonAvatar(url: m?.avatarUrl, handle: handle, size: PresenceRow.avatar,
+                                              name: m?.name, id: m?.id, colorIndex: m?.avatarColorIndex))
+            ))
+        }
+        guard streaming else { return out }
+        if isPeople {
+            let recent = nowMs() - 15 * 60 * 1000
+            var seen = Set<String>()
+            for m in messages.reversed() where m.role == .assistant && m.isStreaming && m.createdAt >= recent {
+                let key = m.senderHandle ?? m.senderName ?? m.sender
+                guard seen.insert(key).inserted else { continue }
+                let agent = people?.agents.first { mentionSlug($0.project?.name ?? "") == key || $0.handle == key }
+                if let p = agent?.project {
+                    out.append(PresenceParticipant(
+                        id: "working:\(key)", name: p.name, activity: .working,
+                        picture: AnyView(AgentAvatar(project: p, theme: theme, size: PresenceRow.avatar, working: true))
+                    ))
+                } else {
+                    let shown = m.senderName ?? key
+                    out.append(PresenceParticipant(
+                        id: "working:\(key)", name: shown, activity: .working,
+                        picture: AnyView(InitialsAvatar(name: shown, handle: key, id: m.sender, size: PresenceRow.avatar))
+                    ))
+                }
+            }
+        } else if let project {
+            out.append(PresenceParticipant(
+                id: "working:\(project.id)", name: project.name, activity: .working,
+                picture: AnyView(AgentAvatar(project: project, theme: theme, size: PresenceRow.avatar, working: true))
+            ))
+        }
+        return out
     }
 
     /// Agent member ids currently selected on the conversation chips.
@@ -306,6 +351,13 @@ struct ChatView: View {
             ZStack(alignment: .top) {
                 theme.bg.ignoresSafeArea()
                 transcript(width: geo.size.width, height: geo.size.height)
+                    // A tap on a mention chip (`arbos://mention/<kind>/<id>`, MentionChips.swift)
+                    // opens that entity's page; every other link goes to the system.
+                    .environment(\.openURL, OpenURLAction { url in
+                        guard let target = MentionTable.target(from: url, model: model) else { return .systemAction }
+                        model.showProfile(target)
+                        return .handled
+                    })
                 headerBlur
                 VStack(spacing: 8) {
                     header
@@ -351,22 +403,25 @@ struct ChatView: View {
         }
         .animation(.easeOut(duration: 0.2), value: awayFromBottom)
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            Group {
-                if isChannel, !model.channelCanPost(chatId) {
-                    // Rule 9: a restricted channel I cannot post in — one quiet line, no composer.
-                    Text("Only admins post here")
-                        .font(theme.font(Theme.small))
-                        .foregroundStyle(theme.muted)
-                        .frame(maxWidth: .infinity)
-                        .frame(height: Theme.fieldHeight)
-                        .accessibilityIdentifier("channel-read-only")
-                } else {
-                    composer
+            VStack(spacing: 0) {
+                presenceRow
+                Group {
+                    if isChannel, !model.channelCanPost(chatId) {
+                        // Rule 9: a restricted channel I cannot post in — one quiet line, no composer.
+                        Text("Only admins post here")
+                            .font(theme.font(Theme.small))
+                            .foregroundStyle(theme.muted)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: Theme.fieldHeight)
+                            .accessibilityIdentifier("channel-read-only")
+                    } else {
+                        composer
+                    }
                 }
+                // Grok: 31 pt side inset with the keyboard down, 19 pt with it up.
+                .padding(.horizontal, composerSideInset)
+                .animation(.easeOut(duration: 0.25), value: composerFocused)
             }
-            // Grok: 31 pt side inset with the keyboard down, 19 pt with it up.
-            .padding(.horizontal, composerSideInset)
-            .animation(.easeOut(duration: 0.25), value: composerFocused)
             .padding(.top, 8)
             .padding(.bottom, composerFocused ? 8 : 2)
             .background(alignment: .top) {
@@ -488,6 +543,8 @@ struct ChatView: View {
                     case "voice": startCall(.voice)
                     case "model": showModelPicker = true
                     case "profile": openHeaderProfile()
+                    // `avatarpicker[-generate|-upload]`: the agent pane, which opens the sheet on that tab.
+                    case let s where s.hasPrefix("avatarpicker"): openHeaderProfile()
                     case "edit": showProfile = true
                     case "userprofile": if let c = counterpart { model.showProfile(.user(ProfilePerson(c))) }
                     // `addmembers`: the group pane opens its Add members sheet on appear.
@@ -750,9 +807,26 @@ struct ChatView: View {
                 .contentShape(Capsule())
             }
             Spacer()
-            // Balance the back circle so the title pill sits on the true centre
-            // (same trick as Hidden chats). Add-person left in 2026-10-20.
-            Color.clear.frame(width: Theme.control, height: Theme.control)
+            // Same-size circle as the back button keeps the title pill centred.
+            Button {
+                if showSearch {
+                    showSearch = false
+                    searchText = ""
+                    searchFocused = false
+                } else {
+                    withAnimation(.easeOut(duration: 0.18)) { showSearch = true }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { searchFocused = true }
+                }
+            } label: {
+                GlassCircle {
+                    Image(systemName: "magnifyingglass")
+                        .font(theme.font(17, weight: .medium))
+                        .foregroundStyle(theme.text)
+                }
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Search in chat")
+            .accessibilityIdentifier("chat-search-button")
         }
         .padding(.horizontal, 16)
         .padding(.top, 6)
@@ -766,6 +840,8 @@ struct ChatView: View {
     /// chevron, right-aligned with the composer, 18 pt above it.
     private var scrollToBottomButton: some View {
         Button {
+            pinnedToBottom = true
+            awayFromBottom = false
             withAnimation(.easeOut(duration: 0.3)) { scroller?.scrollTo("bottom", anchor: .bottom) }
         } label: {
             ZStack {
@@ -795,6 +871,8 @@ struct ChatView: View {
         // Selecting or dragging in the focused composer is a horizontal pan;
         // do not treat it as swipe-right → Home.
         guard !composerFocused else { return }
+        // A message reply swipe owns this drag; do not leave the chat.
+        guard !replySwipeActive else { return }
         let dx = value.translation.width
         let absX = abs(dx), absY = abs(value.translation.height)
         let vx = value.velocity.width, vy = value.velocity.height
@@ -885,30 +963,30 @@ struct ChatView: View {
                     }
                     let shown = windowedRows
                     ForEach(Array(shown.enumerated()), id: \.element.id) { i, row in
+                        let canReply = isMessageRow(row)
                         RowView(row: row, chatId: chatId, width: width, timeReveal: timeReveal,
                                 onQuoteTap: { revealQuoted($0) },
-                                highlighted: highlightedMessage == row.messageId)
+                                highlighted: highlightedMessage == row.messageId,
+                                onReply: canReply ? { beginReply(to: row) } : nil,
+                                replySwipeActive: $replySwipeActive)
                             .padding(.top, gap(before: i, in: shown))
                             .id(row.id)
-                            .onAppear { LaunchClock.mark("chat-first-row", detail: "shown=\(shown.count) rows=\(rows.count) messages=\(messages.count)") }
+                            .onAppear {
+                                // Once per open — not on every row (group chats fire this dozens of times).
+                                if i == 0 {
+                                    LaunchClock.mark("chat-first-row", detail: "shown=\(shown.count) rows=\(rows.count) messages=\(messages.count)")
+                                }
+                            }
                             .contextMenu {
-                                MessageMenuContent(items: MessageMenu.items(forMessage: isMessageRow(row))) { item in
+                                MessageMenuContent(items: MessageMenu.items(forMessage: canReply)) { item in
                                     runMessageMenu(item, row: row)
                                 }
                             }
                     }
-                    if model.isStreaming(chatId) || model.hasOpenSubagent(chatId) || model.isAwaitingReply(chatId) {
-                        // Tick once a second so time-capped working states
-                        // (stale stream, hand-off grace, awaiting-reply cheat)
-                        // expire without a stuck "<name> is working" line.
-                        TimelineView(.periodic(from: .now, by: 1)) { _ in
-                            if model.isStreaming(chatId) || model.hasOpenSubagent(chatId) || model.isAwaitingReply(chatId) {
-                                workingLine.padding(.top, 20)
-                            }
-                        }
-                    }
+                    // Who is working is the presence row over the composer
+                    // (`PresenceRow`), not a transcript row.
                     // Clears the 24 pt fade above the composer, so the last row
-                    // (and "<name> is working") is never under the chat bar.
+                    // is never under the chat bar.
                     Color.clear.frame(height: 28).id("bottom")
                 }
                 .padding(.horizontal, 16)
@@ -932,7 +1010,11 @@ struct ChatView: View {
                 composerFocused = false
                 searchFocused = false
             }
-            .modifier(AwayFromBottomReporter(away: $awayFromBottom))
+            .modifier(AwayFromBottomReporter(away: $awayFromBottom, pinned: $pinnedToBottom) {
+                // Streaming / new-row growth while pinned: re-stick without animation so
+                // each delta glides with layout instead of fighting a scroll animation.
+                proxy.scrollTo("bottom", anchor: .bottom)
+            })
             // Nearing the top: the next older slice of rows joins the view tree; a channel
             // also asks the server for one older page.
             .modifier(NearTopReporter(enabled: true) {
@@ -942,21 +1024,21 @@ struct ChatView: View {
                     model.loadOlderChannel(chatId)
                 }
             })
-            // Mask stays in the scroll view's bounds — `ignoresSafeArea` on the
-            // mask mis-samples the fade when the composer/keyboard inset changes
-            // and can blank the whole transcript (white screen mid-type).
-            .mask {
-                VStack(spacing: 0) {
-                    LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom).frame(height: 110)
-                    Color.black
-                }
-            }
+            // Top fade is `headerBlur` over the transcript — a ScrollView `.mask`
+            // forced an offscreen pass of every row on each scroll frame and made
+            // long / group chats feel sticky (feedback app-01M5MQ2GFB1681YXNJMZV4EK7J).
             .onAppear { settleToBottom(proxy) }
-            .onChange(of: rows.last?.id) { old, _ in
+            // `rows.last` (not only its id): a streaming reply keeps the same id while its
+            // text grows; pinning must follow that growth too (#1444 / lazy window #1399).
+            .onChange(of: rows.last) { old, new in
                 if old == nil {
                     settleToBottom(proxy)
-                } else {
-                    withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("bottom", anchor: .bottom) }
+                } else if pinnedToBottom {
+                    if old?.id != new?.id {
+                        withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("bottom", anchor: .bottom) }
+                    } else {
+                        proxy.scrollTo("bottom", anchor: .bottom)
+                    }
                 }
             }
             .onChange(of: rows.count) { old, new in
@@ -968,10 +1050,13 @@ struct ChatView: View {
                 if ready { settleToBottom(proxy) }
             }
             .onChange(of: streaming) { _, _ in
+                guard pinnedToBottom else { return }
                 withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("bottom", anchor: .bottom) }
             }
             .onChange(of: composerFocused) { _, focused in
                 guard focused else { return }
+                pinnedToBottom = true
+                awayFromBottom = false
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
                     withAnimation(.easeOut(duration: 0.25)) { proxy.scrollTo("bottom", anchor: .bottom) }
                 }
@@ -983,6 +1068,8 @@ struct ChatView: View {
     /// `scrollTo` runs before layout knows the content size, so repeat after
     /// the next runloop turn and once more after the rows settle.
     private func settleToBottom(_ proxy: ScrollViewProxy) {
+        pinnedToBottom = true
+        awayFromBottom = false
         proxy.scrollTo("bottom", anchor: .bottom)
         DispatchQueue.main.async { proxy.scrollTo("bottom", anchor: .bottom) }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { proxy.scrollTo("bottom", anchor: .bottom) }
@@ -1038,25 +1125,37 @@ struct ChatView: View {
         case .copy:
             UIPasteboard.general.string = m_text(row)
         case .reply:
-            guard let m = messageById[row.messageId] else { return }
-            replyTo = m
-            if isPeople, let member = agentMember(for: m)?.member {
-                talkTo = [member]
-            }
-            composerFocused = true
+            beginReply(to: row)
         case .delete:
             model.deleteMessage(chatId: chatId, messageId: row.messageId)
         }
     }
 
-    /// Spacing: 8 pt between bubbles of one sender, 24 pt around sender changes
-    /// and system lines (measured on the references).
+    /// Reply to this row: composer preview + focus (people chats also address the agent).
+    /// Shared by the long-press Reply item and swipe-right-to-reply on the bubble.
+    private func beginReply(to row: Row) {
+        guard let m = messageById[row.messageId] else { return }
+        replyTo = m
+        if isPeople, let member = agentMember(for: m)?.member {
+            talkTo = [member]
+        }
+        composerFocused = true
+    }
+
+    /// Spacing: 8 pt between blocks of one message, 24 pt around sender changes,
+    /// system lines, and each new agent reply (quick ack vs main answer must not
+    /// look merged — #1447). Measured on the references.
     private func gap(before i: Int, in shown: [Row]) -> CGFloat {
         guard i > 0, i < shown.count else { return 0 }
         let prev = shown[i - 1], cur = shown[i]
         if case .system = prev.kind { return 20 }
         if case .system = cur.kind { return 20 }
-        return prev.role == cur.role ? 8 : 24
+        if prev.role != cur.role { return 24 }
+        // Same role: still open the turn gap when an agent starts a new message.
+        if prev.messageId != cur.messageId && (cur.role == .assistant || cur.role == .project) {
+            return 24
+        }
+        return 8
     }
 
     /// The machine's notice (waking / can't reach). The link has no line here:
@@ -1197,27 +1296,21 @@ struct ChatView: View {
         .fixedSize(horizontal: false, vertical: true)
     }
 
-    /// "Cloning RaoFoundation/subtensor" when the harness says what it is doing, else "<name> is working".
-    private var workingText: String {
-        if let a = model.currentActivity(chatId) { return a }
-        return "\(workingName) is working"
-    }
-
-    private var workingLine: some View {
-        HStack(spacing: 10) {
-            if isPeople, let m = messages.last(where: { $0.role == .assistant && $0.isStreaming }),
-               let agent = people?.agents.first(where: { mentionSlug($0.project?.name ?? "") == m.senderHandle || $0.handle == m.senderHandle }),
-               let p = agent.project {
-                AgentAvatar(project: p, theme: theme, size: 26, working: true)
-            } else if let project {
-                AgentAvatar(project: project, theme: theme, size: 26, working: true)
+    /// The presence row over the composer: ticks once a second so time-capped
+    /// states (stale stream, hand-off grace, awaiting-reply cheat, a typing
+    /// mark's 6 s) expire without a stuck line. Left edge = the bubbles' 16 pt.
+    @ViewBuilder
+    private var presenceRow: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { _ in
+            let participants = presenceParticipants
+            if !participants.isEmpty {
+                PresenceRow(participants: participants,
+                            detail: model.currentActivity(chatId),
+                            queued: false)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 4)
             }
-            WorkingStatusText(text: workingText, color: theme.muted)
-                .id(workingText)
-            Spacer(minLength: 0)
         }
-        .accessibilityLabel(workingText)
-        .animation(.easeInOut(duration: 0.25), value: workingText)
     }
 
     // MARK: Composer
@@ -1720,6 +1813,9 @@ struct ChatView: View {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !pending.isEmpty else { return }
         Haptics.send()
+        // A send means follow the reply: re-pin even if the reader had scrolled up.
+        pinnedToBottom = true
+        awayFromBottom = false
         if isChannel {
             // Rule 3/9: the composer sends through the shared client's `sendText`.
             guard !text.isEmpty else { return }
@@ -1762,8 +1858,8 @@ struct ChatView: View {
     }
 }
 
-/// Soft fade + streaming shimmer on "<name> is working" (Mac `working_line`).
-private struct WorkingStatusText: View {
+/// Soft fade + streaming shimmer on the presence row's line (Mac `presence::row`).
+struct WorkingStatusText: View {
     @Environment(\.theme) private var theme
     let text: String
     let color: Color
@@ -2004,16 +2100,40 @@ private struct NearTopReporter: ViewModifier {
 }
 
 /// Reports when the scroll view sits more than 120 pt above its end (iOS 18+;
-/// earlier systems never show the chevron).
+/// earlier systems never show the chevron). While `pinned` is true, content
+/// growth (streaming row height, a new row) must not look like a user scroll-up:
+/// re-stick instead of flipping `away` and leaving the transcript stranded.
 private struct AwayFromBottomReporter: ViewModifier {
     @Binding var away: Bool
+    @Binding var pinned: Bool
+    var onStick: () -> Void
+
+    private struct Sample: Equatable {
+        var height: CGFloat
+        var distance: CGFloat
+    }
 
     func body(content: Content) -> some View {
         if #available(iOS 18, *) {
-            content.onScrollGeometryChange(for: Bool.self) { g in
-                g.contentOffset.y + g.containerSize.height < g.contentSize.height - 120
-            } action: { _, isAway in
+            content.onScrollGeometryChange(for: Sample.self) { g in
+                Sample(
+                    height: g.contentSize.height,
+                    distance: g.contentSize.height - g.contentOffset.y - g.containerSize.height
+                )
+            } action: { old, new in
+                let grew = new.height > old.height + 0.5
+                if pinned && grew {
+                    away = false
+                    onStick()
+                    return
+                }
+                let isAway = new.distance > 120
                 away = isAway
+                if isAway {
+                    pinned = false
+                } else {
+                    pinned = true
+                }
             }
         } else {
             content
