@@ -1071,6 +1071,9 @@ pub struct TurnState {
     /// This turn was started by a voice-call `ask_agent` / `look` (user row `voice: true`).
     /// A later typed `send` preempts it so text chat is not stuck behind a hung call turn.
     pub from_voice: bool,
+    /// This turn was started by a routine fire (user row `sender: routine:<id>`), not by a
+    /// person: nobody is waiting, so an `act` route writes no ack bubble (#1391).
+    pub routine_turn: bool,
     /// The text pi was prompted with; the skills selector matches against it (F5).
     pub prompt_text: String,
     /// Skills injected into this turn's working set (recorded once, in the Details drawer).
@@ -1184,6 +1187,7 @@ impl TurnState {
             text_part_dirty: false,
             stopped: false,
             from_voice,
+            routine_turn: false,
             prompt_text: String::new(),
             skills_used: Vec::new(),
             model_error: None,
@@ -2884,12 +2888,13 @@ impl Agent {
             let _ = self.turn.lock().await.take();
             return Err(anyhow!("turn stopped before prompt"));
         }
-        let from_voice = {
+        let (from_voice, routine_turn) = {
             let h = host.lock().await;
-            h.doc
-                .message(user_msg_id)
-                .as_ref()
-                .is_some_and(message_from_voice)
+            let m = h.doc.message(user_msg_id);
+            (
+                m.as_ref().is_some_and(message_from_voice),
+                m.as_ref().is_some_and(message_from_routine),
+            )
         };
         // Memory tree (D77): the walk ran beside the setup above; the chosen raw records ride in
         // front of the message. Nothing is added when the tree is not built, the walk timed out
@@ -2927,6 +2932,7 @@ impl Agent {
             text_part_dirty: false,
             stopped: false,
             from_voice,
+            routine_turn,
             prompt_text: match &kind {
                 TurnKind::User => prompt_text.to_owned(),
                 TurnKind::SubagentResult { .. } | TurnKind::ApprovalOutcome { .. } => String::new(),
@@ -3940,20 +3946,16 @@ impl Agent {
         // Drop planning / routing thoughts and trailing tool-narration; keep only the
         // user-facing sentence(s), with glued ".Word" spacing fixed.
         let cleaned = ProseFilter::clean_prose(t.ack_text.trim());
-        let mut cleaned = cleaned.trim().to_owned();
-        // act/new/wake must still show one bubble: a thought-aloud-only ack used to leave
-        // the chat on bare "Working…" until the result (feedback AMus6 / ALYEPIee).
-        if cleaned.is_empty() && action != "reply" {
-            cleaned = "On it.".to_owned();
-            tracing::info!(chat_id = %t.chat_id, action, "ack bubble fallback after thought-aloud strip");
-        }
-        if cleaned.is_empty() {
+        let Some(bubble) = ack_bubble(&cleaned, &action, t.routine_turn) else {
             t.ack_text.clear();
             t.ack_split = true;
-            tracing::info!(chat_id = %t.chat_id, action, "ack bubble dropped (thought-aloud only)");
+            tracing::info!(chat_id = %t.chat_id, action, routine_turn = t.routine_turn, "ack bubble dropped");
             return;
+        };
+        if bubble != cleaned.trim() {
+            tracing::info!(chat_id = %t.chat_id, action, "ack bubble fallback after thought-aloud strip");
         }
-        t.ack_text = cleaned;
+        t.ack_text = bubble;
         if t.row_closed {
             self.open_row(host, t, "ack").await;
         }
@@ -5435,6 +5437,36 @@ fn message_from_voice(m: &arbos_core::doc::MessageView) -> bool {
         || m.rest.get("source").and_then(Value::as_str) == Some("voice")
 }
 
+/// The user row was written by a routine fire (`routines.rs`: `sender = routine:<id>`,
+/// `routineRunId`), i.e. the agent's own scheduled check-in — no person sent it.
+fn message_from_routine(m: &arbos_core::doc::MessageView) -> bool {
+    m.rest
+        .get("sender")
+        .and_then(Value::as_str)
+        .is_some_and(|s| s.starts_with("routine:"))
+        || m.rest.get("routineRunId").is_some()
+}
+
+/// The ack bubble's text for a turn, or `None` for no bubble. `act`/`new`/`wake` on a user turn
+/// always show one (a thought-aloud-only ack used to leave the chat on bare "Working…" until the
+/// result — feedback AMus6 / ALYEPIee), so an empty ack falls back to "On it.". A routine-fired
+/// turn has nobody waiting for an acknowledgement: no bubble at all, the note is the whole turn
+/// (#1391: four "On it." rows before the l1 pipeline's check-ins).
+fn ack_bubble(cleaned: &str, action: &str, routine_turn: bool) -> Option<String> {
+    let cleaned = cleaned.trim();
+    if action == "reply" {
+        return (!cleaned.is_empty()).then(|| cleaned.to_owned());
+    }
+    if routine_turn {
+        return None;
+    }
+    Some(if cleaned.is_empty() {
+        "On it.".to_owned()
+    } else {
+        cleaned.to_owned()
+    })
+}
+
 fn turn_deadline_secs() -> u64 {
     std::env::var("ARBOS_TURN_DEADLINE_SECS")
         .ok()
@@ -5807,6 +5839,57 @@ mod tests {
                 "pack lost the rule: {rule}"
             );
         }
+    }
+
+    /// #1391: a routine-fired turn (the agent's own check-in) writes no ack bubble — the l1
+    /// pipeline showed "On it." before every progress note. User turns keep theirs, including the
+    /// "On it." fallback when the model's ack was thought-aloud only.
+    #[test]
+    fn routine_turns_write_no_ack_bubble() {
+        // user turns: unchanged
+        assert_eq!(
+            ack_bubble("Cloning it now.", "act", false).as_deref(),
+            Some("Cloning it now.")
+        );
+        assert_eq!(ack_bubble("", "act", false).as_deref(), Some("On it."));
+        assert_eq!(ack_bubble("  ", "new", false).as_deref(), Some("On it."));
+        assert_eq!(ack_bubble("", "reply", false), None);
+        assert_eq!(
+            ack_bubble("Austin.", "reply", false).as_deref(),
+            Some("Austin.")
+        );
+        // routine turns: no bubble for act/new/wake, whatever the model wrote
+        assert_eq!(ack_bubble("", "act", true), None);
+        assert_eq!(ack_bubble("Checking the pipeline now.", "act", true), None);
+        assert_eq!(ack_bubble("On it.", "wake", true), None);
+        assert_eq!(ack_bubble("", "new", true), None);
+        // a `reply` on a routine turn is the note itself and stays
+        assert_eq!(
+            ack_bubble("Five of 20 chunks are done.", "reply", true).as_deref(),
+            Some("Five of 20 chunks are done.")
+        );
+
+        let routine: arbos_core::doc::MessageView = serde_json::from_value(json!({
+            "id": "m1", "role": "user", "status": "done", "parts": [],
+            "sender": "routine:01RTN", "routineName": "pipeline check", "routineRunId": "run-1"
+        }))
+        .unwrap();
+        assert!(message_from_routine(&routine));
+        let typed: arbos_core::doc::MessageView = serde_json::from_value(json!({
+            "id": "m2", "role": "user", "status": "done", "parts": [], "sender": "user"
+        }))
+        .unwrap();
+        assert!(!message_from_routine(&typed));
+        let channel: arbos_core::doc::MessageView = serde_json::from_value(json!({
+            "id": "m3", "role": "user", "status": "done", "parts": [], "sender": "channel:telegram"
+        }))
+        .unwrap();
+        assert!(
+            !message_from_routine(&channel),
+            "a person writing through a channel keeps the ack"
+        );
+        // the router agrees: no ack on a routine fire
+        assert!(ROUTER_PROMPT.contains("When a routine fires, the message is your own instruction"));
     }
 
     /// The code-mode prompt names the exact script identifiers of the project tools, so the model
