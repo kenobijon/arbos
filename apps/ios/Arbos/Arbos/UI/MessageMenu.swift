@@ -1,20 +1,23 @@
 import SwiftUI
 
-/// The message bubble's long-press menu: **Copy, Reply, Delete**, plus an
-/// emoji reaction row on messages from other users (Discord / Telegram /
-/// WhatsApp style). The Mac's `ui/message_menu.rs` keeps Copy / Reply /
-/// Delete only (#1370); iOS restores the reaction bar here. SwiftUI places
-/// a `.contextMenu` itself, always on screen, so only the item set and the
+/// The message bubble's long-press menu: **Copy, Reply, Forward, Delete**,
+/// plus an emoji reaction row on messages from other users (Discord /
+/// Telegram / WhatsApp style). Forward opens the same chat picker the media
+/// viewer uses. The Mac's `ui/message_menu.rs` keeps Copy / Reply / Delete
+/// only (#1370); iOS restores the reaction bar here. SwiftUI places a
+/// `.contextMenu` itself, always on screen, so only the item set and the
 /// reaction `ControlGroup`s live here.
 enum MessageMenuItem: CaseIterable, Equatable {
     case copy
     case reply
+    case forward
     case delete
 
     var label: String {
         switch self {
         case .copy: return "Copy"
         case .reply: return "Reply"
+        case .forward: return "Forward"
         case .delete: return "Delete"
         }
     }
@@ -23,6 +26,7 @@ enum MessageMenuItem: CaseIterable, Equatable {
         switch self {
         case .copy: return "doc.on.doc"
         case .reply: return "arrowshape.turn.up.left"
+        case .forward: return "arrowshape.turn.up.right"
         case .delete: return "trash"
         }
     }
@@ -32,7 +36,7 @@ enum MessageMenuItem: CaseIterable, Equatable {
 
 enum MessageMenu {
     /// The items, in order, for every real message bubble.
-    static let items: [MessageMenuItem] = [.copy, .reply, .delete]
+    static let items: [MessageMenuItem] = [.copy, .reply, .forward, .delete]
 
     /// Rows that are not a message in a shared doc (channels, date / system
     /// lines) can only be copied.

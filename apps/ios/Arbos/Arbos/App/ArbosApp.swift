@@ -128,7 +128,9 @@ struct RootView: View {
         .onChange(of: scenePhase) { _, phase in
             // Match Mac `window_active`: only suppress push while the scene is
             // active. Background / lock clears focused_chat so APNs banners fire.
-            model.setAppActive(phase == .active)
+            // After `.background`, rooms redial so Syncing… cannot stick
+            // ([feedback app-01M5MVNNNBZHJWSRCZ81S04C8E]).
+            model.noteScenePhase(phase)
             if phase == .active { Task { await push.refreshStatus(); await model.refreshUnread(); await CallManager.shared.sendVoipTokenIfNeeded(); await model.checkForUpdate() } }
         }
         // Safari / Mac-style connector OAuth: relay redirects to arbos://connectors/callback.
