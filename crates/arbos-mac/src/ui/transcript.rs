@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     actions, div, list, prelude::*, px, Animation, AnimationExt, AnyElement, App, Context, Div,
-    Entity, FontWeight, ListAlignment, ListScrollEvent, ListState, Render, SharedString, Stateful,
-    TextRun, Window,
+    Entity, FontWeight, ListAlignment, ListScrollEvent, ListState, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, SharedString, Stateful, TextRun, Window,
 };
 
 use crate::app::{AppEvent, AppState, DetailsTarget};
@@ -98,6 +98,13 @@ const HOVER_FADE_MS: f32 = 150.0;
 pub const HEADER_FADE_BAND: f32 = crate::ui::header::metrics::FADE_BAND;
 /// How long the hover copy glyph stays a checkmark after a successful copy.
 const COPY_FEEDBACK_MS: u64 = 2_000;
+/// How far a right swipe pulls the bubble before reply arms (iPhone
+/// `replySwipeWidth` / Telegram-style).
+const REPLY_SWIPE_WIDTH: f32 = 56.0;
+/// Release past this fraction of [`REPLY_SWIPE_WIDTH`] starts a reply.
+const REPLY_SWIPE_ARM: f32 = REPLY_SWIPE_WIDTH * 0.7;
+/// Ignore pointer noise until the drag travels this far (iPhone minimumDistance).
+const REPLY_SWIPE_SLOP: f32 = 12.0;
 
 /// Which bubble row the pointer is over, and the one it just left, with the
 /// moment each happened: the fade is computed from those at render time.
@@ -105,6 +112,20 @@ const COPY_FEEDBACK_MS: u64 = 2_000;
 struct HoverFade {
     over: Option<(String, Instant)>,
     left: Option<(String, Instant)>,
+}
+
+/// In-progress swipe-right-to-reply on a message row (iPhone `replySwipeGesture`).
+struct ReplySwipe {
+    /// The transcript row the press started on (visual offset + reply glyph).
+    row_id: String,
+    /// The message to reply to when the swipe arms.
+    message_id: Id,
+    /// Press origin in window coordinates.
+    start: Point<Pixels>,
+    /// How far the row has been pulled right (px).
+    drag: f32,
+    /// True once the pan is clearly horizontal-right (scroll / select stay free until then).
+    locked: bool,
 }
 
 impl HoverFade {
@@ -498,6 +519,8 @@ pub struct Transcript {
     /// `ARBOS_RIG_SELECT_AFTER_MS` (so a reply typed over VNC can land
     /// first). Cleared when applied.
     rig_select: Option<(String, Instant)>,
+    /// Swipe-right-to-reply in progress (Telegram / iPhone parity).
+    reply_swipe: Option<ReplySwipe>,
 }
 
 impl Transcript {
@@ -553,7 +576,103 @@ impl Transcript {
                 .detach();
                 (spec, Instant::now() + Duration::from_millis(after))
             }),
+            reply_swipe: None,
         }
+    }
+
+    /// Rows that can be replied to (same set as the message menu's Reply item
+    /// on the iPhone: text, media, and empty agent bubbles — not stamps,
+    /// cards, errors, or chrome).
+    fn can_reply_row(kind: &RowKind) -> bool {
+        matches!(
+            kind,
+            RowKind::User { .. }
+                | RowKind::Markdown { .. }
+                | RowKind::NoAnswer { .. }
+                | RowKind::Attachment { .. }
+        )
+    }
+
+    /// Mouse down on a replyable row: arm a possible swipe-right-to-reply.
+    /// Vertical scroll and text selection stay free until the pan locks.
+    fn begin_reply_swipe(&mut self, row_id: String, message_id: Id, start: Point<Pixels>) {
+        self.reply_swipe = Some(ReplySwipe {
+            row_id,
+            message_id,
+            start,
+            drag: 0.0,
+            locked: false,
+        });
+    }
+
+    /// Trackpad / mouse move while a reply swipe may be in progress.
+    fn on_reply_swipe_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if self.reply_swipe.is_none() {
+            return;
+        }
+        if event.pressed_button != Some(MouseButton::Left) {
+            self.reply_swipe = None;
+            cx.notify();
+            return;
+        }
+        let (dx, dy, was_locked, prev_drag) = {
+            let swipe = self.reply_swipe.as_ref().expect("checked above");
+            let dx: f32 = (event.position.x - swipe.start.x).into();
+            let dy: f32 = (event.position.y - swipe.start.y).into();
+            (dx, dy, swipe.locked, swipe.drag)
+        };
+        if !was_locked {
+            if dx.abs() + dy.abs() < REPLY_SWIPE_SLOP {
+                return;
+            }
+            // Vertical scroll or leftward peek: do not steal the gesture.
+            if dx <= 0.0 || dx.abs() <= dy.abs() * 1.15 {
+                self.reply_swipe = None;
+                return;
+            }
+        }
+        let raw = dx.max(0.0);
+        let w = REPLY_SWIPE_WIDTH;
+        let reveal = if raw <= w {
+            raw
+        } else {
+            w + ((raw - w) * 0.2).min(24.0)
+        };
+        let just_locked = !was_locked;
+        let moved = (prev_drag - reveal).abs() > 0.5;
+        if let Some(swipe) = self.reply_swipe.as_mut() {
+            swipe.locked = true;
+            if moved {
+                swipe.drag = reveal;
+            }
+        }
+        if just_locked {
+            self.selection.update(cx, |s, cx| {
+                s.clear();
+                cx.notify();
+            });
+        }
+        if just_locked || moved {
+            cx.notify();
+        }
+    }
+
+    /// Mouse up: if the swipe armed far enough, start a reply (same path as
+    /// the hover reply glyph and the message-menu Reply item).
+    fn on_reply_swipe_up(&mut self, cx: &mut Context<Self>) {
+        let Some(swipe) = self.reply_swipe.take() else {
+            return;
+        };
+        let triggered = swipe.locked && swipe.drag >= REPLY_SWIPE_ARM;
+        if triggered {
+            if let Some(chat_id) = self.chat_id.clone() {
+                cx.emit(TranscriptEvent::Reply {
+                    chat_id,
+                    message_id: swipe.message_id,
+                });
+            }
+        }
+        cx.notify();
     }
 
     /// Apply `ARBOS_RIG_SELECT` to the newest settled agent bubble, once.
@@ -697,6 +816,9 @@ impl Transcript {
         let pane_open = state.profile.is_some();
         let pane_changed = pane_open != self.pane_open;
         self.pane_open = pane_open;
+        if chat_changed {
+            self.reply_swipe = None;
+        }
         let messages: Vec<Message> = chat_id
             .as_deref()
             .map(|id| state.messages_of(id).to_vec())
@@ -1338,6 +1460,10 @@ impl Transcript {
         };
         let theme = Theme::of(cx).clone();
         let now = Instant::now();
+        // Before the match moves `row.kind`: which rows accept swipe-right-to-reply.
+        let can_reply = Self::can_reply_row(&row.kind) && !row.message_id.is_empty();
+        let swipe_row_id = row.id.clone();
+        let swipe_message_id = row.message_id.clone();
         let selectable = Selectable::new(&self.selection, theme.accent_soft, cx).with_mentions(
             self.mentions.clone(),
             theme.accent,
@@ -1931,11 +2057,53 @@ impl Transcript {
                     && !matches!(prev.kind, RowKind::Stamp { .. } | RowKind::BottomInset)
                     && self.turn_starts.contains(&row.message_id)
             });
-        column_row(inner)
-            .when(turn_start, |el| el.pt(px(TURN_GAP_EXTRA)))
-            .when(highlighted, |el| {
-                el.bg(Theme::with_alpha(theme.accent, 0.14))
+        let swipe_drag = self
+            .reply_swipe
+            .as_ref()
+            .filter(|s| s.row_id == swipe_row_id)
+            .map(|s| s.drag)
+            .unwrap_or(0.0);
+        let accent = theme.accent;
+        div()
+            .id(SharedString::from(format!("{swipe_row_id}#swipe")))
+            .relative()
+            .w_full()
+            .when(can_reply, |el| {
+                let (row_id, message_id) = (swipe_row_id.clone(), swipe_message_id.clone());
+                el.on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, event: &MouseDownEvent, _, _cx| {
+                        if event.modifiers.control || event.modifiers.shift {
+                            return;
+                        }
+                        this.begin_reply_swipe(row_id.clone(), message_id.clone(), event.position);
+                    }),
+                )
             })
+            .when(swipe_drag > 0.5, |el| {
+                el.child(
+                    div()
+                        .absolute()
+                        .left(px(COLUMN_MARGIN + swipe_drag - REPLY_SWIPE_WIDTH))
+                        .top_0()
+                        .bottom_0()
+                        .w(px(REPLY_SWIPE_WIDTH))
+                        .flex()
+                        .items_center()
+                        .justify_start()
+                        .pl(px(4.0))
+                        .opacity((swipe_drag / (REPLY_SWIPE_WIDTH * 0.55)).min(1.0))
+                        .child(icon("reply", 16.0, accent)),
+                )
+            })
+            .child(
+                column_row(inner)
+                    .when(swipe_drag > 0.0, |el| el.ml(px(swipe_drag)))
+                    .when(turn_start, |el| el.pt(px(TURN_GAP_EXTRA)))
+                    .when(highlighted, |el| {
+                        el.bg(Theme::with_alpha(theme.accent, 0.14))
+                    }),
+            )
             .into_any_element()
     }
 }
@@ -2005,6 +2173,19 @@ impl Render for Transcript {
             .track_focus(&focus)
             .on_action(cx.listener(Self::copy_selection))
             .on_scroll_wheel(cx.listener(|this, event, _, cx| this.on_wheel(event, cx)))
+            // Swipe-right-to-reply: move/up live on the transcript so a drag
+            // that leaves the row still finishes (same as the iPhone gesture).
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                this.on_reply_swipe_move(event, cx);
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseUpEvent, _, cx| this.on_reply_swipe_up(cx)),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseUpEvent, _, cx| this.on_reply_swipe_up(cx)),
+            )
             // Grok's header band (Jacob, Oct 22 12:49 CR, superseding the opaque
             // band): the list runs up under the floating pill and fades out
             // over `HEADER_FADE_BAND` — Grok's text is gone at the window edge

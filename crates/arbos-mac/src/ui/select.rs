@@ -88,6 +88,13 @@ impl TextSelection {
         self.model.clear_settled()
     }
 
+    /// Drop any selection (drag or settled). Used when a row gesture
+    /// (swipe-right-to-reply) takes over the pointer.
+    pub fn clear(&mut self) {
+        self.model.active = None;
+        self.model.proposal = None;
+    }
+
     /// Screenshot rig (`ARBOS_RIG_SELECT`): select part of bubble `key` as a
     /// gesture would — `all`, a drag `<from>..<to>` (byte offsets of `text`),
     /// a double-click `word@<i>` or a triple-click `para@<i>`. The GUI
