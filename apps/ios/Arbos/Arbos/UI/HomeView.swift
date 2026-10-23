@@ -348,6 +348,11 @@ struct HomeView: View {
                 try? await Task.sleep(nanoseconds: 5_500_000_000)
                 if let p = model.project(id) { model.open(project: p) }
             }
+            if let id = DebugHooks.openPeople {
+                while !model.peopleChats.contains(where: { $0.id == id }) { try? await Task.sleep(nanoseconds: 300_000_000) }
+                try? await Task.sleep(nanoseconds: 800_000_000)
+                if let c = model.peopleChats.first(where: { $0.id == id }) { model.open(peopleChat: c) }
+            }
         }
         .task { await model.refreshGoals() }
         .onAppear {

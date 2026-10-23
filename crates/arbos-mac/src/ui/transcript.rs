@@ -32,7 +32,7 @@ use crate::ui::people;
 use crate::ui::select::{BubbleSelectable, Selectable, TextSelection};
 use crate::ui::theme::{
     Theme, BUBBLE_PAD_X, BUBBLE_PAD_Y, BUBBLE_RADIUS, CHAT_BODY, CHAT_LINE_HEIGHT, COLUMN_MARGIN,
-    COMPOSER_WIDTH, LINE_HEIGHT, PLUS_BUTTON, TEXT_SMALL, TEXT_TINY,
+    COMPOSER_HEIGHT, COMPOSER_WIDTH, LINE_HEIGHT, PLUS_BUTTON, TEXT_SMALL, TEXT_TINY,
 };
 use crate::ui::veil::Veil;
 use crate::ui::widgets::QuestionCard;
@@ -75,9 +75,21 @@ const STAMP_PAD_BOTTOM: f32 = 24.0 - ROW_GAP_HALF - 7.0;
 const BOTTOM_INSET: f32 = 54.0 - ROW_GAP_HALF - 6.0;
 /// People chats (redesign mocks a/f): a 24 pt sender disc at the bubble's
 /// bottom-left, 8 pt from it; captions and earlier blocks keep the lane free.
-const SENDER_DISC: f32 = 24.0;
-const SENDER_DISC_GAP: f32 = 8.0;
-const SENDER_LANE: f32 = SENDER_DISC + SENDER_DISC_GAP;
+/// The avatar column (Jacob, 2026-10-23 15:20, [feedback
+/// typing-indicator-left-2026-10-23]): every round picture in the chat — the
+/// sender disc beside a people-chat bubble, the pictures on the presence row
+/// over the composer — is the composer's `+` disc: the same size, centred on
+/// it. `AVATAR_COLUMN_INSET` is the pill's rim + pad (1 + 7) from the chat
+/// column's left edge (= the composer's left edge, #1374), so the disc spans
+/// the `+` exactly (24–52 from the pane, centre 38). `SENDER_DISC_GAP` lands
+/// the bubble body on the composer's text start (rim 1 + pad 7 + `+` 28 + 4 +
+/// 10 = 50 from the column edge, 66 from the pane). Agent chats keep #1374's
+/// no-avatar rule (body at the composer edge). Shared with
+/// `feedback/sender-name-in-bubble-2026-10-23`, which builds on these names.
+pub const AVATAR_COLUMN_INSET: f32 = 1.0 + (COMPOSER_HEIGHT - 2.0 - PLUS_BUTTON) / 2.0;
+pub const SENDER_DISC: f32 = PLUS_BUTTON;
+pub const SENDER_DISC_GAP: f32 = 14.0;
+pub const SENDER_LANE: f32 = AVATAR_COLUMN_INSET + SENDER_DISC + SENDER_DISC_GAP;
 /// Messages for Mac fades a row's hover-only affordances (time, react glyph)
 /// in and out rather than snapping them.
 const HOVER_FADE_MS: f32 = 150.0;
@@ -281,6 +293,9 @@ pub enum RowKind {
         /// leaves the avatar lane free and the last one draws the sender's disc
         /// at the bubble's bottom-left (redesign mocks a/f). The sender seed.
         lane: Option<String>,
+        /// People / group reply: quote of the user message this answers
+        /// (`replyTo`, else `inReplyTo`). Only set on the first block of the bubble.
+        quote: Option<Quote>,
     },
     /// A finished reply with no words, cards or attachments: one plain line in the
     /// agent's bubble. `name` is the row's `senderName`; the agent id in `seed` resolves
@@ -290,6 +305,8 @@ pub enum RowKind {
         name: Option<String>,
         time: Option<String>,
         lane: Option<String>,
+        /// People / group reply: quote of the user message this would have answered.
+        quote: Option<Quote>,
     },
     /// Centered muted time line ("Today 9:39 PM").
     Stamp {
@@ -345,13 +362,6 @@ pub enum RowKind {
     /// Tiny inline glyph (■ stopped, ✗ failed) — no words.
     Glyph {
         glyph: &'static str,
-    },
-    /// The one working indicator for the chat: a pulsing dot under the last
-    /// message while anything runs here. `queued` tints it amber.
-    Indicator {
-        queued: bool,
-        /// "Cloning RaoFoundation/subtensor" — else "<name> is working".
-        activity: Option<String>,
     },
     /// Debug-only "Show details" disclosure under a finished reply.
     Details,
@@ -477,8 +487,6 @@ pub struct Transcript {
     /// Set by the scroll callback; the next frame re-pins when the user
     /// stopped within `STICK_THRESHOLD_PX` of the end.
     repin_check_pending: bool,
-    /// The working line's current text and when it changed (fade on swap).
-    activity_shown: Option<(String, Instant)>,
     hover: HoverFade,
     /// Text selected in a bubble (drag / double-click / triple-click); ⌘C copies it.
     selection: Entity<TextSelection>,
@@ -529,7 +537,6 @@ impl Transcript {
             revealed: None,
             spring: StickSpring::default(),
             repin_check_pending: false,
-            activity_shown: None,
             hover: HoverFade::default(),
             selection,
             turn_starts: HashSet::new(),
@@ -706,9 +713,16 @@ impl Transcript {
         let me_id = state.me_id();
         let thumb_keys: HashSet<&str> = state.thumbnails.keys().map(|k| k.as_str()).collect();
         let new_rows = build_rows(&messages, show_details, speech, &me_id, &thumb_keys);
+        // A sender change opens the turn gap. So does every new assistant /
+        // project message — consecutive replies from the same agent (quick ack
+        // then the answer, or two answers in a row) must not read as one bubble
+        // (#1447 / doug-merged-reply-bubbles).
         self.turn_starts = messages
             .windows(2)
-            .filter(|w| (w[0].role, &w[0].sender) != (w[1].role, &w[1].sender))
+            .filter(|w| {
+                (w[0].role, &w[0].sender) != (w[1].role, &w[1].sender)
+                    || matches!(w[1].role, Role::Assistant | Role::Project)
+            })
             .map(|w| w[1].id.clone())
             .collect();
 
@@ -798,11 +812,7 @@ impl Transcript {
             return;
         }
         let Some(ix) = self.rows.iter().position(|r| {
-            r.message_id == msg
-                && !matches!(
-                    r.kind,
-                    RowKind::Stamp { .. } | RowKind::Indicator { .. } | RowKind::BottomInset
-                )
+            r.message_id == msg && !matches!(r.kind, RowKind::Stamp { .. } | RowKind::BottomInset)
         }) else {
             return;
         };
@@ -1140,6 +1150,7 @@ impl Transcript {
         fill: bool,
         time: Option<String>,
         lane: Option<String>,
+        quote: Option<Quote>,
         now: Instant,
         theme: &Theme,
         selectable: &Selectable,
@@ -1164,6 +1175,9 @@ impl Transcript {
             avatars::agent_accent(&a.seed, a.color_index, a.leaf.0, a.leaf.1, theme)
         });
         let r = px(BUBBLE_RADIUS);
+        let quote_header = quote
+            .filter(|_| first)
+            .map(|q| self.quote_header(row_id, q, theme.text));
         let bubble = self
             .menu_target(
                 div().id(SharedString::from(format!("{}#bubble", row_id))),
@@ -1180,6 +1194,9 @@ impl Transcript {
             .min_w_0()
             .relative()
             .when(fill, |el| el.w_full())
+            .when(quote_header.is_some(), |el| {
+                el.flex().flex_col().gap(px(6.0))
+            })
             .px(px(BUBBLE_PAD_X))
             .when(first, |el| el.pt(px(BUBBLE_PAD_Y)).rounded_t(r))
             .when(!first, |el| el.pt(px(3.0)))
@@ -1189,6 +1206,7 @@ impl Transcript {
             .when_some(agent_accent, |el, color| {
                 el.border_l_2().border_color(Theme::with_alpha(color, 0.7))
             })
+            .children(quote_header)
             .child(render_block(
                 row_id,
                 &block,
@@ -1256,7 +1274,9 @@ impl Transcript {
             .items_end()
             .when(first, |el| el.pt(px(ROW_GAP_HALF)))
             .when(last, |el| el.pb(px(ROW_GAP_HALF)))
-            .when(lane.is_some(), |el| el.gap(px(SENDER_DISC_GAP)))
+            .when(lane.is_some(), |el| {
+                el.pl(px(AVATAR_COLUMN_INSET)).gap(px(SENDER_DISC_GAP))
+            })
             .children(disc)
             .child(assistant_slot(bubble))
             .into_any_element()
@@ -1377,6 +1397,7 @@ impl Transcript {
                             row_el
                                 .justify_start()
                                 .items_end()
+                                .pl(px(AVATAR_COLUMN_INSET))
                                 .gap(px(SENDER_DISC_GAP))
                                 .child({
                                     // The disc opens the same profile as the name.
@@ -1466,6 +1487,7 @@ impl Transcript {
                 fill,
                 time,
                 lane,
+                quote,
             } => self.markdown_bubble(
                 &row.id,
                 &row.message_id,
@@ -1477,6 +1499,7 @@ impl Transcript {
                 fill,
                 time,
                 lane,
+                quote,
                 now,
                 &theme,
                 &selectable,
@@ -1488,6 +1511,7 @@ impl Transcript {
                 name,
                 time,
                 lane,
+                quote,
             } => {
                 let hint = name.as_deref().unwrap_or("Agent");
                 let (resolved, _, _, _) = self.agent_identity(&seed, hint, cx);
@@ -1509,6 +1533,7 @@ impl Transcript {
                     false,
                     time,
                     lane,
+                    quote,
                     now,
                     &theme,
                     &selectable,
@@ -1750,69 +1775,6 @@ impl Transcript {
                 .text_color(theme.text_muted)
                 .child(glyph)
                 .into_any_element(),
-            RowKind::Indicator { queued, activity } => {
-                PulseClock::request(cx);
-                // Freshness is time-capped (stale streams / open hand-offs). Re-check
-                // on each pulse so a leftover `streaming` row cannot pin forever;
-                // when it expires, rebuild rows without the indicator.
-                let chat_id = self.chat_id.clone().unwrap_or_default();
-                let still = {
-                    let state = self.state.read(cx);
-                    Message::chat_is_actively_working(state.messages_of(&chat_id), now_ms())
-                };
-                if !still {
-                    cx.spawn(async move |this, cx| {
-                        let _ = this.update(cx, |this, cx| this.sync(cx));
-                    })
-                    .detach();
-                    return div().into_any_element();
-                }
-                // A new activity fades in over 260 ms.
-                let key = activity.clone().unwrap_or_default();
-                let since = match &self.activity_shown {
-                    Some((shown, at)) if *shown == key => *at,
-                    _ => {
-                        self.activity_shown = Some((key, now));
-                        now
-                    }
-                };
-                let fade = (since.elapsed().as_millis() as f32 / 260.0).clamp(0.0, 1.0);
-                // "<name> is working" with the worker's picture (Grok's one line).
-                let state = self.state.read(cx);
-                let (name, picture): (String, Option<gpui::Div>) = match state.selected() {
-                    Some(space) if space.is_people() => {
-                        let msgs = state.messages_of(&chat_id);
-                        let recent = now_ms().saturating_sub(Message::STREAM_FRESH_MS);
-                        let agent = msgs
-                            .iter()
-                            .rev()
-                            .find(|m| {
-                                m.role == Role::Assistant
-                                    && (m.is_streaming() && m.created_at >= recent
-                                        || Message::chat_has_open_subagent(
-                                            std::slice::from_ref(*m),
-                                            now_ms(),
-                                        ))
-                            })
-                            .and_then(|m| m.sender_handle.clone().or_else(|| m.sender_name.clone()))
-                            .unwrap_or_else(|| "Agent".into());
-                        let glyph = space
-                            .agents
-                            .iter()
-                            .find(|a| a.handle == agent || a.name == agent)
-                            .map(|a| people::agent_glyph(a, 20.0, &theme));
-                        (agent, glyph)
-                    }
-                    Some(space) => (
-                        space.name.clone(),
-                        Some(crate::ui::avatars::project(space, 20.0, &theme)),
-                    ),
-                    None => ("Agent".into(), None),
-                };
-                cards::working_line(&name, picture, queued, activity.as_deref(), &theme, cx)
-                    .opacity(fade)
-                    .into_any_element()
-            }
             RowKind::Sender {
                 name,
                 icon,
@@ -2379,15 +2341,32 @@ pub fn build_rows(
                     }
                 }
                 let mut lane: Option<String> = None;
+                // A caption with nothing under it (a stream that has no words yet)
+                // is dropped at the end of the message: the presence row already
+                // says who is working, and Jacob's Oct 23 shot showed the pair —
+                // "GigChadAgent" over "gigchadagent is working" — as a doubled notice.
+                let mut sender_row_ix: Option<usize> = None;
                 let in_people =
                     message.sender.starts_with("agent:") && message.asked_by_handle.is_some();
+                // Quote the user message this answers: prefer `replyTo` (platform
+                // reply feature); fall back to `inReplyTo` (turn link / older rows)
+                // so consecutive replies do not look like one run (#1447).
+                let reply_quote = message
+                    .reply_to
+                    .as_deref()
+                    .filter(|id| !id.is_empty())
+                    .or_else(|| message.in_reply_to.as_deref().filter(|id| !id.is_empty()))
+                    .map(|id| Quote::for_reply(id, messages));
                 if message.role == Role::Project || in_people {
-                    // A people-chat agent (or another Project, F6) speaks in its own lane. The
-                    // name sits above the bubble only when the sender changed (Grok Bot's group
-                    // style); the disc on the last block names it otherwise. No meta line —
+                    // A people-chat agent (or another Project, F6) speaks in its own lane.
+                    // Each reply names its sender (#1447): consecutive answers from the same
+                    // agent must not merge into one unnamed run. No meta line —
                     // "answering @x · owned by @y" moved to the profile pane (Jacob, 2026-10-22).
                     lane = Some(message.sender.clone());
-                    if prev_sender.as_deref() != Some(message.sender.as_str()) {
+                    let name_this = in_people
+                        || message.role == Role::Project
+                        || prev_sender.as_deref() != Some(message.sender.as_str());
+                    if name_this {
                         let fallback = if message.role == Role::Project {
                             message
                                 .sender
@@ -2398,6 +2377,7 @@ pub fn build_rows(
                             "Agent".to_owned()
                         };
                         let name = message.sender_name.clone().unwrap_or(fallback);
+                        sender_row_ix = Some(rows.len());
                         rows.push(Row {
                             version: hash_version(
                                 &(&name, &message.sender_icon, &message.sender_avatar_color),
@@ -2488,7 +2468,10 @@ pub fn build_rows(
                                         BubbleText::single(block_plain(&block, false))
                                     });
                                 rows.push(Row {
-                                    version: hash_version(&(&block, first, last, fill), live),
+                                    version: hash_version(
+                                        &(&block, first, last, fill, &reply_quote),
+                                        live,
+                                    ),
                                     id: format!("{}#{}.{}", message.id, id, bix),
                                     message_id: message.id.clone(),
                                     kind: RowKind::Markdown {
@@ -2500,6 +2483,7 @@ pub fn build_rows(
                                         fill,
                                         time: clock_label(message.created_at),
                                         lane: lane.clone(),
+                                        quote: if first { reply_quote.clone() } else { None },
                                     },
                                 });
                                 block_ix += 1;
@@ -2663,12 +2647,14 @@ pub fn build_rows(
                             fill: false,
                             time: clock_label(message.created_at),
                             lane: lane.clone(),
+                            quote: reply_quote.clone(),
                         },
                         None => RowKind::NoAnswer {
                             seed: message.sender.clone(),
                             name: message.sender_name.clone().filter(|n| !n.trim().is_empty()),
                             time: clock_label(message.created_at),
                             lane: lane.clone(),
+                            quote: reply_quote.clone(),
                         },
                     };
                     rows.push(Row {
@@ -2677,6 +2663,7 @@ pub fn build_rows(
                                 &message.sender,
                                 &message.sender_name,
                                 errors.first().map(|(_, _, text)| text),
+                                &reply_quote,
                             ),
                             false,
                         ),
@@ -2741,6 +2728,11 @@ pub fn build_rows(
                         kind: RowKind::Details,
                     });
                 }
+                if let Some(ix) = sender_row_ix {
+                    if rows.len() == ix + 1 {
+                        rows.pop();
+                    }
+                }
                 // Agent-to-agent messaging: the reply went back to the agent that wrote in.
                 if let Some(name) = message
                     .agent_reply_to
@@ -2762,22 +2754,9 @@ pub fn build_rows(
             prev_sender = Some(message.sender.clone());
         }
     }
-    if running || queued {
-        let last = messages.last().map(|m| m.id.clone()).unwrap_or_default();
-        let activity = messages
-            .iter()
-            .rev()
-            .find(|m| {
-                m.is_streaming() && m.created_at >= now.saturating_sub(Message::STREAM_FRESH_MS)
-            })
-            .and_then(Message::current_activity);
-        rows.push(Row {
-            version: hash_version(&(queued, &activity), true),
-            id: "chat#indicator".into(),
-            message_id: last,
-            kind: RowKind::Indicator { queued, activity },
-        });
-    }
+    // Who is working is the presence row over the composer (`ui::presence`),
+    // not a transcript row: one notice per agent, never a caption plus a line.
+    let _ = (running, queued);
     // Trailing clearance: scrolls with the list so mid-thread bubbles can
     // reach the composer, while the pinned end still keeps 54 pt above it.
     if !rows.is_empty() {
@@ -3627,8 +3606,11 @@ mod layout_tests {
     //! headless through the same frames the shell and the transcript use.
     use gpui::TestAppContext;
 
+    use gpui::Pixels;
+
     use super::*;
-    use crate::ui::theme::{COMPOSER_HEIGHT, COMPOSER_MARGIN, PLUS_BUTTON};
+    use crate::ui::presence;
+    use crate::ui::theme::COMPOSER_MARGIN;
 
     /// The reference window: 1180 pt wide with the 296 pt sidebar open.
     const REFERENCE_PANE: f32 = 1180.0 - crate::ui::theme::SIDEBAR_WIDTH;
@@ -3638,13 +3620,15 @@ mod layout_tests {
 
     struct Column {
         pane: f32,
+        /// How many people / agents the presence row over the pill carries.
+        participants: usize,
     }
 
     impl gpui::Render for Column {
         fn render(
             &mut self,
             _: &mut gpui::Window,
-            _: &mut gpui::Context<Self>,
+            cx: &mut gpui::Context<Self>,
         ) -> impl IntoElement {
             // A long agent reply: the bubble wants more than any pane has.
             let bubble = div()
@@ -3659,8 +3643,32 @@ mod layout_tests {
                 .items_end()
                 .child(assistant_slot(bubble))
                 .into_any_element();
+            // A people-chat bubble row: the sender's disc at the column edge,
+            // then the gap, then the bubble (`RowKind::Markdown` with a lane).
+            let people_row = div()
+                .w_full()
+                .flex()
+                .items_end()
+                .pl(px(AVATAR_COLUMN_INSET))
+                .gap(px(SENDER_DISC_GAP))
+                .child(
+                    div()
+                        .size(px(SENDER_DISC))
+                        .flex_shrink_0()
+                        .rounded_full()
+                        .debug_selector(|| "test-disc".into()),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .h(px(CHAT_LINE_HEIGHT))
+                        .debug_selector(|| "test-people-bubble".into()),
+                )
+                .into_any_element();
             // The composer pill as the shell frames it: the `+` circle 8 pt
-            // inside the pill's left edge (7 pt pad + the 1 pt rim).
+            // inside the pill's left edge (7 pt pad + the 1 pt rim), then the
+            // field body (gap 4, pad 10) where the placeholder's ink starts.
             let pill = div()
                 .w_full()
                 .h(px(COMPOSER_HEIGHT))
@@ -3668,19 +3676,53 @@ mod layout_tests {
                 .pl(px((COMPOSER_HEIGHT - 2.0 - PLUS_BUTTON) / 2.0))
                 .flex()
                 .items_center()
+                .gap(px(4.0))
                 .debug_selector(|| "test-composer".into())
                 .child(
                     div()
                         .size(px(PLUS_BUTTON))
                         .debug_selector(|| "test-plus".into()),
                 )
+                .child(
+                    div().flex_1().pl(px(10.0)).child(
+                        div()
+                            .h(px(4.0))
+                            .debug_selector(|| "test-composer-text".into()),
+                    ),
+                )
                 .into_any_element();
+            // The presence row over the pill, framed exactly as the shell
+            // frames it (`render_center`: `column_row(presence::row(..))`).
+            let theme = Theme::dark(crate::ui::theme::Surface::Matte);
+            let names = ["scouttao", "Lium", "Home", "Doug", "Sam"];
+            let participants = (0..self.participants)
+                .map(|i| presence::Participant {
+                    name: names[i % names.len()].to_string(),
+                    activity: if i % 2 == 0 {
+                        presence::Activity::Typing
+                    } else {
+                        presence::Activity::Working
+                    },
+                    picture: div()
+                        .size(px(presence::AVATAR))
+                        .rounded_full()
+                        .into_any_element(),
+                })
+                .collect();
+            let presence = presence::Presence {
+                participants,
+                detail: None,
+                queued: false,
+            };
+            let row_over_pill = presence::row(presence, &theme, cx).into_any_element();
             div()
                 .w(px(self.pane))
                 .h(px(400.0))
                 .flex()
                 .flex_col()
                 .child(column_row(row))
+                .child(column_row(people_row))
+                .child(column_row(row_over_pill))
                 .child(column_row(pill))
         }
     }
@@ -3691,25 +3733,216 @@ mod layout_tests {
         composer_left: f32,
         composer_width: f32,
         plus_left: f32,
+        plus: gpui::Bounds<Pixels>,
         column_left: f32,
         column_width: f32,
+        presence_left: f32,
+        presence_width: f32,
+        pictures: usize,
+        more: bool,
+        text_left: f32,
+        picture: gpui::Bounds<Pixels>,
+        disc: gpui::Bounds<Pixels>,
+        people_bubble_left: f32,
+        composer_text_left: f32,
     }
 
     fn measure(cx: &mut TestAppContext, pane: f32) -> Edges {
-        let (_view, vcx) = cx.add_window_view(|_, _| Column { pane });
+        measure_with(cx, pane, 1)
+    }
+
+    fn measure_with(cx: &mut TestAppContext, pane: f32, participants: usize) -> Edges {
+        // The presence row breathes with the pulse clock (a global the app installs).
+        cx.update(|cx| {
+            if !cx.has_global::<crate::ui::motion::PulseClock>() {
+                crate::ui::motion::PulseClock::init(cx);
+            }
+        });
+        let (_view, vcx) = cx.add_window_view(|_, _| Column { pane, participants });
         vcx.run_until_parked();
         let bubble = vcx.debug_bounds("test-bubble").expect("bubble drawn");
         let composer = vcx.debug_bounds("test-composer").expect("composer drawn");
         let plus = vcx.debug_bounds("test-plus").expect("plus drawn");
         let column = vcx.debug_bounds("chat-column").expect("column drawn");
+        let presence = vcx
+            .debug_bounds("presence-row")
+            .expect("presence row drawn");
+        let text = vcx
+            .debug_bounds("presence-text")
+            .expect("presence text drawn");
+        let pictures = [
+            "presence-picture-0",
+            "presence-picture-1",
+            "presence-picture-2",
+        ]
+        .into_iter()
+        .filter(|sel| vcx.debug_bounds(sel).is_some())
+        .count();
+        let more = vcx.debug_bounds("presence-more").is_some();
+        let picture = vcx
+            .debug_bounds("presence-picture-0")
+            .expect("first picture drawn");
+        let disc = vcx.debug_bounds("test-disc").expect("sender disc drawn");
+        let people_bubble = vcx
+            .debug_bounds("test-people-bubble")
+            .expect("people bubble drawn");
+        let composer_text = vcx
+            .debug_bounds("test-composer-text")
+            .expect("composer text drawn");
         Edges {
             bubble_left: bubble.origin.x.into(),
             bubble_width: bubble.size.width.into(),
             composer_left: composer.origin.x.into(),
             composer_width: composer.size.width.into(),
             plus_left: plus.origin.x.into(),
+            plus,
             column_left: column.origin.x.into(),
             column_width: column.size.width.into(),
+            presence_left: presence.origin.x.into(),
+            presence_width: presence.size.width.into(),
+            pictures,
+            more,
+            text_left: text.origin.x.into(),
+            picture,
+            disc,
+            people_bubble_left: people_bubble.origin.x.into(),
+            composer_text_left: composer_text.origin.x.into(),
+        }
+    }
+
+    #[gpui::test]
+    fn the_presence_picture_is_the_bubble_disc_on_the_plus_column(cx: &mut TestAppContext) {
+        // Jacob, 15:15 / 15:20: the row's picture and the bubble's picture are
+        // one size at one x, and that x is the composer's `+` disc — centre on
+        // centre, the same diameter (`transcript::identity`). The row's text
+        // then starts where the bubble body starts.
+        for pane in [REFERENCE_PANE, GROK_REF_57_PANE, 1400.0] {
+            let e = measure(cx, pane);
+            let (px0, pw, ph): (f32, f32, f32) = (
+                e.picture.origin.x.into(),
+                e.picture.size.width.into(),
+                e.picture.size.height.into(),
+            );
+            let (dx, dw, dh): (f32, f32, f32) = (
+                e.disc.origin.x.into(),
+                e.disc.size.width.into(),
+                e.disc.size.height.into(),
+            );
+            let plus_w: f32 = e.plus.size.width.into();
+            let plus_center: f32 = (e.plus.origin.x + e.plus.size.width / 2.0).into();
+            assert_eq!((pw, ph), (dw, dh), "pane {pane}: picture size vs disc size");
+            assert_eq!(pw, SENDER_DISC);
+            assert_eq!(
+                pw, plus_w,
+                "pane {pane}: the picture is the `+` disc's size"
+            );
+            assert!(
+                (px0 - dx).abs() <= 0.5,
+                "pane {pane}: picture x {px0} vs disc x {dx}"
+            );
+            assert!(
+                ((px0 + pw / 2.0) - plus_center).abs() <= 1.0,
+                "pane {pane}: picture centre {} vs `+` centre {plus_center}",
+                px0 + pw / 2.0
+            );
+            assert!(
+                ((dx + dw / 2.0) - plus_center).abs() <= 1.0,
+                "pane {pane}: disc centre {} vs `+` centre {plus_center}",
+                dx + dw / 2.0
+            );
+            assert!(
+                (px0 - (e.column_left + AVATAR_COLUMN_INSET)).abs() <= 0.5,
+                "pane {pane}: picture x {px0} vs column {} + X",
+                e.column_left
+            );
+            assert!(
+                (e.text_left - e.people_bubble_left).abs() <= 0.5,
+                "pane {pane}: text x {} vs people bubble x {}",
+                e.text_left,
+                e.people_bubble_left
+            );
+            assert!(
+                (e.people_bubble_left - (e.column_left + SENDER_LANE)).abs() <= 0.5,
+                "pane {pane}: bubble body at {} (lane {})",
+                e.people_bubble_left,
+                SENDER_LANE
+            );
+            // The body (and the row's text) start where the composer's words start.
+            assert!(
+                (e.people_bubble_left - e.composer_text_left).abs() <= 0.5,
+                "pane {pane}: bubble body {} vs composer text {}",
+                e.people_bubble_left,
+                e.composer_text_left
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn the_presence_row_starts_at_the_composers_left_edge(cx: &mut TestAppContext) {
+        // Jacob, 2026-10-23: "@scouttao is typing…" sat over the middle of
+        // the field. The row's first picture now starts where the bubbles and
+        // the pill start, at every pane width, and the text follows the
+        // pictures — never a full-width block whose text floats.
+        for pane in [REFERENCE_PANE, GROK_REF_57_PANE, 1400.0] {
+            let e = measure(cx, pane);
+            assert!(
+                (e.presence_left - e.composer_left).abs() <= 1.0,
+                "pane {pane}: presence row left {} vs composer left {}",
+                e.presence_left,
+                e.composer_left
+            );
+            assert!(
+                (e.presence_left - e.bubble_left).abs() <= 1.0,
+                "pane {pane}: presence row left {} vs bubble left {}",
+                e.presence_left,
+                e.bubble_left
+            );
+            assert!(
+                (e.presence_width - e.composer_width).abs() <= 1.0,
+                "pane {pane}: the row spans the column ({} vs {})",
+                e.presence_width,
+                e.composer_width
+            );
+            let expected_text =
+                e.presence_left + AVATAR_COLUMN_INSET + presence::AVATAR + presence::GAP;
+            assert!(
+                (e.text_left - expected_text).abs() <= 1.0,
+                "pane {pane}: text at {} (expected {expected_text})",
+                e.text_left
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn one_presence_row_whatever_the_count_with_one_picture_each(cx: &mut TestAppContext) {
+        // Several people typing / agents working: ONE row, N pictures side by
+        // side (capped at MAX_PICTURES plus a "+N" disc), one line of text.
+        for n in 1..=5 {
+            let e = measure_with(cx, REFERENCE_PANE, n);
+            let rows = n; // the test column renders exactly one presence row
+            assert_eq!(
+                e.pictures,
+                n.min(presence::MAX_PICTURES),
+                "{n} participants"
+            );
+            assert_eq!(e.more, n > presence::MAX_PICTURES, "{n} participants");
+            assert!(
+                (e.presence_left - e.composer_left).abs() <= 1.0,
+                "{n} participants: row left {} vs composer {}",
+                e.presence_left,
+                e.composer_left
+            );
+            // The stack grows by AVATAR − OVERLAP per extra picture; the text
+            // stays on the same line, after the stack.
+            let shown = n.min(presence::MAX_PICTURES) + usize::from(n > presence::MAX_PICTURES);
+            let stack =
+                presence::AVATAR + (shown as f32 - 1.0) * (presence::AVATAR - presence::OVERLAP);
+            let expected_text = e.presence_left + AVATAR_COLUMN_INSET + stack + presence::GAP;
+            assert!(
+                (e.text_left - expected_text).abs() <= 1.0,
+                "{n} participants: text at {} (expected {expected_text}, rows {rows})",
+                e.text_left
+            );
         }
     }
 
@@ -3822,6 +4055,23 @@ mod system_line_tests {
         .expect("message")
     }
 
+    fn agent_reply(id: &str, text: &str, in_reply_to: &str, at: u64) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "chatId": "chat_group",
+            "role": "assistant",
+            "sender": "agent:doug",
+            "senderName": "Doug",
+            "senderHandle": "doug",
+            "askedByHandle": "jacob",
+            "inReplyTo": in_reply_to,
+            "status": "done",
+            "createdAt": at,
+            "parts": [{ "id": format!("p-{id}"), "kind": "text", "text": text }],
+        }))
+        .expect("agent reply")
+    }
+
     #[test]
     fn membership_notice_is_a_centred_stamp_that_breaks_the_sender_run() {
         let t = 1_700_000_000_000u64;
@@ -3868,6 +4118,139 @@ mod system_line_tests {
         assert!(
             rows.iter().all(|r| r.id != "m-1700000001000#user"),
             "no bubble for the system row"
+        );
+    }
+
+    /// #1447: consecutive people-chat replies from the same agent each get a sender
+    /// caption and a quote of the message they answer — not one merged run.
+    #[test]
+    fn consecutive_agent_replies_each_name_and_quote() {
+        let t = 1_700_000_000_000u64;
+        let user_a = message("user", "user:gh_jacob", "first ask", t);
+        let user_b = message("user", "user:gh_jacob", "second ask", t + 1_000);
+        let messages = [
+            user_a,
+            agent_reply("a1", "quick ack", "m-1700000000000", t + 2_000),
+            agent_reply("a2", "full answer", "m-1700000000000", t + 3_000),
+            user_b,
+            agent_reply("a3", "answer two", "m-1700000001000", t + 4_000),
+        ];
+        let spoken = HashSet::new();
+        let failed = HashMap::new();
+        let speech = SpeechRows {
+            enabled: false,
+            spoken: &spoken,
+            failed: &failed,
+            voice_mode: false,
+        };
+        let rows = build_rows(&messages, false, speech, "gh_jacob", &HashSet::new());
+        let sender_captions: Vec<&str> = rows
+            .iter()
+            .filter_map(|r| match &r.kind {
+                RowKind::Sender { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            sender_captions,
+            ["Doug", "Doug", "Doug"],
+            "each agent reply names the sender: {sender_captions:?}"
+        );
+        let quotes: Vec<(&str, &str)> = rows
+            .iter()
+            .filter_map(|r| match &r.kind {
+                RowKind::Markdown {
+                    quote: Some(q),
+                    first: true,
+                    ..
+                } => Some((q.message_id.as_str(), q.text.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            quotes,
+            [
+                ("m-1700000000000", "first ask"),
+                ("m-1700000000000", "first ask"),
+                ("m-1700000001000", "second ask"),
+            ],
+            "each reply quotes the message it answers: {quotes:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod presence_rows_tests {
+    //! [feedback typing-indicator-left-2026-10-23]: who is working lives in the
+    //! presence row over the composer, so the transcript never doubles it — no
+    //! "<name> is working" row, and no sender caption over a stream that has no
+    //! words yet (Jacob's "GigChadAgent" + "gigchadagent is working" pair).
+    use std::collections::{HashMap, HashSet};
+
+    use super::*;
+
+    fn agent_message(status: &str, text: &str, at: u64) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": format!("m-{at}"),
+            "chatId": "chat_testing",
+            "role": "assistant",
+            "sender": "agent:01PROJGIGCHAD",
+            "senderName": "GigChadAgent",
+            "senderHandle": "gigchadagent",
+            "askedByHandle": "jacob",
+            "status": status,
+            "createdAt": at,
+            "parts": if text.is_empty() {
+                serde_json::json!([{ "id": format!("s-{at}"), "kind": "status", "code": "working", "message": "Working…" }])
+            } else {
+                serde_json::json!([{ "id": format!("p-{at}"), "kind": "text", "text": text }])
+            },
+        }))
+        .expect("message")
+    }
+
+    fn rows_of(messages: &[Message]) -> Vec<Row> {
+        let spoken = HashSet::new();
+        let failed = HashMap::new();
+        let speech = SpeechRows {
+            enabled: false,
+            spoken: &spoken,
+            failed: &failed,
+            voice_mode: false,
+        };
+        build_rows(messages, false, speech, "gh_me", &HashSet::new())
+    }
+
+    #[test]
+    fn a_wordless_stream_adds_no_caption_and_no_working_row() {
+        let now = now_ms();
+        let rows = rows_of(&[agent_message("streaming", "", now)]);
+        assert!(
+            rows.iter()
+                .all(|r| !matches!(r.kind, RowKind::Sender { .. })),
+            "no sender caption without a bubble: {:?}",
+            rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>()
+        );
+        assert!(
+            rows.iter().all(|r| r.id != "chat#indicator"),
+            "the working line is the presence row, not a transcript row"
+        );
+    }
+
+    #[test]
+    fn the_caption_returns_with_the_first_words() {
+        let now = now_ms();
+        let rows = rows_of(&[agent_message(
+            "streaming",
+            "On it — pulling the numbers.",
+            now,
+        )]);
+        assert_eq!(
+            rows.iter()
+                .filter(|r| matches!(r.kind, RowKind::Sender { .. }))
+                .count(),
+            1,
+            "one caption over the first bubble"
         );
     }
 }

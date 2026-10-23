@@ -525,6 +525,84 @@ impl Sender {
             format!("u_{}", self.id)
         }
     }
+
+    pub fn of_person(p: &Person) -> Self {
+        Self {
+            kind: "user".into(),
+            id: p.id.clone(),
+            name: p.name.clone().unwrap_or_default(),
+            handle: p.handle.clone(),
+            avatar: None,
+            avatar_color: None,
+            avatar_color_index: p.avatar_color_index,
+            avatar_leaf: None,
+            avatar_leaf_color: None,
+            avatar_url: p.avatar_url.clone(),
+        }
+    }
+
+    pub fn of_agent(a: &AgentMember) -> Self {
+        Self {
+            kind: "agent".into(),
+            id: a.project_id.clone(),
+            name: a.name.clone(),
+            handle: a.handle.clone(),
+            avatar: a.avatar.clone(),
+            avatar_color: a.avatar_color.clone(),
+            avatar_color_index: a.avatar_color_index,
+            avatar_leaf: a.avatar_leaf,
+            avatar_leaf_color: a.avatar_leaf_color,
+            avatar_url: String::new(),
+        }
+    }
+}
+
+/// Who a call in this space rings (#1430): every other member of a people chat (humans and
+/// agents), the other person of a DM, the owner/guests and the agent of a project space. The
+/// call screen shows each of them as a "Ringing…" tile until they join, so a group call
+/// never reads as "it only called the agent" — the agent joins within a second, the people
+/// take longer.
+pub fn call_people(space: &Project, me_id: &str, call_agents: &[Sender]) -> Vec<Sender> {
+    let mut out: Vec<Sender> = Vec::new();
+    for p in &space.people {
+        if p.id == me_id || p.status == "invited" {
+            continue;
+        }
+        out.push(Sender::of_person(p));
+    }
+    for a in &space.agents {
+        out.push(Sender::of_agent(a));
+    }
+    if !space.is_people() {
+        out.push(Sender {
+            kind: "agent".into(),
+            id: space.id.clone(),
+            name: space.name.clone(),
+            handle: Project::mention_slug(&space.name),
+            avatar: space.avatar.clone(),
+            avatar_color: space.avatar_color.clone(),
+            avatar_color_index: space.avatar_color_index,
+            avatar_leaf: space.avatar_leaf,
+            avatar_leaf_color: space.avatar_leaf_color,
+            avatar_url: String::new(),
+        });
+    }
+    // The relay's `call.agents` is authoritative for which agents belong to the call.
+    for a in call_agents {
+        if !out.iter().any(|s| s.identity() == a.identity()) {
+            out.push(a.clone());
+        }
+    }
+    out
+}
+
+/// `expected` minus those already in the room: the tiles still ringing.
+pub fn still_ringing(expected: &[Sender], in_room: &[String]) -> Vec<Sender> {
+    expected
+        .iter()
+        .filter(|s| !in_room.iter().any(|id| *id == s.identity()))
+        .cloned()
+        .collect()
 }
 
 /// One call as the relay describes it (`POST …/calls`, `GET /calls/{id}`, pushes).
@@ -2913,5 +2991,94 @@ mod null_avatar_tests {
         assert_eq!(p.handle, "mactest-a");
         assert!(p.avatar_url.is_empty());
         assert_eq!(p.initial(), "M");
+    }
+}
+
+#[cfg(test)]
+mod group_call_ring_tests {
+    //! #1430: a group call rings the whole group; the screen shows every member as a ringing
+    //! tile until they join, not just the agent that picked up first.
+
+    use super::*;
+
+    fn person(id: &str, handle: &str) -> Person {
+        Person {
+            id: id.into(),
+            handle: handle.into(),
+            name: Some(handle.to_uppercase()),
+            status: "member".into(),
+            ..Person::default()
+        }
+    }
+
+    fn arbonites() -> Project {
+        Project {
+            id: "chat_arbonites".into(),
+            name: "Arbonites".into(),
+            kind: SpaceKind::Group,
+            people: vec![
+                person("gh_const", "const"),
+                person("gh_scout", "scouttao"),
+                Person {
+                    status: "invited".into(),
+                    ..person("gh_ghost", "ghost")
+                },
+            ],
+            agents: vec![AgentMember {
+                project_id: "proj_home".into(),
+                name: "Home".into(),
+                handle: "home".into(),
+                ..AgentMember::default()
+            }],
+            ..Project::default()
+        }
+    }
+
+    #[test]
+    fn a_group_call_rings_every_member_and_the_agent() {
+        let expected = call_people(&arbonites(), "gh_me", &[]);
+        let ids: Vec<String> = expected.iter().map(Sender::identity).collect();
+        assert_eq!(ids, vec!["u_gh_const", "u_gh_scout", "a_proj_home"]);
+        assert_eq!(expected[0].display_name(), "CONST");
+        assert_eq!(expected[2].kind, "agent");
+    }
+
+    #[test]
+    fn the_agent_joining_first_leaves_the_people_ringing() {
+        let expected = call_people(&arbonites(), "gh_me", &[]);
+        let ringing = still_ringing(&expected, &["a_proj_home".to_owned()]);
+        let ids: Vec<String> = ringing.iter().map(Sender::identity).collect();
+        assert_eq!(
+            ids,
+            vec!["u_gh_const", "u_gh_scout"],
+            "Jacob's case: Home picked up, the people are still being rung"
+        );
+        let ringing = still_ringing(
+            &expected,
+            &["a_proj_home".to_owned(), "u_gh_scout".to_owned()],
+        );
+        assert_eq!(ringing.len(), 1);
+        assert_eq!(ringing[0].identity(), "u_gh_const");
+    }
+
+    #[test]
+    fn the_relay_s_agents_are_added_once_and_a_project_space_rings_its_agent() {
+        let relay_agent = Sender {
+            kind: "agent".into(),
+            id: "proj_home".into(),
+            name: "Home".into(),
+            ..Sender::default()
+        };
+        let expected = call_people(&arbonites(), "gh_me", std::slice::from_ref(&relay_agent));
+        assert_eq!(expected.iter().filter(|s| s.id == "proj_home").count(), 1);
+        let project = Project {
+            id: "proj_forest".into(),
+            name: "Forest".into(),
+            ..Project::default()
+        };
+        let expected = call_people(&project, "gh_me", &[]);
+        assert_eq!(expected.len(), 1);
+        assert_eq!(expected[0].identity(), "a_proj_forest");
+        assert_eq!(expected[0].handle, "forest");
     }
 }

@@ -196,6 +196,15 @@ impl Agent {
             // F5: the library changed on the relay; refetch the index now rather than at the
             // next 60 s tick.
             "skills_changed" => self.refresh_skills().await,
+            "project_renamed" => {
+                // #1431: the relay renamed this project; speak as the new name from the next
+                // turn on (the 3 s poll would catch it too; this is the immediate path).
+                if let Some(to) = payload.get("to").and_then(Value::as_str) {
+                    if let Some(r) = self.identity.observe(to) {
+                        self.on_renamed(&r).await;
+                    }
+                }
+            }
             "channel_message" => {
                 if let Err(e) = self.handle_channel_message(payload).await {
                     tracing::warn!(error = %e, "channel_message push failed");

@@ -93,10 +93,20 @@ fn timeout_secs() -> u64 {
 
 impl Agent {
     /// Chat a card belongs to when the caller only knows a session id.
-    /// Prefer the pinned ("main") chat so access / approval requests are not buried in a
-    /// side thread the owner is not looking at; fall back to the running turn, a known
-    /// chat id, then any chat.
+    /// A request raised in a people chat (a DM or a group this agent is in) is answered where
+    /// it was asked: the owner reads that chat, and a card that went to the agent's own pinned
+    /// chat instead was never seen (#1440). Otherwise prefer the pinned ("main") chat so access
+    /// / approval requests are not buried in a side thread the owner is not looking at; fall
+    /// back to the running turn, a known chat id, then any chat.
     pub async fn approval_chat(&self, hint: &str) -> Option<String> {
+        if self.people.is_people_chat(hint) {
+            return Some(hint.to_owned());
+        }
+        if let Some(t) = self.turn.lock().await.as_ref() {
+            if self.people.is_people_chat(&t.chat_id) {
+                return Some(t.chat_id.clone());
+            }
+        }
         let chats = self.store.chats().ok().unwrap_or_default();
         if let Some(pinned) = chats.iter().find(|c| c.is_pinned) {
             return Some(pinned.id.clone());

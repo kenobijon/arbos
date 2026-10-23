@@ -17,11 +17,12 @@ use arbos_core::api::{
 };
 use arbos_core::wire::BoxState as WireBox;
 use serde_json::Value;
+use std::collections::HashMap;
 
 use crate::model::{
     AccountView, AgentMember, BoxState, Call, CallKind, ChannelBinding, ChannelPairing,
     ChannelPlatform, ChannelPlatformState, ChannelsView, Chat, ChatKind, ConnectedVault, Connector,
-    ConnectorAction, ConnectorProvider, ConnectorStatus, ConnectorsView, Effort, LocalDevice,
+    ConnectorAction, ConnectorProvider, ConnectorStatus, ConnectorsView, Effort, Id, LocalDevice,
     LocalView, Machine, MachineState, MessageGrant, Person, Project, ProjectMachine,
     ProjectSecretAccess, ProjectSecrets, Reachable, ReachableDevice, ReplyPolicy, Routine,
     RoutineRun, RoutineRunStatus, RoutineTrigger, Secret, SecretActivity, SecretAgent,
@@ -689,6 +690,20 @@ fn message_grant_from(g: &arbos_core::api::MessageGrantDto) -> MessageGrant {
     }
 }
 
+/// The relay's verdict for one chat: `GET /me/unread` is the user's read cursor and names
+/// every chat with something unread, so when it answered, a chat it leaves out is read.
+/// Only when it did not answer (`None`: older relay) does the chat's own `unread` flag count.
+pub(crate) fn relay_unread_for(
+    unread_by_chat: Option<&HashMap<Id, bool>>,
+    chat_id: &str,
+    chat_flag: bool,
+) -> bool {
+    match unread_by_chat {
+        Some(map) => map.get(chat_id).copied().unwrap_or(false),
+        None => chat_flag,
+    }
+}
+
 /// Merge the relay's unread flag with a local read mark.
 ///
 /// The relay wins, except when this device marked the chat read at or after
@@ -1194,6 +1209,18 @@ mod tests {
             Some(1_699_999_999_000),
             1_700_000_000_000
         ));
+    }
+
+    /// #1438: `GET /me/unread` is the user's cursor. A chat it does not list is read even when
+    /// the chat's own flag says otherwise (own message bumped the room head); the flag only
+    /// counts when the endpoint did not answer.
+    #[test]
+    fn me_unread_is_authoritative_when_served() {
+        let served: HashMap<Id, bool> = HashMap::from([("dm".to_string(), true)]);
+        assert!(relay_unread_for(Some(&served), "dm", false));
+        assert!(!relay_unread_for(Some(&served), "group", true));
+        assert!(relay_unread_for(None, "group", true));
+        assert!(!relay_unread_for(None, "group", false));
     }
 
     fn sample_chat(id: &str, project_id: &str, title: &str, archived_at: Option<u64>) -> Chat {

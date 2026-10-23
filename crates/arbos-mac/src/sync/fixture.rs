@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use arbos_core::approval::{
@@ -209,6 +209,8 @@ impl SyncSource for FixtureSource {
             emit_open_request(&shared);
             let _ = events.send(SyncEvent::Link(Link::Live));
             emit_link_hook(&shared);
+            emit_typing_hook(&shared);
+            emit_working_hook(&shared);
 
             loop {
                 tokio::select! {
@@ -264,6 +266,142 @@ fn emit_link_hook(shared: &Arc<Shared>) {
                 key,
                 state: LinkState::Live,
             });
+        }
+    });
+}
+
+/// How many agents `ARBOS_FIXTURE_WORKING=<n>` wants working (0 when unset).
+fn fixture_working_count() -> usize {
+    std::env::var("ARBOS_FIXTURE_WORKING")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(0)
+}
+
+/// Extra agents for the Launch week group beyond the seeded Arbos, so the
+/// group has `ARBOS_FIXTURE_WORKING` agents to show working.
+fn fixture_working_extra_agents() -> Vec<(&'static str, &'static str, &'static str, u8, u8)> {
+    const EXTRA: [(&str, &str, &str, u8, u8); 4] = [
+        ("01J9PROJLIUM00000000000000", "Lium", "lium", 2, 3),
+        ("01J9PROJHOME00000000000000", "Home", "home", 5, 6),
+        ("01J9PROJDOUG00000000000000", "Doug", "doug", 7, 1),
+        ("01J9PROJNOVA00000000000000", "Nova", "nova", 1, 8),
+    ];
+    EXTRA
+        .into_iter()
+        .take(fixture_working_count().saturating_sub(1))
+        .collect()
+}
+
+/// `ARBOS_FIXTURE_WORKING=<n>` (screenshot rig, [feedback
+/// typing-indicator-left-2026-10-23]): the first n agents of every fixture
+/// people chat open a streaming row with no words yet — the "<name> is
+/// working" state — and keep it open, so the presence row over the composer
+/// can be shot with one or several agents working. The agent chats (Affine,
+/// Arbos, …) get the same: their one agent streams.
+fn emit_working_hook(shared: &Arc<Shared>) {
+    let n = fixture_working_count();
+    if n == 0 {
+        return;
+    }
+    let spaces: Vec<Project> = shared.projects.lock().unwrap().clone();
+    for space in spaces {
+        let chats: Vec<Id> = shared
+            .chats
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.project_id == space.id)
+            .map(|c| c.id.clone())
+            .collect();
+        for chat_id in chats {
+            if space.is_people() {
+                for agent in space.agents.iter().take(n) {
+                    let id = new_id();
+                    let asker = space.person().cloned().unwrap_or_else(sam);
+                    with_doc(shared, &chat_id, |doc| {
+                        doc.core.transact(|d| {
+                            begin_assistant_row(
+                                d,
+                                &id,
+                                &format!("agent:{}", agent.project_id),
+                                &[
+                                    ("senderName", json!(agent.name)),
+                                    ("senderIcon", json!(agent.icon)),
+                                    ("senderHandle", json!(agent.handle)),
+                                    ("askedByHandle", json!(asker.handle)),
+                                    ("ownerHandle", json!(agent.owner_handle)),
+                                ],
+                                StatusKind::Working,
+                                "Working…",
+                            )
+                        })
+                    });
+                }
+            } else if !space.agents.is_empty() || space.kind == SpaceKind::Project {
+                let id = new_id();
+                with_doc(shared, &chat_id, |doc| {
+                    doc.core.transact(|d| {
+                        begin_assistant_row(d, &id, "agent", &[], StatusKind::Working, "Working…")
+                    })
+                });
+            }
+        }
+    }
+}
+
+/// `ARBOS_FIXTURE_TYPING=1|<handle>[,<handle>…]` keeps "<name> is typing…"
+/// up in every fixture people chat (`1` = the chat's other person, else those
+/// handles) for the screenshot rig ([feedback typing-indicator-left-2026-10-23]);
+/// the app drops a typing mark after 6 s, so it is re-sent every 3 s.
+/// `ARBOS_FIXTURE_TYPING_MS=<ms>` stops it after that long.
+fn emit_typing_hook(shared: &Arc<Shared>) {
+    let Ok(spec) = std::env::var("ARBOS_FIXTURE_TYPING") else {
+        return;
+    };
+    let spec = spec.trim().to_string();
+    if spec.is_empty() || spec == "0" {
+        return;
+    }
+    let chats: Vec<(Id, String)> = shared
+        .projects
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|p| p.is_people())
+        .flat_map(|p| -> Vec<(Id, String)> {
+            if spec == "1" {
+                p.person()
+                    .map(|person| vec![(p.id.clone(), person.handle.clone())])
+                    .unwrap_or_default()
+            } else {
+                spec.split(',')
+                    .map(str::trim)
+                    .filter(|h| !h.is_empty())
+                    .map(|h| (p.id.clone(), h.to_string()))
+                    .collect()
+            }
+        })
+        .collect();
+    let stop_after = std::env::var("ARBOS_FIXTURE_TYPING_MS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok());
+    let events = shared.events.clone();
+    tokio::spawn(async move {
+        let started = Instant::now();
+        loop {
+            let active = stop_after.is_none_or(|ms| started.elapsed() < Duration::from_millis(ms));
+            for (chat_id, handle) in &chats {
+                let _ = events.send(SyncEvent::Typing {
+                    chat_id: chat_id.clone(),
+                    handle: handle.clone(),
+                    active,
+                });
+            }
+            if !active {
+                return;
+            }
+            sleep(Duration::from_secs(3)).await;
         }
     });
 }
@@ -4842,7 +4980,30 @@ fn launch_week() -> Project {
         model: None,
         owner: None,
     };
-    let mut space = people_space(GROUP_LAUNCH, members[0].clone(), vec![agent]);
+    let mut agents = vec![agent];
+    // `ARBOS_FIXTURE_WORKING=<n>` (screenshot rig): the group holds n agents so
+    // the presence row can show several of them working at once.
+    for (project_id, name, handle, leaf, color) in fixture_working_extra_agents() {
+        agents.push(AgentMember {
+            project_id: project_id.into(),
+            name: name.into(),
+            icon: "✳".into(),
+            color: "#1084fe".into(),
+            handle: handle.into(),
+            owner_id: ME_ID.into(),
+            owner_handle: ME_HANDLE.into(),
+            reply_policy: Default::default(),
+            avatar: None,
+            avatar_color: None,
+            avatar_color_index: Some(color),
+            avatar_leaf: Some(leaf),
+            avatar_leaf_color: Some(color),
+            description: None,
+            model: None,
+            owner: None,
+        });
+    }
+    let mut space = people_space(GROUP_LAUNCH, members[0].clone(), agents);
     space.kind = SpaceKind::Group;
     space.name = "Launch week".into();
     space.icon = "L".into();

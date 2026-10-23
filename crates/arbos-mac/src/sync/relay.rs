@@ -44,7 +44,7 @@ use super::doc::ChatDoc;
 use super::dto::{
     account_view_from_me, apply_machine_status, chat_from_create, chat_from_dto,
     connectors_view_from_dto, credentials_from_token, local_view_from_dto, merge_chats,
-    merged_unread, model_ids_from_dto, people_space_from, project_from_dto,
+    merged_unread, model_ids_from_dto, people_space_from, project_from_dto, relay_unread_for,
     remap_queued_send_targets, routine_from_dto, secrets_view_from_dto, skill_from_dto,
     transcript_text, voices_from_dto,
 };
@@ -2006,26 +2006,55 @@ fn people_error(err: &anyhow::Error) -> String {
 }
 
 /// `GET /projects` then `GET /projects/{id}` for chats, models and spend.
-/// `GET /me/unread` → chat id → has unread. Empty on older relays (404) or decode errors.
-async fn fetch_unread_map(shared: &Arc<Shared>) -> HashMap<Id, bool> {
+/// `GET /me/unread` → chat id → has unread, for every chat the relay counts unread in. The
+/// list is the user's one read cursor (shared by all their devices; own messages never
+/// count), so a chat it does not name has nothing unread. `None` when the relay did not
+/// answer it (older relay, transport error): the per-chat flag decides then.
+async fn fetch_unread_map(shared: &Arc<Shared>) -> Option<HashMap<Id, bool>> {
     match shared.get_json("/me/unread").await {
         Ok(v) => match serde_json::from_value::<UnreadDto>(v) {
-            Ok(dto) => dto
-                .chats
-                .into_iter()
-                .map(|c| (c.chat_id, c.unread > 0))
-                .collect(),
+            Ok(dto) => Some(
+                dto.chats
+                    .into_iter()
+                    .map(|c| (c.chat_id, c.unread > 0))
+                    .collect(),
+            ),
             Err(err) => {
                 log::warn!(target: "arbos_mac::relay", "UnreadDto: {err}");
-                HashMap::new()
+                None
             }
         },
         Err(err) => {
             if !format!("{err:#}").contains("HTTP 404") {
                 shared.diagnostic("me-unread", format!("{err:#}"));
             }
-            HashMap::new()
+            None
         }
+    }
+}
+
+/// Rig: `ARBOS_OPEN_CHAT=<chat id>` opens that chat (people or agent) once the registry lists
+/// it, once per launch — the iPhone's hook of the same name; `ARBOS_FIXTURE_OPEN` is the
+/// fixture source's.
+fn apply_open_chat_hook(shared: &Arc<Shared>) {
+    static APPLIED: std::sync::Once = std::sync::Once::new();
+    let Ok(chat_id) = std::env::var("ARBOS_OPEN_CHAT") else {
+        return;
+    };
+    let project_id = shared
+        .chats
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|c| c.id == chat_id)
+        .map(|c| c.project_id.clone());
+    if let Some(project_id) = project_id {
+        APPLIED.call_once(|| {
+            let _ = shared.events.send(SyncEvent::RestoreSelection {
+                project_id,
+                chat_id,
+            });
+        });
     }
 }
 
@@ -2240,7 +2269,7 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
             &pending_ids,
         );
         for c in &mut merged {
-            let relay_unread = unread_by_chat.get(&c.id).copied().unwrap_or(c.unread);
+            let relay_unread = relay_unread_for(unread_by_chat.as_ref(), &c.id, c.unread);
             let local_read = local_reads.get(&c.id).copied();
             c.unread = merged_unread(relay_unread, local_read, c.last_message_at as i64);
         }
@@ -2250,6 +2279,7 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
     let _ = shared.events.send(SyncEvent::Projects(projects.clone()));
     log_first_paint("relay", projects.len());
     emit_chats(shared);
+    apply_open_chat_hook(shared);
     save_registry(shared);
     for p in projects.iter().filter(|p| !p.is_people()) {
         ensure_room(shared, &p.id, &project_doc_key(&p.id), PROJECT_DOC_CHAT_ID);
