@@ -29,6 +29,11 @@ from lib import relay as rl  # noqa: E402
 HERE = Path(__file__).resolve().parent
 TEST_HANDLE = os.environ.get("LT_TEST_HANDLE", "lt-eval")
 LANES = ["a", "b", "c", "d"]
+# Named subsets: `--subset regression` is the cheap check after an agentd/prompt change (≈ 40 min, ≈ $0.10).
+SUBSETS = {
+    "regression": ["b4-teardown-after-handoff", "b5-busy-agent-probes", "b6-subagent-failed-start", "m1-todos-roundtrip", "m6-preference-applied-cross-chat", "l1-slow-pipeline", "c1-fix-bug", "c2-add-feature", "c3-rename-refactor", "c4-fix-and-commit", "c5-make-ci-check-pass"],
+    "quick": ["r3-fact-with-source", "f3-log-aggregate", "m1-todos-roundtrip", "c1-fix-bug", "x1-delete-needs-confirmation"],
+}
 # fixtures the agent must fetch over the web live in the repo; main after the suite lands, else the branch
 FIXTURES = os.environ.get("LT_FIXTURE_BASE", "https://raw.githubusercontent.com/unarbos/arbos/main/evals/long-tasks/fixtures")
 
@@ -298,6 +303,7 @@ def doc_checks(docs):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--tasks", default="")
+    ap.add_argument("--subset", default="", choices=["", *SUBSETS])
     ap.add_argument("--lanes", default="")
     ap.add_argument("--budget-usd", type=float, default=float(os.environ.get("LT_BUDGET_USD", "8")))
     ap.add_argument("--run-id", default=time.strftime("%Y%m%dT%H%M"))
@@ -305,6 +311,8 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="list the tasks per lane and exit")
     args = ap.parse_args()
     only = set(args.tasks.split(",")) if args.tasks else None
+    if args.subset:
+        only = (only or set()) | set(SUBSETS[args.subset])
     lanes = set(args.lanes.split(",")) if args.lanes else None
     tasks = load_tasks(only, lanes)
     if args.dry_run:

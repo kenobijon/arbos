@@ -13,7 +13,7 @@ store (`docs/agent-eval.md`, `docs/agent-eval-runs/`).
   summary + per-run report; `lib/issues.py` — one root-cause issue per failure.
 - `scoreboard/<run>.json`, `scoreboard/SUMMARY.md` — versioned results. `results/` is local evidence
   (chat docs, pi sessions) and is not committed.
-- One command: `scripts/evals/long-tasks/run-suite.sh [--tasks a,b] [--lanes a,b] [--no-issues]` — run from a
+- One command: `scripts/evals/long-tasks/run-suite.sh [--tasks a,b] [--subset regression|quick] [--lanes a,b] [--no-issues]` — run from a
   checkout of `main`; it also commits the scoreboard on a fresh `feedback/long-task-eval-run-<run>` branch
   and registers it with the loop (`LT_COMMIT=0` to skip). Partial re-runs fold in with `merge.py`;
   `rejudge.py` re-runs the rubric for turns the judge skipped.
