@@ -1188,8 +1188,8 @@ struct ChatView: View {
     }
 
     /// A real message in the shared chat doc (the full menu: Copy, Reply,
-    /// Forward, Delete) — not a date / join / system line. Channels carry no
-    /// replies or deletes yet (C1 scope): Copy only.
+    /// Forward, Reply in DM, Delete) — not a date / join / system line.
+    /// Channels carry no replies or deletes yet (C1 scope): Copy only.
     private func isMessageRow(_ row: Row) -> Bool {
         if isChannel { return false }
         switch row.kind {
@@ -1202,7 +1202,8 @@ struct ChatView: View {
 
     /// The long-press menu's actions (`MessageMenu`): Copy the text, Reply
     /// (in a people chat the agent that wrote it becomes the recipient),
-    /// Forward to another chat, Delete for everyone.
+    /// Forward to another chat, Reply in DM (open a private chat with the human
+    /// who wrote it), Delete for everyone.
     private func runMessageMenu(_ item: MessageMenuItem, row: Row) {
         switch item {
         case .copy:
@@ -1211,6 +1212,16 @@ struct ChatView: View {
             beginReply(to: row)
         case .forward:
             beginForward(row)
+        case .replyInDM:
+            // Same path as the group member "Send private message" (#1455): open
+            // (or create) the DM with that person's handle. Agents and your own
+            // messages have no peer to DM.
+            guard let m = messageById[row.messageId],
+                  let handle = m.senderHandle, !handle.isEmpty,
+                  m.sender.hasPrefix("user:"),
+                  m.sender != model.myUserId
+            else { return }
+            Task { _ = await model.openDM(handle: handle) }
         case .delete:
             model.deleteMessage(chatId: chatId, messageId: row.messageId)
         }
