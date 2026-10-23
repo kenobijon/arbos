@@ -43,8 +43,7 @@ use crate::ui::skills::{self, SkillsPanel};
 use crate::ui::theme::{
     reapply_window_background, AppearancePref, GlassOpacity, Surface, Theme, COLUMN_MARGIN,
     COMPOSER_BOTTOM, COMPOSER_WIDTH, DRAWER_WIDTH, GLASS_OPACITY_MAX, GLASS_OPACITY_MIN,
-    HEADER_HEIGHT, LINE_HEIGHT, PANEL_RADIUS, SIDEBAR_WIDTH, TAB_BAR_HEIGHT, TEXT_BODY, TEXT_SMALL,
-    TEXT_TINY,
+    HEADER_HEIGHT, LINE_HEIGHT, PANEL_RADIUS, TAB_BAR_HEIGHT, TEXT_BODY, TEXT_SMALL, TEXT_TINY,
 };
 use crate::ui::transcript::{column_row, Transcript, TranscriptEvent};
 use crate::ui::voice::Voice;
@@ -2090,21 +2089,22 @@ impl Shell {
                     this.state.update(cx, |s, cx| s.close_sidebar_overlay(cx));
                 }),
             )
-            .child(
+            .child({
+                let width = self.state.read(cx).sidebar_width;
                 div()
                     .id("sidebar-overlay-panel")
                     .absolute()
                     .left_0()
                     .top_0()
                     .h_full()
-                    .w(px(SIDEBAR_WIDTH))
+                    .w(px(width))
                     .bg(theme.shell())
                     .border_r_1()
                     .border_color(theme.border)
                     .shadow_lg()
                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(frosted(0.0, PANEL_BLUR, sidebar::render(self, cx))),
-            )
+                    .child(frosted(0.0, PANEL_BLUR, sidebar::render(self, cx)))
+            })
     }
 
     // ----- conversation pane ---------------------------------------------------
