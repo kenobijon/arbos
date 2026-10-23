@@ -281,6 +281,9 @@ pub enum RowKind {
         /// leaves the avatar lane free and the last one draws the sender's disc
         /// at the bubble's bottom-left (redesign mocks a/f). The sender seed.
         lane: Option<String>,
+        /// People-chat agent reply: Grok's quote header on the first block,
+        /// from `replyTo` (or `inReplyTo` on older rows that lack `replyTo`).
+        quote: Option<Quote>,
     },
     /// A finished reply with no words, cards or attachments: one plain line in the
     /// agent's bubble. `name` is the row's `senderName`; the agent id in `seed` resolves
@@ -290,6 +293,9 @@ pub enum RowKind {
         name: Option<String>,
         time: Option<String>,
         lane: Option<String>,
+        /// Same quote as [`RowKind::Markdown`] when this stock line stands in
+        /// for a people-chat reply that never wrote prose.
+        quote: Option<Quote>,
     },
     /// Centered muted time line ("Today 9:39 PM").
     Stamp {
@@ -1070,6 +1076,7 @@ impl Transcript {
         fill: bool,
         time: Option<String>,
         lane: Option<String>,
+        quote: Option<Quote>,
         now: Instant,
         theme: &Theme,
         selectable: &Selectable,
@@ -1094,6 +1101,11 @@ impl Transcript {
             avatars::agent_accent(&a.seed, a.color_index, a.leaf.0, a.leaf.1, theme)
         });
         let r = px(BUBBLE_RADIUS);
+        // Quote only on the first block — one header for the whole bubble.
+        let quote_header = first
+            .then_some(quote)
+            .flatten()
+            .map(|q| self.quote_header(row_id, q, theme.text));
         let bubble = self
             .menu_target(
                 div().id(SharedString::from(format!("{}#bubble", row_id))),
@@ -1110,6 +1122,9 @@ impl Transcript {
             .min_w_0()
             .relative()
             .when(fill, |el| el.w_full())
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
             .px(px(BUBBLE_PAD_X))
             .when(first, |el| el.pt(px(BUBBLE_PAD_Y)).rounded_t(r))
             .when(!first, |el| el.pt(px(3.0)))
@@ -1119,6 +1134,7 @@ impl Transcript {
             .when_some(agent_accent, |el, color| {
                 el.border_l_2().border_color(Theme::with_alpha(color, 0.7))
             })
+            .children(quote_header)
             .child(render_block(
                 row_id,
                 &block,
@@ -1396,6 +1412,7 @@ impl Transcript {
                 fill,
                 time,
                 lane,
+                quote,
             } => self.markdown_bubble(
                 &row.id,
                 &row.message_id,
@@ -1407,6 +1424,7 @@ impl Transcript {
                 fill,
                 time,
                 lane,
+                quote,
                 now,
                 &theme,
                 &selectable,
@@ -1418,6 +1436,7 @@ impl Transcript {
                 name,
                 time,
                 lane,
+                quote,
             } => {
                 let hint = name.as_deref().unwrap_or("Agent");
                 let (resolved, _, _, _) = self.agent_identity(&seed, hint, cx);
@@ -1439,6 +1458,7 @@ impl Transcript {
                     false,
                     time,
                     lane,
+                    quote,
                     now,
                     &theme,
                     &selectable,
@@ -2346,6 +2366,20 @@ pub fn build_rows(
                 let mut lane: Option<String> = None;
                 let in_people =
                     message.sender.starts_with("agent:") && message.asked_by_handle.is_some();
+                // Platform reply quote: prefer `replyTo`; older people-chat rows
+                // only have `inReplyTo` (same asker message) — still show the
+                // header so everyone can see which line is answered.
+                let quote = message
+                    .reply_to
+                    .as_deref()
+                    .filter(|id| !id.is_empty())
+                    .or_else(|| {
+                        in_people
+                            .then_some(message.in_reply_to.as_deref())
+                            .flatten()
+                            .filter(|id| !id.is_empty())
+                    })
+                    .map(|id| Quote::for_reply(id, messages));
                 if message.role == Role::Project || in_people {
                     // A people-chat agent (or another Project, F6) speaks in its own lane. The
                     // name sits above the bubble only when the sender changed (Grok Bot's group
@@ -2453,7 +2487,10 @@ pub fn build_rows(
                                         BubbleText::single(block_plain(&block, false))
                                     });
                                 rows.push(Row {
-                                    version: hash_version(&(&block, first, last, fill), live),
+                                    version: hash_version(
+                                        &(&block, first, last, fill, &quote),
+                                        live,
+                                    ),
                                     id: format!("{}#{}.{}", message.id, id, bix),
                                     message_id: message.id.clone(),
                                     kind: RowKind::Markdown {
@@ -2465,6 +2502,8 @@ pub fn build_rows(
                                         fill,
                                         time: clock_label(message.created_at),
                                         lane: lane.clone(),
+                                        // One quote header on the first block only.
+                                        quote: first.then_some(quote.clone()).flatten(),
                                     },
                                 });
                                 block_ix += 1;
@@ -2628,12 +2667,14 @@ pub fn build_rows(
                             fill: false,
                             time: clock_label(message.created_at),
                             lane: lane.clone(),
+                            quote: quote.clone(),
                         },
                         None => RowKind::NoAnswer {
                             seed: message.sender.clone(),
                             name: message.sender_name.clone().filter(|n| !n.trim().is_empty()),
                             time: clock_label(message.created_at),
                             lane: lane.clone(),
+                            quote: quote.clone(),
                         },
                     };
                     rows.push(Row {
