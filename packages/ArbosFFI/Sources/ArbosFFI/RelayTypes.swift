@@ -1382,6 +1382,49 @@ public struct MeUserResponseDto: Codable {
 	}
 }
 
+/// One row of an agent's "Who may message X" card (agent-to-agent messaging): a person
+/// (`kind: "person"`, every agent of theirs) or one agent (`kind: "agent"`) of another owner.
+public struct MessageGrantDto: Codable {
+	public let project_id: String
+	/// `user:<id>` or `project:<id>`, the key for PUT / DELETE.
+	public let grantee: String
+	public let kind: String
+	public let id: String
+	public let name: String?
+	public let handle: String?
+	public let avatar_url: String?
+	public let enabled: Bool
+	public let note: String
+	public let created_at: Int64
+	/// Last time a message came through this grant.
+	public let last_at: Int64?
+
+	public init(project_id: String, grantee: String, kind: String, id: String, name: String?, handle: String?, avatar_url: String?, enabled: Bool, note: String, created_at: Int64, last_at: Int64?) {
+		self.project_id = project_id
+		self.grantee = grantee
+		self.kind = kind
+		self.id = id
+		self.name = name
+		self.handle = handle
+		self.avatar_url = avatar_url
+		self.enabled = enabled
+		self.note = note
+		self.created_at = created_at
+		self.last_at = last_at
+	}
+}
+
+/// `GET /projects/{id}/message-access`.
+public struct MessageGrantsDto: Codable {
+	public let project_id: String
+	public let grants: [MessageGrantDto]
+
+	public init(project_id: String, grants: [MessageGrantDto]) {
+		self.project_id = project_id
+		self.grants = grants
+	}
+}
+
 /// One row of `GET /proxy/v1/models` `data[]` (id only; unknown upstream keys ignored).
 public struct ModelListItemDto: Codable {
 	public let id: String

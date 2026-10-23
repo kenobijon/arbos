@@ -1,4 +1,5 @@
 mod admin;
+mod agent_messages;
 mod api;
 mod api_error_layer;
 #[cfg(test)]
@@ -16,6 +17,7 @@ mod credits;
 mod daytona;
 mod db;
 mod db_accounts;
+mod db_agent_messages;
 mod db_calls;
 mod db_fleet;
 mod db_people;
@@ -564,6 +566,21 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/projects/{id}/members/{user_id}",
             delete(people::project_member_remove),
+        )
+        // Agent-to-agent messaging (docs/agent-to-agent-messaging.md): the box sends for its
+        // agent, the target box answers; the owner edits "Who may message X" from the agent pane.
+        .route("/projects/{id}/agent-messages", post(agent_messages::send))
+        .route(
+            "/projects/{id}/agent-messages/{mid}/reply",
+            post(agent_messages::reply),
+        )
+        .route(
+            "/projects/{id}/message-access",
+            get(agent_messages::list_grants).put(agent_messages::put_grant),
+        )
+        .route(
+            "/projects/{id}/message-access/{grantee}",
+            delete(agent_messages::delete_grant),
         )
         .route(
             "/blocks",

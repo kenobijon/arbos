@@ -309,6 +309,36 @@ pub struct ProjectMembersDto {
     pub members: Vec<ProjectMemberDto>,
 }
 
+/// One row of an agent's "Who may message X" card (agent-to-agent messaging): a person
+/// (`kind: "person"`, every agent of theirs) or one agent (`kind: "agent"`) of another owner.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MessageGrantDto {
+    pub project_id: String,
+    /// `user:<id>` or `project:<id>`, the key for PUT / DELETE.
+    pub grantee: String,
+    pub kind: String,
+    pub id: String,
+    pub name: Option<String>,
+    pub handle: Option<String>,
+    pub avatar_url: Option<String>,
+    pub enabled: bool,
+    pub note: String,
+    #[typeshare(serialized_as = "I54")]
+    pub created_at: i64,
+    /// Last time a message came through this grant.
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub last_at: Option<i64>,
+}
+
+/// `GET /projects/{id}/message-access`.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MessageGrantsDto {
+    pub project_id: String,
+    pub grants: Vec<MessageGrantDto>,
+}
+
 /// One entry in `group_json` → `participants_detail`.
 #[typeshare]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
