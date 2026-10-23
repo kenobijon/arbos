@@ -25,8 +25,11 @@ use crate::ui::theme::{Theme, TEXT_BODY, TEXT_SMALL};
 /// The outline's inset from the pane edges, and its corner radius.
 pub const OUTLINE_INSET: f32 = 10.0;
 pub const OUTLINE_RADIUS: f32 = 18.0;
-/// How much the pane dims under the outline.
-const DIM_ALPHA: f32 = 0.42;
+/// How much the pane recedes under the outline: a dark theme dims towards
+/// black, a light one washes towards white (a black dim turns a white chat
+/// grey and muddy).
+const DIM_ALPHA_DARK: f32 = 0.42;
+const WASH_ALPHA_LIGHT: f32 = 0.6;
 
 pub const HINT_TITLE: &str = "Drop to attach";
 pub const HINT_BODY: &str = "Images and files go into this chat";
@@ -95,6 +98,11 @@ fn drag_end_watch<V: 'static>(
 /// and a centred card says what the drop does. No ids → no hitboxes, so the
 /// drop still lands on the pane beneath.
 pub fn overlay(theme: &Theme) -> Div {
+    let recede = if theme.is_light() {
+        Theme::with_alpha(gpui::white(), WASH_ALPHA_LIGHT)
+    } else {
+        Theme::with_alpha(gpui::black(), DIM_ALPHA_DARK)
+    };
     div()
         .debug_selector(|| "chat-drop-overlay".into())
         .absolute()
@@ -102,7 +110,7 @@ pub fn overlay(theme: &Theme) -> Div {
         .flex()
         .items_center()
         .justify_center()
-        .bg(Theme::with_alpha(gpui::black(), DIM_ALPHA))
+        .bg(recede)
         .child(
             div()
                 .absolute()
@@ -216,7 +224,7 @@ mod drop_tests {
         ExternalPaths(std::iter::once(PathBuf::from("/tmp/shot.png")).collect())
     }
 
-    fn setup(cx: &mut TestAppContext) -> (gpui::Entity<Chat>, gpui::VisualTestContext) {
+    fn setup(cx: &mut TestAppContext) -> (gpui::Entity<Chat>, &mut gpui::VisualTestContext) {
         cx.update(|cx| {
             if !cx.has_global::<Theme>() {
                 let theme = Theme::for_pref(AppearancePref::Dark, Surface::Matte, cx);
@@ -241,7 +249,7 @@ mod drop_tests {
 
     #[gpui::test]
     fn enter_lights_the_whole_pane_and_drop_clears_it(cx: &mut TestAppContext) {
-        let (view, mut vcx) = setup(cx);
+        let (view, vcx) = setup(cx);
         assert!(
             vcx.debug_bounds("chat-drop-overlay").is_none(),
             "dark at rest"
@@ -252,7 +260,7 @@ mod drop_tests {
             paths: paths(),
         });
         vcx.run_until_parked();
-        assert!(over(&view, &vcx), "drag-enter sets the state");
+        assert!(over(&view, vcx), "drag-enter sets the state");
         let pane: Bounds<Pixels> = vcx.debug_bounds("test-pane").expect("pane drawn");
         let overlay = vcx
             .debug_bounds("chat-drop-overlay")
@@ -263,58 +271,58 @@ mod drop_tests {
             position: point(px(SIDEBAR + 40.0), px(H - 30.0)),
         });
         vcx.run_until_parked();
-        let dropped = view.read_with(&vcx, |w, _| w.dropped.clone());
+        let dropped = view.read_with(vcx, |w, _| w.dropped.clone());
         assert_eq!(dropped, vec![PathBuf::from("/tmp/shot.png")]);
-        assert!(!over(&view, &vcx), "the drop clears the state");
+        assert!(!over(&view, vcx), "the drop clears the state");
         assert!(vcx.debug_bounds("chat-drop-overlay").is_none());
     }
 
     #[gpui::test]
     fn the_sidebar_is_not_part_of_the_target(cx: &mut TestAppContext) {
-        let (view, mut vcx) = setup(cx);
+        let (view, vcx) = setup(cx);
         vcx.simulate_event(FileDropEvent::Entered {
             position: point(px(SIDEBAR / 2.0), px(H / 2.0)),
             paths: paths(),
         });
         vcx.run_until_parked();
-        assert!(!over(&view, &vcx), "over the sidebar: dark");
+        assert!(!over(&view, vcx), "over the sidebar: dark");
 
         vcx.simulate_event(FileDropEvent::Pending {
             position: point(px(SIDEBAR + 1.0), px(1.0)),
         });
         vcx.run_until_parked();
-        assert!(over(&view, &vcx), "the pane's top-left corner counts");
+        assert!(over(&view, vcx), "the pane's top-left corner counts");
 
         vcx.simulate_event(FileDropEvent::Pending {
             position: point(px(SIDEBAR - 1.0), px(H / 2.0)),
         });
         vcx.run_until_parked();
-        assert!(!over(&view, &vcx), "back over the sidebar: dark again");
+        assert!(!over(&view, vcx), "back over the sidebar: dark again");
     }
 
     #[gpui::test]
     fn leaving_the_window_clears_it(cx: &mut TestAppContext) {
-        let (view, mut vcx) = setup(cx);
+        let (view, vcx) = setup(cx);
         vcx.simulate_event(FileDropEvent::Entered {
             position: in_pane(),
             paths: paths(),
         });
         vcx.run_until_parked();
-        assert!(over(&view, &vcx));
+        assert!(over(&view, vcx));
 
         vcx.simulate_event(FileDropEvent::Exited);
         vcx.run_until_parked();
-        assert!(!over(&view, &vcx), "exit (or Escape) clears the state");
+        assert!(!over(&view, vcx), "exit (or Escape) clears the state");
         assert!(vcx.debug_bounds("chat-drop-overlay").is_none());
         assert!(
-            view.read_with(&vcx, |w, _| w.dropped.is_empty()),
+            view.read_with(vcx, |w, _| w.dropped.is_empty()),
             "nothing attached"
         );
     }
 
     #[gpui::test]
     fn lights_up_after_typing_too(cx: &mut TestAppContext) {
-        let (view, mut vcx) = setup(cx);
+        let (view, vcx) = setup(cx);
         // Jacob's path: type a message, reach for a picture in Finder, drag it
         // in. GPUI's hover styles stay off while the last input was a key.
         vcx.simulate_keystrokes("a");
@@ -323,7 +331,7 @@ mod drop_tests {
             paths: paths(),
         });
         vcx.run_until_parked();
-        assert!(over(&view, &vcx), "the highlight does not depend on hover");
+        assert!(over(&view, vcx), "the highlight does not depend on hover");
         assert!(vcx.debug_bounds("chat-drop-overlay").is_some());
     }
 }

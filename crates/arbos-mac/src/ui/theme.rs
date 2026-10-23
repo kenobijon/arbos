@@ -460,7 +460,7 @@ impl Theme {
         self.surface == Surface::Glass
     }
 
-    fn is_light(&self) -> bool {
+    pub fn is_light(&self) -> bool {
         self.appearance == Appearance::Light
     }
 
