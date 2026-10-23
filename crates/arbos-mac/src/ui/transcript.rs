@@ -1840,12 +1840,15 @@ impl Transcript {
                         });
                     }) as attachments::OpenFn
                 });
-                div()
-                    .w_full()
-                    .py(px(4.0))
-                    .flex()
-                    .when(mine, |el| el.justify_end())
-                    .when(lane, |el| el.pl(px(SENDER_LANE)))
+                // Same reply · copy rail and right-click menu as text bubbles
+                // (feedback app-01M5N8ZQVWC63V54HM70D9SJ4H): an image / file
+                // row was a bare card with no way to reply.
+                let card = self
+                    .menu_target(
+                        div().id(SharedString::from(format!("{}#media", row.id))),
+                        &row.message_id,
+                        cx,
+                    )
                     .child(attachments::card(
                         &row.id,
                         &attachment,
@@ -1854,8 +1857,42 @@ impl Transcript {
                         open,
                         self.state.clone(),
                         &theme,
-                    ))
-                    .into_any_element()
+                    ));
+                let (row_el, reveal) = self.hover_row(&row.id, now, window, cx);
+                let actions = self.hover_reply_copy(&row.id, &row.message_id, reveal, &theme, cx);
+                if mine {
+                    // My media sits right; the rail is on its outer (left) edge.
+                    div()
+                        .w_full()
+                        .py(px(4.0))
+                        .flex()
+                        .flex_col()
+                        .items_end()
+                        .child(
+                            row_el
+                                .justify_end()
+                                .items_center()
+                                .child(actions.mr(px(6.0)))
+                                .child(card),
+                        )
+                        .into_any_element()
+                } else {
+                    div()
+                        .w_full()
+                        .py(px(4.0))
+                        .flex()
+                        .flex_col()
+                        .items_start()
+                        .child(
+                            row_el
+                                .justify_start()
+                                .items_center()
+                                .when(lane, |el| el.pl(px(SENDER_LANE)))
+                                .child(card)
+                                .child(actions.ml(px(6.0))),
+                        )
+                        .into_any_element()
+                }
             }
             RowKind::AskUser { text } => {
                 cards::status_row(StatusKind::AskUser, &text, false, &theme, cx).into_any_element()
