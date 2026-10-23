@@ -1578,7 +1578,30 @@ fn handle_server_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             let shared = shared.clone();
             let path = format!("/servers/{server_id}");
             tokio::spawn(async move {
-                match shared.delete(&path).await {
+                // A brief send/timeout on DELETE is common on flaky links; retry twice
+                // before surfacing. If the first attempt already removed the server but
+                // the reply was cut, a retry gets 404 — the server is still gone.
+                let result = {
+                    let mut attempt = 0u32;
+                    loop {
+                        match shared.delete(&path).await {
+                            Ok(()) => break Ok(()),
+                            Err(err) => {
+                                let text = format!("{err:#}");
+                                if text.contains("HTTP 404") {
+                                    break Ok(());
+                                }
+                                if diagnostics::is_transient(&text) && attempt < 2 {
+                                    attempt += 1;
+                                    sleep(Duration::from_millis(400 * u64::from(attempt))).await;
+                                    continue;
+                                }
+                                break Err(err);
+                            }
+                        }
+                    }
+                };
+                match result {
                     Ok(()) => refresh_servers_list(&shared).await,
                     Err(err) => server_error(&shared, &err),
                 }
