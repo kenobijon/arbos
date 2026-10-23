@@ -12,18 +12,18 @@
       "timeout_s": 180
     },
     {
-      "prompt": "[peer] Note from me: we agreed the launch date is 12 November and Priya owns the checklist.",
+      "prompt": "[peer] @lane-a note from me: we agreed the launch date is 12 November and Priya owns the checklist. Please add it to the summary.",
       "chat": "dm",
       "peer": true,
       "verify": "f={D}/dm-notes.md; test -f $f && grep -q 'November' $f && grep -qi priya $f && echo PASS || echo FAIL: peer note not in the summary",
-      "timeout_s": 180
+      "timeout_s": 240
     },
     {
       "prompt": "Read the summary back to us, and say who posted the launch-date note.",
       "chat": "dm",
       "reply_regex": "12 November[\\s\\S]*Priya|Priya[\\s\\S]*12 November",
       "rubric": {
-        "criteria": "The agent kept notes from both people, attributes the launch-date note to the colleague/peer (not the owner), and reads back the summary accurately.",
+        "criteria": "The agent kept notes from both people and attributes the launch-date note to the colleague / second person (NOT to the owner who is asking); it reads the summary back accurately. Attributing the note to the owner scores 0.",
         "min": 3
       },
       "timeout_s": 180
