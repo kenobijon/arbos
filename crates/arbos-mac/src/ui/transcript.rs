@@ -3427,6 +3427,17 @@ const QUOTE_TO_TEXT_GAP: f32 = 6.0;
 /// sizes a flex column from its items, and an item with `min-width: 0`
 /// contributes nothing, so the bubble would take the name's or the quote's
 /// width and wrap the body one word per line (bubble-quote-width-2026-10-23).
+///
+/// The text + time line is a flex *row*, and there the rule is the opposite:
+/// the text item must be `min_w_0`. GPUI measures a text's min-content width
+/// as its unwrapped width (`AvailableSpace::MinContent` → no wrap width), so
+/// without it the item's automatic minimum is the whole line, it cannot
+/// shrink to the bubble, and the text runs out of the bubble's right edge
+/// while the time drops to a line of its own (Jacob, 2026-10-23, v0.6.184:
+/// bubble-overflow-hotfix-2026-10-23). With `min_w_0` the row still reports
+/// the unwrapped width as its max-content size (a flex item's basis is its
+/// content; the minimum only matters when shrinking), so a short bubble is
+/// still content-sized, and a long one wraps at the bubble's width.
 fn sender_bubble_column(
     name: Option<AnyElement>,
     quote: Option<AnyElement>,
@@ -3453,7 +3464,12 @@ fn sender_bubble_column(
                 .flex()
                 .flex_wrap()
                 .items_end()
-                .child(div().debug_selector(|| "bubble-text".into()).child(body))
+                .child(
+                    div()
+                        .min_w_0()
+                        .debug_selector(|| "bubble-text".into())
+                        .child(body),
+                )
                 .children(time.map(|t| {
                     div()
                         .ml_auto()
@@ -4283,6 +4299,262 @@ mod layout_tests {
             assert!(
                 bh < 6.0 * CHAT_LINE_HEIGHT,
                 "lane={lane}: the body wraps to a few lines, not one word per line ({bh} pt tall)"
+            );
+        }
+    }
+
+    /// Which bubble a [`BubbleRow`] draws: my own (right, `RowKind::User`
+    /// without `from`), another person's in a group (left, name + inline
+    /// time, `RowKind::User` with `from`), or an agent's (`markdown_bubble`
+    /// with a lane and the inline time).
+    #[derive(Clone, Copy, Debug)]
+    enum Who {
+        Mine,
+        Other,
+        Agent,
+    }
+
+    /// One transcript row built from the same pieces the real rows use
+    /// (`sender_bubble_column`, `user_message_body` / `render_block`,
+    /// `inline_time_label`, `assistant_slot`, `column_row`) in a pane of
+    /// `pane` pt.
+    struct BubbleRow {
+        pane: f32,
+        who: Who,
+        text: &'static str,
+        selection: Entity<TextSelection>,
+    }
+
+    /// Longer than any bubble cap at a 1200 pt window (≈ 1,350 pt unwrapped).
+    const OVERFLOWING_LINE: &str = "When you think about it, most people are going to be \
+        blocked by how many tokens they can access pretty soon, and the ones who are not \
+        blocked will be the ones who already own the pipes, the chips and the power lines \
+        that the rest of us have to rent by the hour.";
+    const SHORT_LINE: &str = "Most people cant do what I am doing right now";
+
+    impl gpui::Render for BubbleRow {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let theme = Theme::dark(crate::ui::theme::Surface::Matte);
+            let selectable = Selectable::new(&self.selection, theme.accent_soft, cx);
+            let time = Some(inline_time_label("1:52 PM".to_string(), &theme).into_any_element());
+            let name = |name: &'static str| {
+                div()
+                    .text_size(px(CHAT_BODY))
+                    .line_height(px(CHAT_LINE_HEIGHT))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(name)
+                    .into_any_element()
+            };
+            let row = match self.who {
+                Who::Agent => {
+                    let bubble_sel =
+                        selectable.bubble("a#text".to_string(), SharedString::from(self.text));
+                    let bubble = div()
+                        .debug_selector(|| "test-bubble".into())
+                        .max_w_full()
+                        .min_w_0()
+                        .relative()
+                        .px(px(BUBBLE_PAD_X))
+                        .py(px(BUBBLE_PAD_Y))
+                        .child(sender_bubble_column(
+                            Some(name("Doug")),
+                            None,
+                            render_block(
+                                "a",
+                                &Block::Paragraph(self.text.to_string()),
+                                0,
+                                None,
+                                Instant::now(),
+                                &theme,
+                                &bubble_sel,
+                            ),
+                            time,
+                        ));
+                    div()
+                        .w_full()
+                        .flex()
+                        .items_end()
+                        .pl(px(AVATAR_COLUMN_INSET))
+                        .gap(px(SENDER_DISC_GAP))
+                        .child(div().size(px(SENDER_DISC)).flex_shrink_0())
+                        .child(assistant_slot(bubble))
+                }
+                Who::Mine | Who::Other => {
+                    let body =
+                        user_message_body("u", self.text, theme.bubble_text(), &theme, &selectable);
+                    let other = matches!(self.who, Who::Other);
+                    let bubble = div()
+                        .debug_selector(|| "test-bubble".into())
+                        .max_w(relative_width(0.72))
+                        .px(px(BUBBLE_PAD_X))
+                        .py(px(BUBBLE_PAD_Y))
+                        .child(sender_bubble_column(
+                            other.then(|| name("Samir Haddad")),
+                            None,
+                            body,
+                            other.then_some(time).flatten(),
+                        ));
+                    if other {
+                        div()
+                            .w_full()
+                            .flex()
+                            .items_end()
+                            .pl(px(AVATAR_COLUMN_INSET))
+                            .gap(px(SENDER_DISC_GAP))
+                            .child(div().size(px(SENDER_DISC)).flex_shrink_0())
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .items_center()
+                                    .debug_selector(|| "test-bubble-parent".into())
+                                    .child(bubble)
+                                    .child(div().size(px(16.0)).ml(px(6.0))),
+                            )
+                    } else {
+                        div()
+                            .w_full()
+                            .flex()
+                            .items_end()
+                            .justify_end()
+                            .debug_selector(|| "test-bubble-parent".into())
+                            .child(div().size(px(16.0)).mr(px(6.0)))
+                            .child(bubble)
+                    }
+                }
+            };
+            div()
+                .w(px(self.pane))
+                .h(px(600.0))
+                .text_size(px(CHAT_BODY))
+                .line_height(px(CHAT_LINE_HEIGHT))
+                .child(column_row(row.into_any_element()))
+        }
+    }
+
+    /// The cap a [`BubbleRow`] bubble may reach: the slot minus Grok's gap
+    /// for an agent; 72 % of the bubble's parent (the row, or the lane beside
+    /// the disc) for people — `relative_width(0.72)` is relative to the parent.
+    fn bubble_cap(vcx: &mut gpui::VisualTestContext, who: Who) -> f32 {
+        match who {
+            Who::Agent => {
+                let slot = vcx.debug_bounds("chat-bubble-slot").expect("slot drawn");
+                f32::from(slot.size.width) - ASSISTANT_RIGHT_GAP
+            }
+            Who::Mine | Who::Other => {
+                let parent = vcx
+                    .debug_bounds("test-bubble-parent")
+                    .expect("bubble parent drawn");
+                f32::from(parent.size.width) * 0.72
+            }
+        }
+    }
+
+    /// Jacob, 2026-10-23 20:18 (Mac v0.6.184, the Arbonites group): his own
+    /// bubbles ran off the right edge of the chat column, and another person's
+    /// bubble was wide with the text spilling past it and the time on a line
+    /// of its own. Cause: `sender_bubble_column` (v0.6.183, #1437) put the
+    /// text in a flex row with the time, and a text's automatic minimum width
+    /// in a row is its unwrapped width. Every bubble kind, at a 400 pt and a
+    /// 1200 pt window: the bubble stays inside the column and under its cap,
+    /// and the text wraps inside the bubble instead of running out of it.
+    #[gpui::test]
+    fn bubbles_stay_inside_the_column_and_wrap_their_text(cx: &mut TestAppContext) {
+        // 400 pt: the sidebar is hidden, the pane is the window; 1200 pt:
+        // the 296 pt sidebar is open.
+        for pane in [400.0_f32, 1200.0 - crate::ui::theme::SIDEBAR_WIDTH] {
+            for who in [Who::Mine, Who::Other, Who::Agent] {
+                let (_view, vcx) = cx.add_window_view(|_, cx| BubbleRow {
+                    pane,
+                    who,
+                    text: OVERFLOWING_LINE,
+                    selection: cx.new(TextSelection::new),
+                });
+                vcx.run_until_parked();
+                let column = vcx.debug_bounds("chat-column").expect("column drawn");
+                let bubble = vcx.debug_bounds("test-bubble").expect("bubble drawn");
+                let text = vcx.debug_bounds("bubble-text").expect("text drawn");
+                let right = |b: gpui::Bounds<Pixels>| f32::from(b.origin.x + b.size.width);
+                let left = |b: gpui::Bounds<Pixels>| f32::from(b.origin.x);
+                let cap = bubble_cap(vcx, who);
+                let bw = f32::from(bubble.size.width);
+                assert!(
+                    right(bubble) <= right(column) + 0.5 && left(bubble) >= left(column) - 0.5,
+                    "pane {pane} {who:?}: bubble {}..{} runs out of the column {}..{}",
+                    left(bubble),
+                    right(bubble),
+                    left(column),
+                    right(column)
+                );
+                assert!(
+                    bw <= cap + 1.0,
+                    "pane {pane} {who:?}: bubble {bw} pt is wider than its cap {cap}"
+                );
+                assert!(
+                    right(text) <= right(bubble) - BUBBLE_PAD_X + 1.0,
+                    "pane {pane} {who:?}: the text box ends at {} but the bubble's inner edge is {}",
+                    right(text),
+                    right(bubble) - BUBBLE_PAD_X
+                );
+                // A 1,350 pt line never fits a bubble this size: it must have wrapped.
+                let th = f32::from(text.size.height);
+                assert!(
+                    th >= 2.0 * CHAT_LINE_HEIGHT,
+                    "pane {pane} {who:?}: the text is one {th} pt line — it did not wrap inside the bubble"
+                );
+                // … and a long bubble fills its cap (the text is what sizes it).
+                assert!(
+                    (bw - cap).abs() <= 1.0,
+                    "pane {pane} {who:?}: a long line fills the cap: bubble {bw}, cap {cap}"
+                );
+            }
+        }
+    }
+
+    /// A one-line bubble stays content-sized: no slack after a short text
+    /// (the row's max-content width is the text plus the time, never the cap).
+    #[gpui::test]
+    fn a_short_bubble_is_as_wide_as_its_text(cx: &mut TestAppContext) {
+        for who in [Who::Mine, Who::Other, Who::Agent] {
+            let (_view, vcx) = cx.add_window_view(|_, cx| BubbleRow {
+                pane: REFERENCE_PANE,
+                who,
+                text: SHORT_LINE,
+                selection: cx.new(TextSelection::new),
+            });
+            vcx.run_until_parked();
+            let bubble = vcx.debug_bounds("test-bubble").expect("bubble drawn");
+            let text = vcx.debug_bounds("bubble-text").expect("text drawn");
+            let bw = f32::from(bubble.size.width);
+            let tw = f32::from(text.size.width);
+            let th = f32::from(text.size.height);
+            let cap = bubble_cap(vcx, who);
+            assert!(
+                th <= CHAT_LINE_HEIGHT + 0.5,
+                "{who:?}: a short line stays on one line ({th} pt tall)"
+            );
+            assert!(
+                bw < cap - 60.0,
+                "{who:?}: short bubble {bw} pt is at its cap ({cap})"
+            );
+            // The bubble is the text, the pads, and (groups) the time after it.
+            let time_w = match who {
+                Who::Mine => 0.0,
+                Who::Other | Who::Agent => f32::from(
+                    vcx.debug_bounds("bubble-time")
+                        .expect("time drawn")
+                        .size
+                        .width,
+                ),
+            };
+            assert!(
+                (bw - (tw + time_w + 2.0 * BUBBLE_PAD_X)).abs() <= 2.0,
+                "{who:?}: bubble {bw} ≠ text {tw} + time {time_w} + pads"
             );
         }
     }
