@@ -71,6 +71,13 @@ enum DebugHooks {
         }
     }
     static var linkClearsMs: Int? { value("ARBOS_LINK_CLEARS_MS").flatMap { Int($0) } }
+    /// Long-chat performance rig (long-chat-perf, 2026-10-23): pad the fixture group
+    /// "Launch week" with this many synthetic rows — mixed people / agent prose with
+    /// markdown, relay system lines, replies, attachments.
+    static var fixtureLongRows: Int? { value("ARBOS_FIXTURE_LONG_ROWS").flatMap { Int($0) } }
+    /// Log frame pacing (dropped frames, worst frame, time over budget) and memory every
+    /// 2 s to `com.unarbos.arbos.ios` / `perf` for the duration of the launch.
+    static var perfLog: Bool { value("ARBOS_PERF_LOG") == "1" }
     /// Scripted tour for the screen recording (fixture only).
     static var demo: Bool { value("ARBOS_DEMO") == "1" }
     /// Scripted tour against the live relay: sends ARBOS_AUTO_SEND, waits for the reply, tours the sheets.

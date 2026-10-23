@@ -129,7 +129,18 @@ extension AppModel {
                     parts: [.text(id: "g1t", text: "Launch checklist is here: https://notion.so/arbos/launch-week")], hiddenCount: 0, senderHandle: "mira-k", senderName: "Mira Kaplan"),
             Message(id: "g2", chatId: "fx-group-launch", role: .user, sender: "user:fx-u4", status: .done, turn: nil, decision: nil, subagentId: nil,
                     subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 2 * 3_600_000, completedAt: nil, pending: false,
-                    parts: [.attachment(id: "g2a", attachment: Attachment(name: "press-kit-v3.pdf", mime: "application/pdf", blobRef: nil))], hiddenCount: 0, senderHandle: "sam", senderName: "Sam Okafor"),
+                    parts: [.attachment(id: "g2a", attachment: Attachment(name: "press-kit-v3.pdf", mime: "application/pdf", blobRef: "fixture-g2a"))], hiddenCount: 0, senderHandle: "sam", senderName: "Sam Okafor"),
+            // Four pictures (same set as the Mac fixture) so the group's Library grid and
+            // the media viewer's album have something to page through (media-viewer-2026-10-23).
+            Message(id: "g2b", chatId: "fx-group-launch", role: .user, sender: "user:fx-u4", status: .done, turn: nil, decision: nil, subagentId: nil,
+                    subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 2 * 3_600_000 + 60_000, completedAt: nil, pending: false,
+                    parts: [.attachment(id: "g2b1", attachment: Attachment(name: "deck-v3-slide-04.png", mime: "image/png", blobRef: "fixture-g2b1", kind: "image")),
+                            .attachment(id: "g2b2", attachment: Attachment(name: "launch-dashboard.png", mime: "image/png", blobRef: "fixture-g2b2", kind: "image")),
+                            .attachment(id: "g2b3", attachment: Attachment(name: "launch-day-team.jpg", mime: "image/jpeg", blobRef: "fixture-g2b3", kind: "image")),
+                            .attachment(id: "g2b4", attachment: Attachment(name: "signup-funnel.png", mime: "image/png", blobRef: "fixture-g2b4", kind: "image")),
+                            .attachment(id: "g2b5", attachment: Attachment(name: "launch-teaser.mp4", mime: "video/mp4", blobRef: "fixture-g2b5", kind: "video")),
+                            .text(id: "g2bt", text: "Deck, dashboard and the press kit for the run-through.")],
+                    hiddenCount: 0, senderHandle: "sam", senderName: "Sam Okafor"),
             Message(id: "g3", chatId: "fx-group-launch", role: .user, sender: "user:fx-u3", status: .done, turn: nil, decision: nil, subagentId: nil,
                     subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 50 * 60_000, completedAt: nil, pending: false,
                     parts: [.text(id: "g3t", text: "And the signup form: https://arbos.life/i/launch")], hiddenCount: 0, senderHandle: "mira-k", senderName: "Mira Kaplan"),
@@ -140,6 +151,10 @@ extension AppModel {
         ]
         // Mira's second line replies to her first (quote header on another person's bubble).
         messages["fx-group-launch"]?[2].replyTo = "g1"
+        if let rows = DebugHooks.fixtureLongRows, rows > 0 {
+            messages["fx-group-launch"] = Self.longGroupTranscript(rows: rows, before: now - 4 * 3_600_000)
+                + (messages["fx-group-launch"] ?? [])
+        }
         caughtUp.insert("fx-group-launch")
         directory = [
             Person(id: "fx-u1", handle: "alex-rivera", avatarUrl: nil, name: "Alex Rivera", status: "member"),
@@ -395,6 +410,74 @@ extension AppModel {
         Message(id: id, chatId: chat, role: .assistant, sender: "agent", status: .streaming, turn: .reply, decision: nil, subagentId: nil,
                 subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: at, completedAt: nil, pending: false,
                 parts: [.status(id: "\(id)-s", code: .working, message: "Working")], hiddenCount: 0)
+    }
+
+    /// `ARBOS_FIXTURE_LONG_ROWS`: a long group history shaped like the "Testing" group —
+    /// four people and one agent talking, a reply every tenth row, a markdown answer
+    /// every seventh, a relay membership line every fortieth (#1386), an image or file
+    /// every twenty-fifth, a date break every three hundredth. Deterministic, so two
+    /// launches render the same rows. Ends `before`; rows sit 40 s apart.
+    static func longGroupTranscript(rows: Int, before: Int64) -> [Message] {
+        let chat = "fx-group-launch"
+        let people: [(sender: String, handle: String, name: String)] = [
+            ("user:fx-u3", "mira-k", "Mira Kaplan"), ("user:fx-u4", "sam", "Sam Okafor"),
+            ("user:fx-me", "jacob", "Jacob Steeves"), ("user:gh_32490803", "unconst", "Unconst"),
+        ]
+        let lines = [
+            "Can we move the launch call to 10 am? The press embargo lifts at noon.",
+            "Done — calendar updated. I also pinged the design channel about the hero asset.",
+            "The signup form drops the handle field on iOS 27 when autofill fires. Repro in 2 of 5 tries.",
+            "Looks related to the keyboard inset change. Checking the TestFlight build from last night.",
+            "Shipping notes are in the shared doc. Shout if the pricing table reads wrong.",
+            "Also: the relay restarted twice this morning, both clean 1012 closes. Nothing lost.",
+            "https://arbos.life/i/launch is live behind the flag. Please smoke it on a phone.",
+            "Agreed. Let's keep the group to launch chatter until Friday.",
+        ]
+        let markdown = [
+            "Three things to check before the embargo lifts:\n\n- the **hero** video loops without a black frame\n- `/download/mac` resolves to the new build\n- the status page shows green for the relay\n\nI'll take the first two.",
+            "## Launch day timeline\n\n1. 09:30 final smoke on TestFlight\n2. 10:00 call\n3. 12:00 embargo lifts, post goes out\n4. 13:00 watch the relay dashboard\n\nCode to flip the flag: `arbosctl admin flags set launch on`.",
+            "| Step | Owner | State |\n| --- | --- | --- |\n| Hero asset | Mira | done |\n| Pricing copy | Sam | review |\n| Relay deploy | Jacob | queued |",
+        ]
+        var out: [Message] = []
+        out.reserveCapacity(rows)
+        let start = before - Int64(rows) * 40_000
+        for i in 0..<rows {
+            let id = "long-\(i)"
+            var at = start + Int64(i) * 40_000
+            if i > 0, i % 300 == 0 { at += 2 * 3_600_000 }
+            let ts = at
+            if i % 40 == 39 {
+                // What the relay writes on a membership change (#1349 / #1386).
+                let who = people[i % people.count]
+                out.append(Message(id: id, chatId: chat, role: .system, sender: "system", status: .done, turn: nil, decision: nil, subagentId: nil,
+                                   subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: ts, completedAt: nil, pending: false,
+                                   parts: [.text(id: "\(id)-t", text: "Jacob added \(who.name)")], hiddenCount: 0))
+                continue
+            }
+            if i % 7 == 6 {
+                let text = markdown[(i / 7) % markdown.count]
+                out.append(Message(id: id, chatId: chat, role: .assistant, sender: "agent:fx-comms", status: .done, turn: .reply, decision: "reply",
+                                   subagentId: nil, subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: ts, completedAt: ts + 3_000,
+                                   pending: false, parts: [.text(id: "\(id)-t", text: text)], hiddenCount: 0, senderHandle: "comms", senderName: "Comms"))
+                continue
+            }
+            let who = people[(i / 3) % people.count]
+            if i % 25 == 24 {
+                let image = i % 50 == 24
+                let a = image ? Attachment(name: "IMG_\(1000 + i).jpg", mime: "image/jpeg", blobRef: nil, kind: "image")
+                              : Attachment(name: "launch-notes-\(i).pdf", mime: "application/pdf", blobRef: nil)
+                out.append(Message(id: id, chatId: chat, role: .user, sender: who.sender, status: .done, turn: nil, decision: nil, subagentId: nil,
+                                   subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: ts, completedAt: nil, pending: false,
+                                   parts: [.attachment(id: "\(id)-a", attachment: a)], hiddenCount: 0, senderHandle: who.handle, senderName: who.name))
+                continue
+            }
+            var m = Message(id: id, chatId: chat, role: .user, sender: who.sender, status: .done, turn: nil, decision: nil, subagentId: nil,
+                            subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: ts, completedAt: nil, pending: false,
+                            parts: [.text(id: "\(id)-t", text: lines[i % lines.count])], hiddenCount: 0, senderHandle: who.handle, senderName: who.name)
+            if i % 10 == 5, i >= 5 { m.replyTo = "long-\(i - 5)" }
+            out.append(m)
+        }
+        return out
     }
 }
 #endif

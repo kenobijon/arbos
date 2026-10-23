@@ -214,7 +214,20 @@ pub(super) fn page(
                     .group(SharedString::from(format!("member-row-{key}")))
                     .cursor_pointer()
                     .hover(|s| s.bg(theme.surface_2))
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                    // Right-click (control-click) or Shift-click: the row's menu
+                    // (View profile · Remove from group), `ui/member_menu.rs`.
+                    .on_mouse_down(gpui::MouseButton::Right, {
+                        let (sid, key) = (sid.clone(), key.clone());
+                        cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            this.open_member_menu(sid.clone(), key.clone(), event.position, cx);
+                        })
+                    })
+                    .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
+                        if event.modifiers().shift || event.modifiers().control {
+                            this.open_member_menu(sid.clone(), key.clone(), event.position(), cx);
+                            return;
+                        }
                         let (handle, sid) = (handle.clone(), sid.clone());
                         this.push_profile(
                             ProfilePage::User {
@@ -271,10 +284,29 @@ pub(super) fn page(
                         .group(SharedString::from(format!("member-row-{key}")))
                         .cursor_pointer()
                         .hover(|s| s.bg(theme.surface_2))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            let pid = pid.clone();
-                            this.push_profile(ProfilePage::Agent { project_id: pid }, cx);
-                        }))
+                        .on_mouse_down(gpui::MouseButton::Right, {
+                            let (sid, key) = (space.id.clone(), key.clone());
+                            cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                                cx.stop_propagation();
+                                this.open_member_menu(sid.clone(), key.clone(), event.position, cx);
+                            })
+                        })
+                        .on_click({
+                            let sid = space.id.clone();
+                            cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
+                                if event.modifiers().shift || event.modifiers().control {
+                                    this.open_member_menu(
+                                        sid.clone(),
+                                        key.clone(),
+                                        event.position(),
+                                        cx,
+                                    );
+                                    return;
+                                }
+                                let pid = pid.clone();
+                                this.push_profile(ProfilePage::Agent { project_id: pid }, cx);
+                            })
+                        })
                         .into_any_element(),
                     );
                 }

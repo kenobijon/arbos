@@ -16,7 +16,6 @@ use crate::app::SignInMode;
 use crate::app::{AppState, DetailsTarget, ProfilePage, ServerSheet};
 use crate::image_picker;
 use crate::model::{now_ms, CallKind, MachineState};
-use crate::ui::attachments;
 use crate::ui::avatars;
 use crate::ui::callview;
 use crate::ui::channels::{ChannelsEvent, ChannelsPanel};
@@ -29,6 +28,8 @@ use crate::ui::glass::{self, WindowDrag};
 use crate::ui::header;
 use crate::ui::icons::icon;
 use crate::ui::local::{LocalEvent, LocalPanel};
+use crate::ui::media_viewer;
+use crate::ui::member_menu;
 use crate::ui::message_menu;
 use crate::ui::motion::{ease_out_cubic, PulseClock, COMPOSER_DROP_MS, SHAKE_MS};
 use crate::ui::onboarding;
@@ -177,6 +178,12 @@ pub struct Shell {
     pub(crate) create_group_open: bool,
     /// Sidebar search field.
     pub(crate) search_input: Entity<ComposerInput>,
+    /// The media viewer's Forward picker search field (feedback media-viewer-2026-10-23).
+    pub(crate) viewer_search: Entity<ComposerInput>,
+    /// Keyboard focus while the media viewer is up (← → page, Esc closes).
+    viewer_focus: FocusHandle,
+    /// `AppState::media_viewer_generation` the viewer was last focused for.
+    viewer_focused_generation: u64,
     pub(crate) connectors: Entity<ConnectorsPanel>,
     pub(crate) skills: Entity<SkillsPanel>,
     pub(crate) local: Entity<LocalPanel>,
@@ -243,6 +250,9 @@ pub struct Shell {
     /// Group pane › Members: the row whose ✕ was clicked (`user:<id>` or
     /// `agent:<project>`); it shows "Remove … ?" with Cancel / Remove.
     pub(crate) member_remove_armed: Option<String>,
+    /// A member row's menu on the group pane (Shift-click / right-click): View
+    /// profile, Remove from group → arms `member_remove_armed`.
+    pub(crate) member_menu: Option<member_menu::MemberMenu>,
     /// Right-click menu on a session row of the header's tab dropdown: the
     /// chat whose row carries it (#1256: anchored to the row, the dropdown
     /// stays open with the row highlighted).
@@ -425,6 +435,9 @@ impl Shell {
         }
         let search_input = cx.new(ComposerInput::new);
         search_input.update(cx, |input, _| input.set_placeholder("Search"));
+        let viewer_search = cx.new(ComposerInput::new);
+        viewer_search.update(cx, |input, _| input.set_placeholder("Search"));
+        cx.observe(&viewer_search, |_, _, cx| cx.notify()).detach();
         cx.observe(&pairing_input, |_, _, cx| cx.notify()).detach();
         cx.observe(&project_input, |_, _, cx| cx.notify()).detach();
         cx.observe(&search_input, |_, _, cx| cx.notify()).detach();
@@ -665,6 +678,9 @@ impl Shell {
             create_leaf_color: None,
             create_group_open,
             search_input,
+            viewer_search,
+            viewer_focus: cx.focus_handle(),
+            viewer_focused_generation: 0,
             connectors,
             skills,
             local,
@@ -687,6 +703,7 @@ impl Shell {
             row_delete_armed: false,
             agent_delete_armed: false,
             member_remove_armed: None,
+            member_menu: None,
             chat_menu: None,
             chat_delete_armed: false,
             message_menu: None,
@@ -1606,9 +1623,16 @@ impl Shell {
     /// Escape stops a recording memo (keeping its transcript), then closes
     /// whatever floats: menus, then sheets.
     fn escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
-        if self.state.read(cx).image_preview_open() {
-            self.state.update(cx, |s, cx| s.close_image_preview(cx));
-            Composer::focus(&self.composer, window, cx);
+        if let Some(viewer) = self.state.read(cx).media_viewer.as_ref() {
+            // Esc closes the Forward picker first, then the viewer.
+            if viewer.forward_open {
+                self.state
+                    .update(cx, |s, cx| s.media_viewer_toggle_forward(cx));
+                window.focus(&self.viewer_focus, cx);
+            } else {
+                self.state.update(cx, |s, cx| s.close_media_viewer(cx));
+                Composer::focus(&self.composer, window, cx);
+            }
             return;
         }
         if self.voice.update(cx, |v, cx| v.escape(cx)) {
@@ -1625,6 +1649,12 @@ impl Shell {
         }
         if self.state.read(cx).server_sheet.is_some() {
             self.close_server_sheet(window, cx);
+            return;
+        }
+        if self.member_menu.is_some() || self.member_remove_armed.is_some() {
+            self.member_menu = None;
+            self.member_remove_armed = None;
+            cx.notify();
             return;
         }
         if self.server_member_armed.is_some() || self.server_leave_armed {
@@ -1822,6 +1852,24 @@ impl Shell {
         cx.notify();
     }
 
+    /// Shift-click / right-click on a member row of the group pane: its menu at the click.
+    pub(crate) fn open_member_menu(
+        &mut self,
+        space_id: crate::model::Id,
+        key: String,
+        at: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.menu_open = false;
+        self.row_menu = None;
+        self.channel_menu = None;
+        self.chat_menu = None;
+        self.message_menu = None;
+        self.member_remove_armed = None;
+        self.member_menu = Some(member_menu::MemberMenu { space_id, key, at });
+        cx.notify();
+    }
+
     /// Everything that floats closes on a click elsewhere.
     pub(crate) fn close_popovers(&mut self, cx: &mut Context<Self>) {
         self.close_agent_pick(None, cx);
@@ -1833,8 +1881,10 @@ impl Shell {
             || self.channel_menu.is_some()
             || self.chat_menu.is_some()
             || self.message_menu.is_some()
+            || self.member_menu.is_some()
         {
             self.menu_open = false;
+            self.member_menu = None;
             self.members_open = false;
             self.add_agent_open = false;
             self.tab_menu_open = false;
@@ -3153,8 +3203,9 @@ impl Render for Shell {
         let sidebar_hidden = state.rail_collapsed || state.window_is_narrow(width);
         let sidebar_overlay = sidebar_hidden && state.sidebar_overlay;
         let details = state.details_open.clone();
-        let image_preview = state.image_preview.clone();
-        let image_preview_pending = state.image_preview_open() && image_preview.is_none();
+        let viewer_open = state.media_viewer.is_some();
+        let viewer_forward_open = state.media_viewer.as_ref().is_some_and(|v| v.forward_open);
+        let viewer_generation = state.media_viewer_generation;
         let pairing = state.pairing.clone();
         let new_chat_open = state.new_chat_open;
         let people_space = state.selected().filter(|p| p.is_people()).cloned();
@@ -3314,6 +3365,33 @@ impl Render for Shell {
         if let Some(menu) = message_menu::render(self, window, cx) {
             root = root.child(menu);
         }
+        // Rig: the hook asked for the first other member's row menu on the group pane.
+        if let Some(armed) = self.state.update(cx, |s, _| s.rig_member_menu.take()) {
+            let target = {
+                let state = self.state.read(cx);
+                match state.profile.clone() {
+                    Some(ProfilePage::Group { space_id }) => state
+                        .project(&space_id)
+                        .and_then(|p| p.people.first().map(|m| format!("user:{}", m.id)))
+                        .map(|key| (space_id, key)),
+                    _ => None,
+                }
+            };
+            if let Some((space_id, key)) = target {
+                if armed {
+                    self.member_remove_armed = Some(key);
+                } else {
+                    self.member_menu = Some(member_menu::MemberMenu {
+                        space_id,
+                        key,
+                        at: gpui::point(px(980.0), px(330.0)),
+                    });
+                }
+            }
+        }
+        if let Some(menu) = member_menu::render(self, window, cx) {
+            root = root.child(menu);
+        }
         if let Some(space) = people_space {
             let right = 16.0;
             if self.add_agent_open {
@@ -3388,12 +3466,32 @@ impl Render for Shell {
         if self.feedback.read(cx).is_open() {
             root = root.child(self.feedback.clone());
         }
-        if image_preview.is_some() || image_preview_pending {
-            root = root.child(attachments::preview_overlay(
-                image_preview,
-                self.state.clone(),
-                &theme,
-            ));
+        if viewer_open {
+            // Focus moves into the viewer once per opening (← → page, Esc
+            // closes); the Forward picker's search field takes it while it is up.
+            if self.viewer_focused_generation != viewer_generation {
+                self.viewer_focused_generation = viewer_generation;
+                self.viewer_search.update(cx, |input, cx| input.clear(cx));
+                window.focus(&self.viewer_focus, cx);
+            }
+            let search = self.viewer_search.read(cx).focus_handle(cx);
+            if viewer_forward_open {
+                if !search.is_focused(window) {
+                    window.focus(&search, cx);
+                }
+            } else if search.is_focused(window) {
+                window.focus(&self.viewer_focus, cx);
+            }
+            root = root.child(media_viewer::overlay(self, &self.viewer_focus, cx));
+        } else if self.viewer_focus.is_focused(window)
+            || self
+                .viewer_search
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window)
+        {
+            // Closed by × / the backdrop / Forward: typing goes back to the composer.
+            Composer::focus(&self.composer, window, cx);
         }
         // Collapsed video call: the camera keeps showing in a draggable tile.
         let collapsed_video = self

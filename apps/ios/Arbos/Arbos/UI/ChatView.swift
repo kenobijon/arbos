@@ -19,7 +19,23 @@ struct ChatView: View {
 
     @State private var draft = ""
     @State private var rows: [Row] = []
+    /// id → message for the rows on screen (menus, search, replies); rebuilt with `rows`.
+    @State private var messageById: [Id: Message] = [:]
+    /// How many of the newest rows are in the view tree. The transcript is a plain
+    /// VStack (see `transcript`), so every row it holds is built and laid out at once;
+    /// a long group chat put thousands in it and the open took seconds (long-chat-perf,
+    /// 2026-10-23). Older rows join as the user nears the top (`growWindow`).
+    @State private var windowCount = ChatView.windowInitial
+    /// iOS 17 has no scroll-geometry callback to grow the window with, so it keeps every row.
+    static let windowInitial: Int = {
+        if #available(iOS 18, *) { return 160 }
+        return Int.max
+    }()
+    static let windowStep = 120
     @State private var showModelPicker = false
+    /// Rig: the media viewer opened by `ARBOS_SHOW=media…` (media-viewer-2026-10-23).
+    @State private var rigViewer: MediaViewerState?
+    @State private var rigViewerForward = false
     @State private var showSettings = false
     /// Rig: `ARBOS_SHOW=agentsecrets` presents the agent's Secrets page (D83).
     @State private var showAgentSecrets = false
@@ -61,6 +77,30 @@ struct ChatView: View {
         let q = searchText.trimmingCharacters(in: .whitespaces)
         guard showSearch, !q.isEmpty else { return rows }
         return rows.filter { m_text($0).localizedCaseInsensitiveContains(q) }
+    }
+
+    /// The newest `windowCount` of `visibleRows`: what the VStack actually holds.
+    private var windowedRows: [Row] {
+        let all = visibleRows
+        return all.count > windowCount ? Array(all.suffix(windowCount)) : all
+    }
+
+    /// Nearing the top: bring the next older slice into the view tree. The scroll view is
+    /// anchored at the bottom, so the rows on screen stay put while the content grows above.
+    private func growWindow() {
+        guard windowCount < visibleRows.count else { return }
+        windowCount = min(visibleRows.count, windowCount + Self.windowStep)
+    }
+
+    /// Make sure the row for `messageId` is in the window (quote taps into older history).
+    /// Returns true when the window had to grow (the caller scrolls after the next layout).
+    private func includeInWindow(messageId: Id) -> Bool {
+        let all = visibleRows
+        guard let ix = all.firstIndex(where: { $0.messageId == messageId }) else { return false }
+        let needed = all.count - ix + Self.windowStep / 2
+        guard needed > windowCount else { return false }
+        windowCount = min(all.count, needed)
+        return true
     }
 
     /// Who the CallKit card names: the other person in a DM, else the group/project.
@@ -243,9 +283,18 @@ struct ChatView: View {
             let id = m.member.hasPrefix("agent:") ? String(m.member.dropFirst(6)) : m.member
             if let name = m.project?.name ?? m.name, !name.isEmpty { agentNames[id] = name }
         }
-        rows = Transcript.rows(messages, projectId: slot,
-                               me: isChannel ? model.channelMe : model.myUserId,
-                               people: isPeople || isChannel, agentNames: agentNames)
+        let list = messages
+        let byId = Transcript.index(list)
+        let next = Transcript.rows(list, byId: byId, projectId: slot,
+                                   me: isChannel ? model.channelMe : model.myUserId,
+                                   people: isPeople || isChannel, agentNames: agentNames)
+        // Rows that arrived (new messages, an older page) join the window, so the oldest
+        // row on screen does not fall out of the view tree when a new one lands.
+        if windowCount < next.count, next.count > rows.count {
+            windowCount = min(next.count, windowCount + (next.count - rows.count))
+        }
+        messageById = byId
+        rows = next
     }
 
     var body: some View {
@@ -329,6 +378,11 @@ struct ChatView: View {
         .background(InteractivePopGestureEnabler())
         // Full-chat swipes: right → previous agent chat (or Home), left → next (or create), up → archive + previous.
         .simultaneousGesture(chatNavSwipe)
+        .fullScreenCover(item: $rigViewer) { v in
+            MediaViewer(album: v.items, index: v.index, onClose: { rigViewer = nil }, openForward: rigViewerForward)
+                .environmentObject(model)
+                .environment(\.theme, theme)
+        }
         .sheet(isPresented: $showModelPicker, onDismiss: demoDismissed) {
             if let project {
                 ModelPickerView(project: project).environmentObject(model).environment(\.theme, theme)
@@ -399,6 +453,7 @@ struct ChatView: View {
             }
         }
         .onAppear {
+            LaunchClock.mark("chat-appear", detail: "messages=\(messages.count)")
             model.markRead(chatId: chatId)
             model.visibleChatId = chatId
             // Restore unsent text left when the user backed out of this thread.
@@ -430,7 +485,7 @@ struct ChatView: View {
                     case "edit": showProfile = true
                     case "userprofile": if let c = counterpart { model.showProfile(.user(ProfilePerson(c))) }
                     // `addmembers`: the group pane opens its Add members sheet on appear.
-                    case "groupprofile", "addmembers": model.showProfile(.group(chatId: chatId, projectId: isPeople ? nil : projectId))
+                    case "groupprofile", "addmembers", "removemember": model.showProfile(.group(chatId: chatId, projectId: isPeople ? nil : projectId))
                     case "member":
                         // The group page, then its first other member pushed over it (rig).
                         openHeaderProfile()
@@ -452,7 +507,25 @@ struct ChatView: View {
                         #endif
                     case "recording": recorder.start()
                     case "scrollup":
-                        if let first = rows.first { withAnimation { scroller?.scrollTo(first.id, anchor: .top) } }
+                        if let first = windowedRows.first { withAnimation { scroller?.scrollTo(first.id, anchor: .top) } }
+                    case "media", "media-forward", "media-file":
+                        // Rig (media-viewer-2026-10-23): the viewer on this chat's album at
+                        // ARBOS_MEDIA_INDEX (chat order, default 0), with the Forward sheet
+                        // up for `media-forward`; `media-file` opens the chat's first file.
+                        let slot = isPeople ? "\(peopleSlot):\(chatId)" : projectId
+                        if show == "media-file" {
+                            let file = messages.lazy.flatMap { m in m.parts.compactMap { part -> MediaItem? in
+                                guard case .attachment(let id, let a) = part, MediaAlbum.kind(of: a) == .file else { return nil }
+                                return MediaAlbum.item(id: "\(m.id)#\(id)", message: m, attachment: a, kind: .file, slot: slot,
+                                                       projectName: { model.project($0)?.name })
+                            } }.first
+                            if let file { rigViewer = MediaViewerState(items: [file], index: 0) }
+                        } else {
+                            let album = MediaAlbum.items(messages: messages, slot: slot, projectName: { model.project($0)?.name })
+                            let ix = Int(ProcessInfo.processInfo.environment["ARBOS_MEDIA_INDEX"] ?? "") ?? 0
+                            if !album.isEmpty { rigViewer = MediaViewerState(items: album, index: min(ix, album.count - 1)) }
+                        }
+                        rigViewerForward = show == "media-forward"
                     case "pending":
                         pending = [.init(name: "Q3 board deck v5.pdf", mime: "application/pdf", data: Data()),
                                    .init(name: "Photo Oct 15.jpg", mime: "image/jpeg", data: Data())]
@@ -797,12 +870,14 @@ struct ChatView: View {
                         // empty copy would say "Ask @handle anything…" which is wrong here.
                         emptyHint
                     }
-                    ForEach(Array(visibleRows.enumerated()), id: \.element.id) { i, row in
+                    let shown = windowedRows
+                    ForEach(Array(shown.enumerated()), id: \.element.id) { i, row in
                         RowView(row: row, chatId: chatId, width: width, timeReveal: timeReveal,
                                 onQuoteTap: { revealQuoted($0) },
                                 highlighted: highlightedMessage == row.messageId)
-                            .padding(.top, gap(before: i))
+                            .padding(.top, gap(before: i, in: shown))
                             .id(row.id)
+                            .onAppear { LaunchClock.mark("chat-first-row", detail: "shown=\(shown.count) rows=\(rows.count) messages=\(messages.count)") }
                             .contextMenu {
                                 MessageMenuContent(items: MessageMenu.items(forMessage: isMessageRow(row))) { item in
                                     runMessageMenu(item, row: row)
@@ -845,8 +920,15 @@ struct ChatView: View {
                 searchFocused = false
             }
             .modifier(AwayFromBottomReporter(away: $awayFromBottom))
-            // Channels: one older page each time the transcript nears its top.
-            .modifier(NearTopReporter(enabled: isChannel) { model.loadOlderChannel(chatId) })
+            // Nearing the top: the next older slice of rows joins the view tree; a channel
+            // also asks the server for one older page.
+            .modifier(NearTopReporter(enabled: true) {
+                if windowCount < visibleRows.count {
+                    growWindow()
+                } else if isChannel {
+                    model.loadOlderChannel(chatId)
+                }
+            })
             // Mask stays in the scroll view's bounds — `ignoresSafeArea` on the
             // mask mis-samples the fade when the composer/keyboard inset changes
             // and can blank the whole transcript (white screen mid-type).
@@ -894,7 +976,7 @@ struct ChatView: View {
     }
 
     private func m_text(_ row: Row) -> String {
-        messages.first { $0.id == row.messageId }?.plainText ?? ""
+        messageById[row.messageId]?.plainText ?? ""
     }
 
     /// "@sam" / "Bob" (the agent of this chat) / "you" for the composer's reply preview.
@@ -907,7 +989,14 @@ struct ChatView: View {
     /// Tap on a reply bubble's quote: scroll to the original and tint it for a moment.
     private func revealQuoted(_ messageId: Id) {
         guard let target = rows.first(where: { $0.messageId == messageId && $0.role != .system }) else { return }
-        withAnimation(.easeInOut(duration: 0.35)) { scroller?.scrollTo(target.id, anchor: .center) }
+        if includeInWindow(messageId: messageId) {
+            // The original was outside the window: let the grown VStack lay out first.
+            DispatchQueue.main.async {
+                withAnimation(.easeInOut(duration: 0.35)) { scroller?.scrollTo(target.id, anchor: .center) }
+            }
+        } else {
+            withAnimation(.easeInOut(duration: 0.35)) { scroller?.scrollTo(target.id, anchor: .center) }
+        }
         highlightedMessage = messageId
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(1600))
@@ -921,10 +1010,10 @@ struct ChatView: View {
     private func isMessageRow(_ row: Row) -> Bool {
         if isChannel { return false }
         switch row.kind {
-        case .system, .question, .error:
+        case .system, .question, .error, .forwardHint:
             return false
         case .user, .other, .member, .assistant, .file, .voiceMemo, .image:
-            return messages.contains { $0.id == row.messageId }
+            return messageById[row.messageId] != nil
         }
     }
 
@@ -936,7 +1025,7 @@ struct ChatView: View {
         case .copy:
             UIPasteboard.general.string = m_text(row)
         case .reply:
-            guard let m = messages.first(where: { $0.id == row.messageId }) else { return }
+            guard let m = messageById[row.messageId] else { return }
             replyTo = m
             if isPeople, let member = agentMember(for: m)?.member {
                 talkTo = [member]
@@ -949,9 +1038,9 @@ struct ChatView: View {
 
     /// Spacing: 8 pt between bubbles of one sender, 24 pt around sender changes
     /// and system lines (measured on the references).
-    private func gap(before i: Int) -> CGFloat {
-        guard i > 0 else { return 0 }
-        let prev = rows[i - 1], cur = rows[i]
+    private func gap(before i: Int, in shown: [Row]) -> CGFloat {
+        guard i > 0, i < shown.count else { return 0 }
+        let prev = shown[i - 1], cur = shown[i]
         if case .system = prev.kind { return 20 }
         if case .system = cur.kind { return 20 }
         return prev.role == cur.role ? 8 : 24

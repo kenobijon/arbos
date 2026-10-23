@@ -445,6 +445,8 @@ struct ChatItem: Identifiable, Equatable {
     var at: Int64
     var fromHandle: String?
     var mime: String
+    /// The viewer's entry for an attachment (media-viewer-2026-10-23); nil for links.
+    var media: MediaItem? = nil
 }
 
 enum ChatMedia {
@@ -462,8 +464,13 @@ enum ChatMedia {
                     let kind: ChatItem.Kind = a.mime.hasPrefix("audio/") || a.kind == "audio" ? .voice
                         : (a.isImage || a.mime.hasPrefix("video/") || a.kind == "video") ? .media : .file
                     let url = a.blobRef.flatMap { model.blobURL(projectId: slot, key: $0) }
+                    let media = MediaAlbum.kind(of: a).map {
+                        MediaAlbum.item(id: "\(m.id)#\(id)", message: m, attachment: a, kind: $0, slot: slot,
+                                        projectName: { model.project($0)?.name })
+                    }
                     out.append(ChatItem(id: "\(m.id)#\(id)", kind: kind, title: a.name,
-                                        subtitle: a.mime, url: url, at: m.createdAt, fromHandle: m.senderHandle, mime: a.mime))
+                                        subtitle: a.mime, url: url, at: m.createdAt, fromHandle: m.senderHandle, mime: a.mime,
+                                        media: media))
                 case .text(let id, let text):
                     guard let detector else { continue }
                     let ns = text as NSString
@@ -481,12 +488,17 @@ enum ChatMedia {
 }
 
 struct ChatItemsList: View {
+    @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
     let items: [ChatItem]
     let kind: ChatItem.Kind
     let empty: String
+    @State private var viewer: MediaViewerState?
 
     private var filtered: [ChatItem] { items.filter { $0.kind == kind } }
+
+    /// The grid is newest first; the viewer's album runs in chat order (Mac `media_grid`).
+    private var album: [MediaItem] { filtered.reversed().compactMap(\.media) }
 
     var body: some View {
         if filtered.isEmpty {
@@ -498,45 +510,69 @@ struct ChatItemsList: View {
                     // Size from the grid column (fit), then paint the image in an
                     // overlay. `aspectRatio(..., .fill)` + AsyncImage used the
                     // image's intrinsic size and blew the ScrollView (white sheet).
-                    Color.clear
-                        .aspectRatio(1, contentMode: .fit)
-                        .overlay {
-                            ZStack {
-                                Rectangle().fill(theme.card)
-                                if let url = item.url, !item.mime.hasPrefix("video/") {
-                                    AsyncImage(url: url) { img in
-                                        img.resizable().scaledToFill()
-                                    } placeholder: {
-                                        ProgressView().tint(theme.muted)
+                    Button { open(item) } label: {
+                        Color.clear
+                            .aspectRatio(1, contentMode: .fit)
+                            .overlay {
+                                ZStack {
+                                    Rectangle().fill(theme.card)
+                                    if let media = item.media, media.kind == .image {
+                                        BlobImage(item: media)
+                                    } else {
+                                        Image(systemName: "film").font(.system(size: 22)).foregroundStyle(theme.muted)
                                     }
-                                } else {
-                                    Image(systemName: "film").font(.system(size: 22)).foregroundStyle(theme.muted)
                                 }
                             }
-                        }
-                        .clipped()
+                            .clipped()
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("\(item.title), tap to view")
                 }
             }
             .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             .padding(.horizontal, 16)
+            .fullScreenCover(item: $viewer) { v in
+                MediaViewer(album: v.items, index: v.index, onClose: { viewer = nil })
+                    .environmentObject(model)
+                    .environment(\.theme, theme)
+            }
         } else {
             ProfileCard(separatorInset: PaneKit.separatorInset(.glyph(""))) {
                 ForEach(filtered) { item in
                     rowView(item)
                 }
             }
+            .fullScreenCover(item: $viewer) { v in
+                MediaViewer(album: v.items, index: v.index, onClose: { viewer = nil })
+                    .environmentObject(model)
+                    .environment(\.theme, theme)
+            }
         }
     }
 
     private func rowView(_ item: ChatItem) -> some View {
         Group {
-            if let url = item.url {
+            if item.kind == .file, item.media != nil {
+                // A file opens in the viewer (Open → Quick Look, Download, Forward).
+                Button { open(item) } label: { rowLabel(item) }
+            } else if let url = item.url {
                 SwiftUI.Link(destination: url) { rowLabel(item) }
             } else {
                 rowLabel(item)
             }
         }
         .buttonStyle(.plain)
+    }
+
+    /// A tile opens the album at its place; a file row opens that file alone.
+    private func open(_ item: ChatItem) {
+        guard let media = item.media else { return }
+        if kind == .media, let ix = album.firstIndex(where: { $0.id == media.id }) {
+            viewer = MediaViewerState(items: album, index: ix)
+        } else {
+            viewer = MediaViewerState(items: [media], index: 0)
+        }
     }
 
     private func rowLabel(_ item: ChatItem) -> some View {
@@ -811,10 +847,19 @@ struct GroupProfileView: View {
             if let projectId { projectMembers = await model.projectMembers(projectId) }
         }
         .onAppear {
-            // Rig: `ARBOS_SHOW=addmembers` lands on the Add members picker.
+            // Rig: `ARBOS_SHOW=removemember` arms the Remove confirm for the first other member.
+            if DebugHooks.show == "removemember", let r = rows.first(where: { canRemove($0) }) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                    pendingRemoveId = r.person.id
+                    pendingRemoveName = r.agent?.name ?? "@\(r.person.handle)"
+                }
+            }
+            // Rig: `ARBOS_SHOW=addmembers` lands on the Add members picker;
+            // `ARBOS_PANEL_TAB=Library` lands on the Library tab (the media grid).
             if DebugHooks.show == "addmembers", project == nil {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { showAdd = true }
             }
+            if let t = DebugHooks.panelTab, PaneKinds.group.contains(t) { tab = t }
         }
     }
 
@@ -869,7 +914,7 @@ struct GroupProfileView: View {
         let remove: AnyView? = canRemove(r) ? AnyView(
             Button {
                 pendingRemoveId = r.person.id
-                pendingRemoveName = "@\(r.person.handle)"
+                pendingRemoveName = r.agent?.name ?? "@\(r.person.handle)"
             } label: {
                 Image(systemName: "xmark")
                     .font(theme.font(12, weight: .semibold))
@@ -888,12 +933,20 @@ struct GroupProfileView: View {
             PaneRow(leading: .avatar(avatar), title: title, subtitle: memberSubtitle(r), trailing: remove)
         }
         .buttonStyle(.borderless)
+        // Long-press (Jacob, 2026-10-22; the Mac's Shift-/right-click menu): View profile,
+        // and for whoever may remove this member a divider and Remove from group — which
+        // asks first (the confirm above) and then lets the relay write "<me> removed X".
+        // Your own row never offers Remove; leaving is the chat list's Delete.
         .contextMenu {
+            Button {
+                if let a = r.agent { model.showProfile(.agent(projectId: a.id)) } else { model.showProfile(.user(r.person)) }
+            } label: { Label("View profile", systemImage: "person.crop.circle") }
             if canRemove(r) {
-                Button("Remove from chat", role: .destructive) {
+                Divider()
+                Button(role: .destructive) {
                     pendingRemoveId = r.person.id
-                    pendingRemoveName = "@\(r.person.handle)"
-                }
+                    pendingRemoveName = r.agent?.name ?? "@\(r.person.handle)"
+                } label: { Label("Remove from group", systemImage: "xmark") }
             }
         }
     }

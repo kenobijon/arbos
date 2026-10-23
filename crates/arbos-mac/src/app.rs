@@ -19,7 +19,7 @@ use crate::model::{
     CallKind, CallMissed, Person, Reachable, Sender, Voice,
 };
 use crate::model::{
-    new_id, now_ms, AttachmentKind, BoxState, ChannelSel, ChannelsView, Chat, ChatKind,
+    new_id, now_ms, Attachment, AttachmentKind, BoxState, ChannelSel, ChannelsView, Chat, ChatKind,
     ConnectorsView, Effort, Id, Link, LinkState, LocalView, Machine, Message, MessageStatus,
     NewSecret, Part, Project, ProjectDocView, ProjectSecrets, QuestionState, Role, Routine,
     RoutineRun, RoutineTrigger, SecretsView, ServerInfo, Skill, StatusKind,
@@ -235,6 +235,56 @@ pub enum AppEvent {
     ReplaySpeech { message_id: Id },
 }
 
+/// One entry of the media viewer's album (feedback media-viewer-2026-10-23).
+#[derive(Clone, Debug)]
+pub struct ViewerItem {
+    pub attachment: Attachment,
+    /// Who shared it ("Samir Haddad", "You", the agent's name).
+    pub by: String,
+    pub when: u64,
+    pub chat_id: Id,
+    /// The `parts[]` id, so a card click lands on its own picture.
+    pub part_id: Id,
+}
+
+/// The open media viewer: an album, the page shown, where its blobs live.
+#[derive(Clone, Debug)]
+pub struct MediaViewer {
+    pub items: Vec<ViewerItem>,
+    pub index: usize,
+    /// Blob slot the items are read from (the selected space's id).
+    pub slot: Id,
+    /// The Forward picker is up.
+    pub forward_open: bool,
+    /// Blob key being fetched for Play / Quick Look (one at a time).
+    pub busy: Option<String>,
+}
+
+impl MediaViewer {
+    pub fn current(&self) -> Option<&ViewerItem> {
+        self.items.get(self.index)
+    }
+}
+
+/// A chat the Forward picker can send to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ForwardTarget {
+    pub space_id: Id,
+    pub chat_id: Id,
+    pub name: String,
+    /// "@sam", "Group · 4 members", "Agent".
+    pub subtitle: String,
+    pub last_activity: u64,
+}
+
+/// The text line a forwarded attachment travels with (every client renders
+/// it as the card's hint, not a bubble; agents read it as prose).
+pub fn forwarded_from_text(by: &str) -> String {
+    format!("{FORWARDED_FROM_PREFIX}{by}")
+}
+
+pub const FORWARDED_FROM_PREFIX: &str = "Forwarded from ";
+
 /// What the composer should look like for the active chat (§3.10).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ComposerMode {
@@ -374,10 +424,11 @@ pub struct AppState {
     /// auto-hides; the header toggle (or ⌘B) floats it over the chat instead.
     pub sidebar_overlay: bool,
     pub details_open: Option<DetailsTarget>,
-    /// Expanded chat-image preview (click the attachment thumbnail).
-    pub image_preview: Option<Arc<RenderImage>>,
-    /// Blob key whose thumbnail is loading so the expanded preview can open.
-    image_preview_pending: Option<String>,
+    /// The media viewer (feedback media-viewer-2026-10-23): a chat's media as
+    /// an album, opened from an attachment card or the Library grid.
+    pub media_viewer: Option<MediaViewer>,
+    /// Bumped on every open so the shell focuses the viewer once per opening.
+    pub media_viewer_generation: u64,
     pub new_project_open: bool,
     /// Debug: per-message "Show details" disclosures in the transcript.
     pub show_details: bool,
@@ -493,6 +544,9 @@ pub struct AppState {
     /// Rig: `ARBOS_OPEN_SERVER=…:menu|:menu-delete` — the shell opens the selected channel's
     /// row menu on its next render (`true` = with the Delete confirmation armed).
     pub rig_channel_menu: Option<bool>,
+    /// Rig: `ARBOS_OPEN_PROFILE=group:member-menu[:confirm]` — the shell opens the first
+    /// other member's row menu on the group pane (`true` = with the Remove confirm armed).
+    pub rig_member_menu: Option<bool>,
     /// D88: the room list from the homeserver (previews, unread, `can_post`).
     pub matrix_snapshot: Snapshot,
     pub matrix_connected: bool,
@@ -709,8 +763,8 @@ impl AppState {
             rail_collapsed: false,
             sidebar_overlay: false,
             details_open: None,
-            image_preview: None,
-            image_preview_pending: None,
+            media_viewer: None,
+            media_viewer_generation: 0,
             new_project_open: false,
             show_details: false,
             machine: Machine::default(),
@@ -768,6 +822,7 @@ impl AppState {
             servers_available: false,
             open_server_hook_done: false,
             rig_channel_menu: None,
+            rig_member_menu: None,
             servers: Vec::new(),
             matrix_snapshot: Snapshot::default(),
             matrix_connected: false,
@@ -1284,10 +1339,6 @@ impl AppState {
             SyncEvent::Thumbnail { key, bytes } => {
                 if let Some(image) = decode_image(&bytes) {
                     let image = Arc::new(image);
-                    if self.image_preview_pending.as_ref() == Some(&key) {
-                        self.image_preview_pending = None;
-                        self.image_preview = Some(image.clone());
-                    }
                     self.thumbnails_failed.remove(&key);
                     self.thumbnails.insert(key, image);
                     if let Some(chat_id) = self.active_chat_id() {
@@ -1297,9 +1348,6 @@ impl AppState {
                 } else {
                     // Bytes arrived but could not be decoded (unsupported format,
                     // corrupt file, …): show "No preview", not Loading forever.
-                    if self.image_preview_pending.as_ref() == Some(&key) {
-                        self.image_preview_pending = None;
-                    }
                     self.thumbnails_failed.insert(key);
                     if let Some(chat_id) = self.active_chat_id() {
                         cx.emit(AppEvent::TranscriptChanged { chat_id });
@@ -1308,9 +1356,6 @@ impl AppState {
                 }
             }
             SyncEvent::ThumbnailFailed { key } => {
-                if self.image_preview_pending.as_ref() == Some(&key) {
-                    self.image_preview_pending = None;
-                }
                 self.thumbnails_failed.insert(key);
                 if let Some(chat_id) = self.active_chat_id() {
                     cx.emit(AppEvent::TranscriptChanged { chat_id });
@@ -1320,6 +1365,14 @@ impl AppState {
             SyncEvent::AttachmentSaved { path } => {
                 self.push_notice(format!("Saved to {}", path.display()));
                 crate::ui::attachments::reveal(&path);
+                cx.notify();
+            }
+            SyncEvent::AttachmentOpened { key } => {
+                if let Some(viewer) = self.media_viewer.as_mut() {
+                    if viewer.busy.as_ref() == Some(&key) {
+                        viewer.busy = None;
+                    }
+                }
                 cx.notify();
             }
             SyncEvent::Notice(text) => {
@@ -1504,6 +1557,40 @@ impl AppState {
                             }
                         }
                     }
+                    // Rig: `ARBOS_MEDIA_VIEWER=<n>` opens the restored chat's album at
+                    // item n (chat order, 0-based), `=file` its first file;
+                    // `ARBOS_MEDIA_VIEWER_FORWARD=1` opens the Forward picker too
+                    // (feedback media-viewer-2026-10-23).
+                    if let Ok(spec) = std::env::var("ARBOS_MEDIA_VIEWER") {
+                        if let Some(chat) = self.active_chat_id() {
+                            if spec == "file" {
+                                let first_file = self.messages_of(&chat).iter().find_map(|m| {
+                                    m.parts.iter().find_map(|p| match p {
+                                        Part::Attachment { id, attachment }
+                                            if !matches!(
+                                                attachment.kind(),
+                                                AttachmentKind::Image
+                                                    | AttachmentKind::Video
+                                                    | AttachmentKind::Audio
+                                            ) =>
+                                        {
+                                            Some((m.id.clone(), id.clone()))
+                                        }
+                                        _ => None,
+                                    })
+                                });
+                                if let Some((message_id, part_id)) = first_file {
+                                    self.open_media_in_chat(&chat, &message_id, &part_id, cx);
+                                }
+                            } else if let Ok(ix) = spec.parse::<usize>() {
+                                let album = self.media_album(&chat);
+                                self.open_media_viewer(album, ix, cx);
+                            }
+                            if std::env::var("ARBOS_MEDIA_VIEWER_FORWARD").is_ok_and(|v| v == "1") {
+                                self.media_viewer_toggle_forward(cx);
+                            }
+                        }
+                    }
                     // Rig: `ARBOS_OPEN_PROFILE=agent[:model|reasoning|voice]|group[:library|:add-members|:member]|user|me`
                     // opens the right pane for the restored chat (selecting it
                     // closed whatever the shell opened at launch), and
@@ -1531,6 +1618,8 @@ impl AppState {
                             } else if rest == ":add-members" {
                                 // The pane's Add members sheet over the Members tab.
                                 self.open_add_members(project_id, cx);
+                            } else if let Some(menu) = rest.strip_prefix(":member-menu") {
+                                self.rig_member_menu = Some(menu == ":confirm");
                             } else if rest == ":member" {
                                 // `:member` lands on the first other member, pushed
                                 // over the group as a click on its row would.
@@ -4655,42 +4744,377 @@ impl AppState {
         cx.notify();
     }
 
-    /// Open the expanded image preview with an already-decoded thumbnail.
-    pub fn open_image_preview(&mut self, image: Arc<RenderImage>, cx: &mut Context<Self>) {
-        self.image_preview_pending = None;
-        self.image_preview = Some(image);
-        cx.notify();
+    // ----- media viewer (feedback media-viewer-2026-10-23) -----------------
+
+    /// Every picture and video of `chat_id` in transcript order — the album the
+    /// viewer pages through. Files are not in it: a file opens alone.
+    pub fn media_album(&self, chat_id: &str) -> Vec<ViewerItem> {
+        let mut out = Vec::new();
+        for m in self.messages_of(chat_id) {
+            for part in &m.parts {
+                let Part::Attachment { id, attachment } = part else {
+                    continue;
+                };
+                if !matches!(
+                    attachment.kind(),
+                    AttachmentKind::Image | AttachmentKind::Video
+                ) {
+                    continue;
+                }
+                out.push(ViewerItem {
+                    attachment: attachment.clone(),
+                    by: self.viewer_sender_name(m),
+                    when: m.created_at,
+                    chat_id: chat_id.to_owned(),
+                    part_id: id.clone(),
+                });
+            }
+        }
+        out
     }
 
-    /// Close the expanded image preview (backdrop, ×, or Escape).
-    pub fn close_image_preview(&mut self, cx: &mut Context<Self>) {
-        self.image_preview = None;
-        self.image_preview_pending = None;
-        cx.notify();
+    /// Who shared it, for the viewer's caption: name, else `@handle`, else "You" / the agent.
+    fn viewer_sender_name(&self, m: &Message) -> String {
+        if let Some(n) = m.sender_name.as_deref().filter(|n| !n.is_empty()) {
+            return n.to_string();
+        }
+        if let Some(h) = m.sender_handle.as_deref().filter(|h| !h.is_empty()) {
+            return self
+                .person_by_handle(h)
+                .map(|p| p.display_name())
+                .unwrap_or_else(|| format!("@{h}"));
+        }
+        if self.is_mine(m) {
+            return "You".into();
+        }
+        m.sender
+            .strip_prefix("agent:")
+            .or_else(|| m.sender.strip_prefix("project:"))
+            .and_then(|pid| self.project(pid))
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| "Agent".into())
     }
 
-    /// True while the lightbox is up (showing an image or waiting on a fetch).
-    pub fn image_preview_open(&self) -> bool {
-        self.image_preview.is_some() || self.image_preview_pending.is_some()
-    }
-
-    /// Open an attachment image in the lightbox; fetch the thumbnail when missing.
-    pub fn preview_attachment_image(&mut self, key: String, cx: &mut Context<Self>) {
-        if let Some(image) = self.thumbnails.get(&key).cloned() {
-            self.open_image_preview(image, cx);
+    /// Open the viewer on one attachment of a chat: pictures and videos open
+    /// inside the chat's album at their place; a file opens on its own.
+    pub fn open_media_in_chat(
+        &mut self,
+        chat_id: &str,
+        message_id: &str,
+        part_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let album = self.media_album(chat_id);
+        if let Some(ix) = album
+            .iter()
+            .position(|i| i.part_id == part_id && i.chat_id == chat_id)
+        {
+            self.open_media_viewer(album, ix, cx);
             return;
         }
-        if key.starts_with("local:") {
-            return;
-        }
-        let Some(project_id) = self.selected_project.clone() else {
+        let Some(m) = self
+            .messages_of(chat_id)
+            .iter()
+            .find(|m| m.id == message_id)
+        else {
             return;
         };
-        self.image_preview = None;
-        self.image_preview_pending = Some(key.clone());
-        self.thumbnails_failed.remove(&key);
-        self.thumbnails_requested.insert(key.clone());
-        self.command(ClientCommand::FetchThumbnail { project_id, key });
+        let Some(attachment) = m.parts.iter().find_map(|p| match p {
+            Part::Attachment { id, attachment } if id == part_id => Some(attachment.clone()),
+            _ => None,
+        }) else {
+            return;
+        };
+        let item = ViewerItem {
+            attachment,
+            by: self.viewer_sender_name(m),
+            when: m.created_at,
+            chat_id: chat_id.to_owned(),
+            part_id: part_id.to_owned(),
+        };
+        self.open_media_viewer(vec![item], 0, cx);
+    }
+
+    /// Show `items[index]`. Fetches the picture when no thumbnail is cached yet.
+    pub fn open_media_viewer(
+        &mut self,
+        items: Vec<ViewerItem>,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        if items.is_empty() {
+            return;
+        }
+        let index = index.min(items.len() - 1);
+        // The slot the chat's blobs live in: its project, or the people chat
+        // itself (`space_of_chat`); a channel row falls back to the selected space.
+        let slot = {
+            let chat_id = &items[index].chat_id;
+            let known = self
+                .chats
+                .values()
+                .any(|tabs| tabs.iter().any(|c| &c.id == chat_id));
+            if known {
+                self.space_of_chat(chat_id)
+            } else {
+                match self.selected_project.clone() {
+                    Some(p) => p,
+                    None => return,
+                }
+            }
+        };
+        self.media_viewer = Some(MediaViewer {
+            items,
+            index,
+            slot,
+            forward_open: false,
+            busy: None,
+        });
+        self.media_viewer_generation += 1;
+        self.ensure_viewer_pictures();
+        cx.notify();
+    }
+
+    pub fn close_media_viewer(&mut self, cx: &mut Context<Self>) {
+        self.media_viewer = None;
+        cx.notify();
+    }
+
+    /// ← / → (or the chevrons): move through the album, clamped at the ends.
+    pub fn media_viewer_step(&mut self, delta: i32, cx: &mut Context<Self>) {
+        let Some(viewer) = self.media_viewer.as_mut() else {
+            return;
+        };
+        if viewer.forward_open {
+            return;
+        }
+        let last = viewer.items.len() as i32 - 1;
+        let next = (viewer.index as i32 + delta).clamp(0, last.max(0));
+        if next as usize != viewer.index {
+            viewer.index = next as usize;
+            self.ensure_viewer_pictures();
+            cx.notify();
+        }
+    }
+
+    /// Ask for the current item's picture and its neighbours' so paging is instant.
+    fn ensure_viewer_pictures(&mut self) {
+        let Some(viewer) = self.media_viewer.as_ref() else {
+            return;
+        };
+        let slot = viewer.slot.clone();
+        let keys: Vec<String> = [viewer.index.wrapping_sub(1), viewer.index, viewer.index + 1]
+            .into_iter()
+            .filter_map(|ix| viewer.items.get(ix))
+            .filter(|i| i.attachment.kind() == AttachmentKind::Image)
+            .filter_map(|i| i.attachment.blob_ref.clone())
+            .filter(|k| !k.starts_with("local:"))
+            .collect();
+        for key in keys {
+            if self.thumbnails.contains_key(&key) {
+                continue;
+            }
+            // A card that said "No preview" gets one more try when it is opened.
+            self.thumbnails_failed.remove(&key);
+            self.thumbnails_requested.insert(key.clone());
+            self.command(ClientCommand::FetchThumbnail {
+                project_id: slot.clone(),
+                key,
+            });
+        }
+    }
+
+    /// Viewer → Download: `~/Downloads/<name>`, then reveal (the card's button does the same).
+    pub fn media_viewer_download(&mut self, cx: &mut Context<Self>) {
+        let Some(viewer) = self.media_viewer.as_ref() else {
+            return;
+        };
+        let Some(item) = viewer.items.get(viewer.index) else {
+            return;
+        };
+        let Some(key) = item.attachment.blob_ref.clone() else {
+            return;
+        };
+        if key.starts_with("local:") {
+            self.push_notice("Still uploading — try again in a moment");
+            cx.notify();
+            return;
+        }
+        let name = item.attachment.name.clone();
+        let project_id = viewer.slot.clone();
+        self.command(ClientCommand::DownloadAttachment {
+            project_id,
+            key,
+            name,
+        });
+        cx.notify();
+    }
+
+    /// Viewer → Play / Quick Look: fetch the bytes to a temp file and hand them
+    /// to macOS (`qlmanage -p` for files, `open` for video → QuickTime Player).
+    pub fn media_viewer_open_external(&mut self, cx: &mut Context<Self>) {
+        let Some(viewer) = self.media_viewer.as_mut() else {
+            return;
+        };
+        let Some(item) = viewer.items.get(viewer.index) else {
+            return;
+        };
+        let Some(key) = item.attachment.blob_ref.clone() else {
+            return;
+        };
+        if key.starts_with("local:") || viewer.busy.is_some() {
+            return;
+        }
+        let quick_look = item.attachment.kind() != AttachmentKind::Video;
+        let name = item.attachment.name.clone();
+        let project_id = viewer.slot.clone();
+        viewer.busy = Some(key.clone());
+        self.command(ClientCommand::OpenAttachment {
+            project_id,
+            key,
+            name,
+            quick_look,
+        });
+        cx.notify();
+    }
+
+    pub fn media_viewer_toggle_forward(&mut self, cx: &mut Context<Self>) {
+        if let Some(viewer) = self.media_viewer.as_mut() {
+            viewer.forward_open = !viewer.forward_open;
+            cx.notify();
+        }
+    }
+
+    /// The chats the Forward picker offers: every DM, agent and group on the
+    /// rail, the current chat included, filtered by `query`, most recent first.
+    /// Channels are left out — they carry no attachments yet (Matrix `m.text`).
+    pub fn forward_targets(&self, query: &str) -> Vec<ForwardTarget> {
+        let query = query.trim().to_lowercase();
+        let mut out: Vec<ForwardTarget> = self
+            .projects
+            .iter()
+            .filter_map(|p| {
+                let chat_id = self.primary_chat(&p.id).map(|c| c.id.clone())?;
+                let subtitle = match p.kind {
+                    crate::model::SpaceKind::Dm => p
+                        .person()
+                        .map(|q| format!("@{}", q.handle))
+                        .unwrap_or_else(|| "Direct message".into()),
+                    crate::model::SpaceKind::Group => {
+                        let n = p.people.len() + 1 + p.agents.len();
+                        format!("Group · {n} members")
+                    }
+                    _ => "Agent".into(),
+                };
+                Some(ForwardTarget {
+                    space_id: p.id.clone(),
+                    chat_id,
+                    name: p.name.clone(),
+                    subtitle,
+                    last_activity: self
+                        .tabs(&p.id)
+                        .iter()
+                        .map(|c| c.last_message_at)
+                        .max()
+                        .unwrap_or(0),
+                })
+            })
+            .filter(|t| {
+                query.is_empty()
+                    || t.name.to_lowercase().contains(&query)
+                    || t.subtitle.to_lowercase().contains(&query)
+            })
+            .collect();
+        out.sort_by_key(|t| std::cmp::Reverse(t.last_activity));
+        out
+    }
+
+    /// Forward the open item to `target`: the row lands in that chat at once
+    /// (optimistic, same thumbnail), the source copies the blob into the
+    /// destination's slot and writes the message with "Forwarded from <name>".
+    pub fn forward_media_to(&mut self, target: ForwardTarget, cx: &mut Context<Self>) {
+        let Some(viewer) = self.media_viewer.as_mut() else {
+            return;
+        };
+        let Some(item) = viewer.items.get(viewer.index).cloned() else {
+            return;
+        };
+        let Some(key) = item.attachment.blob_ref.clone() else {
+            return;
+        };
+        if key.starts_with("local:") {
+            self.push_notice("Still uploading — try again in a moment");
+            cx.notify();
+            return;
+        }
+        viewer.forward_open = false;
+        let from_slot = viewer.slot.clone();
+        let message_id = new_id();
+        let text = forwarded_from_text(&item.by);
+        let mut attachment = item.attachment.clone();
+        attachment.title = None;
+        let parts = vec![
+            Part::Attachment {
+                id: new_id(),
+                attachment: attachment.clone(),
+            },
+            Part::Text {
+                id: new_id(),
+                text: text.clone(),
+            },
+        ];
+        self.messages
+            .entry(target.chat_id.clone())
+            .or_default()
+            .push(Message {
+                id: message_id.clone(),
+                chat_id: target.chat_id.clone(),
+                role: Role::User,
+                sender: "user".into(),
+                status: MessageStatus::Queued,
+                turn: None,
+                decision: None,
+                subagent_id: None,
+                subagent_name: None,
+                handoff_messages: None,
+                reactions: Default::default(),
+                in_reply_to: None,
+                routine_name: None,
+                sender_name: None,
+                sender_icon: None,
+                sender_handle: None,
+                sender_avatar: None,
+                sender_avatar_color: None,
+                mentions: Vec::new(),
+                reply_to: None,
+                asked_by_handle: None,
+                owner_handle: None,
+                usage: None,
+                return_contract: None,
+                waiting_user: false,
+                waiting_approval: false,
+                model: None,
+                effort: None,
+                created_at: now_ms(),
+                completed_at: None,
+                call_id: None,
+                activity: None,
+                pending: true,
+                parts,
+                hidden_parts: Vec::new(),
+                greeting: false,
+            });
+        self.command(ClientCommand::Forward {
+            chat_id: target.chat_id.clone(),
+            message_id,
+            from_slot,
+            attachment,
+            text,
+        });
+        self.push_notice(format!("Forwarded to {}", target.name));
+        cx.emit(AppEvent::TranscriptChanged {
+            chat_id: target.chat_id,
+        });
         cx.notify();
     }
 

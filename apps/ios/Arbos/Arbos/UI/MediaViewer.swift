@@ -1,0 +1,855 @@
+import AVKit
+import Photos
+import QuickLook
+import SwiftUI
+import UIKit
+
+// The media viewer (feedback media-viewer-2026-10-23, #1381): one full-screen
+// viewer for every chat kind, opened from an image / file bubble or a Library
+// tile. Black backdrop; the album (the chat's pictures and videos in order)
+// pages with a swipe; swipe down or × closes. Caption top-centre (who, when),
+// counter top-right, Download and Forward pills at the bottom. Video plays
+// inline after Play; a file shows its tile with Open (Quick Look). Forward is a
+// sheet of DMs, agents and groups; one tap sends the item there as a new message.
+
+/// One entry of the viewer's album.
+struct MediaItem: Identifiable, Equatable {
+    enum Kind: Equatable { case image, video, file }
+    /// `<message id>#<part id>` — the transcript row's id.
+    var id: String
+    var name: String
+    var mime: String
+    var kind: Kind
+    var blobRef: String?
+    /// Blob slot (`<project id>` or `people:<chat id>`).
+    var slot: String
+    /// Who shared it ("Samir Haddad", "You", the agent's name).
+    var by: String
+    var at: Int64
+
+    /// "Today at 2:14 PM", "Yesterday at 9:03 AM", "Oct 12 at 4:40 PM".
+    var whenLabel: String {
+        let date = Date(timeIntervalSince1970: Double(at) / 1000)
+        let cal = Calendar.current
+        let time = date.formatted(date: .omitted, time: .shortened)
+        if cal.isDateInToday(date) { return "Today at \(time)" }
+        if cal.isDateInYesterday(date) { return "Yesterday at \(time)" }
+        if cal.component(.year, from: date) == cal.component(.year, from: Date()) {
+            return "\(date.formatted(.dateTime.month(.abbreviated).day())) at \(time)"
+        }
+        return "\(date.formatted(date: .abbreviated, time: .omitted)) at \(time)"
+    }
+
+    /// Mac `AttachmentKind::label` for the file state's meta line.
+    var kindLabel: String {
+        let ext = (name as NSString).pathExtension.uppercased()
+        switch kind {
+        case .image: return "Image"
+        case .video: return "Video"
+        case .file: return ext.isEmpty ? "File" : (ext == "PDF" ? "PDF" : "\(ext) file")
+        }
+    }
+}
+
+enum MediaAlbum {
+    /// The viewer kind of an attachment; `nil` for voice memos (they stay in their chip).
+    static func kind(of a: Attachment) -> MediaItem.Kind? {
+        let mime = a.mime.lowercased()
+        let k = a.kind?.lowercased()
+        if mime.hasPrefix("audio/") || k == "audio" { return nil }
+        if a.isImage { return .image }
+        if mime.hasPrefix("video/") || k == "video" { return .video }
+        let ext = (a.name as NSString).pathExtension.lowercased()
+        if ["mp4", "mov", "webm", "mkv", "m4v"].contains(ext) { return .video }
+        return .file
+    }
+
+    /// Every picture and video of a chat in transcript order — what the viewer
+    /// pages through. Files are not in it: a file opens on its own.
+    /// `projectName` resolves an agent's project id for the caption.
+    static func items(messages: [Message], slot: String, projectName: (String) -> String?) -> [MediaItem] {
+        var out: [MediaItem] = []
+        for m in messages where !m.voice {
+            for part in m.parts {
+                guard case .attachment(let id, let a) = part, let kind = kind(of: a), kind != .file else { continue }
+                out.append(item(id: "\(m.id)#\(id)", message: m, attachment: a, kind: kind, slot: slot, projectName: projectName))
+            }
+        }
+        return out
+    }
+
+    static func item(id: String, message m: Message, attachment a: Attachment, kind: MediaItem.Kind, slot: String,
+                     projectName: (String) -> String?) -> MediaItem {
+        MediaItem(id: id, name: a.name, mime: a.mime, kind: kind, blobRef: a.blobRef, slot: slot,
+                  by: senderName(m, projectName: projectName), at: m.createdAt)
+    }
+
+    /// Who shared it, for the caption: name, else `@handle`, else "You" / the agent.
+    static func senderName(_ m: Message, projectName: (String) -> String?) -> String {
+        if let n = m.senderName, !n.isEmpty { return n }
+        if let h = m.senderHandle, !h.isEmpty { return "@\(h)" }
+        if m.role == .user { return "You" }
+        if m.sender.hasPrefix("agent:"), let n = projectName(String(m.sender.dropFirst(6))) { return n }
+        if m.sender.hasPrefix("project:"), let n = projectName(String(m.sender.dropFirst(8))) { return n }
+        return m.role == .assistant ? "Agent" : "You"
+    }
+
+    /// The "Forwarded from <name>" line a forwarded attachment travels with (Mac
+    /// `forwarded_from_text`); every client draws it as the card's hint, not a bubble.
+    static let forwardedPrefix = "Forwarded from "
+
+    static func forwardedFrom(_ text: String) -> String? {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return t.hasPrefix(forwardedPrefix) && !t.contains("\n") ? t : nil
+    }
+}
+
+/// What a `fullScreenCover(item:)` presents: an album and the page to show.
+struct MediaViewerState: Identifiable, Equatable {
+    var id: String { "\(items.first?.id ?? "")#\(index)#\(items.count)" }
+    var items: [MediaItem]
+    var index: Int
+}
+
+/// A chat the Forward sheet can send to.
+struct ForwardTarget: Identifiable, Equatable {
+    enum Kind: Equatable { case people(PeopleChat), agent(Project) }
+    var id: String
+    var kind: Kind
+    var title: String
+    var subtitle: String
+    var activity: Int64
+}
+
+// MARK: - Viewer
+
+struct MediaViewer: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.theme) private var theme
+    let album: [MediaItem]
+    @State var index: Int
+    let onClose: () -> Void
+    /// Rig: open with the Forward sheet already up (`ARBOS_SHOW=media-forward`).
+    var openForward = false
+
+    /// Fades the chrome and backdrop while a swipe-down is in flight (0…1).
+    @State private var dismissProgress: CGFloat = 0
+    @State private var showForward = false
+    @State private var toast: String?
+    @State private var busy = false
+    @State private var shareURL: ShareFile?
+
+    private var item: MediaItem? { album.indices.contains(index) ? album[index] : nil }
+    private var canAct: Bool { item?.blobRef.map { !$0.hasPrefix("local:") } ?? false }
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(1 - Double(dismissProgress) * 0.65).ignoresSafeArea()
+            if album.count > 1 {
+                TabView(selection: $index) {
+                    ForEach(Array(album.enumerated()), id: \.element.id) { i, item in
+                        page(item).tag(i)
+                    }
+                }
+                .tabViewStyle(.page(indexDisplayMode: .never))
+                .ignoresSafeArea()
+            } else if let item {
+                page(item).ignoresSafeArea()
+            }
+            chrome.opacity(1 - Double(dismissProgress))
+        }
+        .statusBarHidden(false)
+        .preferredColorScheme(.dark)
+        .onAppear { if openForward { showForward = true } }
+        .sheet(isPresented: $showForward) {
+            if let item {
+                ForwardSheet(item: item) { target in
+                    showForward = false
+                    model.forward(item, to: target)
+                    flash("Forwarded to \(target.title)")
+                }
+                .environmentObject(model)
+                .environment(\.theme, theme)
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+            }
+        }
+        .sheet(item: $shareURL) { file in
+            ActivityView(items: [file.url])
+        }
+        .accessibilityAction(.escape, onClose)
+    }
+
+    @ViewBuilder
+    private func page(_ item: MediaItem) -> some View {
+        switch item.kind {
+        case .image:
+            ZoomableImagePage(item: item, dismissProgress: $dismissProgress, onClose: onClose)
+        case .video:
+            VideoPage(item: item, dismissProgress: $dismissProgress, onClose: onClose)
+        case .file:
+            FilePage(item: item, dismissProgress: $dismissProgress, onClose: onClose)
+        }
+    }
+
+    // ----- top bar, pills, dots ----------------------------------------------
+
+    private var chrome: some View {
+        VStack(spacing: 0) {
+            ZStack {
+                if let item {
+                    VStack(spacing: 2) {
+                        Text(item.by).font(theme.font(15, weight: .semibold)).foregroundStyle(.white).lineLimit(1)
+                        Text(item.whenLabel).font(theme.font(13)).foregroundStyle(.white.opacity(0.67)).lineLimit(1)
+                    }
+                    .padding(.horizontal, 64)
+                }
+                HStack {
+                    Button(action: onClose) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 36, height: 36)
+                            .background(Circle().fill(Color.white.opacity(0.18)))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Close")
+                    Spacer()
+                    if album.count > 1 {
+                        Text("\(index + 1) of \(album.count)")
+                            .font(theme.font(13, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.67))
+                            .monospacedDigit()
+                    }
+                }
+                .padding(.horizontal, 16)
+            }
+            .frame(height: 44)
+            .padding(.top, 8)
+            Spacer()
+            if let toast {
+                Text(toast)
+                    .font(theme.font(13, weight: .medium))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 14).padding(.vertical, 8)
+                    .background(Capsule().fill(Color.white.opacity(0.18)))
+                    .padding(.bottom, 10)
+                    .transition(.opacity)
+            }
+            if album.count > 1 {
+                HStack(spacing: 4) {
+                    ForEach(album.indices, id: \.self) { i in
+                        Circle().fill(Color.white.opacity(i == index ? 1 : 0.35)).frame(width: 6, height: 6)
+                    }
+                }
+                .padding(.bottom, 12)
+                .accessibilityHidden(true)
+            }
+            HStack(spacing: 12) {
+                pill("Download", system: "arrow.down.to.line") { Task { await download() } }
+                pill("Forward", system: "arrowshape.turn.up.right") { showForward = true }
+            }
+            .padding(.bottom, 14)
+            .disabled(!canAct || busy)
+            .opacity(canAct ? 1 : 0.5)
+        }
+        .animation(.easeOut(duration: 0.2), value: toast)
+    }
+
+    private func pill(_ label: String, system: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: system).font(.system(size: 14, weight: .semibold))
+                Text(label).font(theme.font(15, weight: .medium))
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 16)
+            .frame(height: 38)
+            .background(Capsule().fill(Color.white.opacity(0.16)))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func flash(_ text: String) {
+        toast = text
+        Task {
+            try? await Task.sleep(nanoseconds: 1_800_000_000)
+            if toast == text { toast = nil }
+        }
+    }
+
+    // ----- Download -----------------------------------------------------------
+
+    /// Pictures and videos go to Photos (add-only permission); anything else
+    /// opens the share sheet so it can be saved to Files or sent on.
+    @MainActor
+    private func download() async {
+        guard let item, canAct else { return }
+        busy = true
+        defer { busy = false }
+        guard let (data, _) = await MediaFetch.bytes(for: item, model: model) else {
+            flash("Couldn't download \(item.name)")
+            return
+        }
+        switch item.kind {
+        case .image, .video:
+            let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+            guard status == .authorized || status == .limited else {
+                // No Photos access: fall back to the share sheet (Save to Files is in it).
+                shareURL = MediaFetch.tempFile(data, name: item.name).map(ShareFile.init)
+                return
+            }
+            do {
+                let file = MediaFetch.tempFile(data, name: item.name)
+                try await PHPhotoLibrary.shared().performChanges {
+                    let req = PHAssetCreationRequest.forAsset()
+                    if item.kind == .image {
+                        req.addResource(with: .photo, data: data, options: nil)
+                    } else if let file {
+                        req.addResource(with: .video, fileURL: file, options: nil)
+                    }
+                }
+                flash("Saved to Photos")
+            } catch {
+                flash("Couldn't save to Photos")
+            }
+        case .file:
+            shareURL = MediaFetch.tempFile(data, name: item.name).map(ShareFile.init)
+        }
+    }
+}
+
+// MARK: - Pages
+
+/// Shared swipe-down-to-dismiss for every page kind: a vertical drag at 1×
+/// follows the finger, fades the chrome, and closes past 120 pt.
+private struct DismissDrag: ViewModifier {
+    @Binding var progress: CGFloat
+    let onClose: () -> Void
+    var enabled: Bool = true
+    @State private var offset: CGFloat = 0
+
+    func body(content: Content) -> some View {
+        content
+            .offset(y: offset)
+            .scaleEffect(max(0.85, 1 - offset / 1000))
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 12)
+                    .onChanged { v in
+                        guard enabled else { return }
+                        let t = v.translation
+                        guard t.height > 0, t.height >= abs(t.width) * 1.2 else { return }
+                        offset = t.height
+                        progress = min(1, t.height / 400)
+                    }
+                    .onEnded { v in
+                        guard enabled else { return }
+                        if offset > 120, v.translation.height > abs(v.translation.width) * 1.2 {
+                            onClose()
+                        } else {
+                            withAnimation(.easeOut(duration: 0.2)) {
+                                offset = 0
+                                progress = 0
+                            }
+                        }
+                    }
+            )
+    }
+}
+
+/// Full-screen image: pinch to zoom, drag to pan when zoomed, double-tap to toggle.
+private struct ZoomableImagePage: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.theme) private var theme
+    let item: MediaItem
+    @Binding var dismissProgress: CGFloat
+    let onClose: () -> Void
+
+    @State private var image: UIImage?
+    @State private var failed = false
+    @State private var scale: CGFloat = 1
+    @State private var baseScale: CGFloat = 1
+    @State private var offset: CGSize = .zero
+    @State private var baseOffset: CGSize = .zero
+
+    private let minScale: CGFloat = 1
+    private let maxScale: CGFloat = 5
+
+    var body: some View {
+        ZStack {
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .scaleEffect(scale)
+                    .offset(offset)
+                    .gesture(magnify)
+                    .simultaneousGesture(pan)
+                    .onTapGesture(count: 2, perform: toggleZoom)
+                    .modifier(DismissDrag(progress: $dismissProgress, onClose: onClose, enabled: scale <= minScale + 0.01))
+                    .accessibilityLabel("Image")
+                    .accessibilityHint("Pinch to zoom, double tap to zoom in or out, swipe down to close")
+            } else if failed {
+                VStack(spacing: 12) {
+                    Image(systemName: "photo").font(.system(size: 44)).foregroundStyle(.white.opacity(0.35))
+                    Text("No preview").font(theme.font(13)).foregroundStyle(.white.opacity(0.67))
+                }
+                .modifier(DismissDrag(progress: $dismissProgress, onClose: onClose))
+            } else {
+                ProgressView().tint(.white)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .task(id: item.blobRef) {
+            if let (data, _) = await MediaFetch.bytes(for: item, model: model), let img = UIImage(data: data) {
+                image = img
+            } else {
+                failed = true
+            }
+        }
+    }
+
+    private var magnify: some Gesture {
+        MagnifyGesture()
+            .onChanged { v in scale = min(max(baseScale * v.magnification, minScale), maxScale) }
+            .onEnded { _ in
+                baseScale = scale
+                if scale <= minScale + 0.01 { withAnimation(.easeOut(duration: 0.2)) { reset() } }
+            }
+    }
+
+    private var pan: some Gesture {
+        DragGesture()
+            .onChanged { v in
+                guard scale > minScale else { return }
+                offset = CGSize(width: baseOffset.width + v.translation.width, height: baseOffset.height + v.translation.height)
+            }
+            .onEnded { _ in if scale > minScale { baseOffset = offset } }
+    }
+
+    private func toggleZoom() {
+        withAnimation(.easeOut(duration: 0.2)) {
+            if scale > minScale { reset() } else { scale = 2.5; baseScale = 2.5 }
+        }
+    }
+
+    private func reset() {
+        scale = minScale; baseScale = minScale
+        offset = .zero; baseOffset = .zero
+    }
+}
+
+/// Video: a dark poster with Play; the file is fetched with the device bearer
+/// (AVPlayer cannot send `Authorization`) and plays inline with the system controls.
+private struct VideoPage: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.theme) private var theme
+    let item: MediaItem
+    @Binding var dismissProgress: CGFloat
+    let onClose: () -> Void
+
+    @State private var player: AVPlayer?
+    @State private var loading = false
+    @State private var failed = false
+
+    var body: some View {
+        ZStack {
+            if let player {
+                VideoPlayer(player: player)
+                    .aspectRatio(16 / 9, contentMode: .fit)
+                    .onAppear { player.play() }
+                    .onDisappear { player.pause() }
+            } else {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color.white.opacity(0.06))
+                    .aspectRatio(16 / 9, contentMode: .fit)
+                    .overlay {
+                        Image(systemName: "film").font(.system(size: 44)).foregroundStyle(.white.opacity(0.25))
+                    }
+                    .overlay {
+                        VStack(spacing: 14) {
+                            Button { Task { await load() } } label: {
+                                ZStack {
+                                    Circle().fill(Color.black.opacity(0.47)).frame(width: 72, height: 72)
+                                    if loading {
+                                        ProgressView().tint(.white)
+                                    } else {
+                                        Image(systemName: "play.fill").font(.system(size: 30, weight: .semibold))
+                                            .foregroundStyle(.white).offset(x: 3)
+                                    }
+                                }
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(loading || item.blobRef == nil)
+                            .accessibilityLabel("Play")
+                            Text(failed ? "Couldn't load the video" : (item.blobRef == nil ? "Still uploading" : item.name))
+                                .font(theme.font(13)).foregroundStyle(.white.opacity(0.67)).lineLimit(1)
+                        }
+                    }
+                    .padding(.horizontal, 16)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .modifier(DismissDrag(progress: $dismissProgress, onClose: onClose, enabled: player == nil))
+    }
+
+    @MainActor
+    private func load() async {
+        loading = true
+        defer { loading = false }
+        guard let (data, _) = await MediaFetch.bytes(for: item, model: model),
+              let file = MediaFetch.tempFile(data, name: item.name) else {
+            failed = true
+            return
+        }
+        player = AVPlayer(url: file)
+    }
+}
+
+/// A file / PDF / document: its tile, name, kind, and Open → Quick Look.
+private struct FilePage: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.theme) private var theme
+    let item: MediaItem
+    @Binding var dismissProgress: CGFloat
+    let onClose: () -> Void
+
+    @State private var previewURL: URL?
+    @State private var loading = false
+    @State private var failed = false
+
+    private var ext: String? {
+        let e = (item.name as NSString).pathExtension.uppercased()
+        return (2...4).contains(e.count) ? e : nil
+    }
+
+    var body: some View {
+        VStack(spacing: 10) {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color.white.opacity(0.11))
+                .frame(width: 100, height: 130)
+                .overlay {
+                    if let ext {
+                        Text(ext).font(theme.font(15, weight: .semibold)).foregroundStyle(.white)
+                    } else {
+                        Image(systemName: "doc").font(.system(size: 36)).foregroundStyle(.white.opacity(0.8))
+                    }
+                }
+            Text(item.name).font(theme.font(17, weight: .semibold)).foregroundStyle(.white)
+                .lineLimit(2).multilineTextAlignment(.center).padding(.top, 8).padding(.horizontal, 32)
+            Text(failed ? "Couldn't load the file" : item.kindLabel).font(theme.font(13)).foregroundStyle(.white.opacity(0.67))
+            Button { Task { await open() } } label: {
+                HStack(spacing: 8) {
+                    if loading {
+                        ProgressView().tint(.white).controlSize(.small)
+                    } else {
+                        Image(systemName: "eye").font(.system(size: 14, weight: .semibold))
+                    }
+                    Text(loading ? "Opening…" : "Open").font(theme.font(15, weight: .medium))
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 16)
+                .frame(height: 38)
+                .background(Capsule().fill(Color.white.opacity(0.16)))
+            }
+            .buttonStyle(.plain)
+            .disabled(loading || item.blobRef == nil)
+            .padding(.top, 14)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .modifier(DismissDrag(progress: $dismissProgress, onClose: onClose))
+        .quickLookPreview($previewURL)
+    }
+
+    @MainActor
+    private func open() async {
+        if let previewURL {
+            // `.quickLookPreview` only presents when the binding becomes non-nil.
+            self.previewURL = nil
+            Task { @MainActor in self.previewURL = previewURL }
+            return
+        }
+        loading = true
+        defer { loading = false }
+        guard let (data, _) = await MediaFetch.bytes(for: item, model: model),
+              let file = MediaFetch.tempFile(data, name: item.name) else {
+            failed = true
+            return
+        }
+        previewURL = file
+    }
+}
+
+// MARK: - Forward
+
+private struct ForwardSheet: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.theme) private var theme
+    @Environment(\.dismiss) private var dismiss
+    let item: MediaItem
+    let onPick: (ForwardTarget) -> Void
+    @State private var query = ""
+
+    private var targets: [ForwardTarget] { model.forwardTargets(matching: query) }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if targets.isEmpty {
+                    Text(query.trimmingCharacters(in: .whitespaces).isEmpty ? "No chats yet." : "No chat matches “\(query)”.")
+                        .font(theme.font(Theme.small)).foregroundStyle(theme.muted)
+                        .frame(maxWidth: .infinity).listRowBackground(Color.clear)
+                }
+                ForEach(targets) { target in
+                    Button { onPick(target) } label: {
+                        HStack(spacing: 14) {
+                            avatar(target)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(target.title).font(theme.font(Theme.body, weight: .medium)).foregroundStyle(theme.text).lineLimit(1)
+                                Text(target.subtitle).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted).lineLimit(1)
+                            }
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .listRowBackground(theme.bg)
+                }
+                Text("Sends it as a new message, “\(MediaAlbum.forwardedPrefix)\(item.by)”.")
+                    .font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
+                    .listRowBackground(Color.clear)
+            }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .background(theme.bg)
+            .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search")
+            .navigationTitle("Forward to")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func avatar(_ target: ForwardTarget) -> some View {
+        switch target.kind {
+        case .agent(let p):
+            AgentAvatar(project: p, theme: theme, size: 44, still: true)
+        case .people(let c):
+            if c.isGroup {
+                AvatarCluster(members: c.humans, size: 44, leaf: c.leafPick)
+            } else {
+                let other = c.counterpart(me: model.user?.id)
+                PersonAvatar(url: other?.avatarUrl, handle: other?.handle ?? "?", size: 44, name: other?.name, id: other?.id, colorIndex: other?.avatarColorIndex)
+            }
+        }
+    }
+}
+
+// MARK: - Helpers
+
+enum MediaFetch {
+    /// The bytes of a viewer item: the relay blob with the device bearer, or —
+    /// in the simulator fixture — a generated picture / PDF for `fixture-*` keys.
+    @MainActor
+    static func bytes(for item: MediaItem, model: AppModel) async -> (Data, String)? {
+        guard let ref = item.blobRef, !ref.hasPrefix("local:") else { return nil }
+        #if DEBUG
+        if model.isFixture, ref.hasPrefix("fixture-") {
+            return FixtureMedia.bytes(ref: ref, item: item)
+        }
+        #endif
+        guard let url = model.blobURL(projectId: item.slot, key: ref) else { return nil }
+        return await data(url, headers: model.authHeaders)
+    }
+
+    /// GET with the device bearer; `nil` on any failure.
+    static func data(_ url: URL, headers: [String: String]) async -> (Data, String)? {
+        var req = URLRequest(url: url)
+        for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
+        guard let (data, response) = try? await URLSession.shared.data(for: req),
+              let http = response as? HTTPURLResponse, (200..<400).contains(http.statusCode), !data.isEmpty else {
+            return nil
+        }
+        return (data, http.mimeType ?? "application/octet-stream")
+    }
+
+    /// `tmp/arbos-media/<name>` so Quick Look, AVPlayer and the share sheet see a real file.
+    static func tempFile(_ data: Data, name: String) -> URL? {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("arbos-media", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let safe = (name as NSString).lastPathComponent
+        let file = dir.appendingPathComponent(safe.isEmpty ? "file" : safe)
+        do {
+            try data.write(to: file, options: .atomic)
+            return file
+        } catch {
+            return nil
+        }
+    }
+}
+
+/// A picture loaded through `MediaFetch.bytes` (auth + fixture aware) — the
+/// Library grid's tile and anything else that cannot use `AsyncImage`.
+struct BlobImage: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.theme) private var theme
+    let item: MediaItem
+    @State private var image: UIImage?
+    @State private var failed = false
+
+    var body: some View {
+        ZStack {
+            if let image {
+                Image(uiImage: image).resizable().scaledToFill()
+            } else if failed {
+                Image(systemName: "photo").font(.system(size: 22)).foregroundStyle(theme.muted)
+            } else {
+                ProgressView().tint(theme.muted)
+            }
+        }
+        .task(id: item.blobRef) {
+            if let (data, _) = await MediaFetch.bytes(for: item, model: model), let img = UIImage(data: data) {
+                image = img
+            } else {
+                failed = true
+            }
+        }
+    }
+}
+
+#if DEBUG
+/// Simulator fixture media: a gradient picture seeded by the blob key (the Mac
+/// fixture's `fixture_png`), or a one-page PDF naming the file.
+enum FixtureMedia {
+    static func bytes(ref: String, item: MediaItem) -> (Data, String)? {
+        switch item.kind {
+        case .image:
+            return png(seed: ref).map { ($0, "image/png") }
+        case .file:
+            return (pdf(title: item.name), "application/pdf")
+        case .video:
+            return nil
+        }
+    }
+
+    private static func png(seed: String) -> Data? {
+        var h: UInt32 = 0x811c_9dc5
+        for b in seed.utf8 { h = (h ^ UInt32(b)) &* 0x0100_0193 }
+        let (w, hgt) = (640, 400)
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: w, height: hgt))
+        let img = renderer.image { ctx in
+            let cg = ctx.cgContext
+            let r0 = CGFloat(60 + Int(h & 0x3F)) / 255, g0 = CGFloat(70 + Int((h >> 8) & 0x3F)) / 255, b0 = CGFloat(120 + Int((h >> 16) & 0x3F)) / 255
+            let colors = [UIColor(red: r0, green: g0, blue: min(1, b0 + 60 / 255), alpha: 1).cgColor,
+                          UIColor(red: min(1, r0 + 110 / 255), green: min(1, g0 + 90 / 255), blue: b0, alpha: 1).cgColor]
+            if let grad = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors as CFArray, locations: [0, 1]) {
+                cg.drawLinearGradient(grad, start: .zero, end: CGPoint(x: w, y: hgt), options: [])
+            }
+            cg.setStrokeColor(UIColor(white: 0.96, alpha: 1).cgColor)
+            cg.setLineWidth(12)
+            cg.stroke(CGRect(x: 0, y: 0, width: w, height: hgt))
+        }
+        return img.pngData()
+    }
+
+    private static func pdf(title: String) -> Data {
+        let page = CGRect(x: 0, y: 0, width: 612, height: 792)
+        return UIGraphicsPDFRenderer(bounds: page).pdfData { ctx in
+            ctx.beginPage()
+            let attrs: [NSAttributedString.Key: Any] = [.font: UIFont.boldSystemFont(ofSize: 28), .foregroundColor: UIColor.black]
+            title.draw(at: CGPoint(x: 56, y: 72), withAttributes: attrs)
+            let body: [NSAttributedString.Key: Any] = [.font: UIFont.systemFont(ofSize: 14), .foregroundColor: UIColor.darkGray]
+            "Fixture document for the screenshot rig.".draw(at: CGPoint(x: 56, y: 120), withAttributes: body)
+        }
+    }
+}
+#endif
+
+/// The system share sheet (Download for non-media files, and the Photos fallback).
+private struct ActivityView: UIViewControllerRepresentable {
+    let items: [Any]
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+    func updateUIViewController(_ vc: UIActivityViewController, context: Context) {}
+}
+
+/// A downloaded file for the share sheet (`sheet(item:)` needs an `Identifiable`).
+struct ShareFile: Identifiable, Equatable {
+    let url: URL
+    var id: String { url.absoluteString }
+}
+
+// MARK: - Model side
+
+extension AppModel {
+    /// The chats the Forward sheet offers: every DM, group and agent that is
+    /// not archived, most recent first, filtered by `query`. Channels are left
+    /// out — they carry no attachments yet (Matrix `m.text`).
+    func forwardTargets(matching query: String) -> [ForwardTarget] {
+        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
+        var out: [ForwardTarget] = []
+        for c in peopleChats where !isArchived(peopleChatId: c.id) {
+            let title: String
+            let subtitle: String
+            if c.isGroup {
+                title = c.title.isEmpty ? "Group" : c.title
+                let n = c.humans.count + c.agents.count
+                subtitle = "Group · \(n) member\(n == 1 ? "" : "s")"
+            } else {
+                let other = c.counterpart(me: user?.id)
+                title = other?.displayName ?? c.title
+                subtitle = "@\(other?.handle ?? c.title)"
+            }
+            let at = max(c.lastActivityAt, messages(of: c.id).last?.createdAt ?? 0)
+            out.append(ForwardTarget(id: "c:\(c.id)", kind: .people(c), title: title, subtitle: subtitle, activity: at))
+        }
+        for p in projects where !isArchived(p.id) {
+            guard primaryChat(of: p.id) != nil else { continue }
+            let at = chats(of: p.id).map(\.lastMessageAt).max() ?? 0
+            out.append(ForwardTarget(id: "p:\(p.id)", kind: .agent(p), title: p.name, subtitle: "Agent", activity: at))
+        }
+        if !q.isEmpty {
+            out = out.filter { $0.title.lowercased().contains(q) || $0.subtitle.lowercased().contains(q) }
+        }
+        return out.sorted { $0.activity > $1.activity }
+    }
+
+    /// Forward a viewer item: fetch its bytes, then send them to `target` as a
+    /// new attachment with the "Forwarded from <name>" line (same path as a
+    /// picked photo — the blob is copied into the destination's slot).
+    func forward(_ item: MediaItem, to target: ForwardTarget) {
+        guard let ref = item.blobRef else { return }
+        let text = MediaAlbum.forwardedPrefix + item.by
+        #if DEBUG
+        if isFixture {
+            // No blob store to copy between: the row lands with the same key.
+            let chatId: Id
+            switch target.kind {
+            case .people(let c): chatId = c.id
+            case .agent(let p): guard let chat = primaryChat(of: p.id) else { return }; chatId = chat.id
+            }
+            fixtureAppend(chatId: chatId, text: text,
+                          attachments: [Attachment(name: item.name, mime: item.mime, blobRef: ref,
+                                                   kind: Self.attachmentKind(mime: item.mime, name: item.name))])
+            return
+        }
+        #endif
+        guard let url = blobURL(projectId: item.slot, key: ref) else { return }
+        Task { @MainActor in
+            guard let (data, _) = await MediaFetch.data(url, headers: authHeaders) else {
+                notice = Notice(text: "Couldn't forward \(item.name)")
+                return
+            }
+            let pending = PendingAttachment(name: item.name, mime: item.mime, data: data)
+            switch target.kind {
+            case .people(let c):
+                sendPeople(chatId: c.id, text: text, replyTo: nil, attachments: [pending])
+            case .agent(let p):
+                guard let chat = primaryChat(of: p.id) else { return }
+                send(chatId: chat.id, text: text, attachments: [pending])
+            }
+        }
+    }
+}

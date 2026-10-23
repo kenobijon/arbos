@@ -2870,7 +2870,7 @@ mod agent_tests {
 
         let r = member_remove(
             State(state.clone()),
-            bob_dev,
+            bob_dev.clone(),
             Path((chat.clone(), carol.clone())),
         )
         .await;
@@ -2880,6 +2880,21 @@ mod agent_tests {
             .membership(&chat, &format!("user:{carol}"))
             .unwrap()
             .is_some());
+        // Removing yourself through the member menu is not a thing: Leave is (the
+        // menu omits Remove on your own row).
+        let r = member_remove(
+            State(state.clone()),
+            bob_dev,
+            Path((chat.clone(), bob.clone())),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        // A refused remove writes no membership notice.
+        assert!(state
+            .db
+            .rows_after(&room_of(&chat), 0, None, 10)
+            .unwrap()
+            .is_empty());
 
         let r = member_remove(
             State(state.clone()),

@@ -45,6 +45,9 @@ struct RootView: View {
         }
         .animation(.easeInOut(duration: 0.25), value: model.firstLogin == nil)
         .onAppear {
+            #if DEBUG
+            PerfLog.shared.startIfRequested()
+            #endif
             if DebugHooks.show == "onboarding" {
                 model.demoFirstLogin(stage: DebugHooks.onboardingStage)
                 if DebugHooks.onboardingProfile { model.needsProfileSetup = true }
