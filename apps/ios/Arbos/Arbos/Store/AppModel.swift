@@ -159,8 +159,8 @@ final class AppModel: ObservableObject {
             // Rows that landed while inactive (e.g. mid-call) lit the unread flag
             // because isWatching was false — clear now that we are back on screen.
             if active {
-                if isPeopleChat(id) { markPeopleRead(id) }
-                else { markRead(chatId: id) }
+                if isPeopleChat(id) { markPeopleRead(id, force: true) }
+                else { markRead(chatId: id, force: true) }
             }
         }
         // Leaving the foreground is the last safe moment to write before a kill.
@@ -2372,19 +2372,28 @@ final class AppModel: ObservableObject {
     /// Mark a people chat read up to the relay head (cross-launch cursor).
     /// Local unread/badge clear is immediate; the PUT is skipped when unchanged
     /// and throttled to one per chat per `readPutThrottleSeconds`.
-    func markPeopleRead(_ chatId: String) {
+    /// Pass `force` to re-PUT the same cursor (e.g. onAppear / foreground) so the
+    /// relay clears unread events recorded after the last PUT.
+    func markPeopleRead(_ chatId: String, force: Bool = false) {
+        let hadRemote = (unreadCounts[chatId] ?? 0) > 0
+        let hadLocalFlag = peopleUnread.contains(chatId)
         peopleUnread.remove(chatId)
         if unreadCounts[chatId] != nil { unreadCounts[chatId] = 0 }
         PushManager.shared.clearDelivered(chatId: chatId)
         defer { applyBadge() }
         guard let chat = peopleChat(chatId) else { return }
-        if chat.headSeq > chat.readSeq || chat.unread {
+        let wasUnread = chat.headSeq > chat.readSeq || chat.unread
+        if wasUnread {
             if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
                 peopleChats[i].readSeq = chat.headSeq
                 peopleChats[i].unread = false
             }
         }
-        scheduleReadPut(chatId: chatId, value: chat.headSeq)
+        scheduleReadPut(
+            chatId: chatId,
+            value: chat.headSeq,
+            force: force || hadRemote || hadLocalFlag || wasUnread
+        )
     }
 
     func addAgent(chatId: String, projectId: Id) {
@@ -3560,10 +3569,16 @@ final class AppModel: ObservableObject {
         case delay(seconds: TimeInterval)
     }
 
-    /// Pure helper for mark-read PUT coalescing: unchanged → skip; new value after
-    /// the window → send; new value inside the window → delay the rest of it.
-    nonisolated static func readPutPlan(lastSent: Int64?, lastSentAt: Date?, value: Int64, now: Date) -> ReadPutPlan {
-        if lastSent == value { return .skip }
+    /// Pure helper for mark-read PUT coalescing: unchanged → skip (unless `force`);
+    /// new or forced value after the window → send; inside the window → delay.
+    nonisolated static func readPutPlan(
+        lastSent: Int64?,
+        lastSentAt: Date?,
+        value: Int64,
+        now: Date,
+        force: Bool = false
+    ) -> ReadPutPlan {
+        if lastSent == value && !force { return .skip }
         if let lastSentAt {
             let elapsed = now.timeIntervalSince(lastSentAt)
             if elapsed < readPutThrottleSeconds {
@@ -3574,12 +3589,15 @@ final class AppModel: ObservableObject {
     }
 
     /// Queue or send PUT /chats/{id}/read for `value`, using `readPutPlan`.
-    private func scheduleReadPut(chatId: Id, value: Int64, now: Date = Date()) {
+    /// With `force`, an unchanged value still sends (outside the window) or stays
+    /// pending through a delay (inside it) so the relay can clear late unread events.
+    private func scheduleReadPut(chatId: Id, value: Int64, force: Bool = false, now: Date = Date()) {
         switch Self.readPutPlan(
             lastSent: lastReadPutValue[chatId],
             lastSentAt: lastReadPutAt[chatId],
             value: value,
-            now: now
+            now: now,
+            force: force
         ) {
         case .skip:
             return
@@ -3589,6 +3607,7 @@ final class AppModel: ObservableObject {
             pendingReadPutValue[chatId] = nil
             performReadPut(chatId: chatId, value: value, at: now)
         case .delay(let seconds):
+            // Forced re-PUT of the same cursor still keeps a pending send.
             pendingReadPutValue[chatId] = value
             guard readPutTasks[chatId] == nil else { return }
             readPutTasks[chatId] = Task { [weak self] in
@@ -3613,7 +3632,9 @@ final class AppModel: ObservableObject {
     /// Clear a project chat's unread dot. Local unread/badge clear is immediate;
     /// the PUT is skipped when unchanged and throttled to one per chat per
     /// `readPutThrottleSeconds` (notify can still record events while on screen).
-    func markRead(chatId: Id) {
+    /// Pass `force` to re-PUT the same cursor (e.g. onAppear / foreground) so the
+    /// relay clears unread events recorded after the last PUT.
+    func markRead(chatId: Id, force: Bool = false) {
         let hadRemote = (unreadCounts[chatId] ?? 0) > 0
         if unreadCounts[chatId] != nil { unreadCounts[chatId] = 0 }
         PushManager.shared.clearDelivered(chatId: chatId)
@@ -3631,7 +3652,7 @@ final class AppModel: ObservableObject {
         // clears the user's events for it and badges their other devices.
         if !isFixture, chat(chatId) != nil {
             let seq = Int64(messages(of: chatId).count)
-            scheduleReadPut(chatId: chatId, value: seq)
+            scheduleReadPut(chatId: chatId, value: seq, force: force || hadRemote || hadLocal)
         }
     }
 

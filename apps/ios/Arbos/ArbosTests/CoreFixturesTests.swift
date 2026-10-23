@@ -686,6 +686,7 @@ final class CoreFixturesTests: XCTestCase {
     }
 
     /// Mark-read PUT: skip same value, send after the window, delay inside it.
+    /// With `force`, an unchanged value still sends outside the window / delays inside it.
     func testReadPutPlan() {
         let t0 = Date(timeIntervalSince1970: 1_700_000_000)
         XCTAssertEqual(AppModel.readPutPlan(lastSent: nil, lastSentAt: nil, value: 1, now: t0), .send)
@@ -704,5 +705,20 @@ final class CoreFixturesTests: XCTestCase {
         case .send, .skip:
             XCTFail("expected delay inside the throttle window")
         }
+        // force + unchanged: send outside the window, delay inside it; unforced still skips.
+        XCTAssertEqual(
+            AppModel.readPutPlan(lastSent: 5, lastSentAt: t0, value: 5, now: t0.addingTimeInterval(10), force: true),
+            .send
+        )
+        switch AppModel.readPutPlan(lastSent: 5, lastSentAt: t0, value: 5, now: t0.addingTimeInterval(0.5), force: true) {
+        case .delay(let seconds):
+            XCTAssertEqual(seconds, AppModel.readPutThrottleSeconds - 0.5, accuracy: 0.000_1)
+        case .send, .skip:
+            XCTFail("expected delay for forced unchanged value inside the window")
+        }
+        XCTAssertEqual(
+            AppModel.readPutPlan(lastSent: 5, lastSentAt: t0, value: 5, now: t0.addingTimeInterval(10), force: false),
+            .skip
+        )
     }
 }

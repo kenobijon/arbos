@@ -458,12 +458,14 @@ struct ChatView: View {
         }
         .onAppear {
             LaunchClock.mark("chat-appear", detail: "messages=\(messages.count)")
-            model.markRead(chatId: chatId)
+            // Force: re-PUT even if the cursor is unchanged so the relay clears
+            // unread events recorded after the last PUT (other apps / badge).
+            model.markRead(chatId: chatId, force: true)
             model.visibleChatId = chatId
             // Restore unsent text left when the user backed out of this thread.
             let saved = model.composerDraft(for: chatId)
             if draft.isEmpty, !saved.isEmpty { draft = saved }
-            if isPeople { model.markPeopleRead(chatId) }
+            if isPeople { model.markPeopleRead(chatId, force: true) }
             if isChannel {
                 // The newest page now, live rows through the listener from here on.
                 model.openChannel(chatId)
