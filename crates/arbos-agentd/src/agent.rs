@@ -759,8 +759,11 @@ impl ProseFilter {
                 Some(line.to_owned())
             };
         }
-        if line.trim().is_empty() {
+        if line.trim().is_empty() || (self.started && !line.chars().any(char::is_alphabetic)) {
             // A blank line inside prose is a paragraph break; before prose starts it is noise.
+            // A line without letters once prose has started (".\n" when the sentence's full
+            // stop arrives in its own delta) is the end of the previous sentence, not a
+            // thought sentence to judge: it streams through unchanged (#1369).
             return if self.started {
                 Some(line.to_owned())
             } else {
@@ -5874,6 +5877,28 @@ mod tests {
         assert_eq!(ProseFilter::clean_prose(text), text);
         let with_tail = format!("{text}\n\nChecking the routine list now.");
         assert_eq!(ProseFilter::clean_prose(&with_tail), text);
+    }
+
+    /// The full stop and the line break of a bullet can arrive in their own delta.
+    #[test]
+    fn feed_keeps_lone_full_stop_line() {
+        let mut f = ProseFilter::default();
+        let mut out = String::new();
+        for d in [
+            "• Garlic planting is 1 November",
+            ".\n",
+            "• The season closes 30 November",
+            ".",
+            "\n",
+            "• Water off.",
+        ] {
+            out.push_str(&f.feed(d));
+        }
+        out.push_str(&f.flush());
+        assert_eq!(
+            out,
+            "• Garlic planting is 1 November.\n• The season closes 30 November.\n• Water off."
+        );
     }
 
     /// Narration is still stripped, and the whitespace rule does not glue what follows it.
