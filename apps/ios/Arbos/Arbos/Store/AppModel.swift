@@ -447,6 +447,14 @@ final class AppModel: ObservableObject {
     /// Set when the first home list came from disk and the relay is not live yet.
     var showingSavedCopy: Bool { contentOrigin == "store" && link != .live }
     private static let flushDelayNs: UInt64 = 1_500_000_000
+    /// At most one PUT /chats/{id}/read per chat inside this window (latest value at the end).
+    static let readPutThrottleSeconds: TimeInterval = 2
+    /// Last seq/headSeq successfully handed to the relay for mark-read, per chat.
+    private var lastReadPutValue: [Id: Int64] = [:]
+    private var lastReadPutAt: [Id: Date] = [:]
+    /// Newest value waiting for the throttle window to end.
+    private var pendingReadPutValue: [Id: Int64] = [:]
+    private var readPutTasks: [Id: Task<Void, Never>] = [:]
 
     var appearance: Appearance { Appearance(rawValue: appearanceSetting) ?? .default }
     var surface: Surface { Surface(rawValue: surfaceSetting) ?? .default }
@@ -537,21 +545,37 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// True while a store is open but its docs have not been handed to `ensureRoom`
+    /// yet — a notification open must not build an empty room that would drop the
+    /// saved doc and pending offline sends.
+    nonisolated static func shouldDeferRoomOpen(hasStore: Bool, storeDocsLoaded: Bool) -> Bool {
+        hasStore && !storeDocsLoaded
+    }
+
     /// Deep link from a notification: the people chat or the project chat,
-    /// or remembered until the lists arrive.
+    /// or remembered until the lists arrive. While store docs are still loading,
+    /// only record `pendingOpen` (and set `path` so the screen can show) — do not
+    /// call `ensureRoom` until `retryPendingOpen` after `loadStoreDocs`.
     func openFromNotification(chatId: String, projectId: String) {
+        let deferRoom = Self.shouldDeferRoomOpen(hasStore: store != nil, storeDocsLoaded: storeDocsLoaded)
         if peopleChat(chatId) != nil || projectId == peopleSlot && peopleChats.contains(where: { $0.id == chatId }) {
-            ensureRoom(projectId: peopleSlot, key: chatId, roomChat: chatId)
+            if !deferRoom {
+                ensureRoom(projectId: peopleSlot, key: chatId, roomChat: chatId)
+            }
             path = [.chat(chatId: chatId, projectId: peopleSlot)]
-            pendingOpen = nil
+            pendingOpen = deferRoom ? (chatId, peopleSlot) : nil
         } else if let c = chat(chatId) {
-            ensureRoom(projectId: c.projectId, key: c.id, roomChat: c.id)
+            if !deferRoom {
+                ensureRoom(projectId: c.projectId, key: c.id, roomChat: c.id)
+            }
             path = [.chat(chatId: c.id, projectId: c.projectId)]
-            pendingOpen = nil
+            pendingOpen = deferRoom ? (c.id, c.projectId) : nil
         } else if projectId != peopleSlot, project(projectId) != nil {
-            ensureRoom(projectId: projectId, key: chatId, roomChat: chatId)
+            if !deferRoom {
+                ensureRoom(projectId: projectId, key: chatId, roomChat: chatId)
+            }
             path = [.chat(chatId: chatId, projectId: projectId)]
-            pendingOpen = nil
+            pendingOpen = deferRoom ? (chatId, projectId) : nil
         } else {
             pendingOpen = (chatId, projectId)
         }
@@ -1029,6 +1053,11 @@ final class AppModel: ObservableObject {
         flushTask?.cancel()
         flushTask = nil
         storeDocsLoaded = false
+        for t in readPutTasks.values { t.cancel() }
+        readPutTasks = [:]
+        lastReadPutValue = [:]
+        lastReadPutAt = [:]
+        pendingReadPutValue = [:]
         // Sign-out wipes everything this account had on the device.
         store?.close(wipe: true)
         store = nil
@@ -1070,6 +1099,8 @@ final class AppModel: ObservableObject {
             // the registry opening them empty (one checkpoint download each).
             if let self, let store = self.store { await self.loadStoreDocs(store) }
             self?.storeDocsLoaded = true
+            // Notification opens deferred while docs loaded can ensureRoom now.
+            self?.retryPendingOpen()
             while !Task.isCancelled {
                 guard let self else { return }
                 await self.refreshRegistry()
@@ -2339,8 +2370,8 @@ final class AppModel: ObservableObject {
     }
 
     /// Mark a people chat read up to the relay head (cross-launch cursor).
-    /// Always PUT /read so chat_events unread clears even when Loro read_seq is already caught up
-    /// (notify can insert events after the rows were already on screen).
+    /// Local unread/badge clear is immediate; the PUT is skipped when unchanged
+    /// and throttled to one per chat per `readPutThrottleSeconds`.
     func markPeopleRead(_ chatId: String) {
         peopleUnread.remove(chatId)
         if unreadCounts[chatId] != nil { unreadCounts[chatId] = 0 }
@@ -2353,7 +2384,7 @@ final class AppModel: ObservableObject {
                 peopleChats[i].unread = false
             }
         }
-        Task { try? await api.markRead(chatId: chatId, seq: chat.headSeq) }
+        scheduleReadPut(chatId: chatId, value: chat.headSeq)
     }
 
     func addAgent(chatId: String, projectId: Id) {
@@ -3521,9 +3552,67 @@ final class AppModel: ObservableObject {
         notice = Notice(text: reason)
     }
 
-    /// Clear a project chat's unread dot and always PUT /read so chat_events
-    /// unread clears even when local flags were already clean (notify can record
-    /// events while the chat was on screen, or while focus briefly dropped on a call).
+    /// Whether to PUT /read now, skip (same value already sent), or wait out the
+    /// throttle window and send the latest value then.
+    enum ReadPutPlan: Equatable {
+        case send
+        case skip
+        case delay(seconds: TimeInterval)
+    }
+
+    /// Pure helper for mark-read PUT coalescing: unchanged → skip; new value after
+    /// the window → send; new value inside the window → delay the rest of it.
+    nonisolated static func readPutPlan(lastSent: Int64?, lastSentAt: Date?, value: Int64, now: Date) -> ReadPutPlan {
+        if lastSent == value { return .skip }
+        if let lastSentAt {
+            let elapsed = now.timeIntervalSince(lastSentAt)
+            if elapsed < readPutThrottleSeconds {
+                return .delay(seconds: readPutThrottleSeconds - elapsed)
+            }
+        }
+        return .send
+    }
+
+    /// Queue or send PUT /chats/{id}/read for `value`, using `readPutPlan`.
+    private func scheduleReadPut(chatId: Id, value: Int64, now: Date = Date()) {
+        switch Self.readPutPlan(
+            lastSent: lastReadPutValue[chatId],
+            lastSentAt: lastReadPutAt[chatId],
+            value: value,
+            now: now
+        ) {
+        case .skip:
+            return
+        case .send:
+            readPutTasks[chatId]?.cancel()
+            readPutTasks[chatId] = nil
+            pendingReadPutValue[chatId] = nil
+            performReadPut(chatId: chatId, value: value, at: now)
+        case .delay(let seconds):
+            pendingReadPutValue[chatId] = value
+            guard readPutTasks[chatId] == nil else { return }
+            readPutTasks[chatId] = Task { [weak self] in
+                let ms = max(1, Int((seconds * 1000).rounded()))
+                try? await Task.sleep(for: .milliseconds(ms))
+                guard !Task.isCancelled, let self else { return }
+                self.readPutTasks[chatId] = nil
+                let latest = self.pendingReadPutValue[chatId] ?? value
+                self.pendingReadPutValue[chatId] = nil
+                self.performReadPut(chatId: chatId, value: latest, at: Date())
+            }
+        }
+    }
+
+    private func performReadPut(chatId: Id, value: Int64, at: Date) {
+        lastReadPutValue[chatId] = value
+        lastReadPutAt[chatId] = at
+        let api = self.api
+        Task { try? await api.markRead(chatId: chatId, seq: value) }
+    }
+
+    /// Clear a project chat's unread dot. Local unread/badge clear is immediate;
+    /// the PUT is skipped when unchanged and throttled to one per chat per
+    /// `readPutThrottleSeconds` (notify can still record events while on screen).
     func markRead(chatId: Id) {
         let hadRemote = (unreadCounts[chatId] ?? 0) > 0
         if unreadCounts[chatId] != nil { unreadCounts[chatId] = 0 }
@@ -3541,9 +3630,8 @@ final class AppModel: ObservableObject {
         // §7c: PUT /chats/{id}/read takes project chat ids too; the relay
         // clears the user's events for it and badges their other devices.
         if !isFixture, chat(chatId) != nil {
-            let api = self.api
             let seq = Int64(messages(of: chatId).count)
-            Task { try? await api.markRead(chatId: chatId, seq: seq) }
+            scheduleReadPut(chatId: chatId, value: seq)
         }
     }
 
