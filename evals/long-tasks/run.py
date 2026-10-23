@@ -137,8 +137,10 @@ class Lane(threading.Thread):
         usage0 = rl.usage_all(self.project)
         gen_truth = {}
         task_state = {"D": D, "secret_value": None, "group_chat": None, "old_name": None}
+        tag_up = re.sub(r"[^A-Za-z0-9]", "_", tag).upper()
         if task.get("setup_actions"):
             for act in task["setup_actions"]:
+                act = {k: (v.replace("{TAG}", tag_up) if isinstance(v, str) else v) for k, v in act.items()}
                 self.driver_action(act, task_state)
         chat_id = None
         if task.get("same_chat_as"):
@@ -147,7 +149,7 @@ class Lane(threading.Thread):
         all_docs = []
         first_chat = None
         for i, turn in enumerate(task["turns"], 1):
-            prompt = turn["prompt"].replace("{D}", D).replace("{FIXTURES}", FIXTURES)
+            prompt = turn["prompt"].replace("{D}", D).replace("{FIXTURES}", FIXTURES).replace("{TAG}", tag_up)
             if turn.get("seed"):
                 code, out = self.box.run_as_ws(self.project, turn["seed"].replace("{D}", D).replace("{P}", proj_dir), env=env, timeout=180)
                 if "fatal" in out.lower() or (code not in (0, None)):
@@ -206,6 +208,7 @@ class Lane(threading.Thread):
                 turn.get("timeout_s", task.get("timeout_s", 600)),
                 until_first_reply=bool(turn.get("background")),
                 on_poll=on_poll if turn.get("secret_decide") else None,
+                skip_secret_cards=bool(turn.get("secret_decide")),
             )
             res["secret_requests_decided"] = decided
             if turn.get("after_s"):
