@@ -12,6 +12,7 @@ mod groups;
 mod harness;
 mod hooks;
 mod http;
+mod identity;
 mod isolation;
 mod llm;
 mod local;
@@ -24,6 +25,7 @@ mod reply;
 mod responders;
 mod routines;
 mod rpc_child;
+mod selfref;
 mod settings;
 mod skills;
 mod status;
@@ -389,6 +391,9 @@ async fn boot() -> Result<()> {
             .post_timing("agentd_boot_ms", t_boot.elapsed().as_millis() as i64, None)
             .await;
     }
+    // The read-only copy of Arbos's own source (/opt/arbos/src) follows main: refreshed now, in
+    // the background, and every few hours after.
+    selfref::spawn_refresh();
 
     // Registry poll (3 s): new projects become workspaces, closed ones stop, settings changes
     // (SetModel, rename, new chats) reach each workspace's pi and doc.

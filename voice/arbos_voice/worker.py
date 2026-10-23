@@ -218,6 +218,8 @@ class CallState:
     # Group mode.
     last_asker: dict | None = None
     last_asker_identity: str | None = None
+    # Human transcript lines so far: an agent line before the first one is its greeting.
+    human_lines: int = 0
     last_reply_ended_at: float | None = None
     last_trigger_at: float = field(default_factory=time.monotonic)
     last_human_speech_at: float = field(default_factory=time.monotonic)
@@ -292,10 +294,22 @@ class VoiceCall:
     def event(self, kind: str, **fields) -> None:
         self.events.push({"kind": kind, **fields})
 
+    def call_note(self, text: str) -> None:
+        """Something that happened on the call (joined, left, muted, told to stop). A call event
+        is not a chat message: it is logged and reported to the relay as a `call_note` event
+        (admin view), never written into the chat (#1430)."""
+        log.info("call: %s", text)
+        self.event("call_note", text=text)
+
     def transcript(self, speaker: dict | None, text: str, *, truncated: bool = False) -> bool:
         """Write a transcript line. Returns False when a duplicate/interrupted agent line is dropped."""
         is_agent = speaker is None or speaker.get("kind") == "agent"
         if is_agent:
+            # The greeting (nobody has said anything yet) and the goodbye are call audio, not
+            # chat: a call is a call event, the agent did not answer in the chat (#1430).
+            if self.state.human_lines == 0 or self.state.leaving:
+                log.info("call audio only (not a chat row): %s", text[:120])
+                return False
             # A reply cut within its first words is a noise-trigger regenerate (keep only the
             # final line); a longer cut line is a real barge-in and stays in the chat, as the
             # humans heard it (spec §4).
@@ -309,6 +323,8 @@ class VoiceCall:
                 return False
             self.state.last_agent_text = text
             self.state.last_agent_at = now
+        else:
+            self.state.human_lines += 1
         self.event("transcript", speaker=speaker if speaker else {"kind": "agent"}, text=text, truncated=truncated)
         log.info("transcript %s: %s%s", "agent" if is_agent else label_of(speaker), text[:160], " [cut]" if truncated else "")
         return True
@@ -515,13 +531,13 @@ class VoiceCall:
         owner_label = label_of(owner) if owner else "the owner"
         if self.state.mode == "group":
             line = f"{self.agent_name}, {owner_label}'s agent, has joined and can hear this call."
-            self.event("system", text=line)
+            self.call_note(line)
             await self.wait_for_silence()
             self.speak_line(line)
         else:
             # One fixed greeting line (no free-form generate: that raced the VAD and produced a
             # paraphrase after any noise cut).
-            self.event("system", text=f"{self.agent_name} joined the call")
+            self.call_note(f"{self.agent_name} joined the call")
             self.speak_line(f"Hey — {self.agent_name} here. What do you need?")
 
     async def finish(self, reason: str) -> None:
@@ -560,7 +576,7 @@ class VoiceCall:
                     pass
         except Exception as e:
             log.warning("goodbye failed: %s", e)
-        self.event("system", text=f"{self.agent_name} left the call" + ("" if reason in ("alone", "asked", "idle") else f" · {reason.replace('_', ' ')}"))
+        self.call_note(f"{self.agent_name} left the call" + ("" if reason in ("alone", "asked", "idle") else f" · {reason.replace('_', ' ')}"))
         self.event("left", reason=reason)
         if self.listeners:
             await self.listeners.stop()
@@ -804,7 +820,7 @@ class VoiceCall:
             await self.start_group_listening()
             await self.agent.update_instructions(self.instructions())
             line = f"{self.agent_name} can hear everyone on this call now."
-            self.event("system", text=line)
+            self.call_note(line)
         else:
             if self.listeners:
                 await self.listeners.stop()
@@ -951,7 +967,7 @@ class VoiceCall:
             self.session.interrupt()
             for t in list(self._pending_tools):
                 t.cancel()
-            self.event("system", text=f"{self.agent_name} was told to stop")
+            self.call_note(f"{self.agent_name} was told to stop")
         else:
             await self.finish("asked")
 
@@ -1002,7 +1018,7 @@ class VoiceCall:
                     if muted
                     else "Could not unmute on the audio path; say so briefly."
                 )
-        self.event("system", text=f"{self.agent_name} muted" if muted else f"{self.agent_name} unmuted")
+        self.call_note(f"{self.agent_name} muted" if muted else f"{self.agent_name} unmuted")
         log.info("agent %s", "muted" if muted else "unmuted")
         return "Muted. Stay silent until unmute_self." if muted else "Unmuted. You can speak again."
 
@@ -1263,7 +1279,7 @@ class VoiceCall:
                         await self.agent.update_instructions(self.instructions())
                     except Exception as e:
                         log.warning("update_instructions failed: %s", e)
-                self.event("system", text=f"{self.agent_name} {'can see cameras on this call now' if enabled else 'no longer sees cameras on this call'}")
+                self.call_note(f"{self.agent_name} {'can see cameras on this call now' if enabled else 'no longer sees cameras on this call'}")
             chattiness = s.get("chattiness")
             if chattiness and chattiness != self.chattiness:
                 self.chattiness = chattiness

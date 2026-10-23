@@ -104,6 +104,18 @@ struct Theme {
     static let voiceButton: CGFloat = 36
     static let plusButton: CGFloat = 42
     static let avatar: CGFloat = 28
+    /// The avatar column (typing-indicator-left-2026-10-23, Jacob 15:15 / 15:20): the
+    /// sender's picture beside a people-chat bubble and the presence row's pictures over
+    /// the composer are one size at one x — Grok Bot's working-row avatar (iPhone ref 01:
+    /// 26–54 pt on 420, centred on the `+` with the keyboard up: 19 + 42 / 2 = 40), text
+    /// at 67. `avatarColumnInset` is from the transcript's 16 pt edge (16 + 10 = 26);
+    /// the bubble body follows after `memberAvatarGap` (26 + 28 + 13 = 67). Shared with
+    /// feedback/sender-name-in-bubble-2026-10-23. Agent chats keep #1374's no-avatar rule.
+    static let memberAvatar: CGFloat = 28
+    static let avatarColumnInset: CGFloat = 10
+    static let memberAvatarGap: CGFloat = 13
+    /// Transcript edge → bubble body in a people-chat row.
+    static let memberLane: CGFloat = avatarColumnInset + memberAvatar + memberAvatarGap
     /// Picture → name in the chat header pill: Grok Bot's title measures 5 pt ink to ink
     /// (Mac ref 57); the Mac's `identity::HEADER_GAP` + side bearing.
     static let headerPillGap: CGFloat = 5

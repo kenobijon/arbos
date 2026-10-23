@@ -512,3 +512,65 @@ impl Agent {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! #1430: a call is a call event. The starter's "<me> started a voice call" line and the
+    //! worker's rows (what people and the agent said on the call) land in the chat doc as
+    //! finished rows — never as a `send` command, so no turn runs and no agent is woken.
+
+    use arbos_core::ids::ulid;
+    use serde_json::json;
+
+    use crate::status::tests::test_agent;
+
+    #[tokio::test]
+    async fn a_call_wakes_nobody_in_the_chat() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATGROUPCALL0000000";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let before = host.lock().await.doc.messages().len();
+        // The starter's client writes the one system line of a call start.
+        {
+            let h = host.lock().await;
+            h.doc
+                .append_system_line(
+                    &ulid(),
+                    "Arbos started a voice call",
+                    "dev-mac",
+                    Some("call1"),
+                )
+                .unwrap();
+            h.doc.doc.commit();
+        }
+        // What the worker reports once people talk: a human line and the agent's answer.
+        agent
+            .voice_rows(
+                chat,
+                "call1",
+                &[
+                    json!({ "kind": "transcript", "speaker": { "kind": "user", "id": "u1", "handle": "alice", "name": "Alice" }, "text": "What is the weather in Lisbon?", "at": 1 }),
+                    json!({ "kind": "transcript", "speaker": { "kind": "agent" }, "text": "Sunny, twenty-two degrees.", "at": 2 }),
+                ],
+            )
+            .await;
+        let h = host.lock().await;
+        let msgs = h.doc.messages();
+        assert_eq!(msgs.len(), before + 3, "{msgs:?}");
+        assert!(msgs.iter().all(|m| m.status == "done"));
+        assert_eq!(msgs[before].role, "system");
+        assert_eq!(msgs[before + 1].role, "user");
+        assert_eq!(msgs[before + 2].role, "assistant");
+        assert_eq!(msgs[before + 1].rest["voice"], json!(true));
+        assert_eq!(msgs[before + 2].rest["callId"], json!("call1"));
+        // Zero agent chat turns: nothing for the agent loop to pick up.
+        assert!(
+            h.doc.pending_commands().is_empty(),
+            "{:?}",
+            h.doc.pending_commands()
+        );
+        assert!(h.doc.commands().is_empty(), "{:?}", h.doc.commands());
+        drop(h);
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
