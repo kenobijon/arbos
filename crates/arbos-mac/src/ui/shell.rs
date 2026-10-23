@@ -21,7 +21,7 @@ use crate::ui::avatar_picker;
 use crate::ui::avatars::{self, leaf, LeafPick};
 use crate::ui::callview;
 use crate::ui::channels::{ChannelsEvent, ChannelsPanel};
-use crate::ui::composer::{Composer, ComposerEvent, ComposerInput};
+use crate::ui::composer::{self, Composer, ComposerEvent, ComposerInput};
 use crate::ui::connectors::{ConnectorsEvent, ConnectorsPanel};
 use crate::ui::create_entity::{self, Kind as CreateKind};
 use crate::ui::dropzone;
@@ -882,6 +882,49 @@ impl Shell {
 
     fn send_feedback(&mut self, _: &SendFeedback, window: &mut Window, cx: &mut Context<Self>) {
         self.feedback.update(cx, |sheet, cx| sheet.open(window, cx));
+    }
+
+    /// Edit → Paste / ⌘V when focus is not already on a text field (e.g. after
+    /// selecting a bubble): land the clipboard in the chat composer.
+    fn paste_into_chat(
+        &mut self,
+        _: &composer::Paste,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // A focused ComposerInput (chat, search, secrets, …) already handles
+        // Paste; running again here would insert the text twice.
+        if self.text_field_focused(window, cx) {
+            return;
+        }
+        Composer::focus(&self.composer, window, cx);
+        let input = self.composer.read(cx).input.clone();
+        input.update(cx, |input, cx| input.paste_clipboard(window, cx));
+    }
+
+    /// True when a one-line or chat text field owns the keyboard.
+    fn text_field_focused(&self, window: &Window, cx: &App) -> bool {
+        let focused =
+            |input: &Entity<ComposerInput>| input.read(cx).focus_handle(cx).is_focused(window);
+        focused(&self.composer.read(cx).input)
+            || focused(&self.pairing_input)
+            || focused(&self.project_input)
+            || focused(&self.search_input)
+            || focused(&self.viewer_search)
+            || focused(&self.people_input)
+            || focused(&self.server_input)
+            || focused(&self.name_input)
+            || focused(&self.handle_input)
+            || focused(&self.agent_name_input)
+            || focused(&self.description_input)
+            || focused(&self.avatar_prompt_input)
+            || focused(&self.model_search_input)
+            || focused(&self.tab_rename_input)
+            || focused(&self.feedback.read(cx).note)
+            || self.connectors.read(cx).input_focused(window, cx)
+            || self.secrets.read(cx).input_focused(window, cx)
+            || self.skills.read(cx).has_focus(window, cx)
+            || (self.routines_open && self.routines.read(cx).has_focus(window, cx))
     }
 
     pub(crate) fn open_feedback(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3479,6 +3522,7 @@ impl Render for Shell {
             .on_action(cx.listener(Self::toggle_rail))
             .on_action(cx.listener(Self::escape))
             .on_action(cx.listener(Self::send_feedback))
+            .on_action(cx.listener(Self::paste_into_chat))
             // Clicks on chrome must not strand keyboard focus: unless another
             // text field took it, the composer keeps it. Floating menus close.
             .on_mouse_down(
