@@ -349,6 +349,9 @@ pub struct AppState {
     awaiting_group: Option<Vec<String>>,
     /// The sheet invites into this project instead of starting a DM (step 3).
     pub invite_target: Option<Id>,
+    /// "Who may message X" (agent-to-agent messaging): the agent whose grant list a pick in
+    /// the people sheet adds to.
+    pub message_grant_target: Option<Id>,
     /// The group picker adds to this people group instead of creating one
     /// (the group pane's "Add members").
     pub add_members_target: Option<Id>,
@@ -733,6 +736,7 @@ impl AppState {
             awaiting_dm: None,
             awaiting_group: None,
             invite_target: None,
+            message_grant_target: None,
             add_members_target: None,
             add_members_server: None,
             pending_join_code: None,
@@ -2936,6 +2940,7 @@ impl AppState {
                 subagent_id: None,
                 subagent_name: None,
                 handoff_messages: None,
+                agent_reply_to: None,
                 reactions: Default::default(),
                 in_reply_to: None,
                 routine_name: None,
@@ -3659,6 +3664,7 @@ impl AppState {
                 subagent_id: None,
                 subagent_name: None,
                 handoff_messages: None,
+                agent_reply_to: None,
                 reactions: Default::default(),
                 in_reply_to: None,
                 routine_name: None,
@@ -4051,6 +4057,7 @@ impl AppState {
                 subagent_id: None,
                 subagent_name: None,
                 handoff_messages: None,
+                agent_reply_to: None,
                 reactions: Default::default(),
                 in_reply_to: None,
                 usage: None,
@@ -5146,6 +5153,7 @@ impl AppState {
                 subagent_id: None,
                 subagent_name: None,
                 handoff_messages: None,
+                agent_reply_to: None,
                 reactions: Default::default(),
                 in_reply_to: None,
                 routine_name: None,
@@ -5744,6 +5752,7 @@ impl AppState {
         self.new_group_picked.clear();
         self.new_group_agents.clear();
         self.invite_target = None;
+        self.message_grant_target = None;
         self.add_members_target = None;
         self.add_members_server = None;
         self.people_query.clear();
@@ -5774,6 +5783,50 @@ impl AppState {
         cx.notify();
     }
 
+    /// Agent pane › "Give a person access…": the same sheet; a pick lets that person's agents
+    /// message this agent (`PUT /projects/{id}/message-access`).
+    pub fn open_message_grant_picker(&mut self, project_id: Id, cx: &mut Context<Self>) {
+        self.open_new_chat(cx);
+        self.message_grant_target = Some(project_id);
+        cx.notify();
+    }
+
+    pub fn set_message_grant(
+        &mut self,
+        project_id: Id,
+        grantee: String,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == project_id) {
+            if let Some(g) = p.message_grants.iter_mut().find(|g| g.grantee == grantee) {
+                g.enabled = enabled;
+            }
+        }
+        self.command(ClientCommand::SetMessageGrant {
+            project_id,
+            grantee,
+            enabled,
+        });
+        cx.notify();
+    }
+
+    pub fn remove_message_grant(
+        &mut self,
+        project_id: Id,
+        grantee: String,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == project_id) {
+            p.message_grants.retain(|g| g.grantee != grantee);
+        }
+        self.command(ClientCommand::RemoveMessageGrant {
+            project_id,
+            grantee,
+        });
+        cx.notify();
+    }
+
     pub fn close_new_chat(&mut self, cx: &mut Context<Self>) {
         self.new_chat_open = false;
         self.new_group_open = false;
@@ -5782,6 +5835,7 @@ impl AppState {
         self.awaiting_dm = None;
         self.awaiting_group = None;
         self.invite_target = None;
+        self.message_grant_target = None;
         self.add_members_target = None;
         self.add_members_server = None;
         cx.notify();
@@ -6047,6 +6101,19 @@ impl AppState {
             {
                 self.toggle_group_person(person, cx);
             }
+            return;
+        }
+        if let Some(project_id) = self.message_grant_target.take() {
+            self.new_chat_open = false;
+            let handle = handle.trim().trim_start_matches('@').to_string();
+            if !handle.is_empty() {
+                self.command(ClientCommand::SetMessageGrant {
+                    project_id,
+                    grantee: format!("@{handle}"),
+                    enabled: true,
+                });
+            }
+            cx.notify();
             return;
         }
         match self.invite_target.clone() {

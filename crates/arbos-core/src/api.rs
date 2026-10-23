@@ -106,6 +106,10 @@ pub struct ProjectDto {
     /// `list_projects` shared rows only; `None` omits, `Some(None)` is JSON null.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_handle: Option<Option<String>>,
+    /// "Who may message X" (agent-to-agent messaging): other owners' people / agents the
+    /// owner allowed; empty for everyone but the owner's own clients.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub message_grants: Vec<MessageGrantDto>,
 }
 
 /// Project chat (`chat_json` / `chat_json_for`).

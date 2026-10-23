@@ -346,6 +346,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         | ClientCommand::BlockUser { .. }
         | ClientCommand::InviteToProject { .. }
         | ClientCommand::RemoveProjectMember { .. }
+        | ClientCommand::SetMessageGrant { .. }
+        | ClientCommand::RemoveMessageGrant { .. }
         | ClientCommand::FetchAvatar { .. }
         | ClientCommand::DeleteProject { .. }
         | ClientCommand::DeletePeopleChat { .. }
@@ -998,6 +1000,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 avatar_leaf: leaf.map(|l| l.leaf),
                 avatar_leaf_color: leaf.map(|l| l.color),
                 image_url: None,
+                message_grants: Vec::new(),
             });
             let chat_id = new_id();
             shared.chats.lock().unwrap().push(Chat {
@@ -3692,6 +3695,7 @@ fn seed_projects() -> Vec<Project> {
             avatar_leaf: None,
             avatar_leaf_color: None,
             image_url: None,
+            message_grants: Vec::new(),
         },
         Project {
             id: PROJECT_COMMS.into(),
@@ -3725,6 +3729,7 @@ fn seed_projects() -> Vec<Project> {
             avatar_leaf: None,
             avatar_leaf_color: None,
             image_url: None,
+            message_grants: Vec::new(),
         },
         Project {
             id: PROJECT_ARBOS.into(),
@@ -3758,6 +3763,7 @@ fn seed_projects() -> Vec<Project> {
             avatar_leaf: None,
             avatar_leaf_color: None,
             image_url: None,
+            message_grants: Vec::new(),
         },
     ]
 }
@@ -4703,6 +4709,7 @@ fn people_space(id: &str, other: Person, agents: Vec<AgentMember>) -> Project {
         avatar_leaf: None,
         avatar_leaf_color: None,
         image_url: None,
+        message_grants: Vec::new(),
     }
 }
 
@@ -4778,6 +4785,7 @@ fn seed_people_projects() -> Vec<Project> {
             avatar_leaf: None,
             avatar_leaf_color: None,
             image_url: None,
+            message_grants: Vec::new(),
         },
     ]
 }
@@ -4835,6 +4843,7 @@ fn human_message(chat_id: &str, who: &Person, text: &str, at: u64) -> Message {
         subagent_id: None,
         subagent_name: None,
         handoff_messages: None,
+        agent_reply_to: None,
         reactions: Default::default(),
         in_reply_to: None,
         routine_name: None,
@@ -5573,6 +5582,56 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             let _ = shared
                 .events
                 .send(SyncEvent::Notice(format!("@{handle} blocked.")));
+            true
+        }
+        // "Who may message X" (agent-to-agent messaging): the grant list lives on the project.
+        ClientCommand::SetMessageGrant {
+            project_id,
+            grantee,
+            enabled,
+        } => {
+            let mut projects = shared.projects.lock().unwrap();
+            if let Some(p) = projects.iter_mut().find(|p| p.id == *project_id) {
+                if let Some(g) = p.message_grants.iter_mut().find(|g| g.grantee == *grantee) {
+                    g.enabled = *enabled;
+                } else {
+                    let handle = grantee.trim_start_matches('@').to_lowercase();
+                    let Some(other) = directory().into_iter().find(|p| p.handle == handle) else {
+                        drop(projects);
+                        let _ = shared.events.send(SyncEvent::PeopleError(format!(
+                            "No GitHub user named @{handle}."
+                        )));
+                        return true;
+                    };
+                    p.message_grants.push(crate::model::MessageGrant {
+                        grantee: format!("user:{}", other.id),
+                        kind: "person".into(),
+                        id: other.id.clone(),
+                        name: other.name.clone(),
+                        handle: Some(other.handle.clone()),
+                        avatar_url: other.avatar_url.clone(),
+                        enabled: *enabled,
+                        note: String::new(),
+                        created_at: now_ms() as i64,
+                        last_at: None,
+                    });
+                }
+            }
+            drop(projects);
+            emit_projects(shared);
+            true
+        }
+        ClientCommand::RemoveMessageGrant {
+            project_id,
+            grantee,
+        } => {
+            {
+                let mut projects = shared.projects.lock().unwrap();
+                if let Some(p) = projects.iter_mut().find(|p| p.id == *project_id) {
+                    p.message_grants.retain(|g| g.grantee != *grantee);
+                }
+            }
+            emit_projects(shared);
             true
         }
         ClientCommand::InviteToProject { project_id, handle } => {

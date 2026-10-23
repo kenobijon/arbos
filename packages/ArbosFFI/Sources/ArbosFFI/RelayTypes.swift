@@ -677,6 +677,38 @@ public struct MachineDto: Codable {
 	}
 }
 
+/// One row of an agent's "Who may message X" card (agent-to-agent messaging): a person
+/// (`kind: "person"`, every agent of theirs) or one agent (`kind: "agent"`) of another owner.
+public struct MessageGrantDto: Codable {
+	public let project_id: String
+	/// `user:<id>` or `project:<id>`, the key for PUT / DELETE.
+	public let grantee: String
+	public let kind: String
+	public let id: String
+	public let name: String?
+	public let handle: String?
+	public let avatar_url: String?
+	public let enabled: Bool
+	public let note: String
+	public let created_at: Int64
+	/// Last time a message came through this grant.
+	public let last_at: Int64?
+
+	public init(project_id: String, grantee: String, kind: String, id: String, name: String?, handle: String?, avatar_url: String?, enabled: Bool, note: String, created_at: Int64, last_at: Int64?) {
+		self.project_id = project_id
+		self.grantee = grantee
+		self.kind = kind
+		self.id = id
+		self.name = name
+		self.handle = handle
+		self.avatar_url = avatar_url
+		self.enabled = enabled
+		self.note = note
+		self.created_at = created_at
+		self.last_at = last_at
+	}
+}
+
 /// Project record as clients see it (`project_json`), plus optional `list_projects` extras.
 public struct ProjectDto: Codable {
 	public let id: String
@@ -714,8 +746,11 @@ public struct ProjectDto: Codable {
 	public let my_role: String?
 	/// `list_projects` shared rows only; `None` omits, `Some(None)` is JSON null.
 	public let owner_handle: String??
+	/// "Who may message X" (agent-to-agent messaging): other owners' people / agents the
+	/// owner allowed; empty for everyone but the owner's own clients.
+	public let message_grants: [MessageGrantDto]?
 
-	public init(id: String, name: String, icon: String, color: String, instructions: String, avatar: String, avatar_color: String, state: String, box: String, box_since: Int64, spend_today_usd: Double, spend_cap_usd: Double, created_at: Int64, last_active_at: Int64, description: String, voice: String?, vision_enabled: Bool, avatar_color_index: Int64?, avatar_color_index_effective: Int64, avatar_leaf: Int64?, avatar_leaf_color: Int64?, avatar_leaf_effective: Int64?, avatar_leaf_color_effective: Int64?, primary_chat_id: String?, owner: ProjectOwnerDto, model: String?, machine: MachineDto, shared: Bool?, my_role: String?, owner_handle: String??) {
+	public init(id: String, name: String, icon: String, color: String, instructions: String, avatar: String, avatar_color: String, state: String, box: String, box_since: Int64, spend_today_usd: Double, spend_cap_usd: Double, created_at: Int64, last_active_at: Int64, description: String, voice: String?, vision_enabled: Bool, avatar_color_index: Int64?, avatar_color_index_effective: Int64, avatar_leaf: Int64?, avatar_leaf_color: Int64?, avatar_leaf_effective: Int64?, avatar_leaf_color_effective: Int64?, primary_chat_id: String?, owner: ProjectOwnerDto, model: String?, machine: MachineDto, shared: Bool?, my_role: String?, owner_handle: String??, message_grants: [MessageGrantDto]?) {
 		self.id = id
 		self.name = name
 		self.icon = icon
@@ -746,6 +781,7 @@ public struct ProjectDto: Codable {
 		self.shared = shared
 		self.my_role = my_role
 		self.owner_handle = owner_handle
+		self.message_grants = message_grants
 	}
 }
 
@@ -1379,38 +1415,6 @@ public struct MeUserResponseDto: Codable {
 	public init(user: AccountUserDto, avatar_url: String??) {
 		self.user = user
 		self.avatar_url = avatar_url
-	}
-}
-
-/// One row of an agent's "Who may message X" card (agent-to-agent messaging): a person
-/// (`kind: "person"`, every agent of theirs) or one agent (`kind: "agent"`) of another owner.
-public struct MessageGrantDto: Codable {
-	public let project_id: String
-	/// `user:<id>` or `project:<id>`, the key for PUT / DELETE.
-	public let grantee: String
-	public let kind: String
-	public let id: String
-	public let name: String?
-	public let handle: String?
-	public let avatar_url: String?
-	public let enabled: Bool
-	public let note: String
-	public let created_at: Int64
-	/// Last time a message came through this grant.
-	public let last_at: Int64?
-
-	public init(project_id: String, grantee: String, kind: String, id: String, name: String?, handle: String?, avatar_url: String?, enabled: Bool, note: String, created_at: Int64, last_at: Int64?) {
-		self.project_id = project_id
-		self.grantee = grantee
-		self.kind = kind
-		self.id = id
-		self.name = name
-		self.handle = handle
-		self.avatar_url = avatar_url
-		self.enabled = enabled
-		self.note = note
-		self.created_at = created_at
-		self.last_at = last_at
 	}
 }
 

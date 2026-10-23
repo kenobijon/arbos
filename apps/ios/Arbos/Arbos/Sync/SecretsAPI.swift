@@ -157,3 +157,21 @@ extension RelayAPI {
         return (v?["items"] as? [[String: Any]]) ?? []
     }
 }
+
+// Agent-to-agent messaging: "Who may message X" on the agent pane
+// (`docs/agent-to-agent-messaging.md`). Only the agent's owner may change the list.
+extension RelayAPI {
+    /// `PUT /projects/{id}/message-access {grantee, enabled}` — `grantee` is `@handle`,
+    /// `user:<id>` or `project:<id>`; returns the full list.
+    func setMessageGrant(_ projectId: Id, grantee: String, enabled: Bool) async throws -> [MessageGrant] {
+        let (data, _) = try await request("PUT", "/projects/\(projectId)/message-access",
+                                          body: ["grantee": grantee, "enabled": enabled])
+        return (try? JSONDecoder().decode(MessageGrantsDto.self, from: data))?.grants.map(MessageGrant.init(dto:)) ?? []
+    }
+
+    /// `DELETE /projects/{id}/message-access/{grantee}`.
+    func removeMessageGrant(_ projectId: Id, grantee: String) async throws -> [MessageGrant] {
+        let (data, _) = try await request("DELETE", "/projects/\(projectId)/message-access/\(grantee)")
+        return (try? JSONDecoder().decode(MessageGrantsDto.self, from: data))?.grants.map(MessageGrant.init(dto:)) ?? []
+    }
+}

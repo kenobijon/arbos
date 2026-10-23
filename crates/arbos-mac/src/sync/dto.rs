@@ -22,10 +22,10 @@ use crate::model::{
     AccountView, AgentMember, BoxState, Call, CallKind, ChannelBinding, ChannelPairing,
     ChannelPlatform, ChannelPlatformState, ChannelsView, Chat, ChatKind, ConnectedVault, Connector,
     ConnectorAction, ConnectorProvider, ConnectorStatus, ConnectorsView, Effort, LocalDevice,
-    LocalView, Machine, MachineState, Person, Project, ProjectMachine, ProjectSecretAccess,
-    ProjectSecrets, Reachable, ReachableDevice, ReplyPolicy, Routine, RoutineRun, RoutineRunStatus,
-    RoutineTrigger, Secret, SecretActivity, SecretAgent, SecretDirector, SecretRequest,
-    SecretScope, SecretsView, Sender, Skill, SpaceKind, Voice,
+    LocalView, Machine, MachineState, MessageGrant, Person, Project, ProjectMachine,
+    ProjectSecretAccess, ProjectSecrets, Reachable, ReachableDevice, ReplyPolicy, Routine,
+    RoutineRun, RoutineRunStatus, RoutineTrigger, Secret, SecretActivity, SecretAgent,
+    SecretDirector, SecretRequest, SecretScope, SecretsView, Sender, Skill, SpaceKind, Voice,
 };
 use crate::sync::credentials::{AccountUser, DeviceCredentials};
 
@@ -670,6 +670,22 @@ pub(crate) fn project_from_dto(
         avatar_leaf: p.avatar_leaf.and_then(leaf_index),
         avatar_leaf_color: p.avatar_leaf_color.and_then(leaf_index),
         image_url: None,
+        message_grants: p.message_grants.iter().map(message_grant_from).collect(),
+    }
+}
+
+fn message_grant_from(g: &arbos_core::api::MessageGrantDto) -> MessageGrant {
+    MessageGrant {
+        grantee: g.grantee.clone(),
+        kind: g.kind.clone(),
+        id: g.id.clone(),
+        name: g.name.clone().filter(|n| !n.is_empty()),
+        handle: g.handle.clone().filter(|h| !h.is_empty()),
+        avatar_url: g.avatar_url.clone().unwrap_or_default(),
+        enabled: g.enabled,
+        note: g.note.clone(),
+        created_at: g.created_at,
+        last_at: g.last_at,
     }
 }
 
@@ -938,6 +954,7 @@ pub(crate) fn people_space_from(
             .as_deref()
             .and_then(non_empty)
             .map(|k| format!("{http_url}/blob/people:{id}/{k}?token={token}")),
+        message_grants: Vec::new(),
     };
     let chat = Chat {
         id: id.clone(),
