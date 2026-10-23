@@ -810,6 +810,17 @@ impl ChatDoc {
     /// Client write: append a `commands` row. Does not commit. Returns the command id.
     /// Object payloads become a nested `LoroMap` (arrays → `LoroList`).
     pub fn push_command(&self, kind: &str, payload: Value, device_id: &str) -> String {
+        self.push_command_at(kind, payload, device_id, now_ms())
+    }
+
+    /// `push_command` with an explicit `issuedAt` (replaying history, tests of catch-up order).
+    pub fn push_command_at(
+        &self,
+        kind: &str,
+        payload: Value,
+        device_id: &str,
+        issued_at: i64,
+    ) -> String {
         let cmds = self.commands_list();
         let c = cmds.push_container(LoroMap::new()).expect("push command");
         let id = ulid();
@@ -817,7 +828,7 @@ impl ChatDoc {
         c.insert("kind", kind).ok();
         insert_json_map(&c, "payload", payload).expect("payload");
         c.insert("issuedBy", device_id).ok();
-        c.insert("issuedAt", now_ms()).ok();
+        c.insert("issuedAt", issued_at).ok();
         c.insert("status", CommandStatus::Pending.as_str()).ok();
         id
     }

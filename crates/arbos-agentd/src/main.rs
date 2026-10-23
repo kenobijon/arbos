@@ -3,6 +3,7 @@ mod agent;
 mod agent_messages;
 mod approval;
 mod attachments;
+mod budget;
 mod channels;
 mod config;
 mod connectors;
