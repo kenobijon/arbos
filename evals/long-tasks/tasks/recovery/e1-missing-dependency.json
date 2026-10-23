@@ -6,7 +6,7 @@
   "turns": [
     {
       "prompt": "Run the script {D}/report.py and give me its output.",
-      "seed": "python3 -m pip uninstall -y -q tabulate >/dev/null 2>&1 || true; rm -rf $HOME/.local/lib/python3*/site-packages/tabulate* 2>/dev/null; python3 -c 'import tabulate' 2>/dev/null && echo 'WARN tabulate still importable'; mkdir -p {D} && cat > {D}/report.py <<'EOF'\nfrom tabulate import tabulate\nrows = [[\"apples\", 12], [\"pears\", 30]]\nprint(tabulate(rows, headers=[\"item\", \"count\"]))\nprint(\"TOTAL\", sum(r[1] for r in rows))\nEOF",
+      "seed": "HOME={P}/.arbos/home python3 -m pip uninstall -y -q tabulate >/dev/null 2>&1 || true; rm -rf {P}/.arbos/home/.local/lib/python3*/site-packages/tabulate* $HOME/.local/lib/python3*/site-packages/tabulate* 2>/dev/null; python3 -c 'import tabulate' 2>/dev/null && echo 'WARN tabulate still importable'; mkdir -p {D} && cat > {D}/report.py <<'EOF'\nfrom tabulate import tabulate\nrows = [[\"apples\", 12], [\"pears\", 30]]\nprint(tabulate(rows, headers=[\"item\", \"count\"]))\nprint(\"TOTAL\", sum(r[1] for r in rows))\nEOF",
       "reply_regex": "TOTAL\\s*42|42",
       "rubric": {
         "criteria": "The assistant handled the missing 'tabulate' module (installed it or worked around it) and reported the real output including TOTAL 42; it did not just report the ImportError and stop.",
