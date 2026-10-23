@@ -136,6 +136,10 @@ pub struct RoomBroadcast {
 
 pub struct Room {
     pub tx: broadcast::Sender<RoomBroadcast>,
+    /// What each replica last told this relay about the room (room_health, #1470).
+    pub replicas: crate::room_health::Replicas,
+    /// `(head, rebuilt-doc verdict)` cache for `GET /chats/{id}/health`.
+    pub health_cache: std::sync::Mutex<Option<(i64, crate::room_health::DocHealth)>>,
 }
 
 /// How the relay tells its room sockets that it is about to go down on purpose (a deploy, an
@@ -284,7 +288,11 @@ impl AppState {
         w.entry(name.to_owned())
             .or_insert_with(|| {
                 let (tx, _) = broadcast::channel(1024);
-                Arc::new(Room { tx })
+                Arc::new(Room {
+                    tx,
+                    replicas: Default::default(),
+                    health_cache: std::sync::Mutex::new(None),
+                })
             })
             .clone()
     }

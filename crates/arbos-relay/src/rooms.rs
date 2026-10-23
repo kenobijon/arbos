@@ -296,6 +296,7 @@ async fn handle_frame(
             if !h.device.is_empty() {
                 *device = h.device.clone();
             }
+            crate::room_health::note_hello(room, device, h.cursor);
             send_state(state, project_id, room_name, sink).await?;
         }
         FrameType::RowsReq => {
@@ -328,6 +329,7 @@ async fn handle_frame(
             // a row appended between the store read and now is broadcast live and arrives next,
             // and a client must not move its cursor beyond what it has been sent.
             delivery.catching_up = false;
+            crate::room_health::note_caught_up(room, device, after);
             sink.send(frame(
                 FrameType::RowsDone,
                 json!({ "headSeq": after }),
