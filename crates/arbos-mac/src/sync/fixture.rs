@@ -5106,18 +5106,54 @@ fn seed_people_chat_docs() -> Vec<ChatDoc> {
     out
 }
 
+/// True when `lower` has `@token` as a whole mention (not a longer `@token…` handle).
+fn text_has_at_token(lower: &str, token: &str) -> bool {
+    let t = format!("@{token}");
+    lower.match_indices(&t).any(|(i, _)| {
+        let after = lower[i + t.len()..].chars().next();
+        after.is_none_or(|c| !(c.is_alphanumeric() || c == '-' || c == '_'))
+    })
+}
+
 /// `@slug` / `@handle` tokens in the text, resolved to member ids.
+/// Group owners may also use `@here` (every human) and `@agents` (every agent).
 fn mentions_in(space: &Project, text: &str) -> Vec<String> {
     let lower = text.to_lowercase();
     let mut out = Vec::new();
+    let i_own_group =
+        space.is_people_group() && space.owner_handle.as_deref().is_none_or(|o| o == ME_HANDLE);
+    if i_own_group {
+        if text_has_at_token(&lower, "here") {
+            for p in &space.people {
+                let id = format!("user:{}", p.id);
+                if !out.iter().any(|x| x == &id) {
+                    out.push(id);
+                }
+            }
+        }
+        if text_has_at_token(&lower, "agents") {
+            for a in &space.agents {
+                let id = format!("agent:{}", a.project_id);
+                if !out.iter().any(|x| x == &id) {
+                    out.push(id);
+                }
+            }
+        }
+    }
     for a in &space.agents {
         if lower.contains(&format!("@{}", a.handle)) {
-            out.push(format!("agent:{}", a.project_id));
+            let id = format!("agent:{}", a.project_id);
+            if !out.iter().any(|x| x == &id) {
+                out.push(id);
+            }
         }
     }
     for p in &space.people {
         if lower.contains(&format!("@{}", p.handle.to_lowercase())) {
-            out.push(format!("user:{}", p.id));
+            let id = format!("user:{}", p.id);
+            if !out.iter().any(|x| x == &id) {
+                out.push(id);
+            }
         }
     }
     out

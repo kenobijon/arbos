@@ -1711,18 +1711,46 @@ impl Composer {
 
     /// People and agents of the current space matching the `@token`:
     /// (handle, label, is_agent). Typing after `@` filters by handle or name.
+    /// Group/server owners also get `@here` (all humans) and `@agents` (all agents).
     fn mention_candidates(&self, cx: &App) -> Vec<(String, String, bool)> {
         let Some(query) = self.mention_query(cx) else {
             return Vec::new();
         };
         let state = self.state.read(cx);
+        let me_handle = state.me_handle();
+        let mut out: Vec<(String, String, bool)> = Vec::new();
+
+        if let Some((server, _)) = state.selected_channel_info() {
+            // Server channel: owner-only collective mentions (no per-member picker yet).
+            if server.is_owner() {
+                if query.is_empty() || "here".starts_with(&query) {
+                    out.push(("here".into(), "notify all humans".into(), false));
+                }
+                if query.is_empty() || "agents".starts_with(&query) {
+                    out.push(("agents".into(), "notify all agents".into(), true));
+                }
+            }
+            out.truncate(6);
+            return out;
+        }
+
         let Some(space) = state.selected() else {
             return Vec::new();
         };
         if !space.is_people() && space.people.is_empty() {
             return Vec::new();
         }
-        let mut out: Vec<(String, String, bool)> = Vec::new();
+        // People group: owner-only `@here` / `@agents` at the top of the list.
+        let i_own_group =
+            space.is_people_group() && space.owner_handle.as_deref().is_none_or(|o| o == me_handle);
+        if i_own_group {
+            if query.is_empty() || "here".starts_with(&query) {
+                out.push(("here".into(), "notify all humans".into(), false));
+            }
+            if query.is_empty() || "agents".starts_with(&query) {
+                out.push(("agents".into(), "notify all agents".into(), true));
+            }
+        }
         for a in &space.agents {
             let handle_l = a.handle.to_lowercase();
             let name_l = a.name.to_lowercase();

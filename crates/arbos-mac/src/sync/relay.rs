@@ -2508,7 +2508,17 @@ async fn forward_changes(
     }
 }
 
+/// True when `lower` has `@token` as a whole mention (not a longer `@token…` handle).
+fn text_has_at_token(lower: &str, token: &str) -> bool {
+    let t = format!("@{token}");
+    lower.match_indices(&t).any(|(i, _)| {
+        let after = lower[i + t.len()..].chars().next();
+        after.is_none_or(|c| !(c.is_alphanumeric() || c == '-' || c == '_'))
+    })
+}
+
 /// `@slug` / `@handle` in the text → `agent:<project>` / `user:<id>` (API §3).
+/// Group/server owners may also use `@here` (every human) and `@agents` (every agent).
 fn mentions_for(shared: &Shared, chat_id: &str, text: &str) -> Vec<String> {
     let lower = text.to_lowercase();
     let projects = shared.projects.lock().unwrap();
@@ -2516,14 +2526,41 @@ fn mentions_for(shared: &Shared, chat_id: &str, text: &str) -> Vec<String> {
         return Vec::new();
     };
     let mut out = Vec::new();
+    let me_handle = shared.me_handle();
+    let i_own_group =
+        space.is_people_group() && space.owner_handle.as_deref().is_none_or(|o| o == me_handle);
+    if i_own_group {
+        if text_has_at_token(&lower, "here") {
+            for p in &space.people {
+                let id = format!("user:{}", p.id);
+                if !out.iter().any(|x| x == &id) {
+                    out.push(id);
+                }
+            }
+        }
+        if text_has_at_token(&lower, "agents") {
+            for a in &space.agents {
+                let id = format!("agent:{}", a.project_id);
+                if !out.iter().any(|x| x == &id) {
+                    out.push(id);
+                }
+            }
+        }
+    }
     for a in &space.agents {
         if lower.contains(&format!("@{}", a.handle.to_lowercase())) {
-            out.push(format!("agent:{}", a.project_id));
+            let id = format!("agent:{}", a.project_id);
+            if !out.iter().any(|x| x == &id) {
+                out.push(id);
+            }
         }
     }
     for p in &space.people {
         if lower.contains(&format!("@{}", p.handle.to_lowercase())) {
-            out.push(format!("user:{}", p.id));
+            let id = format!("user:{}", p.id);
+            if !out.iter().any(|x| x == &id) {
+                out.push(id);
+            }
         }
     }
     out
