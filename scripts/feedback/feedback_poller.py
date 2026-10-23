@@ -1784,11 +1784,15 @@ class Loop:
         head = st["branch_head"]
         st["gated_head"] = head
         retries = st.get("gate_retries", 0)
+        st["main_conflicts"] = st.get("main_conflicts", 0) + 1
+        self.arm_solo_slot(fid, st)
         if st.get("handed_off_to"):
             st["status"] = "handed_off"
             self.store.save_state(fid, st)
+            solo = (" Your next push runs ALONE in the slot right after the current gate run (ahead of the pool), and this issue "
+                    "gets a note each time main moves so the merge can land right after a settle." if st.get("solo_next") else "")
             self.gh.comment(st["issue"], f"`{st['branch']}`@{head[:8]} conflicts with `main` — not merged. {st['handed_off_to']}: "
-                            "merge `origin/main` into the branch (a merge, never a rebase), resolve, push; the loop re-gates."
+                            "merge `origin/main` into the branch (a merge, never a rebase), resolve, push; the loop re-gates." + solo
                             + (f"\n\n```\n{detail[-2000:]}\n```" if detail else ""))
             return
         if retries >= 2:
@@ -1936,6 +1940,12 @@ class Loop:
             bounced = self.release_bounced_pins()
             if bounced:
                 log(f"Gate: pinned item(s) {', '.join(bounced)} are back with their owner; pin released, the pool runs on")
+        if not members:
+            solo = sorted(((f, st) for f, st in ready if st.get("solo_next")), key=lambda fs: fs[1].get("created") or "")
+            if solo:
+                fid, st = solo[0]
+                members = {fid: st["branch_head"]}
+                log(f"Gate: solo slot for {fid} (bumped {st.get('sibling_conflicts') or 0}× / {st.get('main_conflicts') or 0} main conflicts; runs alone)")
         if not members:
             # Fairness (2026-10-23 22:2x): a branch bumped twice for sibling conflicts gets a batch of the
             # deferred items only, right after the current run — ahead of bisect / plan halves AND the pool
@@ -2229,6 +2239,35 @@ class Loop:
     # first); bumped SIBLING_LIMIT times (so at least two rounds among deferred items) → treated as a main conflict.
     DEFER_AFTER = 2
     SIBLING_LIMIT = 4
+    # Solo slot (operator rule, 2026-10-23 23:34): an item bumped 3× by siblings, or sent to its owner twice for a
+    # main conflict caused by pool landings, runs ALONE in the slot right after the current run once its owner
+    # pushes again — ahead of the deferred batch and the pool. While it waits with its owner, every landing on
+    # main is announced on its issue so the merge-main can follow a settle immediately.
+    SOLO_AFTER_SIBLING = 3
+    SOLO_AFTER_MAIN = 2
+
+    def arm_solo_slot(self, fid: str, st: dict) -> None:
+        if st.get("solo_next"):
+            return
+        if (st.get("sibling_conflicts") or 0) >= self.SOLO_AFTER_SIBLING or (st.get("main_conflicts") or 0) >= self.SOLO_AFTER_MAIN:
+            st["solo_next"] = True
+            self.store.event(fid, "solo_slot_armed", sibling=st.get("sibling_conflicts") or 0, main=st.get("main_conflicts") or 0)
+            log(f"[{fid}] solo slot armed (sibling bumps {st.get('sibling_conflicts') or 0}, main conflicts {st.get('main_conflicts') or 0}); runs alone after its next push")
+
+    def announce_main_moved(self, landed: str) -> None:
+        """A gate run landed on main: tell every owner holding a solo-slot item (conflict → with owner) once per
+        landing, so the merge-main lands right after this settle and the branch runs alone next."""
+        for fid in self.store.items():
+            st = self.store.state(fid)
+            if not (st.get("solo_next") and st.get("status") == "handed_off" and st.get("handed_off_to") and st.get("issue")):
+                continue
+            if st.get("main_moved_noted") == landed:
+                continue
+            st["main_moved_noted"] = landed
+            self.store.save_state(fid, st)
+            with contextlib.suppress(HttpError):
+                self.gh.comment(st["issue"], f"{st['handed_off_to']}: main just moved (gate run landed as `{landed[:8]}`). Merge `origin/main` into "
+                                f"`{st.get('branch') or 'feedback/' + fid}` now and push — your branch runs ALONE in the next gate slot, ahead of the pool.")
 
     def rust_gate_conflict(self, fid: str, head: str, kind: str, run_id: str) -> None:
         st = self.store.state(fid)
@@ -2237,6 +2276,7 @@ class Loop:
         if kind == "conflict-sibling":
             st["sibling_conflicts"] = st.get("sibling_conflicts", 0) + 1
             if st["sibling_conflicts"] < self.SIBLING_LIMIT:
+                self.arm_solo_slot(fid, st)
                 self.store.save_state(fid, st)
                 log(f"[{fid}] conflicts with a sibling branch in gate {run_id}; retried in the next batch"
                     + (" (deferred-fairness batch next)" if st["sibling_conflicts"] >= self.DEFER_AFTER else ""))
@@ -2320,6 +2360,8 @@ class Loop:
             cur["rust_gate_warm"] = active["tree"] if active["mac"] == "ok" else None
             self.store.save_cursor(cur)
             self.note_green_half(active)
+            with contextlib.suppress(Exception):
+                self.announce_main_moved(self.gh.branch_head("main") or active["tree"])
             return
         diagnostics = ""
         if active["linux"] == "fail":
@@ -3498,6 +3540,13 @@ class Loop:
             if members:
                 print(f"  pinned batch {i}: " + ", ".join(tag(f) for f in members))
                 queued |= set(members)
+        solo = [fid for fid, st in ready if fid not in queued and st.get("solo_next")]
+        if solo:
+            print(f"  solo slots (one per run, right after the current run, {len(solo)}): " + ", ".join(tag(f) for f in solo))
+            queued |= set(solo)
+        solo_waiting = [fid for fid in self.store.items() if self.store.state(fid).get("solo_next") and self.store.state(fid).get("status") == "handed_off"]
+        if solo_waiting:
+            print(f"  solo slot reserved, waiting for the owner's push ({len(solo_waiting)}): " + ", ".join(tag(f) for f in solo_waiting))
         deferred = [fid for fid, st in ready if fid not in queued and (st.get("sibling_conflicts") or 0) >= self.DEFER_AFTER]
         if deferred:
             print(f"  deferred-fairness batch (bumped ≥{self.DEFER_AFTER}× by sibling conflicts; next after the pins, {len(deferred)}): " + ", ".join(tag(f) for f in deferred))
