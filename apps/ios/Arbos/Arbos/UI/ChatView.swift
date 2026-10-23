@@ -75,7 +75,14 @@ struct ChatView: View {
     @State private var memoFinishWhenPermission = false
     /// When the current mic press began (for hold-vs-tap).
     @State private var memoPressStartedAt: Date?
+    /// Hold-to-talk: finger slid left far enough to discard on release.
+    @State private var memoCancelArmed = false
+    /// Hold-to-talk: horizontal drag (≤ 0) while the mic is pressed.
+    @State private var memoDragX: CGFloat = 0
     @FocusState private var composerFocused: Bool
+
+    /// Hold-to-talk: slide the mic this far left to discard instead of send.
+    private static let memoCancelDistance: CGFloat = 56
 
     @State private var showProfile = false
     @State private var showSearch = false
@@ -1577,36 +1584,51 @@ struct ChatView: View {
     private var textField: some View {
         HStack(spacing: 8) {
             if recorder.recording {
-                Button {
-                    memoHoldActive = false
-                    memoIgnoreRelease = false
-                    memoFinishWhenPermission = false
-                    memoPressStartedAt = nil
-                    recorder.cancel()
-                } label: {
-                    Image(systemName: "xmark").font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.icon)
+                // Visible discard control (tap) — also used after a short tap that
+                // left recording on; hold-to-talk can slide left instead.
+                Button(action: cancelMemoRecording) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(theme.danger)
+                        .frame(width: 44, height: Theme.fieldHeight)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .padding(.leading, 14)
-                Circle().fill(theme.danger).frame(width: 8, height: 8)
-                // Level bars drawn into whatever width is left (newest on the right),
-                // so the recorder row never pushes the composer past the screen edge.
-                Canvas { ctx, size in
-                    let pitch: CGFloat = 5, w: CGFloat = 3
-                    let levels = recorder.levels
-                    let n = min(levels.count, max(0, Int(size.width / pitch)))
-                    for i in 0..<n {
-                        let l = CGFloat(levels[levels.count - n + i])
-                        let h = min(size.height, 4 + l * 20)
-                        let x = size.width - CGFloat(n - i) * pitch
-                        let rect = CGRect(x: x, y: (size.height - h) / 2, width: w, height: h)
-                        ctx.fill(Path(roundedRect: rect, cornerRadius: w / 2), with: .color(theme.text))
+                .accessibilityLabel("Cancel")
+                if memoCancelArmed {
+                    Text("Release to cancel")
+                        .font(theme.font(Theme.small))
+                        .foregroundStyle(theme.danger)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                } else if memoHoldActive && memoDragX < -12 {
+                    Text("Slide to cancel")
+                        .font(theme.font(Theme.small))
+                        .foregroundStyle(theme.muted)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .opacity(min(1, -memoDragX / Self.memoCancelDistance))
+                } else {
+                    HStack(spacing: 8) {
+                        Circle().fill(theme.danger).frame(width: 8, height: 8)
+                        // Level bars drawn into whatever width is left (newest on the right),
+                        // so the recorder row never pushes the composer past the screen edge.
+                        Canvas { ctx, size in
+                            let pitch: CGFloat = 5, w: CGFloat = 3
+                            let levels = recorder.levels
+                            let n = min(levels.count, max(0, Int(size.width / pitch)))
+                            for i in 0..<n {
+                                let l = CGFloat(levels[levels.count - n + i])
+                                let h = min(size.height, 4 + l * 20)
+                                let x = size.width - CGFloat(n - i) * pitch
+                                let rect = CGRect(x: x, y: (size.height - h) / 2, width: w, height: h)
+                                ctx.fill(Path(roundedRect: rect, cornerRadius: w / 2), with: .color(theme.text))
+                            }
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: 24)
+                        Text(recorder.timeLabel)
+                            .font(theme.font(Theme.small, design: .monospaced))
+                            .foregroundStyle(theme.text)
                     }
                 }
-                .frame(maxWidth: .infinity, maxHeight: 24)
-                Text(recorder.timeLabel)
-                    .font(theme.font(Theme.small, design: .monospaced))
-                    .foregroundStyle(theme.text)
             } else {
                 TextField("", text: $draft, prompt: Text(composerPrompt).foregroundStyle(theme.placeholder), axis: .vertical)
                     .lineLimit(1...8)
@@ -1632,10 +1654,11 @@ struct ChatView: View {
             }
             if draft.isEmpty || recorder.recording {
                 // Press/release like Mac: tap toggles recording on; hold ≥0.25s then
-                // release sends. highPriorityGesture so a focused TextField cannot
-                // steal the touch. The mic stays mounted while recording so release
-                // can finish without a second tap.
-                Image(systemName: "mic")
+                // release sends. Slide left while holding to discard (WhatsApp-style).
+                // highPriorityGesture so a focused TextField cannot steal the touch.
+                // The mic stays mounted while recording so release can finish without
+                // a second tap.
+                Image(systemName: memoCancelArmed ? "trash" : "mic")
                     .font(theme.font(17))
                     .foregroundStyle(recorder.recording ? theme.danger : theme.icon)
                     .frame(width: 44, height: Theme.fieldHeight)
@@ -1644,26 +1667,47 @@ struct ChatView: View {
                     .id("memo-mic")
                     .highPriorityGesture(
                         DragGesture(minimumDistance: 0)
-                            .onChanged { _ in
-                                guard !memoHoldActive else { return }
-                                memoHoldActive = true
-                                memoPressStartedAt = Date()
-                                memoFinishWhenPermission = false
-                                if recorder.recording {
-                                    memoIgnoreRelease = true
-                                    finishMemoHold()
-                                } else {
-                                    memoIgnoreRelease = false
-                                    Haptics.recordStart()
-                                    recorder.start()
+                            .onChanged { value in
+                                if !memoHoldActive {
+                                    memoHoldActive = true
+                                    memoPressStartedAt = Date()
+                                    memoFinishWhenPermission = false
+                                    memoCancelArmed = false
+                                    memoDragX = 0
+                                    if recorder.recording {
+                                        memoIgnoreRelease = true
+                                        finishMemoHold()
+                                    } else {
+                                        memoIgnoreRelease = false
+                                        Haptics.recordStart()
+                                        recorder.start()
+                                    }
+                                }
+                                // Slide left while holding to arm cancel (hold-to-talk).
+                                guard !memoIgnoreRelease else { return }
+                                let dx = value.translation.width
+                                memoDragX = min(0, dx)
+                                let armed = dx < -Self.memoCancelDistance
+                                if armed != memoCancelArmed {
+                                    memoCancelArmed = armed
+                                    if armed { Haptics.pick() }
                                 }
                             }
-                            .onEnded { _ in
+                            .onEnded { value in
                                 let held = Date().timeIntervalSince(memoPressStartedAt ?? Date())
+                                let cancel = memoCancelArmed || value.translation.width < -Self.memoCancelDistance
                                 memoHoldActive = false
                                 memoPressStartedAt = nil
+                                memoDragX = 0
+                                memoCancelArmed = false
                                 if memoIgnoreRelease {
                                     memoIgnoreRelease = false
+                                    return
+                                }
+                                // Slide-left discard: drop the memo instead of sending.
+                                if cancel {
+                                    memoFinishWhenPermission = false
+                                    if recorder.recording { recorder.cancel() }
                                     return
                                 }
                                 // Hold-to-talk: release after the threshold sends.
@@ -1688,6 +1732,8 @@ struct ChatView: View {
                     memoIgnoreRelease = false
                     memoFinishWhenPermission = false
                     memoPressStartedAt = nil
+                    memoCancelArmed = false
+                    memoDragX = 0
                     finishMemoHold()
                 } else if canSend {
                     send()
@@ -1743,6 +1789,17 @@ struct ChatView: View {
         if let memo = recorder.stop() {
             sendMemo(.init(name: memo.name, mime: "audio/m4a", data: memo.data))
         }
+    }
+
+    /// Discard the in-progress voice memo (✕ or slide-to-cancel).
+    private func cancelMemoRecording() {
+        memoHoldActive = false
+        memoIgnoreRelease = false
+        memoFinishWhenPermission = false
+        memoPressStartedAt = nil
+        memoCancelArmed = false
+        memoDragX = 0
+        recorder.cancel()
     }
 
     private var canSend: Bool {
