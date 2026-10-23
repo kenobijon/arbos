@@ -483,6 +483,41 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 .collect();
             send_user(shared, chat_id, message_id, text, attachments, reply_to);
         }
+        ClientCommand::Forward {
+            chat_id,
+            message_id,
+            attachment,
+            text,
+            ..
+        } => {
+            // No blob store to copy between: the row lands in the destination
+            // chat with the same key, so its picture is already cached.
+            send_user(shared, chat_id, message_id, text, vec![attachment], None);
+        }
+        ClientCommand::OpenAttachment {
+            key,
+            name,
+            quick_look,
+            ..
+        } => {
+            let bytes = if key.ends_with(".png") || name.ends_with(".png") {
+                fixture_png(&key)
+            } else {
+                format!("Fixture attachment {name} ({key}).\n").into_bytes()
+            };
+            let dir = std::env::temp_dir().join("arbos-media");
+            let _ = std::fs::create_dir_all(&dir);
+            let path = dir.join(name.replace('/', "_"));
+            match std::fs::write(&path, &bytes) {
+                Ok(()) => crate::ui::attachments::open_with_system(&path, quick_look),
+                Err(err) => {
+                    let _ = shared
+                        .events
+                        .send(SyncEvent::Notice(format!("Could not open {name}: {err}")));
+                }
+            }
+            let _ = shared.events.send(SyncEvent::AttachmentOpened { key });
+        }
         ClientCommand::Steer {
             chat_id,
             message_id,
@@ -4922,6 +4957,14 @@ fn seed_people_chat_docs() -> Vec<ChatDoc> {
             "Press kit v3",
             1_840_000,
         ),
+        // A clip, so the media viewer's video state (poster + Play) has an item.
+        attachment(
+            "launch-teaser.mp4",
+            "video/mp4",
+            AttachmentKind::Video,
+            "Launch teaser",
+            6_420_000,
+        ),
         text_part("Deck, dashboard and the press kit for the run-through."),
     ];
     insert_message_via_core(&group, &shared_files);
@@ -5913,7 +5956,7 @@ mod seed_parity_tests {
             "User Done user:gh_457 name=Some(\"Samir Haddad\") h=Some(\"samir\") asked=None turn=None wa=false [text] hidden=[] text=93 r=0 dt=0 ct=Some(0)",
             "User Done user:gh_456 name=Some(\"Sam Rivera\") h=Some(\"sam\") asked=None turn=None wa=false [text] hidden=[] text=71 r=0 dt=30000 ct=Some(0)",
             "Assistant Done agent:01J9ARBOS00000000000000000 name=Some(\"Arbos\") h=Some(\"arbos\") asked=Some(\"sam\") turn=None wa=false [text] hidden=[] text=96 r=0 dt=60000 ct=Some(0)",
-            "User Done user:gh_457 name=Some(\"Samir Haddad\") h=Some(\"samir\") asked=None turn=None wa=false [attachment:Slide 4 · signups:Some(212000):Image,attachment:Launch dashboard:Some(348000):Image,attachment:Launch day, the team:Some(1204000):Image,attachment:Signup funnel:Some(156000):Image,attachment:Press kit v3:Some(1840000):Pdf,text] hidden=[] text=54 r=0 dt=80000 ct=Some(0)",
+            "User Done user:gh_457 name=Some(\"Samir Haddad\") h=Some(\"samir\") asked=None turn=None wa=false [attachment:Slide 4 · signups:Some(212000):Image,attachment:Launch dashboard:Some(348000):Image,attachment:Launch day, the team:Some(1204000):Image,attachment:Signup funnel:Some(156000):Image,attachment:Press kit v3:Some(1840000):Pdf,attachment:Launch teaser:Some(6420000):Video,text] hidden=[] text=54 r=0 dt=80000 ct=Some(0)",
             "User Done user:gh_458 name=Some(\"Sara Lind\") h=Some(\"sara\") asked=None turn=None wa=false [text] hidden=[] text=64 r=0 dt=100000 ct=Some(0)",
             "User Done user:gh_458 name=Some(\"Sara Lind\") h=Some(\"sara\") asked=None turn=None wa=false [text] hidden=[] text=55 r=0 dt=120000 ct=Some(0)",
             "Assistant Error agent:01J9ARBOS00000000000000000 name=Some(\"Arbos\") h=Some(\"arbos\") asked=Some(\"sara\") turn=None wa=false [text,error] hidden=[] text=0 r=0 dt=125000 ct=Some(0)",

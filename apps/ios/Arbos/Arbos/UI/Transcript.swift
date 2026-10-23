@@ -106,9 +106,13 @@ enum RowKind: Equatable {
     /// Grok Bot question card: bold question, × top-right, lettered answer rows.
     /// `questionId` is nil for a legacy `waiting_user` status line (no `question` part).
     case question(questionId: String?, text: String, options: [ChoiceOption], multi: Bool, picked: [String], open: Bool)
-    case file(name: String, subtitle: String, projectId: Id, ref: String?)
+    /// A file card; tap opens the media viewer on it (Open → Quick Look).
+    case file(item: MediaItem, subtitle: String)
     case voiceMemo(name: String, projectId: Id, ref: String?, fromUser: Bool)
-    case image(projectId: Id, ref: String?, fromUser: Bool)
+    /// A picture; tap opens the media viewer at its place in the chat's album.
+    case image(item: MediaItem, fromUser: Bool)
+    /// "Forwarded from <name>" under a forwarded attachment (media-viewer-2026-10-23).
+    case forwardHint(text: String, fromUser: Bool)
     case error(code: String, message: String)
 }
 
@@ -149,17 +153,27 @@ enum Transcript {
             switch message.role {
             case .user:
                 var hasImage = false
+                var hasAttachment = false
+                let mine = !people || me == nil || message.sender == me || message.sender == "user"
                 for part in message.parts {
                     if case .attachment(let id, let a) = part {
                         if a.isImage { hasImage = true }
-                        chunk.append(attachmentRow(id: "\(message.id)#\(id)", message: message, a: a, projectId: projectId, fromUser: true))
+                        hasAttachment = true
+                        // Another person's picture / file sits left like their bubble.
+                        chunk.append(attachmentRow(id: "\(message.id)#\(id)", message: message, a: a, projectId: projectId, fromUser: mine, agentNames: agentNames))
                     }
                 }
                 let text = message.plainText
+                // A forwarded attachment's "Forwarded from …" line is a hint under
+                // the card, not a bubble of its own.
+                let forwarded = hasAttachment ? MediaAlbum.forwardedFrom(text) : nil
+                if let forwarded {
+                    chunk.append(Row(id: "\(message.id)#forwarded", messageId: message.id, role: mine ? .user : .project,
+                                     kind: .forwardHint(text: forwarded, fromUser: mine)))
+                }
                 // Generic labels ("Image", "Photo", …) are not prose — the attachment
                 // row already carries the media. Showing them as a bubble is noise.
-                if !text.isEmpty, !(hasImage && Self.isGenericMediaLabel(text)) {
-                    let mine = !people || me == nil || message.sender == me || message.sender == "user"
+                if !text.isEmpty, forwarded == nil, !(hasImage && Self.isGenericMediaLabel(text)) {
                     let quote = message.replyTo.flatMap { $0.isEmpty ? nil : Quote.forReply($0, in: messages) }
                     if mine {
                         chunk.append(Row(id: "\(message.id)#user", messageId: message.id, role: .user,
@@ -234,7 +248,7 @@ enum Transcript {
                         chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .system,
                                          kind: .system(icon: "stop.circle", text: "Stopped", avatarProject: nil)))
                     case .attachment(let id, let a):
-                        chunk.append(attachmentRow(id: "\(message.id)#\(id)", message: message, a: a, projectId: projectId, fromUser: false))
+                        chunk.append(attachmentRow(id: "\(message.id)#\(id)", message: message, a: a, projectId: projectId, fromUser: false, agentNames: agentNames))
                     case .error(let id, let code, let text):
                         errors.append((id: id, code: code, text: text))
                     case .status, .tool, .subagentResult, .reasoning, .unknown:
@@ -356,17 +370,21 @@ enum Transcript {
         return "\(total) messages with \(joined)"
     }
 
-    private static func attachmentRow(id: String, message: Message, a: Attachment, projectId: Id, fromUser: Bool) -> Row {
-        if a.mime.lowercased().hasPrefix("audio/") || a.kind?.lowercased() == "audio" {
+    private static func attachmentRow(id: String, message: Message, a: Attachment, projectId: Id, fromUser: Bool,
+                                      agentNames: [String: String]) -> Row {
+        guard let kind = MediaAlbum.kind(of: a) else {
             return Row(id: id, messageId: message.id, role: fromUser ? .user : .assistant,
                        kind: .voiceMemo(name: a.name, projectId: projectId, ref: a.blobRef, fromUser: fromUser))
         }
-        if a.isImage {
+        let item = MediaAlbum.item(id: id, message: message, attachment: a, kind: kind, slot: projectId,
+                                   projectName: { agentNames[$0] })
+        if kind == .image {
             return Row(id: id, messageId: message.id, role: fromUser ? .user : .assistant,
-                       kind: .image(projectId: projectId, ref: a.blobRef, fromUser: fromUser))
+                       kind: .image(item: item, fromUser: fromUser))
         }
+        // Video shows as a file card in the bubble (poster + Play live in the viewer).
         return Row(id: id, messageId: message.id, role: fromUser ? .user : .assistant,
-                   kind: .file(name: a.name, subtitle: subtitle(for: a), projectId: projectId, ref: a.blobRef))
+                   kind: .file(item: item, subtitle: subtitle(for: a)))
     }
 
     /// UTType-style labels some clients leave as the only text on a media-only send.
@@ -673,7 +691,7 @@ struct RowView: View {
     /// Bubbles get a swipe time; centred system / card / error rows do not.
     private var showsSwipeTime: Bool {
         switch row.kind {
-        case .system, .question, .error:
+        case .system, .question, .error, .forwardHint:
             return false
         case .user, .other, .member, .assistant, .file, .voiceMemo, .image:
             return true
@@ -856,12 +874,19 @@ struct RowView: View {
                     .frame(maxWidth: maxBubble, alignment: .leading)
                 Spacer(minLength: 0)
             }
-        case .file(let name, let subtitle, let projectId, let ref):
+        case .file(let item, let subtitle):
             HStack {
                 if row.role == .user { Spacer(minLength: 0) }
-                FileCard(name: name, subtitle: subtitle, projectId: projectId, blobRef: ref, fromUser: row.role == .user)
+                FileCard(item: item, subtitle: subtitle, chatId: chatId, fromUser: row.role == .user)
                     .frame(maxWidth: maxBubble, alignment: row.role == .user ? .trailing : .leading)
                 if row.role != .user { Spacer(minLength: 0) }
+            }
+        case .forwardHint(let text, let fromUser):
+            HStack {
+                if fromUser { Spacer(minLength: 0) }
+                Text(text).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted).lineLimit(1)
+                    .padding(.horizontal, 6)
+                if !fromUser { Spacer(minLength: 0) }
             }
         case .voiceMemo(let name, let projectId, let ref, let fromUser):
             HStack {
@@ -870,10 +895,10 @@ struct RowView: View {
                     .frame(maxWidth: maxBubble, alignment: fromUser ? .trailing : .leading)
                 if !fromUser { Spacer(minLength: 0) }
             }
-        case .image(let projectId, let ref, let fromUser):
+        case .image(let item, let fromUser):
             HStack {
                 if fromUser { Spacer(minLength: 0) }
-                ImageBubble(projectId: projectId, blobRef: ref, fromUser: fromUser, maxWidth: maxBubble)
+                ImageBubble(item: item, chatId: chatId, fromUser: fromUser, maxWidth: maxBubble)
                 if !fromUser { Spacer(minLength: 0) }
             }
         case .error(let code, let message):
@@ -1329,32 +1354,32 @@ struct AvatarCluster: View {
 }
 
 /// Inline image attachment: loads with the device bearer (same as voice memos),
-/// tappable for a full-screen look. AsyncImage alone cannot send `Authorization`
-/// and often stays blank on people-chat blob URLs.
+/// tappable for the media viewer at its place in the chat's album. AsyncImage
+/// alone cannot send `Authorization` and often stays blank on people-chat blob URLs.
 struct ImageBubble: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
-    let projectId: Id
-    let blobRef: String?
+    let item: MediaItem
+    let chatId: Id
     let fromUser: Bool
     let maxWidth: CGFloat
 
     @State private var image: UIImage?
     @State private var failed = false
-    @State private var showFull = false
+    @State private var viewer: MediaViewerState?
 
     private var width: CGFloat { min(240, maxWidth) }
     private var fill: Color { fromUser ? theme.bubbleUser : theme.bubbleAssistant }
 
     var body: some View {
-        Button { if image != nil { showFull = true } } label: {
+        Button { viewer = MediaOpen.state(for: item, chatId: chatId, model: model) } label: {
             ZStack {
                 fill
                 if let image {
                     Image(uiImage: image)
                         .resizable()
                         .scaledToFill()
-                } else if failed || blobRef == nil {
+                } else if failed || item.blobRef == nil {
                     Image(systemName: "photo")
                         .font(theme.font(28))
                         .foregroundStyle(fromUser ? theme.userText.opacity(0.7) : theme.muted)
@@ -1366,34 +1391,20 @@ struct ImageBubble: View {
             .clipShape(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous))
         }
         .buttonStyle(.plain)
-        .disabled(image == nil)
-        .accessibilityLabel(image == nil ? "Image" : "Image, tap to view")
-        .task(id: blobRef) { await load() }
-        .fullScreenCover(isPresented: $showFull) {
-            if let image {
-                ZoomableImageViewer(image: image, onClose: { showFull = false })
-            }
+        .accessibilityLabel("Image, tap to view")
+        .task(id: item.blobRef) { await load() }
+        .fullScreenCover(item: $viewer) { v in
+            MediaViewer(album: v.items, index: v.index, onClose: { viewer = nil })
+                .environmentObject(model)
+                .environment(\.theme, theme)
         }
     }
 
     private func load() async {
-        guard let ref = blobRef,
-              let url = model.blobURL(projectId: projectId, key: ref) else {
-            failed = true
-            return
-        }
-        var req = URLRequest(url: url)
-        for (k, v) in model.authHeaders { req.setValue(v, forHTTPHeaderField: k) }
-        do {
-            let (data, response) = try await URLSession.shared.data(for: req)
-            guard let http = response as? HTTPURLResponse, (200..<400).contains(http.statusCode),
-                  let img = UIImage(data: data) else {
-                failed = true
-                return
-            }
+        if let (data, _) = await MediaFetch.bytes(for: item, model: model), let img = UIImage(data: data) {
             image = img
             failed = false
-        } catch {
+        } else {
             failed = true
         }
     }
@@ -1436,163 +1447,37 @@ struct ReplyThumb: View {
     }
 }
 
-/// Full-screen image: pinch to zoom, drag to pan when zoomed, double-tap to toggle.
-/// At 1×: swipe down or swipe right from the left edge to dismiss.
-private struct ZoomableImageViewer: View {
-    @Environment(\.theme) private var theme
-    let image: UIImage
-    let onClose: () -> Void
-
-    @State private var scale: CGFloat = 1
-    @State private var baseScale: CGFloat = 1
-    @State private var offset: CGSize = .zero
-    @State private var baseOffset: CGSize = .zero
-
-    private let minScale: CGFloat = 1
-    private let maxScale: CGFloat = 5
-    private let doubleTapScale: CGFloat = 2.5
-    /// Vertical drag past this distance dismisses when not zoomed.
-    private let dismissDownThreshold: CGFloat = 120
-    /// Horizontal drag past this distance dismisses from the left edge.
-    private let dismissEdgeThreshold: CGFloat = 100
-    /// Start must be within this many points of the leading edge for edge swipe.
-    private let edgeSwipeWidth: CGFloat = 28
-
-    var body: some View {
-        ZStack(alignment: .topTrailing) {
-            Color.black.opacity(backdropOpacity).ignoresSafeArea()
-            Image(uiImage: image)
-                .resizable()
-                .scaledToFit()
-                .scaleEffect(scale * dismissScale)
-                .offset(offset)
-                .ignoresSafeArea()
-                .gesture(magnifyGesture)
-                .simultaneousGesture(panGesture)
-                .onTapGesture(count: 2, perform: toggleZoom)
-                .accessibilityLabel("Image")
-                .accessibilityHint("Pinch to zoom, double tap to zoom in or out, swipe down or from the left edge to close")
-            Button(action: onClose) {
-                Image(systemName: "xmark")
-                    .font(theme.font(15, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 36, height: 36)
-                    .background(Circle().fill(Color.white.opacity(0.18)))
-            }
-            .buttonStyle(.plain)
-            .padding(16)
-            .accessibilityLabel("Close")
-        }
-    }
-
-    /// Fade the black backdrop while the user drags to dismiss at 1×.
-    private var backdropOpacity: Double {
-        guard scale <= minScale + 0.01 else { return 1 }
-        let distance = max(offset.height, offset.width)
-        guard distance > 0 else { return 1 }
-        return max(0.35, 1 - Double(distance) / 400)
-    }
-
-    /// Slight shrink while dragging to dismiss, matching the Photos-style feel.
-    private var dismissScale: CGFloat {
-        guard scale <= minScale + 0.01 else { return 1 }
-        let distance = max(offset.height, offset.width)
-        guard distance > 0 else { return 1 }
-        return max(0.85, 1 - distance / 1000)
-    }
-
-    private var magnifyGesture: some Gesture {
-        MagnifyGesture()
-            .onChanged { value in
-                scale = min(max(baseScale * value.magnification, minScale), maxScale)
-            }
-            .onEnded { _ in
-                baseScale = scale
-                if scale <= minScale + 0.01 {
-                    withAnimation(.easeOut(duration: 0.2)) { reset() }
-                }
-            }
-    }
-
-    private var panGesture: some Gesture {
-        DragGesture()
-            .onChanged { value in
-                if scale > minScale {
-                    offset = CGSize(
-                        width: baseOffset.width + value.translation.width,
-                        height: baseOffset.height + value.translation.height
-                    )
-                    return
-                }
-                // At 1×: follow a dismiss drag (down anywhere, or right from the left edge).
-                let t = value.translation
-                if t.height > 0, t.height >= abs(t.width) {
-                    offset = CGSize(width: 0, height: t.height)
-                } else if value.startLocation.x <= edgeSwipeWidth,
-                          t.width > 0,
-                          t.width >= abs(t.height) {
-                    offset = CGSize(width: t.width, height: 0)
-                }
-            }
-            .onEnded { value in
-                if scale > minScale {
-                    baseOffset = offset
-                    return
-                }
-                let t = value.translation
-                let dismissDown = t.height > dismissDownThreshold
-                    && t.height > abs(t.width) * 1.5
-                let dismissEdge = value.startLocation.x <= edgeSwipeWidth
-                    && t.width > dismissEdgeThreshold
-                    && t.width > abs(t.height) * 1.25
-                if dismissDown || dismissEdge {
-                    onClose()
-                } else {
-                    withAnimation(.easeOut(duration: 0.2)) {
-                        offset = .zero
-                        baseOffset = .zero
-                    }
-                }
-            }
-    }
-
-    private func toggleZoom() {
-        withAnimation(.easeOut(duration: 0.2)) {
-            if scale > minScale {
-                reset()
-            } else {
-                scale = doubleTapScale
-                baseScale = doubleTapScale
+/// Opening the viewer from a bubble or a tile: the chat's album at the item's
+/// place for pictures and videos; the item alone for a file.
+enum MediaOpen {
+    @MainActor
+    static func state(for item: MediaItem, chatId: Id, model: AppModel) -> MediaViewerState {
+        if item.kind != .file {
+            let album = MediaAlbum.items(messages: model.messages(of: chatId), slot: item.slot,
+                                         projectName: { model.project($0)?.name })
+            if let ix = album.firstIndex(where: { $0.id == item.id }) {
+                return MediaViewerState(items: album, index: ix)
             }
         }
-    }
-
-    private func reset() {
-        scale = minScale
-        baseScale = minScale
-        offset = .zero
-        baseOffset = .zero
+        return MediaViewerState(items: [item], index: 0)
     }
 }
 
 /// Document card (Grok: icon, title, domain) for a non-audio attachment.
-/// Tap downloads the blob with the device bearer (Safari cannot send auth) and
-/// opens a Quick Look preview so the user can read the file in-app.
+/// Tap opens the media viewer on it (Open there = Quick Look, plus Download / Forward).
 struct FileCard: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
-    let name: String
+    let item: MediaItem
     let subtitle: String
-    let projectId: Id
-    let blobRef: String?
+    let chatId: Id
     let fromUser: Bool
 
-    @State private var previewURL: URL?
-    @State private var loading = false
+    @State private var viewer: MediaViewerState?
 
     var body: some View {
         Button {
-            Task { await open() }
+            viewer = MediaOpen.state(for: item, chatId: chatId, model: model)
         } label: {
             // Grok's file card (web-08, measured): 61 pt tall, 20×27 icon at 15 pt,
             // text 16 pt after the icon, 17 pt title over a 15 pt muted subtitle.
@@ -1600,15 +1485,10 @@ struct FileCard: View {
                 RoundedRectangle(cornerRadius: 5, style: .continuous)
                     .fill(Color(hex: "#FFB000")!)
                     .frame(width: 21, height: 27)
-                    .overlay(Image(systemName: "doc.text").font(.system(size: 12, weight: .bold)).foregroundStyle(.black))
+                    .overlay(Image(systemName: item.kind == .video ? "play.fill" : "doc.text").font(.system(size: 12, weight: .bold)).foregroundStyle(.black))
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(name).font(theme.font(Theme.body)).foregroundStyle(fromUser ? theme.userText : theme.text).lineLimit(1)
+                    Text(item.name).font(theme.font(Theme.body)).foregroundStyle(fromUser ? theme.userText : theme.text).lineLimit(1)
                     Text(subtitle).font(theme.font(Theme.small)).foregroundStyle(fromUser ? theme.userText.opacity(0.7) : theme.muted).lineLimit(1)
-                }
-                if loading {
-                    ProgressView()
-                        .tint(fromUser ? theme.userText.opacity(0.7) : theme.muted)
-                        .controlSize(.small)
                 }
             }
             .padding(.leading, 15)
@@ -1618,49 +1498,12 @@ struct FileCard: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .disabled(blobRef == nil || loading)
-        .accessibilityLabel(blobRef == nil ? "\(name), unavailable" : "\(name), \(subtitle), tap to open")
-        .quickLookPreview($previewURL)
-    }
-
-    @MainActor
-    private func open() async {
-        // Already on disk from an earlier tap — re-present Quick Look.
-        if let previewURL {
-            present(previewURL)
-            return
-        }
-        guard let ref = blobRef,
-              let url = model.blobURL(projectId: projectId, key: ref) else { return }
-        loading = true
-        defer { loading = false }
-        var req = URLRequest(url: url)
-        for (k, v) in model.authHeaders { req.setValue(v, forHTTPHeaderField: k) }
-        do {
-            let (data, response) = try await URLSession.shared.data(for: req)
-            guard let http = response as? HTTPURLResponse, (200..<400).contains(http.statusCode), !data.isEmpty else {
-                return
-            }
-            let dir = FileManager.default.temporaryDirectory.appendingPathComponent("arbos-files", isDirectory: true)
-            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            let safe = (name as NSString).lastPathComponent
-            let file = dir.appendingPathComponent(safe.isEmpty ? "file" : safe)
-            try data.write(to: file, options: .atomic)
-            present(file)
-        } catch {
-            // Leave the card tappable so the user can retry.
-        }
-    }
-
-    /// `.quickLookPreview` only presents when the binding becomes non-nil, so a
-    /// second tap after dismiss must briefly clear it first.
-    @MainActor
-    private func present(_ url: URL) {
-        if previewURL == url {
-            previewURL = nil
-            Task { @MainActor in previewURL = url }
-        } else {
-            previewURL = url
+        .disabled(item.blobRef == nil)
+        .accessibilityLabel(item.blobRef == nil ? "\(item.name), unavailable" : "\(item.name), \(subtitle), tap to open")
+        .fullScreenCover(item: $viewer) { v in
+            MediaViewer(album: v.items, index: v.index, onClose: { viewer = nil })
+                .environmentObject(model)
+                .environment(\.theme, theme)
         }
     }
 }

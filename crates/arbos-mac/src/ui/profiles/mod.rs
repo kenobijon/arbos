@@ -17,6 +17,7 @@ pub(crate) mod pane;
 mod server;
 mod user;
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
@@ -24,8 +25,8 @@ use gpui::{
     ScrollHandle, SharedString, Stateful,
 };
 
-use crate::app::{AppState, ProfilePage};
-use crate::model::{now_ms, Attachment, AttachmentKind, Chat, Message, Part};
+use crate::app::{AppState, ProfilePage, ViewerItem};
+use crate::model::{now_ms, Attachment, AttachmentKind, Chat, Id, Message, Part};
 use crate::ui::glass;
 use crate::ui::icons::icon;
 use crate::ui::shell::Shell;
@@ -374,6 +375,9 @@ pub(crate) struct Found {
     pub by: String,
     pub when: u64,
     pub thumbnail: Option<Arc<RenderImage>>,
+    /// The chat and `parts[]` id it sits in (the viewer's album entry).
+    pub chat_id: Id,
+    pub part_id: Id,
 }
 
 /// A link found in a message.
@@ -404,7 +408,7 @@ pub(super) fn collect(state: &AppState, chats: &[&Chat]) -> Content {
             let by = sender_label(state, m);
             for part in &m.parts {
                 match part {
-                    Part::Attachment { attachment, .. } => {
+                    Part::Attachment { id, attachment } => {
                         let thumbnail = attachment
                             .blob_ref
                             .as_ref()
@@ -414,6 +418,8 @@ pub(super) fn collect(state: &AppState, chats: &[&Chat]) -> Content {
                             by: sender_name(state, m),
                             when: m.created_at,
                             thumbnail,
+                            chat_id: chat.id.clone(),
+                            part_id: id.clone(),
                         };
                         match attachment.kind() {
                             AttachmentKind::Image | AttachmentKind::Video => out.media.push(found),
@@ -518,7 +524,7 @@ const MEDIA_GAP: f32 = 3.0;
 /// gutters; a photo / video glyph while a thumbnail loads. The cell is
 /// floored against the pane's inner width (the 1 pt left border counts) —
 /// at exactly a third the last tile used to wrap and leave two per row.
-pub(super) fn media_grid(items: &[Found], theme: &Theme) -> Div {
+pub(super) fn media_grid(items: Vec<Found>, theme: &Theme, cx: &mut Context<Shell>) -> Div {
     if items.is_empty() {
         return empty("No photos or videos yet", theme);
     }
@@ -530,7 +536,24 @@ pub(super) fn media_grid(items: &[Found], theme: &Theme) -> Div {
         .gap(px(MEDIA_GAP))
         .px(px(kit::INSET))
         .pb(px(16.0));
+    // The grid is newest first; the viewer's album runs in chat order, so a
+    // tile opens the viewer at its own place in that order (media-viewer-2026-10-23).
+    let album: Rc<Vec<ViewerItem>> = Rc::new(
+        items
+            .iter()
+            .rev()
+            .map(|f| ViewerItem {
+                attachment: f.attachment.clone(),
+                by: f.by.clone(),
+                when: f.when,
+                chat_id: f.chat_id.clone(),
+                part_id: f.part_id.clone(),
+            })
+            .collect(),
+    );
+    let n = items.len();
     for (i, f) in items.iter().enumerate() {
+        let album = album.clone();
         let tile = div()
             .id(ElementId::Name(SharedString::from(format!(
                 "profile-media-{i}"
@@ -541,7 +564,13 @@ pub(super) fn media_grid(items: &[Found], theme: &Theme) -> Div {
             .bg(theme.surface_1)
             .flex()
             .items_center()
-            .justify_center();
+            .justify_center()
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let album = album.as_ref().clone();
+                this.state
+                    .update(cx, |s, cx| s.open_media_viewer(album, n - 1 - i, cx));
+            }));
         grid = grid.child(match &f.thumbnail {
             // The tile's overflow clip is rectangular, so the picture rounds itself.
             Some(img) => tile.child(

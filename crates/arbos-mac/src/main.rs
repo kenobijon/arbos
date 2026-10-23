@@ -22,6 +22,7 @@ use std::rc::Rc;
 use crate::app::AppState;
 use crate::ui::composer;
 use crate::ui::feedback;
+use crate::ui::media_viewer;
 use crate::ui::motion::{self, PulseClock};
 use crate::ui::shell::{self, Shell};
 use crate::ui::theme::{reapply_window_background, AppearancePref, Surface, Theme};
@@ -232,6 +233,9 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-b", shell::ToggleRail, None),
         KeyBinding::new("ctrl-b", shell::ToggleRail, None),
         KeyBinding::new("escape", shell::Escape, None),
+        // Media viewer: ← → page through the album (Esc closes via the shell).
+        KeyBinding::new("left", media_viewer::Prev, Some("MediaViewer")),
+        KeyBinding::new("right", media_viewer::Next, Some("MediaViewer")),
         KeyBinding::new("cmd-q", shell::Quit, None),
         KeyBinding::new("cmd-shift-f", feedback::SendFeedback, None),
         KeyBinding::new("ctrl-shift-f", feedback::SendFeedback, None),

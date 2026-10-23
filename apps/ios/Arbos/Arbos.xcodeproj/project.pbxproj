@@ -59,6 +59,7 @@
 		A1D8800000000000000000C4 /* ServerStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D8800000000000000000C3 /* ServerStore.swift */; };
 		A1D8800000000000000000C6 /* ServerChannelsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D8800000000000000000C5 /* ServerChannelsView.swift */; };
 		A1D8800000000000000000D2 /* LeafAvatar.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D8800000000000000000D1 /* LeafAvatar.swift */; };
+		A1D8800000000000000000F2 /* MediaViewer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D8800000000000000000F1 /* MediaViewer.swift */; };
 		A115819FE05076AF542EABF0 /* SecretsAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1112911C0D615A9C335C0EF /* SecretsAPI.swift */; };
 		A1BB7C8BDA3465CD63AA1284 /* SecretsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C69DB7C444253D783D4156 /* SecretsStore.swift */; };
 		A1C98CB150ED95D675AD1811 /* SecretsViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A19678BD13DA9148706081DF /* SecretsViews.swift */; };
@@ -172,6 +173,7 @@
 		A1D8800000000000000000C3 /* ServerStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerStore.swift; sourceTree = "<group>"; };
 		A1D8800000000000000000C5 /* ServerChannelsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerChannelsView.swift; sourceTree = "<group>"; };
 		A1D8800000000000000000D1 /* LeafAvatar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LeafAvatar.swift; sourceTree = "<group>"; };
+		A1D8800000000000000000F1 /* MediaViewer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaViewer.swift; sourceTree = "<group>"; };
 		A1112911C0D615A9C335C0EF /* SecretsAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecretsAPI.swift; sourceTree = "<group>"; };
 		A1C69DB7C444253D783D4156 /* SecretsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecretsStore.swift; sourceTree = "<group>"; };
 		A19678BD13DA9148706081DF /* SecretsViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecretsViews.swift; sourceTree = "<group>"; };
@@ -343,6 +345,7 @@
 				A1DA96384927E136586BC012,
 				A1ECED47C60FFA9826884A25,
 				A1BC00000000000000000001 /* MessageMenu.swift */,
+				A1D8800000000000000000F1 /* MediaViewer.swift */,
 				A1C0DE5A11B2C3D4E5F60711,
 				A1C0DE5A11B2C3D4E5F60911,
 				A1C0DE5A11B2C3D4E5F60921,
@@ -534,6 +537,7 @@
 				A1D8800000000000000000C4 /* ServerStore.swift in Sources */,
 				A1D8800000000000000000C6 /* ServerChannelsView.swift in Sources */,
 				A1D8800000000000000000D2 /* LeafAvatar.swift in Sources */,
+				A1D8800000000000000000F2 /* MediaViewer.swift in Sources */,
 				A1D0C5B0E1F2A3B4C5D6E703 /* LaunchClock.swift in Sources */,
 				A1D0C5B0E1F2A3B4C5D6E701 /* DeviceStore.swift in Sources */,
 				A16CDC927A9BCBA23734AFF8 /* CallManager.swift in Sources */,
@@ -662,6 +666,7 @@
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Arbos uses the microphone for voice memos and calls.";
 				INFOPLIST_KEY_NSCameraUsageDescription = "Arbos uses the camera for video calls.";
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Arbos saves pictures and videos you download to your Photos.";
 				INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsArbitraryLoads = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -695,6 +700,7 @@
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Arbos uses the microphone for voice memos and calls.";
 				INFOPLIST_KEY_NSCameraUsageDescription = "Arbos uses the camera for video calls.";
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Arbos saves pictures and videos you download to your Photos.";
 				INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsArbitraryLoads = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;

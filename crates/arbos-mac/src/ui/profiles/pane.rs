@@ -186,7 +186,7 @@ fn section(part: Section, shell: &Shell, theme: &Theme, cx: &mut Context<Shell>)
                 None => card.into_any_element(),
             }
         }
-        Section::Grid(items) => media_grid(&items, theme).into_any_element(),
+        Section::Grid(items) => media_grid(items, theme, cx).into_any_element(),
         Section::Files(items) => file_list(&items, "doc", "", theme).into_any_element(),
         Section::Links(items) => link_list(&items, shell, theme, cx).into_any_element(),
         Section::Picker {
