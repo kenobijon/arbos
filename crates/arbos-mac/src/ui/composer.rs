@@ -29,6 +29,7 @@ use crate::ui::callview;
 use crate::ui::frost::{frosted, PANEL_BLUR};
 use crate::ui::glass;
 use crate::ui::icons::icon;
+use crate::ui::mention::Mentions;
 use crate::ui::select::word_range;
 use crate::ui::theme::{
     Theme, COMPOSER_HEIGHT, LINE_HEIGHT, PANEL_RADIUS, PLUS_BUTTON, SEND_BUTTON, TEXT_BODY,
@@ -130,6 +131,9 @@ pub struct ComposerInput {
     text_center: bool,
     /// Type size; the composer's `TEXT_BODY` unless a smaller field asks otherwise.
     font_size: f32,
+    /// Known `@handle`s (people, agents, `@here`, `@agents`): paint them in the
+    /// accent as soon as the full token is typed, same as bubble chips resolve.
+    mentions: Rc<Mentions>,
 }
 
 impl ComposerInput {
@@ -152,7 +156,13 @@ impl ComposerInput {
             masked: false,
             text_center: false,
             font_size: INPUT_FONT_SIZE,
+            mentions: Mentions::empty(),
         }
+    }
+
+    /// Who `@handle` resolves to while typing (composer accent highlight).
+    pub fn set_mentions(&mut self, mentions: Rc<Mentions>) {
+        self.mentions = mentions;
     }
 
     pub fn set_font_size(&mut self, size: f32) {
@@ -1059,6 +1069,14 @@ impl Element for InputElement {
         } else {
             (content.clone(), theme.text)
         };
+        // Known `@handle` / `@here` / `@agents` in the live text (not the
+        // placeholder, not a masked field).
+        let mention_ranges = if content.is_empty() || input.masked {
+            Vec::new()
+        } else {
+            input.mentions.find_raw(&display_text)
+        };
+        let mention_accent = theme.accent;
 
         let mut font = style.font();
         font.family = theme.font_sans.into();
@@ -1075,7 +1093,16 @@ impl Element for InputElement {
         let mut lines = Vec::new();
         let mut start = 0usize;
         for para in display_text.split('\n') {
-            let runs = runs_for(para, start, marked.as_ref(), &base_run);
+            let mut runs = runs_for(para, start, marked.as_ref(), &base_run);
+            let para_end = start + para.len();
+            for range in &mention_ranges {
+                if range.end <= start || range.start >= para_end {
+                    continue;
+                }
+                let local_start = range.start.saturating_sub(start);
+                let local_end = range.end.min(para_end).saturating_sub(start);
+                runs = accent_runs(runs, local_start..local_end, mention_accent);
+            }
             let shaped = window
                 .text_system()
                 .shape_text(
@@ -1300,6 +1327,33 @@ fn runs_for(
             ..base.clone()
         }],
     }
+}
+
+/// Recolour a known `@handle` run in the composer with the accent.
+fn accent_runs(runs: Vec<TextRun>, range: Range<usize>, accent: gpui::Hsla) -> Vec<TextRun> {
+    if range.is_empty() {
+        return runs;
+    }
+    let mut out = Vec::with_capacity(runs.len() + 2);
+    let mut pos = 0usize;
+    for run in runs {
+        let run_end = pos + run.len;
+        let mut cursor = pos;
+        for cut in [range.start, range.end, run_end] {
+            if cut <= cursor || cut > run_end {
+                continue;
+            }
+            let inside = cursor >= range.start && cursor < range.end;
+            out.push(TextRun {
+                len: cut - cursor,
+                color: if inside { accent } else { run.color },
+                ..run.clone()
+            });
+            cursor = cut;
+        }
+        pos = run_end;
+    }
+    out
 }
 
 impl Render for ComposerInput {
@@ -1915,6 +1969,10 @@ impl Render for Composer {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_draft(cx);
         let theme = Theme::of(cx).clone();
+        // Keep the field's known `@handle`s in step with the app (incl. `@here`).
+        let mentions = Mentions::from_state(&self.state, &theme, cx);
+        self.input
+            .update(cx, |input, _| input.set_mentions(mentions));
         let mode = self.mode(cx);
         let state = self.state.read(cx);
         let space = state.selected().cloned();
