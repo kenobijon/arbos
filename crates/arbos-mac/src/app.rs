@@ -341,8 +341,9 @@ pub struct AppState {
     /// Feature flag: several chats per agent. Off → one chat per agent, the
     /// primary one (`primary_chat()`); extra chats stay in the data, unseen.
     pub multi_chat: bool,
-    /// Last tab opened per agent on this Mac (within a session). Opening an
-    /// agent from the rail prefers `primary_chat` so history matches iPhone.
+    /// Last tab opened per agent on this Mac (within a session). With
+    /// multi-chat on, returning to an agent restores this tab; with it off,
+    /// the rail opens `primary_chat` so history matches iPhone (D78).
     pub last_chats: HashMap<Id, Id>,
     /// Chats archived for me (§9c, synced through the relay; the store keeps an
     /// offline copy): off the tab strip, listed in the "+" dropdown, still open on
@@ -2343,16 +2344,20 @@ impl AppState {
         }
         self.selected_project = Some(project_id.clone());
         self.sidebar_overlay = false;
-        // Switching to an agent: open its primary chat so Mac shows the same
-        // conversation as the iPhone (D78). Re-clicking the already-selected
-        // agent keeps the tab the user is on (multi-chat tabs still work).
-        if switching && self.project(&project_id).is_some_and(|p| !p.is_people()) {
+        // Single-chat agents: open the primary chat so Mac matches iPhone (D78).
+        // Multi-chat: keep the tab last used here (active_tab / last_chats) so
+        // leaving for another agent and coming back restores that sub-chat.
+        // Re-clicking the already-selected agent keeps the tab either way.
+        if switching
+            && !self.multi_chat
+            && self.project(&project_id).is_some_and(|p| !p.is_people())
+        {
             if let Some(primary) = self.primary_chat(&project_id).map(|c| c.id.clone()) {
                 self.active_tab.insert(project_id.clone(), primary.clone());
                 self.last_chats.insert(project_id.clone(), primary);
             }
         }
-        // Agents: primary (above), else last used, else first visible.
+        // Agents: keep a valid tab; else primary, else last used, else first.
         if self.enforce_tab(&project_id) {
             self.sync_focus();
             cx.notify();
