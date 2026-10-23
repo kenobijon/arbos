@@ -311,7 +311,7 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
             selected: selected.as_deref() == Some(p.id.as_str()),
             streaming,
             unread: state.project_unread(&p.id) > 0,
-            typing: state.typing_in(&p.id).is_some(),
+            typing: !state.typing_in(&p.id).is_empty(),
             preview: preview(state, p),
             time: time_label(last_activity(state, p)),
             person_image: p.person().and_then(|x| state.avatar(&x.avatar_url)),

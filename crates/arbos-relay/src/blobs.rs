@@ -81,6 +81,33 @@ fn blob_path(state: &AppState, project_id: &str, key: &str) -> std::path::PathBu
     state.cfg.data_dir.join("blobs").join(project_id).join(key)
 }
 
+/// Write a blob the relay itself produced (the generated avatar) exactly as `put` would store an
+/// upload: bytes under the slot, the MIME sidecar, the `blobs` row.
+pub async fn store(
+    state: &AppState,
+    slot: &str,
+    key: &str,
+    mime: &str,
+    bytes: &[u8],
+) -> Result<(), String> {
+    if !safe_key(key) || !safe_key(slot) {
+        return Err("bad key".to_owned());
+    }
+    let p = blob_path(state, slot, key);
+    if let Some(parent) = p.parent() {
+        let _ = tokio::fs::create_dir_all(parent).await;
+    }
+    tokio::fs::write(&p, bytes)
+        .await
+        .map_err(|e| e.to_string())?;
+    let _ = state
+        .db
+        .record_blob(slot, key, bytes.len() as i64, Some(mime));
+    tokio::fs::write(p.with_extension("mime"), mime)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 pub async fn put(
     State(state): State<AppState>,
     principal: Principal,
@@ -119,10 +146,15 @@ pub async fn get(
     if !state.allows(&principal, &project_id) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    if !safe_key(&key) || !safe_key(&project_id) {
+    serve(&state, &project_id, &key).await
+}
+
+/// Stream one stored blob (access already checked by the caller).
+pub async fn serve(state: &AppState, slot: &str, key: &str) -> Response {
+    if !safe_key(key) || !safe_key(slot) {
         return (StatusCode::BAD_REQUEST, "bad key").into_response();
     }
-    let p = blob_path(&state, &project_id, &key);
+    let p = blob_path(state, slot, key);
     let Ok(f) = tokio::fs::File::open(&p).await else {
         return StatusCode::NOT_FOUND.into_response();
     };

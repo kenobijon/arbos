@@ -96,18 +96,18 @@ impl Kind {
 }
 
 /// Grok's dark sheet palette (approved as is); the light theme keeps its own.
-struct Palette {
-    bg: Hsla,
-    line: Hsla,
-    title: Hsla,
-    placeholder: Hsla,
-    ring: Hsla,
-    cancel_bg: Hsla,
-    create_bg: Hsla,
-    create_text: Hsla,
+pub(crate) struct Palette {
+    pub(crate) bg: Hsla,
+    pub(crate) line: Hsla,
+    pub(crate) title: Hsla,
+    pub(crate) placeholder: Hsla,
+    pub(crate) ring: Hsla,
+    pub(crate) cancel_bg: Hsla,
+    pub(crate) create_bg: Hsla,
+    pub(crate) create_text: Hsla,
 }
 
-fn hex(v: u32) -> Hsla {
+pub(crate) fn hex(v: u32) -> Hsla {
     gpui::Rgba {
         r: ((v >> 16) & 0xff) as f32 / 255.0,
         g: ((v >> 8) & 0xff) as f32 / 255.0,
@@ -117,7 +117,7 @@ fn hex(v: u32) -> Hsla {
     .into()
 }
 
-fn palette(theme: &Theme) -> Palette {
+pub(crate) fn palette(theme: &Theme) -> Palette {
     match theme.appearance {
         Appearance::Dark => Palette {
             bg: hex(0x1F1F1F),

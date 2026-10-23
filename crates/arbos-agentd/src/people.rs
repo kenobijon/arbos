@@ -432,6 +432,94 @@ fn text_addresses_agents_collectively(msg: &MessageView) -> bool {
     false
 }
 
+/// True when the message explicitly addresses one or more agents in this chat — by `mentions`
+/// (`agent:<id>`), by `@slug` in the prose, or by an agent's bare name at the start — and this
+/// agent is not among them. Such a message belongs to the named agent(s): this agent stays
+/// silent, and the group decision model is not asked (it must never hand "@gigchadagent you
+/// still borked?" to hjkb).
+fn addressed_to_other_agents_only(
+    msg: &MessageView,
+    info: &PeopleChatInfo,
+    project_id: &str,
+) -> bool {
+    let me = format!("agent:{project_id}");
+    let mentioned = mentioned_agent_ids(msg);
+    if !mentioned.is_empty() {
+        return !mentioned.iter().any(|id| *id == project_id);
+    }
+    let text = msg.text().to_lowercase();
+    let has = |token: &str| {
+        let t = format!("@{token}");
+        text.match_indices(&t).any(|(i, _)| {
+            let after = text[i + t.len()..].chars().next();
+            after.is_none_or(|c| !(c.is_alphanumeric() || c == '-' || c == '_'))
+        })
+    };
+    let leading = leading_address_token(&msg.text());
+    let mut names_other = false;
+    for m in &info.members {
+        let Some(member) = m["member"].as_str() else {
+            continue;
+        };
+        if !member.starts_with("agent:") || member == me {
+            continue;
+        }
+        let handle = m["handle"].as_str().unwrap_or("").to_lowercase();
+        let name = m["project"]["name"]
+            .as_str()
+            .or_else(|| m["name"].as_str())
+            .unwrap_or("")
+            .trim()
+            .to_lowercase();
+        let slug = name.replace(' ', "-");
+        if (!handle.is_empty() && has(&handle)) || (!slug.is_empty() && has(&slug)) {
+            names_other = true;
+        }
+        if let Some(t) = &leading {
+            if (!handle.is_empty() && handle == *t)
+                || (!name.is_empty() && (name == *t || slug == *t))
+            {
+                names_other = true;
+            }
+        }
+    }
+    if !names_other {
+        return false;
+    }
+    // Named another agent and not this one (by any of the same rules).
+    !(text_mentions_this_agent(msg, info, project_id)
+        || text_names_this_agent(msg, info, project_id))
+}
+
+/// True when the prose `@`-mentions this agent (its slug or handle).
+fn text_mentions_this_agent(msg: &MessageView, info: &PeopleChatInfo, project_id: &str) -> bool {
+    let text = msg.text().to_lowercase();
+    let has = |token: &str| {
+        let t = format!("@{token}");
+        text.match_indices(&t).any(|(i, _)| {
+            let after = text[i + t.len()..].chars().next();
+            after.is_none_or(|c| !(c.is_alphanumeric() || c == '-' || c == '_'))
+        })
+    };
+    if !info.slug.is_empty() && has(&info.slug) {
+        return true;
+    }
+    let me = format!("agent:{project_id}");
+    info.members.iter().any(|m| {
+        if m["member"].as_str() != Some(me.as_str()) {
+            return false;
+        }
+        let handle = m["handle"].as_str().unwrap_or("").to_lowercase();
+        let name = m["project"]["name"]
+            .as_str()
+            .or_else(|| m["name"].as_str())
+            .unwrap_or("")
+            .trim()
+            .to_lowercase();
+        (!handle.is_empty() && has(&handle)) || (!name.is_empty() && has(&name.replace(' ', "-")))
+    })
+}
+
 /// Leading person ping in the prose (or a people chip / leading `@handle`) and no agent `@`
 /// in the text. Sticky chip / reply-to agent mentions must not wake an agent for "Allan?".
 /// Mid-line `@person` alone is not a people ping — see `addressed_only_to_people`.
@@ -448,7 +536,9 @@ fn people_ping_not_for_agents(msg: &MessageView, info: &PeopleChatInfo) -> bool 
 }
 
 /// What a reply in a people chat carries: message fields for the clients.
-/// Clients show `inReplyTo` / `askedByHandle` as a reply chip; the prose stays clean.
+/// `replyTo` is the platform quote/reply (clients show Grok's quote header on
+/// the bubble). `inReplyTo` is turn linkage (retry, "already replied"). Both
+/// point at the asker's message; the prose stays clean.
 pub struct ReplyAttribution {
     pub fields: Vec<(&'static str, Value)>,
 }
@@ -654,7 +744,13 @@ impl Agent {
                     .open_room_named(&chat_id, &room, PEOPLE_PROJECT)
                     .await
                 {
-                    Ok(_) => tracing::info!(chat = %chat_id, "joined a people chat"),
+                    Ok(_) => {
+                        if !full {
+                            // Added (or re-added) while running: the room's past is not ours.
+                            self.sync.mark_late_join(&chat_id).await;
+                        }
+                        tracing::info!(chat = %chat_id, late = !full, "joined a people chat");
+                    }
                     Err(e) => tracing::warn!(chat = %chat_id, error = %e, "people room"),
                 }
             }
@@ -793,10 +889,40 @@ impl Agent {
         let Some(info) = self.people.info(chat_id) else {
             return true;
         };
+        let (wants, reason) = self.people_gate(chat_id, host, user_msg_id, &info).await;
+        // The decision is part of the agent's record (`GET /projects/{id}/inspect`, kind
+        // `gate`): "why did bob answer / stay quiet" is the first question in every routing bug.
+        let _ = self.store.t3_append(
+            chat_id,
+            None,
+            Some(chat_id),
+            "gate",
+            Some("system"),
+            &format!(
+                "gate {}: {reason}",
+                if wants { "reply" } else { "skip" }
+            ),
+            Some(&json!({
+                "message_id": user_msg_id, "reply": wants, "reason": reason,
+                "me": self.cfg.project_id, "handle": self.identity.handle(),
+                "reply_policy": info.settings["reply_policy"], "agents": info.agents(), "group": info.is_group(),
+            })),
+        );
+        wants
+    }
+
+    /// The mention gate proper: the decision and the rule that made it.
+    async fn people_gate(
+        &self,
+        chat_id: &str,
+        host: &SharedHost,
+        user_msg_id: &str,
+        info: &PeopleChatInfo,
+    ) -> (bool, &'static str) {
         let (msg, replied_to_mine, recent) = {
             let h = host.lock().await;
             let Some(msg) = h.doc.message(user_msg_id) else {
-                return false;
+                return (false, "message not in the doc");
             };
             let me = format!("agent:{}", self.cfg.project_id);
             let replied_to_mine = msg
@@ -817,8 +943,8 @@ impl Agent {
         // Bare person name / people-only address in the prose ("Allan?", "Ken") wins over a
         // sticky agent chip or reply-to, unless the text @-mentions an agent or the policy is
         // every_message. The decision model must not wake bob for a ping meant for Allan.
-        if !every && people_ping_not_for_agents(&msg, &info) {
-            return false;
+        if !every && people_ping_not_for_agents(&msg, info) {
+            return (false, "ping for a person, not for agents");
         }
         if addressed(
             &msg,
@@ -828,26 +954,50 @@ impl Agent {
             every,
             replied_to_mine,
         ) {
-            return true;
+            return (
+                true,
+                if every {
+                    "reply_policy every_message"
+                } else if replied_to_mine {
+                    "reply to my message"
+                } else {
+                    "addressed to me (mention, @handle or sole agent)"
+                },
+            );
         }
         // Bare agent name / collective address ("Bob?", "hey Bob …", "can the agents respond?")
         // — same as an @mention, including in DMs where the decision model does not run.
-        if text_names_this_agent(&msg, &info, &self.cfg.project_id)
-            || text_addresses_agents_collectively(&msg)
-        {
-            return true;
+        if text_names_this_agent(&msg, info, &self.cfg.project_id) {
+            return (true, "text names me");
+        }
+        if text_addresses_agents_collectively(&msg) {
+            return (true, "text addresses the agents collectively");
+        }
+        // Addressed to another agent by mention, @slug or name: theirs, not ours — even when
+        // that agent is silent, and even for a steer while this agent's own turn is running.
+        if addressed_to_other_agents_only(&msg, info, &self.cfg.project_id) {
+            return (false, "addressed to another agent only");
         }
         // A person chip or leading @handle with no agent address is for humans — stay quiet
         // even in a group (the decision model must not wake an agent to decline a call meant
         // for Ken). Mid-line @person references alone still reach the decision model.
         if addressed_only_to_people(&msg) {
-            return false;
+            return (false, "addressed to people only");
         }
         if !info.is_group() {
-            return false;
+            return (false, "unaddressed in a DM");
         }
-        self.people_decide_respond(chat_id, &info, &msg, &recent)
-            .await
+        let chosen = self
+            .people_decide_respond(chat_id, info, &msg, &recent)
+            .await;
+        (
+            chosen,
+            if chosen {
+                "respond decision model chose me"
+            } else {
+                "respond decision model did not choose me"
+            },
+        )
     }
 
     /// Responder decision for an unaddressed human message in a people group (`responders.rs`):
@@ -1107,7 +1257,7 @@ impl Agent {
         let msg = host.lock().await.doc.message(user_msg_id)?;
         let name = msg.rest.get("senderName").and_then(Value::as_str);
         let handle = msg.rest.get("senderHandle").and_then(Value::as_str);
-        owner_address_note_text(name, handle, &self.cfg.project_name)
+        owner_address_note_text(name, handle, &self.name())
     }
 }
 
@@ -1228,8 +1378,8 @@ impl Agent {
             .and_then(|m| m["project"]["name"].as_str().or_else(|| m["name"].as_str()))
             .map(str::trim)
             .filter(|n| !n.is_empty())
-            .unwrap_or(self.cfg.project_name.as_str())
-            .to_owned();
+            .map(str::to_owned)
+            .unwrap_or_else(|| self.name());
         let fields = vec![
             ("sender", json!(format!("agent:{}", self.cfg.project_id))),
             ("senderHandle", json!(info.slug)),
@@ -1240,6 +1390,10 @@ impl Agent {
             ("askedBy", json!(format!("user:{}", asker.user_id))),
             ("askedByHandle", json!(asker.handle)),
             ("inReplyTo", json!(asker.message_id)),
+            // Platform reply feature: thread this bubble to the asker's message
+            // so everyone sees which line is being answered (feedback
+            // app-01M5MPKJ9K6HGHFH6BZWR9CME0).
+            ("replyTo", json!(asker.message_id)),
         ];
         Some(ReplyAttribution { fields })
     }
@@ -1592,6 +1746,82 @@ mod tests {
         .is_empty());
     }
 
+    /// Arbonites, 2026-10-23 (#vault-approval-card): "@gigchadagent you still borked?" reached
+    /// hjkb as a steer while its own turn ran, and hjkb answered. A message that names another
+    /// agent — by resolved mention, by @slug, or by its bare name at the start — is that agent's
+    /// alone: this agent stays silent and the decision model is not asked. Naming this agent too
+    /// (both, or "hey agents") still counts as addressed.
+    #[test]
+    fn message_for_another_agent_is_not_ours() {
+        let arbonites = PeopleChatInfo {
+            members: vec![
+                json!({ "member": "agent:01HPROJ", "handle": "hjkb", "project": { "name": "hjkb" } }),
+                json!({ "member": "agent:GIG", "handle": "gigchadagent", "project": { "name": "GigChadAgent" } }),
+                json!({ "member": "user:gh_2", "handle": "unarbos", "name": "Arbos" }),
+            ],
+            slug: "hjkb".into(),
+            kind: "group".into(),
+            ..Default::default()
+        };
+        // Resolved mention of the other agent (what the Mac composer sends).
+        assert!(addressed_to_other_agents_only(
+            &msg(
+                "@gigchadagent you still borked?",
+                json!({ "mentions": ["agent:GIG"] })
+            ),
+            &arbonites,
+            P
+        ));
+        // Prose-only @slug of the other agent; bare name at the start; the display-name slug.
+        assert!(addressed_to_other_agents_only(
+            &msg("hey @gigchadagent use your engy key", json!({})),
+            &arbonites,
+            P
+        ));
+        assert!(addressed_to_other_agents_only(
+            &msg("GigChadAgent, are you there?", json!({})),
+            &arbonites,
+            P
+        ));
+        assert!(addressed_to_other_agents_only(
+            &msg("ping @GigChadAgent", json!({})),
+            &arbonites,
+            P
+        ));
+        // Both named, or this agent named: not "other only".
+        assert!(!addressed_to_other_agents_only(
+            &msg("hi", json!({ "mentions": ["agent:GIG", "agent:01HPROJ"] })),
+            &arbonites,
+            P
+        ));
+        assert!(!addressed_to_other_agents_only(
+            &msg("@gigchadagent and @hjkb both try", json!({})),
+            &arbonites,
+            P
+        ));
+        assert!(!addressed_to_other_agents_only(
+            &msg("@hjkb try to use that engy key now", json!({})),
+            &arbonites,
+            P
+        ));
+        // Nobody named (plain group chatter) — the decision model may still run.
+        assert!(!addressed_to_other_agents_only(
+            &msg("done yet?", json!({})),
+            &arbonites,
+            P
+        ));
+        // A mid-line reference to the other agent, with no address to anyone, is chatter too
+        // ("ive borked @gigchadagent in this chat it seems" names it — theirs, not ours).
+        assert!(addressed_to_other_agents_only(
+            &msg(
+                "ive borked @gigchadagent in this chat it seems",
+                json!({ "mentions": ["agent:GIG"] })
+            ),
+            &arbonites,
+            P
+        ));
+    }
+
     #[test]
     fn recent_context_stops_at_current_and_caps() {
         let mut lines = Vec::new();
@@ -1615,5 +1845,82 @@ mod tests {
         let all = recent_people_context(&lines, "missing", 3);
         assert_eq!(all.len(), 3);
         assert_eq!(all[2]["text"], "line 14");
+    }
+}
+
+#[cfg(test)]
+mod gate_record_tests {
+    //! Every mention-gate decision leaves a `gate` T3 row with its reason, so
+    //! `GET /projects/{id}/inspect` can answer "why did this agent stay quiet".
+
+    use arbos_core::ids::ulid;
+
+    use super::*;
+    use crate::status::tests::test_agent;
+
+    #[tokio::test]
+    async fn gate_decision_is_recorded_with_its_reason() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATGATERECORD000001";
+        agent.people.chats.lock().expect("people").insert(
+            chat.to_owned(),
+            PeopleChatInfo {
+                members: vec![
+                    json!({ "member": "user:gh_2", "handle": "sam" }),
+                    json!({ "member": format!("agent:{}", agent.cfg.project_id), "handle": "doug" }),
+                    json!({ "member": "agent:OTHER", "handle": "hjkb" }),
+                ],
+                settings: json!({ "reply_policy": "mention" }),
+                owner_user: "gh_1".into(),
+                slug: "doug".into(),
+                kind: "group".into(),
+            },
+        );
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let for_other = ulid();
+        let for_me = ulid();
+        {
+            let h = host.lock().await;
+            let opts = arbos_core::doc::UserMessageOpts {
+                mentions: vec!["agent:OTHER".into()],
+                ..Default::default()
+            };
+            h.doc
+                .append_user_message(&for_other, "@hjkb you still borked?", "dev-mac", &opts)
+                .unwrap();
+            let opts = arbos_core::doc::UserMessageOpts {
+                mentions: vec![format!("agent:{}", agent.cfg.project_id)],
+                ..Default::default()
+            };
+            h.doc
+                .append_user_message(&for_me, "@doug status?", "dev-mac", &opts)
+                .unwrap();
+        }
+        assert!(!agent.people_wants(chat, &host, &for_other).await);
+        assert!(agent.people_wants(chat, &host, &for_me).await);
+
+        let rows = agent.store.t3_after(0, Some(chat), 50).unwrap();
+        let gates: Vec<&(crate::store::T3Row, Option<Value>)> =
+            rows.iter().filter(|(r, _)| r.kind == "gate").collect();
+        assert_eq!(gates.len(), 2, "{rows:?}");
+        let (skip, skip_data) = gates[0];
+        assert!(skip
+            .text
+            .starts_with("gate skip: addressed to another agent only"));
+        let skip_data = skip_data.as_ref().expect("gate row carries its facts");
+        assert_eq!(skip_data["reply"], false);
+        assert_eq!(skip_data["message_id"], for_other);
+        assert_eq!(skip_data["handle"], "doug");
+        let (reply, _) = gates[1];
+        assert!(reply.text.starts_with("gate reply: addressed to me"));
+        // The window honours the chat filter and the time cursor.
+        assert!(agent
+            .store
+            .t3_after(0, Some("other-chat"), 50)
+            .unwrap()
+            .is_empty());
+        let after = agent.store.t3_after(reply.at, Some(chat), 50).unwrap();
+        assert!(after.iter().all(|(r, _)| r.at > reply.at));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

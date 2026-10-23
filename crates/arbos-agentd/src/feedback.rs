@@ -108,19 +108,8 @@ fn read_user_image(a: &Agent, path: &str) -> Result<UserImage, String> {
 
 /// Secret values (D19 redaction) and secret placeholders / vault references, so a report never
 /// carries anything the owner's secrets system handed the agent.
-fn scrub(text: &str) -> String {
-    let mut out = crate::store::redact(text);
-    let patterns: [(&str, &str); 3] = [
-        (r"arbos-secret://[^\s\x22'`<>]+", "[secret placeholder]"),
-        (r"\bop://[^\s\x22'`<>]+", "[vault reference]"),
-        (r"\$\{?ARBOS_SECRET_[A-Z0-9_]+\}?", "[secret env]"),
-    ];
-    for (pat, rep) in patterns {
-        if let Ok(re) = regex_lite::Regex::new(pat) {
-            out = re.replace_all(&out, rep).into_owned();
-        }
-    }
-    out
+pub(crate) fn scrub(text: &str) -> String {
+    arbos_core::redact::redact_placeholders(&crate::store::redact(text))
 }
 
 fn clip(s: &str, max: usize) -> String {
@@ -521,7 +510,7 @@ pub async fn submit_feedback(a: &Arc<Agent>, args: &Value, chat_id: &str) -> Val
         })
     };
     let mut context = json!({
-        "agent_id": a.cfg.project_id, "agent_name": a.cfg.project_name,
+        "agent_id": a.cfg.project_id, "agent_name": a.name(),
         "chat_id": chat_id, "box_device_id": a.cfg.device_id,
         "box_image_version": image_version, "agentd_sha": agentd_sha, "agentd_version": env!("CARGO_PKG_VERSION"),
         "talking_model": talking_model, "subagent_model": subagent_model,
@@ -602,7 +591,7 @@ pub async fn submit_feedback(a: &Arc<Agent>, args: &Value, chat_id: &str) -> Val
     }
     note.push_str(&format!(
         "\n\n— filed by the user's agent {} from the chat",
-        a.cfg.project_name
+        a.name()
     ));
     let note: String = note.chars().take(3_900).collect();
     let rollout_text = rollout(a, chat_id);
@@ -610,7 +599,7 @@ pub async fn submit_feedback(a: &Arc<Agent>, args: &Value, chat_id: &str) -> Val
     let mut body = json!({
         "note": note, "platform": platform, "app_version": app_version, "os": os,
         "project_id": a.cfg.project_id, "chat_id": chat_id,
-        "submitted_by": "agent", "agent_name": a.cfg.project_name,
+        "submitted_by": "agent", "agent_name": a.name(),
         "rollout": rollout_text, "context": context,
         "capture_id": capture_id, "capture_device_id": capture_device,
     });

@@ -303,6 +303,15 @@ jobs:
         run: |
           set -euo pipefail
           export PATH="$HOME/.cargo/bin:$PATH"
+          # Self-hosted: the smoke's debug build gets its own persistent target dir, kept small by
+          # scripts/release/smoke-target-prune.sh (every release bumps the workspace version, which
+          # changes cargo's metadata hash, so each release left ~1.7 GB of stale debug artifacts in the
+          # release target dir — 36 GB a day, #1439). The release trees are untouched by this step.
+          if [[ "${RUNNER_ENVIRONMENT:-}" == "self-hosted" ]]; then
+            export CARGO_TARGET_DIR="$HOME/arbos-release-smoke-target"
+            mkdir -p "$CARGO_TARGET_DIR"
+            trap 'scripts/release/smoke-target-prune.sh "$CARGO_TARGET_DIR" 25 || true' EXIT
+          fi
           cargo test -p arbos-mac --locked enter_tests
       - name: Build, sign, notarize, staple
         id: build

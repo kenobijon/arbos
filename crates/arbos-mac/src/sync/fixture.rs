@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use arbos_core::approval::{
@@ -27,7 +27,7 @@ use crate::model::{
 };
 
 use super::doc::ChatDoc;
-use super::{ClientCommand, SyncEvent, SyncSource};
+use super::{ClientCommand, PictureSource, SyncEvent, SyncSource};
 use crate::model::{
     new_id, now_ms, ApprovalRisk, ApprovalState, Attachment, AttachmentKind, BoxState,
     ChannelBinding, ChannelPairing, ChannelPlatform, ChannelPlatformState, ChannelsView, Chat,
@@ -209,6 +209,8 @@ impl SyncSource for FixtureSource {
             emit_open_request(&shared);
             let _ = events.send(SyncEvent::Link(Link::Live));
             emit_link_hook(&shared);
+            emit_typing_hook(&shared);
+            emit_working_hook(&shared);
 
             loop {
                 tokio::select! {
@@ -264,6 +266,142 @@ fn emit_link_hook(shared: &Arc<Shared>) {
                 key,
                 state: LinkState::Live,
             });
+        }
+    });
+}
+
+/// How many agents `ARBOS_FIXTURE_WORKING=<n>` wants working (0 when unset).
+fn fixture_working_count() -> usize {
+    std::env::var("ARBOS_FIXTURE_WORKING")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(0)
+}
+
+/// Extra agents for the Launch week group beyond the seeded Arbos, so the
+/// group has `ARBOS_FIXTURE_WORKING` agents to show working.
+fn fixture_working_extra_agents() -> Vec<(&'static str, &'static str, &'static str, u8, u8)> {
+    const EXTRA: [(&str, &str, &str, u8, u8); 4] = [
+        ("01J9PROJLIUM00000000000000", "Lium", "lium", 2, 3),
+        ("01J9PROJHOME00000000000000", "Home", "home", 5, 6),
+        ("01J9PROJDOUG00000000000000", "Doug", "doug", 7, 1),
+        ("01J9PROJNOVA00000000000000", "Nova", "nova", 1, 8),
+    ];
+    EXTRA
+        .into_iter()
+        .take(fixture_working_count().saturating_sub(1))
+        .collect()
+}
+
+/// `ARBOS_FIXTURE_WORKING=<n>` (screenshot rig, [feedback
+/// typing-indicator-left-2026-10-23]): the first n agents of every fixture
+/// people chat open a streaming row with no words yet — the "<name> is
+/// working" state — and keep it open, so the presence row over the composer
+/// can be shot with one or several agents working. The agent chats (Affine,
+/// Arbos, …) get the same: their one agent streams.
+fn emit_working_hook(shared: &Arc<Shared>) {
+    let n = fixture_working_count();
+    if n == 0 {
+        return;
+    }
+    let spaces: Vec<Project> = shared.projects.lock().unwrap().clone();
+    for space in spaces {
+        let chats: Vec<Id> = shared
+            .chats
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.project_id == space.id)
+            .map(|c| c.id.clone())
+            .collect();
+        for chat_id in chats {
+            if space.is_people() {
+                for agent in space.agents.iter().take(n) {
+                    let id = new_id();
+                    let asker = space.person().cloned().unwrap_or_else(sam);
+                    with_doc(shared, &chat_id, |doc| {
+                        doc.core.transact(|d| {
+                            begin_assistant_row(
+                                d,
+                                &id,
+                                &format!("agent:{}", agent.project_id),
+                                &[
+                                    ("senderName", json!(agent.name)),
+                                    ("senderIcon", json!(agent.icon)),
+                                    ("senderHandle", json!(agent.handle)),
+                                    ("askedByHandle", json!(asker.handle)),
+                                    ("ownerHandle", json!(agent.owner_handle)),
+                                ],
+                                StatusKind::Working,
+                                "Working…",
+                            )
+                        })
+                    });
+                }
+            } else if !space.agents.is_empty() || space.kind == SpaceKind::Project {
+                let id = new_id();
+                with_doc(shared, &chat_id, |doc| {
+                    doc.core.transact(|d| {
+                        begin_assistant_row(d, &id, "agent", &[], StatusKind::Working, "Working…")
+                    })
+                });
+            }
+        }
+    }
+}
+
+/// `ARBOS_FIXTURE_TYPING=1|<handle>[,<handle>…]` keeps "<name> is typing…"
+/// up in every fixture people chat (`1` = the chat's other person, else those
+/// handles) for the screenshot rig ([feedback typing-indicator-left-2026-10-23]);
+/// the app drops a typing mark after 6 s, so it is re-sent every 3 s.
+/// `ARBOS_FIXTURE_TYPING_MS=<ms>` stops it after that long.
+fn emit_typing_hook(shared: &Arc<Shared>) {
+    let Ok(spec) = std::env::var("ARBOS_FIXTURE_TYPING") else {
+        return;
+    };
+    let spec = spec.trim().to_string();
+    if spec.is_empty() || spec == "0" {
+        return;
+    }
+    let chats: Vec<(Id, String)> = shared
+        .projects
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|p| p.is_people())
+        .flat_map(|p| -> Vec<(Id, String)> {
+            if spec == "1" {
+                p.person()
+                    .map(|person| vec![(p.id.clone(), person.handle.clone())])
+                    .unwrap_or_default()
+            } else {
+                spec.split(',')
+                    .map(str::trim)
+                    .filter(|h| !h.is_empty())
+                    .map(|h| (p.id.clone(), h.to_string()))
+                    .collect()
+            }
+        })
+        .collect();
+    let stop_after = std::env::var("ARBOS_FIXTURE_TYPING_MS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok());
+    let events = shared.events.clone();
+    tokio::spawn(async move {
+        let started = Instant::now();
+        loop {
+            let active = stop_after.is_none_or(|ms| started.elapsed() < Duration::from_millis(ms));
+            for (chat_id, handle) in &chats {
+                let _ = events.send(SyncEvent::Typing {
+                    chat_id: chat_id.clone(),
+                    handle: handle.clone(),
+                    active,
+                });
+            }
+            if !active {
+                return;
+            }
+            sleep(Duration::from_secs(3)).await;
         }
     });
 }
@@ -351,6 +489,9 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         | ClientCommand::DeletePeopleChat { .. }
         | ClientCommand::RenameGroup { .. }
         | ClientCommand::SetGroupImage { .. }
+        | ClientCommand::SetGroupLeaf { .. }
+        | ClientCommand::SetProjectImage { .. }
+        | ClientCommand::GenerateProjectImage { .. }
         | ClientCommand::CloseChat { .. } => {}
         // D88 servers live on the relay only; the fixture has none.
         ClientCommand::ServersRefresh
@@ -833,16 +974,6 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             set_machine(shared, MachineState::Stopped, Some("Stopped by you"), None);
         }
         ClientCommand::FocusChat { .. } => {}
-        ClientCommand::SetAvatarColorIndex { project_id, index } => {
-            {
-                let mut projects = shared.projects.lock().unwrap();
-                if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
-                    p.avatar_color_override = index;
-                    p.avatar_color_index = Some(crate::ui::avatars::index_for(&project_id, index));
-                }
-            }
-            emit_projects(shared);
-        }
         ClientCommand::SetAvatarLeaf {
             project_id,
             leaf,
@@ -853,6 +984,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
                     p.avatar_leaf = leaf;
                     p.avatar_leaf_color = color;
+                    p.image_url = None;
                 }
             }
             emit_projects(shared);
@@ -4727,11 +4859,36 @@ fn launch_week() -> Project {
         avatar_color_index: None,
         avatar_leaf: None,
         avatar_leaf_color: None,
+        image_url: None,
         description: None,
         model: None,
         owner: None,
     };
-    let mut space = people_space(GROUP_LAUNCH, members[0].clone(), vec![agent]);
+    let mut agents = vec![agent];
+    // `ARBOS_FIXTURE_WORKING=<n>` (screenshot rig): the group holds n agents so
+    // the presence row can show several of them working at once.
+    for (project_id, name, handle, leaf, color) in fixture_working_extra_agents() {
+        agents.push(AgentMember {
+            project_id: project_id.into(),
+            name: name.into(),
+            icon: "✳".into(),
+            color: "#1084fe".into(),
+            handle: handle.into(),
+            owner_id: ME_ID.into(),
+            owner_handle: ME_HANDLE.into(),
+            reply_policy: Default::default(),
+            avatar: None,
+            avatar_color: None,
+            avatar_color_index: Some(color),
+            avatar_leaf: Some(leaf),
+            avatar_leaf_color: Some(color),
+            image_url: None,
+            description: None,
+            model: None,
+            owner: None,
+        });
+    }
+    let mut space = people_space(GROUP_LAUNCH, members[0].clone(), agents);
     space.kind = SpaceKind::Group;
     space.name = "Launch week".into();
     space.icon = "L".into();
@@ -4940,15 +5097,13 @@ fn seed_people_chat_docs() -> Vec<ChatDoc> {
         "Deck v3 is in the shared folder. Sam, can you check the pricing slide before the run-through?",
         base + 300_000,
     ));
-    insert_message_via_core(
-        &group,
-        &human_message(
-            GROUP_LAUNCH,
-            &sam(),
-            "On it. @arbos pull the latest signup numbers into slide 4 while I read.",
-            base + 330_000,
-        ),
+    let ask = human_message(
+        GROUP_LAUNCH,
+        &sam(),
+        "On it. @arbos pull the latest signup numbers into slide 4 while I read.",
+        base + 330_000,
     );
+    insert_message_via_core(&group, &ask);
     let mut agent = human_message(GROUP_LAUNCH, &sam(), "", base + 360_000);
     agent.role = Role::Assistant;
     agent.sender = format!("agent:{PROJECT_ARBOS}");
@@ -4957,6 +5112,10 @@ fn seed_people_chat_docs() -> Vec<ChatDoc> {
     agent.sender_avatar = None;
     agent.asked_by_handle = Some("sam".into());
     agent.owner_handle = Some(ME_HANDLE.into());
+    // The relay threads a group reply to the asker's message (#1447), so the
+    // bubble opens with a quote header — the shape of Jacob's Oct 23 "Doug"
+    // screenshot (bubble-quote-width-2026-10-23).
+    agent.in_reply_to = Some(ask.id.clone());
     agent.parts = vec![text_part(
         "Done. Slide 4 now reads 1,284 signups this week (+18 %). The chart is in `deck/v3/slide-04.png`.",
     )];
@@ -5341,6 +5500,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                                 avatar_color_index: p.avatar_color_index,
                                 avatar_leaf: p.avatar_leaf,
                                 avatar_leaf_color: p.avatar_leaf_color,
+                                image_url: None,
                                 description: None,
                                 model: None,
                                 owner: None,
@@ -5434,6 +5594,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                         avatar_color_index: p.avatar_color_index,
                         avatar_leaf: p.avatar_leaf,
                         avatar_leaf_color: p.avatar_leaf_color,
+                        image_url: None,
                         description: None,
                         model: None,
                         owner: None,
@@ -5505,6 +5666,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                             avatar_color_index: p.avatar_color_index,
                             avatar_leaf: p.avatar_leaf,
                             avatar_leaf_color: p.avatar_leaf_color,
+                            image_url: None,
                             description: None,
                             model: None,
                             owner: None,
@@ -5628,6 +5790,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                                 avatar_color_index: p.avatar_color_index,
                                 avatar_leaf: p.avatar_leaf,
                                 avatar_leaf_color: p.avatar_leaf_color,
+                                image_url: None,
                                 description: None,
                                 model: None,
                                 owner: None,
@@ -5690,6 +5853,58 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             }
             emit_avatar(shared, &url);
             emit_projects(shared);
+            true
+        }
+        ClientCommand::SetGroupLeaf { chat_id, pick } => {
+            {
+                let mut projects = shared.projects.lock().unwrap();
+                if let Some(p) = projects.iter_mut().find(|p| p.id == *chat_id) {
+                    p.avatar_leaf = pick.map(|l| l.leaf);
+                    p.avatar_leaf_color = pick.map(|l| l.color);
+                    p.image_url = None;
+                }
+            }
+            emit_projects(shared);
+            true
+        }
+        ClientCommand::SetProjectImage { project_id, source } => {
+            // No blob store in the demo: the picked file (or the "generated" key) becomes a
+            // seeded picture, like a group's.
+            let seed = match source {
+                PictureSource::File(path) => path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("picture")
+                    .to_owned(),
+                PictureSource::Key(key) => key.clone(),
+            };
+            let url = format!("fixture://avatar/agent-{seed}");
+            {
+                let mut projects = shared.projects.lock().unwrap();
+                if let Some(p) = projects.iter_mut().find(|p| p.id == *project_id) {
+                    p.image_url = Some(url.clone());
+                }
+            }
+            emit_avatar(shared, &url);
+            emit_projects(shared);
+            true
+        }
+        ClientCommand::GenerateProjectImage { project_id, prompt } => {
+            // The demo "generates" after a short wait: a seeded picture named after the prompt.
+            let key = format!("gen-{}", prompt.trim().to_lowercase().replace(' ', "-"));
+            let url = format!("fixture://avatar/agent-{key}");
+            let shared = shared.clone();
+            let project_id = project_id.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(1400)).await;
+                emit_avatar(&shared, &url);
+                let _ = shared.events.send(SyncEvent::ProjectImageGenerated {
+                    project_id,
+                    image_key: Some(key),
+                    url: Some(url),
+                    error: None,
+                });
+            });
             true
         }
         _ => false,

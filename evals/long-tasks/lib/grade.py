@@ -77,6 +77,19 @@ def truth_check(spec, ctx):
             reasons.append(f"only {len(hits)} of the newest release tags {tags[:5]} appear in the output")
         elif hay and tags[0] not in hay and tags[1] not in hay:
             reasons.append("newest tag missing")
+    elif kind == "cited_paths_exist":
+        # repo-relative (docs/…, crates/…) or absolute (/opt/arbos/src/…) paths named in the reply must exist on the box
+        root = spec.get("root", "/opt/arbos/src")
+        cands = set(re.findall(r"(?<![\w/])((?:/opt/arbos/src/|docs/|crates/|harness/|image/|apps/|scripts/)[\w./-]+)", reply))
+        cands = {c.rstrip(".,:;)") for c in cands}
+        truth["cited"] = sorted(cands)[:10]
+        if not cands:
+            reasons.append("reply cites no docs/ or crates/ path")
+        elif ctx.get("box_exists"):
+            found = [c for c in cands if ctx["box_exists"](c if c.startswith("/") else f"{root}/{c}")]
+            truth["cited_existing"] = found
+            if not found:
+                reasons.append(f"none of the cited paths exists in the repo tree: {sorted(cands)[:4]}")
     elif kind == "fixture_json":
         # truth committed next to the web fixtures (static files the agent fetches over the web)
         gt = json.loads((Path(__file__).resolve().parent.parent / "fixtures" / spec["file"]).read_text())
@@ -209,7 +222,8 @@ def grade_turn(turn, ctx, box, project, env):
     if turn.get("show"):
         code, shown = box.run_as_ws(project, turn["show"], env=env, timeout=120)
         produced = (produced + "\n" + shown).strip()
-    ctx = dict(ctx, produced=produced, read_file=lambda path: box.read_file(project, path.replace(f"/work/{project}/", ""), limit=60000))
+    ctx = dict(ctx, produced=produced, read_file=lambda path: box.read_file(project, path.replace(f"/work/{project}/", ""), limit=60000),
+               box_exists=lambda path: "EXISTS" in box.root(f"test -e {path!r} && echo EXISTS; true")[1])
     if turn.get("truth"):
         if turn["truth"].get("file"):
             turn["truth"] = dict(turn["truth"], file=turn["truth"]["file"].replace("{D}", env.get("D", "")))

@@ -12,6 +12,8 @@ mod groups;
 mod harness;
 mod hooks;
 mod http;
+mod identity;
+mod inspect;
 mod isolation;
 mod llm;
 mod local;
@@ -24,6 +26,7 @@ mod reply;
 mod responders;
 mod routines;
 mod rpc_child;
+mod selfref;
 mod settings;
 mod skills;
 mod status;
@@ -40,6 +43,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use serde_json::{json, Value};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::config::BoxConfig;
 use crate::workspace::Supervisor;
@@ -117,11 +122,13 @@ enum Cmd {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
+    tracing_subscriber::registry()
+        .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "info,loro_internal=warn,arbos_agentd=debug".into()),
         )
+        .with(tracing_subscriber::fmt::layer())
+        .with(inspect::WarnRing)
         .init();
     let args = Args::parse();
     match args.cmd {
@@ -389,6 +396,9 @@ async fn boot() -> Result<()> {
             .post_timing("agentd_boot_ms", t_boot.elapsed().as_millis() as i64, None)
             .await;
     }
+    // The read-only copy of Arbos's own source (/opt/arbos/src) follows main: refreshed now, in
+    // the background, and every few hours after.
+    selfref::spawn_refresh();
 
     // Registry poll (3 s): new projects become workspaces, closed ones stop, settings changes
     // (SetModel, rename, new chats) reach each workspace's pi and doc.

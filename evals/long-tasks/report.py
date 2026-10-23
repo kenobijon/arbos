@@ -28,6 +28,14 @@ def all_runs():
     return runs
 
 
+def median(xs):
+    xs = sorted(x for x in xs if x is not None)
+    if not xs:
+        return 0.0
+    n = len(xs)
+    return xs[n // 2] if n % 2 else (xs[n // 2 - 1] + xs[n // 2]) / 2
+
+
 def fmt(v, suffix=""):
     return "—" if v is None else f"{v}{suffix}"
 
