@@ -7,8 +7,14 @@ The scenario is Doug's (Jacob, 2026-10-22): the agent is in the middle of a long
 (default 5) while the long turn is still running. Before the fix both waited for the long turn
 to end (measured 93–98 s on the test box).
 
-Runs against one test user on the relay (default: arbosdemo-alice) with a device minted through
-the admin API and revoked at the end. Needs `arbosctl` on PATH and ARBOS_RELAY_ADMIN_TOKEN in
+Runs against one test user on the relay (default: arbosdemo-alice) with THREE devices minted
+through the admin API (one per arbosctl client: the long turn, the same-chat probe, the new-chat
+probe) and revoked at the end. One device per replica is a rule, not a nicety: rows from a
+client's own device are excluded on the way back (relay `excludeOwn`, arbosctl's own-device
+skip), so two replicas behind one device id never see each other's rows, and the box's reply —
+whose ops depend on the user message — sits as a pending Loro import in the probe's replica.
+That showed as "same-chat probe: no row for 150 s" on images 0.1.81 / 0.1.84 (the box had
+answered in 2.7 s) and passed on the images in between by timing alone. Needs `arbosctl` on PATH and ARBOS_RELAY_ADMIN_TOKEN in
 the environment (the deploy worker passes it). Prints one JSON report line; exit 0 = gate held,
 1 = gate failed, 2 = the smoke itself could not run (no verdict).
 
@@ -134,26 +140,28 @@ def main():
     relay = args.relay.rstrip("/")
     work = tempfile.mkdtemp(prefix="busy-reply-smoke-")
     log = open(args.log or os.path.join(work, "stream.log"), "a")
-    device = None
-    token = None
+    devices = []  # (token, device_id), one per arbosctl client
     report = {"ok": None, "relay": relay, "user": args.user, "gate_s": args.gate_seconds}
     try:
-        st, dev = api(relay, admin, "POST", f"/admin/users/{args.user}/devices",
-                      {"name": "busy-reply smoke (deploy worker; revoked at the end)"})
-        if st != 200 and st != 201:
-            report["error"] = f"device mint HTTP {st}"
-            print(json.dumps(report))
-            return 2
-        token, device = dev["access_token"], dev["device_id"]
         cfgs = []
         for name in ("busy", "same", "other"):
+            st, dev = api(relay, admin, "POST", f"/admin/users/{args.user}/devices",
+                          {"name": f"busy-reply smoke {name} (deploy worker; revoked at the end)"})
+            if st != 200 and st != 201:
+                report["error"] = f"device mint HTTP {st}"
+                print(json.dumps(report))
+                return 2
+            devices.append((dev["access_token"], dev["device_id"]))
             d = os.path.join(work, name)
             os.makedirs(d)
             path = os.path.join(d, "arbosctl.json")
             with open(path, "w") as fh:
-                json.dump({"relay_url": relay, "device_token": token, "device_id": device}, fh)
+                json.dump({"relay_url": relay, "device_token": dev["access_token"],
+                           "device_id": dev["device_id"]}, fh)
             os.chmod(path, 0o600)
             cfgs.append(path)
+        token = devices[0][0]
+        report["devices"] = [d for _, d in devices]
         _, projects = api(relay, token, "GET", "/projects")
         projects = projects if isinstance(projects, list) else (projects or {}).get("projects", [])
         if not projects:
@@ -230,9 +238,9 @@ def main():
         print(json.dumps(report))
         return 2
     finally:
-        if token and device:
+        for tok, dev_id in devices:
             try:
-                api(relay, token, "DELETE", f"/auth/devices/{device}")
+                api(relay, tok, "DELETE", f"/auth/devices/{dev_id}")
             except (urllib.error.URLError, urllib.error.HTTPError, OSError):
                 pass
         log.close()
