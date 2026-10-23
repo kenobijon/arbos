@@ -34,8 +34,8 @@ use crate::model::{
     ChatKind, ChoiceOption, Connector, ConnectorAction, ConnectorProvider, ConnectorStatus,
     ConnectorsView, Effort, FieldKind, FormField, Id, Link, LocalDevice, LocalView, Message,
     MessageStatus, Part, Project, QuestionState, Role, Routine, RoutineRun, RoutineRunStatus,
-    RoutineTrigger, Secret, SecretActivity, SecretAgent, SecretRequest, SecretScope, SecretsView,
-    Skill, StatusKind, ToolCall, ToolStatus, TurnKind, Widget,
+    RoutineTrigger, Secret, SecretActivity, SecretAgent, SecretDirector, SecretRequest,
+    SecretScope, SecretsView, Skill, StatusKind, ToolCall, ToolStatus, TurnKind, Widget,
 };
 
 pub const STREAM_FRAME_MS: u64 = arbos_core::STREAM_COMMIT_MS;
@@ -1228,6 +1228,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     vault_name: "Arbos".into(),
                     agents,
                     directors: Vec::new(),
+                    others_ask: "refuse".into(),
                 });
                 view.secrets.sort_by(|a, b| a.env.cmp(&b.env));
             }
@@ -1302,6 +1303,51 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                             note.as_deref().unwrap_or(""),
                         )),
                     }
+                }
+            }
+            emit_secrets(shared);
+        }
+        ClientCommand::SecretPerson {
+            id,
+            user_id,
+            enabled,
+            note,
+        } => {
+            {
+                let mut view = shared.secrets.lock().unwrap();
+                if let Some(s) = view.secrets.iter_mut().find(|s| s.id == id) {
+                    if let Some(d) = s.directors.iter_mut().find(|d| d.user_id == user_id) {
+                        d.enabled = enabled;
+                        d.disabled_at = (!enabled).then(|| now_ms() as i64);
+                        if let Some(n) = note {
+                            d.note = n;
+                        }
+                    }
+                }
+            }
+            emit_secrets(shared);
+        }
+        ClientCommand::SecretPeopleAdd { id, handles } => {
+            {
+                let mut view = shared.secrets.lock().unwrap();
+                if let Some(s) = view.secrets.iter_mut().find(|s| s.id == id) {
+                    for h in handles {
+                        if s.directors.iter().any(|d| d.handle == h) {
+                            continue;
+                        }
+                        if let Some(p) = directory().into_iter().find(|p| p.handle == h) {
+                            s.directors.push(fixture_person(&p, true, "", None));
+                        }
+                    }
+                }
+            }
+            emit_secrets(shared);
+        }
+        ClientCommand::SecretPersonRemove { id, user_id } => {
+            {
+                let mut view = shared.secrets.lock().unwrap();
+                if let Some(s) = view.secrets.iter_mut().find(|s| s.id == id) {
+                    s.directors.retain(|d| d.user_id != user_id);
                 }
             }
             emit_secrets(shared);
@@ -1712,9 +1758,30 @@ fn fixture_agent(project_id: &str, name: &str, enabled: bool, note: &str) -> Sec
     }
 }
 
+/// One People row for the fixture (spec §7.7).
+fn fixture_person(
+    p: &Person,
+    enabled: bool,
+    note: &str,
+    last_asked_ago_ms: Option<i64>,
+) -> SecretDirector {
+    SecretDirector {
+        user_id: p.id.clone(),
+        handle: p.handle.clone(),
+        name: p.name.clone(),
+        avatar_url: Some(p.avatar_url.clone()),
+        note: note.into(),
+        created_at: now_ms() as i64 - 9 * 86_400_000,
+        enabled,
+        disabled_at: (!enabled).then(|| now_ms() as i64 - 2 * 86_400_000),
+        scope: SecretScope::default(),
+        last_asked_at: last_asked_ago_ms.map(|ago| now_ms() as i64 - ago),
+    }
+}
+
 /// Settings → Secrets demo (D83): a Stripe key for Research and Comms, a Mailgun key for Comms,
 /// a GitHub login for Website, one pending request from Comms, recent activity. No value exists
-/// anywhere in the fixture.
+/// anywhere in the fixture. STRIPE_KEY has two people on its list (Sam on, Samir off).
 fn seed_secrets() -> SecretsView {
     let now = now_ms() as i64;
     let secret = |name: &str,
@@ -1739,6 +1806,7 @@ fn seed_secrets() -> SecretsView {
         vault_name: "Arbos".into(),
         agents,
         directors: Vec::new(),
+        others_ask: "refuse".into(),
     };
     let mut stripe = secret(
         "STRIPE_KEY",
@@ -1757,8 +1825,14 @@ fn seed_secrets() -> SecretsView {
         ],
         12,
     );
-    // The iPhone fixture's twin: the Stripe key is a real value in the agents' environment.
+    // The iPhone fixture's twin: the Stripe key is a real value in the agents' environment,
+    // and Sam may ask for it (Samir's row is off).
     stripe.inject_env = true;
+    let dir = directory();
+    stripe.directors = vec![
+        fixture_person(&dir[0], true, "reports only", Some(120_000)),
+        fixture_person(&dir[1], false, "", None),
+    ];
     let secrets = vec![
         stripe,
         secret(
@@ -1800,6 +1874,8 @@ fn seed_secrets() -> SecretsView {
         status: "pending".into(),
         created_at: now - 180_000,
         decided_at: None,
+        asked_by_handle: None,
+        asked_by_name: None,
     }];
     let act = |action: &str,
                name: &str,
@@ -1818,7 +1894,7 @@ fn seed_secrets() -> SecretsView {
         by: by.into(),
         detail: serde_json::json!({}),
     };
-    let activity = vec![
+    let mut activity = vec![
         act(
             "used",
             "STRIPE_KEY",
@@ -1844,6 +1920,8 @@ fn seed_secrets() -> SecretsView {
             4_320,
         ),
     ];
+    // Sam asked Affine for the Stripe key (spec §7.7): the row names who asked.
+    activity[0].detail = serde_json::json!({ "asked_by": SAM_ID, "asked_by_handle": "sam" });
     // One connected 1Password vault (Phase 2), names only — the iPhone fixture's twin. Seeded only
     // with `ARBOS_FIXTURE_VAULT=1` (screenshot rig): the shipped default hides the connect flow
     // (`features.vault_connect` off) and no user has a vault, so the page shows secrets only.

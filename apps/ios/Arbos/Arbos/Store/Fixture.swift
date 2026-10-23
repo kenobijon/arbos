@@ -183,7 +183,9 @@ extension AppModel {
         }
         func secret(_ id: String, _ name: String, _ env: String, _ kind: String, _ note: String, _ hosts: [String], _ agents: [[String: Any]], _ daysAgo: Int64) -> [String: Any] {
             var m: [String: Any] = ["id": id, "name": name, "env": env, "kind": kind, "note": note, "hosts": hosts, "ask_every_time": false,
-                                    "version": 1, "created_at": now - daysAgo * 86_400_000, "vault_name": "Arbos", "agents": agents]
+                                    "inject_env": false, "version": 1, "created_at": now - daysAgo * 86_400_000, "updated_at": now - daysAgo * 86_400_000,
+                                    "vault_name": "Arbos", "ref": "arbos-secret://\(env)/\(kind == "login" ? "password" : "value")",
+                                    "agents": agents, "directors": [], "people": [], "others_ask": "refuse"]
             if daysAgo > 3 { m["last_used_at"] = now - 120_000 }
             if kind == "login" { m["username"] = "unarbos" }
             return m
@@ -199,12 +201,22 @@ extension AppModel {
                             agent("fx-hyper", "Hyper", false, "")]
         var stripe = secret("fx-sec-stripe", "STRIPE_KEY", "STRIPE_KEY", "key", "Stripe live key — refunds and reports. Never for payouts.", ["api.stripe.com"], stripeAgents, 12)
         stripe["inject_env"] = true
+        // The People list (spec §7.7), the Mac fixture's twin: Sam may ask (on), Jen's row is off.
+        stripe["people"] = [
+            ["user_id": "fx-u4", "handle": "sam", "name": "Sam Okafor", "note": "reports only", "created_at": now - 9 * 86_400_000,
+             "enabled": true, "scope": ["kind": "all"], "last_asked_at": now - 120_000],
+            ["user_id": "fx-u2", "handle": "jen", "name": "Jen Park", "note": "", "created_at": now - 9 * 86_400_000,
+             "enabled": false, "disabled_at": now - 2 * 86_400_000, "scope": ["kind": "all"]],
+        ]
+        stripe["others_ask"] = "refuse"
         let mailgun = secret("fx-sec-mailgun", "MAILGUN_API_KEY", "MAILGUN_API_KEY", "key", "Newsletter sends.", ["api.mailgun.net"], [agent("fx-comms", "Comms", true, "send the newsletter")], 5)
         let github = secret("fx-sec-github", "GitHub login", "GITHUB_LOGIN", "login", "The unarbos account, for Actions and reviews.", ["github.com", "*.github.com"], [agent("fx-hyper", "Hyper", true, "review failing Actions runs")], 1)
         let vault: [String: Any] = ["id": "fx-vault-1p", "provider": "onepassword", "name": "Arbos — Research", "items_count": 12, "status": "ok",
                                     "env_items": 1, "limits": ["reads_per_hour": 1000, "reads_used_hour": 3],
                                     "agents": [agent("fx-affine", "Affine", true, "read the Stripe and Postgres items")]]
-        let activity = [act(1, "used", "STRIPE_KEY", ("fx-affine", "Affine"), "api.stripe.com", "agent:affine", 2),
+        var usedBySam = act(1, "used", "STRIPE_KEY", ("fx-affine", "Affine"), "api.stripe.com", "agent:affine", 2)
+        usedBySam["detail"] = ["asked_by": "fx-u4", "asked_by_handle": "sam"]
+        let activity = [usedBySam,
                         act(2, "access_on", "MAILGUN_API_KEY", ("fx-comms", "Comms"), nil, "user:me", 1_440),
                         act(3, "refused", "STRIPE_KEY", ("fx-hyper", "Hyper"), "stripe.evil.example", "agent:hyper", 4_320)]
         // One pending card: shown on the Secrets root and on Comms's page (same rule on the Mac).

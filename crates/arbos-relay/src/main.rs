@@ -801,6 +801,12 @@ async fn main() -> anyhow::Result<()> {
             "/secrets/{id}/access/{project_id}",
             put(secrets::put_access).delete(secrets::delete_access),
         )
+        .route("/secrets/{id}/people", post(secrets::post_director))
+        .route(
+            "/secrets/{id}/people/{director_user_id}",
+            put(secrets::put_director).delete(secrets::delete_director),
+        )
+        // #1041 names, kept one release for clients built before #1442.
         .route("/secrets/{id}/directors", post(secrets::post_director))
         .route(
             "/secrets/{id}/directors/{director_user_id}",

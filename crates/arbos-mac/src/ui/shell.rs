@@ -371,7 +371,10 @@ impl Shell {
                     .update(cx, |input, cx| input.set_text(code, cx));
             }
             let st = state.read(cx);
-            if st.add_members_server.is_some() {
+            if st.add_members_secret.is_some() {
+                this.people_input
+                    .update(cx, |input, _| input.set_placeholder("Search people"));
+            } else if st.add_members_server.is_some() {
                 this.people_input
                     .update(cx, |input, _| input.set_placeholder("Add people"));
             } else if st.add_members_target.is_some() {

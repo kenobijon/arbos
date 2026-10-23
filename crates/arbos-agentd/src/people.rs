@@ -12,7 +12,7 @@
 //! agent should reply (or stay quiet) so the right agent continues the thread — or none do. Each
 //! human message is labelled with the author's display name (falling back to bare handle) and role
 //! (`owner` | `guest`) in the prompt. Guests may direct ordinary work; they may not use the
-//! owner's secrets unless the owner added them under Who can direct for that secret. Agents
+//! owner's secrets unless the owner put them on that secret's People list. Agents
 //! address people by display name, never `@handle`. The owner's credits pay; audit lines carry
 //! `asked_by`.
 
@@ -1027,7 +1027,7 @@ impl Agent {
         };
         let owner_spoken = info.spoken_name_of(&info.owner_user);
         let secrets_rule = if role == "guest" {
-            " Do not use the owner's secrets (egress, browser fill, or real values in the environment) for this person unless they are listed under Who can direct for that secret; if a director note sets a limit, honour it."
+            " Do not use the owner's secrets (egress, browser fill, or real values in the environment) for this person unless they are on that secret's People list (secrets_list shows it); when a secret's others_ask is card, ask through secrets_request and wait for the owner's card instead; if a person's note sets a limit, honour it."
         } else {
             ""
         };
@@ -1088,7 +1088,7 @@ impl Agent {
         );
         self.people.set_current(Some(chat_id));
         Some(format!(
-            "[This message is from {spoken}, a person the owner of this Project invited to work in it with you. Address them by their display name ({spoken}), never as an @handle. They may direct ordinary work here; do not use the owner's secrets for them unless the owner added them under Who can direct for that secret, and honour any director note (for example a daily credit limit).]\n\n"
+            "[This message is from {spoken}, a person the owner of this Project invited to work in it with you. Address them by their display name ({spoken}), never as an @handle. They may direct ordinary work here; do not use the owner's secrets for them unless the owner put them on that secret's People list (or, when its others_ask is card, the owner answered your secrets_request card), and honour any note on their row (for example a daily credit limit).]\n\n"
         ))
     }
 
