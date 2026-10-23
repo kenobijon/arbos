@@ -1375,6 +1375,9 @@ pub struct Agent {
     pub(crate) side_notes: std::sync::Mutex<HashMap<String, Vec<String>>>,
     /// Per chat: when quick-reply model calls were made (rate limit, `status.rs`).
     pub(crate) quick_calls: std::sync::Mutex<HashMap<String, Vec<Instant>>>,
+    /// Per chat: `TurnState::started` of the busy turn we already wrote a status note for
+    /// (at most one note per waiting period; see `status.rs`, #1448).
+    pub(crate) quick_noted: std::sync::Mutex<HashMap<String, Instant>>,
 }
 
 impl Agent {
@@ -1454,6 +1457,7 @@ impl Agent {
             pending_sends: std::sync::atomic::AtomicUsize::new(0),
             side_notes: std::sync::Mutex::new(HashMap::new()),
             quick_calls: std::sync::Mutex::new(HashMap::new()),
+            quick_noted: std::sync::Mutex::new(HashMap::new()),
         })
     }
 
