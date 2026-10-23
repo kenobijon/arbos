@@ -2864,6 +2864,7 @@ async fn perform_room_actions(
         if actions.is_empty() {
             return Ok(reconnect);
         }
+        let mut abort_batch = false;
         for action in actions {
             match action {
                 RoomAction::SendFrame(bytes) => {
@@ -2916,11 +2917,24 @@ async fn perform_room_actions(
                     }
                 }
                 RoomAction::ApplyBytes(bytes) => {
-                    let docs = shared.docs.lock().unwrap();
-                    if let Some(doc) = docs.get(key) {
-                        if let Err(err) = doc.core.doc.import(&bytes) {
-                            eprintln!("relay room {}: import failed: {err}", session.room());
+                    let import_failed = {
+                        let docs = shared.docs.lock().unwrap();
+                        if let Some(doc) = docs.get(key) {
+                            if let Err(err) = doc.core.doc.import(&bytes) {
+                                eprintln!("relay room {}: import failed: {err}", session.room());
+                                true
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
                         }
+                    };
+                    if import_failed {
+                        // Skip the Cursor that follows in this drain; reconnect
+                        // from the last good cursor via apply_failed.
+                        session.apply_failed();
+                        abort_batch = true;
                     }
                 }
                 RoomAction::Cursor(cursor) => {
@@ -3019,6 +3033,9 @@ async fn perform_room_actions(
                         session.room()
                     );
                 }
+            }
+            if abort_batch {
+                break;
             }
         }
     }

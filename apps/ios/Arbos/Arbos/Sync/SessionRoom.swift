@@ -82,6 +82,8 @@ final class SessionRoom {
     private var started = false
     private var stopped = false
     private var isDraining = false
+    /// Stop the current drain batch after a failed row import (skip following Cursor).
+    private var abortDrainBatch = false
 
     private var receiveTask: Task<Void, Never>?
     private var tickTask: Task<Void, Never>?
@@ -291,6 +293,10 @@ final class SessionRoom {
             if actions.isEmpty { return }
             for action in actions {
                 apply(action)
+                if abortDrainBatch {
+                    abortDrainBatch = false
+                    break
+                }
             }
         }
     }
@@ -306,6 +312,10 @@ final class SessionRoom {
                 try doc.importUpdate(bytes)
             } catch {
                 NSLog("relay room \(roomChat): import failed: \(error.localizedDescription)")
+                // Skip the Cursor that follows in this drain; reconnect from the
+                // last good cursor via applyFailed.
+                session.applyFailed()
+                abortDrainBatch = true
             }
         case .cursor(let seq):
             cursor = seq

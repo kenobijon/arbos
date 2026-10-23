@@ -191,6 +191,51 @@ final class SessionRoomTests: XCTestCase {
         room.stop()
     }
 
+    func testFailedRowImportLeavesCursorAndReconnects() async throws {
+        let sockets = SocketFactory()
+        let room = SessionRoom(
+            projectId: "proj",
+            key: "chat",
+            roomChat: "chat",
+            doc: CoreChatDoc(key: "chat"),
+            roomURL: { _ in URL(string: "wss://example.test/r")! },
+            makeSocket: { sockets.make($0) },
+            fetchCheckpoint: { _ in (0, Data()) },
+            cursor: 20,
+            deviceId: { "dev:me" }
+        )
+        room.start()
+        try await waitUntil { sockets.sockets.count == 1 }
+        let sock1 = try XCTUnwrap(sockets.current)
+        sock1.fireOpen()
+        try await waitUntil { !sock1.sent.isEmpty }
+
+        // STATE with no checkpoint → Live + RowsReq.
+        sock1.deliver(try encodeState(checkpointSeq: 0, frontier: Data()))
+        try await waitUntil {
+            sock1.sent.contains { data in
+                (try? decodeFrame(bytes: data))?.ty == .rowsReq
+            }
+        }
+        XCTAssertEqual(room.cursor, 20)
+
+        // ROW whose payload is not a Loro update — import fails.
+        let header = try JSONSerialization.data(
+            withJSONObject: [
+                "seq": Int64(21),
+                "device": "dev:other",
+                "batchId": "batch-bad",
+            ] as [String: Any]
+        )
+        let headerJson = try XCTUnwrap(String(data: header, encoding: .utf8))
+        let badPayload = Data("not-a-loro-update".utf8)
+        sock1.deliver(try encodeFrame(ty: .row, headerJson: headerJson, payload: badPayload))
+
+        try await waitUntil { sockets.sockets.count == 2 }
+        XCTAssertEqual(room.cursor, 20, "failed import must not advance the room cursor")
+        room.stop()
+    }
+
     // MARK: - Helpers
 
     private func encodeState(checkpointSeq: Int64, frontier: Data) throws -> Data {
