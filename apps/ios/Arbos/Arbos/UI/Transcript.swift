@@ -1189,10 +1189,10 @@ final class AvatarImageCache: ObservableObject {
     }
 
     /// Pictures are kept at the largest size a row draws (128 pt hero at 3x).
-    static let maxPixelSize = 384
+    nonisolated static let maxPixelSize = 384
     /// How many of a list's pictures `warm` fetches ahead (several screens of rows;
     /// the rest load as they scroll in).
-    static let warmLimit = 48
+    nonisolated static let warmLimit = 48
 
     /// Start fetching the first `warmLimit` URLs not seen this launch (through the shared URLCache).
     func warm(urls: [String?]) {

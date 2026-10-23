@@ -132,7 +132,7 @@ final class AppModel: ObservableObject {
     @Published var directory: [Person] = []
     private var directoryLoadedAt: Int64 = 0
     /// How long a loaded directory stays fresh before the next `loadDirectory` refetches.
-    static let directoryTtlMs: Int64 = 600_000
+    nonisolated static let directoryTtlMs: Int64 = 600_000
     /// The chat currently on screen; pushes for it never notify while the
     /// scene is active (Mac: `window_active`). Background / lock clears focus
     /// so a reply still pushes a banner.
@@ -1246,13 +1246,13 @@ final class AppModel: ObservableObject {
     }
 
     /// The directory as the store keeps it; nil for an empty list (nothing to restore).
-    static func encodeDirectoryCache(_ list: [Person]) -> Data? {
+    nonisolated static func encodeDirectoryCache(_ list: [Person]) -> Data? {
         guard !list.isEmpty else { return nil }
         return try? JSONEncoder().encode(list)
     }
 
     /// nil when the bytes are not a non-empty list (an older store, or nothing saved).
-    static func decodeDirectoryCache(_ data: Data) -> [Person]? {
+    nonisolated static func decodeDirectoryCache(_ data: Data) -> [Person]? {
         guard let list = try? JSONDecoder().decode([Person].self, from: data), !list.isEmpty else { return nil }
         return list
     }
@@ -1852,7 +1852,7 @@ final class AppModel: ObservableObject {
 
     /// A refresh is due when nothing is loaded yet or the TTL has passed. A restored
     /// (non-empty) directory with no load this launch refetches at once, in the background.
-    static func directoryNeedsRefresh(loadedAt: Int64, now: Int64, isEmpty: Bool) -> Bool {
+    nonisolated static func directoryNeedsRefresh(loadedAt: Int64, now: Int64, isEmpty: Bool) -> Bool {
         isEmpty || now - loadedAt >= directoryTtlMs
     }
 
@@ -1869,7 +1869,7 @@ final class AppModel: ObservableObject {
     }
 
     /// The list to publish after a refresh: nil when it equals what is shown.
-    static func directoryUpdate(current: [Person], fresh: [Person]) -> [Person]? {
+    nonisolated static func directoryUpdate(current: [Person], fresh: [Person]) -> [Person]? {
         fresh == current ? nil : fresh
     }
 
