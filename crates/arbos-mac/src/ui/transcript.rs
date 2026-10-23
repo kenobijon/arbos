@@ -1997,7 +1997,7 @@ impl Transcript {
                         &theme,
                     ));
                 let (row_el, reveal) = self.hover_row(&row.id, now, window, cx);
-                let actions = self.hover_reply_copy(&row.id, &row.message_id, reveal, &theme, cx);
+                let actions = self.hover_rail(&row.id, &row.message_id, reveal, &theme, cx);
                 if mine {
                     // My media sits right; the rail is on its outer (left) edge.
                     div()
