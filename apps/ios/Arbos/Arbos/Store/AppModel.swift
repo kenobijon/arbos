@@ -123,7 +123,8 @@ final class AppModel: ObservableObject {
     @Published var waitlistPosition: Int?
     /// People chats (D72): DMs I am a member of, newest activity first.
     @Published var peopleChats: [PeopleChat] = []
-    /// Chat ids with unread rows (per device, from head_seq > read_seq and pushes).
+    /// Chat ids with unread rows: the relay's per-user `unread` flag plus live rows from
+    /// others that landed while the chat was off screen (never `head_seq > read_seq`, #1438).
     @Published var peopleUnread: Set<String> = []
     @Published private(set) var blocked: [Person] = []
     /// Every Arbos user the relay knows (members + invited), for the New Message sheet.
@@ -838,13 +839,25 @@ final class AppModel: ObservableObject {
     }
 
     func unreadCount(for chat: PeopleChat) -> Int {
-        // On screen: never show a stale remote count (notify can lag behind Loro).
-        if chat.id == visibleChatId { return 0 }
-        let bySeq = Int(max(0, chat.headSeq - chat.readSeq))
-        let local = bySeq > 0 ? bySeq : (peopleUnread.contains(chat.id) ? 1 : 0)
-        // Loro can light peopleUnread before GET /me/unread catches up — never let a
+        Self.peopleUnreadCount(
+            remote: unreadCounts[chat.id],
+            flagged: chat.unread || peopleUnread.contains(chat.id),
+            watching: chat.id == visibleChatId
+        )
+    }
+
+    /// #1438: one read cursor per user, kept by the relay. `remote` is `GET /me/unread`'s
+    /// count for the chat (nil when it lists nothing for it); `flagged` is the relay's
+    /// per-chat `unread` (same cursor) or a live row from someone else that landed while the
+    /// chat was off screen; `watching` = on screen in the foreground. Row sequence numbers
+    /// (`head_seq` / `read_seq`) are not consulted: they counted the user's own rows and
+    /// system lines, which is what painted the false blue dots.
+    nonisolated static func peopleUnreadCount(remote: Int?, flagged: Bool, watching: Bool) -> Int {
+        if watching { return 0 }
+        let local = flagged ? 1 : 0
+        // Loro can light the flag before GET /me/unread catches up — never let a
         // stale remote 0 hide the blue circle / count.
-        if let n = unreadCounts[chat.id] { return max(n, local) }
+        if let n = remote { return max(n, local) }
         return local
     }
 
@@ -1754,11 +1767,13 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// A live Loro row landed while this chat is not on screen: show the blue
-    /// circle immediately and drain `/me/pushes` so the banner does not wait
-    /// for the 15 s registry poll (notify / APNs can lag the row).
+    /// A live Loro row from someone else landed. Chat on screen in the foreground: the
+    /// user has seen it, so the per-user read cursor on the relay advances (#1438) and
+    /// nothing lights. Otherwise: show the blue circle immediately and drain
+    /// `/me/pushes` so the banner does not wait for the 15 s registry poll (notify /
+    /// APNs can lag the row). Own rows and system lines do neither.
     private func noteLiveUnread(chatId: Id) {
-        guard !isWatching(chatId), !isHiddenChat(chatId) else { return }
+        guard !isHiddenChat(chatId) else { return }
         if let last = messages[chatId]?.last {
             if last.pending { return }
             if last.role == .system { return }
@@ -1767,6 +1782,10 @@ final class AppModel: ObservableObject {
             if peopleChat(chatId) == nil, last.role == .user, last.sender == "user" || last.sender.isEmpty {
                 return
             }
+        }
+        if isWatching(chatId) {
+            if peopleChat(chatId) != nil { markPeopleRead(chatId, force: true) } else { markRead(chatId: chatId, force: true) }
+            return
         }
         var changed = false
         if peopleChat(chatId) != nil {
