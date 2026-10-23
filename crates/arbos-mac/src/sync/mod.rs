@@ -131,6 +131,12 @@ pub enum SyncEvent {
         chat_id: Id,
         archived_at: Option<u64>,
     },
+    /// `space_archived` push: another device archived / unarchived a sidebar
+    /// space (an agent or a server) for me.
+    SpaceArchived {
+        space_id: Id,
+        archived_at: Option<u64>,
+    },
     /// `feedback_capture` push: the user's agent is filing feedback and wants a picture of the
     /// screen; the app answers `POST /feedback/capture/{id}` if it is in the foreground.
     /// The relay's `release_published` push: a new build of `platform` is installable.
@@ -653,6 +659,14 @@ pub enum ClientCommand {
     SetMuted {
         space_id: Id,
         muted: bool,
+    },
+    /// Sidebar archive (2026-10-23): `PUT /projects/{id}/archive` or
+    /// `PUT /servers/{id}/archive` `{archived}` — hides the row for me on every
+    /// device; nothing is deleted. People chats use `ArchiveChat`.
+    ArchiveSpace {
+        space_id: Id,
+        server: bool,
+        archived: bool,
     },
     /// Leaf picker (D92): `PATCH /projects/{id} {avatar_leaf: 0–8|null, avatar_leaf_color: 0–9|null}`;
     /// `None` = automatic (derived from the project id).

@@ -110,6 +110,11 @@ pub struct ProjectDto {
     /// `list_projects` shared rows only; `None` omits, `Some(None)` is JSON null.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_handle: Option<Option<String>>,
+    /// `list_projects` for a signed-in device only: archived for this user (sidebar row hidden on
+    /// every device; the agent keeps running). `None` omits, `Some(None)` is JSON null.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[typeshare(serialized_as = "Option<Option<I54>>")]
+    pub archived_at: Option<Option<i64>>,
 }
 
 /// Project chat (`chat_json` / `chat_json_for`).
@@ -1497,6 +1502,18 @@ pub struct ProjectMemberRemovedPayloadDto {
     pub by_handle: String,
 }
 
+/// `space_archived` payload: a sidebar space (agent `project` or `server`) archived for this
+/// user on another device (`archived_at` is null when un-archiving).
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SpaceArchivedPayloadDto {
+    pub space_id: String,
+    /// `project` or `server`.
+    pub kind: String,
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub archived_at: Option<i64>,
+}
+
 /// `chat_archived` payload (`archived_at` is null when un-archiving).
 #[typeshare]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1659,6 +1676,8 @@ pub enum PushEventDto {
     ProjectMemberRemoved(ProjectMemberRemovedPayloadDto),
     #[serde(rename = "chat_archived")]
     ChatArchived(ChatArchivedPayloadDto),
+    #[serde(rename = "space_archived")]
+    SpaceArchived(SpaceArchivedPayloadDto),
     #[serde(rename = "people_invite_accepted")]
     PeopleInviteAccepted(PeopleInviteAcceptedPayloadDto),
     #[serde(rename = "feedback_capture")]

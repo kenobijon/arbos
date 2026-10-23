@@ -1055,6 +1055,19 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             }
             emit_projects(shared);
         }
+        ClientCommand::ArchiveSpace {
+            space_id,
+            server: _,
+            archived,
+        } => {
+            {
+                let mut projects = shared.projects.lock().unwrap();
+                if let Some(p) = projects.iter_mut().find(|p| p.id == space_id) {
+                    p.archived_at = archived.then(now_ms);
+                }
+            }
+            emit_projects(shared);
+        }
         ClientCommand::SetMuted { space_id, muted } => {
             {
                 let mut projects = shared.projects.lock().unwrap();
@@ -1121,6 +1134,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 owner_person: None,
                 machine_info: None,
                 muted: false,
+                archived_at: None,
                 primary_chat: None,
                 voice: None,
                 vision_enabled: true,
@@ -3816,6 +3830,7 @@ fn seed_projects() -> Vec<Project> {
             owner_person: None,
             machine_info: None,
             muted: false,
+            archived_at: None,
             primary_chat: None,
             voice: None,
             vision_enabled: true,
@@ -3849,6 +3864,7 @@ fn seed_projects() -> Vec<Project> {
             owner_person: None,
             machine_info: None,
             muted: false,
+            archived_at: None,
             primary_chat: None,
             voice: None,
             vision_enabled: true,
@@ -3882,6 +3898,7 @@ fn seed_projects() -> Vec<Project> {
             owner_person: None,
             machine_info: None,
             muted: false,
+            archived_at: None,
             primary_chat: None,
             voice: None,
             vision_enabled: true,
@@ -4827,6 +4844,7 @@ fn people_space(id: &str, other: Person, agents: Vec<AgentMember>) -> Project {
         owner_person: None,
         machine_info: None,
         muted: false,
+        archived_at: None,
         primary_chat: None,
         voice: None,
         vision_enabled: true,
@@ -4927,6 +4945,7 @@ fn seed_people_projects() -> Vec<Project> {
             owner_person: None,
             machine_info: None,
             muted: false,
+            archived_at: None,
             primary_chat: None,
             voice: None,
             vision_enabled: true,
