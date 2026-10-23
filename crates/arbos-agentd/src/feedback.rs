@@ -42,9 +42,9 @@ const MAX_ATTACH_BYTES: usize = 15 * 1024 * 1024;
 pub fn tool_specs() -> Vec<Value> {
     vec![json!({
         "name": "submit_feedback",
-        "description": "File the user's feedback or bug report for them. Use it whenever the user asks to submit, send, file or report feedback, a bug, a problem, a crash or a suggestion about this app or about you. By default it captures a picture of the user's current screen from their app; when they already attached or saved a PNG/JPEG for the report, pass image_path instead. It also attaches the recent conversation and your tool calls, errors and timings (scrubbed of secrets), adds platform and version details, and files the report. Returns a reference id to give the user. Call it once per report; do not ask the user to use a menu, settings screen or another channel instead.",
+        "description": "File the user's feedback or bug report for them. Filing is irreversible from this chat (you cannot withdraw a report once filed). Use it when the user asks to submit, send, file or report feedback, a bug, a problem, a crash or a suggestion about this app or about you, and they have said what to report. When they only ask to file with no content (for example \"file a feedback report\"), do not call yet — ask what to include, or propose a one-line description and wait for their yes. By default it captures a picture of the user's current screen from their app; when they already attached or saved a PNG/JPEG for the report, pass image_path instead. It also attaches the recent conversation and your tool calls, errors and timings (scrubbed of secrets), adds platform and version details, and files the report. Returns a reference id to give the user. Call it once per report; do not ask the user to use a menu, settings screen or another channel instead.",
         "inputSchema": { "type": "object", "properties": {
-            "description": { "type": "string", "description": "What the user reported, in their words plus what you observed (what happened, what they expected). Required; ask one short question first only when you have nothing to say here." },
+            "description": { "type": "string", "description": "What the user reported, in their words plus what you observed (what happened, what they expected). Required. When the user has not said what to report, ask them first; do not invent a report from a bare file request." },
             "expected": { "type": "string", "description": "Optional: what should have happened instead." },
             "include_screenshot": { "type": "boolean", "description": "Default true. false when the user says the screen is not relevant. Ignored when image_path is set (the file replaces the live capture)." },
             "image_path": { "type": "string", "description": "Optional path to a PNG or JPEG the user attached or saved for this report (usually under in/). Attaches that file instead of capturing the live screen. Pass it whenever the user provides their own image." }
@@ -388,6 +388,40 @@ async fn request_capture(
     Ok(pick.map(|v| capture_from(&request_id, v)))
 }
 
+/// True when `description` only restates that the user asked to file, with no problem or
+/// suggestion named — the agent must ask what to include before filing (irreversible).
+fn description_lacks_report_content(description: &str) -> bool {
+    let d = description.to_lowercase();
+    if d.contains("no specific details")
+        || d.contains("no details given")
+        || d.contains("nothing specific")
+        || d.contains("no details provided")
+    {
+        return true;
+    }
+    let asks_to_file = (d.contains("asked") || d.contains("wants") || d.contains("asked me"))
+        && (d.contains("file") || d.contains("submit") || d.contains("send"))
+        && (d.contains("feedback") || d.contains("bug report") || d.contains("bug"));
+    if !asks_to_file {
+        return false;
+    }
+    // Meta-only: they asked to file, but the text never names a problem, change, or topic.
+    let has_substance = d.contains(" because ")
+        || d.contains(" about ")
+        || d.contains("expected")
+        || d.contains("should have")
+        || d.contains("instead")
+        || d.contains("broken")
+        || d.contains("crash")
+        || d.contains("bug:")
+        || d.contains("issue:")
+        || d.contains("problem:")
+        || d.contains("analysis")
+        || d.contains("weakness")
+        || d.contains("hole");
+    !has_substance
+}
+
 pub async fn submit_feedback(a: &Arc<Agent>, args: &Value, chat_id: &str) -> Value {
     let description = args
         .get("description")
@@ -398,6 +432,11 @@ pub async fn submit_feedback(a: &Arc<Agent>, args: &Value, chat_id: &str) -> Val
     if description.is_empty() {
         return err_result(
             "description is empty: ask the user one short question about what went wrong or what they want changed (ask_user), then call submit_feedback again with their answer",
+        );
+    }
+    if description_lacks_report_content(&description) {
+        return err_result(
+            "description has no report content: the user asked to file but did not say what to include. Ask one short question about what to report (or propose a one-line description and wait for their yes), then call submit_feedback again with their answer",
         );
     }
     let expected = args
