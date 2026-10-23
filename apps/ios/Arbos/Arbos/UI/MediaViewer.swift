@@ -163,7 +163,7 @@ struct MediaViewer: View {
         .onAppear { if openForward { showForward = true } }
         .sheet(isPresented: $showForward) {
             if let item {
-                ForwardSheet(item: item) { target in
+                ForwardSheet(fromName: item.by, attachmentNote: true) { target in
                     showForward = false
                     model.forward(item, to: target)
                     flash("Forwarded to \(target.title)")
@@ -582,15 +582,26 @@ private struct FilePage: View {
 
 // MARK: - Forward
 
-private struct ForwardSheet: View {
+/// Chat picker for Forward: media viewer and the bubble long-press menu share it.
+struct ForwardSheet: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
-    let item: MediaItem
+    /// Who wrote the original (shown in the attachment-style footer note).
+    let fromName: String
+    /// Media forward: footer mentions the “Forwarded from …” line the attachment travels with.
+    var attachmentNote = false
     let onPick: (ForwardTarget) -> Void
     @State private var query = ""
 
     private var targets: [ForwardTarget] { model.forwardTargets(matching: query) }
+
+    private var footer: String {
+        if attachmentNote {
+            return "Sends it as a new message, “\(MediaAlbum.forwardedPrefix)\(fromName)”."
+        }
+        return "Sends the text as a new message."
+    }
 
     var body: some View {
         NavigationStack {
@@ -614,7 +625,7 @@ private struct ForwardSheet: View {
                     .buttonStyle(.plain)
                     .listRowBackground(theme.bg)
                 }
-                Text("Sends it as a new message, “\(MediaAlbum.forwardedPrefix)\(item.by)”.")
+                Text(footer)
                     .font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
                     .listRowBackground(Color.clear)
             }
@@ -870,6 +881,20 @@ extension AppModel {
                 guard let chat = primaryChat(of: p.id) else { return }
                 send(chatId: chat.id, text: text, attachments: [pending])
             }
+        }
+    }
+
+    /// Bubble long-press → Forward: send the message's text to `target` as a
+    /// new message (no reply quote — it is a fresh send in that chat).
+    func forwardText(_ text: String, to target: ForwardTarget) {
+        let body = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !body.isEmpty else { return }
+        switch target.kind {
+        case .people(let c):
+            sendPeople(chatId: c.id, text: body, replyTo: nil)
+        case .agent(let p):
+            guard let chat = primaryChat(of: p.id) else { return }
+            send(chatId: chat.id, text: body)
         }
     }
 }

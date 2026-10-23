@@ -697,11 +697,15 @@ auto_requests() {
 # often an empty `hotfix:` commit pushed on top of the merge (#1323, #1346), which sits above
 # the request's newest-green commit until its own CI runs, so the whole deployed..origin/main
 # range is scanned, not just deployed..request. Hotfixes skip the coalescing window.
-relay_request_is_hotfix() {
+# The newest revert / hotfix marker on main above the deployed relay commit (subject or body,
+# the auto-stable rule), or nothing. A marker is usually an empty `hotfix:` commit pushed on top
+# of the merge it releases (#1323, #1346, #1464).
+relay_hotfix_marker() {
   local deployed
   deployed="$(deployed_sha relay)"
-  [[ -n "$deployed" ]] && git -C "$REPO" cat-file -e "$deployed^{commit}" 2>/dev/null || return 1
-  git -C "$REPO" log --format='%s%n%b' "$deployed..origin/main" 2>/dev/null | grep -qiE '^(revert|hotfix)\b|\[hotfix\]'
+  [[ -n "$deployed" ]] && git -C "$REPO" cat-file -e "$deployed^{commit}" 2>/dev/null || return 0
+  git -C "$REPO" log --first-parent --format='%H%x09%s%x09%b' "$deployed..origin/main" 2>/dev/null \
+    | grep -iE $'\t(revert|hotfix)\b|\[hotfix\]' | head -1 | cut -f1
 }
 
 # Four relay deploys in 95 minutes caused the 2026-10-22 "Reconnecting..." outage. Hold a relay
@@ -717,8 +721,8 @@ relay_deploy_held() {
     log "relay: $full waited ${age_first}s (RELAY_DEPLOY_MAX_WAIT_S); deploying now"
     return 1
   fi
-  if relay_request_is_hotfix "$full"; then
-    log "relay: $full brings a revert/hotfix commit; skipping the coalescing window"
+  if [[ -n "$RELAY_HOTFIX" ]]; then
+    log "relay: $full carries hotfix marker ${RELAY_HOTFIX:0:8}; skipping the coalescing window once"
     return 1
   fi
   if [[ "$(cat "$STATE/relay.held" 2>/dev/null || true)" != "$full" ]]; then
@@ -811,8 +815,26 @@ handle_request() {
     rm -f "$file"
     return 0
   fi
+  # A hotfix marker above the deployed relay commit means "ship now, once": the deploy must carry
+  # the marker itself, so one deploy covers it and the next request sees no marker and coalesces
+  # again. 17:36-17:49 Oct 23: one marker made three deploys skip the window - the first for a
+  # commit that did not even contain the hotfix (#1494). The marker's tree is a gate-built merge
+  # plus an empty commit, so its own CI run is not waited for (the build is the gate, as for the
+  # release fast path).
+  RELAY_HOTFIX=""
+  if [[ "$kind" == relay ]]; then
+    RELAY_HOTFIX="$(relay_hotfix_marker)"
+    if [[ -n "$RELAY_HOTFIX" ]] && ! git -C "$REPO" merge-base --is-ancestor "$RELAY_HOTFIX" "$full" 2>/dev/null; then
+      log "relay: hotfix marker ${RELAY_HOTFIX:0:8} is above the request; deploying the marker commit instead of $full"
+      full="$RELAY_HOTFIX"
+    fi
+  fi
   state="$(ci_state "$full")"
+  if [[ -n "$RELAY_HOTFIX" && "$state" != failed ]]; then
+    state=hotfix
+  fi
   case "$state" in
+    hotfix) log "$kind: hotfix marker ${RELAY_HOTFIX:0:8} on main; not waiting for its CI (the build is the gate)" ;;
     pending) log "$kind: CI for $full still running; waiting"; return 0 ;;
     failed) log "$kind: CI for $full is red; request dropped (the next green commit will be deployed)"; rm -f "$file"; return 0 ;;
     none)

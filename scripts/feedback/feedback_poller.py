@@ -1841,6 +1841,8 @@ class Loop:
         cleared. Every ready branch re-batches at its current head on the next tick."""
         if active.get("mac_started") and active.get("mac") == "pending":
             self.rust_gate_mac("abort", active["id"])
+        if active.get("ios_started") and active.get("ios") == "pending":
+            self.rust_gate_mac("abort", f"{active['id']}-ios")
         cur.pop("rust_gate", None)
         cur["rust_gate_plan"] = []
         self.store.save_cursor(cur)
@@ -1966,22 +1968,45 @@ class Loop:
                         active["mac_tail"] = body[-4000:]
                         self.store.save_cursor(cur)
                         log(f"Rust gate {active['id']}: Mac half {verdict}")
-        # iOS half: Xcode build (Release + Debug) of the same integration tree, on the Mac.
+        # iOS half: Xcode build (Release + Debug) of the same integration tree, on the Mac — a background run
+        # (rust-gate.sh start-ios / status), polled each tick like the Mac half. It used to run inline over ssh
+        # and held the whole tick for the length of an Xcode build (13 min on 2026-10-23 17:51–18:04: no
+        # pushes registered, no launches, no merges meanwhile). A run older than ios_gate_timeout_s is aborted
+        # and counts as a failure of the batch's tree, never as a hung loop.
         if active.get("ios", "skipped") == "pending" and active["linux"] != "fail" and active["mac"] != "fail":
-            try:
-                ok, out = self.ios_gate(active["branch"], active["tree"])
-            except RuntimeError as e:
-                log(f"Gate {active['id']}: iOS half infrastructure error, retrying next tick: {str(e)[-300:]}")
+            ios_id = f"{active['id']}-ios"
+            if not active.get("ios_started"):
+                if self.rust_gate_mac("start-ios", ios_id, active["branch"], active["tree"]) is not None:
+                    active["ios_started"] = iso()
+                    self.store.save_cursor(cur)
+                    log(f"Gate {active['id']}: iOS half started for {active['tree'][:8]}")
             else:
-                active["ios"] = "ok" if ok else "fail"
-                active["ios_tail"] = out[-5000:]
-                self.store.save_cursor(cur)
-                log(f"Gate {active['id']}: iOS half {active['ios']}")
+                out = self.rust_gate_mac("status", ios_id)
+                if out is not None:
+                    verdict, _, body = out.partition("\n")
+                    verdict = verdict.strip()
+                    waited = (utcnow() - parse_iso(active["ios_started"])).total_seconds()
+                    if verdict == "running" and waited > self.cfg.ios_gate_timeout_s:
+                        self.rust_gate_mac("abort", ios_id)
+                        verdict, body = "fail", body + f"\n(iOS gate timed out after {int(waited)} s; aborted)"
+                    if verdict == "running":
+                        pass
+                    elif verdict == "infra":
+                        log(f"Gate {active['id']}: iOS half infrastructure error, retrying next tick: {body[-300:]}")
+                        active["ios_started"] = None
+                        self.store.save_cursor(cur)
+                    else:
+                        active["ios"] = verdict  # ok | fail
+                        active["ios_tail"] = body[-5000:]
+                        self.store.save_cursor(cur)
+                        log(f"Gate {active['id']}: iOS half {active['ios']}")
         if active["linux"] == "pending" or active["mac"] == "pending" or active.get("ios", "skipped") == "pending":
             if active["linux"] == "fail" or active["mac"] == "fail" or active.get("ios") == "fail":
                 # One half is already red: settle now; a Mac build still running is for a dead tree.
                 if active["mac"] == "pending" and active.get("mac_started"):
                     self.rust_gate_mac("abort", active["id"])
+                if active.get("ios") == "pending" and active.get("ios_started"):
+                    self.rust_gate_mac("abort", f"{active['id']}-ios")
             else:
                 return True
         self.rust_gate_settle(active)
