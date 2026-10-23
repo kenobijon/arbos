@@ -735,6 +735,8 @@ pub async fn patch_project(
         .map_err(internal)?;
     // A rename reaches the box at once (#1431): agentd refreshes the agent's identity (system
     // prompt, per-turn notes, group preludes) instead of waiting for the registry poll.
+    // People-chat clients also refresh (#1481): AgentMember.handle is derived from the live
+    // name, so without `people_chat_updated` mid-group @mentions keep the old slug.
     if let Some(new_name) = b.name.as_deref().map(str::trim) {
         if !new_name.is_empty() && new_name != p.name.trim() {
             let _ = state.db.enqueue_push(
@@ -742,6 +744,7 @@ pub async fn patch_project(
                 "project_renamed",
                 &json!({ "from": p.name, "to": new_name, "at": now_ms() }),
             );
+            crate::people::notify_agent_renamed(&state, &p.id);
         }
     }
     let p = state
@@ -969,6 +972,7 @@ pub(crate) async fn project_dto(state: &AppState, p: &Project) -> ProjectDto {
         my_role: None,
         owner_handle: None,
         archived_at: None,
+        message_grants: crate::agent_messages::grants_dto(state, p).grants,
     }
 }
 
