@@ -750,9 +750,26 @@ struct ChatView: View {
                 .contentShape(Capsule())
             }
             Spacer()
-            // Balance the back circle so the title pill sits on the true centre
-            // (same trick as Hidden chats). Add-person left in 2026-10-20.
-            Color.clear.frame(width: Theme.control, height: Theme.control)
+            // Same-size circle as the back button keeps the title pill centred.
+            Button {
+                if showSearch {
+                    showSearch = false
+                    searchText = ""
+                    searchFocused = false
+                } else {
+                    withAnimation(.easeOut(duration: 0.18)) { showSearch = true }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { searchFocused = true }
+                }
+            } label: {
+                GlassCircle {
+                    Image(systemName: "magnifyingglass")
+                        .font(theme.font(17, weight: .medium))
+                        .foregroundStyle(theme.text)
+                }
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Search in chat")
+            .accessibilityIdentifier("chat-search-button")
         }
         .padding(.horizontal, 16)
         .padding(.top, 6)
