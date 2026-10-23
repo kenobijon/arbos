@@ -92,6 +92,11 @@ extension AppModel {
         ]
         chats = allChats
         messages = allMessages
+        // `ARBOS_FIXTURE_LONG_REPLY=1`: the opened chat ends with a several-block
+        // agent reply, the shape of Jacob's bubble in #1389 (selection / copy rigs).
+        if DebugHooks.fixtureLongReply, let c = DebugHooks.openChat {
+            messages[c, default: []].append(assistant("fx-long", c, Self.longReply, at: now - 60_000))
+        }
         machine = Machine(state: .awake, since: now - 3_600_000, spec: "Daytona · 4 vCPU · 8 GiB · 10 GiB disk · arbos-agent-0.2.0",
                           provider: "daytona", sandboxId: "fixture-box", spendTodayUsd: 1.6, spendCapUsd: 25,
                           workspaces: Dictionary(uniqueKeysWithValues: list.map { ($0.id, $0.id == "fx-comms" ? WorkspaceState.active : .idle) }),
@@ -252,14 +257,7 @@ extension AppModel {
         }
         let request = messages[chatId]?.last(where: { $0.role == .user })?.plainText.lowercased() ?? ""
         let clone = request.contains("pull") || request.contains("clone") || request.contains("subtensor")
-        // "rules" / "long": a several-paragraph answer with a list and a code
-        // span, the shape of Jacob's bubble in #1389 (selection / copy rigs).
-        let long = request.contains("rules") || request.contains("long")
         try? await Task.sleep(nanoseconds: 900_000_000)
-        if long {
-            append(bubble(Self.longReply))
-            return
-        }
         // 1. Ack — one short present-tense sentence, nothing else.
         append(bubble(clone ? "Cloning it now." : "On it."))
         // 2. Working line only (no milestone bubble for a quick clone).
@@ -298,6 +296,8 @@ extension AppModel {
         append(bubble(resultText))
     }
 
+    /// A several-paragraph agent answer with a list and a code span — the shape
+    /// of Jacob's bubble in #1389 (`ARBOS_FIXTURE_LONG_REPLY`, tests).
     static let longReply = """
     I can't see anything in my records that points to an app bug, so I wouldn't blame the app without more evidence.
 
