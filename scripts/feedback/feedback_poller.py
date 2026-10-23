@@ -584,7 +584,10 @@ class GitHub:
     def pending_run_containing(self, workflow: str, sha: str, since_iso: str) -> dict | None:
         """A queued / in-progress run of `workflow` on main (started after `since_iso`) whose commit contains `sha`:
         the build that will carry the fix is still in GitHub's runner queue, so waiting is right."""
-        for status in ("queued", "in_progress"):
+        # `pending` is the status of a run held by the `ios-main` concurrency group (one pending run per
+        # group, #1295): it is the build that will carry the fix as much as a queued one is (04:50 Oct 23:
+        # #1399-followup and #1403 were failed "nothing shipped within 90 min" while their run sat pending).
+        for status in ("queued", "pending", "waiting", "in_progress"):
             q = urllib.parse.urlencode({"branch": "main", "status": status, "created": f">={since_iso}", "per_page": 20})
             for r in self.repo_api("GET", f"/actions/workflows/{workflow}/runs?{q}").get("workflow_runs", []):
                 try:
