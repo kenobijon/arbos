@@ -278,6 +278,14 @@ pub enum Job {
     SyncServer { server_id: String },
     /// C1: make a channel room match its row (members, name, posting rule, parent).
     SyncChannel { channel_id: String },
+    /// A membership notice in a channel ("Jacob added Doug"): an `m.notice` from the server
+    /// owner with `life.arbos.sender: system`, which the apps draw as a centred system line.
+    ChannelNotice {
+        channel_id: String,
+        text: String,
+        /// Stable per notice: the txn id, so a retried job never doubles the line.
+        notice_id: String,
+    },
     /// A device pushed rows: mirror the doc's messages nobody announced (debounced per chat).
     Resync {
         chat_id: String,
@@ -297,7 +305,7 @@ impl Job {
             | Job::Resync { chat_id, .. } => chat_id,
             Job::Pushers { user_id, .. } => user_id,
             Job::SyncServer { server_id } => server_id,
-            Job::SyncChannel { channel_id } => channel_id,
+            Job::SyncChannel { channel_id } | Job::ChannelNotice { channel_id, .. } => channel_id,
         }
     }
 }
@@ -450,6 +458,18 @@ impl Matrix {
             state,
             Job::SyncChannel {
                 channel_id: channel_id.to_owned(),
+            },
+        );
+    }
+
+    /// Membership notice in a channel (#1349); runs after that channel's pending sync.
+    pub fn channel_notice(&self, state: &AppState, channel_id: &str, text: &str) {
+        self.enqueue(
+            state,
+            Job::ChannelNotice {
+                channel_id: channel_id.to_owned(),
+                text: text.to_owned(),
+                notice_id: arbos_core::ids::ulid(),
             },
         );
     }

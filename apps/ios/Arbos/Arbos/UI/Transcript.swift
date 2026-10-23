@@ -90,40 +90,17 @@ struct Row: Identifiable, Equatable {
 }
 
 enum Transcript {
-    /// An agent (or person) who joined a people chat — rendered as a centred "@handle joined" line.
-    struct Join: Equatable {
-        var id: String
-        var handle: String
-        var at: Int64
-    }
-
     /// `me` = my `user:<id>` in a people chat; nil in project chats (every user row is mine).
-    /// `joins` = people-chat membership events (people/agents added mid-chat) merged by time.
+    /// Membership lines ("Jacob added Home, hjkb and Doug") are relay-written system
+    /// messages in the doc (#1349); nothing is synthesised here.
     /// `agentNames`: agent project id → display name from the chat's member list, the
     /// fallback when a reply row carries no `senderName` (older boxes).
-    static func rows(_ messages: [Message], projectId: Id, subagentNames: [String: String] = [:], me: String? = nil, people: Bool = false, joins: [Join] = [], agentNames: [String: String] = [:]) -> [Row] {
+    static func rows(_ messages: [Message], projectId: Id, subagentNames: [String: String] = [:], me: String? = nil, people: Bool = false, agentNames: [String: String] = [:]) -> [Row] {
         var rows: [Row] = []
         var lastAt: Int64 = 0
         // Who spoke last: a name sits above a bubble only when the sender changed or a date
         // line broke the run (Grok Bot's group style).
         var prevSender: String? = nil
-        var pendingJoins = joins.filter { $0.at > 0 && !$0.handle.isEmpty }.sorted { $0.at < $1.at }
-
-        /// Emit join lines whose time is at or before `before` (or all remaining when `before` is nil).
-        func flushJoins(before: Int64?) {
-            while let j = pendingJoins.first {
-                if let before, j.at > before { break }
-                pendingJoins.removeFirst()
-                if j.at > 0 && (lastAt == 0 || j.at - lastAt > 3_600_000) {
-                    rows.append(Row(id: "join-\(j.id)#date", messageId: "join-\(j.id)", role: .system,
-                                    kind: .system(icon: nil, text: dateLabel(j.at), avatarProject: nil)))
-                }
-                rows.append(Row(id: "join-\(j.id)", messageId: "join-\(j.id)", role: .system,
-                                kind: .system(icon: nil, text: "@\(j.handle) joined", avatarProject: nil)))
-                if j.at > 0 { lastAt = j.at }
-            }
-        }
-
         /// Hand-off rows by id (name, messages exchanged), merged into one line when consecutive.
         var handoffs: [String: (String, Int)] = [:]
         for message in messages {
@@ -284,8 +261,6 @@ enum Transcript {
                }) {
                 chunk[ix].reactions = message.reactions
             }
-            // Joins that happened before this message land first (Grok: "@bob joined").
-            if message.createdAt > 0 { flushJoins(before: message.createdAt) }
             // Date separators when the gap is over an hour (Grok: "Today 8:00 AM").
             if dateBreak {
                 rows.append(Row(id: "\(message.id)#date", messageId: message.id, role: .system,
@@ -295,8 +270,6 @@ enum Transcript {
             rows.append(contentsOf: chunk)
             prevSender = message.sender
         }
-        // Agent added after the latest message (the usual "I just added Bob" case).
-        flushJoins(before: nil)
         return Self.mergeHandoffs(rows, handoffs)
     }
 
