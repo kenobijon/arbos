@@ -36,9 +36,10 @@ fn room_version_vector(
     room_name: &str,
 ) -> anyhow::Result<Vec<u8>> {
     use arbos_core::doc::{encode_vv, ChatDoc};
-    let head = state.db.room_state(room_name)?.head;
-    if let Some((h, vv)) = room.vv_cache.lock().unwrap().as_ref() {
-        if *h == head {
+    let st = state.db.room_state(room_name)?;
+    let key = (st.head, st.floor);
+    if let Some((k, vv)) = room.vv_cache.lock().unwrap().as_ref() {
+        if *k == key {
             return Ok(vv.clone());
         }
     }
@@ -59,7 +60,7 @@ fn room_version_vector(
         }
     }
     let vv = encode_vv(&doc.oplog_vv());
-    *room.vv_cache.lock().unwrap() = Some((head, vv.clone()));
+    *room.vv_cache.lock().unwrap() = Some((key, vv.clone()));
     Ok(vv)
 }
 
@@ -337,6 +338,7 @@ async fn handle_frame(
             if !h.device.is_empty() {
                 *device = h.device.clone();
             }
+            crate::room_health::note_hello(room, device, h.cursor);
             send_state(state, project_id, room_name, sink).await?;
         }
         FrameType::RowsReq => {
@@ -369,6 +371,7 @@ async fn handle_frame(
             // a row appended between the store read and now is broadcast live and arrives next,
             // and a client must not move its cursor beyond what it has been sent.
             delivery.catching_up = false;
+            crate::room_health::note_caught_up(room, device, after);
             // The payload is the relay's version vector for the room (checkpoint ∪ rows): a
             // device compares it with its own doc and pushes back what the relay lacks
             // (`PushHeader.heal`), so one complete device heals a room whose rows were lost.
@@ -395,6 +398,7 @@ async fn handle_frame(
                     return Ok(());
                 }
                 delivery.heals += 1;
+                crate::room_health::note_heal(room, device, f.payload.len());
                 tracing::info!(
                     %room_name, %device, bytes = f.payload.len(), batch_id = %p.batch_id,
                     "history heal: a device pushed ops the relay lacked"
