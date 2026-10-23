@@ -188,6 +188,15 @@ pub fn inline_spans(text: &str) -> Vec<Span> {
         .collect()
 }
 
+/// The text `inline_spans` renders, markers removed: what the user sees and
+/// what a selection copies.
+pub fn inline_plain(text: &str) -> String {
+    inline_styled(text)
+        .into_iter()
+        .map(|(text, _, _)| text)
+        .collect()
+}
+
 fn inline_styled(text: &str) -> Vec<Styled> {
     let mut spans: Vec<Styled> = Vec::new();
     let style = InlineStyle::default();

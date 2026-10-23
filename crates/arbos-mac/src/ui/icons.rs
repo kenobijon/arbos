@@ -129,6 +129,11 @@ const ICONS: &[(&str, &str)] = &[
         "reply",
         "<path d=\"M9 14l-5-5 5-5\"/><path d=\"M4 9h9a6 6 0 0 1 6 6v4\"/>"
     ),
+    // Forward (iPhone `arrowshape.turn.up.right`): the media viewer's Forward pill.
+    icon!(
+        "forward",
+        "<path d=\"M15 14l5-5-5-5\"/><path d=\"M20 9h-9a6 6 0 0 0-6 6v4\"/>"
+    ),
     // Speech bubble (iPhone `bubble.left`): the quote header of a reply bubble.
     icon!(
         "bubble",

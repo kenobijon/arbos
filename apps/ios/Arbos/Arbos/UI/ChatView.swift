@@ -33,6 +33,9 @@ struct ChatView: View {
     }()
     static let windowStep = 120
     @State private var showModelPicker = false
+    /// Rig: the media viewer opened by `ARBOS_SHOW=media…` (media-viewer-2026-10-23).
+    @State private var rigViewer: MediaViewerState?
+    @State private var rigViewerForward = false
     @State private var showSettings = false
     /// Rig: `ARBOS_SHOW=agentsecrets` presents the agent's Secrets page (D83).
     @State private var showAgentSecrets = false
@@ -375,6 +378,11 @@ struct ChatView: View {
         .background(InteractivePopGestureEnabler())
         // Full-chat swipes: right → previous agent chat (or Home), left → next (or create), up → archive + previous.
         .simultaneousGesture(chatNavSwipe)
+        .fullScreenCover(item: $rigViewer) { v in
+            MediaViewer(album: v.items, index: v.index, onClose: { rigViewer = nil }, openForward: rigViewerForward)
+                .environmentObject(model)
+                .environment(\.theme, theme)
+        }
         .sheet(isPresented: $showModelPicker, onDismiss: demoDismissed) {
             if let project {
                 ModelPickerView(project: project).environmentObject(model).environment(\.theme, theme)
@@ -500,6 +508,24 @@ struct ChatView: View {
                     case "recording": recorder.start()
                     case "scrollup":
                         if let first = windowedRows.first { withAnimation { scroller?.scrollTo(first.id, anchor: .top) } }
+                    case "media", "media-forward", "media-file":
+                        // Rig (media-viewer-2026-10-23): the viewer on this chat's album at
+                        // ARBOS_MEDIA_INDEX (chat order, default 0), with the Forward sheet
+                        // up for `media-forward`; `media-file` opens the chat's first file.
+                        let slot = isPeople ? "\(peopleSlot):\(chatId)" : projectId
+                        if show == "media-file" {
+                            let file = messages.lazy.flatMap { m in m.parts.compactMap { part -> MediaItem? in
+                                guard case .attachment(let id, let a) = part, MediaAlbum.kind(of: a) == .file else { return nil }
+                                return MediaAlbum.item(id: "\(m.id)#\(id)", message: m, attachment: a, kind: .file, slot: slot,
+                                                       projectName: { model.project($0)?.name })
+                            } }.first
+                            if let file { rigViewer = MediaViewerState(items: [file], index: 0) }
+                        } else {
+                            let album = MediaAlbum.items(messages: messages, slot: slot, projectName: { model.project($0)?.name })
+                            let ix = Int(ProcessInfo.processInfo.environment["ARBOS_MEDIA_INDEX"] ?? "") ?? 0
+                            if !album.isEmpty { rigViewer = MediaViewerState(items: album, index: min(ix, album.count - 1)) }
+                        }
+                        rigViewerForward = show == "media-forward"
                     case "pending":
                         pending = [.init(name: "Q3 board deck v5.pdf", mime: "application/pdf", data: Data()),
                                    .init(name: "Photo Oct 15.jpg", mime: "image/jpeg", data: Data())]
@@ -508,6 +534,16 @@ struct ChatView: View {
                         // Rig: the composer's reply preview on the newest agent message.
                         replyTo = messages.last { $0.role == .assistant && !$0.isStreaming }
                         composerFocused = true
+                    case "reply-long":
+                        // Rig: the preview on a multi-paragraph markdown reply (the shape of
+                        // Jacob's Oct 23 screenshot; fixture only).
+                        #if DEBUG
+                        if model.isFixture {
+                            model.fixtureAppendAssistant(chatId: chatId, text: AppModel.longReview)
+                            replyTo = model.messages[chatId]?.last { $0.role == .assistant }
+                            composerFocused = true
+                        }
+                        #endif
                     case "replied":
                         // Rig: a sent bubble quoting the newest agent message (fixture only).
                         #if DEBUG
@@ -974,7 +1010,7 @@ struct ChatView: View {
     private func isMessageRow(_ row: Row) -> Bool {
         if isChannel { return false }
         switch row.kind {
-        case .system, .question, .error:
+        case .system, .question, .error, .forwardHint:
             return false
         case .user, .other, .member, .assistant, .file, .voiceMemo, .image:
             return messageById[row.messageId] != nil
@@ -1173,24 +1209,50 @@ struct ChatView: View {
 
     // MARK: Composer
 
+    /// The reply preview above the field: one fixed-height row — glyph, "Replying to
+    /// @handle", one truncated line of the quoted message (newlines and markdown
+    /// flattened), × — whatever the original's length ([feedback
+    /// reply-preview-fixed-height]; same bar on the Mac). A quoted picture adds a small
+    /// square thumbnail inside the row.
+    private func replyPreview(_ r: Message) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "arrowshape.turn.up.left").font(.system(size: 12)).foregroundStyle(theme.muted)
+            Text("Replying to \(replyLabel(for: r))").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
+                .lineLimit(1).fixedSize()
+            if let ref = quotedImageRef(r) {
+                ReplyThumb(projectId: projectId, blobRef: ref)
+            }
+            Text(Quote.line(of: r, maxChars: Theme.replyPreviewChars))
+                .font(theme.font(Theme.tiny)).foregroundStyle(theme.text)
+                .lineLimit(1).truncationMode(.tail)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button { replyTo = nil } label: { Image(systemName: "xmark").font(.system(size: 11, weight: .bold)).foregroundStyle(theme.muted) }
+                .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 14)
+        // Full composer width: the same edges as the message field (Jacob, Oct 21).
+        .frame(maxWidth: .infinity)
+        .frame(height: Theme.replyPreviewHeight)
+        .clipped()
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(theme.bubbleAssistant))
+        .accessibilityElement(children: .combine)
+    }
+
+    /// The blob of the first picture on the quoted message, for the preview's thumbnail.
+    private func quotedImageRef(_ m: Message) -> String? {
+        for part in m.parts {
+            if case .attachment(_, let a) = part, a.isImage, let ref = a.blobRef { return ref }
+        }
+        return nil
+    }
+
     private var composer: some View {
         VStack(spacing: 8) {
             if let q = mentionQuery, isPeople, let people {
                 mentionList(people, query: q)
             }
             if let r = replyTo {
-                HStack(spacing: 8) {
-                    Image(systemName: "arrowshape.turn.up.left").font(.system(size: 12)).foregroundStyle(theme.muted)
-                    Text("Replying to \(replyLabel(for: r))").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
-                        .lineLimit(1).fixedSize()
-                    Text(Quote.text(of: r)).font(theme.font(Theme.tiny)).foregroundStyle(theme.text).lineLimit(1)
-                    Spacer()
-                    Button { replyTo = nil } label: { Image(systemName: "xmark").font(.system(size: 11, weight: .bold)).foregroundStyle(theme.muted) }
-                        .buttonStyle(.plain)
-                }
-                .padding(.horizontal, 14).padding(.vertical, 8)
-                // Full composer width: the same edges as the message field (Jacob, Oct 21).
-                .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(theme.bubbleAssistant))
+                replyPreview(r)
             }
             if !pending.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {

@@ -18,6 +18,8 @@ enum DebugHooks {
     /// Seed the connected 1Password vault and the connect flow (`features.vault_connect` on).
     /// Default off, like the shipped relay flag.
     static var fixtureVault: Bool { value("ARBOS_FIXTURE_VAULT") == "1" }
+    /// With `ARBOS_OPEN_CHAT`: that chat ends with a several-block agent reply (#1389 rigs).
+    static var fixtureLongReply: Bool { value("ARBOS_FIXTURE_LONG_REPLY") == "1" }
     /// Join a call seen via presence automatically (two-simulator relay tests).
     static var autoJoinCall: Bool { value("ARBOS_AUTO_JOIN") == "1" }
     /// Accept an incoming call automatically (two-simulator relay tests).

@@ -7,6 +7,7 @@
 //! mid-task), Shift+Enter inserts a newline. The model and reasoning pickers
 //! open from the sidebar row's control-click menu.
 
+use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -23,7 +24,7 @@ use gpui::{
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::app::{decode_image, AppState, ComposerMode};
-use crate::model::CallKind;
+use crate::model::{AttachmentKind, CallKind, Message, Part, Role};
 use crate::ui::callview;
 use crate::ui::frost::{frosted, PANEL_BLUR};
 use crate::ui::glass;
@@ -33,6 +34,7 @@ use crate::ui::theme::{
     Theme, COMPOSER_HEIGHT, LINE_HEIGHT, PANEL_RADIUS, PLUS_BUTTON, SEND_BUTTON, TEXT_BODY,
     TEXT_TINY,
 };
+use crate::ui::transcript;
 use crate::ui::voice::{render_recording_row, Voice, VoiceEvent};
 
 actions!(
@@ -2236,7 +2238,9 @@ impl Render for Composer {
             .flex_col()
             .gap(px(8.0));
 
-        // Reply chip (iPhone parity): set by the hover reply icon on a message.
+        // Reply preview (iPhone parity): set by the hover reply icon / the
+        // bubble menu on a message. Always one fixed-height row, whatever
+        // the quoted message's length ([feedback reply-preview-fixed-height]).
         if let Some(chat_id) = self.state.read(cx).active_chat_id() {
             let reply_id = self
                 .state
@@ -2245,77 +2249,32 @@ impl Render for Composer {
                 .get(&chat_id)
                 .and_then(|ui| ui.reply_to.clone());
             if let Some(reply_id) = reply_id {
-                let (who, preview) =
-                    self.state
-                        .read(cx)
+                let preview = {
+                    let state = self.state.read(cx);
+                    state
                         .messages
                         .get(&chat_id)
                         .and_then(|list| list.iter().find(|m| m.id == reply_id))
-                        .map(|m| {
-                            let who =
-                                m.sender_handle
-                                    .as_deref()
-                                    .map(|h| format!("@{h}"))
-                                    .unwrap_or_else(|| match m.role {
-                                        crate::model::Role::Assistant => "agent".into(),
-                                        crate::model::Role::User => "you".into(),
-                                        crate::model::Role::System
-                                        | crate::model::Role::Project => "message".into(),
-                                    });
-                            let mut preview = m.plain_text();
-                            if preview.chars().count() > 72 {
-                                preview = preview.chars().take(72).collect::<String>() + "…";
-                            }
-                            (who, preview)
-                        })
-                        .unwrap_or_else(|| ("message".into(), String::new()));
+                        .map(|m| ReplyPreview::for_message(m, &state.thumbnails))
+                        .unwrap_or_else(ReplyPreview::missing)
+                };
                 let clear_chat = chat_id.clone();
-                column = column.child(
-                    div()
-                        .id("composer-reply")
-                        .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        // Full composer width: the same left / right edges as the
-                        // message field (Jacob, Oct 21; Grok keeps bars flush).
-                        .w_full()
-                        .px(px(14.0))
-                        .py(px(8.0))
-                        .rounded(px(14.0))
-                        .bg(theme.bubble_assistant)
-                        .child(icon("reply", 12.0, theme.text_muted))
-                        .child(
-                            div()
-                                .text_size(px(TEXT_TINY))
-                                .text_color(theme.text_muted)
-                                .child(format!("Replying to {who}")),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .text_size(px(TEXT_TINY))
-                                .text_color(theme.text)
-                                .truncate()
-                                .child(preview),
-                        )
-                        .child(
-                            div()
-                                .id("composer-reply-clear")
-                                .size(px(18.0))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded_full()
-                                .cursor_pointer()
-                                .hover(|s| s.bg(theme.surface_2))
-                                .child(icon("xmark", 10.0, theme.text_muted))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.state
-                                        .update(cx, |s, cx| s.clear_reply_to(&clear_chat, cx));
-                                })),
-                        ),
-                );
+                let clear = div()
+                    .id("composer-reply-clear")
+                    .size(px(18.0))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.surface_2))
+                    .child(icon("xmark", 10.0, theme.text_muted))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.state
+                            .update(cx, |s, cx| s.clear_reply_to(&clear_chat, cx));
+                    }));
+                column = column.child(reply_preview_bar(&preview, &theme, clear));
             }
         }
 
@@ -2416,6 +2375,298 @@ fn primary_action(has_text: bool, running: bool, recording: bool, guide: bool) -
 /// recording (a hold-to-talk release lands on it).
 fn mic_mounted(has_text: bool, recording: bool) -> bool {
     recording || !has_text
+}
+
+/// The reply preview above the field is always this tall (Jacob, Oct 23:
+/// "reply boxes should always be the same size, not fitted to the message"):
+/// one row — glyph, "Replying to @handle", one truncated line of the quoted
+/// message, × — whatever the original's length. 16 pt line + 2 × 8 pt.
+pub const REPLY_PREVIEW_HEIGHT: f32 = 32.0;
+/// The quoted line is pre-cut to this many characters; the row's own ellipsis
+/// trims it to the width that is left after the label.
+pub const REPLY_PREVIEW_CHARS: usize = 160;
+/// A quoted picture shows as a square thumbnail this big, inside the row.
+pub const REPLY_PREVIEW_THUMB: f32 = 20.0;
+
+/// What the composer's reply preview shows for the quoted message.
+#[derive(Clone)]
+pub struct ReplyPreview {
+    /// "@handle", or "agent" / "you" / "message" when the row has no handle.
+    pub who: String,
+    /// The quoted message on one line (newlines and markdown flattened,
+    /// cut on a word boundary with an ellipsis); its file name when it has
+    /// no prose.
+    pub line: String,
+    /// The quoted picture's thumbnail when the message carries one that is
+    /// already decoded for the transcript.
+    pub thumb: Option<Arc<RenderImage>>,
+}
+
+impl ReplyPreview {
+    pub fn for_message(message: &Message, thumbnails: &HashMap<String, Arc<RenderImage>>) -> Self {
+        let who = message
+            .sender_handle
+            .as_deref()
+            .map(|h| format!("@{h}"))
+            .unwrap_or_else(|| match message.role {
+                Role::Assistant => "agent".into(),
+                Role::User => "you".into(),
+                Role::System | Role::Project => "message".into(),
+            });
+        let thumb = message.parts.iter().find_map(|p| match p {
+            Part::Attachment { attachment, .. } if attachment.kind() == AttachmentKind::Image => {
+                attachment
+                    .blob_ref
+                    .as_deref()
+                    .and_then(|k| thumbnails.get(k).cloned())
+            }
+            _ => None,
+        });
+        Self {
+            who,
+            line: transcript::message_line(message, REPLY_PREVIEW_CHARS),
+            thumb,
+        }
+    }
+
+    /// The quoted message is not loaded (older than the snapshot).
+    pub fn missing() -> Self {
+        Self {
+            who: "message".into(),
+            line: String::new(),
+            thumb: None,
+        }
+    }
+}
+
+/// The fixed-height reply preview row above the field: full composer width
+/// (same edges as the message field — Jacob, Oct 21; Grok keeps bars flush),
+/// [`REPLY_PREVIEW_HEIGHT`] tall, the quoted line on one line with the
+/// ellipsis at its end. `clear` is the × at the right.
+pub fn reply_preview_bar(
+    preview: &ReplyPreview,
+    theme: &Theme,
+    clear: impl IntoElement,
+) -> gpui::Stateful<Div> {
+    let mut row = div()
+        .id("composer-reply")
+        .debug_selector(|| "composer-reply".into())
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .w_full()
+        .h(px(REPLY_PREVIEW_HEIGHT))
+        .flex_shrink_0()
+        .overflow_hidden()
+        .px(px(14.0))
+        .rounded(px(14.0))
+        .bg(theme.bubble_assistant)
+        .child(
+            div()
+                .flex_shrink_0()
+                .child(icon("reply", 12.0, theme.text_muted)),
+        )
+        .child(
+            div()
+                .flex_shrink_0()
+                .whitespace_nowrap()
+                .text_size(px(TEXT_TINY))
+                .text_color(theme.text_muted)
+                .child(format!("Replying to {}", preview.who)),
+        );
+    if let Some(image) = preview.thumb.clone() {
+        row = row.child(
+            img(image)
+                .size(px(REPLY_PREVIEW_THUMB))
+                .flex_shrink_0()
+                .rounded(px(4.0))
+                .object_fit(ObjectFit::Cover),
+        );
+    }
+    // A block (not a flex) slot: GPUI's text only truncates with an ellipsis when
+    // its parent hands it a definite width, which a flex item's max-content
+    // measure pass does not (first cut rendered a hard clip, no "…").
+    row.child(
+        div()
+            .id("composer-reply-line")
+            .debug_selector(|| "composer-reply-line".into())
+            .flex_1()
+            .min_w_0()
+            .text_size(px(TEXT_TINY))
+            .text_color(theme.text)
+            .truncate()
+            .child(preview.line.clone()),
+    )
+    .child(clear)
+}
+
+#[cfg(test)]
+mod reply_preview_tests {
+    //! The reply preview above the composer is one fixed-height row whatever
+    //! the quoted message looks like (Jacob, 2026-10-23: a multi-paragraph
+    //! markdown reply made the bar four lines tall). Rendered headless through
+    //! the same `reply_preview_bar` the composer draws.
+    use gpui::TestAppContext;
+
+    use super::*;
+    use crate::ui::theme::{AppearancePref, Surface};
+
+    fn message(text: &str) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": "m1",
+            "role": "assistant",
+            "status": "done",
+            "senderHandle": "lium",
+            "parts": [{ "kind": "text", "id": "t1", "text": text }],
+        }))
+        .expect("message")
+    }
+
+    const ONE_LINE: &str = "Arbos, from where I sat: the authority held.";
+
+    fn twenty_lines() -> String {
+        let mut text = String::from("Arbos, from where I sat:\n\n**What worked**\n");
+        for i in 1..=17 {
+            text.push_str(&format!(
+                "- Authority held: point {i} of the review, with detail.\n"
+            ));
+        }
+        text
+    }
+
+    struct Bar {
+        text: String,
+    }
+
+    impl gpui::Render for Bar {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let theme = cx.global::<Theme>().clone();
+            let preview = ReplyPreview::for_message(&message(&self.text), &HashMap::new());
+            div()
+                .w(px(852.0))
+                .h(px(300.0))
+                .flex()
+                .flex_col()
+                .child(reply_preview_bar(
+                    &preview,
+                    &theme,
+                    div()
+                        .debug_selector(|| "composer-reply-clear".into())
+                        .size(px(18.0))
+                        .flex_shrink_0(),
+                ))
+        }
+    }
+
+    struct Measured {
+        bar: gpui::Bounds<Pixels>,
+        line: gpui::Bounds<Pixels>,
+        clear: gpui::Bounds<Pixels>,
+    }
+
+    fn measure(cx: &mut TestAppContext, text: String) -> Measured {
+        cx.update(|cx| {
+            if !cx.has_global::<Theme>() {
+                let theme = Theme::for_pref(AppearancePref::Dark, Surface::Matte, cx);
+                cx.set_global(theme);
+            }
+        });
+        let (_view, vcx) = cx.add_window_view(|_, _| Bar { text });
+        vcx.run_until_parked();
+        Measured {
+            bar: vcx.debug_bounds("composer-reply").expect("bar drawn"),
+            line: vcx.debug_bounds("composer-reply-line").expect("line drawn"),
+            clear: vcx
+                .debug_bounds("composer-reply-clear")
+                .expect("clear drawn"),
+        }
+    }
+
+    #[gpui::test]
+    fn the_bar_is_the_same_height_for_one_line_and_twenty(cx: &mut TestAppContext) {
+        let short = measure(cx, ONE_LINE.to_owned());
+        let long = measure(cx, twenty_lines());
+        let short_h: f32 = short.bar.size.height.into();
+        let long_h: f32 = long.bar.size.height.into();
+        assert_eq!(short_h, REPLY_PREVIEW_HEIGHT, "one-line bar height");
+        assert_eq!(long_h, REPLY_PREVIEW_HEIGHT, "twenty-line bar height");
+        assert_eq!(short_h, long_h, "the bar never fits itself to the message");
+        // The text slot is one line inside the bar, for either message.
+        let short_line: f32 = short.line.size.height.into();
+        let long_line: f32 = long.line.size.height.into();
+        assert!(
+            short_line > 0.0 && short_line <= REPLY_PREVIEW_HEIGHT,
+            "{short_line}"
+        );
+        assert_eq!(
+            short_line, long_line,
+            "the twenty-line quote takes one line"
+        );
+    }
+
+    #[gpui::test]
+    fn the_quoted_line_stays_inside_the_bar_whatever_its_length(cx: &mut TestAppContext) {
+        // A quoted line far wider than the bar neither widens the row nor
+        // pushes the × out: the bar is the column's width and the text slot
+        // ends where the × begins, with the text clipped (ellipsis) inside it.
+        let m = measure(cx, twenty_lines());
+        let bar_w: f32 = m.bar.size.width.into();
+        assert!((bar_w - 852.0).abs() <= 1.0, "bar width {bar_w}");
+        let line_right: f32 = (m.line.origin.x + m.line.size.width).into();
+        let clear_left: f32 = m.clear.origin.x.into();
+        let bar_right: f32 = (m.bar.origin.x + m.bar.size.width).into();
+        assert!(
+            line_right <= clear_left + 0.5,
+            "line ends {line_right}, × at {clear_left}"
+        );
+        let clear_right: f32 = (m.clear.origin.x + m.clear.size.width).into();
+        assert!(
+            clear_right <= bar_right - 13.0,
+            "× right {clear_right} inside the 14 pt padding of {bar_right}"
+        );
+    }
+
+    #[test]
+    fn the_quoted_text_is_one_flattened_line_with_an_ellipsis() {
+        let preview = ReplyPreview::for_message(&message(&twenty_lines()), &HashMap::new());
+        assert_eq!(preview.who, "@lium");
+        assert!(!preview.line.contains('\n'), "{:?}", preview.line);
+        assert!(!preview.line.contains("**"), "{:?}", preview.line);
+        assert!(!preview.line.contains("- Authority"), "{:?}", preview.line);
+        assert!(
+            preview
+                .line
+                .starts_with("Arbos, from where I sat: What worked Authority held: point 1"),
+            "{:?}",
+            preview.line
+        );
+        assert!(preview.line.ends_with('…'), "{:?}", preview.line);
+        assert!(preview.line.chars().count() <= REPLY_PREVIEW_CHARS + 1);
+
+        let short = ReplyPreview::for_message(&message(ONE_LINE), &HashMap::new());
+        assert_eq!(short.line, ONE_LINE);
+        assert!(short.thumb.is_none());
+    }
+
+    #[test]
+    fn a_picture_without_prose_names_its_file() {
+        let m: Message = serde_json::from_value(serde_json::json!({
+            "id": "m2",
+            "role": "user",
+            "status": "done",
+            "parts": [{ "kind": "attachment", "id": "a1",
+                        "attachment": { "name": "IMG_0412.jpg", "mime": "image/jpeg", "ref": "blob/x" } }],
+        }))
+        .expect("message");
+        let preview = ReplyPreview::for_message(&m, &HashMap::new());
+        assert_eq!(preview.who, "you");
+        assert_eq!(preview.line, "IMG_0412.jpg");
+        assert!(preview.thumb.is_none(), "no decoded thumbnail yet");
+    }
 }
 
 #[cfg(test)]

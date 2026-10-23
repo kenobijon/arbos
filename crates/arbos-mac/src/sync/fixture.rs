@@ -483,6 +483,41 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 .collect();
             send_user(shared, chat_id, message_id, text, attachments, reply_to);
         }
+        ClientCommand::Forward {
+            chat_id,
+            message_id,
+            attachment,
+            text,
+            ..
+        } => {
+            // No blob store to copy between: the row lands in the destination
+            // chat with the same key, so its picture is already cached.
+            send_user(shared, chat_id, message_id, text, vec![attachment], None);
+        }
+        ClientCommand::OpenAttachment {
+            key,
+            name,
+            quick_look,
+            ..
+        } => {
+            let bytes = if key.ends_with(".png") || name.ends_with(".png") {
+                fixture_png(&key)
+            } else {
+                format!("Fixture attachment {name} ({key}).\n").into_bytes()
+            };
+            let dir = std::env::temp_dir().join("arbos-media");
+            let _ = std::fs::create_dir_all(&dir);
+            let path = dir.join(name.replace('/', "_"));
+            match std::fs::write(&path, &bytes) {
+                Ok(()) => crate::ui::attachments::open_with_system(&path, quick_look),
+                Err(err) => {
+                    let _ = shared
+                        .events
+                        .send(SyncEvent::Notice(format!("Could not open {name}: {err}")));
+                }
+            }
+            let _ = shared.events.send(SyncEvent::AttachmentOpened { key });
+        }
         ClientCommand::Steer {
             chat_id,
             message_id,
@@ -2383,10 +2418,25 @@ const FLOW_ACK: &str = "Cloning it now.";
 const FLOW_ACTIVITIES: &[(&str, u64)] = &[("Cloning RaoFoundation/subtensor", 2200)];
 const FLOW_RESULT: &[&str] = &["Got `subtensor/` on main. What do you want to do with it?"];
 
+/// `ARBOS_FIXTURE_REPLY=long`: the shape of Jacob's Oct 23 screenshot — a
+/// heading, bold labels and bullets over twenty-odd lines.
+const LONG_REVIEW: &str = "Arbos, from where I sat:\n\n**What worked**\n- Authority held: three guest agents deferred to the owner's call every time.\n- The handoff lines read cleanly; nobody asked who was speaking.\n- Replies landed inside two seconds on every box.\n\n**What did not**\n- The group lost the thread twice when two agents answered at once.\n- One attachment never rendered on the phone.\n- The working line stayed up after a stopped turn.\n\n**Next**\n1. Serialize agent replies in groups.\n2. Re-check the attachment pipeline on iPhone.\n3. Clear the working line on stop.\n\nTell me which of these you want first.";
+
 const REPLY_DEFAULT: &[&str] = &[
     "Here is how I would approach it.",
     "- Keep the rail narrow and the tabs flat, so the chat column gets the width.\n- Put the composer at the bottom once a chat has a message; before that, center it so a new tab feels like a blank page.\n- Treat every tool call as a card that folds, so long runs stay readable.",
     "If you want, I can turn this into a short checklist and start on the first item.",
+];
+
+/// "rules" / "long": a several-paragraph answer with a list and a code span,
+/// the shape of Jacob's bubble in #1389 (selection / copy rigs; the iPhone
+/// fixture answers the same words with the same text).
+const REPLY_RULES: &[&str] = &[
+    "I can't see anything in my records that points to an app bug, so I wouldn't blame the app without more evidence.",
+    "The likeliest cause is a prompt that never told the agents to wait for everyone and to keep quiet between turns:",
+    "- post only the number\n- call `I won` only for the lowest\n- wait for every player before the next round",
+    "The app side plays a part too: several agents answer the same message at once, and some of my filings went out before you could stop them.",
+    "Do you want me to post a clear rule summary to the group before the next round?",
 ];
 
 const REPLY_SIMPLE: &[&str] = &[
@@ -2517,6 +2567,9 @@ fn pick_script(text: &str, force_reply: bool) -> Script {
             diff: Some(("crates/arbos-mac/src/ui/rail.rs", 6, 2)),
             summary: ACT_SUMMARY,
         };
+    }
+    if t.contains("rules") || t.contains("long") {
+        return Script::Reply(REPLY_RULES);
     }
     if t.contains("simple") {
         return Script::Reply(REPLY_SIMPLE);
@@ -4161,8 +4214,21 @@ fn seed_chat_docs() -> Vec<ChatDoc> {
             )],
         );
         // `ARBOS_FIXTURE_REPLY=1` (screenshot rig): one reply bubble quoting that answer.
-        if std::env::var("ARBOS_FIXTURE_REPLY").is_ok_and(|v| v == "1") {
-            s.user_replying_to("Which tabs do you mean here?", &last);
+        // `ARBOS_FIXTURE_REPLY=long`: a multi-paragraph markdown review as the last
+        // message, so `ARBOS_REPLY_TO=1` arms the composer's reply preview on it.
+        match std::env::var("ARBOS_FIXTURE_REPLY").as_deref() {
+            Ok("1") => {
+                s.user_replying_to("Which tabs do you mean here?", &last);
+            }
+            Ok("long") => {
+                s.user("How did the review go?");
+                s.assistant(
+                    TurnKind::Reply,
+                    MessageStatus::Done,
+                    vec![text(LONG_REVIEW)],
+                );
+            }
+            _ => {}
         }
     }
     out.push(main);
@@ -4890,6 +4956,14 @@ fn seed_people_chat_docs() -> Vec<ChatDoc> {
             AttachmentKind::Pdf,
             "Press kit v3",
             1_840_000,
+        ),
+        // A clip, so the media viewer's video state (poster + Play) has an item.
+        attachment(
+            "launch-teaser.mp4",
+            "video/mp4",
+            AttachmentKind::Video,
+            "Launch teaser",
+            6_420_000,
         ),
         text_part("Deck, dashboard and the press kit for the run-through."),
     ];
@@ -5882,7 +5956,7 @@ mod seed_parity_tests {
             "User Done user:gh_457 name=Some(\"Samir Haddad\") h=Some(\"samir\") asked=None turn=None wa=false [text] hidden=[] text=93 r=0 dt=0 ct=Some(0)",
             "User Done user:gh_456 name=Some(\"Sam Rivera\") h=Some(\"sam\") asked=None turn=None wa=false [text] hidden=[] text=71 r=0 dt=30000 ct=Some(0)",
             "Assistant Done agent:01J9ARBOS00000000000000000 name=Some(\"Arbos\") h=Some(\"arbos\") asked=Some(\"sam\") turn=None wa=false [text] hidden=[] text=96 r=0 dt=60000 ct=Some(0)",
-            "User Done user:gh_457 name=Some(\"Samir Haddad\") h=Some(\"samir\") asked=None turn=None wa=false [attachment:Slide 4 · signups:Some(212000):Image,attachment:Launch dashboard:Some(348000):Image,attachment:Launch day, the team:Some(1204000):Image,attachment:Signup funnel:Some(156000):Image,attachment:Press kit v3:Some(1840000):Pdf,text] hidden=[] text=54 r=0 dt=80000 ct=Some(0)",
+            "User Done user:gh_457 name=Some(\"Samir Haddad\") h=Some(\"samir\") asked=None turn=None wa=false [attachment:Slide 4 · signups:Some(212000):Image,attachment:Launch dashboard:Some(348000):Image,attachment:Launch day, the team:Some(1204000):Image,attachment:Signup funnel:Some(156000):Image,attachment:Press kit v3:Some(1840000):Pdf,attachment:Launch teaser:Some(6420000):Video,text] hidden=[] text=54 r=0 dt=80000 ct=Some(0)",
             "User Done user:gh_458 name=Some(\"Sara Lind\") h=Some(\"sara\") asked=None turn=None wa=false [text] hidden=[] text=64 r=0 dt=100000 ct=Some(0)",
             "User Done user:gh_458 name=Some(\"Sara Lind\") h=Some(\"sara\") asked=None turn=None wa=false [text] hidden=[] text=55 r=0 dt=120000 ct=Some(0)",
             "Assistant Error agent:01J9ARBOS00000000000000000 name=Some(\"Arbos\") h=Some(\"arbos\") asked=Some(\"sara\") turn=None wa=false [text,error] hidden=[] text=0 r=0 dt=125000 ct=Some(0)",

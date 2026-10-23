@@ -92,6 +92,11 @@ extension AppModel {
         ]
         chats = allChats
         messages = allMessages
+        // `ARBOS_FIXTURE_LONG_REPLY=1`: the opened chat ends with a several-block
+        // agent reply, the shape of Jacob's bubble in #1389 (selection / copy rigs).
+        if DebugHooks.fixtureLongReply, let c = DebugHooks.openChat {
+            messages[c, default: []].append(assistant("fx-long", c, Self.longReply, at: now - 60_000))
+        }
         machine = Machine(state: .awake, since: now - 3_600_000, spec: "Daytona · 4 vCPU · 8 GiB · 10 GiB disk · arbos-agent-0.2.0",
                           provider: "daytona", sandboxId: "fixture-box", spendTodayUsd: 1.6, spendCapUsd: 25,
                           workspaces: Dictionary(uniqueKeysWithValues: list.map { ($0.id, $0.id == "fx-comms" ? WorkspaceState.active : .idle) }),
@@ -124,7 +129,18 @@ extension AppModel {
                     parts: [.text(id: "g1t", text: "Launch checklist is here: https://notion.so/arbos/launch-week")], hiddenCount: 0, senderHandle: "mira-k", senderName: "Mira Kaplan"),
             Message(id: "g2", chatId: "fx-group-launch", role: .user, sender: "user:fx-u4", status: .done, turn: nil, decision: nil, subagentId: nil,
                     subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 2 * 3_600_000, completedAt: nil, pending: false,
-                    parts: [.attachment(id: "g2a", attachment: Attachment(name: "press-kit-v3.pdf", mime: "application/pdf", blobRef: nil))], hiddenCount: 0, senderHandle: "sam", senderName: "Sam Okafor"),
+                    parts: [.attachment(id: "g2a", attachment: Attachment(name: "press-kit-v3.pdf", mime: "application/pdf", blobRef: "fixture-g2a"))], hiddenCount: 0, senderHandle: "sam", senderName: "Sam Okafor"),
+            // Four pictures (same set as the Mac fixture) so the group's Library grid and
+            // the media viewer's album have something to page through (media-viewer-2026-10-23).
+            Message(id: "g2b", chatId: "fx-group-launch", role: .user, sender: "user:fx-u4", status: .done, turn: nil, decision: nil, subagentId: nil,
+                    subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 2 * 3_600_000 + 60_000, completedAt: nil, pending: false,
+                    parts: [.attachment(id: "g2b1", attachment: Attachment(name: "deck-v3-slide-04.png", mime: "image/png", blobRef: "fixture-g2b1", kind: "image")),
+                            .attachment(id: "g2b2", attachment: Attachment(name: "launch-dashboard.png", mime: "image/png", blobRef: "fixture-g2b2", kind: "image")),
+                            .attachment(id: "g2b3", attachment: Attachment(name: "launch-day-team.jpg", mime: "image/jpeg", blobRef: "fixture-g2b3", kind: "image")),
+                            .attachment(id: "g2b4", attachment: Attachment(name: "signup-funnel.png", mime: "image/png", blobRef: "fixture-g2b4", kind: "image")),
+                            .attachment(id: "g2b5", attachment: Attachment(name: "launch-teaser.mp4", mime: "video/mp4", blobRef: "fixture-g2b5", kind: "video")),
+                            .text(id: "g2bt", text: "Deck, dashboard and the press kit for the run-through.")],
+                    hiddenCount: 0, senderHandle: "sam", senderName: "Sam Okafor"),
             Message(id: "g3", chatId: "fx-group-launch", role: .user, sender: "user:fx-u3", status: .done, turn: nil, decision: nil, subagentId: nil,
                     subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 50 * 60_000, completedAt: nil, pending: false,
                     parts: [.text(id: "g3t", text: "And the signup form: https://arbos.life/i/launch")], hiddenCount: 0, senderHandle: "mira-k", senderName: "Mira Kaplan"),
@@ -247,6 +263,41 @@ extension AppModel {
         Task { await fixtureReply(chatId: chatId) }
     }
 
+    /// Rig (`ARBOS_SHOW=reply-long`): one finished agent reply appended as the chat's last
+    /// message, so the composer's reply preview can be armed on a long one.
+    func fixtureAppendAssistant(chatId: Id, text: String) {
+        var list = messages[chatId] ?? []
+        if let i = list.lastIndex(where: { $0.isStreaming }) {
+            list[i].status = .done
+            list[i].parts = [.text(id: "\(list[i].id)-t", text: "Got it.")]
+        }
+        list.append(assistant(newId(), chatId, text, at: nowMs()))
+        messages[chatId] = list
+    }
+
+    /// The shape of Jacob's Oct 23 screenshot — a heading, bold labels and bullets over
+    /// twenty-odd lines (the Mac fixture's `ARBOS_FIXTURE_REPLY=long` carries the same text).
+    static let longReview = """
+    Arbos, from where I sat:
+
+    **What worked**
+    - Authority held: three guest agents deferred to the owner's call every time.
+    - The handoff lines read cleanly; nobody asked who was speaking.
+    - Replies landed inside two seconds on every box.
+
+    **What did not**
+    - The group lost the thread twice when two agents answered at once.
+    - One attachment never rendered on the phone.
+    - The working line stayed up after a stopped turn.
+
+    **Next**
+    1. Serialize agent replies in groups.
+    2. Re-check the attachment pipeline on iPhone.
+    3. Clear the working line on stop.
+
+    Tell me which of these you want first.
+    """
+
     /// Grok Bot reply flow for a cloning exercise: one short ack, a working
     /// line, then a conversational result — no thoughts, no milestone boilerplate.
     private func fixtureReply(chatId: Id) async {
@@ -298,6 +349,22 @@ extension AppModel {
             : "Done. Short replies from now on, and I'll keep anything that goes out on Discord to one or two casual lines in your voice."
         append(bubble(resultText))
     }
+
+    /// A several-paragraph agent answer with a list and a code span — the shape
+    /// of Jacob's bubble in #1389 (`ARBOS_FIXTURE_LONG_REPLY`, tests).
+    static let longReply = """
+    I can't see anything in my records that points to an app bug, so I wouldn't blame the app without more evidence.
+
+    The likeliest cause is a prompt that never told the agents to wait for everyone and to keep quiet between turns:
+
+    - post only the number
+    - call `I won` only for the lowest
+    - wait for every player before the next round
+
+    The app side plays a part too: several agents answer the same message at once, and some of my filings went out before you could stop them.
+
+    Do you want me to post a clear rule summary to the group before the next round?
+    """
 
     private func user(_ id: Id, _ chat: Id, _ text: String, at: Int64) -> Message {
         Message(id: id, chatId: chat, role: .user, sender: "user", status: .done, turn: nil, decision: nil, subagentId: nil,
