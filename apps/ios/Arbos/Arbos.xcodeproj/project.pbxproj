@@ -61,6 +61,7 @@
 		A1D8800000000000000000C2 /* Servers.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D8800000000000000000C1 /* Servers.swift */; };
 		A1D8800000000000000000C4 /* ServerStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D8800000000000000000C3 /* ServerStore.swift */; };
 		A1D8800000000000000000C6 /* ServerChannelsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D8800000000000000000C5 /* ServerChannelsView.swift */; };
+		A1DE700000000000000000B2 /* MentionChips.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1DE700000000000000000B1 /* MentionChips.swift */; };
 		A1D8800000000000000000D2 /* LeafAvatar.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D8800000000000000000D1 /* LeafAvatar.swift */; };
 		A1D8800000000000000000F2 /* MediaViewer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D8800000000000000000F1 /* MediaViewer.swift */; };
 		A115819FE05076AF542EABF0 /* SecretsAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1112911C0D615A9C335C0EF /* SecretsAPI.swift */; };
@@ -179,6 +180,7 @@
 		A1D8800000000000000000C1 /* Servers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Servers.swift; sourceTree = "<group>"; };
 		A1D8800000000000000000C3 /* ServerStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerStore.swift; sourceTree = "<group>"; };
 		A1D8800000000000000000C5 /* ServerChannelsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerChannelsView.swift; sourceTree = "<group>"; };
+		A1DE700000000000000000B1 /* MentionChips.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MentionChips.swift; sourceTree = "<group>"; };
 		A1D8800000000000000000D1 /* LeafAvatar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LeafAvatar.swift; sourceTree = "<group>"; };
 		A1D8800000000000000000F1 /* MediaViewer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaViewer.swift; sourceTree = "<group>"; };
 		A1112911C0D615A9C335C0EF /* SecretsAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecretsAPI.swift; sourceTree = "<group>"; };
@@ -362,6 +364,7 @@
 				A1D8800000000000000000C5,
 				A1D8800000000000000000D1,
 				A1C1E00000000000000000A1 /* PresenceRow.swift */,
+				A1DE700000000000000000B1 /* MentionChips.swift */,
 			);
 			path = UI;
 			sourceTree = "<group>";
@@ -548,6 +551,7 @@
 				A17DC1D0E22C9438EC90011C /* AppModel.swift in Sources */,
 				A1D8800000000000000000C4 /* ServerStore.swift in Sources */,
 				A1D8800000000000000000C6 /* ServerChannelsView.swift in Sources */,
+				A1DE700000000000000000B2 /* MentionChips.swift in Sources */,
 				A1D8800000000000000000D2 /* LeafAvatar.swift in Sources */,
 				A1D8800000000000000000F2 /* MediaViewer.swift in Sources */,
 				A1D0C5B0E1F2A3B4C5D6E703 /* LaunchClock.swift in Sources */,
