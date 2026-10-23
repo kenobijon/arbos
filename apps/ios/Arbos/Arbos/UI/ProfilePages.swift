@@ -276,11 +276,22 @@ struct PaneDangerRow: View {
     let title: String
     let action: () -> Void
 
+    var body: some View { PaneActionRow(title: title, color: theme.danger, action: action) }
+}
+
+/// A centred one-label action in its own card, in the given colour — the
+/// non-destructive twin of `PaneDangerRow` (Unblock in the accent colour).
+struct PaneActionRow: View {
+    @Environment(\.theme) private var theme
+    let title: String
+    let color: Color
+    let action: () -> Void
+
     var body: some View {
         Button(action: action) {
             Text(title)
                 .font(theme.font(Theme.body))
-                .foregroundStyle(theme.danger)
+                .foregroundStyle(color)
                 .frame(maxWidth: .infinity)
                 .frame(minHeight: PaneKit.rowHeight)
                 .contentShape(Rectangle())
@@ -587,6 +598,23 @@ struct ChatItemsList: View {
 
 // MARK: - User page
 
+/// The person pane's footer row (#1545): Block user / Unblock derives from the relay's
+/// block list (`AppModel.blocked`, `GET /blocks`), never from a local flag, so it is right
+/// on pane re-open and app relaunch. The Mac twin is `app.rs` `blocked_entry` /
+/// `user.rs` `block_row_label`.
+enum BlockRow {
+    /// The block-list entry for a person: same non-empty id, else the same handle
+    /// (GitHub logins are case-insensitive).
+    static func entry(in blocked: [Person], id: String, handle: String) -> Person? {
+        blocked.first { b in
+            (!b.id.isEmpty && b.id == id)
+                || (!b.handle.isEmpty && b.handle.caseInsensitiveCompare(handle) == .orderedSame)
+        }
+    }
+
+    static func title(blocked: Bool) -> String { blocked ? "Unblock" : "Block user" }
+}
+
 struct UserProfileView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
@@ -609,6 +637,7 @@ struct UserProfileView: View {
     }
     @State private var fresh: Person?
     private var isMe: Bool { peerId == model.user?.id || person.id == model.user?.id }
+    private var blockedEntry: Person? { BlockRow.entry(in: model.blocked, id: peerId, handle: peerHandle) }
     private var items: [ChatItem] {
         guard let dm else { return [] }
         return ChatMedia.items(messages: model.messages(of: dm.id), slot: "\(peopleSlot):\(dm.id)", model: model)
@@ -639,7 +668,7 @@ struct UserProfileView: View {
                         body: tab == "Links"
                             ? [.custom(AnyView(ChatItemsList(items: items, kind: .link, empty: dm == nil ? "No chat with \(person.displayName) yet." : "No links shared yet.")))]
                             : groupsSections,
-                        footer: isMe ? [] : [.card([AnyView(ProfileLinkRow(title: "Block user", destructive: true) { confirmBlock = true })])]
+                        footer: isMe ? [] : [.card([AnyView(blockRow)])]
                     )
                     Color.clear.frame(height: 40)
                 }
@@ -648,11 +677,12 @@ struct UserProfileView: View {
         }
         .confirmationDialog("Block @\(person.handle)?", isPresented: $confirmBlock, titleVisibility: .visible) {
             Button("Block", role: .destructive) {
+                // The pane stays open: the row flips to Unblock once the relay lists them.
                 if let m = dm?.humans.first(where: isPeer) { model.block(m) } else { model.block(handle: peerHandle) }
-                dismiss()
             }
         } message: { Text("They cannot message you or add you to chats.") }
         .task {
+            await model.refreshBlocks()
             await model.refreshPeople()
             let id = model.personId(handle: person.handle) ?? person.id
             fresh = await model.fetchUser(id)
@@ -666,6 +696,15 @@ struct UserProfileView: View {
                 avatarColorIndex: fresh?.avatarColorIndex ?? person.avatarColorIndex
             )
             sharedProjects = await model.sharedProjects(with: who)
+        }
+    }
+
+    /// Block user (red) or Unblock (accent), from the relay's block list.
+    @ViewBuilder private var blockRow: some View {
+        if let entry = blockedEntry {
+            PaneActionRow(title: BlockRow.title(blocked: true), color: theme.accent) { model.unblock(entry) }
+        } else {
+            PaneDangerRow(title: BlockRow.title(blocked: false)) { confirmBlock = true }
         }
     }
 

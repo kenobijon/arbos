@@ -90,6 +90,8 @@ struct Shared {
     /// Voice memos sent in this session, by blob key (F11; no blob store offline).
     voice_blobs: Mutex<HashMap<String, Arc<Vec<u8>>>>,
     machine: Mutex<Machine>,
+    /// People blocked in this session (the relay's `GET /blocks` stand-in, #1545).
+    blocked: Mutex<Vec<Person>>,
 }
 
 /// What the offline STT "hears" (the bundled test clip says this).
@@ -133,6 +135,7 @@ impl SyncSource for FixtureSource {
                 routine_runs: Mutex::new(seed_routine_runs()),
                 local: Mutex::new(seed_local()),
                 voice_blobs: Mutex::new(HashMap::new()),
+                blocked: Mutex::new(Vec::new()),
                 machine: Mutex::new(Machine {
                     // `ARBOS_FIXTURE_MACHINE=error|waking` seeds a banner state (screenshot rig).
                     state: match std::env::var("ARBOS_FIXTURE_MACHINE").as_deref() {
@@ -482,6 +485,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         | ClientCommand::RemoveMember { .. }
         | ClientCommand::LeaveChat { .. }
         | ClientCommand::BlockUser { .. }
+        | ClientCommand::UnblockUser { .. }
         | ClientCommand::InviteToProject { .. }
         | ClientCommand::RemoveProjectMember { .. }
         | ClientCommand::FetchAvatar { .. }
@@ -2383,6 +2387,11 @@ async fn wake_machine(shared: &Arc<Shared>) {
 fn emit_projects(shared: &Shared) {
     let projects = shared.projects.lock().unwrap().clone();
     let _ = shared.events.send(SyncEvent::Projects(projects));
+}
+
+fn emit_blocked(shared: &Shared) {
+    let blocked = shared.blocked.lock().unwrap().clone();
+    let _ = shared.events.send(SyncEvent::Blocked(blocked));
 }
 
 fn emit_project_docs(shared: &Shared) {
@@ -5732,9 +5741,33 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             true
         }
         ClientCommand::BlockUser { handle } => {
+            let handle = handle.trim().trim_start_matches('@').to_lowercase();
+            let who = directory()
+                .into_iter()
+                .find(|p| p.handle == handle)
+                .unwrap_or_else(|| person("", &handle, None, "member"));
+            {
+                let mut blocked = shared.blocked.lock().unwrap();
+                if !blocked.iter().any(|p| p.handle == who.handle) {
+                    blocked.push(who);
+                }
+            }
             let _ = shared
                 .events
                 .send(SyncEvent::Notice(format!("@{handle} blocked.")));
+            emit_blocked(shared);
+            true
+        }
+        ClientCommand::UnblockUser { user_id, handle } => {
+            shared
+                .blocked
+                .lock()
+                .unwrap()
+                .retain(|p| p.id != *user_id && p.handle != *handle);
+            let _ = shared
+                .events
+                .send(SyncEvent::Notice(format!("@{handle} unblocked.")));
+            emit_blocked(shared);
             true
         }
         ClientCommand::InviteToProject { project_id, handle } => {
