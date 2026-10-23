@@ -1623,14 +1623,22 @@ impl Db {
     /// Announced messages the relay indexed for a chat (`chat_events`).
     pub fn chat_events_count(&self, chat_id: &str) -> Result<i64> {
         self.with(|c| {
-            c.query_row("SELECT COUNT(*) FROM chat_events WHERE chat_id = ?1", params![chat_id], |r| r.get(0))
+            c.query_row(
+                "SELECT COUNT(*) FROM chat_events WHERE chat_id = ?1",
+                params![chat_id],
+                |r| r.get(0),
+            )
         })
     }
 
     /// Messages the Matrix mirror holds for a chat (`matrix_events`).
     pub fn matrix_events_count(&self, chat_id: &str) -> Result<i64> {
         self.with(|c| {
-            c.query_row("SELECT COUNT(*) FROM matrix_events WHERE chat_id = ?1", params![chat_id], |r| r.get(0))
+            c.query_row(
+                "SELECT COUNT(*) FROM matrix_events WHERE chat_id = ?1",
+                params![chat_id],
+                |r| r.get(0),
+            )
         })
     }
 

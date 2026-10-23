@@ -83,10 +83,15 @@ pub struct DocHealth {
 }
 
 /// Rebuild checkpoint + rows and count what applies. Cached on the room by head.
-pub fn doc_health(state: &AppState, room: &crate::state::Room, room_name: &str) -> anyhow::Result<DocHealth> {
+pub fn doc_health(
+    state: &AppState,
+    room: &crate::state::Room,
+    room_name: &str,
+) -> anyhow::Result<DocHealth> {
     let st = state.db.room_state(room_name)?;
-    if let Some((h, cached)) = room.health_cache.lock().unwrap().as_ref() {
-        if *h == st.head {
+    // Keyed on (head, floor): a checkpoint changes the stored doc without moving the head.
+    if let Some((key, cached)) = room.health_cache.lock().unwrap().as_ref() {
+        if *key == (st.head, st.floor) {
             return Ok(cached.clone());
         }
     }
@@ -130,7 +135,7 @@ pub fn doc_health(state: &AppState, room: &crate::state::Room, room_name: &str) 
         rows_bad: bad,
         projected: doc.messages_list().len() as i64,
     };
-    *room.health_cache.lock().unwrap() = Some((st.head, h.clone()));
+    *room.health_cache.lock().unwrap() = Some(((st.head, st.floor), h.clone()));
     Ok(h)
 }
 
@@ -150,8 +155,9 @@ pub async fn health_of(state: &AppState, chat_id: &str, room_name: &str) -> Valu
     let mirror = state.db.matrix_events_count(chat_id).unwrap_or(0);
     let replicas: Vec<Value> = {
         let r = room.replicas.lock().unwrap();
-        let mut v: Vec<(String, ReplicaInfo)> = r.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        v.sort_by(|a, b| b.1.last_seen_at.cmp(&a.1.last_seen_at));
+        let mut v: Vec<(String, ReplicaInfo)> =
+            r.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        v.sort_by_key(|(_, i)| std::cmp::Reverse(i.last_seen_at));
         v.into_iter()
             .map(|(device, i)| {
                 json!({
@@ -229,7 +235,11 @@ pub async fn chat_health(
 ) -> Response {
     let room = if state.db.people_chat(&id).ok().flatten().is_some() {
         if !people::room_access(&state, &principal, &id) {
-            return api_error(StatusCode::FORBIDDEN, "not_member", "you are not in this chat");
+            return api_error(
+                StatusCode::FORBIDDEN,
+                "not_member",
+                "you are not in this chat",
+            );
         }
         people::room_of(&id)
     } else {
@@ -242,4 +252,117 @@ pub async fn chat_health(
         }
     };
     Json(health_of(&state, &id, &room).await).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    //! Health says the truth about a damaged room and about a whole one.
+
+    use arbos_core::doc::{ChatDoc, UserMessageOpts};
+    use arbos_core::ids::{now_ms, ulid};
+
+    use crate::db::Chat;
+    use crate::people::tests_support::{person, project_of};
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    #[tokio::test]
+    async fn health_flags_pending_rows_and_clears_when_whole() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let project = project_of(&state, &alice, "Health");
+        let chat = ulid();
+        state
+            .db
+            .insert_chat(&Chat {
+                id: chat.clone(),
+                project_id: project.clone(),
+                title: "t".into(),
+                is_pinned: false,
+                position: 0,
+                created_at: now_ms(),
+                doc_epoch: 1,
+                kind: "chat".into(),
+                participants: Vec::new(),
+                forked_from: None,
+            })
+            .unwrap();
+        let room = format!("{project}/{chat}");
+        let doc = ChatDoc::new(Some(7), false);
+        let base = doc.oplog_vv();
+        doc.init_meta("c", "p", 1);
+        state
+            .db
+            .append_row(&room, "dev:phone", "meta", &doc.export_updates_since(&base))
+            .unwrap();
+        for i in 0..300 {
+            let before = doc.oplog_vv();
+            doc.append_user_message(
+                &format!("m{i}"),
+                "hi",
+                "dev:phone",
+                &UserMessageOpts::default(),
+            )
+            .unwrap();
+            state
+                .db
+                .append_row(
+                    &room,
+                    "dev:phone",
+                    &format!("b{i}"),
+                    &doc.export_updates_since(&before),
+                )
+                .unwrap();
+        }
+        // Whole: 301 rows, nothing pending, 300 messages.
+        let h = super::health_of(&state, &chat, &room).await;
+        assert_eq!(h["rows"]["pending"], 0);
+        assert_eq!(h["messages"]["projected"], 300);
+        assert_eq!(h["divergent"], false, "{h}");
+
+        // Damage it the way the old relay did: a checkpoint of a replica that had 100 messages
+        // "covers" 200 rows and deletes them.
+        let stale = {
+            let mut d = ChatDoc::new(None, false);
+            for r in state.db.rows_between(&room, 0, 101, 1000).unwrap() {
+                d.import(&r.bytes).unwrap();
+            }
+            d.snapshot()
+        };
+        assert!(state.db.put_checkpoint(&room, 201, &[], &stale).unwrap());
+        let h = super::health_of(&state, &chat, &room).await;
+        assert_eq!(h["rows"]["stored"], 100);
+        assert_eq!(h["rows"]["pending"], 100, "{h}");
+        assert_eq!(h["rows"]["first_pending_seq"], 202);
+        assert_eq!(h["messages"]["projected"], 100);
+        assert_eq!(h["divergent"], true);
+        assert!(h["reasons"][0]
+            .as_str()
+            .unwrap()
+            .contains("do not apply to the rebuilt doc"));
+
+        // A replica tells the relay what it knows; health lists it.
+        let r = state.room(&room).await;
+        super::note_hello(&r, "dev:mac", 150);
+        super::note_caught_up(&r, "dev:mac", 301);
+        super::note_heal(&r, "dev:phone", 4096);
+        let h = super::health_of(&state, &chat, &room).await;
+        let reps = h["replicas"].as_array().unwrap();
+        assert_eq!(reps.len(), 2);
+        let phone = reps.iter().find(|r| r["device"] == "dev:phone").unwrap();
+        assert_eq!(phone["heals"], 1);
+        assert_eq!(phone["ops_beyond_relay_bytes"], 4096);
+        let mac = reps.iter().find(|r| r["device"] == "dev:mac").unwrap();
+        assert_eq!(mac["rows_behind"], 0);
+
+        // The whole doc as the checkpoint (what a heal + the next checkpoint produce): clean again.
+        assert!(state
+            .db
+            .put_checkpoint(&room, 301, &[], &doc.snapshot())
+            .unwrap());
+        let h = super::health_of(&state, &chat, &room).await;
+        assert_eq!(h["rows"]["pending"], 0);
+        assert_eq!(h["messages"]["projected"], 300);
+        assert_eq!(h["divergent"], false, "{h}");
+    }
 }
