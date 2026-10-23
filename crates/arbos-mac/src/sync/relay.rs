@@ -3279,13 +3279,27 @@ fn user_attachment_from_part(att: Attachment) -> UserAttachment {
     }
 }
 
+/// An attachment on its way out: a file from disk, or a blob already on the
+/// relay that is copied into this chat's slot (Forward from the media viewer).
+enum Outgoing {
+    Path(PathBuf),
+    Copy {
+        from_slot: String,
+        attachment: Attachment,
+    },
+}
+
+fn outgoing_paths(paths: Vec<PathBuf>) -> Vec<Outgoing> {
+    paths.into_iter().map(Outgoing::Path).collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn send_message(
     shared: Arc<Shared>,
     chat_id: Id,
     message_id: Id,
     text: String,
-    attachments: Vec<PathBuf>,
+    attachments: Vec<Outgoing>,
     voice_wav: Option<Arc<Vec<u8>>>,
     command: &'static str,
     answer: Option<(String, serde_json::Value)>,
@@ -3302,21 +3316,47 @@ async fn send_message(
         &project_id
     });
     let mut user_attachments: Vec<UserAttachment> = Vec::new();
-    for path in attachments {
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("attachment")
-            .to_string();
+    for outgoing in attachments {
+        let (name, mime, kind, bytes) = match outgoing {
+            Outgoing::Path(path) => {
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("attachment")
+                    .to_string();
+                let mime = mime_for(&path).to_string();
+                let bytes = tokio::fs::read(&path)
+                    .await
+                    .map_err(|err| format!("Could not read {}: {err}", path.display()));
+                (name, mime, None, bytes)
+            }
+            Outgoing::Copy {
+                from_slot,
+                attachment,
+            } => {
+                let bytes = match attachment.blob_ref.as_deref() {
+                    Some(key) => fetch_blob_bytes(&shared, &from_slot, key)
+                        .await
+                        .map(|(_, b)| b)
+                        .map_err(|err| format!("Could not read {}: {err}", attachment.name)),
+                    None => Err(format!("{} has no file on the relay", attachment.name)),
+                };
+                (
+                    attachment.name,
+                    attachment.mime,
+                    attachment.kind.map(attachment_kind_str),
+                    bytes,
+                )
+            }
+        };
         let key = format!("att-{}-{}", new_id().to_lowercase(), safe_name(&name));
-        let mime = mime_for(&path);
-        let blob_ref = match tokio::fs::read(&path).await {
+        let blob_ref = match bytes {
             Ok(bytes) => {
                 let put = shared
                     .http
                     .put(format!("{}/blob/{}/{}", shared.http_url, blob_slot, key))
                     .bearer_auth(shared.token())
-                    .header("content-type", mime)
+                    .header("content-type", mime.clone())
                     .body(bytes)
                     .send()
                     .await;
@@ -3333,14 +3373,14 @@ async fn send_message(
                 }
             }
             Err(err) => {
-                shared.notice(format!("Could not read {}: {err}", path.display()));
+                shared.notice(err);
                 None
             }
         };
         user_attachments.push(UserAttachment {
             name,
-            mime: mime.into(),
-            kind: None,
+            mime,
+            kind,
             blob_ref,
         });
     }
@@ -4354,11 +4394,33 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 chat_id,
                 message_id,
                 text,
-                attachments,
+                outgoing_paths(attachments),
                 None,
                 "send",
                 None,
                 reply_to,
+            ));
+        }
+        ClientCommand::Forward {
+            chat_id,
+            message_id,
+            from_slot,
+            attachment,
+            text,
+        } => {
+            tokio::spawn(send_message(
+                shared.clone(),
+                chat_id,
+                message_id,
+                text,
+                vec![Outgoing::Copy {
+                    from_slot,
+                    attachment,
+                }],
+                None,
+                "send",
+                None,
+                None,
             ));
         }
         ClientCommand::Steer {
@@ -5366,6 +5428,32 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         shared.notice(format!("Couldn't download {name}"));
                     }
                 }
+            });
+        }
+        ClientCommand::OpenAttachment {
+            project_id,
+            key,
+            name,
+            quick_look,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                match fetch_blob_bytes(&shared, &project_id, &key).await {
+                    Ok((_, bytes)) => {
+                        let dir = std::env::temp_dir().join("arbos-media");
+                        let _ = tokio::fs::create_dir_all(&dir).await;
+                        let path = dir.join(safe_name(&name));
+                        match tokio::fs::write(&path, &bytes).await {
+                            Ok(()) => crate::ui::attachments::open_with_system(&path, quick_look),
+                            Err(err) => shared.notice(format!("Could not open {name}: {err}")),
+                        }
+                    }
+                    Err(err) => {
+                        shared.diagnostic("open", format!("{name}: {err}"));
+                        shared.notice(format!("Couldn't open {name}"));
+                    }
+                }
+                let _ = shared.events.send(SyncEvent::AttachmentOpened { key });
             });
         }
         ClientCommand::RefreshConnectors => {

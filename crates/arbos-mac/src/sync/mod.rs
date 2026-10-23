@@ -28,9 +28,9 @@ use crate::model::{
     Voice,
 };
 use crate::model::{
-    BoxState, ChannelsView, Chat, ConnectorsView, Effort, Id, Link, LinkState, LocalView, Machine,
-    Message, NewSecret, Project, ProjectDocView, ProjectSecrets, Routine, RoutineRun,
-    RoutineTrigger, SecretsView, Skill,
+    Attachment, BoxState, ChannelsView, Chat, ConnectorsView, Effort, Id, Link, LinkState,
+    LocalView, Machine, Message, NewSecret, Project, ProjectDocView, ProjectSecrets, Routine,
+    RoutineRun, RoutineTrigger, SecretsView, Skill,
 };
 
 /// Something the source learned; the UI applies it to its mirror.
@@ -224,6 +224,11 @@ pub enum SyncEvent {
     /// An attachment landed in ~/Downloads (F10); the app reveals it.
     AttachmentSaved {
         path: PathBuf,
+    },
+    /// Play / Quick Look from the media viewer finished fetching `key` (handed
+    /// to macOS, or failed with a notice) — the viewer's spinner stops.
+    AttachmentOpened {
+        key: String,
     },
     /// Relay link state (S14), app-wide and coarse.
     Link(Link),
@@ -635,6 +640,24 @@ pub enum ClientCommand {
         project_id: Id,
         key: String,
         name: String,
+    },
+    /// Media viewer: fetch `key` to a temp file and hand it to macOS — Quick
+    /// Look (`qlmanage -p`) for files, the default app (QuickTime Player) for video.
+    OpenAttachment {
+        project_id: Id,
+        key: String,
+        name: String,
+        quick_look: bool,
+    },
+    /// Media viewer → Forward: copy the blob `attachment.blob_ref` from
+    /// `from_slot` into `chat_id`'s slot and write a user row carrying it plus
+    /// `text` ("Forwarded from …"). `message_id` is the optimistic row's id.
+    Forward {
+        chat_id: Id,
+        message_id: Id,
+        from_slot: Id,
+        attachment: Attachment,
+        text: String,
     },
     /// Settings → Connectors opened or asked for a refresh.
     RefreshConnectors,

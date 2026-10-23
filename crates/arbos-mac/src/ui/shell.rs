@@ -16,7 +16,6 @@ use crate::app::SignInMode;
 use crate::app::{AppState, DetailsTarget, ProfilePage, ServerSheet};
 use crate::image_picker;
 use crate::model::{now_ms, CallKind, MachineState};
-use crate::ui::attachments;
 use crate::ui::avatars;
 use crate::ui::callview;
 use crate::ui::channels::{ChannelsEvent, ChannelsPanel};
@@ -29,6 +28,7 @@ use crate::ui::glass::{self, WindowDrag};
 use crate::ui::header;
 use crate::ui::icons::icon;
 use crate::ui::local::{LocalEvent, LocalPanel};
+use crate::ui::media_viewer;
 use crate::ui::member_menu;
 use crate::ui::message_menu;
 use crate::ui::motion::{ease_out_cubic, PulseClock, COMPOSER_DROP_MS, SHAKE_MS};
@@ -178,6 +178,12 @@ pub struct Shell {
     pub(crate) create_group_open: bool,
     /// Sidebar search field.
     pub(crate) search_input: Entity<ComposerInput>,
+    /// The media viewer's Forward picker search field (feedback media-viewer-2026-10-23).
+    pub(crate) viewer_search: Entity<ComposerInput>,
+    /// Keyboard focus while the media viewer is up (← → page, Esc closes).
+    viewer_focus: FocusHandle,
+    /// `AppState::media_viewer_generation` the viewer was last focused for.
+    viewer_focused_generation: u64,
     pub(crate) connectors: Entity<ConnectorsPanel>,
     pub(crate) skills: Entity<SkillsPanel>,
     pub(crate) local: Entity<LocalPanel>,
@@ -429,6 +435,9 @@ impl Shell {
         }
         let search_input = cx.new(ComposerInput::new);
         search_input.update(cx, |input, _| input.set_placeholder("Search"));
+        let viewer_search = cx.new(ComposerInput::new);
+        viewer_search.update(cx, |input, _| input.set_placeholder("Search"));
+        cx.observe(&viewer_search, |_, _, cx| cx.notify()).detach();
         cx.observe(&pairing_input, |_, _, cx| cx.notify()).detach();
         cx.observe(&project_input, |_, _, cx| cx.notify()).detach();
         cx.observe(&search_input, |_, _, cx| cx.notify()).detach();
@@ -669,6 +678,9 @@ impl Shell {
             create_leaf_color: None,
             create_group_open,
             search_input,
+            viewer_search,
+            viewer_focus: cx.focus_handle(),
+            viewer_focused_generation: 0,
             connectors,
             skills,
             local,
@@ -1611,9 +1623,16 @@ impl Shell {
     /// Escape stops a recording memo (keeping its transcript), then closes
     /// whatever floats: menus, then sheets.
     fn escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
-        if self.state.read(cx).image_preview_open() {
-            self.state.update(cx, |s, cx| s.close_image_preview(cx));
-            Composer::focus(&self.composer, window, cx);
+        if let Some(viewer) = self.state.read(cx).media_viewer.as_ref() {
+            // Esc closes the Forward picker first, then the viewer.
+            if viewer.forward_open {
+                self.state
+                    .update(cx, |s, cx| s.media_viewer_toggle_forward(cx));
+                window.focus(&self.viewer_focus, cx);
+            } else {
+                self.state.update(cx, |s, cx| s.close_media_viewer(cx));
+                Composer::focus(&self.composer, window, cx);
+            }
             return;
         }
         if self.voice.update(cx, |v, cx| v.escape(cx)) {
@@ -3184,8 +3203,9 @@ impl Render for Shell {
         let sidebar_hidden = state.rail_collapsed || state.window_is_narrow(width);
         let sidebar_overlay = sidebar_hidden && state.sidebar_overlay;
         let details = state.details_open.clone();
-        let image_preview = state.image_preview.clone();
-        let image_preview_pending = state.image_preview_open() && image_preview.is_none();
+        let viewer_open = state.media_viewer.is_some();
+        let viewer_forward_open = state.media_viewer.as_ref().is_some_and(|v| v.forward_open);
+        let viewer_generation = state.media_viewer_generation;
         let pairing = state.pairing.clone();
         let new_chat_open = state.new_chat_open;
         let people_space = state.selected().filter(|p| p.is_people()).cloned();
@@ -3446,12 +3466,32 @@ impl Render for Shell {
         if self.feedback.read(cx).is_open() {
             root = root.child(self.feedback.clone());
         }
-        if image_preview.is_some() || image_preview_pending {
-            root = root.child(attachments::preview_overlay(
-                image_preview,
-                self.state.clone(),
-                &theme,
-            ));
+        if viewer_open {
+            // Focus moves into the viewer once per opening (← → page, Esc
+            // closes); the Forward picker's search field takes it while it is up.
+            if self.viewer_focused_generation != viewer_generation {
+                self.viewer_focused_generation = viewer_generation;
+                self.viewer_search.update(cx, |input, cx| input.clear(cx));
+                window.focus(&self.viewer_focus, cx);
+            }
+            let search = self.viewer_search.read(cx).focus_handle(cx);
+            if viewer_forward_open {
+                if !search.is_focused(window) {
+                    window.focus(&search, cx);
+                }
+            } else if search.is_focused(window) {
+                window.focus(&self.viewer_focus, cx);
+            }
+            root = root.child(media_viewer::overlay(self, &self.viewer_focus, cx));
+        } else if self.viewer_focus.is_focused(window)
+            || self
+                .viewer_search
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window)
+        {
+            // Closed by × / the backdrop / Forward: typing goes back to the composer.
+            Composer::focus(&self.composer, window, cx);
         }
         // Collapsed video call: the camera keeps showing in a draggable tile.
         let collapsed_video = self

@@ -20,6 +20,9 @@ struct ChatView: View {
     @State private var draft = ""
     @State private var rows: [Row] = []
     @State private var showModelPicker = false
+    /// Rig: the media viewer opened by `ARBOS_SHOW=media…` (media-viewer-2026-10-23).
+    @State private var rigViewer: MediaViewerState?
+    @State private var rigViewerForward = false
     @State private var showSettings = false
     /// Rig: `ARBOS_SHOW=agentsecrets` presents the agent's Secrets page (D83).
     @State private var showAgentSecrets = false
@@ -329,6 +332,11 @@ struct ChatView: View {
         .background(InteractivePopGestureEnabler())
         // Full-chat swipes: right → previous agent chat (or Home), left → next (or create), up → archive + previous.
         .simultaneousGesture(chatNavSwipe)
+        .fullScreenCover(item: $rigViewer) { v in
+            MediaViewer(album: v.items, index: v.index, onClose: { rigViewer = nil }, openForward: rigViewerForward)
+                .environmentObject(model)
+                .environment(\.theme, theme)
+        }
         .sheet(isPresented: $showModelPicker, onDismiss: demoDismissed) {
             if let project {
                 ModelPickerView(project: project).environmentObject(model).environment(\.theme, theme)
@@ -399,6 +407,7 @@ struct ChatView: View {
             }
         }
         .onAppear {
+            LaunchClock.mark("chat-appear", detail: "messages=\(messages.count)")
             model.markRead(chatId: chatId)
             model.visibleChatId = chatId
             // Restore unsent text left when the user backed out of this thread.
@@ -453,6 +462,24 @@ struct ChatView: View {
                     case "recording": recorder.start()
                     case "scrollup":
                         if let first = rows.first { withAnimation { scroller?.scrollTo(first.id, anchor: .top) } }
+                    case "media", "media-forward", "media-file":
+                        // Rig (media-viewer-2026-10-23): the viewer on this chat's album at
+                        // ARBOS_MEDIA_INDEX (chat order, default 0), with the Forward sheet
+                        // up for `media-forward`; `media-file` opens the chat's first file.
+                        let slot = isPeople ? "\(peopleSlot):\(chatId)" : projectId
+                        if show == "media-file" {
+                            let file = messages.lazy.flatMap { m in m.parts.compactMap { part -> MediaItem? in
+                                guard case .attachment(let id, let a) = part, MediaAlbum.kind(of: a) == .file else { return nil }
+                                return MediaAlbum.item(id: "\(m.id)#\(id)", message: m, attachment: a, kind: .file, slot: slot,
+                                                       projectName: { model.project($0)?.name })
+                            } }.first
+                            if let file { rigViewer = MediaViewerState(items: [file], index: 0) }
+                        } else {
+                            let album = MediaAlbum.items(messages: messages, slot: slot, projectName: { model.project($0)?.name })
+                            let ix = Int(ProcessInfo.processInfo.environment["ARBOS_MEDIA_INDEX"] ?? "") ?? 0
+                            if !album.isEmpty { rigViewer = MediaViewerState(items: album, index: min(ix, album.count - 1)) }
+                        }
+                        rigViewerForward = show == "media-forward"
                     case "pending":
                         pending = [.init(name: "Q3 board deck v5.pdf", mime: "application/pdf", data: Data()),
                                    .init(name: "Photo Oct 15.jpg", mime: "image/jpeg", data: Data())]
@@ -803,6 +830,7 @@ struct ChatView: View {
                                 highlighted: highlightedMessage == row.messageId)
                             .padding(.top, gap(before: i))
                             .id(row.id)
+                            .onAppear { LaunchClock.mark("chat-first-row", detail: "rows=\(rows.count) messages=\(messages.count)") }
                             .contextMenu {
                                 MessageMenuContent(items: MessageMenu.items(forMessage: isMessageRow(row))) { item in
                                     runMessageMenu(item, row: row)
@@ -921,7 +949,7 @@ struct ChatView: View {
     private func isMessageRow(_ row: Row) -> Bool {
         if isChannel { return false }
         switch row.kind {
-        case .system, .question, .error:
+        case .system, .question, .error, .forwardHint:
             return false
         case .user, .other, .member, .assistant, .file, .voiceMemo, .image:
             return messages.contains { $0.id == row.messageId }
