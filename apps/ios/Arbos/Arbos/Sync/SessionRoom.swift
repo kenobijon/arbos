@@ -371,7 +371,11 @@ final class SessionRoom {
             applyFetchCheckpoint(room: room, frontier: frontier)
         case .applyBytes(let bytes):
             do {
-                try doc.importUpdate(bytes)
+                // Parked (dependencies missing): the session keeps the persisted cursor
+                // below this row so a relaunch re-requests it (#1540 follow-up).
+                if try doc.importUpdateReportingPending(bytes) {
+                    session.applyPending()
+                }
             } catch {
                 NSLog("relay room \(roomChat): import failed: \(error.localizedDescription)")
                 // Skip the Cursor that follows in this drain; reconnect from the

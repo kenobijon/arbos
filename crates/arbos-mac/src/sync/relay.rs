@@ -3100,19 +3100,28 @@ async fn perform_room_actions(
                     }
                 }
                 RoomAction::ApplyBytes(bytes) => {
-                    let import_failed = {
+                    // (failed, parked): parked = Loro holds the ops until their dependencies
+                    // arrive; the session keeps the persisted cursor below that row.
+                    let (import_failed, parked) = {
                         let docs = shared.docs.lock().unwrap();
                         if let Some(doc) = docs.get(key) {
-                            if let Err(err) = doc.core.doc.import(&bytes) {
-                                eprintln!("relay room {}: import failed: {err}", session.room());
-                                true
-                            } else {
-                                false
+                            match doc.core.doc.import(&bytes) {
+                                Ok(status) => (false, status.pending.is_some()),
+                                Err(err) => {
+                                    eprintln!(
+                                        "relay room {}: import failed: {err}",
+                                        session.room()
+                                    );
+                                    (true, false)
+                                }
                             }
                         } else {
-                            false
+                            (false, false)
                         }
                     };
+                    if parked {
+                        session.apply_pending();
+                    }
                     if import_failed {
                         // Skip the Cursor that follows in this drain; reconnect
                         // from the last good cursor via apply_failed.
