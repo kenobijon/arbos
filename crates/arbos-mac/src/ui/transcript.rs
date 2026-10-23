@@ -355,11 +355,15 @@ pub enum RowKind {
     /// S18: draft-and-approve card.
     Approval {
         view: ApprovalView,
+        /// People chat: the card sits after the sender's avatar lane, like its bubble.
+        lane: bool,
     },
     /// Error: one line, red glyph, Retry.
     /// A typed question widget (design §10): rendered by a [`QuestionCard`] view.
     Question {
         question_id: String,
+        /// People chat: the card sits after the sender's avatar lane, like its bubble.
+        lane: bool,
     },
     Error {
         code: String,
@@ -769,9 +773,9 @@ impl Transcript {
         self.veils
             .retain(|id, _| new_rows.iter().any(|r| r.id == *id));
         self.cards.retain(|qid, _| {
-            new_rows
-                .iter()
-                .any(|r| matches!(&r.kind, RowKind::Question { question_id } if question_id == qid))
+            new_rows.iter().any(
+                |r| matches!(&r.kind, RowKind::Question { question_id, .. } if question_id == qid),
+            )
         });
 
         if chat_changed {
@@ -1842,7 +1846,7 @@ impl Transcript {
             RowKind::AskUser { text } => {
                 cards::status_row(StatusKind::AskUser, &text, false, &theme, cx).into_any_element()
             }
-            RowKind::Question { question_id } => {
+            RowKind::Question { question_id, lane } => {
                 let Some(chat_id) = self.chat_id.clone() else {
                     return div().into_any_element();
                 };
@@ -1872,14 +1876,9 @@ impl Transcript {
                         cx.new(|cx| QuestionCard::new(state, chat_id, question_id, &widget, cx))
                     })
                     .clone();
-                // Grok: the card is as wide as the assistant block.
-                div()
-                    .w_full()
-                    .flex()
-                    .child(assistant_slot(card))
-                    .into_any_element()
+                card_row(card, lane).into_any_element()
             }
-            RowKind::Approval { view } => {
+            RowKind::Approval { view, lane } => {
                 let chat_id = self.chat_id.clone().unwrap_or_default();
                 let approval_id = view.approval_id.clone();
                 let (state_a, chat_a, id_a) =
@@ -1904,11 +1903,7 @@ impl Transcript {
                         });
                     },
                 );
-                div()
-                    .w_full()
-                    .flex()
-                    .child(assistant_slot(card))
-                    .into_any_element()
+                card_row(card, lane).into_any_element()
             }
             RowKind::Error { code, message } => {
                 let state = self.state.clone();
@@ -2034,6 +2029,19 @@ fn assistant_slot(bubble: impl IntoElement) -> Div {
         .items_center()
         .debug_selector(|| "chat-bubble-slot".into())
         .child(bubble)
+}
+
+/// A question / approval card is a transcript row like a bubble (#1374, #1440 follow-up): the
+/// same left edge as an incoming bubble — after the sender's avatar lane in a people chat — and
+/// the same cap width (`assistant_slot`). The lane is left empty: the card belongs to the
+/// agent's run and the disc already sits on its bubble.
+pub fn card_row(card: impl IntoElement, lane: bool) -> Div {
+    div()
+        .w_full()
+        .flex()
+        .when(lane, |el| el.pl(px(SENDER_LANE)))
+        .debug_selector(|| "chat-card-row".into())
+        .child(assistant_slot(card))
 }
 
 fn relative_width(fraction: f32) -> gpui::DefiniteLength {
@@ -2632,6 +2640,7 @@ pub fn build_rows(
                                 message_id: message.id.clone(),
                                 kind: RowKind::Question {
                                     question_id: question_id.clone(),
+                                    lane: lane.is_some(),
                                 },
                             }),
                             None => rows.push(Row {
@@ -2673,7 +2682,10 @@ pub fn build_rows(
                                 ),
                                 id: format!("{}#{}", message.id, id),
                                 message_id: message.id.clone(),
-                                kind: RowKind::Approval { view },
+                                kind: RowKind::Approval {
+                                    view,
+                                    lane: lane.is_some(),
+                                },
                             });
                         }
                         Part::Status {
@@ -3905,6 +3917,17 @@ mod layout_tests {
                 queued: false,
             };
             let row_over_pill = presence::row(presence, &theme, cx).into_any_element();
+            // A question / approval card, framed by the real `card_row`: in an agent chat (no
+            // lane) and in a people chat (lane) — a card that wants more than any pane has.
+            let card = |sel: &'static str| {
+                div()
+                    .debug_selector(move || sel.into())
+                    .max_w_full()
+                    .min_w_0()
+                    .child(div().w(px(4000.0)).h(px(CHAT_LINE_HEIGHT)))
+            };
+            let card_plain = card_row(card("test-card"), false).into_any_element();
+            let card_people = card_row(card("test-people-card"), true).into_any_element();
             div()
                 .w(px(self.pane))
                 .h(px(400.0))
@@ -3912,6 +3935,8 @@ mod layout_tests {
                 .flex_col()
                 .child(column_row(row))
                 .child(column_row(people_row))
+                .child(column_row(card_plain))
+                .child(column_row(card_people))
                 .child(column_row(row_over_pill))
                 .child(column_row(pill))
         }
@@ -3935,6 +3960,8 @@ mod layout_tests {
         disc: gpui::Bounds<Pixels>,
         people_bubble_left: f32,
         composer_text_left: f32,
+        card: gpui::Bounds<gpui::Pixels>,
+        people_card: gpui::Bounds<gpui::Pixels>,
     }
 
     fn measure(cx: &mut TestAppContext, pane: f32) -> Edges {
@@ -3979,6 +4006,10 @@ mod layout_tests {
         let composer_text = vcx
             .debug_bounds("test-composer-text")
             .expect("composer text drawn");
+        let card = vcx.debug_bounds("test-card").expect("card drawn");
+        let people_card = vcx
+            .debug_bounds("test-people-card")
+            .expect("people card drawn");
         Edges {
             bubble_left: bubble.origin.x.into(),
             bubble_width: bubble.size.width.into(),
@@ -3997,6 +4028,43 @@ mod layout_tests {
             disc,
             people_bubble_left: people_bubble.origin.x.into(),
             composer_text_left: composer_text.origin.x.into(),
+            card,
+            people_card,
+        }
+    }
+
+    /// #1440 follow-up (Jacob, 2026-10-23 17:59): a question / approval card lines up with the
+    /// bubbles — card left == bubble left, card width ≤ the bubble cap — in an agent chat and,
+    /// after the avatar lane, in a people chat.
+    #[gpui::test]
+    fn cards_share_the_bubbles_left_edge_and_cap(cx: &mut TestAppContext) {
+        for pane in [REFERENCE_PANE, GROK_REF_57_PANE, 1400.0] {
+            let e = measure(cx, pane);
+            let (cx0, cw): (f32, f32) = (e.card.origin.x.into(), e.card.size.width.into());
+            assert!(
+                (cx0 - e.bubble_left).abs() <= 0.5,
+                "pane {pane}: card left {cx0} vs bubble left {}",
+                e.bubble_left
+            );
+            assert!(
+                cw <= e.bubble_width + 0.5,
+                "pane {pane}: card width {cw} over the bubble cap {}",
+                e.bubble_width
+            );
+            let (pcx, pcw): (f32, f32) = (
+                e.people_card.origin.x.into(),
+                e.people_card.size.width.into(),
+            );
+            assert!(
+                (pcx - e.people_bubble_left).abs() <= 0.5,
+                "pane {pane}: people card left {pcx} vs people bubble left {}",
+                e.people_bubble_left
+            );
+            let people_cap = e.bubble_width - SENDER_LANE;
+            assert!(
+                pcw <= people_cap + 0.5,
+                "pane {pane}: people card width {pcw} over the lane cap {people_cap}"
+            );
         }
     }
 
