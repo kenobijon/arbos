@@ -2,8 +2,10 @@
 //! shallow clone of the public unarbos/arbos tree at `/opt/arbos/src`, so an agent asked how
 //! Arbos works (encryption, privacy, where data goes) reads the real code and docs instead of
 //! guessing. agentd runs as root and refreshes the clone to main's tip at boot and every few
-//! hours; the model's children (workspace users) can only read it. It is not a path for
-//! shipping changes: the clone is reset hard on every refresh.
+//! hours where the rootfs is writable (Daytona boxes); on a read-only rootfs (D89 host
+//! sandboxes) the copy is the image's commit, renewed by every image roll. The model's children
+//! (workspace users) can only read it. It is not a path for shipping changes: the clone is reset
+//! hard on every refresh.
 
 use std::path::Path;
 use std::process::Stdio;
@@ -32,6 +34,16 @@ pub fn spawn_refresh() {
         tracing::info!(
             dir = SRC_DIR,
             "self-reference checkout: not root, kept as shipped"
+        );
+        return;
+    }
+    // Host sandboxes (D89 gVisor) run the image with a read-only rootfs: there the copy is the
+    // image's commit until the next image roll, and a fetch could only fail (EROFS).
+    if let Err(e) = write_probe() {
+        tracing::info!(
+            dir = SRC_DIR,
+            error = %e,
+            "self-reference checkout: rootfs not writable, the image's copy stays until the next roll"
         );
         return;
     }
@@ -77,6 +89,14 @@ async fn refresh() -> Result<Option<(String, String)>> {
     git(&["gc", "-q", "--prune=now"]).await?;
     run("chmod", &["-R", "a-w", SRC_DIR]).await?;
     Ok(Some((head, tip)))
+}
+
+/// Create and remove one empty file under `.git`; the only failure mode seen is `EROFS`.
+fn write_probe() -> Result<()> {
+    let probe = Path::new(SRC_DIR).join(".git").join(".arbos-write-probe");
+    std::fs::File::create(&probe).with_context(|| format!("create {}", probe.display()))?;
+    std::fs::remove_file(&probe).with_context(|| format!("remove {}", probe.display()))?;
+    Ok(())
 }
 
 async fn git(args: &[&str]) -> Result<String> {
