@@ -1026,4 +1026,68 @@ mod tests {
         host.on_ack(&batch3);
         assert!(host.next_push().is_none());
     }
+
+    /// Jacob's rule (#1573): @mentions set the ORDER, never a filter. A fresh un-mentioned send
+    /// still goes through the normal respond gate after a backlog drain, and the stale rows that
+    /// were not gated stay in the doc, so the reply can be in context.
+    #[test]
+    fn fresh_unmentioned_sends_still_reach_the_gate_with_the_backlog_in_context() {
+        let doc = ChatDoc::new(Some(7), true);
+        let now = now_ms();
+        let hour_ago = now - 60 * 60 * 1000;
+        let msg = |id: &str, text: &str, mentions: Vec<&str>| {
+            doc.append_user_message(
+                id,
+                text,
+                "mac",
+                &arbos_core::doc::UserMessageOpts {
+                    mentions: mentions.into_iter().map(str::to_owned).collect(),
+                    sender_handle: Some("sam".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        };
+        msg(
+            "stale-fact",
+            "fyi the launch date moved to the 12th",
+            vec![],
+        );
+        msg("mention", "@testagent are you back?", vec!["agent:ME"]);
+        msg("follow-up", "so when is the launch now?", vec![]);
+        doc.push_command_at(
+            "send",
+            serde_json::json!({ "messageId": "stale-fact" }),
+            "mac",
+            hour_ago,
+        );
+        let mention = doc.push_command_at(
+            "send",
+            serde_json::json!({ "messageId": "mention" }),
+            "mac",
+            now - 2_000,
+        );
+        let follow_up = doc.push_command_at(
+            "send",
+            serde_json::json!({ "messageId": "follow-up" }),
+            "mac",
+            now - 1_000,
+        );
+        let mut host = host_with(doc);
+        let ids: Vec<String> = host.new_pending().into_iter().map(|c| c.id).collect();
+        assert_eq!(
+            ids,
+            vec![mention, follow_up],
+            "the mention first, then the fresh un-mentioned send — it is gated normally, not dropped"
+        );
+        // The stale row was not gated, but it is still in the doc and in the context the gate
+        // and the turn read for the follow-up.
+        assert!(host.doc.message("stale-fact").is_some());
+        let ctx = crate::people::recent_people_context(&host.doc.messages(), "follow-up", 12);
+        assert!(
+            ctx.iter()
+                .any(|m| m["text"].as_str() == Some("fyi the launch date moved to the 12th")),
+            "{ctx:?}"
+        );
+    }
 }

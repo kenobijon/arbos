@@ -689,7 +689,11 @@ pub fn addressed(
 
 /// Recent human and agent lines before `up_to` as `[{from, text}]`, oldest first, for the
 /// responder decision.
-fn recent_people_context(messages: &[MessageView], up_to: &str, max: usize) -> Vec<Value> {
+pub(crate) fn recent_people_context(
+    messages: &[MessageView],
+    up_to: &str,
+    max: usize,
+) -> Vec<Value> {
     let mut out = Vec::new();
     for m in messages {
         if m.id == up_to {
