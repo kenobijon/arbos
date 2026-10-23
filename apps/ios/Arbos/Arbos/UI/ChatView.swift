@@ -588,7 +588,7 @@ struct ChatView: View {
                     if let channel {
                         // Rule 3: the unified pill — the server's disc, the `#` glyph and the
                         // name (never "#name": the glyph shows it, #1317).
-                        HStack(spacing: 8) {
+                        HStack(spacing: Theme.headerPillGap) {
                             if let s = channelServer {
                                 ServerAvatar(server: s, size: Theme.avatar)
                             }
@@ -609,7 +609,7 @@ struct ChatView: View {
                     } else if let people {
                         // One pill for every chat (2026-10-20): avatar + name,
                         // no member cluster, counts or agent lines.
-                        HStack(spacing: 8) {
+                        HStack(spacing: Theme.headerPillGap) {
                             if people.isGroup, let url = groupImageURL(people) {
                                 // Custom group picture.
                                 PersonAvatar(url: url, handle: people.title, size: Theme.avatar, name: people.title, id: people.id)
@@ -645,7 +645,7 @@ struct ChatView: View {
                         .accessibilityAddTraits(.isButton)
                         .accessibilityHint(people.isGroup ? "Opens group info" : "Opens the profile")
                     } else {
-                        HStack(spacing: 8) {
+                        HStack(spacing: Theme.headerPillGap) {
                             if let project {
                                 AgentAvatar(project: project, theme: theme, size: Theme.avatar, dot: machineDotColor(model.machine.state, theme: theme), working: streaming)
                             }

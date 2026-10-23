@@ -16,12 +16,13 @@ use gpui::{div, prelude::*, px, AnyElement, Div, ElementId, FontWeight, SharedSt
 
 use crate::ui::glass;
 use crate::ui::icons::icon;
+use crate::ui::identity;
 use crate::ui::theme::{Theme, PANEL_RADIUS, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
 
 /// Row height, side inset, gap between leading and text.
 pub const ROW_MIN_H: f32 = 48.0;
 pub const INSET: f32 = 16.0;
-pub const GAP: f32 = 12.0;
+pub const GAP: f32 = identity::ROW_GAP;
 /// The avatar size on people / agent / group rows.
 pub const AVATAR: f32 = 36.0;
 /// The hairline starts under the label: inset + leading + gap.
@@ -112,16 +113,7 @@ fn leading_el(leading: Leading, theme: &Theme) -> Option<AnyElement> {
     match leading {
         Leading::None => None,
         Leading::Tile(glyph) => Some(glass::icon_tile(glyph, theme).into_any_element()),
-        Leading::Avatar(el) => Some(
-            div()
-                .size(px(AVATAR))
-                .flex_shrink_0()
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(el)
-                .into_any_element(),
-        ),
+        Leading::Avatar(el) => Some(identity::slot(AVATAR, el).into_any_element()),
         Leading::Glyph(glyph) => Some(
             div()
                 .size(px(AVATAR))
