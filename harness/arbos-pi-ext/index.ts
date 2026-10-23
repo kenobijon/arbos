@@ -244,6 +244,8 @@ export default function arbosPiExt(pi: ExtensionAPI) {
     if (typeof input.code !== "string") return;
     input.code = input.code
       .replace(/\btools\.mcp__arbos\.([A-Za-z_][A-Za-z0-9_]*)/g, "tools.mcp__arbos__$1")
+      // the opposite guess: a pi built-in with the arbos prefix ("tools.mcp__arbos__write")
+      .replace(/\btools\.mcp__arbos__([a-z]+)\b/g, (whole, name: string) => (PI_BUILTIN_TOOLS.has(name) ? `tools.${name}` : whole))
       .replace(/\btools\.([a-z][a-z0-9_]*)(?=\s*\()/g, (whole, name: string) =>
         PI_BUILTIN_TOOLS.has(name) || name.startsWith("mcp__") ? whole : `tools.mcp__arbos__${name}`,
       );

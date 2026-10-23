@@ -553,6 +553,8 @@ pub struct AppState {
     /// Rig: `ARBOS_OPEN_PROFILE=group:member-menu[:confirm]` — the shell opens the first
     /// other member's row menu on the group pane (`true` = with the Remove confirm armed).
     pub rig_member_menu: Option<bool>,
+    /// Rig: `ARBOS_OPEN_SPACE` applied once.
+    pub rig_space_opened: bool,
     /// D88: the room list from the homeserver (previews, unread, `can_post`).
     pub matrix_snapshot: Snapshot,
     pub matrix_connected: bool,
@@ -831,6 +833,7 @@ impl AppState {
             open_server_hook_done: false,
             rig_channel_menu: None,
             rig_member_menu: None,
+            rig_space_opened: false,
             servers: Vec::new(),
             matrix_snapshot: Snapshot::default(),
             matrix_connected: false,
@@ -1483,6 +1486,25 @@ impl AppState {
                     }
                 }
                 self.projects = projects;
+                // Rig (screenshots without a pointer): `ARBOS_OPEN_SPACE=<space id>` selects that
+                // agent or people chat once it is known; `ARBOS_START_CALL=voice|video` then
+                // starts a call there, as the header's call button would.
+                if !self.rig_space_opened {
+                    if let Ok(space) = std::env::var("ARBOS_OPEN_SPACE") {
+                        if self.projects.iter().any(|p| p.id == space) {
+                            self.rig_space_opened = true;
+                            self.select_project(space, cx);
+                            if let Ok(kind) = std::env::var("ARBOS_START_CALL") {
+                                let kind = if kind == "video" {
+                                    CallKind::Video
+                                } else {
+                                    CallKind::Voice
+                                };
+                                self.start_call_in_chat(kind, cx);
+                            }
+                        }
+                    }
+                }
                 // Nothing in the centre yet: pick an agent. A channel open in the centre
                 // (D88) has no selected project on purpose and stays.
                 if self.selected_project.is_none() && self.selected_channel.is_none() {
@@ -1851,12 +1873,11 @@ impl AppState {
                     self.notify_for_message(&chat_id, m, false, false, true);
                 }
                 let chat_visible = self.chat_visible_in_active_window(&chat_id);
-                if arrived
+                let effects: Vec<ArrivalRead> = arrived
                     .iter()
-                    .any(|m| marks_unread_on_arrival(chat_visible, self.is_mine(m)))
-                {
-                    self.mark_chat_unread(&chat_id);
-                }
+                    .map(|m| arrival_read(chat_visible, self.is_mine(m), m.role == Role::System))
+                    .collect();
+                self.apply_arrival_read(&chat_id, &effects);
                 self.request_thumbnails(&chat_id);
                 if self.onboarding.is_some() {
                     self.onboarding_tick(cx);
@@ -1909,13 +1930,13 @@ impl AppState {
                     had_open_question,
                     is_new,
                 );
-                if is_new
-                    && marks_unread_on_arrival(
+                if is_new {
+                    let effect = arrival_read(
                         self.chat_visible_in_active_window(&chat_id),
                         self.is_mine(&message),
-                    )
-                {
-                    self.mark_chat_unread(&chat_id);
+                        message.role == Role::System,
+                    );
+                    self.apply_arrival_read(&chat_id, &[effect]);
                 }
                 if text_only && appended > 0 {
                     cx.emit(AppEvent::TranscriptText { chat_id });
@@ -5209,6 +5230,19 @@ impl AppState {
         self.window_active && self.active_chat_id().as_deref() == Some(chat_id)
     }
 
+    /// Apply what a batch of arrivals does to the chat's read state: one unread lights the
+    /// dot; otherwise, content seen on screen advances the user's read cursor on the relay
+    /// (`MarkRead` → `PUT /chats/{id}/read`) so no device of theirs shows it unread later.
+    fn apply_arrival_read(&mut self, chat_id: &str, effects: &[ArrivalRead]) {
+        if effects.contains(&ArrivalRead::MarkUnread) {
+            self.mark_chat_unread(chat_id);
+        } else if effects.contains(&ArrivalRead::AdvanceCursor) {
+            self.command(ClientCommand::MarkRead {
+                chat_id: chat_id.to_owned(),
+            });
+        }
+    }
+
     /// Light the unread dot (and Dock badge) until the next refresh confirms.
     fn mark_chat_unread(&mut self, chat_id: &str) {
         if let Some(chat) = self
@@ -7829,10 +7863,32 @@ fn preview(m: &Message) -> String {
     }
 }
 
-/// Light unread when someone else's message lands in a chat that is not on
-/// screen in an active window. Own messages never mark unread.
-pub(crate) fn marks_unread_on_arrival(chat_visible: bool, message_own: bool) -> bool {
-    !chat_visible && !message_own
+/// What a message that just landed does to the chat's read state (#1438).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ArrivalRead {
+    /// Someone else's content in a chat not on screen in a focused window: light the dot.
+    MarkUnread,
+    /// Someone else's content in the chat the user is looking at: the user has seen it, so
+    /// the read cursor advances (on the relay, for every device) and nothing lights.
+    AdvanceCursor,
+    /// Own message (from any device) or a system line: never unread, nothing to advance.
+    Nothing,
+}
+
+/// Decide the read effect of an arrival. `message_own` = sent by this user (any device);
+/// `system_line` = a relay/system notice such as a membership change.
+pub(crate) fn arrival_read(
+    chat_visible: bool,
+    message_own: bool,
+    system_line: bool,
+) -> ArrivalRead {
+    if message_own || system_line {
+        ArrivalRead::Nothing
+    } else if chat_visible {
+        ArrivalRead::AdvanceCursor
+    } else {
+        ArrivalRead::MarkUnread
+    }
 }
 
 pub fn init_source(cx: &mut App) -> Box<dyn SyncSource> {
@@ -7916,18 +7972,24 @@ pub(crate) fn directory_update(current: &[Person], fresh: Vec<Person>) -> Option
 
 #[cfg(test)]
 mod unread_arrival_tests {
-    use super::marks_unread_on_arrival;
+    use super::{arrival_read, ArrivalRead};
 
     #[test]
     fn someone_elses_message_in_hidden_chat_marks_unread() {
-        assert!(marks_unread_on_arrival(false, false));
+        assert_eq!(arrival_read(false, false, false), ArrivalRead::MarkUnread);
     }
 
+    /// #1438: own message (any device) → nothing; other's message while the chat is on screen
+    /// → the cursor advances; other's message in a hidden chat / inactive window → unread;
+    /// a system line never counts.
     #[test]
-    fn visible_chat_or_own_message_does_not() {
-        assert!(!marks_unread_on_arrival(true, false));
-        assert!(!marks_unread_on_arrival(false, true));
-        assert!(!marks_unread_on_arrival(true, true));
+    fn arrival_read_decides_cursor_versus_dot() {
+        assert_eq!(arrival_read(true, true, false), ArrivalRead::Nothing);
+        assert_eq!(arrival_read(false, true, false), ArrivalRead::Nothing);
+        assert_eq!(arrival_read(true, false, false), ArrivalRead::AdvanceCursor);
+        assert_eq!(arrival_read(false, false, false), ArrivalRead::MarkUnread);
+        assert_eq!(arrival_read(false, false, true), ArrivalRead::Nothing);
+        assert_eq!(arrival_read(true, false, true), ArrivalRead::Nothing);
     }
 }
 

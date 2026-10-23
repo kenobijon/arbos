@@ -500,7 +500,7 @@ impl Agent {
         let mut used_model = false;
         let (kind, text) = if self.quick_call_allowed(chat_id) {
             used_model = true;
-            let system = quick_system_prompt(&self.cfg.project_name, address.as_deref());
+            let system = quick_system_prompt(&self.name(), address.as_deref());
             let user = snap.render(&user_text);
             let llm = self.llm.with_purpose("quick-reply");
             // No hidden reasoning on this call: with it on, the model's thinking counted
@@ -637,7 +637,7 @@ impl Agent {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -784,7 +784,7 @@ mod tests {
         }))
     }
 
-    async fn test_agent() -> (Arc<Agent>, std::path::PathBuf) {
+    pub(crate) async fn test_agent() -> (Arc<Agent>, std::path::PathBuf) {
         let app = axum::Router::new().route(
             "/proxy/v1/chat/completions",
             axum::routing::post(mock_quick),
@@ -885,6 +885,44 @@ mod tests {
         assert!(note.contains("what is going on now?") && note.contains("benchmark"));
         assert!(agent.take_side_notes(chat).is_none());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #1431 (GigChadAgent): after the relay renames the project, the system prompt, the quick
+    /// reply and the owner note speak the new name and never present the old one as current.
+    #[tokio::test]
+    async fn renamed_agent_speaks_as_its_new_name() {
+        let (agent, root) = test_agent().await;
+        assert_eq!(agent.name(), "Doug");
+        agent.write_system_prompt().unwrap();
+        let path = agent.cfg.state_dir.join("pi").join("system-prompt.md");
+        let before = std::fs::read_to_string(&path).unwrap();
+        assert!(before.contains("You are Doug, this user's agent in Arbos"));
+
+        let r = agent.identity.observe("GigChadAgent").expect("renamed");
+        assert_eq!((r.from.as_str(), r.to.as_str()), ("Doug", "GigChadAgent"));
+        assert_eq!(agent.name(), "GigChadAgent");
+        assert_eq!(agent.identity.handle(), "gigchadagent");
+        agent.write_system_prompt().unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(after.contains("You are GigChadAgent, this user's agent in Arbos"));
+        assert!(after.contains("as @gigchadagent"));
+        assert!(after.contains("You used to be called \"Doug\""));
+        assert!(!after.contains("You are Doug"));
+
+        let quick = quick_system_prompt(&agent.name(), None);
+        assert!(quick.starts_with("You are GigChadAgent, this user's agent in Arbos."));
+        let note =
+            crate::people::owner_address_note_text(Some("Jacob"), None, &agent.name()).unwrap();
+        assert!(note.contains("You are GigChadAgent; \"GigChadAgent\" is your own name"));
+        assert!(!note.contains("Doug"));
+        // The history survives on disk for the next boot.
+        let saved: crate::identity::Identity = serde_json::from_str(
+            &std::fs::read_to_string(agent.cfg.state_dir.join("identity.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved.name, "GigChadAgent");
+        assert_eq!(saved.former_names(), vec!["Doug".to_owned()]);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]

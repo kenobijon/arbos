@@ -1358,6 +1358,12 @@ pub struct Agent {
     pub goals_cache: std::sync::Mutex<String>,
     /// D87: the project-memory text last written into the system prompt and when (debounce).
     pub prompt_memory: std::sync::Mutex<Option<(String, Instant)>>,
+    /// Live name / handle / rename history from the relay's project record (#1431); the system
+    /// prompt, the per-turn notes and the group preludes read this, never `cfg.project_name`.
+    pub identity: crate::identity::IdentityState,
+    /// A rename (or instructions change) landed while a turn was running: the pi session must
+    /// re-read the system prompt before the next turn (the supervisor loop does it).
+    pub(crate) prompt_refresh_pending: AtomicBool,
     /// D91 soft-compaction hysteresis per chat: `None` right after a compaction (the floor is
     /// not known yet), then the window observed on the first turn after it.
     compaction_floor: std::sync::Mutex<HashMap<String, Option<i64>>>,
@@ -1442,6 +1448,8 @@ impl Agent {
             turn_images: std::sync::Mutex::new(Vec::new()),
             goals_cache: std::sync::Mutex::new(String::new()),
             prompt_memory: std::sync::Mutex::new(None),
+            identity: crate::identity::IdentityState::load(&cfg_for_settings),
+            prompt_refresh_pending: AtomicBool::new(false),
             compaction_floor: std::sync::Mutex::new(HashMap::new()),
             pending_sends: std::sync::atomic::AtomicUsize::new(0),
             side_notes: std::sync::Mutex::new(HashMap::new()),
@@ -1506,6 +1514,12 @@ impl Agent {
         }
     }
 
+    /// The agent's current display name as the relay has it (#1431). `cfg.project_name` is only
+    /// the value at box start; a renamed agent must speak as its new self on the next turn.
+    pub(crate) fn name(&self) -> String {
+        self.identity.name()
+    }
+
     /// Live model slots (registry/doc writes land here; `cfg` only holds the boot values).
     pub(crate) async fn live_models(&self) -> (String, String) {
         let m = self.settings.models.read().await;
@@ -1532,16 +1546,24 @@ impl Agent {
             .map(|m| m.talking.id.clone())
             .unwrap_or_else(|_| self.cfg.talking_model.clone());
         // One box, many workspaces (D70): the project's files live in its own folder, not /work.
-        s.push_str(&project_section(
-            &self.cfg.project_name,
+        // Identity and instructions are the relay's current ones (#1431), not the boot config.
+        s.push_str(&crate::identity::project_section(
+            &self.identity.snapshot(),
+            &self.cfg.project_id,
             &self.cfg.work_dir.display().to_string(),
             &talking,
         ));
         s.push('\n');
         s.push_str(&crate::media::prompt_section(&self.cfg));
-        if !self.cfg.instructions.trim().is_empty() {
+        let instructions = self
+            .settings
+            .state
+            .try_read()
+            .map(|st| st.instructions.clone())
+            .unwrap_or_else(|_| self.cfg.instructions.clone());
+        if !instructions.trim().is_empty() {
             s.push_str("\n\n## Project instructions\n\n");
-            s.push_str(self.cfg.instructions.trim());
+            s.push_str(instructions.trim());
             s.push('\n');
         }
         // D87 stable prefix: project memory changes after most memory passes; inside the system
@@ -1698,6 +1720,17 @@ impl Agent {
                     if let Err(e) = me.respawn_pi(&chat).await {
                         tracing::error!(error = %e, "pi respawn failed");
                         tokio::time::sleep(Duration::from_secs(5)).await;
+                    }
+                } else if alive
+                    && me.prompt_refresh_pending.load(Ordering::SeqCst)
+                    && !me.turn_running.load(Ordering::SeqCst)
+                {
+                    // A rename landed mid-turn (#1431): pi reads the system prompt at spawn, so
+                    // the session restarts now that the turn is over.
+                    me.prompt_refresh_pending.store(false, Ordering::SeqCst);
+                    if let Err(e) = me.respawn_pi_current().await {
+                        tracing::warn!(error = %e, "pi respawn for the identity refresh failed");
+                        me.prompt_refresh_pending.store(true, Ordering::SeqCst);
                     }
                 }
             }
@@ -5743,23 +5776,6 @@ pub fn base_system_prompt(code_mode: bool) -> String {
     s
 }
 
-/// The "This project" block of the system prompt. The user sees this agent under the
-/// project's name (the sidebar row "Doug" is the agent), so the model is told that name is
-/// its own — not a place to work "in" — and that "Arbos" is the app, never the user.
-pub fn project_section(project_name: &str, work_dir: &str, talking_model: &str) -> String {
-    let name = project_name.trim();
-    let identity = if name.is_empty() || name.eq_ignore_ascii_case("arbos") {
-        "You are this user's agent in Arbos.".to_owned()
-    } else {
-        format!(
-            "You are {name}, this user's agent in Arbos; the user sees you as \"{name}\". \"{name}\" is your own name — not a place, a workspace or a product — so never say \"in {name}\" or \"on {name}\"."
-        )
-    };
-    format!(
-        "\n\n## This project\n\n{identity} Arbos is the app you run in; it is never the user's name — call the user by the name given with their message. Your folder is `{work_dir}`: every file you create or read for this project goes there (relative paths resolve there; do not use `/work` itself, other folders under `/work` belong to other projects). You run on model `{talking_model}`.\n"
-    )
-}
-
 #[cfg(test)]
 impl Agent {
     /// Test seam: hold the turn lock as a running act turn of `chat_id` would, with a turn state
@@ -5784,26 +5800,6 @@ impl Agent {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Feedback 2026-10-22: "Hello, Arbos. What do you want to work on in Doug?" — the prompt
-    /// must present the project name as the agent's own name and Arbos as the app.
-    #[test]
-    fn project_section_names_the_agent_not_a_place() {
-        let s = project_section("Doug", "/work/01HPROJ", "anthropic/claude-haiku-5.5");
-        assert!(s.starts_with("\n\n## This project\n\n"));
-        assert!(s.contains("You are Doug, this user's agent in Arbos"));
-        assert!(s.contains("never say \"in Doug\" or \"on Doug\""));
-        assert!(s.contains("it is never the user's name"));
-        assert!(s.contains("Your folder is `/work/01HPROJ`"));
-        assert!(s.contains("You run on model `anthropic/claude-haiku-5.5`."));
-        assert!(!s.contains("Project \"Doug\""));
-        // An agent literally called Arbos (or unnamed) gets no self line that contradicts the app.
-        let s = project_section("Arbos", "/work/p", "m");
-        assert!(s.contains("You are this user's agent in Arbos."));
-        assert!(!s.contains("never say \"in Arbos\""));
-        let s = project_section("  ", "/work/p", "m");
-        assert!(s.contains("You are this user's agent in Arbos."));
-    }
 
     /// D91: the window size pi would start the next turn from, as pi counts it.
     #[test]

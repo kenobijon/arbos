@@ -1107,7 +1107,7 @@ impl Agent {
         let msg = host.lock().await.doc.message(user_msg_id)?;
         let name = msg.rest.get("senderName").and_then(Value::as_str);
         let handle = msg.rest.get("senderHandle").and_then(Value::as_str);
-        owner_address_note_text(name, handle, &self.cfg.project_name)
+        owner_address_note_text(name, handle, &self.name())
     }
 }
 
@@ -1228,8 +1228,8 @@ impl Agent {
             .and_then(|m| m["project"]["name"].as_str().or_else(|| m["name"].as_str()))
             .map(str::trim)
             .filter(|n| !n.is_empty())
-            .unwrap_or(self.cfg.project_name.as_str())
-            .to_owned();
+            .map(str::to_owned)
+            .unwrap_or_else(|| self.name());
         let fields = vec![
             ("sender", json!(format!("agent:{}", self.cfg.project_id))),
             ("senderHandle", json!(info.slug)),

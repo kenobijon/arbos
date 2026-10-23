@@ -31,6 +31,10 @@ CREATE TABLE IF NOT EXISTS chat_user_archive (
   user_id TEXT NOT NULL, chat_id TEXT NOT NULL, archived_at INTEGER NOT NULL,
   PRIMARY KEY (user_id, chat_id)
 );
+CREATE TABLE IF NOT EXISTS chat_user_cursor (
+  user_id TEXT NOT NULL, chat_id TEXT NOT NULL, seq INTEGER NOT NULL, at INTEGER NOT NULL,
+  PRIMARY KEY (user_id, chat_id)
+);
 "#;
 
 /// Keep the event log a month deep; unread counts older than that are noise.
@@ -251,6 +255,47 @@ impl Db {
                 params![user_id, chat_id, head, now_ms()],
             )?;
             Ok(())
+        })
+    }
+
+    /// The user's row cursor in a chat (one per user, shared by every device): the highest
+    /// room `seq` any of their devices reported read, or that they wrote themselves.
+    pub fn user_cursor(&self, user_id: &str, chat_id: &str) -> Result<i64> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT seq FROM chat_user_cursor WHERE user_id = ?1 AND chat_id = ?2",
+                params![user_id, chat_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map(|o| o.unwrap_or(0))
+        })
+    }
+
+    /// Advance the user's row cursor (never backwards).
+    pub fn advance_user_cursor(&self, user_id: &str, chat_id: &str, seq: i64) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO chat_user_cursor(user_id, chat_id, seq, at) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(user_id, chat_id) DO UPDATE SET seq = MAX(chat_user_cursor.seq, excluded.seq), at = excluded.at",
+                params![user_id, chat_id, seq.max(0), now_ms()],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Unread messages in one chat for a user: announced events after their read mark that
+    /// someone else wrote. System lines and rows nobody announced do not count.
+    pub fn unread_in_chat(&self, user_id: &str, chat_id: &str) -> Result<i64> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT COUNT(*) FROM chat_events e
+                 WHERE e.chat_id = ?2
+                   AND e.id > COALESCE((SELECT r.event_id FROM chat_user_reads r WHERE r.user_id = ?1 AND r.chat_id = ?2), 0)
+                   AND (e.sender_user IS NULL OR e.sender_user != ?1)",
+                params![user_id, chat_id],
+                |r| r.get(0),
+            )
         })
     }
 
