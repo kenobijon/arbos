@@ -93,8 +93,36 @@ pub(super) fn pushed_frame(
 /// the pinned block's bottom margin (hero `pb` / tab pill `mb`): the body
 /// starts that far up, under the margin, with the same amount of padding, so
 /// at rest the first card sits fully visible 18 pt under the pill and only
-/// scrolled rows pass through the fade.
+/// scrolled rows pass through the fade. A page with no pinned block (the
+/// settings subpages: `‹ Title ×`, then cards) gets the same 18 pt as top
+/// padding instead, so its first card starts where the fade ends (#1365's
+/// sibling, Jacob Oct 23: "the first card is cut off under the header").
 pub(crate) const PANE_FADE_BAND: f32 = 18.0;
+
+/// The pane's scrolling body under the top bar (and the pinned block, when
+/// there is one), fading out over `PANE_FADE_BAND` at its top. With a pinned
+/// block the body is pulled up under the block's bottom margin (the page adds
+/// the matching spacer); without one it is padded down by the band, so in
+/// both cases the first card at rest starts exactly where the fade ends.
+pub(crate) fn scroll_body(
+    body: Div,
+    has_pinned: bool,
+    scroll: Option<&ScrollHandle>,
+) -> crate::ui::frost::EdgeFaded {
+    crate::ui::frost::edge_faded(
+        PANE_FADE_BAND,
+        true,
+        false,
+        body.id("profile-body")
+            .flex_1()
+            .min_h_0()
+            .when(has_pinned, |el| el.mt(px(-PANE_FADE_BAND)))
+            .when(!has_pinned, |el| el.pt(px(PANE_FADE_BAND)))
+            .debug_selector(|| "profile-body".into())
+            .overflow_y_scroll()
+            .when_some(scroll, |el, h| el.track_scroll(h)),
+    )
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn pane_frame(
@@ -120,7 +148,8 @@ pub(crate) fn pane_frame(
         .items_center()
         .gap(px(6.0))
         .px(px(10.0))
-        .bg(theme.card());
+        .bg(theme.card())
+        .debug_selector(|| "profile-top-bar".into());
     if let Some((title, back)) = back {
         header = header.child(back).child(
             div()
@@ -149,17 +178,7 @@ pub(crate) fn pane_frame(
         .bg(theme.pane())
         .child(header)
         .children(pinned.map(|p| p.flex_shrink_0()))
-        .child(crate::ui::frost::edge_faded(
-            PANE_FADE_BAND,
-            true,
-            false,
-            body.id("profile-body")
-                .flex_1()
-                .min_h_0()
-                .when(has_pinned, |el| el.mt(px(-PANE_FADE_BAND)))
-                .overflow_y_scroll()
-                .when_some(scroll, |el, h| el.track_scroll(h)),
-        ))
+        .child(scroll_body(body, has_pinned, scroll))
         .on_mouse_down(
             gpui::MouseButton::Left,
             cx.listener(|this, _, _, cx| {
@@ -754,4 +773,106 @@ pub(super) fn link_list(
 /// The chats of a space, for content tabs (one per agent unless multi-chat is on).
 pub(super) fn chats_of<'a>(state: &'a AppState, space_id: &str) -> Vec<&'a Chat> {
     state.visible_tabs(space_id)
+}
+
+#[cfg(test)]
+mod frame_tests {
+    use gpui::{div, prelude::*, px, TestAppContext};
+
+    use super::{scroll_body, PANE_FADE_BAND};
+    use crate::ui::theme::HEADER_HEIGHT;
+
+    /// The shapes a settings subpage body takes (Updates / Notifications /
+    /// About start with a card; Machine with a card too; a Library-like page
+    /// with a section title), with and without a pinned hero + pill block.
+    #[derive(Clone, Copy)]
+    enum First {
+        Card,
+        Title,
+    }
+
+    struct Frame {
+        pinned: bool,
+        first: First,
+    }
+
+    impl gpui::Render for Frame {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let header = div()
+                .h(px(HEADER_HEIGHT))
+                .flex_shrink_0()
+                .debug_selector(|| "profile-top-bar".into());
+            let mut body = div().flex().flex_col().px(px(16.0));
+            if self.pinned {
+                // What `pane::render` does: the spacer that puts the first card
+                // back under the pinned block's bottom margin.
+                body = body.child(div().h(px(PANE_FADE_BAND)).flex_shrink_0());
+            }
+            if let First::Title = self.first {
+                body = body.child(div().h(px(20.0)).child("Images · 4"));
+            }
+            body = body
+                .child(
+                    div()
+                        .h(px(48.0))
+                        .debug_selector(|| "first-card".into())
+                        .child("Automatic updates"),
+                )
+                .child(div().h(px(900.0)));
+            let mut col = div()
+                .w(px(340.0))
+                .h(px(600.0))
+                .flex()
+                .flex_col()
+                .child(header);
+            if self.pinned {
+                col = col.child(div().h(px(140.0)).flex_shrink_0().pb(px(PANE_FADE_BAND)));
+            }
+            col.child(scroll_body(body, self.pinned, None))
+        }
+    }
+
+    #[gpui::test]
+    fn the_first_card_starts_where_the_fade_ends_with_and_without_a_pinned_block(
+        cx: &mut TestAppContext,
+    ) {
+        for pinned in [false, true] {
+            for first in [First::Card, First::Title] {
+                let (_view, vcx) = cx.add_window_view(|_, _| Frame { pinned, first });
+                vcx.run_until_parked();
+                let bar = vcx.debug_bounds("profile-top-bar").expect("bar");
+                let body = vcx.debug_bounds("profile-body").expect("body");
+                let card = vcx.debug_bounds("first-card").expect("card");
+                let fade_end: f32 = (body.origin.y + px(PANE_FADE_BAND)).into();
+                let card_top: f32 = card.origin.y.into();
+                let bar_bottom: f32 = bar.bottom().into();
+                let title_h = match first {
+                    First::Card => 0.0,
+                    First::Title => 20.0,
+                };
+                assert!(
+                    card_top >= fade_end - 0.5,
+                    "first card top {card_top} is inside the fade (ends {fade_end}), pinned={pinned}"
+                );
+                assert!(
+                    card_top >= bar_bottom + PANE_FADE_BAND + title_h - 0.5,
+                    "first card top {card_top} vs bar bottom {bar_bottom} + {PANE_FADE_BAND}, pinned={pinned}"
+                );
+                if !pinned {
+                    // No pinned block: the body starts flush under the bar and the
+                    // card sits exactly one band below it.
+                    let body_top: f32 = body.origin.y.into();
+                    assert_eq!(body_top, bar_bottom, "body under the bar");
+                    assert!(
+                        (card_top - (bar_bottom + PANE_FADE_BAND + title_h)).abs() <= 0.5,
+                        "card at bar + band ({card_top})"
+                    );
+                }
+            }
+        }
+    }
 }
