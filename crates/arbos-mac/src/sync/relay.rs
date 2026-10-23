@@ -2613,7 +2613,7 @@ fn mentions_for(shared: &Shared, chat_id: &str, text: &str) -> Vec<String> {
         }
     }
     for a in &space.agents {
-        if lower.contains(&format!("@{}", a.handle.to_lowercase())) {
+        if text_has_at_token(&lower, &a.handle.to_lowercase()) {
             let id = format!("agent:{}", a.project_id);
             if !out.iter().any(|x| x == &id) {
                 out.push(id);
@@ -2621,11 +2621,22 @@ fn mentions_for(shared: &Shared, chat_id: &str, text: &str) -> Vec<String> {
         }
     }
     for p in &space.people {
-        if lower.contains(&format!("@{}", p.handle.to_lowercase())) {
-            let id = format!("user:{}", p.id);
-            if !out.iter().any(|x| x == &id) {
-                out.push(id);
-            }
+        let handle = p.handle.to_lowercase();
+        if !text_has_at_token(&lower, &handle) {
+            continue;
+        }
+        // Typed resolution (#1538): a slug both a person and an agent carry means the agent
+        // when it is my own handle (nobody @-mentions themselves) and the person otherwise.
+        let agent_has_it = space
+            .agents
+            .iter()
+            .any(|a| a.handle.eq_ignore_ascii_case(&handle));
+        if agent_has_it && handle.eq_ignore_ascii_case(&me_handle) {
+            continue;
+        }
+        let id = format!("user:{}", p.id);
+        if !out.iter().any(|x| x == &id) {
+            out.push(id);
         }
     }
     out

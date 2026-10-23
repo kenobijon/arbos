@@ -1734,6 +1734,13 @@ struct ChatView: View {
         let agents = people.agents.filter { $0.project != nil && (query.isEmpty || mentionSlug($0.project?.name ?? $0.handle).hasPrefix(query)) }
         let humans = people.humans.filter { $0.id != model.user?.id && (query.isEmpty || $0.handle.lowercased().hasPrefix(query)) }
         let items = agents + humans
+        // A slug both an agent and a person carry (#1538) gets a kind label on each chip.
+        let slugs = items.map { $0.isAgent ? mentionSlug($0.project?.name ?? $0.handle) : $0.handle.lowercased() }
+        func label(_ m: ChatMember) -> String {
+            let slug = m.isAgent ? mentionSlug(m.project?.name ?? m.handle) : m.handle.lowercased()
+            let shared = slugs.filter { $0 == slug }.count > 1 || slug == model.user?.login.lowercased()
+            return shared ? (m.isAgent ? "agent" : "person") : ""
+        }
         return Group {
             if !items.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
@@ -1744,6 +1751,9 @@ struct ChatView: View {
                                     if m.isAgent, let p = m.project { AgentAvatar(project: p, theme: theme, size: 20, still: true) } else { PersonAvatar(url: m.avatarUrl, handle: m.handle, size: 20, name: m.name, id: m.id, colorIndex: m.avatarColorIndex) }
                                     Text("@\(m.isAgent ? mentionSlug(m.project?.name ?? m.handle) : m.handle)")
                                         .font(theme.font(Theme.small, weight: .medium)).foregroundStyle(theme.text)
+                                    if !label(m).isEmpty {
+                                        Text(label(m)).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
+                                    }
                                 }
                                 .padding(.leading, 6).padding(.trailing, 12).padding(.vertical, 7)
                                 .background(Capsule().fill(theme.bubbleAssistant))

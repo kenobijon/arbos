@@ -364,6 +364,70 @@ pub fn agent_slug(name: &str) -> String {
         .join("-")
 }
 
+/// An agent's `@slug` must not be a person's `@handle`: when Jacob (@unarbos) named an agent
+/// "unarbos", `@unarbos` in the group resolved to him and the agent's mention gate never fired
+/// (#1538). The name that keeps the slug clear of every signed-in user's login: `name` itself,
+/// else `<name> agent`, `<name> 2`, `<name> 3`, … Returns `(name, changed)`.
+pub fn agent_name_clear_of_people(state: &AppState, name: &str) -> (String, bool) {
+    let taken = |candidate: &str| {
+        let slug = agent_slug(candidate);
+        !slug.is_empty() && state.db.user_by_handle(&slug).ok().flatten().is_some()
+    };
+    let name = name.trim();
+    if !taken(name) {
+        return (name.to_owned(), false);
+    }
+    let first = format!("{name} agent");
+    if !taken(&first) {
+        return (first, true);
+    }
+    for n in 2..100 {
+        let c = format!("{name} {n}");
+        if !taken(&c) {
+            return (c, true);
+        }
+    }
+    (format!("{name} agent {}", now_ms() % 1000), true)
+}
+
+/// One-shot at boot (#1538): every live agent whose slug is a person's handle gets the same
+/// suffix a new one would, and its box hears `project_renamed`. Idempotent; logs each rename.
+pub fn rename_agents_that_shadow_people(state: &AppState) {
+    let Ok(projects) = state.db.list_projects() else {
+        return;
+    };
+    for p in projects {
+        let (clear, changed) = agent_name_clear_of_people(state, &p.name);
+        if !changed {
+            continue;
+        }
+        if let Err(e) = state.db.update_project(
+            &p.id,
+            Some(&clear),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ) {
+            tracing::warn!(project = %p.id, error = %e, "handle-collision rename failed");
+            continue;
+        }
+        let _ = state.db.enqueue_push(
+            &p.id,
+            "project_renamed",
+            &json!({ "from": p.name, "to": clear, "at": now_ms(), "reason": "handle_collision" }),
+        );
+        tracing::info!(project = %p.id, from = %p.name, to = %clear, "agent renamed: its @slug was a person's handle");
+    }
+}
+
 /// Soft-deleted agents leave every list at once; do not linger as @mention ghosts that
 /// never wake (workspace already moved to `/work/.archive/`). Humans always pass.
 fn member_alive(state: &AppState, m: &Membership) -> bool {
@@ -2611,6 +2675,39 @@ mod tests {
     use super::*;
     use crate::state::test_support::test_state;
     use crate::state::AuthMode;
+
+    /// #1538: an agent named after a person ("unarbos" by @unarbos) gets a suffix so `@unarbos`
+    /// keeps meaning the person; the boot sweep fixes existing ones; a free name is untouched.
+    #[test]
+    fn agent_names_stay_clear_of_people_handles() {
+        let state = test_state(AuthMode::Paircode);
+        let (jacob, _) = person(&state, 268993031); // login user268993031
+        assert_eq!(
+            agent_name_clear_of_people(&state, "User268993031"),
+            ("User268993031 agent".to_owned(), true)
+        );
+        assert_eq!(
+            agent_name_clear_of_people(&state, "Research"),
+            ("Research".to_owned(), false)
+        );
+        // An existing collision is renamed at boot and the box is told.
+        let pid = project_of(&state, &jacob, "user268993031");
+        rename_agents_that_shadow_people(&state);
+        let p = state.db.project(&pid).unwrap().unwrap();
+        assert_eq!(p.name, "user268993031 agent");
+        assert_ne!(agent_slug(&p.name), "user268993031");
+        let pushes = state.db.take_pushes(&pid).unwrap_or_default();
+        assert!(
+            pushes.iter().any(|(_, kind, _)| kind == "project_renamed"),
+            "{pushes:?}"
+        );
+        // Idempotent.
+        rename_agents_that_shadow_people(&state);
+        assert_eq!(
+            state.db.project(&pid).unwrap().unwrap().name,
+            "user268993031 agent"
+        );
+    }
 
     #[test]
     fn non_member_cannot_read_a_people_room() {

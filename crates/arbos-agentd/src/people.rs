@@ -128,6 +128,11 @@ fn addressed_only_to_people(msg: &MessageView) -> bool {
     let Some(mentions) = msg.rest.get("mentions").and_then(Value::as_array) else {
         return false;
     };
+    // Typed mentions (#1538): a `user:` chip for the SENDER is not a people ping — nobody
+    // @-mentions themselves. It happens when an agent's slug equals the sender's own handle
+    // (Jacob @unarbos named an agent "unarbos"): the composer resolved `@unarbos` to the
+    // person, and the agent of that slug is who was meant. Other people's chips still are.
+    let sender = msg.rest.get("sender").and_then(Value::as_str).unwrap_or("");
     let mut saw_person = false;
     for m in mentions {
         let Some(s) = m.as_str() else {
@@ -136,7 +141,7 @@ fn addressed_only_to_people(msg: &MessageView) -> bool {
         if s.starts_with("agent:") {
             return false;
         }
-        if s.starts_with("user:") {
+        if s.starts_with("user:") && s != sender {
             saw_person = true;
         }
     }
@@ -215,23 +220,34 @@ fn text_names_people(msg: &MessageView, info: &PeopleChatInfo) -> bool {
     let Some(token) = leading_address_token(&msg.text()) else {
         return false;
     };
-    text_token_names_people(&token, info, true)
+    let sender = msg.rest.get("sender").and_then(Value::as_str).unwrap_or("");
+    text_token_names_people_except(&token, info, true, sender)
 }
 
 /// True when the leading token is a human's `@handle` (not merely their display name).
+/// The sender's own handle does not count (#1538).
 fn text_names_people_by_handle(msg: &MessageView, info: &PeopleChatInfo) -> bool {
     let Some(token) = leading_address_token(&msg.text()) else {
         return false;
     };
-    text_token_names_people(&token, info, false)
+    let sender = msg.rest.get("sender").and_then(Value::as_str).unwrap_or("");
+    text_token_names_people_except(&token, info, false, sender)
 }
 
-fn text_token_names_people(token: &str, info: &PeopleChatInfo, allow_display_name: bool) -> bool {
+/// Does `token` name a human in the chat (by `@handle`, or by display / first name when
+/// allowed), ignoring the member `except` (the sender: "@unarbos" written by @unarbos is not a
+/// ping to themselves — #1538, an agent may carry that slug).
+fn text_token_names_people_except(
+    token: &str,
+    info: &PeopleChatInfo,
+    allow_display_name: bool,
+    except: &str,
+) -> bool {
     for m in &info.members {
         let Some(member) = m["member"].as_str() else {
             continue;
         };
-        if !member.starts_with("user:") {
+        if !member.starts_with("user:") || member == except {
             continue;
         }
         let handle = m["handle"].as_str().unwrap_or("").to_lowercase();
@@ -1820,6 +1836,59 @@ mod tests {
             &arbonites,
             P
         ));
+    }
+
+    /// #1538: Jacob (@unarbos) named an agent "unarbos". The composer resolved `@unarbos` to
+    /// the person (`mentions=[user:…]`), which silenced every agent; typed resolution: a
+    /// `user:` chip for the sender is not a people ping, and the sender's own handle in the
+    /// prose does not count as naming a person — so the agent with that slug is addressed.
+    /// An `agent:` chip wakes the agent regardless; another person's chip still wins.
+    #[test]
+    fn sender_own_handle_resolves_to_the_agent_of_that_slug() {
+        let arbonites = PeopleChatInfo {
+            members: vec![
+                json!({ "member": "agent:01HPROJ", "handle": "unarbos", "project": { "name": "unarbos" } }),
+                json!({ "member": "user:gh_2", "handle": "unarbos", "name": "Arbos" }),
+                json!({ "member": "user:gh_9", "handle": "scout", "name": "Scout" }),
+            ],
+            slug: "unarbos".into(),
+            kind: "group".into(),
+            ..Default::default()
+        };
+        // The Mac resolved the slug to the sender themself.
+        let m = msg(
+            "@unarbos are you there?",
+            json!({ "mentions": ["user:gh_2"] }),
+        );
+        assert!(
+            !addressed_only_to_people(&m),
+            "a chip for the sender is not a people ping"
+        );
+        assert!(!text_names_people_by_handle(&m, &arbonites));
+        assert!(!people_ping_not_for_agents(&m, &arbonites));
+        assert!(
+            addressed(&m, P, "unarbos", false, false, false),
+            "the agent of that slug is addressed"
+        );
+        // A typed agent chip wakes the agent, whoever shares the slug.
+        assert!(addressed(
+            &msg("hey", json!({ "mentions": ["agent:01HPROJ"] })),
+            P,
+            "unarbos",
+            false,
+            false,
+            false
+        ));
+        // Someone else pinging the person by chip: still the person's, not ours.
+        let other = msg(
+            "@unarbos can you look?",
+            json!({ "sender": "user:gh_9", "mentions": ["user:gh_2"] }),
+        );
+        assert!(addressed_only_to_people(&other));
+        assert!(
+            people_ping_not_for_agents(&other, &arbonites)
+                || text_mentions_agent(&other, &arbonites)
+        );
     }
 
     #[test]

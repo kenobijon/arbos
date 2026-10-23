@@ -334,6 +334,7 @@ async fn main() -> anyhow::Result<()> {
         matrix: matrix::Matrix::new(matrix::Config::from_env()?),
     };
     tracing::info!(auth_mode = auth_mode.as_str(), public_url = %state.cfg.public_url, "sign-in");
+    people::rename_agents_that_shadow_people(&state);
     if state.cfg.connectors_mock {
         tracing::info!("ARBOS_CONNECTORS_MOCK=1: connectors return canned data; sends land in connector_outbox");
     }
