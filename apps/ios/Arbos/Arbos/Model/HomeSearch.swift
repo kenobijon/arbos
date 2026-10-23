@@ -113,8 +113,8 @@ enum HomeSearch {
             guard let s = snippet(m.text, q: q) else { continue }
             if best == nil || m.createdAt >= best!.0.createdAt { best = (m, s) }
         }
-        guard let (m, s) = best else { return nil }
-        return Hit(kind: .message, reason: "Message · \(s)", chatId: m.chatId, messageId: m.messageId)
+        guard let found = best else { return nil }
+        return Hit(kind: .message, reason: "Message · \(found.1)", chatId: found.0.chatId, messageId: found.0.messageId)
     }
 
     /// Up to this many characters of context before the match in a snippet.
