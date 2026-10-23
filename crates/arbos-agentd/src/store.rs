@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS t3 (
   role TEXT, at INTEGER NOT NULL, text TEXT NOT NULL, source TEXT, size INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS t3_thread_at ON t3(thread_id, at);
+CREATE INDEX IF NOT EXISTS t3_at ON t3(at);
 CREATE VIRTUAL TABLE IF NOT EXISTS t3_fts USING fts5(text, id UNINDEXED, thread_id UNINDEXED, kind UNINDEXED, tokenize = 'porter unicode61');
 
 CREATE TABLE IF NOT EXISTS memory (
@@ -204,34 +205,7 @@ pub fn redact(text: &str) -> String {
             }
         }
     }
-    let patterns: [(&str, &str); 8] = [
-        (r"sk-or-v1-[A-Za-z0-9]{20,}", "[REDACTED:openrouter-key]"),
-        (r"\bops_[A-Za-z0-9]{20,}", "[REDACTED:1password-token]"),
-        (r"\bdp\.st\.[A-Za-z0-9_\-]{10,}", "[REDACTED:doppler-token]"),
-        (r"sk-ant-[A-Za-z0-9_\-]{20,}", "[REDACTED:anthropic-key]"),
-        (r"sk-[A-Za-z0-9]{32,}", "[REDACTED:openai-key]"),
-        (r"dtn_[A-Za-z0-9]{20,}", "[REDACTED:daytona-key]"),
-        (
-            r"(?i)(authorization:\s*bearer\s+)[A-Za-z0-9._\-]+",
-            "${1}[REDACTED:bearer]",
-        ),
-        (
-            r"(?i)\b(gh[pousr]_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9\-]{10,}|AKIA[0-9A-Z]{16})\b",
-            "[REDACTED:token]",
-        ),
-    ];
-    for (pat, rep) in patterns {
-        if let Ok(re) = regex_lite::Regex::new(pat) {
-            out = re.replace_all(&out, rep).into_owned();
-        }
-    }
-    // KEY=value lines for well-known secret names.
-    if let Ok(re) = regex_lite::Regex::new(
-        r"(?im)^(\s*(?:export\s+)?[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD)[A-Z0-9_]*\s*=\s*)\S+",
-    ) {
-        out = re.replace_all(&out, "${1}[REDACTED:env]").into_owned();
-    }
-    out
+    arbos_core::redact::redact_patterns(&out)
 }
 
 impl Store {
@@ -710,6 +684,37 @@ impl Store {
         })
     }
 
+    /// Rows written after `after_ms` (exclusive), every thread or one chat, oldest first, at
+    /// most `limit` — the inspect window (`inspect.rs`). Both shapes hit an index
+    /// (`t3_at`, `t3_thread_at`), so a call never scans the table.
+    pub fn t3_after(
+        &self,
+        after_ms: i64,
+        thread_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<T3Row>> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT id, thread_id, subagent_id, session_id, kind, role, at, text, size FROM t3
+                 WHERE at > ?1 AND (?2 IS NULL OR thread_id = ?2) ORDER BY at ASC, id ASC LIMIT ?3",
+            )?;
+            let rows = st.query_map(params![after_ms, thread_id, limit], |r| {
+                Ok(T3Row {
+                    id: r.get(0)?,
+                    thread_id: r.get(1)?,
+                    subagent_id: r.get(2)?,
+                    session_id: r.get(3)?,
+                    kind: r.get(4)?,
+                    role: r.get(5)?,
+                    at: r.get(6)?,
+                    text: r.get(7)?,
+                    size: r.get(8)?,
+                })
+            })?;
+            rows.collect()
+        })
+    }
+
     /// Replace every occurrence of `values` in T3 text (and its FTS index). Returns how many
     /// rows changed. Used by Scrub from context.
     pub fn t3_scrub(&self, values: &[String]) -> Result<usize> {
@@ -1075,6 +1080,54 @@ impl Store {
                     "ttft_ms": r.get::<_, Option<i64>>(3)?, "route_ms": r.get::<_, Option<i64>>(4)?, "total_ms": r.get::<_, i64>(5)?,
                     "tool_calls": r.get::<_, i64>(6)?, "escalated": r.get::<_, i64>(7)? != 0,
                     "usage": r.get::<_, Option<String>>(8)?.and_then(|s| serde_json::from_str::<Value>(&s).ok()), "created_at": r.get::<_, i64>(9)?,
+                }))
+            })?;
+            rows.collect()
+        })
+    }
+
+    /// Turn metrics recorded after `after_ms`, oldest first (inspect window).
+    pub fn turn_metrics_after(
+        &self,
+        after_ms: i64,
+        chat_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<Value>> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT id, chat_id, message_id, route, ttft_ms, route_ms, total_ms, tool_calls, escalated, usage, created_at
+                 FROM turn_metrics WHERE created_at > ?1 AND (?2 IS NULL OR chat_id = ?2) ORDER BY created_at ASC LIMIT ?3",
+            )?;
+            let rows = st.query_map(params![after_ms, chat_id, limit], |r| {
+                Ok(json!({
+                    "id": r.get::<_, String>(0)?,
+                    "chat_id": r.get::<_, String>(1)?, "message_id": r.get::<_, String>(2)?, "route": r.get::<_, Option<String>>(3)?,
+                    "ttft_ms": r.get::<_, Option<i64>>(4)?, "route_ms": r.get::<_, Option<i64>>(5)?, "total_ms": r.get::<_, i64>(6)?,
+                    "tool_calls": r.get::<_, i64>(7)?, "escalated": r.get::<_, i64>(8)? != 0,
+                    "usage": r.get::<_, Option<String>>(9)?.and_then(|s| serde_json::from_str::<Value>(&s).ok()), "created_at": r.get::<_, i64>(10)?,
+                }))
+            })?;
+            rows.collect()
+        })
+    }
+
+    /// Decision-log rows of one `side` (`respond`, `route`, …) after `after_ms`, oldest first
+    /// (inspect window): the responder gate's scores and reasons.
+    pub fn decisions_after(&self, after_ms: i64, side: &str, limit: i64) -> Result<Vec<Value>> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT id, side, event_id, gate, action, target_ids, reason, confidence, model, latency_ms, usage, created_at
+                 FROM memory_decision_log WHERE created_at > ?1 AND side = ?2 ORDER BY created_at ASC LIMIT ?3",
+            )?;
+            let rows = st.query_map(params![after_ms, side, limit], |r| {
+                let parse = |s: Option<String>| s.and_then(|s| serde_json::from_str::<Value>(&s).ok());
+                Ok(json!({
+                    "id": r.get::<_, String>(0)?, "side": r.get::<_, String>(1)?, "event_id": r.get::<_, Option<String>>(2)?,
+                    "gate": parse(r.get::<_, Option<String>>(3)?), "action": r.get::<_, Option<String>>(4)?,
+                    "target_ids": parse(r.get::<_, Option<String>>(5)?), "reason": r.get::<_, Option<String>>(6)?,
+                    "confidence": r.get::<_, Option<f64>>(7)?, "model": r.get::<_, Option<String>>(8)?,
+                    "latency_ms": r.get::<_, Option<i64>>(9)?, "usage": parse(r.get::<_, Option<String>>(10)?),
+                    "created_at": r.get::<_, i64>(11)?,
                 }))
             })?;
             rows.collect()

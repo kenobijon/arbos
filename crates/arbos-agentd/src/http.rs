@@ -214,6 +214,32 @@ async fn workspace_release(
     Json(json!({ "project": project, "held": false })).into_response()
 }
 
+/// `GET /w/{project}/inspect?since=&chat=&kind=&limit=` (bearer = the box's MCP token, which
+/// only the relay holds): one bounded window of the agent's recent events (`inspect.rs`).
+async fn workspace_inspect(
+    State(b): State<B>,
+    Path(project): Path<String>,
+    headers: HeaderMap,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    if !box_admin_authed(&b, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let Some(w) = b.get(&project).await else {
+        return (StatusCode::NOT_FOUND, "no such workspace").into_response();
+    };
+    let query = crate::inspect::Query::from_params(&q);
+    Json(crate::inspect::page(&w, &query).await).into_response()
+}
+
+/// `GET /box/state` (same bearer): image, build, uptime, load, memory, disk, workspaces.
+async fn box_state(State(b): State<B>, headers: HeaderMap) -> Response {
+    if !box_admin_authed(&b, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    Json(crate::inspect::box_state(&b).await).into_response()
+}
+
 fn box_admin_authed(b: &Supervisor, headers: &HeaderMap) -> bool {
     headers
         .get(axum::http::header::AUTHORIZATION)
@@ -232,6 +258,8 @@ pub fn box_router(sup: Arc<Supervisor>) -> Router {
             axum::routing::post(workspace_release),
         )
         .route("/w/{project}/metrics", get(metrics))
+        .route("/w/{project}/inspect", get(workspace_inspect))
+        .route("/box/state", get(box_state))
         .route("/w/{project}/history/{chat_id}", get(history))
         .route("/w/{project}/t3/search", get(t3_search))
         .route("/history/{chat_id}", get(history_legacy))

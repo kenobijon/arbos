@@ -18,6 +18,7 @@ mod db;
 mod db_accounts;
 mod db_calls;
 mod db_fleet;
+mod db_inspect;
 mod db_people;
 mod db_push;
 mod db_secrets;
@@ -29,6 +30,7 @@ mod goals;
 mod groups;
 mod image_sniff;
 mod images;
+mod inspect;
 mod livekit;
 mod local;
 mod matrix;
@@ -599,6 +601,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/projects/{id}/history/{chat}", get(api::chat_history))
         .route("/projects/{id}/status", get(api::project_status))
+        .route("/projects/{id}/inspect", get(inspect::project_inspect))
         .route(
             "/projects/{id}/chats",
             get(api::list_chats).post(api::create_chat),
