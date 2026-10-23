@@ -58,6 +58,37 @@ pub struct DocHost {
     pub ignore_before_ms: i64,
     /// `agent:<project_id>` — this agent as a people-chat member, for the catch-up ordering.
     me: String,
+    /// Room link state for debugging readers (`/box/state`, `inspect`): is the relay session
+    /// up, since when, when it last fell, how many sessions so far.
+    pub link: LinkState,
+}
+
+/// What a room's relay session is doing right now (2026-10-23 #1575: two rooms came back
+/// minutes after a sub-second relay restart and nothing said so).
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct LinkState {
+    pub connected: bool,
+    pub connected_at: Option<i64>,
+    pub disconnected_at: Option<i64>,
+    pub sessions: u32,
+    pub last_error: Option<String>,
+}
+
+/// Room redials after a relay restart go through this gate: at most this many handshakes in
+/// flight per box, each after a little jitter, so 200+ rooms do not storm one relay the second
+/// it is back (and time out together, doubling their backoff together).
+const REDIAL_CONCURRENCY: usize = 16;
+/// A push the relay has not acked within this is a dead link, not a slow relay (the relay acks
+/// from its frame handler right after `append_row`).
+const PUSH_ACK_TIMEOUT: Duration = Duration::from_secs(10);
+/// Liveness probe cadence; two silent periods end the session (was one probe per 15 min).
+const PROBE_EVERY: Duration = Duration::from_secs(60);
+/// Backoff ceiling for a room whose session failed for any reason but a refusal.
+const ROOM_BACKOFF_MAX: Duration = Duration::from_secs(4);
+
+fn redial_gate() -> &'static tokio::sync::Semaphore {
+    static GATE: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    GATE.get_or_init(|| tokio::sync::Semaphore::new(REDIAL_CONCURRENCY))
 }
 
 /// A pending people-chat `send` older than this at catch-up is history, not work: nobody asked
@@ -322,6 +353,7 @@ impl SyncHub {
             closed: false,
             ignore_before_ms: 0,
             me: format!("agent:{}", self.cfg.project_id),
+            link: LinkState::default(),
         }));
         self.hosts
             .lock()
@@ -435,7 +467,17 @@ impl SyncHub {
             let started = std::time::Instant::now();
             let room_name = host.lock().await.room.clone();
             let mut refused = false;
-            match self.room_session(&host).await {
+            let mut handshook = false;
+            let result = {
+                // Jitter + the box-wide gate: see `REDIAL_CONCURRENCY`.
+                let jitter = Duration::from_millis(rand::random::<u64>() % 750);
+                tokio::time::sleep(jitter).await;
+                let permit = redial_gate().acquire().await;
+                let r = self.room_session(&host, &mut handshook).await;
+                drop(permit);
+                r
+            };
+            match result {
                 Ok(()) => tracing::info!(room = %room_name, "room session closed"),
                 Err(e) if handshake_refused(&e) => {
                     refused = true;
@@ -444,27 +486,34 @@ impl SyncHub {
                     } else {
                         tracing::debug!(room = %room_name, error = %e, "room still refused");
                     }
+                    host.lock().await.link.last_error = Some(format!("refused: {e}"));
                 }
-                Err(e) => tracing::warn!(room = %room_name, error = %e, "room session error"),
+                Err(e) => {
+                    tracing::warn!(room = %room_name, error = %e, handshook, "room session error");
+                    host.lock().await.link.last_error = Some(e.to_string());
+                }
             }
             {
                 let mut h = host.lock().await;
                 h.clear_inflight();
                 h.caught_up = false;
+                h.link.connected = false;
+                h.link.disconnected_at = Some(now_ms());
             }
             if refused {
                 backoff = REFUSED_ROOM_BACKOFF;
-            } else if started.elapsed() > Duration::from_secs(30) {
+            } else if handshook || started.elapsed() > Duration::from_secs(30) {
+                // The relay answered: this was a restart or a dropped link, not a dead relay.
                 backoff = Duration::from_millis(250);
             }
             tokio::time::sleep(backoff).await;
             if !refused {
-                backoff = (backoff * 2).min(Duration::from_secs(16));
+                backoff = (backoff * 2).min(ROOM_BACKOFF_MAX);
             }
         }
     }
 
-    async fn room_session(&self, host: &SharedHost) -> Result<()> {
+    async fn room_session(&self, host: &SharedHost, handshook: &mut bool) -> Result<()> {
         let (room, cursor) = {
             let h = host.lock().await;
             (h.room.clone(), h.cursor)
@@ -493,13 +542,30 @@ impl SyncHub {
             Bytes::new(),
         );
         sink.send(Message::Binary(hello.encode())).await?;
-        let chat_id = host.lock().await.chat_id.clone();
+        *handshook = true;
+        let chat_id = {
+            let mut h = host.lock().await;
+            h.link.connected = true;
+            h.link.connected_at = Some(now_ms());
+            h.link.sessions = h.link.sessions.saturating_add(1);
+            h.link.last_error = None;
+            if h.link.sessions > 1 {
+                tracing::info!(room = %room, sessions = h.link.sessions, cursor, unacked = h.doc.oplog_vv() != h.acked_vv, "room session reconnected");
+            }
+            h.chat_id.clone()
+        };
 
         let mut tick = tokio::time::interval(Duration::from_millis(STREAM_COMMIT_MS));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut persist_tick = tokio::time::interval(Duration::from_secs(2));
-        let mut probe_tick = tokio::time::interval(Duration::from_secs(15 * 60));
+        let mut probe_tick = tokio::time::interval(PROBE_EVERY);
         probe_tick.tick().await;
+        // Dead-link detection (#1575): a socket the relay side has dropped can look open from
+        // here (the tunnel keeps our half up); pushes then sit in flight with no ack and no
+        // frame ever arrives, and the room is silent until the 15-minute probe. Now a push not
+        // acked within `PUSH_ACK_TIMEOUT`, or a probe unanswered, ends the session so it redials.
+        let mut inflight_since: Option<std::time::Instant> = None;
+        let mut last_rx = std::time::Instant::now();
         let mut dirty_since_persist = false;
         let mut head_seq_for_checkpoint: Option<(i64, i64, i64)> = None;
         // False once a row of this session failed to import or was parked by Loro as pending
@@ -515,10 +581,12 @@ impl SyncHub {
                     let data = match msg? {
                         Message::Binary(b) => b,
                         Message::Close(_) => return Ok(()),
-                        Message::Ping(p) => { sink.send(Message::Pong(p)).await?; continue; }
+                        Message::Ping(p) => { last_rx = std::time::Instant::now(); sink.send(Message::Pong(p)).await?; continue; }
+                        Message::Pong(_) => { last_rx = std::time::Instant::now(); continue; }
                         _ => continue,
                     };
                     let Some(f) = Frame::decode(data)? else { continue };
+                    last_rx = std::time::Instant::now();
                     match f.ty {
                         FrameType::State => {
                             let st: wire::State = serde_json::from_value(f.header)?;
@@ -625,6 +693,9 @@ impl SyncHub {
                             let ack: wire::Ack = serde_json::from_value(f.header)?;
                             let mut h = host.lock().await;
                             h.on_ack(&ack.batch_id);
+                            if h.inflight.is_none() {
+                                inflight_since = None;
+                            }
                             dirty_since_persist = true;
                         }
                         FrameType::Status => {
@@ -649,10 +720,19 @@ impl SyncHub {
                     if host.lock().await.closed {
                         return Ok(());
                     }
+                    if let Some(since) = inflight_since {
+                        if since.elapsed() > PUSH_ACK_TIMEOUT {
+                            return Err(anyhow!("push not acked in {PUSH_ACK_TIMEOUT:?}; link presumed dead"));
+                        }
+                    }
+                    if last_rx.elapsed() > PROBE_EVERY * 2 {
+                        return Err(anyhow!("no frame from the relay in {:?}; link presumed dead", PROBE_EVERY * 2));
+                    }
                     let push = { host.lock().await.next_push() };
                     if let Some((batch, bytes)) = push {
                         let f = Frame::new(FrameType::Push, json!({ "batchId": batch }), Bytes::from(bytes));
                         sink.send(Message::Binary(f.encode())).await?;
+                        inflight_since = Some(std::time::Instant::now());
                         dirty_since_persist = true;
                     }
                 }
@@ -680,6 +760,35 @@ impl SyncHub {
             return Err(anyhow!("checkpoint fetch: HTTP {}", resp.status()));
         }
         Ok(resp.bytes().await?.to_vec())
+    }
+
+    /// Room links of this workspace for debugging readers: counts plus every room that is down
+    /// or holds changes the relay has not acked.
+    pub async fn link_summary(&self) -> serde_json::Value {
+        let hosts: Vec<SharedHost> = self.hosts.lock().await.values().cloned().collect();
+        let mut total = 0usize;
+        let mut connected = 0usize;
+        let mut trouble = Vec::new();
+        for h in hosts {
+            let h = h.lock().await;
+            if h.closed {
+                continue;
+            }
+            total += 1;
+            let unacked = h.doc.oplog_vv() != h.acked_vv;
+            if h.link.connected {
+                connected += 1;
+            }
+            if !h.link.connected || unacked {
+                trouble.push(json!({
+                    "chat_id": h.chat_id, "connected": h.link.connected, "connected_at": h.link.connected_at,
+                    "disconnected_at": h.link.disconnected_at, "sessions": h.link.sessions,
+                    "unacked": unacked, "inflight": h.inflight.is_some(), "caught_up": h.caught_up,
+                    "last_error": h.link.last_error,
+                }));
+            }
+        }
+        json!({ "rooms": total, "connected": connected, "trouble": trouble })
     }
 
     /// Write the box status into the project doc (`status` map).
@@ -718,6 +827,7 @@ mod tests {
             closed: false,
             ignore_before_ms: 0,
             me: "agent:ME".into(),
+            link: LinkState::default(),
         }
     }
 
@@ -853,5 +963,42 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![old]
         );
+    }
+
+    /// #1575: a reply written while the relay was restarting must go out on the next session.
+    /// The un-acked batch is dropped from `inflight` when a session ends and re-exported from
+    /// `acked_vv` by the next `next_push`; an ack moves the mark, a dropped session does not.
+    #[test]
+    fn unacked_rows_are_replayed_after_a_dropped_session() {
+        let doc = ChatDoc::new(Some(7), true);
+        let mut host = host_with(doc);
+        host.doc
+            .append_user_message(
+                "m1",
+                "hi",
+                "mac",
+                &arbos_core::doc::UserMessageOpts::default(),
+            )
+            .unwrap();
+        let (batch1, bytes1) = host.next_push().expect("first push");
+        assert!(host.next_push().is_none(), "one batch in flight at a time");
+        // The socket died (1012) before the ack: the session loop clears inflight only.
+        host.clear_inflight();
+        let (batch2, bytes2) = host.next_push().expect("replayed on the next session");
+        assert_ne!(batch1, batch2);
+        assert_eq!(
+            bytes1, bytes2,
+            "same ops, exported from the same acked mark"
+        );
+        host.on_ack(&batch2);
+        assert!(host.next_push().is_none(), "acked: nothing left to push");
+        // A stale ack for the dropped batch is ignored.
+        host.doc
+            .push_command("send", serde_json::json!({ "messageId": "m1" }), "mac");
+        let (batch3, _) = host.next_push().expect("new change");
+        host.on_ack(&batch1);
+        assert!(host.next_push().is_none(), "still in flight");
+        host.on_ack(&batch3);
+        assert!(host.next_push().is_none());
     }
 }
