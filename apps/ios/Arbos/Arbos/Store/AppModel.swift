@@ -56,6 +56,8 @@ private struct RegistryCache: Codable {
 private enum StoreKey {
     static let registry = "registry"
     static let people = "people"
+    static let directory = "directory"
+    static let serversAvailable = "serversAvailable"
     static let me = "me"
     static let unread = "unread"
     static let lastChat = "lastChat"
@@ -125,8 +127,12 @@ final class AppModel: ObservableObject {
     @Published var peopleUnread: Set<String> = []
     @Published private(set) var blocked: [Person] = []
     /// Every Arbos user the relay knows (members + invited), for the New Message sheet.
+    /// Restored from the device store at launch and refreshed in the registry loop, so
+    /// the sheet opens on its final list instead of a spinner that the list replaces.
     @Published var directory: [Person] = []
     private var directoryLoadedAt: Int64 = 0
+    /// How long a loaded directory stays fresh before the next `loadDirectory` refetches.
+    nonisolated static let directoryTtlMs: Int64 = 600_000
     /// The chat currently on screen; pushes for it never notify while the
     /// scene is active (Mac: `window_active`). Background / lock clears focus
     /// so a reply still pushes a banner.
@@ -1009,6 +1015,8 @@ final class AppModel: ObservableObject {
         stopMatrix()
         servers = []
         serversAvailable = false
+        directory = []
+        directoryLoadedAt = 0
         dirtyDocs = []
         flushTask?.cancel()
         flushTask = nil
@@ -1059,6 +1067,8 @@ final class AppModel: ObservableObject {
                 await self.refreshRegistry()
                 await self.refreshAccount()
                 await self.refreshPeople()
+                // The New Message sheet's list, ahead of the first "+" (TTL-gated, off this loop).
+                Task { await self.loadDirectory() }
                 await self.refreshServers()
                 await self.startMatrixIfNeeded()
                 await self.drainPushes()
@@ -1160,6 +1170,14 @@ final class AppModel: ObservableObject {
         if user == nil, let data = store.get(StoreKey.me), let who = try? JSONDecoder().decode(AuthUser.self, from: data) {
             user = who
         }
+        if directory.isEmpty, let data = store.get(StoreKey.directory), let cached = AppModel.decodeDirectoryCache(data) {
+            directory = cached
+            AvatarImageCache.shared.warm(urls: cached.map(\.avatarUrl))
+        }
+        // The "+" sheet's New server row is decided before the first `GET /servers` answers.
+        if let data = store.get(StoreKey.serversAvailable) {
+            serversAvailable = data.first == 1
+        }
         if let data = store.get(StoreKey.unread), let counts = try? JSONDecoder().decode([String: Int].self, from: data) {
             unreadCounts = counts
         }
@@ -1210,6 +1228,33 @@ final class AppModel: ObservableObject {
     private func savePeopleCache(_ raw: [Any]) {
         guard let store, let data = try? JSONSerialization.data(withJSONObject: raw) else { return }
         store.put(StoreKey.people, data)
+    }
+
+    /// Remember whether this relay runs servers, so the next launch's "+" sheet
+    /// shows (or hides) New server on its first frame instead of after the first poll.
+    func rememberServersAvailable(_ on: Bool) {
+        store?.put(StoreKey.serversAvailable, Data([on ? 1 : 0]))
+    }
+
+    private func saveDirectoryCache() {
+        guard let store else { return }
+        if let data = AppModel.encodeDirectoryCache(directory) {
+            store.put(StoreKey.directory, data)
+        } else {
+            store.remove(StoreKey.directory)
+        }
+    }
+
+    /// The directory as the store keeps it; nil for an empty list (nothing to restore).
+    nonisolated static func encodeDirectoryCache(_ list: [Person]) -> Data? {
+        guard !list.isEmpty else { return nil }
+        return try? JSONEncoder().encode(list)
+    }
+
+    /// nil when the bytes are not a non-empty list (an older store, or nothing saved).
+    nonisolated static func decodeDirectoryCache(_ data: Data) -> [Person]? {
+        guard let list = try? JSONDecoder().decode([Person].self, from: data), !list.isEmpty else { return nil }
+        return list
     }
 
     private func saveAccountCache() {
@@ -1787,10 +1832,10 @@ final class AppModel: ObservableObject {
     /// Older relays without the route: the union of one-letter searches.
     func loadDirectory(force: Bool = false) async {
         guard credentials != nil, !isFixture else { return }
-        if !force, nowMs() - directoryLoadedAt < 600_000, !directory.isEmpty { return }
+        if !force, !AppModel.directoryNeedsRefresh(loadedAt: directoryLoadedAt, now: nowMs(), isEmpty: directory.isEmpty) { return }
         directoryLoadedAt = nowMs()
         if let list = try? await api.users() {
-            directory = list.filter { $0.id != user?.id }
+            setDirectory(list.filter { $0.id != user?.id })
             return
         }
         var seen: [String: Person] = [:]
@@ -1802,7 +1847,30 @@ final class AppModel: ObservableObject {
                 for p in list where p.status != "github" && p.id != user?.id { seen[p.id] = p }
             }
         }
-        directory = seen.values.sorted { $0.handle.lowercased() < $1.handle.lowercased() }
+        setDirectory(seen.values.sorted { $0.handle.lowercased() < $1.handle.lowercased() })
+    }
+
+    /// A refresh is due when nothing is loaded yet or the TTL has passed. A restored
+    /// (non-empty) directory with no load this launch refetches at once, in the background.
+    nonisolated static func directoryNeedsRefresh(loadedAt: Int64, now: Int64, isEmpty: Bool) -> Bool {
+        isEmpty || loadedAt == 0 || now - loadedAt >= directoryTtlMs
+    }
+
+    /// Publish a fresh directory only when it differs (an unchanged list must not
+    /// repaint an open sheet), persist it, and warm the avatars it shows.
+    private func setDirectory(_ list: [Person]) {
+        if let changed = AppModel.directoryUpdate(current: directory, fresh: list) {
+            var t = Transaction()
+            t.disablesAnimations = true
+            withTransaction(t) { directory = changed }
+            saveDirectoryCache()
+        }
+        AvatarImageCache.shared.warm(urls: list.map(\.avatarUrl))
+    }
+
+    /// The list to publish after a refresh: nil when it equals what is shown.
+    nonisolated static func directoryUpdate(current: [Person], fresh: [Person]) -> [Person]? {
+        fresh == current ? nil : fresh
     }
 
     /// People group: `POST /chats {kind: group, members}`. Relays that still
