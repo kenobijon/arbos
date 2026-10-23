@@ -161,7 +161,7 @@ final class MentionTable {
 
     // MARK: Routing
 
-    static func url(for target: ProfileTarget) -> URL? {
+    nonisolated static func url(for target: ProfileTarget) -> URL? {
         switch target {
         case .agent(let projectId): return URL(string: "arbos://mention/agent/\(projectId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? projectId)")
         case .user(let p): return URL(string: "arbos://mention/user/\(p.handle.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? p.handle)")
@@ -246,9 +246,11 @@ final class MentionTable {
         var out = Text("")
         var cursor = attr.startIndex
         for (range, entry) in chips {
-            let lo = AttributedString.Index(range.lowerBound, within: attr)
-            let hi = AttributedString.Index(range.upperBound, within: attr)
-            guard let lo, let hi else { continue }
+            // Map the plain-string range onto the attributed string by character offset.
+            let loOff = plain.distance(from: plain.startIndex, to: range.lowerBound)
+            let hiOff = plain.distance(from: plain.startIndex, to: range.upperBound)
+            let lo = attr.characters.index(attr.startIndex, offsetBy: loOff)
+            let hi = attr.characters.index(attr.startIndex, offsetBy: hiOff)
             out = out + Text(AttributedString(attr[cursor..<lo]))
             // The name run: accent on the pill, a link `ChatView` routes to the pane.
             var name = AttributedString(attr[attr.index(afterCharacter: lo)..<hi])
@@ -256,7 +258,7 @@ final class MentionTable {
             name.swiftUI.backgroundColor = pill
             name.underlineStyle = nil
             name.link = Self.url(for: entry.target)
-            name.font = .system(size: Theme.body, weight: .medium)
+            name.swiftUI.font = .system(size: Theme.body, weight: .medium)
             let dy = -Self.padY - 1
             if let cap = leftCap(for: entry, pill: pill, lineHeight: lineHeight, key: Self.key(for: entry.target)) {
                 out = out + Text(Image(uiImage: cap)).baselineOffset(dy)

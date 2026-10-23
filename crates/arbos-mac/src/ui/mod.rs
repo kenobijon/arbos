@@ -27,6 +27,7 @@ pub mod motion;
 pub mod notify;
 pub mod onboarding;
 pub mod people;
+pub mod presence;
 pub mod profiles;
 pub mod routines;
 pub mod secrets;

@@ -102,10 +102,12 @@ enum RowKind: Equatable {
     /// only when the sender changed (`named`, Grok Bot's group style).
     case other(text: String, handle: String, avatar: String?, named: Bool, quote: Quote?)
     case assistant(blocks: [Block], live: Bool, caption: String?)
-    /// Shared agent in a people chat: same shape as `.other` (avatar + bubble, name on sender
-    /// change). No "answering @x · owned by @y" meta — ownership lives in the profile pane
+    /// Shared agent in a people chat: same shape as `.other` (avatar + bubble, name on each
+    /// reply — consecutive answers from the same agent must not merge, #1447). No
+    /// "answering @x · owned by @y" meta — ownership lives in the profile pane
     /// (Jacob, 2026-10-22). `agentId` opens that pane from the avatar / name.
-    case member(blocks: [Block], live: Bool, handle: String, avatar: String?, named: Bool, agentId: String?)
+    /// `quote` is the user message this answers (`inReplyTo`).
+    case member(blocks: [Block], live: Bool, handle: String, avatar: String?, named: Bool, agentId: String?, quote: Quote?)
     /// Centred muted line: hand-offs ("Messaged ◉ Affine"), stops, dates.
     case system(icon: String?, text: String, avatarProject: Id?)
     /// Grok Bot question card: bold question, × top-right, lettered answer rows.
@@ -171,7 +173,10 @@ enum Transcript {
             var chunk: [Row] = []
             let streaming = message.isStreaming
             let dateBreak = message.createdAt > 0 && (lastAt == 0 || message.createdAt - lastAt > 3_600_000)
-            let named = dateBreak || prevSender != message.sender
+            // People-chat agent replies always name the sender (#1447): two answers in a
+            // row from the same agent must not look like one run.
+            let agentInPeople = people && (message.role == .assistant || message.role == .project)
+            let named = dateBreak || prevSender != message.sender || agentInPeople
             switch message.role {
             case .user:
                 var hasImage = false
@@ -227,6 +232,8 @@ enum Transcript {
                 let lastTextPart = message.parts.lastIndex { $0.textValue != nil }
                 let firstTextPart = message.parts.firstIndex { $0.textValue != nil }
                 let agentId: String? = message.sender.hasPrefix("agent:") ? String(message.sender.dropFirst(6)) : nil
+                // Quote the user message this answers (`inReplyTo`); same chip as a human reply.
+                let replyQuote = message.inReplyTo.flatMap { $0.isEmpty ? nil : Quote.forReply($0, in: byId) }
                 // Error parts wait until the prose is known: under a real answer they stay the
                 // chip with Retry; on an answer with no words they become the words.
                 var errors: [(id: Id, code: String, text: String)] = []
@@ -243,7 +250,8 @@ enum Transcript {
                             chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
                                              kind: .member(blocks: blocks, live: live, handle: h,
                                                            avatar: message.senderAvatar, named: named && pix == firstTextPart,
-                                                           agentId: agentId)))
+                                                           agentId: agentId,
+                                                           quote: pix == firstTextPart ? replyQuote : nil)))
                         } else {
                             chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
                                              kind: .assistant(blocks: blocks, live: live, caption: nil)))
@@ -306,7 +314,8 @@ enum Transcript {
                     if people, let h = message.senderHandle {
                         chunk.append(Row(id: "\(message.id)#failed", messageId: message.id, role: .assistant,
                                          kind: .member(blocks: blocks, live: false, handle: h,
-                                                       avatar: message.senderAvatar, named: named, agentId: agentId)))
+                                                       avatar: message.senderAvatar, named: named, agentId: agentId,
+                                                       quote: replyQuote)))
                     } else {
                         chunk.append(Row(id: "\(message.id)#failed", messageId: message.id, role: .assistant,
                                          kind: .assistant(blocks: blocks, live: false, caption: nil)))
@@ -724,11 +733,21 @@ struct RowView: View {
     var onQuoteTap: ((Id) -> Void)? = nil
     /// Briefly tinted after a quote tap landed on this row's message.
     var highlighted: Bool = false
+    /// Swipe right on this bubble → reply (same as the long-press Reply item).
+    /// Nil on system / channel / non-message rows.
+    var onReply: (() -> Void)? = nil
+    /// ChatView sets this while a reply swipe is locked so swipe-right-to-back does not fire.
+    var replySwipeActive: Binding<Bool> = .constant(false)
     /// Mention chips (Oct 23): who `@handle` resolves to.
     private var mentions: MentionTable { MentionTable(model: model, theme: theme) }
 
     /// Trailing column width for swipe-revealed times (fits "12:59 PM").
     static let timeRevealWidth: CGFloat = 56
+    /// How far a right swipe pulls the bubble before reply arms (Telegram-style).
+    static let replySwipeWidth: CGFloat = 56
+
+    @State private var replyDrag: CGFloat = 0
+    @State private var replyLocked = false
 
     private var maxBubble: CGFloat { max(200, width - Theme.bubbleInset) }
 
@@ -766,8 +785,8 @@ struct RowView: View {
                 .padding(-4)
         )
         .animation(.easeInOut(duration: 0.35), value: highlighted)
-        // iMessage: drag left → whole row slides; time sits on the trailing edge.
-        .offset(x: -timeReveal)
+        // iMessage: drag left → times; Telegram: drag right → reply. Mutually exclusive.
+        .offset(x: replyDrag - timeReveal)
         .overlay(alignment: .trailing) {
             if let time = swipeTimeLabel, timeReveal > 0.5 {
                 Text(time)
@@ -780,6 +799,59 @@ struct RowView: View {
                     .accessibilityHidden(timeReveal < 12)
             }
         }
+        .overlay(alignment: .leading) {
+            if onReply != nil, replyDrag > 0.5 {
+                Image(systemName: "arrowshape.turn.up.left")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(theme.accent)
+                    .frame(width: Self.replySwipeWidth, alignment: .leading)
+                    .offset(x: replyDrag - Self.replySwipeWidth)
+                    .opacity(Double(min(1, replyDrag / (Self.replySwipeWidth * 0.55))))
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(replyDrag < 12)
+            }
+        }
+        .simultaneousGesture(replySwipeGesture)
+    }
+
+    /// Drag right on a message to reply. Locks only after a clear horizontal-right
+    /// pan so vertical scroll and swipe-left time reveal stay free.
+    private var replySwipeGesture: some Gesture {
+        DragGesture(minimumDistance: 12, coordinateSpace: .local)
+            .onChanged { value in
+                guard onReply != nil else { return }
+                let dx = value.translation.width
+                let dy = value.translation.height
+                if !replyLocked {
+                    guard abs(dx) + abs(dy) >= 12 else { return }
+                    // Vertical scroll or swipe-left time peek: do not steal.
+                    guard dx > 0, abs(dx) > abs(dy) * 1.15 else { return }
+                    replyLocked = true
+                    replySwipeActive.wrappedValue = true
+                }
+                let raw = max(0, dx)
+                let w = Self.replySwipeWidth
+                let reveal = raw <= w ? raw : w + min(24, (raw - w) * 0.2)
+                var t = Transaction()
+                t.disablesAnimations = true
+                withTransaction(t) { replyDrag = reveal }
+            }
+            .onEnded { _ in
+                let triggered = replyLocked && replyDrag >= Self.replySwipeWidth * 0.7
+                replyLocked = false
+                withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
+                    replyDrag = 0
+                }
+                if triggered {
+                    Haptics.pick()
+                    onReply?()
+                }
+                // Keep the back-swipe suppress flag until after ChatView's simultaneous
+                // swipe-right-to-Home onEnded has run (same drag).
+                DispatchQueue.main.async {
+                    replySwipeActive.wrappedValue = false
+                }
+            }
     }
 
     @ViewBuilder
@@ -805,11 +877,12 @@ struct RowView: View {
                 .opacity(pending ? 0.6 : 1)
             }
         case .other(let text, let handle, let avatar, let named, let quote):
-            HStack(alignment: .bottom, spacing: 8) {
+            HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
                 Button { model.openPersonProfile(handle: handle, avatarUrl: avatar, chatId: chatId) } label: {
-                    PersonAvatar(url: avatar, handle: handle, size: 26, name: model.personName(handle: handle), id: model.personId(handle: handle))
+                    PersonAvatar(url: avatar, handle: handle, size: Theme.memberAvatar, name: model.personName(handle: handle), id: model.personId(handle: handle))
                 }
                 .buttonStyle(.plain)
+                .padding(.leading, Theme.avatarColumnInset)
                 .accessibilityLabel("@\(handle), profile")
                 VStack(alignment: .leading, spacing: 3) {
                     if named {
@@ -836,17 +909,18 @@ struct RowView: View {
                     .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
                     .senderBar(personAccent(handle: handle, avatar: avatar))
                 }
-                .frame(maxWidth: maxBubble - 34, alignment: .leading)
+                .frame(maxWidth: maxBubble - Theme.memberLane, alignment: .leading)
                 Spacer(minLength: 0)
             }
             .task(id: avatar) { accents.load(url: avatar) }
-        case .member(let blocks, let live, let handle, let avatar, let named, let agentId):
+        case .member(let blocks, let live, let handle, let avatar, let named, let agentId, let quote):
             let openMember = {
                 if let agentId { model.showProfile(.agent(projectId: agentId)) }
                 else { model.openPersonProfile(handle: handle, avatarUrl: avatar, chatId: chatId) }
             }
-            HStack(alignment: .bottom, spacing: 8) {
+            HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
                 Button(action: openMember) { peopleAvatar(handle: handle, avatar: avatar) }
+                    .padding(.leading, Theme.avatarColumnInset)
                     .buttonStyle(.plain)
                     .accessibilityLabel("@\(handle), profile")
                 VStack(alignment: .leading, spacing: 3) {
@@ -860,6 +934,9 @@ struct RowView: View {
                         .buttonStyle(.plain)
                     }
                     VStack(alignment: .leading, spacing: 8) {
+                        if let quote {
+                            quoteHeader(quote, color: theme.text)
+                        }
                         ForEach(Array(blocks.enumerated()), id: \.offset) { i, block in
                             BlockView(block: block, live: live && i == blocks.count - 1)
                         }
@@ -869,7 +946,7 @@ struct RowView: View {
                     .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
                     .senderBar(memberAccent(handle: handle, avatar: avatar))
                 }
-                .frame(maxWidth: maxBubble - 34, alignment: .leading)
+                .frame(maxWidth: maxBubble - Theme.memberLane, alignment: .leading)
                 Spacer(minLength: 0)
             }
             .task(id: avatar) { if memberProject(handle: handle) == nil { accents.load(url: avatar) } }
@@ -1002,7 +1079,7 @@ struct RowView: View {
     /// Match the avatar offset used by people-chat bubbles (26 pt + 8 pt gap).
     private var reactionLeading: CGFloat {
         switch row.kind {
-        case .other, .member: return 34
+        case .other, .member: return Theme.memberLane
         default: return 0
         }
     }
@@ -1016,11 +1093,11 @@ struct RowView: View {
     @ViewBuilder
     private func peopleAvatar(handle: String, avatar: String?) -> some View {
         if let project = memberProject(handle: handle) {
-            AgentAvatar(project: project, theme: theme, size: 26, still: true)
+            AgentAvatar(project: project, theme: theme, size: Theme.memberAvatar, still: true)
         } else if let avatar, avatar.contains("://") {
-            PersonAvatar(url: avatar, handle: handle, size: 26, name: model.personName(handle: handle), id: model.personId(handle: handle))
+            PersonAvatar(url: avatar, handle: handle, size: Theme.memberAvatar, name: model.personName(handle: handle), id: model.personId(handle: handle))
         } else {
-            PersonAvatar(url: nil, handle: handle, size: 26, name: model.personName(handle: handle), id: model.personId(handle: handle))
+            PersonAvatar(url: nil, handle: handle, size: Theme.memberAvatar, name: model.personName(handle: handle), id: model.personId(handle: handle))
         }
     }
 
