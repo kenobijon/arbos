@@ -30,7 +30,7 @@ final class MessageMenuTests: XCTestCase {
     /// its Copy is the whole message — every paragraph, the list, the code
     /// span — not the block under the finger. The fixture's "rules" reply is
     /// the shape of Jacob's bubble: five blocks, one text part.
-    func testCopyOfAMultiBlockBubbleIsTheWholeMessage() {
+    @MainActor func testCopyOfAMultiBlockBubbleIsTheWholeMessage() {
         let text = AppModel.longReply
         let blocks = Markdown.blocks(text)
         XCTAssertGreaterThanOrEqual(blocks.count, 5, "the fixture reply must span several blocks")
