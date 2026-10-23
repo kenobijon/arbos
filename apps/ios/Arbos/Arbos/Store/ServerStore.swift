@@ -185,11 +185,13 @@ extension AppModel {
             }
             servers = list
             serversAvailable = true
+            rememberServersAvailable(true)
             applyOpenServerHook()
         } catch let e as RelayError where e.status == 404 || e.status == 405 || e.status == 503 {
             // Relays without servers: nothing server-related.
             servers = []
             serversAvailable = false
+            rememberServersAvailable(false)
         } catch {
             // Keep the last list; the loop tries again.
         }

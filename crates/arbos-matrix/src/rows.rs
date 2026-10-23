@@ -93,19 +93,26 @@ pub fn message_row(
         .unwrap_or_else(|| event_id.clone());
     let text = content["body"].as_str().unwrap_or_default().to_owned();
     let created_at = ev["origin_server_ts"].as_i64().unwrap_or(0);
-    let sender_name = display_name(mxid).unwrap_or_else(|| {
-        mxid.trim_start_matches('@')
-            .split(':')
-            .next()
-            .unwrap_or_default()
-            .to_owned()
-    });
     let role = if sender.starts_with("agent:") {
         "assistant"
     } else if sender == "system" {
         "system"
     } else {
         "user"
+    };
+    // A system line (membership notice, #1386) is nobody's message: no sender
+    // name, so the channel list shows "Mira K. added Sam Rivera", not
+    // "launchcrew: Mira K. added Sam Rivera" (the owner only carried it).
+    let sender_name = if role == "system" {
+        String::new()
+    } else {
+        display_name(mxid).unwrap_or_else(|| {
+            mxid.trim_start_matches('@')
+                .split(':')
+                .next()
+                .unwrap_or_default()
+                .to_owned()
+        })
     };
     let handle = match sender.strip_prefix("user:") {
         Some(_) => sender_name.clone(),
@@ -176,5 +183,16 @@ mod tests {
         let v: Value = serde_json::from_str(&row.json).unwrap();
         assert_eq!(v["role"], "assistant");
         assert!(message_row(&json!({ "type": "m.room.member" }), &|_| None).is_none());
+        // A membership notice: the owner sent it, the content names the system.
+        let notice = json!({
+            "type": "m.room.message", "event_id": "$e3", "sender": "@gh_7:arbos.life", "origin_server_ts": 1900,
+            "content": { "msgtype": "m.notice", "body": "Mira K. added Sam Rivera", "life.arbos.sender": "system", "life.arbos.id": "01N" }
+        });
+        let row = message_row(&notice, &|_| Some("launchcrew".to_owned())).unwrap();
+        assert_eq!(row.sender, "system");
+        assert_eq!(row.sender_name, "", "a system line carries no sender name");
+        let v: Value = serde_json::from_str(&row.json).unwrap();
+        assert_eq!(v["role"], "system");
+        assert_eq!(v["senderHandle"], "");
     }
 }

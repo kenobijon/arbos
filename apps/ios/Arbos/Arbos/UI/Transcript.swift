@@ -5,6 +5,7 @@
 
 import ArbosFFI
 import AVFoundation
+import ImageIO
 import QuickLook
 import SwiftUI
 import UIKit
@@ -1176,11 +1177,65 @@ final class SenderAccents: ObservableObject {
     }
 }
 
+/// Decoded people pictures for the launch, keyed by URL. A picture that is here
+/// paints on the first frame of any row that shows it (`PersonAvatar` reads it
+/// synchronously); `warm` fetches the New Message directory's pictures ahead of
+/// the sheet, so its rows never flash initials and then the photo.
+@MainActor
+final class AvatarImageCache: ObservableObject {
+    static let shared = AvatarImageCache()
+
+    @Published private(set) var images: [String: UIImage] = [:]
+    private var requested: Set<String> = []
+
+    func image(for url: String?) -> UIImage? {
+        url.flatMap { images[$0] }
+    }
+
+    /// Pictures are kept at the largest size a row draws (128 pt hero at 3x).
+    nonisolated static let maxPixelSize = 384
+    /// How many of a list's pictures `warm` fetches ahead (several screens of rows;
+    /// the rest load as they scroll in).
+    nonisolated static let warmLimit = 48
+
+    /// Start fetching the first `warmLimit` URLs not seen this launch (through the shared URLCache).
+    func warm(urls: [String?]) {
+        for case let url? in urls.prefix(AvatarImageCache.warmLimit) { fetch(url) }
+    }
+
+    func fetch(_ url: String) {
+        guard url.contains("://"), let u = URL(string: url), !requested.contains(url) else { return }
+        requested.insert(url)
+        Task.detached(priority: .userInitiated) { [weak self] in
+            guard let (data, _) = try? await URLSession.shared.data(from: u),
+                  let img = AvatarImageCache.decode(data) else {
+                await MainActor.run { self?.requested.remove(url) }
+                return
+            }
+            await MainActor.run { self?.images[url] = img }
+        }
+    }
+
+    /// Downsampled decode through ImageIO: a 460 px GitHub picture never sits in memory at full size.
+    nonisolated static func decode(_ data: Data) -> UIImage? {
+        guard let src = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        let opts: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
+        ]
+        guard let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else { return nil }
+        return UIImage(cgImage: cg)
+    }
+}
+
 /// Round avatar for a person: the GitHub/uploaded picture when there is one,
 /// else the Telegram-style initials circle (D79). `id` is the stable user id
 /// the colour is derived from; without it the handle stands in.
 struct PersonAvatar: View {
     @Environment(\.theme) private var theme
+    @ObservedObject private var cache = AvatarImageCache.shared
     let url: String?
     let handle: String
     var size: CGFloat = 40
@@ -1190,13 +1245,15 @@ struct PersonAvatar: View {
 
     var body: some View {
         ZStack {
-            initials
-            if let url, let u = URL(string: url) {
-                AsyncImage(url: u) { img in img.resizable().scaledToFill() } placeholder: { initials }
+            if let img = cache.image(for: url) {
+                Image(uiImage: img).resizable().scaledToFill()
+            } else {
+                initials
             }
         }
         .frame(width: size, height: size)
         .clipShape(Circle())
+        .onAppear { if let url { cache.fetch(url) } }
     }
 
     private var initials: some View {
