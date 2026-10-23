@@ -21,6 +21,7 @@ use crate::ui::composer::Composer;
 use crate::ui::glass::{self, WindowDrag};
 use crate::ui::groups;
 use crate::ui::icons::icon;
+use crate::ui::identity;
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
 use crate::ui::shell::Shell;
@@ -104,55 +105,47 @@ pub fn render(
             .child(text)
     };
     // The name part: its own hit region so the tab segment can sit beside it.
-    let mut name_part = div()
-        .id("header-name")
-        .flex()
-        .items_center()
-        .gap(px(9.0))
-        .h_full()
-        .min_w_0()
-        .cursor_pointer()
-        .rounded_full()
-        .hover(|s| s.bg(theme.surface_2))
-        .pr(px(4.0));
-
-    if let Some(person) = space
+    let name_part = if let Some(person) = space
         .person()
         .filter(|_| is_people && !space.is_people_group())
     {
         let image = state.avatar(&person.avatar_url);
         let handle = person.handle.clone();
         let sid = space.id.clone();
-        name_part = name_part
-            .child(people::avatar(image, person, AVATAR_HEADER, &theme))
-            .child(name_label(person.display_name(), &theme))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.members_open = false;
-                this.add_agent_open = false;
-                let (handle, sid) = (handle.clone(), sid.clone());
-                this.state.update(cx, |s, cx| {
-                    s.toggle_profile(
-                        ProfilePage::User {
-                            handle,
-                            space_id: Some(sid),
-                        },
-                        cx,
-                    )
-                });
-            }));
+        name_part(
+            people::avatar(image, person, AVATAR_HEADER, &theme),
+            name_label(person.display_name(), &theme).into_any_element(),
+            &theme,
+        )
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.members_open = false;
+            this.add_agent_open = false;
+            let (handle, sid) = (handle.clone(), sid.clone());
+            this.state.update(cx, |s, cx| {
+                s.toggle_profile(
+                    ProfilePage::User {
+                        handle,
+                        space_id: Some(sid),
+                    },
+                    cx,
+                )
+            });
+        }))
     } else if space.is_people_group() {
         let sid = space.id.clone();
-        name_part = name_part
-            .child(groups::picture(space, state, AVATAR_HEADER, &theme))
-            .child(name_label(space.name.clone(), &theme))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.members_open = false;
-                this.add_agent_open = false;
-                let sid = sid.clone();
-                this.state.update(cx, |s, cx| {
-                    s.toggle_profile(ProfilePage::Group { space_id: sid }, cx)
-                });
-            }));
+        name_part(
+            groups::picture(space, state, AVATAR_HEADER, &theme),
+            name_label(space.name.clone(), &theme).into_any_element(),
+            &theme,
+        )
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.members_open = false;
+            this.add_agent_open = false;
+            let sid = sid.clone();
+            this.state.update(cx, |s, cx| {
+                s.toggle_profile(ProfilePage::Group { space_id: sid }, cx)
+            });
+        }))
     } else {
         let avatar_state = state.avatar_state(&space.id);
         let machine = state.machine.shown_state();
@@ -188,48 +181,45 @@ pub fn render(
         // a single click opens the page only after the double-click window
         // (#1068).
         let groupish = space.is_groupish();
-        name_part = name_part
+        // The machine dot hangs off the disc's corner, inside the slot's box.
+        let picture = div()
+            .relative()
+            .size(px(AVATAR_HEADER))
+            .flex_shrink_0()
+            .child(avatars::project(space, AVATAR_HEADER, &theme))
             .child(
                 div()
-                    .relative()
-                    .size(px(AVATAR_HEADER))
-                    .flex_shrink_0()
-                    .child(avatars::project(space, AVATAR_HEADER, &theme))
+                    .absolute()
+                    .right(px(-2.0))
+                    .bottom(px(-2.0))
+                    .size(px(10.0))
+                    .rounded_full()
+                    .bg(theme.bg)
+                    .flex()
+                    .items_center()
+                    .justify_center()
                     .child(
                         div()
-                            .absolute()
-                            .right(px(-2.0))
-                            .bottom(px(-2.0))
-                            .size(px(10.0))
+                            .size(px(6.0))
                             .rounded_full()
-                            .bg(theme.bg)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(
-                                div()
-                                    .size(px(6.0))
-                                    .rounded_full()
-                                    .bg(machine_dot(machine, &theme)),
-                            ),
+                            .bg(machine_dot(machine, &theme)),
                     ),
-            )
-            .child(name_el)
-            .on_click(
-                cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
-                    this.members_open = false;
-                    this.add_agent_open = false;
-                    let p = pid.clone();
-                    if !can_rename {
-                        this.open_from_name(p, groupish, cx);
-                    } else if event.click_count() >= 2 {
-                        this.start_rename_agent(p, window, cx);
-                    } else {
-                        this.name_clicked(p, groupish, cx);
-                    }
-                }),
             );
-    }
+        name_part(picture, name_el, &theme).on_click(cx.listener(
+            move |this, event: &gpui::ClickEvent, window, cx| {
+                this.members_open = false;
+                this.add_agent_open = false;
+                let p = pid.clone();
+                if !can_rename {
+                    this.open_from_name(p, groupish, cx);
+                } else if event.click_count() >= 2 {
+                    this.start_rename_agent(p, window, cx);
+                } else {
+                    this.name_clicked(p, groupish, cx);
+                }
+            },
+        ))
+    };
     pill = pill.child(name_part);
 
     // ----- tabs fold into the pill: "· Tab ⌄" (when several) and "+" -----------
@@ -461,41 +451,32 @@ pub fn render_channel(
     let overlay = state.sidebar_overlay;
     let locked = channel.restricted;
 
-    let name_part = div()
-        .id("header-name")
+    let title = div()
         .flex()
         .items_center()
-        .gap(px(9.0))
-        .h_full()
+        .gap(px(5.0))
         .min_w_0()
-        .cursor_pointer()
-        .rounded_full()
-        .hover(|s| s.bg(theme.surface_2))
-        .pr(px(4.0))
-        .child(sidebar::server_picture(server, AVATAR_HEADER, &theme))
+        .child(icon("hash", 14.0, theme.text_muted))
         .child(
             div()
-                .flex()
-                .items_center()
-                .gap(px(5.0))
-                .min_w_0()
-                .child(icon("hash", 14.0, theme.text_muted))
-                .child(
-                    div()
-                        .text_size(px(TEXT_BODY))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.text)
-                        .truncate()
-                        .child(channel.name.clone()),
-                )
-                .when(locked, |el| el.child(icon("lock", 11.0, theme.text_faint))),
+                .text_size(px(TEXT_BODY))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme.text)
+                .truncate()
+                .child(channel.name.clone()),
         )
-        .on_click(cx.listener(move |this, _, _, cx| {
-            this.members_open = false;
-            this.add_agent_open = false;
-            let page = page.clone();
-            this.state.update(cx, |s, cx| s.toggle_profile(page, cx));
-        }));
+        .when(locked, |el| el.child(icon("lock", 11.0, theme.text_faint)));
+    let name_part = name_part(
+        sidebar::server_picture(server, AVATAR_HEADER, &theme),
+        title.into_any_element(),
+        &theme,
+    )
+    .on_click(cx.listener(move |this, _, _, cx| {
+        this.members_open = false;
+        this.add_agent_open = false;
+        let page = page.clone();
+        this.state.update(cx, |s, cx| s.toggle_profile(page, cx));
+    }));
     let pill = div()
         .id("header-title")
         .flex()
@@ -563,6 +544,19 @@ fn new_chat_plus(cx: &mut Context<Shell>) -> Stateful<Div> {
 
 /// "· Tab ⌄" inside the pill when an agent has more than one tab (a single tab
 /// shows the name and "+" only). Click toggles the dropdown, which hangs off it.
+/// The pill's picture + name for every chat kind: the one `identity::row`
+/// (fixed 22 pt slot, Grok's header gap), its own hit region so the tab
+/// segment and "+" can sit beside it.
+fn name_part(picture: impl IntoElement, name: AnyElement, theme: &Theme) -> Stateful<Div> {
+    identity::row(AVATAR_HEADER, identity::HEADER_GAP, picture, name)
+        .id("header-name")
+        .h_full()
+        .cursor_pointer()
+        .rounded_full()
+        .hover(|s| s.bg(theme.surface_2))
+        .pr(px(4.0))
+}
+
 fn tab_segment(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option<Stateful<Div>> {
     let theme = Theme::of(cx).clone();
     let state = shell.state.read(cx);

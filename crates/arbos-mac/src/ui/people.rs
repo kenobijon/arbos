@@ -17,6 +17,7 @@ use crate::ui::frost::{frosted, MENU_BLUR};
 use crate::ui::glass;
 use crate::ui::groups::project_color;
 use crate::ui::icons::icon;
+use crate::ui::identity;
 use crate::ui::shell::Shell;
 use crate::ui::theme::{Theme, PANEL_RADIUS, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
 
@@ -218,7 +219,7 @@ pub fn new_chat_sheet(
                 .id("new-group")
                 .flex()
                 .items_center()
-                .gap(px(12.0))
+                .gap(px(identity::ROW_GAP))
                 .px(px(14.0))
                 .py(px(10.0))
                 .cursor_pointer()
@@ -269,7 +270,7 @@ pub fn new_chat_sheet(
                         .id(id)
                         .flex()
                         .items_center()
-                        .gap(px(12.0))
+                        .gap(px(identity::ROW_GAP))
                         .px(px(14.0))
                         .py(px(10.0))
                         .cursor_pointer()
@@ -372,7 +373,7 @@ pub fn new_chat_sheet(
                     ))))
                     .flex()
                     .items_center()
-                    .gap(px(12.0))
+                    .gap(px(identity::ROW_GAP))
                     .px(px(14.0))
                     .py(px(9.0))
                     .when(i + 1 < count, |el| {
@@ -659,7 +660,7 @@ fn new_group_body(
                     ))))
                     .flex()
                     .items_center()
-                    .gap(px(12.0))
+                    .gap(px(identity::ROW_GAP))
                     .px(px(14.0))
                     .py(px(9.0))
                     .when(i + 1 < count, |el| {
@@ -757,7 +758,7 @@ fn new_group_body(
                 ))))
                 .flex()
                 .items_center()
-                .gap(px(12.0))
+                .gap(px(identity::ROW_GAP))
                 .px(px(14.0))
                 .py(px(9.0))
                 .when(i + 1 < count, |el| {

@@ -240,7 +240,7 @@ struct NewChatSheet: View {
     }
 
     private func actionRow(icon: String, title: String, subtitle: String) -> some View {
-        HStack(spacing: 14) {
+        HStack(spacing: PaneKit.gap) {
             GlassCircle(size: 44) {
                 Image(systemName: icon).font(.system(size: 17, weight: .semibold)).foregroundStyle(theme.text)
             }
@@ -346,7 +346,7 @@ struct ServerPickRow: View {
     let server: Server
 
     var body: some View {
-        HStack(spacing: 14) {
+        HStack(spacing: PaneKit.gap) {
             ServerAvatar(server: server, size: 44)
             VStack(alignment: .leading, spacing: 2) {
                 Text(server.name).font(theme.font(Theme.body, weight: .medium)).foregroundStyle(theme.text).lineLimit(1)
@@ -377,7 +377,7 @@ struct AgentPickRow: View {
     var trailing: AnyView? = nil
 
     var body: some View {
-        HStack(spacing: 14) {
+        HStack(spacing: PaneKit.gap) {
             AgentAvatar(project: project, theme: theme, size: 44, still: true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(project.name).font(theme.font(Theme.body, weight: .medium)).foregroundStyle(theme.text).lineLimit(1)
@@ -399,7 +399,7 @@ struct PersonRow: View {
     var trailing: AnyView? = nil
 
     var body: some View {
-        HStack(spacing: 14) {
+        HStack(spacing: PaneKit.gap) {
             PersonAvatar(url: person.avatarUrl, handle: person.handle, size: 44, name: person.name, id: person.id, colorIndex: person.avatarColorIndex)
             VStack(alignment: .leading, spacing: 2) {
                 Text(person.displayName).font(theme.font(Theme.body, weight: .medium)).foregroundStyle(theme.text).lineLimit(1)
@@ -1017,7 +1017,7 @@ struct ProjectMembersSheet: View {
                         if !trimmed.isEmpty {
                             ForEach(suggestions) { p in
                                 Button { invite(p.handle) } label: {
-                                    HStack(spacing: 12) {
+                                    HStack(spacing: PaneKit.gap) {
                                         PersonAvatar(url: p.avatarUrl, handle: p.handle, size: 40, name: p.name, id: p.id, colorIndex: p.avatarColorIndex)
                                         VStack(alignment: .leading, spacing: 2) {
                                             Text(p.displayName).foregroundStyle(theme.text)
@@ -1044,7 +1044,7 @@ struct ProjectMembersSheet: View {
                 }
                 Section("Members") {
                     ForEach(members) { m in
-                        HStack(spacing: 12) {
+                        HStack(spacing: PaneKit.gap) {
                             Button { model.showProfile(.user(ProfilePerson(m))) } label: { PersonAvatar(url: m.avatarUrl, handle: m.handle, size: 40, name: m.name, id: m.id, colorIndex: m.avatarColorIndex) }.buttonStyle(.plain)
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(m.name?.isEmpty == false ? m.name! : m.handle).foregroundStyle(theme.text)

@@ -19,6 +19,7 @@ use crate::ui::frost::edge_faded;
 use crate::ui::glass::{self, WindowDrag};
 use crate::ui::groups;
 use crate::ui::icons::icon;
+use crate::ui::identity;
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
 use crate::ui::shell::{Shell, TRAFFIC_LIGHTS_INSET};
@@ -767,7 +768,7 @@ fn render_server_row(
         ))))
         .flex()
         .items_center()
-        .gap(px(10.0))
+        .gap(px(identity::ROW_GAP))
         .px(px(12.0))
         .py(px(11.0))
         .rounded(px(PANEL_RADIUS - 4.0))
@@ -968,7 +969,7 @@ fn server_channels(
                 ))))
                 .flex()
                 .items_center()
-                .gap(px(10.0))
+                .gap(px(identity::ROW_GAP))
                 .px(px(12.0))
                 .py(px(11.0))
                 .rounded(px(PANEL_RADIUS - 4.0))
@@ -1312,7 +1313,7 @@ fn render_row(
         ))))
         .flex()
         .items_center()
-        .gap(px(10.0))
+        .gap(px(identity::ROW_GAP))
         .px(px(12.0))
         .py(px(11.0))
         .rounded(px(PANEL_RADIUS - 4.0))

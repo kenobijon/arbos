@@ -104,6 +104,9 @@ struct Theme {
     static let voiceButton: CGFloat = 36
     static let plusButton: CGFloat = 42
     static let avatar: CGFloat = 28
+    /// Picture → name in the chat header pill: Grok Bot's title measures 5 pt ink to ink
+    /// (Mac ref 57); the Mac's `identity::HEADER_GAP` + side bearing.
+    static let headerPillGap: CGFloat = 5
     /// Composer side inset: Grok uses 31 pt with the keyboard down, 19 pt with it up.
     static let composerInset: CGFloat = 31
     static let composerInsetKeyboard: CGFloat = 19
