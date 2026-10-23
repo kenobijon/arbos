@@ -162,7 +162,9 @@ final class PushManager: NSObject, ObservableObject, UNUserNotificationCenterDel
 
     // MARK: Delegate
 
-    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
+    // Must stay on the main actor: UIKit restores notification state after this
+    // returns, and a nonisolated async method resumes off-main (SIGABRT).
+    func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
         let info = notification.request.content.userInfo
         if notification.request.content.categoryIdentifier == PushManager.callCategory {
             // In the foreground the ringing screen takes over; no banner on top of it.
@@ -198,7 +200,8 @@ final class PushManager: NSObject, ObservableObject, UNUserNotificationCenterDel
         return silent ? [] : [.banner, .sound, .list, .badge]
     }
 
-    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
+    // Same main-actor rule as willPresent — tap completion must not resume off-main.
+    func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
         let info = response.notification.request.content.userInfo
         if response.notification.request.content.categoryIdentifier == PushManager.callCategory {
             let action = response.actionIdentifier
