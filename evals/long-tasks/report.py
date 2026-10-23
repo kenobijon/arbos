@@ -139,10 +139,17 @@ def run_report(board, prev, issues, fixed_text):
         nxt.append(f"- fix the root cause behind **{k}** ({', '.join(ex[:3])}); the tasks stay as regression cases")
     nxt.append("- add tasks where this run was weakest; keep the per-run cost under the line")
     lines += nxt
-    lines += ["", "## Per task", "", "| task | result | first reply | total | tool err | stalls | cost | rubric | reasons |", "|---|---|---|---|---|---|---|---|---|"]
+    by_route = {}
+    for r in board["results"]:
+        if not r.get("skipped"):
+            by_route.setdefault(r.get("route_t1") or "?", []).append(r.get("cost_usd") or 0)
+    if by_route:
+        lines += ["", "Cost by first-turn route (a `new` route spawns a Sonnet helper and costs ≈ 5× an `act` turn on Haiku, so a task's cost is bimodal): "
+                  + ", ".join(f"`{k}` × {len(v)} → median ${median(v):.3f}" for k, v in sorted(by_route.items()))]
+    lines += ["", "## Per task", "", "| task | result | route (t1) | first reply | total | tool err | stalls | cost | rubric | reasons |", "|---|---|---|---|---|---|---|---|---|---|"]
     for r in board["results"]:
         res = "skip" if r.get("skipped") else ("pass" if r["success"] else "FAIL")
-        lines.append(f"| `{r['task']}` | {res} | {fmt(r.get('ttfr_s'), ' s')} | {fmt(r.get('total_s'), ' s')} | {r.get('tool_errors', '—')} | {r.get('stalls', '—')} | ${(r.get('cost_usd') or 0):.3f} | {fmt(r.get('rubric_min'))} | {'; '.join(r.get('reasons') or [])[:160]} |")
+        lines.append(f"| `{r['task']}` | {res} | {r.get('route_t1') or '—'} | {fmt(r.get('ttfr_s'), ' s')} | {fmt(r.get('total_s'), ' s')} | {r.get('tool_errors', '—')} | {r.get('stalls', '—')} | ${(r.get('cost_usd') or 0):.3f} | {fmt(r.get('rubric_min'))} | {'; '.join(r.get('reasons') or [])[:160]} |")
     return "\n".join(lines) + "\n"
 
 
