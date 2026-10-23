@@ -2,8 +2,8 @@
 // agent's picture — a tab pill Bot | Generate | Upload with Reset at the right, a body per tab,
 // and a footer Cancel | Set avatar. Nothing changes until "Set avatar".
 //
-// Bot: the nine D92 leaves in Grok's grid (5 / 4), every leaf on a muted disc and the selected
-// one tinted with the chosen colour; the ten autumn swatches in two rows of five. The per-id
+// Bot: the sixteen D92 (v2) leaves as their 4 × 4 sheet, every leaf neutral and the selected one
+// in its hue (pastel disc, darker leaf); the ten hues in two rows of five. The per-id
 // automatic default stays: Reset goes back to it. Generate: a short prompt → the relay paints one
 // picture (`POST /projects/{id}/avatar/generate`) → previewed here; Set keeps it. Upload: Photos
 // (images only), uploaded as a 512 px JPEG on Set. Groups open the same sheet for their picture
@@ -62,6 +62,7 @@ struct AvatarPickerSheet: View {
     private let labelMuted = Color(red: 0x9A / 255, green: 0x9A / 255, blue: 0x9A / 255)
     private let pillBg = Color(red: 0x27 / 255, green: 0x27 / 255, blue: 0x27 / 255)
     private let mutedDisc = Color(red: 0x3A / 255, green: 0x3A / 255, blue: 0x3A / 255)
+    private let mutedInk = Color(red: 0x8A / 255, green: 0x8A / 255, blue: 0x8A / 255)
     private let disabledBg = Color(red: 0x3B / 255, green: 0x3B / 255, blue: 0x3B / 255)
     private let disabledText = Color(red: 0x73 / 255, green: 0x73 / 255, blue: 0x73 / 255)
     private let setBg = Color(white: 0xE5 / 255)
@@ -182,12 +183,14 @@ struct AvatarPickerSheet: View {
 
     /// Nine leaves, 5 / 4, on a 56 pt pitch: 33 pt discs, only the selected one tinted; then the
     /// ten colours in two rows of five on a 40 pt pitch (23 pt discs, a 31 pt ring on the pick).
+    /// The 4 × 4 leaf sheet (v2) on a 48 pt pitch — 30 pt discs, every leaf neutral and the
+    /// selected one in its hue — then the ten hues on a 36 pt pitch (21 pt discs, 29 pt ring).
     private var botBody: some View {
         VStack(spacing: 0) {
-            VStack(spacing: 56 - 40) {
-                ForEach([Array(0..<5), Array(5..<9)], id: \.self) { row in
-                    HStack(spacing: 56 - 40) {
-                        ForEach(row, id: \.self) { i in
+            VStack(spacing: 48 - 36) {
+                ForEach(0..<4, id: \.self) { r in
+                    HStack(spacing: 48 - 36) {
+                        ForEach(r * 4..<r * 4 + 4, id: \.self) { i in
                             let selected = Int(pick.leaf) == i
                             Button {
                                 pickedLeaf = i
@@ -196,11 +199,11 @@ struct AvatarPickerSheet: View {
                                 ZStack {
                                     Circle().fill(selected ? LeafArt.colors[Int(pick.color)] : mutedDisc)
                                     LeafShape(index: i)
-                                        .fill(LeafArt.ink, style: FillStyle(eoFill: true))
-                                        .frame(width: 33 * LeafArt.scale, height: 33 * LeafArt.scale)
+                                        .fill(selected ? LeafArt.ink(pick.color) : mutedInk, style: FillStyle(eoFill: true))
+                                        .frame(width: 30 * LeafArt.scale, height: 30 * LeafArt.scale)
                                 }
-                                .frame(width: 33, height: 33)
-                                .frame(width: 40, height: 40)
+                                .frame(width: 30, height: 30)
+                                .frame(width: 36, height: 36)
                                 .overlay(Circle().strokeBorder(selected ? ring : .clear, lineWidth: 1))
                                 .contentShape(Circle())
                             }
@@ -210,18 +213,18 @@ struct AvatarPickerSheet: View {
                     }
                 }
             }
-            .padding(.top, 92 - 44 - 20)
-            VStack(spacing: 40 - 31) {
+            .padding(.top, 84 - 44 - 18)
+            VStack(spacing: 36 - 29) {
                 ForEach([Array(0..<5), Array(5..<10)], id: \.self) { row in
-                    HStack(spacing: 40 - 31) {
+                    HStack(spacing: 36 - 29) {
                         ForEach(row, id: \.self) { i in
                             let selected = Int(pick.color) == i
                             Button {
                                 pickedColor = i
                                 reset = false
                             } label: {
-                                Circle().fill(LeafArt.colors[i]).frame(width: 23, height: 23)
-                                    .frame(width: 31, height: 31)
+                                Circle().fill(LeafArt.colors[i]).frame(width: 21, height: 21)
+                                    .frame(width: 29, height: 29)
                                     .overlay(Circle().strokeBorder(selected ? ring : .clear, lineWidth: 1))
                                     .contentShape(Circle())
                             }
@@ -231,7 +234,7 @@ struct AvatarPickerSheet: View {
                     }
                 }
             }
-            .padding(.top, 206 - 148 - 20 - 15.5)
+            .padding(.top, 282 - 228 - 18 - 14.5)
         }
         .frame(maxWidth: .infinity)
         .padding(.bottom, 24)
