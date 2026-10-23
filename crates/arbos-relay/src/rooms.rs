@@ -405,7 +405,15 @@ async fn handle_frame(
                 );
             }
             let mut wake_owners = Vec::new();
-            if let Some(chat_id) = room_name.strip_prefix(&format!("{}/", people::PEOPLE_PROJECT)) {
+            // A heal carries other members' history, not a message of this device: the
+            // message gates (rate limit, blocks, member pushes) do not apply — the socket's ACL
+            // already does. 20:42 Oct 23: the first production heal (60 KB, Arbonites) was
+            // dropped because a member had blocked the healing user.
+            if p.heal {
+                // nothing to gate or wake
+            } else if let Some(chat_id) =
+                room_name.strip_prefix(&format!("{}/", people::PEOPLE_PROJECT))
+            {
                 match people::on_room_push(state, principal, chat_id) {
                     Ok(owners) => wake_owners = owners,
                     Err(r) => {
@@ -435,7 +443,10 @@ async fn handle_frame(
                     bytes: row,
                     seq,
                 });
-                if !is_box {
+                if p.heal {
+                    // History, not a new message: no read-cursor move, no notification, no
+                    // wake. The Matrix mirror resync picks the rows up on its own.
+                } else if !is_box {
                     // A person wrote without announcing a message (older apps): the fallback
                     // notifies the other members by name only.
                     if let Principal::Device { user_id, .. } = principal {
@@ -1524,6 +1535,43 @@ mod history_tests {
             checkpoint_covers_store(&state.db, &room, head, &partial.snapshot()).unwrap(),
             CheckpointVerdict::Incomplete(why) if why.contains("current checkpoint")
         ));
+    }
+
+    /// A heal is history, not a message: a healer that another member has blocked (or that is
+    /// over the message rate limit) still heals the room. The first production heal (Oct 23
+    /// 20:42, 60 KB) was dropped by the block gate.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn blocked_member_can_still_heal() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let (bob, _) = person(&state, 2);
+        let chat = crate::people::tests_support::dm(&state, &alice, &bob);
+        let room = format!("people/{chat}");
+        let token = device_token(&state, &bob);
+        let phone = write_rows(&state, &room, "dev:bob", 300);
+        // Alice blocks Bob; Bob's messages are refused, but his history is not.
+        state.db.block(&alice, &bob).unwrap();
+        let stale = {
+            let mut d = ChatDoc::new(None, false);
+            for r in state.db.rows_between(&room, 0, 101, 1000).unwrap() {
+                d.import(&r.bytes).unwrap();
+            }
+            d.snapshot()
+        };
+        assert!(state.db.put_checkpoint(&room, 201, &[], &stale).unwrap());
+        let addr = serve(state.clone()).await;
+        let mut bob_mac = Device::holding("dev:bob", phone, 301);
+        bob_mac.sync(addr, &room, &token, &state, None).await;
+        assert!(bob_mac.healed_bytes > 0);
+        assert_eq!(
+            state.db.room_state(&room).unwrap().head,
+            302,
+            "the heal row is stored"
+        );
+        let mut probe = Device::fresh("dev:probe");
+        let token_a = device_token(&state, &alice);
+        probe.sync(addr, &room, &token_a, &state, None).await;
+        assert_eq!(probe.message_ids(), expected_ids(300));
     }
 
     /// The Arbonites recovery (#1518 follow-up): the relay's history was cut to a stale
