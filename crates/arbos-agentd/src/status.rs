@@ -16,8 +16,10 @@
 //!
 //! Guardrails: one call of at most `QUICK_MAX_TOKENS`, `QUICK_CALLS_PER_MINUTE` model calls per
 //! chat (then a canned line, no call), `ARBOS_QUICK_REPLY_TIMEOUT_MS` on the call (then the
-//! canned line), tagged `x-arbos-purpose: quick-reply` for spend accounting. Nothing here
-//! touches the main session's system prompt (D87) or the #1037 limit announcements.
+//! canned line), tagged `x-arbos-purpose: quick-reply` for spend accounting. A status note is
+//! written only after `BUSY_GRACE` of real waiting (so a turn that answers in normal time never
+//! gets one) and at most once per busy turn per chat (#1448). Nothing here touches the main
+//! session's system prompt (D87) or the #1037 limit announcements.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -67,8 +69,10 @@ pub const QUICK_MAX_TOKENS: u32 = 320;
 pub const QUICK_CALLS_PER_MINUTE: usize = 6;
 /// Characters of the user's message the quick call sees.
 const USER_TEXT_MAX: usize = 1200;
-/// How long a held lock is given to free before a message counts as arriving at a busy agent.
-const BUSY_GRACE: Duration = Duration::from_millis(1500);
+/// How long the agent may stay busy before a new message earns a status note. Short turns that
+/// free the lock inside this window never get a "Still on it" row (#1448). Kept under the
+/// busy-reply gate (~5 s) so a real long turn still answers within seconds.
+const BUSY_GRACE: Duration = Duration::from_secs(3);
 
 /// `ARBOS_QUICK_REPLY_TIMEOUT_MS` (default 8000): the call's budget before the canned line.
 pub fn quick_reply_timeout() -> Duration {
@@ -303,6 +307,28 @@ impl Agent {
         true
     }
 
+    /// `true` when this chat already got a status note for the running turn (at most one per
+    /// waiting period). `turn_started` is `TurnState::started` of the held turn; with no turn
+    /// yet there is nothing to pin a waiting period to, so a note is always allowed.
+    fn already_quick_noted(&self, chat_id: &str, turn_started: Option<Instant>) -> bool {
+        let Some(started) = turn_started else {
+            return false;
+        };
+        let mut noted = self.quick_noted.lock().unwrap_or_else(|e| e.into_inner());
+        // Drop notes that belong to a previous turn.
+        noted.retain(|_, t| *t == started);
+        noted.contains_key(chat_id)
+    }
+
+    fn mark_quick_noted(&self, chat_id: &str, turn_started: Option<Instant>) {
+        let Some(started) = turn_started else {
+            return;
+        };
+        let mut noted = self.quick_noted.lock().unwrap_or_else(|e| e.into_inner());
+        noted.retain(|_, t| *t == started);
+        noted.insert(chat_id.to_owned(), started);
+    }
+
     /// The running work as the quick call sees it; `None` when nothing holds the lock and
     /// nothing is waiting for it.
     pub(crate) async fn busy_snapshot(
@@ -468,17 +494,28 @@ impl Agent {
         if from_voice || user_text.trim().is_empty() {
             return QuickOutcome::NotBusy;
         }
-        // A lock about to free (a short reply turn, the setup of the previous message) is not
-        // "busy": give it a moment, so two quick messages in a row do not earn a canned ack.
+        // Wait out short turns: if the lock frees (or the queue drains) inside BUSY_GRACE the
+        // user is not really waiting — no status note (#1448). Poll the snapshot so a free
+        // agent exits early instead of only watching the lock.
         let t_wait = Instant::now();
-        while self.turn_lock_busy() && t_wait.elapsed() < BUSY_GRACE {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        let Some(snap) = self.busy_snapshot(chat_id, host).await else {
-            return QuickOutcome::NotBusy;
+        let snap = loop {
+            match self.busy_snapshot(chat_id, host).await {
+                None => return QuickOutcome::NotBusy,
+                Some(s) if t_wait.elapsed() >= BUSY_GRACE => break s,
+                Some(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+            }
         };
+        let turn_started = {
+            let tl = self.turn.lock().await;
+            tl.as_ref().map(|t| t.started)
+        };
+        // One status note per busy turn per chat; further messages queue with no extra row.
+        if self.already_quick_noted(chat_id, turn_started) {
+            tracing::info!(chat_id, "quick reply skipped; already noted this wait");
+            return QuickOutcome::Queued;
+        }
         let t0 = Instant::now();
-        // The row first: the user sees the message was taken within milliseconds.
+        // The row first: the user sees something after the grace, not in the first milliseconds.
         let row_id = ulid();
         {
             let h = host.lock().await;
@@ -586,6 +623,7 @@ impl Agent {
             );
             h.doc.finish_message(&row_id, MessageStatus::Done);
         }
+        self.mark_quick_noted(chat_id, turn_started);
         tracing::info!(
             chat_id,
             kind = kind.as_str(),
