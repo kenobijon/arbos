@@ -804,7 +804,10 @@ impl Shell {
             profile_scroll: ScrollHandle::new(),
             profile_scroll_epoch: 0,
             agent_pick_reveal: false,
-            settings_open_at_bottom: open_settings.as_deref() == Some("bottom"),
+            // `ARBOS_OPEN_SETTINGS_BOTTOM=1` does the same for any Settings page (a Secret
+            // page's People / Activity cards sit below the fold on the rig).
+            settings_open_at_bottom: open_settings.as_deref() == Some("bottom")
+                || std::env::var("ARBOS_OPEN_SETTINGS_BOTTOM").is_ok_and(|v| v == "1"),
             profile_edit_open: false,
             name_input,
             handle_input,
