@@ -609,6 +609,15 @@ pub struct Call {
     /// Project agents that belong to this chat (Phase 2).
     #[serde(default)]
     pub agents: Vec<Sender>,
+    /// `"open"` or `"hosted"` (bigger group calls: host + invited speakers only).
+    #[serde(default)]
+    pub speak_mode: Option<String>,
+    /// Invited speakers (host is `started_by`).
+    #[serde(default)]
+    pub invited_speakers: Vec<Sender>,
+    /// Whether this device may publish audio (from the join token reply).
+    #[serde(default)]
+    pub can_speak: Option<bool>,
 }
 
 impl Call {

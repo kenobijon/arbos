@@ -416,6 +416,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/calls/{id}", get(calls::get_call))
         .route("/calls/{id}/join", post(calls::join_call))
         .route("/calls/{id}/leave", post(calls::leave_call))
+        .route("/calls/{id}/speakers", post(calls::invite_speaker))
+        .route(
+            "/calls/{id}/speakers/{user_id}",
+            axum::routing::delete(calls::revoke_speaker),
+        )
         .route(
             "/devices/{id}/voip",
             post(calls::register_voip).delete(calls::unregister_voip),
