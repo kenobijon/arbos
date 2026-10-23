@@ -1145,19 +1145,22 @@ final class AppModel: ObservableObject {
 
     func refreshRegistry() async {
         do {
-            let items = try await api.registry()
+            let result = try await api.registry()
+            let items = result.projects
             registryError = nil
+            let previousProjects = projects
+            let previousChatsMap = chats
             var newProjects: [Project] = []
             var newChats: [Id: [Chat]] = [:]
             for item in items {
                 var p = item.project
-                if let prev = projects.first(where: { $0.id == p.id }) {
+                if let prev = previousProjects.first(where: { $0.id == p.id }) {
                     p.modelNote = prev.modelNote
                     if p.state == prev.state { p.stateDetail = prev.stateDetail }
                 }
                 newProjects.append(p)
                 var mine = item.chats
-                let prevChats = chats[p.id] ?? []
+                let prevChats = previousChatsMap[p.id] ?? []
                 for i in mine.indices {
                     if let prev = prevChats.first(where: { $0.id == mine[i].id }) {
                         mine[i].unread = prev.unread
@@ -1169,8 +1172,24 @@ final class AppModel: ObservableObject {
                 }
                 newChats[p.id] = AppModel.sorted(mine)
             }
+            let merged = Self.mergeSkippedProjects(
+                fresh: newProjects,
+                previous: previousProjects,
+                previousChats: previousChatsMap,
+                skippedIds: result.skippedIds
+            )
+            newProjects = merged.projects
+            for (id, list) in merged.chats {
+                newChats[id] = list
+            }
+            if !result.skippedIds.isEmpty {
+                NSLog("registry: kept \(result.skippedIds.count) project(s) skipped on detail parse/decode")
+            }
+            if result.incomplete {
+                NSLog("registry: list incomplete (unreadable item id); skipping room prune")
+            }
             for i in newProjects.indices {
-                if let prev = projects.first(where: { $0.id == newProjects[i].id }) {
+                if let prev = previousProjects.first(where: { $0.id == newProjects[i].id }) {
                     newProjects[i].workspace = prev.workspace
                 }
             }
@@ -1189,23 +1208,26 @@ final class AppModel: ObservableObject {
             }
             // Drop rooms the relay no longer lists (deleted projects/chats). People
             // rooms stay for refreshPeople. Skip keys created in the last 60s so a
-            // chat minted locally is not pruned before the relay lists it.
-            let listedChatIds = Set(newChats.values.flatMap { $0.map(\.id) })
-            let listedProjectIds = Set(newProjects.map(\.id))
-            let peopleKeys = Set(rooms.compactMap { key, room in room.projectId == peopleSlot ? key : nil })
-                .union(peopleChats.map(\.id))
-            let now = Date()
-            let recentKeys = Set(roomCreatedAt.compactMap { key, at in
-                now.timeIntervalSince(at) < Self.roomRecentGraceSeconds ? key : nil
-            })
-            let doomed = Self.roomsToPrune(
-                roomKeys: Set(rooms.keys).union(docs.keys),
-                listedChatIds: listedChatIds,
-                listedProjectIds: listedProjectIds,
-                peopleKeys: peopleKeys,
-                recentKeys: recentKeys
-            )
-            for key in doomed { wipeRoom(key) }
+            // chat minted locally is not pruned before the relay lists it. Skip the
+            // whole prune when the list had an unreadable item (incomplete).
+            if Self.shouldPrune(incomplete: result.incomplete) {
+                let listedChatIds = Set(newChats.values.flatMap { $0.map(\.id) })
+                let listedProjectIds = Set(newProjects.map(\.id))
+                let peopleKeys = Set(rooms.compactMap { key, room in room.projectId == peopleSlot ? key : nil })
+                    .union(peopleChats.map(\.id))
+                let now = Date()
+                let recentKeys = Set(roomCreatedAt.compactMap { key, at in
+                    now.timeIntervalSince(at) < Self.roomRecentGraceSeconds ? key : nil
+                })
+                let doomed = Self.roomsToPrune(
+                    roomKeys: Set(rooms.keys).union(docs.keys),
+                    listedChatIds: listedChatIds,
+                    listedProjectIds: listedProjectIds,
+                    peopleKeys: peopleKeys,
+                    recentKeys: recentKeys
+                )
+                for key in doomed { wipeRoom(key) }
+            }
             firstLoginRegistryUpdated()
         } catch {
             if (error as? RelayError)?.isUnauthorized == true {
@@ -1411,6 +1433,33 @@ final class AppModel: ObservableObject {
             if listedProjectDocs.contains(key) { return false }
             return true
         })
+    }
+
+    /// False when the registry list had an item with no readable id — pruning
+    /// would wipe rooms for projects we never got a chance to list.
+    nonisolated static func shouldPrune(incomplete: Bool) -> Bool {
+        !incomplete
+    }
+
+    /// Keep previous projects (and their chats) whose detail failed to parse;
+    /// drop anything that is neither in `fresh` nor in `skippedIds`.
+    nonisolated static func mergeSkippedProjects(
+        fresh: [Project],
+        previous: [Project],
+        previousChats: [Id: [Chat]],
+        skippedIds: Set<String>
+    ) -> (projects: [Project], chats: [Id: [Chat]]) {
+        var projects = fresh
+        var chats: [Id: [Chat]] = [:]
+        let freshIds = Set(fresh.map(\.id))
+        for id in skippedIds where !freshIds.contains(id) {
+            guard let kept = previous.first(where: { $0.id == id }) else { continue }
+            projects.append(kept)
+            if let list = previousChats[id] {
+                chats[id] = list
+            }
+        }
+        return (projects, chats)
     }
 
     /// Whether to dial a room again after consecutive HTTP 403/404 endings.
