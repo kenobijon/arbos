@@ -218,7 +218,7 @@ struct AgentProfileView: View {
     /// Jacob's rule (2026-10-22): one tab set per entity, identical on Mac
     /// and iPhone — Profile | Settings | Library (`PaneKinds.agent`, the Mac's
     /// `agent.rs`). Kinds share the structure, not a tab count (22:32 UTC).
-    @State private var tab = "Profile"
+    @State private var tab = DebugHooks.profileTab ?? "Profile"
     @State private var showEdit = false
     /// The avatar picker sheet (D92 amendment), from the hero's crayon; the rig's
     /// `ARBOS_SHOW=avatarpicker[-generate|-upload]` opens it on that tab.

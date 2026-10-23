@@ -1682,7 +1682,7 @@ impl AppState {
                             }
                         }
                     }
-                    // Rig: `ARBOS_OPEN_PROFILE=agent[:model|reasoning|voice]|group[:library|:add-members|:member]|user|me`
+                    // Rig: `ARBOS_OPEN_PROFILE=agent[:model|reasoning|voice|settings]|group[:library|:add-members|:member]|user|me`
                     // opens the right pane for the restored chat (selecting it
                     // closed whatever the shell opened at launch), and
                     // `ARBOS_OPEN_SETTINGS=…` re-opens my pane on its Settings tab.
@@ -1697,6 +1697,10 @@ impl AppState {
                             self.agent_pick = rest.strip_prefix(':').and_then(AgentPick::parse);
                             if self.agent_pick == Some(AgentPick::Voice) {
                                 self.fetch_voices();
+                            }
+                            // `agent:settings` — the pane on its Settings tab (#1544 rig).
+                            if rest == ":settings" {
+                                self.set_profile_tab(1, cx);
                             }
                             // `agent:avatar[:generate|:upload]` opens the avatar picker sheet
                             // (D92 amendment) on that tab.

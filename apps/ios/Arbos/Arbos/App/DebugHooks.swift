@@ -20,6 +20,8 @@ enum DebugHooks {
     /// Seed the connected 1Password vault and the connect flow (`features.vault_connect` on).
     /// Default off, like the shipped relay flag.
     static var fixtureVault: Bool { value("ARBOS_FIXTURE_VAULT") == "1" }
+    /// With `ARBOS_SHOW=profile`: the agent pane's tab to land on (`Settings`, `Library`).
+    static var profileTab: String? { value("ARBOS_PROFILE_TAB") }
     /// #1544 rig: the Comms chat ends with a destructive-shell card (four standing rows).
     static var fixtureShellCard: Bool { value("ARBOS_FIXTURE_SHELL_CARD") == "1" }
     /// With `ARBOS_OPEN_CHAT`: that chat ends with a several-block agent reply (#1389 rigs).
