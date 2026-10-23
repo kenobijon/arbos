@@ -46,6 +46,22 @@ func voipPlan(isActive: Bool, incomingCallId: String?, currentCallId: String?, n
     return .ring
 }
 
+/// How `CXAnswerCallAction` should finish: fulfill promptly, or fail without joining.
+enum AnswerPlan: Equatable {
+    /// No incoming call, or the microphone is already denied — fail the action.
+    case fail
+    /// Fulfill the action at once, then join the room asynchronously.
+    case fulfillThenJoin
+}
+
+/// Pure decision for answering via CallKit: never await the network before fulfilling.
+func answerPlan(hasIncoming: Bool, micDenied: Bool) -> AnswerPlan {
+    if !hasIncoming || micDenied {
+        return .fail
+    }
+    return .fulfillThenJoin
+}
+
 /// One stable CallKit UUID per relay `callId` (128-bit hash with version/variant bits set).
 func callKitUUID(forCallId callId: String) -> UUID {
     var bytes = Array(SHA256.hash(data: Data(callId.utf8)).prefix(16))
@@ -430,17 +446,52 @@ final class CallManager: NSObject, ObservableObject {
         }
     }
 
+    /// Non-CallKit accept (in-app without a reported UUID, or CallKit request error fallback).
     func accept() async {
-        guard let inc = incoming, let api else { return }
+        let micDenied = AVAudioApplication.shared.recordPermission == .denied
+        switch answerPlan(hasIncoming: incoming != nil, micDenied: micDenied) {
+        case .fail:
+            if incoming != nil, micDenied {
+                error = "Microphone access is off in Settings."
+                endIncoming(reason: .failed)
+            }
+            return
+        case .fulfillThenJoin:
+            break
+        }
+        guard let inc = startAccept() else { return }
+        await joinAccept(inc)
+    }
+
+    /// Sync half of answering: no awaits. Returns the incoming call to join, or nil.
+    private func startAccept() -> (call: Call, from: CallPerson?)? {
+        let micDenied = AVAudioApplication.shared.recordPermission == .denied
+        guard answerPlan(hasIncoming: incoming != nil, micDenied: micDenied) == .fulfillThenJoin,
+              let inc = incoming else {
+            return nil
+        }
         ringTimeout?.cancel()
         stopIncomingRing()
-        guard await CallManager.micGranted() else { error = "Microphone access is off in Settings."; endIncoming(reason: .failed); return }
-        if inc.call.kind == .video { _ = await CallManager.cameraGranted() }
         incoming = nil
         phase = .connecting
         isPresented = true
         ringbackWanted = false
         stopRingback()
+        return inc
+    }
+
+    /// Async half of answering: mic/camera if needed, then join and connect.
+    private func joinAccept(_ inc: (call: Call, from: CallPerson?)) async {
+        guard await CallManager.micGranted() else {
+            error = "Microphone access is off in Settings."
+            await teardown(leave: false, reason: .failed)
+            return
+        }
+        if inc.call.kind == .video { _ = await CallManager.cameraGranted() }
+        guard let api else {
+            await teardown(leave: false, reason: .failed)
+            return
+        }
         do {
             let fresh = try await api.joinCall(inc.call.callId)
             call = fresh
@@ -1184,8 +1235,24 @@ extension CallManager: CXProviderDelegate {
 
     nonisolated func provider(_ provider: CXProvider, perform action: CXAnswerCallAction) {
         Task { @MainActor in
-            await self.accept()
-            action.fulfill()
+            // CallKit expects a prompt fulfill/fail: it will not activate the audio
+            // session until then, and times out a slow join (lock-screen "Connecting").
+            let micDenied = AVAudioApplication.shared.recordPermission == .denied
+            switch answerPlan(hasIncoming: self.incoming != nil, micDenied: micDenied) {
+            case .fail:
+                if self.incoming != nil {
+                    self.error = "Microphone access is off in Settings."
+                    self.endIncoming(reason: .failed)
+                }
+                action.fail()
+            case .fulfillThenJoin:
+                guard let inc = self.startAccept() else {
+                    action.fail()
+                    return
+                }
+                action.fulfill()
+                Task { await self.joinAccept(inc) }
+            }
         }
     }
 
