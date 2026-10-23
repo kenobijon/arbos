@@ -547,6 +547,8 @@ pub struct AppState {
     /// Rig: `ARBOS_OPEN_PROFILE=group:member-menu[:confirm]` — the shell opens the first
     /// other member's row menu on the group pane (`true` = with the Remove confirm armed).
     pub rig_member_menu: Option<bool>,
+    /// Rig: `ARBOS_OPEN_SPACE` applied once.
+    pub rig_space_opened: bool,
     /// D88: the room list from the homeserver (previews, unread, `can_post`).
     pub matrix_snapshot: Snapshot,
     pub matrix_connected: bool,
@@ -823,6 +825,7 @@ impl AppState {
             open_server_hook_done: false,
             rig_channel_menu: None,
             rig_member_menu: None,
+            rig_space_opened: false,
             servers: Vec::new(),
             matrix_snapshot: Snapshot::default(),
             matrix_connected: false,
@@ -1468,6 +1471,25 @@ impl AppState {
                     }
                 }
                 self.projects = projects;
+                // Rig (screenshots without a pointer): `ARBOS_OPEN_SPACE=<space id>` selects that
+                // agent or people chat once it is known; `ARBOS_START_CALL=voice|video` then
+                // starts a call there, as the header's call button would.
+                if !self.rig_space_opened {
+                    if let Ok(space) = std::env::var("ARBOS_OPEN_SPACE") {
+                        if self.projects.iter().any(|p| p.id == space) {
+                            self.rig_space_opened = true;
+                            self.select_project(space, cx);
+                            if let Ok(kind) = std::env::var("ARBOS_START_CALL") {
+                                let kind = if kind == "video" {
+                                    CallKind::Video
+                                } else {
+                                    CallKind::Voice
+                                };
+                                self.start_call_in_chat(kind, cx);
+                            }
+                        }
+                    }
+                }
                 // Nothing in the centre yet: pick an agent. A channel open in the centre
                 // (D88) has no selected project on purpose and stays.
                 if self.selected_project.is_none() && self.selected_channel.is_none() {
