@@ -94,7 +94,7 @@ class StreamWatcher(threading.Thread):
             self.lines.append(buf)
 
 
-def send_turn(project, chat_id, prompt, timeout_s, reject_approvals=True, on_rows=None, until_first_reply=False):
+def send_turn(project, chat_id, prompt, timeout_s, reject_approvals=True, on_rows=None, until_first_reply=False, on_poll=None):
     """until_first_reply: for background tasks — return once the agent has answered (ack or text)
     and the ack row has settled, without waiting for the background result."""
     t0 = time.time()
@@ -127,6 +127,8 @@ def send_turn(project, chat_id, prompt, timeout_s, reject_approvals=True, on_row
             first_row_at = time.time() - t0
         if on_rows:
             on_rows(rows)
+        if on_poll:
+            on_poll()
         if reject_approvals:
             for cid in {chat_id, pinned} - {None}:
                 cdoc = doc if cid == chat_id else rl.chat_dump(project, cid)
