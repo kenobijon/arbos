@@ -79,6 +79,7 @@ import contextlib
 import datetime as dt
 import difflib
 import fcntl
+import fnmatch
 import hashlib
 import json
 import os
@@ -88,6 +89,7 @@ import shutil
 import subprocess
 import struct
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -1579,7 +1581,49 @@ class Loop:
                 # the Mac — the iOS build runs on the merged tree, never on the branch alone (2026-10-20 19:34: two
                 # branches each compiled alone, their textual merge removed `showMembers`, main was red 25 min).
                 return
+        elif not self.shellcheck_ok(fid, st, head):
+            return
         self.merge_branch(fid, st)
+
+    # The paths CI's Layout job runs `shellcheck -S warning` over (.github/workflows/ci.yml). A scripts-only branch
+    # is merged without the Rust gate, so it is the one path where a shell warning reaches main unchecked:
+    # 430bbcfe5 (#1567) landed an SC2115 at 21:29 on 2026-10-23 and main was red for everyone until 22:07.
+    SHELLCHECK_GLOBS = ("scripts/*.sh", "scripts/release/*.sh", "scripts/runner/*.sh", "scripts/feedback/*.sh", "image/*.sh")
+
+    def shellcheck_ok(self, fid: str, st: dict, head: str) -> bool:
+        """Run shellcheck (as CI's Layout job does) over the CI-linted shell files a scripts-only branch touches,
+        at the branch head, before merging it. Red → the diagnostics go back to the owner / agent, not to main.
+        No shellcheck on this host → merge as before (logged once)."""
+        files = [f for f in (st.get("files") or []) if any(fnmatch.fnmatch(f, g) for g in self.SHELLCHECK_GLOBS)]
+        if not files:
+            return True
+        if not shutil.which("shellcheck"):
+            log(f"[{fid}] shellcheck not installed here; merging {len(files)} CI-linted shell file(s) unchecked")
+            return True
+        with tempfile.TemporaryDirectory(prefix="fb-shellcheck-") as tmp:
+            paths = []
+            for f in files:
+                try:
+                    blob = self.gh.repo_api("GET", f"/contents/{urllib.parse.quote(f)}?ref={head}")
+                except HttpError as e:
+                    log(f"[{fid}] shellcheck: cannot fetch {f}@{head[:8]} ({e}); skipping that file")
+                    continue
+                p = Path(tmp) / f
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_bytes(base64.b64decode(blob.get("content") or ""))
+                paths.append(str(p))
+            if not paths:
+                return True
+            r = subprocess.run(["shellcheck", "-S", "warning", *paths], capture_output=True, text=True, timeout=120)
+        if r.returncode == 0:
+            return True
+        output = (r.stdout + r.stderr).replace(tmp + "/", "")
+        if st.get("gated_head") == head:
+            return False  # already reported for this head; waiting for a new commit
+        log(f"[{fid}] shellcheck red at {head[:8]} on {', '.join(files)}; not merged")
+        self.store.event(fid, "shellcheck_red", head=head, files=files)
+        self.gate_followup(fid, st, "rust", "shellcheck -S warning (CI's Layout job) on the branch:\n" + output[-3000:])
+        return False
 
     def branch_files(self, fid: str, cmp: dict) -> list[str]:
         """Files a branch changes against main; when the head is a merge of main the compare lists none,
