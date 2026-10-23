@@ -278,14 +278,15 @@ def people_dm_with_agent(peer_handle, project):
     st, v = relay("POST", f"/chats/{chat_id}/agents", {"project_id": project})
     if st not in (200, 201, 409):
         raise RuntimeError(f"agent add: {st} {v}")
-    return chat_id, tok["access_token"]
+    return chat_id, {"access_token": tok["access_token"], "device_id": tok.get("device_id", "")}
 
 
-def people_send_as(token, chat_id, text):
-    """One human row from the peer into the DM, written through the peer's own arbosctl config."""
+def people_send_as(peer, chat_id, text):
+    """One human row from the peer into the DM, written through the peer's own arbosctl config
+    (device id included, so the row carries the peer's identity rather than `dev:anon`)."""
     cfg = STATE_DIR / "ctl-peer" / "arbosctl.json"
     cfg.parent.mkdir(parents=True, exist_ok=True)
-    cfg.write_text(json.dumps({"relay_url": RELAY, "device_token": token, "device_id": ""}))
+    cfg.write_text(json.dumps({"relay_url": RELAY, "device_token": peer["access_token"], "device_id": peer.get("device_id", "")}))
     env = dict(os.environ, ARBOSCTL_CONFIG=str(cfg))
     p = subprocess.run([ARBOSCTL, "chat", "send", "people", chat_id, text, "--timeout", "5"], capture_output=True, text=True, timeout=60, env=env)
     return p.returncode
