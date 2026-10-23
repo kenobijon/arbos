@@ -4882,6 +4882,7 @@ fn launch_week() -> Project {
             avatar_color_index: Some(color),
             avatar_leaf: Some(leaf),
             avatar_leaf_color: Some(color),
+            image_url: None,
             description: None,
             model: None,
             owner: None,
