@@ -54,6 +54,10 @@ on:
         description: "Upload to TestFlight (off = archive only)"
         type: boolean
         default: true
+      runner:
+        description: "runs-on label for this run; empty = vars.ARBOS_IOS_RUNNER or macos-15 (arbos-mac = the self-hosted EC2 Mac)"
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -74,7 +78,7 @@ jobs:
     name: Build and upload the phone app
     # The repository variable ARBOS_IOS_RUNNER (e.g. `arbos-mac`, the self-hosted EC2 Mac) moves
     # the lane off GitHub's hosted pool once that runner has fastlane; empty = macos-15.
-    runs-on: ${{ vars.ARBOS_IOS_RUNNER || 'macos-15' }}
+    runs-on: ${{ inputs.runner || vars.ARBOS_IOS_RUNNER || 'macos-15' }}
     timeout-minutes: 45
     env:
       APP_DIR: apps/ios/Arbos
@@ -93,6 +97,20 @@ jobs:
           path: apps/ios/Arbos/build/spm
           key: spm-${{ runner.os }}-${{ hashFiles('apps/ios/Arbos/Arbos.xcodeproj/project.pbxproj', 'apps/ios/Arbos/Arbos.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
           restore-keys: spm-${{ runner.os }}-
+      # The self-hosted EC2 Mac has no system fastlane: it is a user gem of the runner account on the
+      # Homebrew Ruby (gem install --user-install fastlane, #1400 follow-up). Hosted macos-15 images
+      # ship fastlane on PATH already.
+      - name: fastlane on PATH (self-hosted)
+        if: runner.environment == 'self-hosted'
+        run: |
+          set -euo pipefail
+          for d in /opt/homebrew/opt/ruby/bin "$HOME"/.local/share/gem/ruby/*/bin "$HOME"/.gem/ruby/*/bin; do
+            [[ -d "$d" ]] && echo "$d" >> "$GITHUB_PATH"
+          done
+          gem_bins="$(echo "$HOME"/.local/share/gem/ruby/*/bin "$HOME"/.gem/ruby/*/bin | tr ' ' ':')"
+          export PATH="/opt/homebrew/opt/ruby/bin:$gem_bins:$PATH"
+          command -v fastlane >/dev/null || { echo "::error title=fastlane missing::install it for $(whoami): gem install --user-install fastlane"; exit 1; }
+          fastlane --version | tail -1
       - name: Select Xcode
         run: |
           set -euo pipefail
@@ -110,6 +128,8 @@ jobs:
           rustup show active-toolchain || rustup toolchain install
           rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
       - uses: Swatinem/rust-cache@v2
+        # The self-hosted Mac keeps its target dir; saving the cache cost minutes there (#1233).
+        if: runner.environment != 'self-hosted'
         with:
           key: ios-arbos-ffi
           cache-on-failure: true
