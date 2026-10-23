@@ -1438,7 +1438,9 @@ final class AppModel: ObservableObject {
             return
         }
         snapshotPending.insert(chatId)
-        DispatchQueue.main.asyncAfter(deadline: .now() + (window - since)) { [weak self] in
+        let delayMs = max(1, Int((window - since) * 1000))
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(delayMs))
             guard let self, self.snapshotPending.contains(chatId) else { return }
             self.emitSnapshot(chatId)
         }

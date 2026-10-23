@@ -399,6 +399,7 @@ struct ChatView: View {
             }
         }
         .onAppear {
+            LaunchClock.mark("chat-appear", detail: "messages=\(messages.count)")
             model.markRead(chatId: chatId)
             model.visibleChatId = chatId
             // Restore unsent text left when the user backed out of this thread.
@@ -793,6 +794,7 @@ struct ChatView: View {
                                 highlighted: highlightedMessage == row.messageId)
                             .padding(.top, gap(before: i))
                             .id(row.id)
+                            .onAppear { LaunchClock.mark("chat-first-row", detail: "rows=\(rows.count) messages=\(messages.count)") }
                             .contextMenu {
                                 MessageMenuContent(items: MessageMenu.items(forMessage: isMessageRow(row))) { item in
                                     runMessageMenu(item, row: row)
