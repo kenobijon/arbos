@@ -19,10 +19,45 @@ import CallKit
 import PushKit
 import LiveKit
 import ArbosFFI
+import CryptoKit
 import os
 
 private let log = Logger(subsystem: "com.unarbos.arbos.ios", category: "calls")
 private let audioLog = Logger(subsystem: "com.unarbos.arbos.ios", category: "call-audio")
+
+/// How a VoIP push should satisfy CallKit when the app may already know about a call.
+enum VoipPlan: Equatable {
+    /// Idle: report and start ringing as usual.
+    case ring
+    /// Same call already ringing or active: report again (CallKit returns `callUUIDAlreadyExists`).
+    case reportDuplicate
+    /// A different call while one is active or ringing: report then end; leave the current call alone.
+    case reportAndEnd
+}
+
+/// Pure decision for a VoIP push: always report to CallKit; only `.ring` changes call state.
+func voipPlan(isActive: Bool, incomingCallId: String?, currentCallId: String?, newCallId: String) -> VoipPlan {
+    if incomingCallId == newCallId || currentCallId == newCallId {
+        return .reportDuplicate
+    }
+    if isActive || incomingCallId != nil {
+        return .reportAndEnd
+    }
+    return .ring
+}
+
+/// One stable CallKit UUID per relay `callId` (128-bit hash with version/variant bits set).
+func callKitUUID(forCallId callId: String) -> UUID {
+    var bytes = Array(SHA256.hash(data: Data(callId.utf8)).prefix(16))
+    bytes[6] = (bytes[6] & 0x0F) | 0x50 // version 5
+    bytes[8] = (bytes[8] & 0x3F) | 0x80 // RFC 4122 variant
+    return UUID(uuid: (
+        bytes[0], bytes[1], bytes[2], bytes[3],
+        bytes[4], bytes[5], bytes[6], bytes[7],
+        bytes[8], bytes[9], bytes[10], bytes[11],
+        bytes[12], bytes[13], bytes[14], bytes[15]
+    ))
+}
 
 /// A remote participant as the UI needs it.
 struct CallTile: Identifiable, Equatable {
@@ -213,9 +248,29 @@ final class CallManager: NSObject, ObservableObject {
     /// Ring: a `call_started` push while the app is open, or a VoIP push.
     /// `onCallKitReported` runs from CallKit's report callback (PushKit must finish there).
     func ring(_ incomingCall: Call, from: CallPerson?, viaVoip: Bool, onCallKitReported: (() -> Void)? = nil) {
-        guard !isActive, incoming == nil, call?.callId != incomingCall.callId else {
-            onCallKitReported?()
-            return
+        if viaVoip {
+            switch voipPlan(
+                isActive: isActive,
+                incomingCallId: incoming?.call.callId,
+                currentCallId: call?.callId,
+                newCallId: incomingCall.callId
+            ) {
+            case .reportDuplicate:
+                // Same call already known: report again so PushKit completes (CallKit → callUUIDAlreadyExists).
+                reportVoipIncoming(incomingCall, from: from, endImmediately: false, onCallKitReported: onCallKitReported)
+                return
+            case .reportAndEnd:
+                // Another call while busy: report then end; do not touch the active/ringing call.
+                reportVoipIncoming(incomingCall, from: from, endImmediately: true, onCallKitReported: onCallKitReported)
+                return
+            case .ring:
+                break
+            }
+        } else {
+            guard !isActive, incoming == nil, call?.callId != incomingCall.callId else {
+                onCallKitReported?()
+                return
+            }
         }
         incoming = (incomingCall, from)
         #if DEBUG
@@ -225,16 +280,9 @@ final class CallManager: NSObject, ObservableObject {
         #endif
         phase = .ringing
         activeByChat[incomingCall.chatId] = incomingCall
-        let uuid = UUID()
+        let uuid = callKitUUID(forCallId: incomingCall.callId)
         cxUUID = uuid
-        let update = CXCallUpdate()
-        update.remoteHandle = CXHandle(type: .generic, value: from?.displayName ?? incomingCall.startedBy?.displayName ?? "Arbos")
-        update.localizedCallerName = from?.displayName ?? incomingCall.startedBy?.displayName ?? "Arbos"
-        update.hasVideo = incomingCall.kind == .video
-        update.supportsHolding = false
-        update.supportsGrouping = false
-        update.supportsUngrouping = false
-        update.supportsDTMF = false
+        let update = Self.callKitUpdate(for: incomingCall, from: from)
         provider.reportNewIncomingCall(with: uuid, update: update) { [weak self] err in
             // CallKit rings (system ringtone + vibration, honouring the ring/silent
             // switch like a phone call). If it refuses, keep the incoming state and
@@ -256,6 +304,35 @@ final class CallManager: NSObject, ObservableObject {
             self.endIncoming(reason: .unanswered)
         }
         if viaVoip { Task { await verifyStillLive(incomingCall.callId) } }
+    }
+
+    /// VoIP-only: satisfy PushKit with `reportNewIncomingCall` without changing call state.
+    /// When `endImmediately`, end that reported UUID right away (busy with a different call).
+    private func reportVoipIncoming(_ incomingCall: Call, from: CallPerson?, endImmediately: Bool, onCallKitReported: (() -> Void)?) {
+        let uuid = callKitUUID(forCallId: incomingCall.callId)
+        let update = Self.callKitUpdate(for: incomingCall, from: from)
+        let provider = self.provider
+        provider.reportNewIncomingCall(with: uuid, update: update) { err in
+            if let err {
+                log.error("reportNewIncomingCall (voip): \(err.localizedDescription, privacy: .public)")
+            }
+            if endImmediately {
+                provider.reportCall(with: uuid, endedAt: Date(), reason: .unanswered)
+            }
+            onCallKitReported?()
+        }
+    }
+
+    private static func callKitUpdate(for incomingCall: Call, from: CallPerson?) -> CXCallUpdate {
+        let update = CXCallUpdate()
+        update.remoteHandle = CXHandle(type: .generic, value: from?.displayName ?? incomingCall.startedBy?.displayName ?? "Arbos")
+        update.localizedCallerName = from?.displayName ?? incomingCall.startedBy?.displayName ?? "Arbos"
+        update.hasVideo = incomingCall.kind == .video
+        update.supportsHolding = false
+        update.supportsGrouping = false
+        update.supportsUngrouping = false
+        update.supportsDTMF = false
+        return update
     }
 
     /// A VoIP-woken phone checks the call did not end in the meantime.
@@ -917,7 +994,7 @@ final class CallManager: NSObject, ObservableObject {
     // MARK: CallKit mirror
 
     private func reportOutgoing(title: String, video: Bool) {
-        let uuid = UUID()
+        let uuid = call.map { callKitUUID(forCallId: $0.callId) } ?? UUID()
         cxUUID = uuid
         let handle = CXHandle(type: .generic, value: title)
         let action = CXStartCallAction(call: uuid, handle: handle)
