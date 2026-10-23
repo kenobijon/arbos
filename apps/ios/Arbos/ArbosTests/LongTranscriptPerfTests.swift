@@ -36,6 +36,31 @@ final class LongTranscriptPerfTests: XCTestCase {
         XCTAssertLessThan(elapsed, 2.0, "readAll of \(rows) rows took \(elapsed) s")
     }
 
+    /// The row builder runs on every transcript change (each streaming delta included):
+    /// 5 000 mixed messages — people, markdown answers, relay lines, replies, media —
+    /// must build in well under a second, cold and warm. Replies used to scan the whole
+    /// list each (`Quote.forReply`), and every answer was re-parsed on every rebuild.
+    func testRowsForFiveThousandMessagesBuildFast() {
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        let messages = AppModel.longGroupTranscript(rows: 5_000, before: now)
+        XCTAssertEqual(messages.count, 5_000)
+
+        let cold = Date()
+        let rows = Transcript.rows(messages, projectId: "people:fx-group-launch", me: "user:fx-me", people: true)
+        let coldS = Date().timeIntervalSince(cold)
+
+        let warm = Date()
+        let again = Transcript.rows(messages, projectId: "people:fx-group-launch", me: "user:fx-me", people: true)
+        let warmS = Date().timeIntervalSince(warm)
+
+        XCTAssertEqual(rows, again)
+        XCTAssertGreaterThan(rows.count, 5_000, "replies, date lines and media add rows")
+        XCTAssertTrue(rows.contains { if case .user(_, _, let q) = $0.kind { return q != nil } else { return false } }, "my replies carry a quote")
+        XCTAssertTrue(rows.contains { if case .member(let blocks, _, _, _, _, _) = $0.kind { return blocks.count > 1 } else { return false } }, "markdown answers split into blocks")
+        XCTAssertLessThan(coldS, 3.0, "cold rows() over 5 000 messages took \(coldS) s")
+        XCTAssertLessThan(warmS, 1.0, "warm rows() over 5 000 messages took \(warmS) s")
+    }
+
     func testSingleRowReadMatchesReadAll() throws {
         let rows = 300
         let doc = try longTranscript(rows: rows)
