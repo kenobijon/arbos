@@ -721,4 +721,36 @@ final class CoreFixturesTests: XCTestCase {
             .skip
         )
     }
+
+    /// Registry prune keeps listed chats, listed project docs, people keys and
+    /// recent keys; everything else is returned for wipe.
+    func testRoomsToPrune() {
+        let keys: Set<String> = ["chat-a", "chat-b", "proj:p1", "proj:p2", "people-1", "gone", "recent-x"]
+        let pruned = AppModel.roomsToPrune(
+            roomKeys: keys,
+            listedChatIds: ["chat-a"],
+            listedProjectIds: ["p1"],
+            peopleKeys: ["people-1"],
+            recentKeys: ["recent-x"]
+        )
+        XCTAssertEqual(pruned, ["chat-b", "proj:p2", "gone"])
+    }
+
+    /// Recreate below 3 failures; stop at 3 within 10 minutes; allow again after.
+    func testShouldRecreateRoom() {
+        let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+        XCTAssertTrue(AppModel.shouldRecreateRoom(failures: 0, lastFailureAt: nil, now: t0))
+        XCTAssertTrue(AppModel.shouldRecreateRoom(failures: 2, lastFailureAt: t0, now: t0))
+        XCTAssertFalse(AppModel.shouldRecreateRoom(failures: 3, lastFailureAt: t0, now: t0.addingTimeInterval(60)))
+        XCTAssertFalse(AppModel.shouldRecreateRoom(
+            failures: 3,
+            lastFailureAt: t0,
+            now: t0.addingTimeInterval(AppModel.roomUnavailableBackoffSeconds - 1)
+        ))
+        XCTAssertTrue(AppModel.shouldRecreateRoom(
+            failures: 3,
+            lastFailureAt: t0,
+            now: t0.addingTimeInterval(AppModel.roomUnavailableBackoffSeconds)
+        ))
+    }
 }
