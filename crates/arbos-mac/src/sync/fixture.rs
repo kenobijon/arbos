@@ -90,6 +90,8 @@ struct Shared {
     /// Voice memos sent in this session, by blob key (F11; no blob store offline).
     voice_blobs: Mutex<HashMap<String, Arc<Vec<u8>>>>,
     machine: Mutex<Machine>,
+    /// People blocked in this session (the relay's `GET /blocks` stand-in, #1545).
+    blocked: Mutex<Vec<Person>>,
 }
 
 /// What the offline STT "hears" (the bundled test clip says this).
@@ -133,6 +135,7 @@ impl SyncSource for FixtureSource {
                 routine_runs: Mutex::new(seed_routine_runs()),
                 local: Mutex::new(seed_local()),
                 voice_blobs: Mutex::new(HashMap::new()),
+                blocked: Mutex::new(Vec::new()),
                 machine: Mutex::new(Machine {
                     // `ARBOS_FIXTURE_MACHINE=error|waking` seeds a banner state (screenshot rig).
                     state: match std::env::var("ARBOS_FIXTURE_MACHINE").as_deref() {
@@ -482,6 +485,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         | ClientCommand::RemoveMember { .. }
         | ClientCommand::LeaveChat { .. }
         | ClientCommand::BlockUser { .. }
+        | ClientCommand::UnblockUser { .. }
         | ClientCommand::InviteToProject { .. }
         | ClientCommand::RemoveProjectMember { .. }
         | ClientCommand::SetMessageGrant { .. }
@@ -2486,6 +2490,11 @@ async fn wake_machine(shared: &Arc<Shared>) {
 fn emit_projects(shared: &Shared) {
     let projects = shared.projects.lock().unwrap().clone();
     let _ = shared.events.send(SyncEvent::Projects(projects));
+}
+
+fn emit_blocked(shared: &Shared) {
+    let blocked = shared.blocked.lock().unwrap().clone();
+    let _ = shared.events.send(SyncEvent::Blocked(blocked));
 }
 
 fn emit_project_docs(shared: &Shared) {
@@ -5388,6 +5397,18 @@ fn seed_people_chat_docs() -> Vec<ChatDoc> {
         text_part("Deck, dashboard and the press kit for the run-through."),
     ];
     insert_message_via_core(&group, &shared_files);
+    // Two shared links, as in the iPhone fixture: the group Library's Links
+    // section ([feedback group-library-links-2026-10-23]) and the link-open
+    // confirm have something to show.
+    insert_message_via_core(
+        &group,
+        &human_message(
+            GROUP_LAUNCH,
+            &samir,
+            "Launch checklist is here: https://notion.so/arbos/launch-week — and the signup form: https://arbos.life/i/launch",
+            base + 390_000,
+        ),
+    );
     insert_message_via_core(
         &group,
         &human_message(
@@ -5984,9 +6005,33 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             true
         }
         ClientCommand::BlockUser { handle } => {
+            let handle = handle.trim().trim_start_matches('@').to_lowercase();
+            let who = directory()
+                .into_iter()
+                .find(|p| p.handle == handle)
+                .unwrap_or_else(|| person("", &handle, None, "member"));
+            {
+                let mut blocked = shared.blocked.lock().unwrap();
+                if !blocked.iter().any(|p| p.handle == who.handle) {
+                    blocked.push(who);
+                }
+            }
             let _ = shared
                 .events
                 .send(SyncEvent::Notice(format!("@{handle} blocked.")));
+            emit_blocked(shared);
+            true
+        }
+        ClientCommand::UnblockUser { user_id, handle } => {
+            shared
+                .blocked
+                .lock()
+                .unwrap()
+                .retain(|p| p.id != *user_id && p.handle != *handle);
+            let _ = shared
+                .events
+                .send(SyncEvent::Notice(format!("@{handle} unblocked.")));
+            emit_blocked(shared);
             true
         }
         // "Who may message X" (agent-to-agent messaging): the grant list lives on the project.
@@ -6588,6 +6633,7 @@ mod seed_parity_tests {
             "User Done user:gh_456 name=Some(\"Sam Rivera\") h=Some(\"sam\") asked=None turn=None wa=false [text] hidden=[] text=71 r=0 dt=30000 ct=Some(0)",
             "Assistant Done agent:01J9ARBOS00000000000000000 name=Some(\"Arbos\") h=Some(\"arbos\") asked=Some(\"sam\") turn=None wa=false [text] hidden=[] text=96 r=0 dt=60000 ct=Some(0)",
             "User Done user:gh_457 name=Some(\"Samir Haddad\") h=Some(\"samir\") asked=None turn=None wa=false [attachment:Slide 4 · signups:Some(212000):Image,attachment:Launch dashboard:Some(348000):Image,attachment:Launch day, the team:Some(1204000):Image,attachment:Signup funnel:Some(156000):Image,attachment:Press kit v3:Some(1840000):Pdf,attachment:Launch teaser:Some(6420000):Video,text] hidden=[] text=54 r=0 dt=80000 ct=Some(0)",
+            "User Done user:gh_457 name=Some(\"Samir Haddad\") h=Some(\"samir\") asked=None turn=None wa=false [text] hidden=[] text=112 r=0 dt=90000 ct=Some(0)",
             "User Done user:gh_458 name=Some(\"Sara Lind\") h=Some(\"sara\") asked=None turn=None wa=false [text] hidden=[] text=64 r=0 dt=100000 ct=Some(0)",
             "User Done user:gh_458 name=Some(\"Sara Lind\") h=Some(\"sara\") asked=None turn=None wa=false [text] hidden=[] text=55 r=0 dt=120000 ct=Some(0)",
             "Assistant Error agent:01J9ARBOS00000000000000000 name=Some(\"Arbos\") h=Some(\"arbos\") asked=Some(\"sara\") turn=None wa=false [text,error] hidden=[] text=0 r=0 dt=125000 ct=Some(0)",

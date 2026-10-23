@@ -88,6 +88,13 @@ impl TextSelection {
         self.model.clear_settled()
     }
 
+    /// Drop any selection (drag or settled). Used when a row gesture
+    /// (swipe-right-to-reply) takes over the pointer.
+    pub fn clear(&mut self) {
+        self.model.active = None;
+        self.model.proposal = None;
+    }
+
     /// Screenshot rig (`ARBOS_RIG_SELECT`): select part of bubble `key` as a
     /// gesture would — `all`, a drag `<from>..<to>` (byte offsets of `text`),
     /// a double-click `word@<i>` or a triple-click `para@<i>`. The GUI
@@ -820,9 +827,15 @@ fn paint_chip_picture(layout: &TextLayout, chip: &Chip, window: &mut Window, cx:
         return;
     }
     let line_h = layout.line_height();
-    // The disc fills the cell's height budget and sits at the cell's left;
-    // the hair space after `@` keeps a gap to the name.
-    let d = px(mention::PICTURE).min(line_h);
+    // The disc sits at the cell's left and never reaches the name: it is
+    // the cell minus the gap when that is smaller than the full picture.
+    let cell_w = after_at.x - at.x;
+    let d = px(mention::PICTURE)
+        .min(line_h)
+        .min(cell_w - px(mention::PICTURE_GAP));
+    if d <= px(4.0) {
+        return;
+    }
     let origin = point(at.x, at.y + (line_h - d) / 2.0);
     let bounds = Bounds::new(origin, size(d, d));
     let radii = Corners::all(d / 2.0);

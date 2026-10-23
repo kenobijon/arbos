@@ -758,8 +758,12 @@ enum Markdown {
 
 // MARK: - Row views
 
-struct RowView: View {
-    @EnvironmentObject private var model: AppModel
+struct RowView: View, Equatable {
+    /// Held without `@EnvironmentObject` / `@ObservedObject` so presence, typing
+    /// and the other ~60 `@Published` AppModel fields do not invalidate every
+    /// bubble. ChatView still observes the model and rebuilds rows when the
+    /// transcript changes; actions call through this reference.
+    let model: AppModel
     @Environment(\.theme) private var theme
     let row: Row
     let chatId: Id
@@ -775,8 +779,8 @@ struct RowView: View {
     var onReply: (() -> Void)? = nil
     /// ChatView sets this while a reply swipe is locked so swipe-right-to-back does not fire.
     var replySwipeActive: Binding<Bool> = .constant(false)
-    /// Mention chips (Oct 23): who `@handle` resolves to.
-    private var mentions: MentionTable { MentionTable(model: model, theme: theme) }
+    /// Shared mention table from ChatView (built once per directory sync).
+    let mentions: MentionTable
 
     /// Trailing column width for swipe-revealed times (fits "12:59 PM").
     static let timeRevealWidth: CGFloat = 56
@@ -785,6 +789,18 @@ struct RowView: View {
 
     @State private var replyDrag: CGFloat = 0
     @State private var replyLocked = false
+
+    /// Skip re-drawing when the parent re-evaluates for an unrelated reason
+    /// (composer keystrokes, presence ticks). Closures / the swipe binding are
+    /// not compared — they stay valid for the open chat.
+    static func == (lhs: RowView, rhs: RowView) -> Bool {
+        lhs.row == rhs.row
+            && lhs.chatId == rhs.chatId
+            && lhs.width == rhs.width
+            && lhs.timeReveal == rhs.timeReveal
+            && lhs.highlighted == rhs.highlighted
+            && lhs.mentions === rhs.mentions
+    }
 
     private var maxBubble: CGFloat { max(200, width - Theme.bubbleInset) }
 
@@ -993,7 +1009,7 @@ struct RowView: View {
                                         .tint(theme.accent)
                                         .textSelection(.enabled)
                                 } else {
-                                    BlockView(block: block, live: live && i == blocks.count - 1)
+                                    BlockView(block: block, live: live && i == blocks.count - 1, mentions: mentions)
                                 }
                             }
                             if let time, lastParagraph == nil {
@@ -1017,7 +1033,7 @@ struct RowView: View {
                             .foregroundStyle(theme.muted)
                     }
                     ForEach(Array(blocks.enumerated()), id: \.offset) { i, block in
-                        BlockView(block: block, live: live && i == blocks.count - 1)
+                        BlockView(block: block, live: live && i == blocks.count - 1, mentions: mentions)
                     }
                 }
                 .padding(.horizontal, Theme.bubbleHPad)
@@ -1297,12 +1313,11 @@ struct RowView: View {
 }
 
 struct BlockView: View {
-    @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
     let block: Block
     let live: Bool
-    /// Mention chips (Oct 23): who `@handle` resolves to.
-    private var mentions: MentionTable { MentionTable(model: model, theme: theme) }
+    /// Shared mention table from the row (built once per directory sync).
+    let mentions: MentionTable
 
     var body: some View {
         switch block {

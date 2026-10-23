@@ -79,6 +79,9 @@ pub enum SyncEvent {
     },
     /// Error from a people-chat action (search, DM, members), shown inline.
     PeopleError(String),
+    /// The people I block (`GET /blocks`), sent on every registry refresh and after each
+    /// block / unblock. The person pane derives its Block user / Unblock row from this list.
+    Blocked(Vec<Person>),
     /// `CreatePeopleGroup` succeeded: the new group's id, sent after the
     /// registry refresh that lists it. The sheet closes and the group opens.
     PeopleGroupCreated {
@@ -410,6 +413,11 @@ pub enum ClientCommand {
     },
     /// `POST /blocks {handle}`.
     BlockUser {
+        handle: String,
+    },
+    /// `DELETE /blocks/{user_id}`; `handle` only names the person in the notice.
+    UnblockUser {
+        user_id: String,
         handle: String,
     },
     /// `POST /projects/{id}/members {handle}` (D72 step 3).

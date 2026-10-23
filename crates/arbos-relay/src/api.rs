@@ -243,6 +243,8 @@ pub async fn create_project(
     if name.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "name required".into()));
     }
+    // #1538: the agent's @slug must not be a person's @handle.
+    let (name, renamed_for_handle) = crate::people::agent_name_clear_of_people(&state, &name);
     let provider = match b.provider.as_deref() {
         Some(p) => Provider::parse(p).ok_or((
             StatusCode::BAD_REQUEST,
@@ -390,7 +392,7 @@ pub async fn create_project(
             boxes::copy_workspace_for_fork(&state2, &owner, &src_id, &dest).await;
         });
     }
-    Ok(Json(
+    let mut body = Json(
         serde_json::to_value(CreateProjectResponseDto {
             project: project_dto(&state, &project).await,
             pinned_chat: chat_dto(&pinned),
@@ -410,7 +412,27 @@ pub async fn create_project(
         })
         .expect("CreateProjectResponseDto"),
     )
-    .into_response())
+    .0;
+    // #1538: tell the client the name it asked for was a person's handle.
+    if renamed_for_handle {
+        if let Some(o) = body.as_object_mut() {
+            o.insert("renamed_from".into(), json!(b.name.trim()));
+            o.insert(
+                "notice".into(),
+                json!(handle_notice(b.name.trim(), &project.name)),
+            );
+        }
+    }
+    Ok(Json(body).into_response())
+}
+
+/// The warning for a create / rename whose slug was a person's handle.
+pub(crate) fn handle_notice(wanted: &str, got: &str) -> String {
+    format!(
+        "@{} is a person in Arbos, so the agent is called \"{got}\" (@{}) — otherwise @-mentions would go to the person.",
+        crate::people::agent_slug(wanted),
+        crate::people::agent_slug(got)
+    )
 }
 
 /// `GET /projects`: the caller's own projects, then the ones shared with them (`shared: true`,
@@ -715,11 +737,23 @@ pub async fn patch_project(
             .set_voice_agent_vision(&p.id, v)
             .map_err(internal)?;
     }
+    // #1538: a rename must not take a person's @handle either.
+    let mut renamed_for_handle: Option<(String, String)> = None;
+    let new_name = match b.name.as_deref().map(str::trim) {
+        Some(n) if !n.is_empty() => {
+            let (clear, changed) = crate::people::agent_name_clear_of_people(&state, n);
+            if changed {
+                renamed_for_handle = Some((n.to_owned(), clear.clone()));
+            }
+            Some(clear)
+        }
+        other => other.map(str::to_owned),
+    };
     state
         .db
         .update_project(
             &p.id,
-            b.name.as_deref(),
+            new_name.as_deref(),
             b.icon.as_deref(),
             b.color.as_deref(),
             b.instructions.as_deref(),
@@ -736,8 +770,9 @@ pub async fn patch_project(
     // A rename reaches the box at once (#1431): agentd refreshes the agent's identity (system
     // prompt, per-turn notes, group preludes) instead of waiting for the registry poll.
     // People-chat clients also refresh (#1481): AgentMember.handle is derived from the live
-    // name, so without `people_chat_updated` mid-group @mentions keep the old slug.
-    if let Some(new_name) = b.name.as_deref().map(str::trim) {
+    // name, so without `people_chat_updated` mid-group @mentions keep the old slug. The name
+    // pushed is the one stored (#1538: a colliding name was suffixed above).
+    if let Some(new_name) = new_name.as_deref() {
         if !new_name.is_empty() && new_name != p.name.trim() {
             let _ = state.db.enqueue_push(
                 &p.id,
@@ -752,7 +787,14 @@ pub async fn patch_project(
         .project(&p.id)
         .map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
-    Ok(Json(project_json(&state, &p).await).into_response())
+    let mut body = project_json(&state, &p).await;
+    if let Some((wanted, got)) = renamed_for_handle {
+        if let Some(o) = body.as_object_mut() {
+            o.insert("renamed_from".into(), json!(wanted));
+            o.insert("notice".into(), json!(handle_notice(&wanted, &got)));
+        }
+    }
+    Ok(Json(body).into_response())
 }
 
 #[derive(Deserialize)]

@@ -12,7 +12,7 @@
 //! agent should reply (or stay quiet) so the right agent continues the thread — or none do. Each
 //! human message is labelled with the author's display name (falling back to bare handle) and role
 //! (`owner` | `guest`) in the prompt. Guests may direct ordinary work; they may not use the
-//! owner's secrets unless the owner added them under Who can direct for that secret. Agents
+//! owner's secrets unless the owner put them on that secret's People list. Agents
 //! address people by display name, never `@handle`. The owner's credits pay; audit lines carry
 //! `asked_by`.
 
@@ -77,6 +77,16 @@ impl PeopleChatInfo {
         self.handle_of(&self.owner_user)
     }
 
+    /// "Jacob's" — whose budget this agent spends, for the budget notice (`budget.rs`).
+    pub fn owner_spoken_possessive(&self) -> String {
+        let name = self.spoken_name_of(&self.owner_user);
+        if name.ends_with('s') {
+            format!("{name}'")
+        } else {
+            format!("{name}'s")
+        }
+    }
+
     /// How to speak to / about this person: display name, else bare handle (no `@`).
     fn spoken_name_of(&self, user_id: &str) -> String {
         self.members
@@ -128,6 +138,11 @@ fn addressed_only_to_people(msg: &MessageView) -> bool {
     let Some(mentions) = msg.rest.get("mentions").and_then(Value::as_array) else {
         return false;
     };
+    // Typed mentions (#1538): a `user:` chip for the SENDER is not a people ping — nobody
+    // @-mentions themselves. It happens when an agent's slug equals the sender's own handle
+    // (Jacob @unarbos named an agent "unarbos"): the composer resolved `@unarbos` to the
+    // person, and the agent of that slug is who was meant. Other people's chips still are.
+    let sender = msg.rest.get("sender").and_then(Value::as_str).unwrap_or("");
     let mut saw_person = false;
     for m in mentions {
         let Some(s) = m.as_str() else {
@@ -136,7 +151,7 @@ fn addressed_only_to_people(msg: &MessageView) -> bool {
         if s.starts_with("agent:") {
             return false;
         }
-        if s.starts_with("user:") {
+        if s.starts_with("user:") && s != sender {
             saw_person = true;
         }
     }
@@ -215,23 +230,34 @@ fn text_names_people(msg: &MessageView, info: &PeopleChatInfo) -> bool {
     let Some(token) = leading_address_token(&msg.text()) else {
         return false;
     };
-    text_token_names_people(&token, info, true)
+    let sender = msg.rest.get("sender").and_then(Value::as_str).unwrap_or("");
+    text_token_names_people_except(&token, info, true, sender)
 }
 
 /// True when the leading token is a human's `@handle` (not merely their display name).
+/// The sender's own handle does not count (#1538).
 fn text_names_people_by_handle(msg: &MessageView, info: &PeopleChatInfo) -> bool {
     let Some(token) = leading_address_token(&msg.text()) else {
         return false;
     };
-    text_token_names_people(&token, info, false)
+    let sender = msg.rest.get("sender").and_then(Value::as_str).unwrap_or("");
+    text_token_names_people_except(&token, info, false, sender)
 }
 
-fn text_token_names_people(token: &str, info: &PeopleChatInfo, allow_display_name: bool) -> bool {
+/// Does `token` name a human in the chat (by `@handle`, or by display / first name when
+/// allowed), ignoring the member `except` (the sender: "@unarbos" written by @unarbos is not a
+/// ping to themselves — #1538, an agent may carry that slug).
+fn text_token_names_people_except(
+    token: &str,
+    info: &PeopleChatInfo,
+    allow_display_name: bool,
+    except: &str,
+) -> bool {
     for m in &info.members {
         let Some(member) = m["member"].as_str() else {
             continue;
         };
-        if !member.starts_with("user:") {
+        if !member.starts_with("user:") || member == except {
             continue;
         }
         let handle = m["handle"].as_str().unwrap_or("").to_lowercase();
@@ -607,6 +633,15 @@ impl PeopleState {
     pub fn set_current(&self, chat_id: Option<&str>) {
         *self.current.lock().expect("people") = chat_id.map(str::to_owned);
     }
+
+    /// Test-only: seed a people-chat snapshot (e.g. rename + @handle refresh).
+    #[cfg(test)]
+    pub(crate) fn test_insert(&self, chat_id: &str, info: PeopleChatInfo) {
+        self.chats
+            .lock()
+            .expect("people")
+            .insert(chat_id.to_owned(), info);
+    }
 }
 
 /// Is this human message for the agent `project_id` with the given slug and policy?
@@ -691,6 +726,31 @@ fn recent_people_context(messages: &[MessageView], up_to: &str, max: usize) -> V
 }
 
 impl Agent {
+    /// After a rename (#1481): patch every cached people-chat row so `@newslug` still wakes this
+    /// agent and the prelude / reply attribution speak the live name — without waiting for the
+    /// next `/box/projects` listing.
+    pub fn refresh_people_identity_after_rename(&self) {
+        let me = format!("agent:{}", self.cfg.project_id);
+        let handle = self.identity.handle();
+        let name = self.name();
+        let mut chats = self.people.chats.lock().expect("people");
+        for info in chats.values_mut() {
+            info.slug = handle.clone();
+            for m in &mut info.members {
+                if m["member"].as_str() != Some(me.as_str()) {
+                    continue;
+                }
+                m["handle"] = json!(handle.clone());
+                if let Some(obj) = m.as_object_mut() {
+                    obj.insert("name".into(), json!(name.clone()));
+                }
+                if m.get("project").map(|p| p.is_object()).unwrap_or(false) {
+                    m["project"]["name"] = json!(name.clone());
+                }
+            }
+        }
+    }
+
     /// The relay's list of people chats this agent is in (`people_chats` of `/box/projects`, or a
     /// single chat after an `people_agent_added` push): remember members and settings, open the
     /// rooms, and leave chats that are gone.
@@ -946,10 +1006,19 @@ impl Agent {
         if !every && people_ping_not_for_agents(&msg, info) {
             return (false, "ping for a person, not for agents");
         }
+        // Prefer the live identity handle over a stale people-chat snapshot (#1481).
+        let slug = {
+            let live = self.identity.handle();
+            if live.is_empty() {
+                info.slug.clone()
+            } else {
+                live
+            }
+        };
         if addressed(
             &msg,
             &self.cfg.project_id,
-            &info.slug,
+            &slug,
             info.agents() == 1,
             every,
             replied_to_mine,
@@ -1064,6 +1133,14 @@ impl Agent {
             }
             Err(errors) => {
                 self.log_responder_decision(&room, &msg.id, Err(&errors), Some(("SKIP", &[])));
+                // A budget refusal is not an outage: say so once in the chat and stop asking
+                // the model for every message until the block lapses (`budget.rs`).
+                if let Some(e) = errors
+                    .iter()
+                    .find(|e| crate::budget::Refusal::classify(e).is_some())
+                {
+                    self.note_budget_refusal(chat_id, e, false).await;
+                }
                 false
             }
         }
@@ -1177,14 +1254,23 @@ impl Agent {
         };
         let owner_spoken = info.spoken_name_of(&info.owner_user);
         let secrets_rule = if role == "guest" {
-            " Do not use the owner's secrets (egress, browser fill, or real values in the environment) for this person unless they are listed under Who can direct for that secret; if a director note sets a limit, honour it."
+            " Do not use the owner's secrets (egress, browser fill, or real values in the environment) for this person unless they are on that secret's People list (secrets_list shows it); when a secret's others_ask is card, ask through secrets_request and wait for the owner's card instead; if a person's note sets a limit, honour it."
         } else {
             ""
         };
+        // Live identity handle — not the join-time snapshot — so a mid-group rename does not
+        // tell the model it is still @oldname (#1481 / #1431).
+        let my_slug = {
+            let live = self.identity.handle();
+            if live.is_empty() {
+                info.slug.clone()
+            } else {
+                live
+            }
+        };
         let mut prelude = format!(
-            "[People chat with {}. You are @{} (the agent of {owner_spoken}'s Project \"{}\"){}.{} This message is from {spoken} ({role}); treat it as a request from another person in the conversation and address them by their display name ({spoken}), never as an @handle. Your reply is read by everyone in the chat.{secrets_rule}]\n",
+            "[People chat with {}. You are @{my_slug} (the agent of {owner_spoken}'s Project \"{}\"){}.{} This message is from {spoken} ({role}); treat it as a request from another person in the conversation and address them by their display name ({spoken}), never as an @handle. Your reply is read by everyone in the chat.{secrets_rule}]\n",
             people.join(", "),
-            info.slug,
             self.cfg.project_id,
             others_clause,
             visibility,
@@ -1238,7 +1324,7 @@ impl Agent {
         );
         self.people.set_current(Some(chat_id));
         Some(format!(
-            "[This message is from {spoken}, a person the owner of this Project invited to work in it with you. Address them by their display name ({spoken}), never as an @handle. They may direct ordinary work here; do not use the owner's secrets for them unless the owner added them under Who can direct for that secret, and honour any director note (for example a daily credit limit).]\n\n"
+            "[This message is from {spoken}, a person the owner of this Project invited to work in it with you. Address them by their display name ({spoken}), never as an @handle. They may direct ordinary work here; do not use the owner's secrets for them unless the owner put them on that secret's People list (or, when its others_ask is card, the owner answered your secrets_request card), and honour any note on their row (for example a daily credit limit).]\n\n"
         ))
     }
 
@@ -1372,17 +1458,31 @@ impl Agent {
         let avatar_color = mine
             .and_then(|m| m["avatar_color"].as_str())
             .map(str::to_owned);
-        // The display name rides on the row so clients can name the agent without a member
-        // lookup ("Lium didn't answer. Ask again.", feedback agent-name-no-answer-2026-10-22).
-        let name = mine
-            .and_then(|m| m["project"]["name"].as_str().or_else(|| m["name"].as_str()))
-            .map(str::trim)
-            .filter(|n| !n.is_empty())
-            .map(str::to_owned)
-            .unwrap_or_else(|| self.name());
+        // Live identity first (#1481): a mid-group rename must not attribute the reply under
+        // the join-time name/handle. Fall back to the member row only when identity is empty.
+        let name = {
+            let live = self.name();
+            if live.trim().is_empty() {
+                mine.and_then(|m| m["project"]["name"].as_str().or_else(|| m["name"].as_str()))
+                    .map(str::trim)
+                    .filter(|n| !n.is_empty())
+                    .map(str::to_owned)
+                    .unwrap_or_default()
+            } else {
+                live
+            }
+        };
+        let handle = {
+            let live = self.identity.handle();
+            if live.is_empty() {
+                info.slug.clone()
+            } else {
+                live
+            }
+        };
         let fields = vec![
             ("sender", json!(format!("agent:{}", self.cfg.project_id))),
-            ("senderHandle", json!(info.slug)),
+            ("senderHandle", json!(handle)),
             ("senderName", json!(name)),
             ("senderAvatar", json!(avatar)),
             ("senderAvatarColor", json!(avatar_color)),
@@ -1820,6 +1920,59 @@ mod tests {
             &arbonites,
             P
         ));
+    }
+
+    /// #1538: Jacob (@unarbos) named an agent "unarbos". The composer resolved `@unarbos` to
+    /// the person (`mentions=[user:…]`), which silenced every agent; typed resolution: a
+    /// `user:` chip for the sender is not a people ping, and the sender's own handle in the
+    /// prose does not count as naming a person — so the agent with that slug is addressed.
+    /// An `agent:` chip wakes the agent regardless; another person's chip still wins.
+    #[test]
+    fn sender_own_handle_resolves_to_the_agent_of_that_slug() {
+        let arbonites = PeopleChatInfo {
+            members: vec![
+                json!({ "member": "agent:01HPROJ", "handle": "unarbos", "project": { "name": "unarbos" } }),
+                json!({ "member": "user:gh_2", "handle": "unarbos", "name": "Arbos" }),
+                json!({ "member": "user:gh_9", "handle": "scout", "name": "Scout" }),
+            ],
+            slug: "unarbos".into(),
+            kind: "group".into(),
+            ..Default::default()
+        };
+        // The Mac resolved the slug to the sender themself.
+        let m = msg(
+            "@unarbos are you there?",
+            json!({ "mentions": ["user:gh_2"] }),
+        );
+        assert!(
+            !addressed_only_to_people(&m),
+            "a chip for the sender is not a people ping"
+        );
+        assert!(!text_names_people_by_handle(&m, &arbonites));
+        assert!(!people_ping_not_for_agents(&m, &arbonites));
+        assert!(
+            addressed(&m, P, "unarbos", false, false, false),
+            "the agent of that slug is addressed"
+        );
+        // A typed agent chip wakes the agent, whoever shares the slug.
+        assert!(addressed(
+            &msg("hey", json!({ "mentions": ["agent:01HPROJ"] })),
+            P,
+            "unarbos",
+            false,
+            false,
+            false
+        ));
+        // Someone else pinging the person by chip: still the person's, not ours.
+        let other = msg(
+            "@unarbos can you look?",
+            json!({ "sender": "user:gh_9", "mentions": ["user:gh_2"] }),
+        );
+        assert!(addressed_only_to_people(&other));
+        assert!(
+            people_ping_not_for_agents(&other, &arbonites)
+                || text_mentions_agent(&other, &arbonites)
+        );
     }
 
     #[test]

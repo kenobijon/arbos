@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     actions, div, list, prelude::*, px, Animation, AnimationExt, AnyElement, App, Context, Div,
-    Entity, FontWeight, ListAlignment, ListScrollEvent, ListState, Render, SharedString, Stateful,
-    TextRun, Window,
+    Entity, FontWeight, ListAlignment, ListScrollEvent, ListState, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, SharedString, Stateful, TextRun, Window,
 };
 
 use crate::app::{AppEvent, AppState, DetailsTarget};
@@ -98,6 +98,13 @@ const HOVER_FADE_MS: f32 = 150.0;
 pub const HEADER_FADE_BAND: f32 = crate::ui::header::metrics::FADE_BAND;
 /// How long the hover copy glyph stays a checkmark after a successful copy.
 const COPY_FEEDBACK_MS: u64 = 2_000;
+/// How far a right swipe pulls the bubble before reply arms (iPhone
+/// `replySwipeWidth` / Telegram-style).
+const REPLY_SWIPE_WIDTH: f32 = 56.0;
+/// Release past this fraction of [`REPLY_SWIPE_WIDTH`] starts a reply.
+const REPLY_SWIPE_ARM: f32 = REPLY_SWIPE_WIDTH * 0.7;
+/// Ignore pointer noise until the drag travels this far (iPhone minimumDistance).
+const REPLY_SWIPE_SLOP: f32 = 12.0;
 
 /// Which bubble row the pointer is over, and the one it just left, with the
 /// moment each happened: the fade is computed from those at render time.
@@ -105,6 +112,20 @@ const COPY_FEEDBACK_MS: u64 = 2_000;
 struct HoverFade {
     over: Option<(String, Instant)>,
     left: Option<(String, Instant)>,
+}
+
+/// In-progress swipe-right-to-reply on a message row (iPhone `replySwipeGesture`).
+struct ReplySwipe {
+    /// The transcript row the press started on (visual offset + reply glyph).
+    row_id: String,
+    /// The message to reply to when the swipe arms.
+    message_id: Id,
+    /// Press origin in window coordinates.
+    start: Point<Pixels>,
+    /// How far the row has been pulled right (px).
+    drag: f32,
+    /// True once the pan is clearly horizontal-right (scroll / select stay free until then).
+    locked: bool,
 }
 
 impl HoverFade {
@@ -514,6 +535,8 @@ pub struct Transcript {
     /// `ARBOS_RIG_SELECT_AFTER_MS` (so a reply typed over VNC can land
     /// first). Cleared when applied.
     rig_select: Option<(String, Instant)>,
+    /// Swipe-right-to-reply in progress (Telegram / iPhone parity).
+    reply_swipe: Option<ReplySwipe>,
 }
 
 impl Transcript {
@@ -569,7 +592,103 @@ impl Transcript {
                 .detach();
                 (spec, Instant::now() + Duration::from_millis(after))
             }),
+            reply_swipe: None,
         }
+    }
+
+    /// Rows that can be replied to (same set as the message menu's Reply item
+    /// on the iPhone: text, media, and empty agent bubbles — not stamps,
+    /// cards, errors, or chrome).
+    fn can_reply_row(kind: &RowKind) -> bool {
+        matches!(
+            kind,
+            RowKind::User { .. }
+                | RowKind::Markdown { .. }
+                | RowKind::NoAnswer { .. }
+                | RowKind::Attachment { .. }
+        )
+    }
+
+    /// Mouse down on a replyable row: arm a possible swipe-right-to-reply.
+    /// Vertical scroll and text selection stay free until the pan locks.
+    fn begin_reply_swipe(&mut self, row_id: String, message_id: Id, start: Point<Pixels>) {
+        self.reply_swipe = Some(ReplySwipe {
+            row_id,
+            message_id,
+            start,
+            drag: 0.0,
+            locked: false,
+        });
+    }
+
+    /// Trackpad / mouse move while a reply swipe may be in progress.
+    fn on_reply_swipe_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if self.reply_swipe.is_none() {
+            return;
+        }
+        if event.pressed_button != Some(MouseButton::Left) {
+            self.reply_swipe = None;
+            cx.notify();
+            return;
+        }
+        let (dx, dy, was_locked, prev_drag) = {
+            let swipe = self.reply_swipe.as_ref().expect("checked above");
+            let dx: f32 = (event.position.x - swipe.start.x).into();
+            let dy: f32 = (event.position.y - swipe.start.y).into();
+            (dx, dy, swipe.locked, swipe.drag)
+        };
+        if !was_locked {
+            if dx.abs() + dy.abs() < REPLY_SWIPE_SLOP {
+                return;
+            }
+            // Vertical scroll or leftward peek: do not steal the gesture.
+            if dx <= 0.0 || dx.abs() <= dy.abs() * 1.15 {
+                self.reply_swipe = None;
+                return;
+            }
+        }
+        let raw = dx.max(0.0);
+        let w = REPLY_SWIPE_WIDTH;
+        let reveal = if raw <= w {
+            raw
+        } else {
+            w + ((raw - w) * 0.2).min(24.0)
+        };
+        let just_locked = !was_locked;
+        let moved = (prev_drag - reveal).abs() > 0.5;
+        if let Some(swipe) = self.reply_swipe.as_mut() {
+            swipe.locked = true;
+            if moved {
+                swipe.drag = reveal;
+            }
+        }
+        if just_locked {
+            self.selection.update(cx, |s, cx| {
+                s.clear();
+                cx.notify();
+            });
+        }
+        if just_locked || moved {
+            cx.notify();
+        }
+    }
+
+    /// Mouse up: if the swipe armed far enough, start a reply (same path as
+    /// the hover reply glyph and the message-menu Reply item).
+    fn on_reply_swipe_up(&mut self, cx: &mut Context<Self>) {
+        let Some(swipe) = self.reply_swipe.take() else {
+            return;
+        };
+        let triggered = swipe.locked && swipe.drag >= REPLY_SWIPE_ARM;
+        if triggered {
+            if let Some(chat_id) = self.chat_id.clone() {
+                cx.emit(TranscriptEvent::Reply {
+                    chat_id,
+                    message_id: swipe.message_id,
+                });
+            }
+        }
+        cx.notify();
     }
 
     /// Apply `ARBOS_RIG_SELECT` to the newest settled agent bubble, once.
@@ -648,9 +767,15 @@ impl Transcript {
     /// and let the next frame (`step_spring`) read pixel offsets.
     fn handle_scroll(&mut self, event: &ListScrollEvent) {
         // `is_scrolled == false` means the bottom-aligned list snapped to its
-        // end: the user is back at the tail. Direction is handled by the
-        // wheel listener; this callback never re-pins on its own otherwise.
-        if !event.is_scrolled {
+        // end: the user is back at the tail. `is_scrolled == true` means they
+        // left that natural end (wheel, trackpad, or scrollbar). Unpin so a
+        // new incoming row cannot spring them back while they read history —
+        // the parent wheel listener alone was not enough (scrollbar / list
+        // scroll paths never cleared the pin).
+        if event.is_scrolled {
+            self.pinned_to_bottom = false;
+            self.spring.velocity = 0.0;
+        } else {
             self.pinned_to_bottom = true;
             self.spring.velocity = 0.0;
         }
@@ -713,6 +838,9 @@ impl Transcript {
         let pane_open = state.profile.is_some();
         let pane_changed = pane_open != self.pane_open;
         self.pane_open = pane_open;
+        if chat_changed {
+            self.reply_swipe = None;
+        }
         let messages: Vec<Message> = chat_id
             .as_deref()
             .map(|id| state.messages_of(id).to_vec())
@@ -821,6 +949,14 @@ impl Transcript {
         let old_len = self.rows.len();
         self.rows = new_rows;
         self.list.splice(prefix..old_len, self.rows.len() - prefix);
+        // Reading history: a stale pin (scrollbar / list scroll that never
+        // cleared it) must not spring to the new end when rows land below.
+        let max = f32::from(self.list.max_offset_for_scrollbar().y);
+        let cur = -f32::from(self.list.scroll_px_offset_for_scrollbar().y);
+        if max - cur > STICK_THRESHOLD_PX {
+            self.pinned_to_bottom = false;
+            self.spring.velocity = 0.0;
+        }
         self.reveal_hit(cx);
         // While pinned the spring glides to the new end on the next frames.
         cx.notify();
@@ -1440,6 +1576,10 @@ impl Transcript {
         };
         let theme = Theme::of(cx).clone();
         let now = Instant::now();
+        // Before the match moves `row.kind`: which rows accept swipe-right-to-reply.
+        let can_reply = Self::can_reply_row(&row.kind) && !row.message_id.is_empty();
+        let swipe_row_id = row.id.clone();
+        let swipe_message_id = row.message_id.clone();
         let selectable = Selectable::new(&self.selection, theme.accent_soft, cx).with_mentions(
             self.mentions.clone(),
             theme.accent,
@@ -1826,12 +1966,15 @@ impl Transcript {
                         });
                     }) as attachments::OpenFn
                 });
-                div()
-                    .w_full()
-                    .py(px(4.0))
-                    .flex()
-                    .when(mine, |el| el.justify_end())
-                    .when(lane, |el| el.pl(px(SENDER_LANE)))
+                // Same reply · copy rail and right-click menu as text bubbles
+                // (feedback app-01M5N8ZQVWC63V54HM70D9SJ4H): an image / file
+                // row was a bare card with no way to reply.
+                let card = self
+                    .menu_target(
+                        div().id(SharedString::from(format!("{}#media", row.id))),
+                        &row.message_id,
+                        cx,
+                    )
                     .child(attachments::card(
                         &row.id,
                         &attachment,
@@ -1840,8 +1983,42 @@ impl Transcript {
                         open,
                         self.state.clone(),
                         &theme,
-                    ))
-                    .into_any_element()
+                    ));
+                let (row_el, reveal) = self.hover_row(&row.id, now, window, cx);
+                let actions = self.hover_reply_copy(&row.id, &row.message_id, reveal, &theme, cx);
+                if mine {
+                    // My media sits right; the rail is on its outer (left) edge.
+                    div()
+                        .w_full()
+                        .py(px(4.0))
+                        .flex()
+                        .flex_col()
+                        .items_end()
+                        .child(
+                            row_el
+                                .justify_end()
+                                .items_center()
+                                .child(actions.mr(px(6.0)))
+                                .child(card),
+                        )
+                        .into_any_element()
+                } else {
+                    div()
+                        .w_full()
+                        .py(px(4.0))
+                        .flex()
+                        .flex_col()
+                        .items_start()
+                        .child(
+                            row_el
+                                .justify_start()
+                                .items_center()
+                                .when(lane, |el| el.pl(px(SENDER_LANE)))
+                                .child(card)
+                                .child(actions.ml(px(6.0))),
+                        )
+                        .into_any_element()
+                }
             }
             RowKind::AskUser { text } => {
                 cards::status_row(StatusKind::AskUser, &text, false, &theme, cx).into_any_element()
@@ -1989,11 +2166,53 @@ impl Transcript {
                     && !matches!(prev.kind, RowKind::Stamp { .. } | RowKind::BottomInset)
                     && self.turn_starts.contains(&row.message_id)
             });
-        column_row(inner)
-            .when(turn_start, |el| el.pt(px(TURN_GAP_EXTRA)))
-            .when(highlighted, |el| {
-                el.bg(Theme::with_alpha(theme.accent, 0.14))
+        let swipe_drag = self
+            .reply_swipe
+            .as_ref()
+            .filter(|s| s.row_id == swipe_row_id)
+            .map(|s| s.drag)
+            .unwrap_or(0.0);
+        let accent = theme.accent;
+        div()
+            .id(SharedString::from(format!("{swipe_row_id}#swipe")))
+            .relative()
+            .w_full()
+            .when(can_reply, |el| {
+                let (row_id, message_id) = (swipe_row_id.clone(), swipe_message_id.clone());
+                el.on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, event: &MouseDownEvent, _, _cx| {
+                        if event.modifiers.control || event.modifiers.shift {
+                            return;
+                        }
+                        this.begin_reply_swipe(row_id.clone(), message_id.clone(), event.position);
+                    }),
+                )
             })
+            .when(swipe_drag > 0.5, |el| {
+                el.child(
+                    div()
+                        .absolute()
+                        .left(px(COLUMN_MARGIN + swipe_drag - REPLY_SWIPE_WIDTH))
+                        .top_0()
+                        .bottom_0()
+                        .w(px(REPLY_SWIPE_WIDTH))
+                        .flex()
+                        .items_center()
+                        .justify_start()
+                        .pl(px(4.0))
+                        .opacity((swipe_drag / (REPLY_SWIPE_WIDTH * 0.55)).min(1.0))
+                        .child(icon("reply", 16.0, accent)),
+                )
+            })
+            .child(
+                column_row(inner)
+                    .when(swipe_drag > 0.0, |el| el.ml(px(swipe_drag)))
+                    .when(turn_start, |el| el.pt(px(TURN_GAP_EXTRA)))
+                    .when(highlighted, |el| {
+                        el.bg(Theme::with_alpha(theme.accent, 0.14))
+                    }),
+            )
             .into_any_element()
     }
 }
@@ -2076,6 +2295,19 @@ impl Render for Transcript {
             .track_focus(&focus)
             .on_action(cx.listener(Self::copy_selection))
             .on_scroll_wheel(cx.listener(|this, event, _, cx| this.on_wheel(event, cx)))
+            // Swipe-right-to-reply: move/up live on the transcript so a drag
+            // that leaves the row still finishes (same as the iPhone gesture).
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                this.on_reply_swipe_move(event, cx);
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseUpEvent, _, cx| this.on_reply_swipe_up(cx)),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseUpEvent, _, cx| this.on_reply_swipe_up(cx)),
+            )
             // Grok's header band (Jacob, Oct 22 12:49 CR, superseding the opaque
             // band): the list runs up under the floating pill and fades out
             // over `HEADER_FADE_BAND` — Grok's text is gone at the window edge
@@ -3504,21 +3736,27 @@ const QUOTE_TO_TEXT_GAP: f32 = 6.0;
 /// The inside of a bubble, in this order: sender name (group / channel,
 /// someone else) → reply quote header → the text, with the time after it.
 /// A short text keeps the time on its line; a wrapped one pushes it to the
-/// right of the next line. No `min_w_0` on the column or its items: taffy
-/// sizes a flex column from its items, and an item with `min-width: 0`
-/// contributes nothing, so the bubble would take the name's or the quote's
-/// width and wrap the body one word per line (bubble-quote-width-2026-10-23).
+/// right of the next line.
 ///
-/// The text + time line is a flex *row*, and there the rule is the opposite:
-/// the text item must be `min_w_0`. GPUI measures a text's min-content width
-/// as its unwrapped width (`AvailableSpace::MinContent` → no wrap width), so
-/// without it the item's automatic minimum is the whole line, it cannot
-/// shrink to the bubble, and the text runs out of the bubble's right edge
-/// while the time drops to a line of its own (Jacob, 2026-10-23, v0.6.184:
-/// bubble-overflow-hotfix-2026-10-23). With `min_w_0` the row still reports
-/// the unwrapped width as its max-content size (a flex item's basis is its
-/// content; the minimum only matters when shrinking), so a short bubble is
-/// still content-sized, and a long one wraps at the bubble's width.
+/// Width rules:
+/// - The column and the text+time row are `w_full` so they take the bubble's
+///   content box when the bubble is capped — the body can wrap at that edge.
+/// - No `min_w_0` on the column or the text+time row: taffy sizes a flex
+///   column from its items, and an item with `min-width: 0` contributes
+///   nothing, so the bubble would take the name's or the quote's width and
+///   wrap the body one word per line (bubble-quote-width-2026-10-23).
+/// - The text wrapper alone keeps `min_w_0`. The text+time line is a flex
+///   *row*, and there the rule is the opposite of the column: GPUI measures
+///   a text's min-content width as its unwrapped width
+///   (`AvailableSpace::MinContent` → no wrap width), so without `min_w_0`
+///   the item's automatic minimum is the whole line, it cannot shrink to
+///   the bubble, and the text runs out of the bubble's right edge while the
+///   time drops to a line of its own (Jacob, 2026-10-23, v0.6.184 / 0.6.185:
+///   bubble-overflow-hotfix-2026-10-23, app-01M5N8R9VYF64GWW8TVXW8HFX9).
+///   With `min_w_0` the row still reports the unwrapped width as its
+///   max-content size (a flex item's basis is its content; the minimum only
+///   matters when shrinking), so a short bubble is still content-sized, and
+///   a long one wraps at the bubble's width.
 fn sender_bubble_column(
     name: Option<AnyElement>,
     quote: Option<AnyElement>,
@@ -3528,6 +3766,7 @@ fn sender_bubble_column(
     div()
         .flex()
         .flex_col()
+        .w_full()
         .children(name.map(|n| {
             div()
                 .pb(px(NAME_TO_TEXT_GAP))
@@ -3545,6 +3784,7 @@ fn sender_bubble_column(
                 .flex()
                 .flex_wrap()
                 .items_end()
+                .w_full()
                 .child(
                     div()
                         .min_w_0()
@@ -4333,9 +4573,8 @@ mod layout_tests {
         );
     }
 
-    /// A quoted agent bubble as `markdown_bubble` builds it: the bubble is a
-    /// flex column (quote header over the text) in the slot, with and without
-    /// the avatar lane.
+    /// A quoted agent bubble as `markdown_bubble` builds it: `sender_bubble_column`
+    /// (name → quote → body) in the slot, with and without the avatar lane.
     struct QuotedBubble {
         lane: bool,
         selection: Entity<TextSelection>,
@@ -4371,20 +4610,21 @@ mod layout_tests {
                 .max_w_full()
                 .min_w_0()
                 .relative()
-                .flex()
-                .flex_col()
-                .gap(px(6.0))
                 .px(px(BUBBLE_PAD_X))
                 .py(px(BUBBLE_PAD_Y))
-                .child(quote)
-                .child(render_block(
-                    "q",
-                    &Block::Paragraph(LONG_BODY.to_string()),
-                    0,
+                .child(sender_bubble_column(
                     None,
-                    Instant::now(),
-                    &theme,
-                    &bubble_sel,
+                    Some(quote.into_any_element()),
+                    render_block(
+                        "q",
+                        &Block::Paragraph(LONG_BODY.to_string()),
+                        0,
+                        None,
+                        Instant::now(),
+                        &theme,
+                        &bubble_sel,
+                    ),
+                    None,
                 ));
             let row = div()
                 .w_full()
@@ -4410,6 +4650,10 @@ mod layout_tests {
     /// incoming bubble with a one-word reply quote collapsed to the quote's
     /// width and wrapped its body one word per line. The bubble's width is the
     /// body's (capped by the column), never the quote header's.
+    ///
+    /// 2026-10-23 20:55 (v0.6.185): after sender_bubble_column dropped
+    /// `min_w_0` on the text wrapper, a long quoted body ran past the bubble's
+    /// right edge instead of wrapping — assert the text stays inside.
     #[gpui::test]
     fn a_quoted_bubble_is_as_wide_as_its_body_not_its_quote(cx: &mut TestAppContext) {
         for lane in [false, true] {
@@ -4420,9 +4664,13 @@ mod layout_tests {
             vcx.run_until_parked();
             let bubble = vcx.debug_bounds("test-bubble").expect("bubble drawn");
             let quote = vcx.debug_bounds("test-quote").expect("quote drawn");
+            let text = vcx.debug_bounds("bubble-text").expect("body drawn");
             let slot = vcx.debug_bounds("chat-bubble-slot").expect("slot drawn");
             let bw: f32 = bubble.size.width.into();
             let qw: f32 = quote.size.width.into();
+            let tw: f32 = text.size.width.into();
+            let tx: f32 = text.origin.x.into();
+            let bx: f32 = bubble.origin.x.into();
             let cap: f32 = f32::from(slot.size.width) - ASSISTANT_RIGHT_GAP;
             assert!(
                 qw < 120.0 && bw > qw + 200.0,
@@ -4436,6 +4684,16 @@ mod layout_tests {
             assert!(
                 bh < 6.0 * CHAT_LINE_HEIGHT,
                 "lane={lane}: the body wraps to a few lines, not one word per line ({bh} pt tall)"
+            );
+            let text_right = tx + tw;
+            let bubble_inner_right = bx + bw - BUBBLE_PAD_X;
+            assert!(
+                text_right <= bubble_inner_right + 1.0,
+                "lane={lane}: body runs past the bubble (text right {text_right}, inner {bubble_inner_right})"
+            );
+            assert!(
+                bh > 2.0 * CHAT_LINE_HEIGHT,
+                "lane={lane}: a long body must wrap to more than one line ({bh} pt tall)"
             );
         }
     }

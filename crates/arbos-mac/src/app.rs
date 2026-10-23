@@ -349,6 +349,9 @@ pub struct AppState {
     pub new_group_agents: Vec<Id>,
     pub people_query: String,
     pub people_results: Vec<Person>,
+    /// The people I block, as the relay lists them (`GET /blocks`; `SyncEvent::Blocked`).
+    /// The person pane's Block user / Unblock row derives from this, never from a local flag.
+    pub blocked: Vec<Person>,
     pub people_busy: bool,
     pub people_error: Option<String>,
     /// Everyone on Arbos (`GET /users`), fetched once the account is known and
@@ -586,6 +589,9 @@ pub struct AppState {
     /// Rig: `ARBOS_OPEN_PROFILE=group:member-menu[:confirm]` — the shell opens the first
     /// other member's row menu on the group pane (`true` = with the Remove confirm armed).
     pub rig_member_menu: Option<bool>,
+    /// Rig: `ARBOS_OPEN_PROFILE=user:block:unblock` — unblock this person as soon as the
+    /// block list names them (the row must read Unblock first, then Block user again).
+    pub rig_unblock: Option<Person>,
     /// Rig: `ARBOS_OPEN_SPACE` applied once.
     pub rig_space_opened: bool,
     /// D88: the room list from the homeserver (previews, unread, `can_post`).
@@ -759,6 +765,7 @@ impl AppState {
             new_group_agents: Vec::new(),
             people_query: String::new(),
             people_results: Vec::new(),
+            blocked: Vec::new(),
             people_busy: false,
             people_error: None,
             people_directory: Vec::new(),
@@ -869,6 +876,7 @@ impl AppState {
             open_server_hook_done: false,
             rig_channel_menu: None,
             rig_member_menu: None,
+            rig_unblock: None,
             rig_space_opened: false,
             servers: Vec::new(),
             matrix_snapshot: Snapshot::default(),
@@ -1281,6 +1289,16 @@ impl AppState {
                     self.my_call = None;
                 }
                 self.push_notice(message);
+                cx.notify();
+            }
+            SyncEvent::Blocked(people) => {
+                self.blocked = people;
+                if let Some(person) = self
+                    .rig_unblock
+                    .take_if(|p| blocked_entry(&self.blocked, p).is_some())
+                {
+                    self.unblock_user(&person, cx);
+                }
                 cx.notify();
             }
             SyncEvent::PeopleError(err) => {
@@ -1753,21 +1771,29 @@ impl AppState {
                                     );
                                 }
                             }
-                        } else if spec == "user" {
-                            if let Some(handle) = self
+                        } else if let Some(rest) = spec.strip_prefix("user") {
+                            // `user[:block[:unblock]]` (#1545 rig): the DM peer's pane, then the
+                            // same block / unblock commands the footer row sends.
+                            if let Some(person) = self
                                 .projects
                                 .iter()
                                 .find(|p| p.id == project_id)
                                 .and_then(|p| p.person())
-                                .map(|person| person.handle.clone())
+                                .cloned()
                             {
                                 self.open_profile(
                                     ProfilePage::User {
-                                        handle,
+                                        handle: person.handle.clone(),
                                         space_id: Some(project_id),
                                     },
                                     cx,
                                 );
+                                if rest.starts_with(":block") {
+                                    self.block_user(person.handle.clone(), cx);
+                                }
+                                if rest == ":block:unblock" {
+                                    self.rig_unblock = Some(person);
+                                }
                             }
                         } else if spec == "me" {
                             self.open_profile(ProfilePage::Me, cx);
@@ -6664,6 +6690,35 @@ impl AppState {
         cx.notify();
     }
 
+    /// Is this person on my block list? Matched the way the relay keys blocks — by user
+    /// id — with the handle as the fallback for rows that only carry a handle.
+    pub fn is_blocked(&self, person: &Person) -> bool {
+        blocked_entry(&self.blocked, person).is_some()
+    }
+
+    /// `DELETE /blocks/{user_id}` for the block-list entry that matches `person`; a no-op
+    /// when the relay does not list them (the row already reads Block user).
+    pub fn unblock_user(&mut self, person: &Person, cx: &mut Context<Self>) {
+        let Some(entry) = blocked_entry(&self.blocked, person) else {
+            return;
+        };
+        let user_id = if entry.id.is_empty() {
+            person.id.clone()
+        } else {
+            entry.id.clone()
+        };
+        if user_id.is_empty() {
+            return;
+        }
+        let handle = if entry.handle.is_empty() {
+            person.handle.clone()
+        } else {
+            entry.handle.clone()
+        };
+        self.command(ClientCommand::UnblockUser { user_id, handle });
+        cx.notify();
+    }
+
     pub fn invite_to_project(&mut self, project_id: Id, handle: String, cx: &mut Context<Self>) {
         let handle = handle.trim().trim_start_matches('@').to_string();
         if handle.is_empty() {
@@ -8503,6 +8558,65 @@ mod unread_arrival_tests {
         assert_eq!(arrival_read(false, false, false), ArrivalRead::MarkUnread);
         assert_eq!(arrival_read(false, false, true), ArrivalRead::Nothing);
         assert_eq!(arrival_read(true, false, true), ArrivalRead::Nothing);
+    }
+}
+
+/// The block-list row for `person`: same non-empty id, else the same handle (GitHub logins
+/// are case-insensitive).
+pub(crate) fn blocked_entry<'a>(blocked: &'a [Person], person: &Person) -> Option<&'a Person> {
+    blocked.iter().find(|b| {
+        (!b.id.is_empty() && b.id == person.id)
+            || (!b.handle.is_empty() && b.handle.eq_ignore_ascii_case(&person.handle))
+    })
+}
+
+#[cfg(test)]
+mod block_state_tests {
+    //! #1545 (Jacob, 2026-10-23): after "Block user" the row kept reading Block user. The
+    //! row now derives from the relay's block list (`SyncEvent::Blocked`), so it flips to
+    //! Unblock once the list names the person and back once it no longer does.
+    use super::blocked_entry;
+    use crate::model::Person;
+    use crate::ui::profiles::user::block_row_label;
+
+    fn person(id: &str, handle: &str) -> Person {
+        Person {
+            id: id.into(),
+            handle: handle.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn blocked_matches_by_id_then_handle() {
+        let ken = person("gh_1", "kenobijon");
+        let list = vec![ken.clone()];
+        assert!(blocked_entry(&list, &ken).is_some());
+        // The pane may open from a row that only knows the handle.
+        assert!(blocked_entry(&list, &person("", "KenobiJon")).is_some());
+        // A different id with a different handle is not blocked.
+        assert!(blocked_entry(&list, &person("gh_2", "sami")).is_none());
+        assert!(blocked_entry(&[], &ken).is_none());
+    }
+
+    #[test]
+    fn block_row_flips_with_the_list() {
+        let ken = person("gh_1", "kenobijon");
+        let mut list: Vec<Person> = Vec::new();
+        assert_eq!(
+            block_row_label(blocked_entry(&list, &ken).is_some()),
+            "Block user"
+        );
+        list.push(ken.clone());
+        assert_eq!(
+            block_row_label(blocked_entry(&list, &ken).is_some()),
+            "Unblock"
+        );
+        list.retain(|p| p.id != ken.id);
+        assert_eq!(
+            block_row_label(blocked_entry(&list, &ken).is_some()),
+            "Block user"
+        );
     }
 }
 

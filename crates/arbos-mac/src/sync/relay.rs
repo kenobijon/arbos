@@ -2324,6 +2324,7 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
     emit_chats(shared);
     apply_open_chat_hook(shared);
     save_registry(shared);
+    refresh_blocks(shared).await;
     for p in projects.iter().filter(|p| !p.is_people()) {
         ensure_room(shared, &p.id, &project_doc_key(&p.id), PROJECT_DOC_CHAT_ID);
     }
@@ -2331,6 +2332,30 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
         ensure_room(shared, &c.project_id, &c.id, &c.id);
     }
     Ok(())
+}
+
+/// The relay's block list is the truth for the person pane's Block user / Unblock row
+/// (#1545): read it after every registry refresh and after each block / unblock, so the row
+/// is right on pane re-open and app relaunch. Older relays without `/blocks` answer 404 and
+/// the list is left as it was; other errors are logged, never shown.
+async fn refresh_blocks(shared: &Arc<Shared>) {
+    match shared.get_json("/blocks").await {
+        Ok(list) => {
+            let people: Vec<Person> = list
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|item| serde_json::from_value::<Person>(item).ok())
+                .collect();
+            let _ = shared.events.send(SyncEvent::Blocked(people));
+        }
+        Err(err) => {
+            if !format!("{err:#}").contains("HTTP 404") {
+                log::warn!(target: "arbos_mac::relay", "GET /blocks: {err:#}");
+            }
+        }
+    }
 }
 
 /// §9c, once after the update: chats archived on this Mac before archive state
@@ -2663,11 +2688,21 @@ fn mentions_for(shared: &Shared, chat_id: &str, text: &str) -> Vec<String> {
         }
     }
     for p in &space.people {
-        if lower.contains(&format!("@{}", p.handle.to_lowercase())) {
-            let id = format!("user:{}", p.id);
-            if !out.iter().any(|x| x == &id) {
-                out.push(id);
-            }
+        let handle = p.handle.to_lowercase();
+        if !text_has_at_token(&lower, &handle) {
+            continue;
+        }
+        // Typed resolution (#1538): a slug both a person and an agent carry means the agent
+        // when it is my own handle (nobody @-mentions themselves) and the person otherwise.
+        let agent_has_it = space.agents.iter().any(|a| {
+            a.handle.eq_ignore_ascii_case(&handle) || Project::mention_slug(&a.name) == handle
+        });
+        if agent_has_it && handle.eq_ignore_ascii_case(&me_handle) {
+            continue;
+        }
+        let id = format!("user:{}", p.id);
+        if !out.iter().any(|x| x == &id) {
+            out.push(id);
         }
     }
     out
@@ -3142,19 +3177,28 @@ async fn perform_room_actions(
                     }
                 }
                 RoomAction::ApplyBytes(bytes) => {
-                    let import_failed = {
+                    // (failed, parked): parked = Loro holds the ops until their dependencies
+                    // arrive; the session keeps the persisted cursor below that row.
+                    let (import_failed, parked) = {
                         let docs = shared.docs.lock().unwrap();
                         if let Some(doc) = docs.get(key) {
-                            if let Err(err) = doc.core.doc.import(&bytes) {
-                                eprintln!("relay room {}: import failed: {err}", session.room());
-                                true
-                            } else {
-                                false
+                            match doc.core.doc.import(&bytes) {
+                                Ok(status) => (false, status.pending.is_some()),
+                                Err(err) => {
+                                    eprintln!(
+                                        "relay room {}: import failed: {err}",
+                                        session.room()
+                                    );
+                                    (true, false)
+                                }
                             }
                         } else {
-                            false
+                            (false, false)
                         }
                     };
+                    if parked {
+                        session.apply_pending();
+                    }
                     if import_failed {
                         // Skip the Cursor that follows in this drain; reconnect
                         // from the last good cursor via apply_failed.
@@ -4670,13 +4714,32 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .post_json("/blocks", json!({ "handle": handle }))
                     .await
                 {
-                    Ok(_) => shared.notice(format!("@{handle} blocked.")),
+                    Ok(_) => {
+                        shared.notice(format!("@{handle} blocked."));
+                        refresh_blocks(&shared).await;
+                    }
                     Err(err) => {
                         let _ = shared
                             .events
                             .send(SyncEvent::PeopleError(people_error(&err)));
                     }
                 }
+            });
+        }
+        ClientCommand::UnblockUser { user_id, handle } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                match shared.delete(&format!("/blocks/{user_id}")).await {
+                    // 404 = already not blocked on the relay: the list below says so.
+                    Ok(()) => shared.notice(format!("@{handle} unblocked.")),
+                    Err(err) if format!("{err:#}").contains("HTTP 404") => {}
+                    Err(err) => {
+                        let _ = shared
+                            .events
+                            .send(SyncEvent::PeopleError(people_error(&err)));
+                    }
+                }
+                refresh_blocks(&shared).await;
             });
         }
         ClientCommand::InviteToProject { project_id, handle } => {

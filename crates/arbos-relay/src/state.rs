@@ -138,16 +138,22 @@ pub struct RoomBroadcast {
 /// changes the stored doc without moving the head, so both are part of the key.
 pub type HeadCache<T> = std::sync::Mutex<Option<((i64, i64), T)>>;
 
+/// Cached rebuild of a room's stored doc (checkpoint ∪ rows) at one `(head, floor)`. When the
+/// head advances, only the new rows are imported; the first build runs off the socket task.
+pub struct RoomDocCache {
+    pub key: (i64, i64),
+    pub doc: arbos_core::doc::ChatDoc,
+}
+
 pub struct Room {
     pub tx: broadcast::Sender<RoomBroadcast>,
     /// What each replica last told this relay about the room (room_health, #1470).
     pub replicas: crate::room_health::Replicas,
     /// `(head, rebuilt-doc verdict)` cache for `GET /chats/{id}/health`.
     pub health_cache: HeadCache<crate::room_health::DocHealth>,
-    /// `(head, encoded version vector)` of the stored doc (checkpoint ∪ rows) at that head —
-    /// what ROWS_DONE hands a device so it can push back history the relay lacks (#1518
-    /// follow-up). Rebuilt only when the head moved.
-    pub vv_cache: HeadCache<Vec<u8>>,
+    /// Rebuilt chat doc for covered-push checks and ROWS_DONE's version vector. Dropped when the
+    /// room has no sockets left.
+    pub doc_cache: std::sync::Mutex<Option<RoomDocCache>>,
 }
 
 /// How the relay tells its room sockets that it is about to go down on purpose (a deploy, an
@@ -300,7 +306,7 @@ impl AppState {
                     tx,
                     replicas: Default::default(),
                     health_cache: std::sync::Mutex::new(None),
-                    vv_cache: std::sync::Mutex::new(None),
+                    doc_cache: std::sync::Mutex::new(None),
                 })
             })
             .clone()
