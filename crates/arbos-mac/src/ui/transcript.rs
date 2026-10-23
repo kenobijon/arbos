@@ -331,6 +331,11 @@ pub enum RowKind {
         names: Vec<String>,
         total: u32,
     },
+    /// Agent-to-agent messaging: this reply went back to the agent that wrote in —
+    /// "Replied to ◉ hjkb", the same line style as a hand-off.
+    RepliedTo {
+        name: String,
+    },
     /// An image or file in the chat (agent or user). `mine` right-aligns my sends.
     Attachment {
         attachment: Attachment,
@@ -350,11 +355,15 @@ pub enum RowKind {
     /// S18: draft-and-approve card.
     Approval {
         view: ApprovalView,
+        /// People chat: the card sits after the sender's avatar lane, like its bubble.
+        lane: bool,
     },
     /// Error: one line, red glyph, Retry.
     /// A typed question widget (design §10): rendered by a [`QuestionCard`] view.
     Question {
         question_id: String,
+        /// People chat: the card sits after the sender's avatar lane, like its bubble.
+        lane: bool,
     },
     Error {
         code: String,
@@ -444,9 +453,16 @@ pub const STICK_THRESHOLD_PX: f32 = 70.0;
 const JUMP_BUTTON_AFTER_PX: f32 = 160.0;
 
 /// Right-click on a bubble: the shell opens the message menu there.
+/// Hover face-smile: the shell opens the quick-react emoji bar there.
 /// Hover reply: the shell sets the composer's reply target.
 pub enum TranscriptEvent {
     MessageMenu {
+        chat_id: Id,
+        message_id: Id,
+        position: gpui::Point<gpui::Pixels>,
+    },
+    /// Hover react glyph → the six-emoji bar (`react_menu`).
+    ReactMenu {
         chat_id: Id,
         message_id: Id,
         position: gpui::Point<gpui::Pixels>,
@@ -757,9 +773,9 @@ impl Transcript {
         self.veils
             .retain(|id, _| new_rows.iter().any(|r| r.id == *id));
         self.cards.retain(|qid, _| {
-            new_rows
-                .iter()
-                .any(|r| matches!(&r.kind, RowKind::Question { question_id } if question_id == qid))
+            new_rows.iter().any(
+                |r| matches!(&r.kind, RowKind::Question { question_id, .. } if question_id == qid),
+            )
         });
 
         if chat_changed {
@@ -944,8 +960,9 @@ impl Transcript {
             })
     }
 
-    /// Hover-only reply + copy glyphs beside a bubble (fade with the row).
-    /// After a successful copy the glyph becomes a checkmark for a moment.
+    /// Hover-only reply · copy · react glyphs beside a bubble (fade with the
+    /// row). After a successful copy the glyph becomes a checkmark for a
+    /// moment. The face-smile opens the six-emoji bar (`react_menu`).
     fn hover_reply_copy(
         &self,
         row_id: &str,
@@ -957,6 +974,8 @@ impl Transcript {
         let chat_id = self.chat_id.clone();
         let reply_msg = message_id.clone();
         let copy_msg = message_id.clone();
+        let react_chat = self.chat_id.clone();
+        let react_msg = message_id.clone();
         let just_copied = self.copied_feedback.as_ref().is_some_and(|(id, at)| {
             id == message_id && at.elapsed() < Duration::from_millis(COPY_FEEDBACK_MS)
         });
@@ -1010,6 +1029,25 @@ impl Transcript {
                     copy_color,
                 )
                 .on_click(cx.listener(move |this, _, _, cx| this.copy_message(&copy_msg, cx))),
+            )
+            .child(
+                btn(
+                    SharedString::from(format!("{row_id}#react")),
+                    "face-smile",
+                    opacity,
+                    theme.text_muted,
+                )
+                .on_click(cx.listener(
+                    move |_, event: &gpui::ClickEvent, _, cx| {
+                        if let Some(chat_id) = react_chat.clone() {
+                            cx.emit(TranscriptEvent::ReactMenu {
+                                chat_id,
+                                message_id: react_msg.clone(),
+                                position: event.position(),
+                            });
+                        }
+                    },
+                )),
             )
     }
 
@@ -1079,6 +1117,71 @@ impl Transcript {
             image,
             project_id: agent_pid,
         }
+    }
+
+    /// Grok's centred agent line: `lead` then "◉ A, ◉ B and ◉ C" with 16 pt discs. A name that
+    /// is one of my agents is a link to that agent's chat (the "open Doug" affordance).
+    fn agent_line(
+        &self,
+        lead: &str,
+        names: &[String],
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let state = self.state.read(cx);
+        let mut line = div()
+            .flex()
+            .items_center()
+            .gap(px(5.0))
+            .text_size(px(TEXT_SMALL))
+            .text_color(theme.text_muted)
+            .child(lead.to_owned());
+        let n = names.len();
+        for (i, name) in names.iter().enumerate() {
+            let mine = state
+                .projects
+                .iter()
+                .find(|p| p.name.eq_ignore_ascii_case(name) && p.kind == SpaceKind::Project);
+            let glyph: AnyElement = match mine {
+                Some(space) => crate::ui::avatars::project(space, 16.0, theme).into_any_element(),
+                // Not one of my projects (a subagent): initials on the name's gradient.
+                None => {
+                    crate::ui::avatars::element(name, name, None, 16.0, theme).into_any_element()
+                }
+            };
+            let mut who = div()
+                .id(SharedString::from(format!("agent-line-{lead}-{i}-{name}")))
+                .flex()
+                .items_center()
+                .gap(px(5.0))
+                .child(glyph)
+                .child(div().child(name.clone()));
+            if let Some(space) = mine {
+                let pid = space.id.clone();
+                let state_entity = self.state.clone();
+                who = who
+                    .cursor_pointer()
+                    .hover(|el| el.text_color(theme.text))
+                    .on_click(move |_, _, cx| {
+                        let pid = pid.clone();
+                        state_entity.update(cx, |s, cx| s.select_project(pid, cx));
+                    });
+            }
+            line = line.child(who);
+            if n >= 2 && i + 2 == n {
+                line = line.child(div().child("and"));
+            } else if i + 2 < n {
+                line = line.child(div().ml(px(-5.0)).child(","));
+            }
+        }
+        div()
+            .w_full()
+            .flex()
+            .justify_center()
+            .pt(px(10.0))
+            .pb(px(6.0))
+            .child(line)
+            .into_any_element()
     }
 
     /// The 24 pt disc for an agent's message in a people chat.
@@ -1266,8 +1369,7 @@ impl Transcript {
                 time_el,
             ));
         let (row_el, reveal) = self.hover_row(row_id, now, window, cx);
-        // Hover: reply + copy. The react glyph that opened the emoji bar is
-        // gone with the bar itself (#1370).
+        // Hover: reply · copy · react (face-smile opens the emoji bar).
         let hover_actions = (last && !live).then(|| {
             let actions = self.hover_reply_copy(row_id, message_id, reveal, theme, cx);
             div().flex().items_center().gap(px(2.0)).child(actions)
@@ -1686,49 +1788,14 @@ impl Transcript {
             RowKind::Handoff { names, total } => {
                 // "Messaged ◉ A" while only the brief went out; "N messages with
                 // ◉ A, ◉ B and ◉ C" once replies came back (Grok refs 13/58).
-                let state = self.state.read(cx);
                 let lead = if total <= names.len() as u32 {
                     "Messaged".to_string()
                 } else {
                     format!("{total} messages with")
                 };
-                let mut line = div()
-                    .flex()
-                    .items_center()
-                    .gap(px(5.0))
-                    .text_size(px(TEXT_SMALL))
-                    .text_color(theme.text_muted)
-                    .child(lead);
-                let n = names.len();
-                for (i, name) in names.iter().enumerate() {
-                    let glyph: AnyElement = match state
-                        .projects
-                        .iter()
-                        .find(|p| p.name.eq_ignore_ascii_case(name))
-                    {
-                        Some(space) => {
-                            crate::ui::avatars::project(space, 16.0, &theme).into_any_element()
-                        }
-                        // Not one of my projects (a subagent): initials on the name's gradient.
-                        None => crate::ui::avatars::element(name, name, None, 16.0, &theme)
-                            .into_any_element(),
-                    };
-                    line = line.child(glyph).child(div().child(name.clone()));
-                    if n >= 2 && i + 2 == n {
-                        line = line.child(div().child("and"));
-                    } else if i + 2 < n {
-                        line = line.child(div().ml(px(-5.0)).child(","));
-                    }
-                }
-                div()
-                    .w_full()
-                    .flex()
-                    .justify_center()
-                    .pt(px(10.0))
-                    .pb(px(6.0))
-                    .child(line)
-                    .into_any_element()
+                self.agent_line(&lead, &names, &theme, cx)
             }
+            RowKind::RepliedTo { name } => self.agent_line("Replied to", &[name], &theme, cx),
             RowKind::Attachment {
                 attachment,
                 part_id,
@@ -1779,7 +1846,7 @@ impl Transcript {
             RowKind::AskUser { text } => {
                 cards::status_row(StatusKind::AskUser, &text, false, &theme, cx).into_any_element()
             }
-            RowKind::Question { question_id } => {
+            RowKind::Question { question_id, lane } => {
                 let Some(chat_id) = self.chat_id.clone() else {
                     return div().into_any_element();
                 };
@@ -1809,14 +1876,9 @@ impl Transcript {
                         cx.new(|cx| QuestionCard::new(state, chat_id, question_id, &widget, cx))
                     })
                     .clone();
-                // Grok: the card is as wide as the assistant block.
-                div()
-                    .w_full()
-                    .flex()
-                    .child(assistant_slot(card))
-                    .into_any_element()
+                card_row(card, lane).into_any_element()
             }
-            RowKind::Approval { view } => {
+            RowKind::Approval { view, lane } => {
                 let chat_id = self.chat_id.clone().unwrap_or_default();
                 let approval_id = view.approval_id.clone();
                 let (state_a, chat_a, id_a) =
@@ -1841,11 +1903,7 @@ impl Transcript {
                         });
                     },
                 );
-                div()
-                    .w_full()
-                    .flex()
-                    .child(assistant_slot(card))
-                    .into_any_element()
+                card_row(card, lane).into_any_element()
             }
             RowKind::Error { code, message } => {
                 let state = self.state.clone();
@@ -1971,6 +2029,19 @@ fn assistant_slot(bubble: impl IntoElement) -> Div {
         .items_center()
         .debug_selector(|| "chat-bubble-slot".into())
         .child(bubble)
+}
+
+/// A question / approval card is a transcript row like a bubble (#1374, #1440 follow-up): the
+/// same left edge as an incoming bubble — after the sender's avatar lane in a people chat — and
+/// the same cap width (`assistant_slot`). The lane is left empty: the card belongs to the
+/// agent's run and the disc already sits on its bubble.
+pub fn card_row(card: impl IntoElement, lane: bool) -> Div {
+    div()
+        .w_full()
+        .flex()
+        .when(lane, |el| el.pl(px(SENDER_LANE)))
+        .debug_selector(|| "chat-card-row".into())
+        .child(assistant_slot(card))
 }
 
 fn relative_width(fraction: f32) -> gpui::DefiniteLength {
@@ -2569,6 +2640,7 @@ pub fn build_rows(
                                 message_id: message.id.clone(),
                                 kind: RowKind::Question {
                                     question_id: question_id.clone(),
+                                    lane: lane.is_some(),
                                 },
                             }),
                             None => rows.push(Row {
@@ -2610,7 +2682,10 @@ pub fn build_rows(
                                 ),
                                 id: format!("{}#{}", message.id, id),
                                 message_id: message.id.clone(),
-                                kind: RowKind::Approval { view },
+                                kind: RowKind::Approval {
+                                    view,
+                                    lane: lane.is_some(),
+                                },
                             });
                         }
                         Part::Status {
@@ -2753,6 +2828,21 @@ pub fn build_rows(
                         id: format!("{}#details", message.id),
                         message_id: message.id.clone(),
                         kind: RowKind::Details,
+                    });
+                }
+                // Agent-to-agent messaging: the reply went back to the agent that wrote in.
+                if let Some(name) = message
+                    .agent_reply_to
+                    .as_deref()
+                    .filter(|n| !streaming && !n.trim().is_empty())
+                {
+                    rows.push(Row {
+                        version: hash_version(&name, false),
+                        id: format!("{}#replied", message.id),
+                        message_id: message.id.clone(),
+                        kind: RowKind::RepliedTo {
+                            name: name.to_owned(),
+                        },
                     });
                 }
             }
@@ -3418,6 +3508,17 @@ const QUOTE_TO_TEXT_GAP: f32 = 6.0;
 /// sizes a flex column from its items, and an item with `min-width: 0`
 /// contributes nothing, so the bubble would take the name's or the quote's
 /// width and wrap the body one word per line (bubble-quote-width-2026-10-23).
+///
+/// The text + time line is a flex *row*, and there the rule is the opposite:
+/// the text item must be `min_w_0`. GPUI measures a text's min-content width
+/// as its unwrapped width (`AvailableSpace::MinContent` → no wrap width), so
+/// without it the item's automatic minimum is the whole line, it cannot
+/// shrink to the bubble, and the text runs out of the bubble's right edge
+/// while the time drops to a line of its own (Jacob, 2026-10-23, v0.6.184:
+/// bubble-overflow-hotfix-2026-10-23). With `min_w_0` the row still reports
+/// the unwrapped width as its max-content size (a flex item's basis is its
+/// content; the minimum only matters when shrinking), so a short bubble is
+/// still content-sized, and a long one wraps at the bubble's width.
 fn sender_bubble_column(
     name: Option<AnyElement>,
     quote: Option<AnyElement>,
@@ -3444,7 +3545,12 @@ fn sender_bubble_column(
                 .flex()
                 .flex_wrap()
                 .items_end()
-                .child(div().debug_selector(|| "bubble-text".into()).child(body))
+                .child(
+                    div()
+                        .min_w_0()
+                        .debug_selector(|| "bubble-text".into())
+                        .child(body),
+                )
                 .children(time.map(|t| {
                     div()
                         .ml_auto()
@@ -3811,6 +3917,17 @@ mod layout_tests {
                 queued: false,
             };
             let row_over_pill = presence::row(presence, &theme, cx).into_any_element();
+            // A question / approval card, framed by the real `card_row`: in an agent chat (no
+            // lane) and in a people chat (lane) — a card that wants more than any pane has.
+            let card = |sel: &'static str| {
+                div()
+                    .debug_selector(move || sel.into())
+                    .max_w_full()
+                    .min_w_0()
+                    .child(div().w(px(4000.0)).h(px(CHAT_LINE_HEIGHT)))
+            };
+            let card_plain = card_row(card("test-card"), false).into_any_element();
+            let card_people = card_row(card("test-people-card"), true).into_any_element();
             div()
                 .w(px(self.pane))
                 .h(px(400.0))
@@ -3818,6 +3935,8 @@ mod layout_tests {
                 .flex_col()
                 .child(column_row(row))
                 .child(column_row(people_row))
+                .child(column_row(card_plain))
+                .child(column_row(card_people))
                 .child(column_row(row_over_pill))
                 .child(column_row(pill))
         }
@@ -3841,6 +3960,8 @@ mod layout_tests {
         disc: gpui::Bounds<Pixels>,
         people_bubble_left: f32,
         composer_text_left: f32,
+        card: gpui::Bounds<gpui::Pixels>,
+        people_card: gpui::Bounds<gpui::Pixels>,
     }
 
     fn measure(cx: &mut TestAppContext, pane: f32) -> Edges {
@@ -3885,6 +4006,10 @@ mod layout_tests {
         let composer_text = vcx
             .debug_bounds("test-composer-text")
             .expect("composer text drawn");
+        let card = vcx.debug_bounds("test-card").expect("card drawn");
+        let people_card = vcx
+            .debug_bounds("test-people-card")
+            .expect("people card drawn");
         Edges {
             bubble_left: bubble.origin.x.into(),
             bubble_width: bubble.size.width.into(),
@@ -3903,6 +4028,43 @@ mod layout_tests {
             disc,
             people_bubble_left: people_bubble.origin.x.into(),
             composer_text_left: composer_text.origin.x.into(),
+            card,
+            people_card,
+        }
+    }
+
+    /// #1440 follow-up (Jacob, 2026-10-23 17:59): a question / approval card lines up with the
+    /// bubbles — card left == bubble left, card width ≤ the bubble cap — in an agent chat and,
+    /// after the avatar lane, in a people chat.
+    #[gpui::test]
+    fn cards_share_the_bubbles_left_edge_and_cap(cx: &mut TestAppContext) {
+        for pane in [REFERENCE_PANE, GROK_REF_57_PANE, 1400.0] {
+            let e = measure(cx, pane);
+            let (cx0, cw): (f32, f32) = (e.card.origin.x.into(), e.card.size.width.into());
+            assert!(
+                (cx0 - e.bubble_left).abs() <= 0.5,
+                "pane {pane}: card left {cx0} vs bubble left {}",
+                e.bubble_left
+            );
+            assert!(
+                cw <= e.bubble_width + 0.5,
+                "pane {pane}: card width {cw} over the bubble cap {}",
+                e.bubble_width
+            );
+            let (pcx, pcw): (f32, f32) = (
+                e.people_card.origin.x.into(),
+                e.people_card.size.width.into(),
+            );
+            assert!(
+                (pcx - e.people_bubble_left).abs() <= 0.5,
+                "pane {pane}: people card left {pcx} vs people bubble left {}",
+                e.people_bubble_left
+            );
+            let people_cap = e.bubble_width - SENDER_LANE;
+            assert!(
+                pcw <= people_cap + 0.5,
+                "pane {pane}: people card width {pcw} over the lane cap {people_cap}"
+            );
         }
     }
 
@@ -4274,6 +4436,262 @@ mod layout_tests {
             assert!(
                 bh < 6.0 * CHAT_LINE_HEIGHT,
                 "lane={lane}: the body wraps to a few lines, not one word per line ({bh} pt tall)"
+            );
+        }
+    }
+
+    /// Which bubble a [`BubbleRow`] draws: my own (right, `RowKind::User`
+    /// without `from`), another person's in a group (left, name + inline
+    /// time, `RowKind::User` with `from`), or an agent's (`markdown_bubble`
+    /// with a lane and the inline time).
+    #[derive(Clone, Copy, Debug)]
+    enum Who {
+        Mine,
+        Other,
+        Agent,
+    }
+
+    /// One transcript row built from the same pieces the real rows use
+    /// (`sender_bubble_column`, `user_message_body` / `render_block`,
+    /// `inline_time_label`, `assistant_slot`, `column_row`) in a pane of
+    /// `pane` pt.
+    struct BubbleRow {
+        pane: f32,
+        who: Who,
+        text: &'static str,
+        selection: Entity<TextSelection>,
+    }
+
+    /// Longer than any bubble cap at a 1200 pt window (≈ 1,350 pt unwrapped).
+    const OVERFLOWING_LINE: &str = "When you think about it, most people are going to be \
+        blocked by how many tokens they can access pretty soon, and the ones who are not \
+        blocked will be the ones who already own the pipes, the chips and the power lines \
+        that the rest of us have to rent by the hour.";
+    const SHORT_LINE: &str = "Most people cant do what I am doing right now";
+
+    impl gpui::Render for BubbleRow {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let theme = Theme::dark(crate::ui::theme::Surface::Matte);
+            let selectable = Selectable::new(&self.selection, theme.accent_soft, cx);
+            let time = Some(inline_time_label("1:52 PM".to_string(), &theme).into_any_element());
+            let name = |name: &'static str| {
+                div()
+                    .text_size(px(CHAT_BODY))
+                    .line_height(px(CHAT_LINE_HEIGHT))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(name)
+                    .into_any_element()
+            };
+            let row = match self.who {
+                Who::Agent => {
+                    let bubble_sel =
+                        selectable.bubble("a#text".to_string(), SharedString::from(self.text));
+                    let bubble = div()
+                        .debug_selector(|| "test-bubble".into())
+                        .max_w_full()
+                        .min_w_0()
+                        .relative()
+                        .px(px(BUBBLE_PAD_X))
+                        .py(px(BUBBLE_PAD_Y))
+                        .child(sender_bubble_column(
+                            Some(name("Doug")),
+                            None,
+                            render_block(
+                                "a",
+                                &Block::Paragraph(self.text.to_string()),
+                                0,
+                                None,
+                                Instant::now(),
+                                &theme,
+                                &bubble_sel,
+                            ),
+                            time,
+                        ));
+                    div()
+                        .w_full()
+                        .flex()
+                        .items_end()
+                        .pl(px(AVATAR_COLUMN_INSET))
+                        .gap(px(SENDER_DISC_GAP))
+                        .child(div().size(px(SENDER_DISC)).flex_shrink_0())
+                        .child(assistant_slot(bubble))
+                }
+                Who::Mine | Who::Other => {
+                    let body =
+                        user_message_body("u", self.text, theme.bubble_text(), &theme, &selectable);
+                    let other = matches!(self.who, Who::Other);
+                    let bubble = div()
+                        .debug_selector(|| "test-bubble".into())
+                        .max_w(relative_width(0.72))
+                        .px(px(BUBBLE_PAD_X))
+                        .py(px(BUBBLE_PAD_Y))
+                        .child(sender_bubble_column(
+                            other.then(|| name("Samir Haddad")),
+                            None,
+                            body,
+                            other.then_some(time).flatten(),
+                        ));
+                    if other {
+                        div()
+                            .w_full()
+                            .flex()
+                            .items_end()
+                            .pl(px(AVATAR_COLUMN_INSET))
+                            .gap(px(SENDER_DISC_GAP))
+                            .child(div().size(px(SENDER_DISC)).flex_shrink_0())
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .items_center()
+                                    .debug_selector(|| "test-bubble-parent".into())
+                                    .child(bubble)
+                                    .child(div().size(px(16.0)).ml(px(6.0))),
+                            )
+                    } else {
+                        div()
+                            .w_full()
+                            .flex()
+                            .items_end()
+                            .justify_end()
+                            .debug_selector(|| "test-bubble-parent".into())
+                            .child(div().size(px(16.0)).mr(px(6.0)))
+                            .child(bubble)
+                    }
+                }
+            };
+            div()
+                .w(px(self.pane))
+                .h(px(600.0))
+                .text_size(px(CHAT_BODY))
+                .line_height(px(CHAT_LINE_HEIGHT))
+                .child(column_row(row.into_any_element()))
+        }
+    }
+
+    /// The cap a [`BubbleRow`] bubble may reach: the slot minus Grok's gap
+    /// for an agent; 72 % of the bubble's parent (the row, or the lane beside
+    /// the disc) for people — `relative_width(0.72)` is relative to the parent.
+    fn bubble_cap(vcx: &mut gpui::VisualTestContext, who: Who) -> f32 {
+        match who {
+            Who::Agent => {
+                let slot = vcx.debug_bounds("chat-bubble-slot").expect("slot drawn");
+                f32::from(slot.size.width) - ASSISTANT_RIGHT_GAP
+            }
+            Who::Mine | Who::Other => {
+                let parent = vcx
+                    .debug_bounds("test-bubble-parent")
+                    .expect("bubble parent drawn");
+                f32::from(parent.size.width) * 0.72
+            }
+        }
+    }
+
+    /// Jacob, 2026-10-23 20:18 (Mac v0.6.184, the Arbonites group): his own
+    /// bubbles ran off the right edge of the chat column, and another person's
+    /// bubble was wide with the text spilling past it and the time on a line
+    /// of its own. Cause: `sender_bubble_column` (v0.6.183, #1437) put the
+    /// text in a flex row with the time, and a text's automatic minimum width
+    /// in a row is its unwrapped width. Every bubble kind, at a 400 pt and a
+    /// 1200 pt window: the bubble stays inside the column and under its cap,
+    /// and the text wraps inside the bubble instead of running out of it.
+    #[gpui::test]
+    fn bubbles_stay_inside_the_column_and_wrap_their_text(cx: &mut TestAppContext) {
+        // 400 pt: the sidebar is hidden, the pane is the window; 1200 pt:
+        // the 296 pt sidebar is open.
+        for pane in [400.0_f32, 1200.0 - crate::ui::theme::SIDEBAR_WIDTH] {
+            for who in [Who::Mine, Who::Other, Who::Agent] {
+                let (_view, vcx) = cx.add_window_view(|_, cx| BubbleRow {
+                    pane,
+                    who,
+                    text: OVERFLOWING_LINE,
+                    selection: cx.new(TextSelection::new),
+                });
+                vcx.run_until_parked();
+                let column = vcx.debug_bounds("chat-column").expect("column drawn");
+                let bubble = vcx.debug_bounds("test-bubble").expect("bubble drawn");
+                let text = vcx.debug_bounds("bubble-text").expect("text drawn");
+                let right = |b: gpui::Bounds<Pixels>| f32::from(b.origin.x + b.size.width);
+                let left = |b: gpui::Bounds<Pixels>| f32::from(b.origin.x);
+                let cap = bubble_cap(vcx, who);
+                let bw = f32::from(bubble.size.width);
+                assert!(
+                    right(bubble) <= right(column) + 0.5 && left(bubble) >= left(column) - 0.5,
+                    "pane {pane} {who:?}: bubble {}..{} runs out of the column {}..{}",
+                    left(bubble),
+                    right(bubble),
+                    left(column),
+                    right(column)
+                );
+                assert!(
+                    bw <= cap + 1.0,
+                    "pane {pane} {who:?}: bubble {bw} pt is wider than its cap {cap}"
+                );
+                assert!(
+                    right(text) <= right(bubble) - BUBBLE_PAD_X + 1.0,
+                    "pane {pane} {who:?}: the text box ends at {} but the bubble's inner edge is {}",
+                    right(text),
+                    right(bubble) - BUBBLE_PAD_X
+                );
+                // A 1,350 pt line never fits a bubble this size: it must have wrapped.
+                let th = f32::from(text.size.height);
+                assert!(
+                    th >= 2.0 * CHAT_LINE_HEIGHT,
+                    "pane {pane} {who:?}: the text is one {th} pt line — it did not wrap inside the bubble"
+                );
+                // … and a long bubble fills its cap (the text is what sizes it).
+                assert!(
+                    (bw - cap).abs() <= 1.0,
+                    "pane {pane} {who:?}: a long line fills the cap: bubble {bw}, cap {cap}"
+                );
+            }
+        }
+    }
+
+    /// A one-line bubble stays content-sized: no slack after a short text
+    /// (the row's max-content width is the text plus the time, never the cap).
+    #[gpui::test]
+    fn a_short_bubble_is_as_wide_as_its_text(cx: &mut TestAppContext) {
+        for who in [Who::Mine, Who::Other, Who::Agent] {
+            let (_view, vcx) = cx.add_window_view(|_, cx| BubbleRow {
+                pane: REFERENCE_PANE,
+                who,
+                text: SHORT_LINE,
+                selection: cx.new(TextSelection::new),
+            });
+            vcx.run_until_parked();
+            let bubble = vcx.debug_bounds("test-bubble").expect("bubble drawn");
+            let text = vcx.debug_bounds("bubble-text").expect("text drawn");
+            let bw = f32::from(bubble.size.width);
+            let tw = f32::from(text.size.width);
+            let th = f32::from(text.size.height);
+            let cap = bubble_cap(vcx, who);
+            assert!(
+                th <= CHAT_LINE_HEIGHT + 0.5,
+                "{who:?}: a short line stays on one line ({th} pt tall)"
+            );
+            assert!(
+                bw < cap - 60.0,
+                "{who:?}: short bubble {bw} pt is at its cap ({cap})"
+            );
+            // The bubble is the text, the pads, and (groups) the time after it.
+            let time_w = match who {
+                Who::Mine => 0.0,
+                Who::Other | Who::Agent => f32::from(
+                    vcx.debug_bounds("bubble-time")
+                        .expect("time drawn")
+                        .size
+                        .width,
+                ),
+            };
+            assert!(
+                (bw - (tw + time_w + 2.0 * BUBBLE_PAD_X)).abs() <= 2.0,
+                "{who:?}: bubble {bw} ≠ text {tw} + time {time_w} + pads"
             );
         }
     }
