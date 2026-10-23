@@ -4665,6 +4665,44 @@ fn seed_chat_docs() -> Vec<ChatDoc> {
         drafts
             .core
             .set_message_fields(&pending, &[("waitingApproval", json!(true))]);
+        // #1544 rig (`ARBOS_FIXTURE_SHELL_CARD=1`): a destructive-shell card with its four
+        // standing rows, as agentd posts it for `rm -rf` outside scratch.
+        if std::env::var("ARBOS_FIXTURE_SHELL_CARD").as_deref() == Ok("1") {
+            s.user("clone arbos into /tmp and list the top level");
+            let command = "cd /work/app && rm -rf node_modules && git clone --depth 1 https://github.com/unarbos/arbos arbos-src";
+            let shell = s.assistant(
+                TurnKind::Act,
+                MessageStatus::Done,
+                vec![
+                    text("On it."),
+                    Part::Approval {
+                        id: new_id(),
+                        approval_id: "01J9APPROVAL0SHELL00000000".into(),
+                        title: "Run a destructive command (rm-recursive)".into(),
+                        summary: command.into(),
+                        risk: ApprovalRisk::Destructive,
+                        payload: json!({
+                            "kind": "tool_call", "tool": "bash", "class": "rm-recursive", "path_class": "workspace",
+                            "why": "recursive or forced delete outside /work/tmp",
+                            "input": { "command": command },
+                            "grant_options": [
+                                { "path_class": "workspace", "label": "its workspace", "detail": "the agent's own /work folder, including scratch" },
+                                { "path_class": "anywhere", "label": "anywhere", "detail": "any folder of its box" }
+                            ]
+                        }),
+                        state: ApprovalState::Pending,
+                        expires_at: Some(s.t as u64 + APPROVAL_TTL_MS as u64),
+                        decided_at: None,
+                        decided_by: None,
+                        reason: None,
+                        grant: None,
+                    },
+                ],
+            );
+            drafts
+                .core
+                .set_message_fields(&shell, &[("waitingApproval", json!(true))]);
+        }
     }
     out.push(drafts);
     let media = ChatDoc::new(CHAT_ARBOS_MEDIA, PROJECT_ARBOS);
