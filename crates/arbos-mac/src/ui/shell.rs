@@ -59,7 +59,7 @@ actions!(
 );
 
 /// Left inset for the conversation header while the sidebar is hidden: the window's traffic lights.
-/// The sidebar's collapse control sits at the same inset, so it never moves when the pane folds.
+/// The expand control (when the rail is folded) sits at this inset beside the lights.
 pub(crate) const TRAFFIC_LIGHTS_INSET: f32 = 72.0;
 
 /// What the shared name field (`agent_name_input`) renames when Return is pressed.
@@ -233,9 +233,6 @@ pub struct Shell {
     /// app-01M5ATBWSY9E1HHBKH2QQVDEZX). Nothing renders it; escapes and
     /// click-outside still clear it so leftover true never sticks.
     pub(crate) menu_open: bool,
-    /// The left pane's search field is shown (the magnifier in the top strip
-    /// toggles it; it stays while a query is typed).
-    pub(crate) search_open: bool,
     /// D88: the name/invite/channel field of the server sheets and the inline channel rename
     /// on the server page; `channel_rename` is the channel being renamed there.
     pub(crate) server_input: Entity<ComposerInput>,
@@ -805,7 +802,6 @@ impl Shell {
             fixture_drag_over: std::env::var("ARBOS_FIXTURE_DRAG_OVER").is_ok_and(|v| v == "1"),
             signing_in: false,
             menu_open: false,
-            search_open: false,
             server_input,
             channel_rename: None,
             invite_expires: false,
@@ -1863,16 +1859,14 @@ impl Shell {
             cx.notify();
             return;
         }
-        if self.search_open
-            && self
-                .search_input
-                .read(cx)
-                .focus_handle(cx)
-                .is_focused(window)
+        if self
+            .search_input
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window)
         {
-            // Escape in the search field clears and folds it.
+            // Escape in the Search field clears it and returns to the composer.
             self.search_input.update(cx, |i, cx| i.clear(cx));
-            self.search_open = false;
             Composer::focus(&self.composer, window, cx);
             cx.notify();
             return;
