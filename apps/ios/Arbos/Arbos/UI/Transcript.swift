@@ -1142,7 +1142,7 @@ struct RowView: View {
     private var reactionLeading: CGFloat {
         switch row.kind {
         case .other, .member: return Theme.memberLane
-        case .question(_, _, _, _, _, _, let lane): return lane ? Theme.memberLane : 0
+        case .question(_, _, _, _, _, _, let lane, _): return lane ? Theme.memberLane : 0
         default: return 0
         }
     }
