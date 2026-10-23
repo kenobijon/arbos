@@ -367,6 +367,11 @@ impl RoomSession {
         self.lock().on_checkpoint_failed();
     }
 
+    /// Host failed to import row bytes; reconnect from the last good cursor.
+    pub fn apply_failed(&self) {
+        self.lock().apply_failed();
+    }
+
     pub fn prepare_reconnect(&self) {
         self.lock().prepare_reconnect();
     }

@@ -124,6 +124,9 @@ pub struct RoomSession {
     device_id: String,
     room: String,
     cursor: i64,
+    /// Cursor before the most recent [`Self::on_row`] advance. Restored by
+    /// [`Self::apply_failed`] so reconnect catch-up re-requests the failed row.
+    cursor_before_apply: i64,
     pending: Vec<(String, Vec<u8>)>,
     phase: Phase,
     actions: VecDeque<RoomAction>,
@@ -155,6 +158,7 @@ impl RoomSession {
             device_id: device_id.into(),
             room: room.into(),
             cursor,
+            cursor_before_apply: cursor,
             pending,
             phase: Phase::Idle,
             actions: VecDeque::new(),
@@ -292,6 +296,7 @@ impl RoomSession {
             return;
         }
         self.cursor = self.cursor.max(self.checkpoint_seq);
+        self.cursor_before_apply = self.cursor;
         self.push(RoomAction::Cursor(self.cursor));
         self.finish_handshake();
     }
@@ -304,6 +309,7 @@ impl RoomSession {
             return;
         }
         self.cursor = self.cursor.max(seq.max(self.checkpoint_seq));
+        self.cursor_before_apply = self.cursor;
         self.push(RoomAction::Cursor(self.cursor));
         self.finish_handshake();
     }
@@ -367,6 +373,9 @@ impl RoomSession {
             return;
         };
         self.push(RoomAction::ApplyBytes(frame.payload.to_vec()));
+        // Tentative: host skips the following Cursor and calls [`Self::apply_failed`]
+        // if import fails, restoring `cursor_before_apply`.
+        self.cursor_before_apply = self.cursor;
         self.cursor = self.cursor.max(header.seq);
         self.push(RoomAction::Cursor(self.cursor));
     }
@@ -381,6 +390,7 @@ impl RoomSession {
             .and_then(Value::as_i64)
             .unwrap_or(self.cursor);
         self.cursor = self.cursor.max(head_seq);
+        self.cursor_before_apply = self.cursor;
         self.push(RoomAction::Cursor(self.cursor));
         self.push(RoomAction::LinkLive);
     }
@@ -390,6 +400,11 @@ impl RoomSession {
         // handshake (ACK can arrive while waiting for STATE). Ignoring the
         // ACK until Live leaves the batch in `pending` forever when the only ACK
         // arrived before STATE and a later resend is treated as dup.
+        //
+        // Do not move the cursor on ACK: the relay can ACK while rows from other
+        // connections are still queued for this socket. Advancing past those rows
+        // would skip them on the next RowsReq (crdt-sync: cursor only moves on
+        // ROW / ROWS_DONE / checkpoint). Own rows still arrive as ROW broadcasts.
         if matches!(self.phase, Phase::Idle | Phase::Closed) {
             return;
         }
@@ -401,8 +416,6 @@ impl RoomSession {
         if self.pending.len() != before {
             self.push(RoomAction::Pending(self.pending.clone()));
         }
-        self.cursor = self.cursor.max(header.seq);
-        self.push(RoomAction::Cursor(self.cursor));
         self.push(RoomAction::Ack {
             batch_id: header.batch_id,
             seq: header.seq,
@@ -510,6 +523,26 @@ impl RoomSession {
     pub fn on_close(&mut self, now_ms: u64) {
         self.last_now_ms = now_ms;
         self.close_for_reconnect(Some(now_ms));
+    }
+
+    /// Host failed to import the [`RoomAction::ApplyBytes`] that preceded a
+    /// [`RoomAction::Cursor`] in the same drain. Restores the cursor to the last
+    /// successfully imported row and schedules an immediate reconnect so catch-up
+    /// re-requests from there. Does not emit a Cursor action (host must skip the
+    /// one already queued).
+    pub fn apply_failed(&mut self) {
+        if matches!(self.phase, Phase::Idle | Phase::Closed) {
+            return;
+        }
+        self.cursor = self.cursor_before_apply;
+        // Immediate reconnect; do not bump backoff — this is not a transport fault.
+        self.reconnect_after = Some(Duration::ZERO);
+        self.phase = Phase::Closed;
+        self.opened_at_ms = None;
+        self.live_since_ms = None;
+        self.push(RoomAction::ScheduleReconnect {
+            after: Duration::ZERO,
+        });
     }
 
     fn close_for_reconnect(&mut self, now_ms: Option<u64>) {
@@ -885,6 +918,105 @@ mod tests {
         assert_eq!(
             sends[0].header.get("excludeOwn").and_then(Value::as_bool),
             Some(false)
+        );
+    }
+
+    #[test]
+    fn ack_does_not_advance_cursor() {
+        let pending = vec![("batch-1".into(), b"mine".to_vec())];
+        let mut s = RoomSession::new("dev:me", "proj/chat", 20, pending);
+        s.on_open(1_000);
+        let _ = s.drain_actions();
+        s.on_frame(&state_frame(0, Vec::new()));
+        let _ = s.drain_actions();
+        assert!(s.is_live());
+        assert_eq!(s.cursor(), 20);
+
+        s.on_frame(&ack_frame("batch-1", 51));
+        let ack_actions = s.drain_actions();
+        assert!(s.pending().is_empty());
+        assert!(ack_actions
+            .iter()
+            .any(|a| matches!(a, RoomAction::Pending(p) if p.is_empty())));
+        assert!(ack_actions
+            .iter()
+            .any(|a| matches!(a, RoomAction::Ack { seq: 51, .. })));
+        assert!(
+            !ack_actions
+                .iter()
+                .any(|a| matches!(a, RoomAction::Cursor(_))),
+            "ACK must not emit Cursor"
+        );
+        assert_eq!(s.cursor(), 20);
+
+        s.on_frame(&row_frame(21, b"row-21".to_vec()));
+        let row_actions = s.drain_actions();
+        assert!(row_actions
+            .iter()
+            .any(|a| matches!(a, RoomAction::Cursor(21))));
+        assert_eq!(s.cursor(), 21);
+    }
+
+    #[test]
+    fn lagging_after_ack_rows_req_keeps_pre_ack_cursor() {
+        let pending = vec![("batch-1".into(), b"mine".to_vec())];
+        let mut s = RoomSession::new("dev:me", "proj/chat", 20, pending);
+        s.on_open(1_000);
+        let _ = s.drain_actions();
+        s.on_frame(&state_frame(0, Vec::new()));
+        let _ = s.drain_actions();
+        s.on_frame(&ack_frame("batch-1", 51));
+        let _ = s.drain_actions();
+        assert_eq!(s.cursor(), 20);
+
+        s.on_frame(&lagging_frame());
+        let actions = s.drain_actions();
+        let sends = take_sends(&actions);
+        assert_eq!(sends.len(), 1);
+        assert_eq!(sends[0].ty, FrameType::RowsReq);
+        assert_eq!(
+            sends[0].header.get("after").and_then(Value::as_i64),
+            Some(20),
+            "lagging RowsReq must use cursor before the ACK seq"
+        );
+    }
+
+    #[test]
+    fn apply_failed_reconnects_from_last_good_cursor() {
+        let mut s = RoomSession::new("dev:me", "proj/chat", 20, Vec::new());
+        s.on_open(1_000);
+        let _ = s.drain_actions();
+        s.on_frame(&state_frame(0, Vec::new()));
+        let _ = s.drain_actions();
+        assert!(s.is_live());
+        assert_eq!(s.cursor(), 20);
+
+        s.apply_failed();
+        let actions = s.drain_actions();
+        assert!(
+            !actions.iter().any(|a| matches!(a, RoomAction::Cursor(_))),
+            "apply_failed must not emit Cursor"
+        );
+        assert!(actions.iter().any(|a| matches!(
+            a,
+            RoomAction::ScheduleReconnect { after } if *after == Duration::ZERO
+        )));
+        assert!(s.is_closed());
+        assert_eq!(s.cursor(), 20);
+
+        s.prepare_reconnect();
+        s.on_open(5_000);
+        let _ = s.drain_actions();
+        s.on_frame(&state_frame(0, Vec::new()));
+        let after = s.drain_actions();
+        let rows: Vec<_> = take_sends(&after)
+            .into_iter()
+            .filter(|f| f.ty == FrameType::RowsReq)
+            .collect();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].header.get("after").and_then(Value::as_i64),
+            Some(20)
         );
     }
 
