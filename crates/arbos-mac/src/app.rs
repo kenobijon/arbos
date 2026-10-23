@@ -6865,12 +6865,6 @@ impl AppState {
         cx.notify();
     }
 
-    /// #1544: the agent pane opened — load its standing shell approvals.
-    pub fn shell_grants_refresh(&mut self, project_id: Id, cx: &mut Context<Self>) {
-        self.command(ClientCommand::ShellGrantsRefresh { project_id });
-        cx.notify();
-    }
-
     /// Settings › Shell approvals: switch a grant off. The row goes at once; the relay's list
     /// confirms it.
     pub fn shell_grant_revoke(&mut self, project_id: Id, grant_id: String, cx: &mut Context<Self>) {
