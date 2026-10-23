@@ -4926,6 +4926,14 @@ fn seed_people_chat_docs() -> Vec<ChatDoc> {
             "Press kit v3",
             1_840_000,
         ),
+        // A clip, so the media viewer's video state (poster + Play) has an item.
+        attachment(
+            "launch-teaser.mp4",
+            "video/mp4",
+            AttachmentKind::Video,
+            "Launch teaser",
+            6_420_000,
+        ),
         text_part("Deck, dashboard and the press kit for the run-through."),
     ];
     insert_message_via_core(&group, &shared_files);

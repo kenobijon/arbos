@@ -1554,15 +1554,34 @@ impl AppState {
                         }
                     }
                     // Rig: `ARBOS_MEDIA_VIEWER=<n>` opens the restored chat's album at
-                    // item n (chat order, 0-based); `ARBOS_MEDIA_VIEWER_FORWARD=1`
-                    // opens its Forward picker too (feedback media-viewer-2026-10-23).
-                    if let Some(ix) = std::env::var("ARBOS_MEDIA_VIEWER")
-                        .ok()
-                        .and_then(|v| v.parse::<usize>().ok())
-                    {
+                    // item n (chat order, 0-based), `=file` its first file;
+                    // `ARBOS_MEDIA_VIEWER_FORWARD=1` opens the Forward picker too
+                    // (feedback media-viewer-2026-10-23).
+                    if let Ok(spec) = std::env::var("ARBOS_MEDIA_VIEWER") {
                         if let Some(chat) = self.active_chat_id() {
-                            let album = self.media_album(&chat);
-                            self.open_media_viewer(album, ix, cx);
+                            if spec == "file" {
+                                let first_file = self.messages_of(&chat).iter().find_map(|m| {
+                                    m.parts.iter().find_map(|p| match p {
+                                        Part::Attachment { id, attachment }
+                                            if !matches!(
+                                                attachment.kind(),
+                                                AttachmentKind::Image
+                                                    | AttachmentKind::Video
+                                                    | AttachmentKind::Audio
+                                            ) =>
+                                        {
+                                            Some((m.id.clone(), id.clone()))
+                                        }
+                                        _ => None,
+                                    })
+                                });
+                                if let Some((message_id, part_id)) = first_file {
+                                    self.open_media_in_chat(&chat, &message_id, &part_id, cx);
+                                }
+                            } else if let Ok(ix) = spec.parse::<usize>() {
+                                let album = self.media_album(&chat);
+                                self.open_media_viewer(album, ix, cx);
+                            }
                             if std::env::var("ARBOS_MEDIA_VIEWER_FORWARD").is_ok_and(|v| v == "1") {
                                 self.media_viewer_toggle_forward(cx);
                             }

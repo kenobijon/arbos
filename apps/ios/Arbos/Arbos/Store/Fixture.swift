@@ -133,6 +133,7 @@ extension AppModel {
                             .attachment(id: "g2b2", attachment: Attachment(name: "launch-dashboard.png", mime: "image/png", blobRef: "fixture-g2b2", kind: "image")),
                             .attachment(id: "g2b3", attachment: Attachment(name: "launch-day-team.jpg", mime: "image/jpeg", blobRef: "fixture-g2b3", kind: "image")),
                             .attachment(id: "g2b4", attachment: Attachment(name: "signup-funnel.png", mime: "image/png", blobRef: "fixture-g2b4", kind: "image")),
+                            .attachment(id: "g2b5", attachment: Attachment(name: "launch-teaser.mp4", mime: "video/mp4", blobRef: "fixture-g2b5", kind: "video")),
                             .text(id: "g2bt", text: "Deck, dashboard and the press kit for the run-through.")],
                     hiddenCount: 0, senderHandle: "sam", senderName: "Sam Okafor"),
             Message(id: "g3", chatId: "fx-group-launch", role: .user, sender: "user:fx-u3", status: .done, turn: nil, decision: nil, subagentId: nil,
