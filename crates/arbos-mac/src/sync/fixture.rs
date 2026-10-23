@@ -4128,6 +4128,75 @@ impl Seeder<'_> {
             .core
             .transact(|d| write_project_line(d, project, text, self.t));
     }
+
+    /// Agent-to-agent messaging, sender side: the hand-off row agentd writes after
+    /// `send_message` (what the box writes, byte for byte in shape).
+    fn agent_message_sent(&mut self, to_name: &str, text: &str) -> Id {
+        self.t += 6_000;
+        let id = new_id();
+        self.doc.core.transact(|d| {
+            let _ = d.begin_message(
+                &id,
+                "assistant",
+                "agent",
+                DEVICE,
+                core_status(MessageStatus::Done),
+                &[
+                    ("turn", json!({ "kind": "spawn" })),
+                    ("subagentName", json!(to_name)),
+                    ("handoffMessages", json!(2)),
+                    ("agentMessage", json!({ "id": new_id(), "toName": to_name })),
+                    ("createdAt", json!(self.t)),
+                    ("completedAt", json!(self.t)),
+                ],
+            );
+            let _ = d.add_hidden_part(
+                &id,
+                "agent_message_sent",
+                text,
+                &json!({ "toName": to_name }),
+            );
+        });
+        id
+    }
+
+    /// Agent-to-agent messaging, receiving side: another agent's words in this chat.
+    fn agent_message_received(&mut self, from_id: &str, from_name: &str, text: &str) {
+        self.t += 30_000;
+        self.doc.core.transact(|d| {
+            d.append_project_message(
+                &new_id(),
+                text,
+                DEVICE,
+                &format!("project:{from_id}"),
+                &[
+                    ("senderName", json!(from_name)),
+                    ("senderHandle", json!(Project::mention_slug(from_name))),
+                    (
+                        "agentMessage",
+                        json!({ "id": new_id(), "fromProjectId": from_id }),
+                    ),
+                    ("createdAt", json!(self.t)),
+                    ("completedAt", json!(self.t)),
+                ],
+                false,
+            );
+        });
+    }
+
+    /// The reply that went back to that agent ("Replied to ◉ X").
+    fn assistant_replying_to_agent(&mut self, to_name: &str, text: &str) -> Id {
+        let id = self.assistant(TurnKind::Reply, MessageStatus::Done, vec![text_part(text)]);
+        self.doc.core.transact(|d| {
+            d.set_message_fields(&id, &[("agentReplyTo", json!(to_name))]);
+        });
+        id
+    }
+}
+
+/// `ARBOS_FIXTURE_AGENT_MESSAGE=1`: seed the agent-to-agent messaging scenario.
+fn agent_message_fixture() -> bool {
+    std::env::var("ARBOS_FIXTURE_AGENT_MESSAGE").is_ok_and(|v| v == "1")
 }
 
 fn text(s: &str) -> Part {
@@ -4261,6 +4330,27 @@ fn seed_chat_docs() -> Vec<ChatDoc> {
                 );
             }
             _ => {}
+        }
+        // `ARBOS_FIXTURE_AGENT_MESSAGE=1` (screenshot rig): the sender side of an
+        // agent-to-agent message — "send Comms a hello" → the hand-off row
+        // ("Messaged ◉ Comms" → "2 messages with ◉ Comms") → "Sent to Comms." → the
+        // relayed reply. The Comms chat gets the receiving side (below).
+        if agent_message_fixture() {
+            s.user("send Comms a hello");
+            s.agent_message_sent(
+                "Comms",
+                "Hello, Comms — Jacob asked me to pass along a hello.",
+            );
+            s.assistant(
+                TurnKind::Reply,
+                MessageStatus::Done,
+                vec![text("Sent to Comms.")],
+            );
+            s.assistant(
+                TurnKind::SubagentResult,
+                MessageStatus::Done,
+                vec![text("Comms says hello back — and it's ready whenever you want the weekly update sent.")],
+            );
         }
     }
     out.push(main);
@@ -4619,6 +4709,20 @@ fn seed_chat_docs() -> Vec<ChatDoc> {
                 },
             ],
         );
+        // `ARBOS_FIXTURE_AGENT_MESSAGE=1`: the receiving side — Arbos's row (member
+        // bubble labelled "Arbos"), Comms's reply, "Replied to ◉ Arbos".
+        if agent_message_fixture() {
+            s.t = base.saturating_sub(10 * 60_000);
+            s.agent_message_received(
+                PROJECT_ARBOS,
+                "Arbos",
+                "Hello, Comms — Jacob asked me to pass along a hello.",
+            );
+            s.assistant_replying_to_agent(
+                "Arbos",
+                "Hello back, Jacob — and hi Arbos! Ready whenever you want the weekly update sent.",
+            );
+        }
     }
     out.push(comms);
     out
