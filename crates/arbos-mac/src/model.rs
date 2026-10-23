@@ -1548,6 +1548,8 @@ impl Message {
 
     /// The working line's text while this turn streams: the `activity` field,
     /// else the newest `Working` / `Step` status message (visible or hidden).
+    /// Generic placeholders ("Working…", "thinking") fall through so the line
+    /// reads "<name> is working" — same rule as the iPhone (`AppModel.currentActivity`).
     pub fn current_activity(&self) -> Option<String> {
         if let Some(a) = self
             .activity
@@ -1566,7 +1568,21 @@ impl Message {
                     code: StatusKind::Working | StatusKind::Step,
                     message,
                     ..
-                } if !message.trim().is_empty() => Some(message.trim().to_string()),
+                } => {
+                    let t = message.trim();
+                    if t.is_empty() {
+                        return None;
+                    }
+                    // "Working…", "Working.", "thinking" → "<name> is working".
+                    let bare = t
+                        .trim_matches(|c: char| c == '.' || c == '…')
+                        .to_ascii_lowercase();
+                    if bare.is_empty() || bare == "working" || bare == "thinking" {
+                        None
+                    } else {
+                        Some(t.to_string())
+                    }
+                }
                 _ => None,
             })
     }
