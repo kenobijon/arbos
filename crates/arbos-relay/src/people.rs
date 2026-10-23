@@ -512,7 +512,7 @@ fn load_chat(state: &AppState, chat_id: &str) -> Result<ChatWithMembers, Box<Res
 }
 
 /// The chat, if the caller's user is a live member.
-fn member_chat(
+pub(crate) fn member_chat(
     state: &AppState,
     principal: &Principal,
     chat_id: &str,
