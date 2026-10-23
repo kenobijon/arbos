@@ -507,6 +507,7 @@ struct SecretPage: View {
                     SecretAddRow(title: "Give another agent access…") { showGive = true }
                 }
                 SettingsGroup(header: "People", footer: "People here can ask any agent that has access to use \(s.env), with no card to you. They never see the value. What they spend is yours.") {
+                    Color.clear.frame(height: 0).id("people")
                     ForEach(s.directors) { d in
                         Button { editingDirector = d } label: {
                             personRow(s, d)
@@ -569,6 +570,13 @@ struct SecretPage: View {
             }
         }
         .task { await load() }
+        .onAppear {
+            switch DebugHooks.secretSheet {
+            case "people": DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { showAddDirector = true }
+            case "person": DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { editingDirector = secret?.directors.first }
+            default: break
+            }
+        }
         .confirmationDialog("Delete \(secret?.env ?? "secret")?", isPresented: $confirmDelete, titleVisibility: .visible) {
             Button("Delete secret", role: .destructive) {
                 model.deleteSecret(secretId)
@@ -978,6 +986,7 @@ struct OthersAskSegment: View {
         }
         .padding(2)
         .background(Capsule().fill(theme.field))
+        .fixedSize()
     }
 
     private func segment(_ label: String, _ id: String) -> some View {
@@ -985,6 +994,7 @@ struct OthersAskSegment: View {
         return Button { if !on { Haptics.pick(); set(id) } } label: {
             Text(label)
                 .font(theme.font(Theme.small, weight: on ? .semibold : .regular))
+                .lineLimit(1)
                 .foregroundStyle(on ? theme.onPrimary : theme.muted)
                 .padding(.horizontal, 12)
                 .frame(height: 28)
