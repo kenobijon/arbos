@@ -3076,8 +3076,14 @@ final class AppModel: ObservableObject {
     }
 
     func unblock(_ person: Person) {
-        blocked.removeAll { $0.id == person.id }
-        Task { try? await api.unblock(userId: person.id) }
+        Task {
+            do { try await api.unblock(userId: person.id) }
+            catch let e as RelayError where e.status == 404 {
+                // Already not blocked on the relay; the list below says so.
+            }
+            catch { notice = Notice(text: "Unblock failed: \(error.localizedDescription)") }
+            await refreshBlocks()
+        }
     }
 
     func refreshBlocks() async {

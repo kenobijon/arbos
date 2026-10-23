@@ -2311,6 +2311,7 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
     emit_chats(shared);
     apply_open_chat_hook(shared);
     save_registry(shared);
+    refresh_blocks(shared).await;
     for p in projects.iter().filter(|p| !p.is_people()) {
         ensure_room(shared, &p.id, &project_doc_key(&p.id), PROJECT_DOC_CHAT_ID);
     }
@@ -2318,6 +2319,30 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
         ensure_room(shared, &c.project_id, &c.id, &c.id);
     }
     Ok(())
+}
+
+/// The relay's block list is the truth for the person pane's Block user / Unblock row
+/// (#1545): read it after every registry refresh and after each block / unblock, so the row
+/// is right on pane re-open and app relaunch. Older relays without `/blocks` answer 404 and
+/// the list is left as it was; other errors are logged, never shown.
+async fn refresh_blocks(shared: &Arc<Shared>) {
+    match shared.get_json("/blocks").await {
+        Ok(list) => {
+            let people: Vec<Person> = list
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|item| serde_json::from_value::<Person>(item).ok())
+                .collect();
+            let _ = shared.events.send(SyncEvent::Blocked(people));
+        }
+        Err(err) => {
+            if !format!("{err:#}").contains("HTTP 404") {
+                log::warn!(target: "arbos_mac::relay", "GET /blocks: {err:#}");
+            }
+        }
+    }
 }
 
 /// §9c, once after the update: chats archived on this Mac before archive state
@@ -4667,13 +4692,32 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .post_json("/blocks", json!({ "handle": handle }))
                     .await
                 {
-                    Ok(_) => shared.notice(format!("@{handle} blocked.")),
+                    Ok(_) => {
+                        shared.notice(format!("@{handle} blocked."));
+                        refresh_blocks(&shared).await;
+                    }
                     Err(err) => {
                         let _ = shared
                             .events
                             .send(SyncEvent::PeopleError(people_error(&err)));
                     }
                 }
+            });
+        }
+        ClientCommand::UnblockUser { user_id, handle } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                match shared.delete(&format!("/blocks/{user_id}")).await {
+                    // 404 = already not blocked on the relay: the list below says so.
+                    Ok(()) => shared.notice(format!("@{handle} unblocked.")),
+                    Err(err) if format!("{err:#}").contains("HTTP 404") => {}
+                    Err(err) => {
+                        let _ = shared
+                            .events
+                            .send(SyncEvent::PeopleError(people_error(&err)));
+                    }
+                }
+                refresh_blocks(&shared).await;
             });
         }
         ClientCommand::InviteToProject { project_id, handle } => {
