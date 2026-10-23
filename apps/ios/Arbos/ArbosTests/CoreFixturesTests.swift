@@ -753,4 +753,60 @@ final class CoreFixturesTests: XCTestCase {
             now: t0.addingTimeInterval(AppModel.roomUnavailableBackoffSeconds)
         ))
     }
+
+    /// Incomplete registry list must not prune rooms (a bad list item could omit a live project).
+    func testShouldPrune() {
+        XCTAssertTrue(AppModel.shouldPrune(incomplete: false))
+        XCTAssertFalse(AppModel.shouldPrune(incomplete: true))
+    }
+
+    /// Skipped detail keeps the previous project and chats; neither-fresh-nor-skipped is dropped.
+    func testMergeSkippedProjects() {
+        let kept = Self.fixtureProject(id: "skip-me", name: "Kept")
+        let dropped = Self.fixtureProject(id: "gone", name: "Gone")
+        let fresh = Self.fixtureProject(id: "fresh", name: "Fresh")
+        let keptChat = Chat(
+            id: "chat-skip",
+            projectId: "skip-me",
+            title: "Saved",
+            isPinned: false,
+            unread: true,
+            lastMessageAt: 42
+        )
+        let droppedChat = Chat(
+            id: "chat-gone",
+            projectId: "gone",
+            title: "Old",
+            isPinned: false,
+            unread: false,
+            lastMessageAt: 1
+        )
+        let merged = AppModel.mergeSkippedProjects(
+            fresh: [fresh],
+            previous: [kept, dropped],
+            previousChats: [
+                "skip-me": [keptChat],
+                "gone": [droppedChat],
+            ],
+            skippedIds: ["skip-me"]
+        )
+        XCTAssertEqual(Set(merged.projects.map(\.id)), ["fresh", "skip-me"])
+        XCTAssertEqual(merged.chats.keys.sorted(), ["skip-me"])
+        XCTAssertEqual(merged.chats["skip-me"], [keptChat])
+        XCTAssertNil(merged.chats["gone"])
+    }
+
+    private static func fixtureProject(id: String, name: String) -> Project {
+        Project(
+            id: id,
+            name: name,
+            icon: "Ω",
+            color: "#000000",
+            state: .hibernatedLight,
+            model: "anthropic/claude-haiku-5.5",
+            effort: .low,
+            spendTodayUsd: 0,
+            spendCapUsd: 0
+        )
+    }
 }

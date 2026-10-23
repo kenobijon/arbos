@@ -63,6 +63,15 @@ struct RegistryProject {
     var chats: [Arbos.Chat]
 }
 
+/// Outcome of `GET /projects` + per-project detail. `skippedIds` are projects
+/// whose list row parsed but detail failed to parse/decode (not 403/404).
+/// `incomplete` is true when a list item had no readable id.
+struct RegistryResult {
+    var projects: [RegistryProject]
+    var skippedIds: Set<String>
+    var incomplete: Bool
+}
+
 /// List rows from `GET /projects` may overwrite `owner` with a user-id string; that
 /// fails `ProjectDto` decoding, so we only need the id to fetch the detail.
 private struct ProjectListId: Decodable {
@@ -175,13 +184,20 @@ final class RelayAPI {
     // MARK: Registry
 
     /// `GET /projects` then `GET /projects/{id}` for chats, models and spend.
-    func registry() async throws -> [RegistryProject] {
-        guard let list = try await json("GET", "/projects") as? [Any] else { return [] }
+    func registry() async throws -> RegistryResult {
+        guard let list = try await json("GET", "/projects") as? [Any] else {
+            return RegistryResult(projects: [], skippedIds: [], incomplete: false)
+        }
         var out: [RegistryProject] = []
+        var skippedIds: Set<String> = []
+        var incomplete = false
         let decoder = JSONDecoder()
         for item in list {
             guard JSONSerialization.isValidJSONObject(item),
-                  let itemData = try? JSONSerialization.data(withJSONObject: item) else { continue }
+                  let itemData = try? JSONSerialization.data(withJSONObject: item) else {
+                incomplete = true
+                continue
+            }
             let id: String
             if let dto = try? decoder.decode(ProjectDto.self, from: itemData) {
                 id = dto.id
@@ -189,9 +205,11 @@ final class RelayAPI {
                 id = bare.id
             } else {
                 NSLog("ProjectDto: bad list item")
+                incomplete = true
                 continue
             }
-            // A project the list shows but this user may not open (403) is skipped, not fatal.
+            // A project the list shows but this user may not open (403) is an
+            // access answer, not a parse skip — leave it out of skippedIds.
             let detailRaw: Any
             do {
                 detailRaw = try await json("GET", "/projects/\(id)")
@@ -199,12 +217,16 @@ final class RelayAPI {
                 continue
             }
             guard JSONSerialization.isValidJSONObject(detailRaw),
-                  let detailData = try? JSONSerialization.data(withJSONObject: detailRaw) else { continue }
+                  let detailData = try? JSONSerialization.data(withJSONObject: detailRaw) else {
+                skippedIds.insert(id)
+                continue
+            }
             let detail: GetProjectResponseDto
             do {
                 detail = try decoder.decode(GetProjectResponseDto.self, from: detailData)
             } catch {
                 NSLog("GetProjectResponseDto: \(error)")
+                skippedIds.insert(id)
                 continue
             }
             var project = Arbos.Project(dto: detail.project)
@@ -224,7 +246,7 @@ final class RelayAPI {
             let chats = detail.chats.map { Arbos.Chat(dto: $0) }
             out.append(RegistryProject(project: project, chats: chats))
         }
-        return out
+        return RegistryResult(projects: out, skippedIds: skippedIds, incomplete: incomplete)
     }
 
     static func parseChat(_ raw: Any) -> Arbos.Chat? {
