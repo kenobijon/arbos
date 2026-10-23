@@ -252,7 +252,14 @@ extension AppModel {
         }
         let request = messages[chatId]?.last(where: { $0.role == .user })?.plainText.lowercased() ?? ""
         let clone = request.contains("pull") || request.contains("clone") || request.contains("subtensor")
+        // "rules" / "long": a several-paragraph answer with a list and a code
+        // span, the shape of Jacob's bubble in #1389 (selection / copy rigs).
+        let long = request.contains("rules") || request.contains("long")
         try? await Task.sleep(nanoseconds: 900_000_000)
+        if long {
+            append(bubble(Self.longReply))
+            return
+        }
         // 1. Ack — one short present-tense sentence, nothing else.
         append(bubble(clone ? "Cloning it now." : "On it."))
         // 2. Working line only (no milestone bubble for a quick clone).
@@ -290,6 +297,20 @@ extension AppModel {
             : "Done. Short replies from now on, and I'll keep anything that goes out on Discord to one or two casual lines in your voice."
         append(bubble(resultText))
     }
+
+    static let longReply = """
+    I can't see anything in my records that points to an app bug, so I wouldn't blame the app without more evidence.
+
+    The likeliest cause is a prompt that never told the agents to wait for everyone and to keep quiet between turns:
+
+    - post only the number
+    - call `I won` only for the lowest
+    - wait for every player before the next round
+
+    The app side plays a part too: several agents answer the same message at once, and some of my filings went out before you could stop them.
+
+    Do you want me to post a clear rule summary to the group before the next round?
+    """
 
     private func user(_ id: Id, _ chat: Id, _ text: String, at: Int64) -> Message {
         Message(id: id, chatId: chat, role: .user, sender: "user", status: .done, turn: nil, decision: nil, subagentId: nil,

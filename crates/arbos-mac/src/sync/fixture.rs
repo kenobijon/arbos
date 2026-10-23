@@ -2389,6 +2389,17 @@ const REPLY_DEFAULT: &[&str] = &[
     "If you want, I can turn this into a short checklist and start on the first item.",
 ];
 
+/// "rules" / "long": a several-paragraph answer with a list and a code span,
+/// the shape of Jacob's bubble in #1389 (selection / copy rigs; the iPhone
+/// fixture answers the same words with the same text).
+const REPLY_RULES: &[&str] = &[
+    "I can't see anything in my records that points to an app bug, so I wouldn't blame the app without more evidence.",
+    "The likeliest cause is a prompt that never told the agents to wait for everyone and to keep quiet between turns:",
+    "- post only the number\n- call `I won` only for the lowest\n- wait for every player before the next round",
+    "The app side plays a part too: several agents answer the same message at once, and some of my filings went out before you could stop them.",
+    "Do you want me to post a clear rule summary to the group before the next round?",
+];
+
 const REPLY_SIMPLE: &[&str] = &[
     "Agreed. Two sections only: the rail on the left and the chat in the center.",
     "Nothing else at rest. Details open only when you ask for them.",
@@ -2517,6 +2528,9 @@ fn pick_script(text: &str, force_reply: bool) -> Script {
             diff: Some(("crates/arbos-mac/src/ui/rail.rs", 6, 2)),
             summary: ACT_SUMMARY,
         };
+    }
+    if t.contains("rules") || t.contains("long") {
+        return Script::Reply(REPLY_RULES);
     }
     if t.contains("simple") {
         return Script::Reply(REPLY_SIMPLE);
