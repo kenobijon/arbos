@@ -136,6 +136,10 @@ pub struct RoomBroadcast {
 
 pub struct Room {
     pub tx: broadcast::Sender<RoomBroadcast>,
+    /// `(head, encoded version vector)` of the stored doc (checkpoint ∪ rows) at that head —
+    /// what ROWS_DONE hands a device so it can push back history the relay lacks (#1518
+    /// follow-up). Rebuilt only when the head moved.
+    pub vv_cache: std::sync::Mutex<Option<(i64, Vec<u8>)>>,
 }
 
 /// How the relay tells its room sockets that it is about to go down on purpose (a deploy, an
@@ -284,7 +288,10 @@ impl AppState {
         w.entry(name.to_owned())
             .or_insert_with(|| {
                 let (tx, _) = broadcast::channel(1024);
-                Arc::new(Room { tx })
+                Arc::new(Room {
+                    tx,
+                    vv_cache: std::sync::Mutex::new(None),
+                })
             })
             .clone()
     }
