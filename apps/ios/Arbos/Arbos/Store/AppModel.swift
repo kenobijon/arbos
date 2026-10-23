@@ -1853,7 +1853,7 @@ final class AppModel: ObservableObject {
     /// A refresh is due when nothing is loaded yet or the TTL has passed. A restored
     /// (non-empty) directory with no load this launch refetches at once, in the background.
     nonisolated static func directoryNeedsRefresh(loadedAt: Int64, now: Int64, isEmpty: Bool) -> Bool {
-        isEmpty || now - loadedAt >= directoryTtlMs
+        isEmpty || loadedAt == 0 || now - loadedAt >= directoryTtlMs
     }
 
     /// Publish a fresh directory only when it differs (an unchanged list must not
