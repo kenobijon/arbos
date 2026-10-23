@@ -3363,7 +3363,10 @@ const QUOTE_TO_TEXT_GAP: f32 = 6.0;
 /// The inside of a bubble, in this order: sender name (group / channel,
 /// someone else) → reply quote header → the text, with the time after it.
 /// A short text keeps the time on its line; a wrapped one pushes it to the
-/// right of the next line.
+/// right of the next line. No `min_w_0` on the column or its items: taffy
+/// sizes a flex column from its items, and an item with `min-width: 0`
+/// contributes nothing, so the bubble would take the name's or the quote's
+/// width and wrap the body one word per line (bubble-quote-width-2026-10-23).
 fn sender_bubble_column(
     name: Option<AnyElement>,
     quote: Option<AnyElement>,
@@ -3373,7 +3376,6 @@ fn sender_bubble_column(
     div()
         .flex()
         .flex_col()
-        .min_w_0()
         .children(name.map(|n| {
             div()
                 .pb(px(NAME_TO_TEXT_GAP))
@@ -3391,13 +3393,7 @@ fn sender_bubble_column(
                 .flex()
                 .flex_wrap()
                 .items_end()
-                .min_w_0()
-                .child(
-                    div()
-                        .min_w_0()
-                        .debug_selector(|| "bubble-text".into())
-                        .child(body),
-                )
+                .child(div().debug_selector(|| "bubble-text".into()).child(body))
                 .children(time.map(|t| {
                     div()
                         .ml_auto()
