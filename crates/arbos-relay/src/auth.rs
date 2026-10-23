@@ -172,6 +172,23 @@ impl FromRequestParts<AppState> for Principal {
         let principal = resolve_checked(state, &tok).map_err(|r| {
             crate::signin::api_error(StatusCode::UNAUTHORIZED, r.kind(), r.message())
         })?;
+        // A read-only device (`kind = reader`, docs/grok-bot-read-access.md) may only list and
+        // export chats; every other route is refused before the handler runs.
+        if let Principal::Device { id, .. } = &principal {
+            let is_reader = state
+                .db
+                .device_kind(id)
+                .ok()
+                .flatten()
+                .is_some_and(|k| k == crate::export::READER_KIND);
+            if is_reader && !crate::export::reader_may(parts.method.as_str(), parts.uri.path()) {
+                return Err(crate::signin::api_error(
+                    StatusCode::FORBIDDEN,
+                    "reader_only",
+                    "this token can only read chats",
+                ));
+            }
+        }
         // What the app runs (`X-Arbos-Client`): the "installed" signal for continuous delivery.
         if let Principal::Device { id, user_id, .. } = &principal {
             if let Some(h) = parts
