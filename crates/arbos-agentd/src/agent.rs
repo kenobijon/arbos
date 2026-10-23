@@ -1849,6 +1849,20 @@ impl Agent {
         // Every human command carries the mention rule, not only `send`: a `steer` the Mac
         // sends while another agent's turn runs ("@gigchadagent you still borked?") is for the
         // named agent, not for whoever happens to be busy.
+        // A card answered in a shared people room reaches every agent in it; only the agent
+        // that posted the card owns the approval — the others leave the command alone (a
+        // "unknown approval" failure from them would race the owner's `done`).
+        if matches!(cmd.kind.as_str(), "approve" | "reject") && self.people.is_people_chat(chat_id)
+        {
+            let approval_id = cmd
+                .payload
+                .get("approvalId")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if !matches!(self.store.approval(approval_id), Ok(Some(_))) {
+                return Ok(());
+            }
+        }
         let people_msg_id = if matches!(cmd.kind.as_str(), "send" | "steer" | "guide" | "answer")
             && self.people.is_people_chat(chat_id)
         {
