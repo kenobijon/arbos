@@ -146,10 +146,15 @@ pub async fn get(
     if !state.allows(&principal, &project_id) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    if !safe_key(&key) || !safe_key(&project_id) {
+    serve(&state, &project_id, &key).await
+}
+
+/// Stream one stored blob (access already checked by the caller).
+pub async fn serve(state: &AppState, slot: &str, key: &str) -> Response {
+    if !safe_key(key) || !safe_key(slot) {
         return (StatusCode::BAD_REQUEST, "bad key").into_response();
     }
-    let p = blob_path(&state, &project_id, &key);
+    let p = blob_path(state, slot, key);
     let Ok(f) = tokio::fs::File::open(&p).await else {
         return StatusCode::NOT_FOUND.into_response();
     };

@@ -2999,7 +2999,9 @@ fn user_message_body(
     let blocks = split_blocks(text);
     let bubble = selectable.bubble(key, bubble_plain(&blocks, true));
     let offsets = block_offsets(&blocks, true);
-    let mut col = div().flex().flex_col().gap(px(6.0)).w_full().min_w_0();
+    // Same as `render_block`: no `min_w_0`, so the quote header above never
+    // sets this column's width.
+    let mut col = div().flex().flex_col().gap(px(6.0)).w_full();
     for (i, block) in blocks.iter().enumerate() {
         let id = format!("{row_id}.u{i}");
         let at = offsets[i];
@@ -3165,9 +3167,16 @@ fn render_block(
     theme: &Theme,
     bubble: &BubbleSelectable,
 ) -> AnyElement {
+    // No `min_w_0` here. Inside a flex-column bubble (a quote header stacked
+    // over the text, #1447) taffy sizes the column from its items, and an
+    // item with `min-width: 0` contributes nothing to that width — the bubble
+    // took the quote header's width and wrapped the body one word per line
+    // (Jacob, 2026-10-23, v0.6.175). With the minimum left auto the text's
+    // unwrapped width sizes the bubble, up to the column cap; it still shrinks
+    // with the bubble (a flex item's automatic minimum is main-axis only, and
+    // the bubble itself keeps `min_w_0`). `layout_tests::a_quoted_bubble_…`.
     let base = div()
         .w_full()
-        .min_w_0()
         .text_color(theme.text)
         .text_size(px(CHAT_BODY))
         .line_height(px(CHAT_LINE_HEIGHT));
@@ -4012,6 +4021,113 @@ mod layout_tests {
         );
         assert!((e.bubble_left - 16.0).abs() <= 1.0, "{}", e.bubble_left);
         assert!((e.bubble_width - 612.0).abs() <= 1.0, "{}", e.bubble_width);
+    }
+
+    /// A quoted agent bubble as `markdown_bubble` builds it: the bubble is a
+    /// flex column (quote header over the text) in the slot, with and without
+    /// the avatar lane.
+    struct QuotedBubble {
+        lane: bool,
+        selection: Entity<TextSelection>,
+    }
+
+    const LONG_BODY: &str = "Here, Arbos. Good to hear the avatar alignment is fixed. Nothing is \
+        running on my side; the ten reports are in. What do you need?";
+
+    impl gpui::Render for QuotedBubble {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let theme = Theme::dark(crate::ui::theme::Surface::Matte);
+            let selectable = Selectable::new(&self.selection, theme.accent_soft, cx);
+            let bubble_sel = selectable.bubble("q#text".to_string(), SharedString::from(LONG_BODY));
+            let quote = div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .min_w_0()
+                .child(div().size(px(12.0)))
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .debug_selector(|| "test-quote".into())
+                        .child("“@doug”"),
+                );
+            let bubble = div()
+                .debug_selector(|| "test-bubble".into())
+                .max_w_full()
+                .min_w_0()
+                .relative()
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
+                .px(px(BUBBLE_PAD_X))
+                .py(px(BUBBLE_PAD_Y))
+                .child(quote)
+                .child(render_block(
+                    "q",
+                    &Block::Paragraph(LONG_BODY.to_string()),
+                    0,
+                    None,
+                    Instant::now(),
+                    &theme,
+                    &bubble_sel,
+                ));
+            let row = div()
+                .w_full()
+                .flex()
+                .items_end()
+                .when(self.lane, |el| {
+                    el.pl(px(AVATAR_COLUMN_INSET))
+                        .gap(px(SENDER_DISC_GAP))
+                        .child(div().size(px(SENDER_DISC)).flex_shrink_0())
+                })
+                .child(assistant_slot(bubble))
+                .into_any_element();
+            div()
+                .w(px(REFERENCE_PANE))
+                .h(px(600.0))
+                .text_size(px(CHAT_BODY))
+                .line_height(px(CHAT_LINE_HEIGHT))
+                .child(column_row(row))
+        }
+    }
+
+    /// Jacob, 2026-10-23 17:09 (v0.6.175, "Doug" in the Arbonites group): an
+    /// incoming bubble with a one-word reply quote collapsed to the quote's
+    /// width and wrapped its body one word per line. The bubble's width is the
+    /// body's (capped by the column), never the quote header's.
+    #[gpui::test]
+    fn a_quoted_bubble_is_as_wide_as_its_body_not_its_quote(cx: &mut TestAppContext) {
+        for lane in [false, true] {
+            let (_view, vcx) = cx.add_window_view(|_, cx| QuotedBubble {
+                lane,
+                selection: cx.new(TextSelection::new),
+            });
+            vcx.run_until_parked();
+            let bubble = vcx.debug_bounds("test-bubble").expect("bubble drawn");
+            let quote = vcx.debug_bounds("test-quote").expect("quote drawn");
+            let slot = vcx.debug_bounds("chat-bubble-slot").expect("slot drawn");
+            let bw: f32 = bubble.size.width.into();
+            let qw: f32 = quote.size.width.into();
+            let cap: f32 = f32::from(slot.size.width) - ASSISTANT_RIGHT_GAP;
+            assert!(
+                qw < 120.0 && bw > qw + 200.0,
+                "lane={lane}: bubble {bw} pt is as narrow as its quote ({qw} pt)"
+            );
+            assert!(
+                (bw - cap).abs() <= 1.0,
+                "lane={lane}: a long body fills the cap: bubble {bw}, cap {cap}"
+            );
+            let bh: f32 = bubble.size.height.into();
+            assert!(
+                bh < 6.0 * CHAT_LINE_HEIGHT,
+                "lane={lane}: the body wraps to a few lines, not one word per line ({bh} pt tall)"
+            );
+        }
     }
 
     #[test]

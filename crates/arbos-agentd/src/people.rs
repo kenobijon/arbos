@@ -889,10 +889,40 @@ impl Agent {
         let Some(info) = self.people.info(chat_id) else {
             return true;
         };
+        let (wants, reason) = self.people_gate(chat_id, host, user_msg_id, &info).await;
+        // The decision is part of the agent's record (`GET /projects/{id}/inspect`, kind
+        // `gate`): "why did bob answer / stay quiet" is the first question in every routing bug.
+        let _ = self.store.t3_append(
+            chat_id,
+            None,
+            Some(chat_id),
+            "gate",
+            Some("system"),
+            &format!(
+                "gate {}: {reason}",
+                if wants { "reply" } else { "skip" }
+            ),
+            Some(&json!({
+                "message_id": user_msg_id, "reply": wants, "reason": reason,
+                "me": self.cfg.project_id, "handle": self.identity.handle(),
+                "reply_policy": info.settings["reply_policy"], "agents": info.agents(), "group": info.is_group(),
+            })),
+        );
+        wants
+    }
+
+    /// The mention gate proper: the decision and the rule that made it.
+    async fn people_gate(
+        &self,
+        chat_id: &str,
+        host: &SharedHost,
+        user_msg_id: &str,
+        info: &PeopleChatInfo,
+    ) -> (bool, &'static str) {
         let (msg, replied_to_mine, recent) = {
             let h = host.lock().await;
             let Some(msg) = h.doc.message(user_msg_id) else {
-                return false;
+                return (false, "message not in the doc");
             };
             let me = format!("agent:{}", self.cfg.project_id);
             let replied_to_mine = msg
@@ -913,8 +943,8 @@ impl Agent {
         // Bare person name / people-only address in the prose ("Allan?", "Ken") wins over a
         // sticky agent chip or reply-to, unless the text @-mentions an agent or the policy is
         // every_message. The decision model must not wake bob for a ping meant for Allan.
-        if !every && people_ping_not_for_agents(&msg, &info) {
-            return false;
+        if !every && people_ping_not_for_agents(&msg, info) {
+            return (false, "ping for a person, not for agents");
         }
         if addressed(
             &msg,
@@ -924,31 +954,50 @@ impl Agent {
             every,
             replied_to_mine,
         ) {
-            return true;
+            return (
+                true,
+                if every {
+                    "reply_policy every_message"
+                } else if replied_to_mine {
+                    "reply to my message"
+                } else {
+                    "addressed to me (mention, @handle or sole agent)"
+                },
+            );
         }
         // Bare agent name / collective address ("Bob?", "hey Bob …", "can the agents respond?")
         // — same as an @mention, including in DMs where the decision model does not run.
-        if text_names_this_agent(&msg, &info, &self.cfg.project_id)
-            || text_addresses_agents_collectively(&msg)
-        {
-            return true;
+        if text_names_this_agent(&msg, info, &self.cfg.project_id) {
+            return (true, "text names me");
+        }
+        if text_addresses_agents_collectively(&msg) {
+            return (true, "text addresses the agents collectively");
         }
         // Addressed to another agent by mention, @slug or name: theirs, not ours — even when
         // that agent is silent, and even for a steer while this agent's own turn is running.
-        if addressed_to_other_agents_only(&msg, &info, &self.cfg.project_id) {
-            return false;
+        if addressed_to_other_agents_only(&msg, info, &self.cfg.project_id) {
+            return (false, "addressed to another agent only");
         }
         // A person chip or leading @handle with no agent address is for humans — stay quiet
         // even in a group (the decision model must not wake an agent to decline a call meant
         // for Ken). Mid-line @person references alone still reach the decision model.
         if addressed_only_to_people(&msg) {
-            return false;
+            return (false, "addressed to people only");
         }
         if !info.is_group() {
-            return false;
+            return (false, "unaddressed in a DM");
         }
-        self.people_decide_respond(chat_id, &info, &msg, &recent)
-            .await
+        let chosen = self
+            .people_decide_respond(chat_id, info, &msg, &recent)
+            .await;
+        (
+            chosen,
+            if chosen {
+                "respond decision model chose me"
+            } else {
+                "respond decision model did not choose me"
+            },
+        )
     }
 
     /// Responder decision for an unaddressed human message in a people group (`responders.rs`):
@@ -1796,5 +1845,82 @@ mod tests {
         let all = recent_people_context(&lines, "missing", 3);
         assert_eq!(all.len(), 3);
         assert_eq!(all[2]["text"], "line 14");
+    }
+}
+
+#[cfg(test)]
+mod gate_record_tests {
+    //! Every mention-gate decision leaves a `gate` T3 row with its reason, so
+    //! `GET /projects/{id}/inspect` can answer "why did this agent stay quiet".
+
+    use arbos_core::ids::ulid;
+
+    use super::*;
+    use crate::status::tests::test_agent;
+
+    #[tokio::test]
+    async fn gate_decision_is_recorded_with_its_reason() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATGATERECORD000001";
+        agent.people.chats.lock().expect("people").insert(
+            chat.to_owned(),
+            PeopleChatInfo {
+                members: vec![
+                    json!({ "member": "user:gh_2", "handle": "sam" }),
+                    json!({ "member": format!("agent:{}", agent.cfg.project_id), "handle": "doug" }),
+                    json!({ "member": "agent:OTHER", "handle": "hjkb" }),
+                ],
+                settings: json!({ "reply_policy": "mention" }),
+                owner_user: "gh_1".into(),
+                slug: "doug".into(),
+                kind: "group".into(),
+            },
+        );
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let for_other = ulid();
+        let for_me = ulid();
+        {
+            let h = host.lock().await;
+            let opts = arbos_core::doc::UserMessageOpts {
+                mentions: vec!["agent:OTHER".into()],
+                ..Default::default()
+            };
+            h.doc
+                .append_user_message(&for_other, "@hjkb you still borked?", "dev-mac", &opts)
+                .unwrap();
+            let opts = arbos_core::doc::UserMessageOpts {
+                mentions: vec![format!("agent:{}", agent.cfg.project_id)],
+                ..Default::default()
+            };
+            h.doc
+                .append_user_message(&for_me, "@doug status?", "dev-mac", &opts)
+                .unwrap();
+        }
+        assert!(!agent.people_wants(chat, &host, &for_other).await);
+        assert!(agent.people_wants(chat, &host, &for_me).await);
+
+        let rows = agent.store.t3_after(0, Some(chat), 50).unwrap();
+        let gates: Vec<&(crate::store::T3Row, Option<Value>)> =
+            rows.iter().filter(|(r, _)| r.kind == "gate").collect();
+        assert_eq!(gates.len(), 2, "{rows:?}");
+        let (skip, skip_data) = gates[0];
+        assert!(skip
+            .text
+            .starts_with("gate skip: addressed to another agent only"));
+        let skip_data = skip_data.as_ref().expect("gate row carries its facts");
+        assert_eq!(skip_data["reply"], false);
+        assert_eq!(skip_data["message_id"], for_other);
+        assert_eq!(skip_data["handle"], "doug");
+        let (reply, _) = gates[1];
+        assert!(reply.text.starts_with("gate reply: addressed to me"));
+        // The window honours the chat filter and the time cursor.
+        assert!(agent
+            .store
+            .t3_after(0, Some("other-chat"), 50)
+            .unwrap()
+            .is_empty());
+        let after = agent.store.t3_after(reply.at, Some(chat), 50).unwrap();
+        assert!(after.iter().all(|(r, _)| r.at > reply.at));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

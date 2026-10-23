@@ -1563,7 +1563,24 @@ impl Db {
         })
     }
 
+    /// Rows with `after < seq <= upto`, oldest first (the checkpoint validation walk).
+    pub fn rows_between(&self, room: &str, after: i64, upto: i64, limit: i64) -> Result<Vec<Row>> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT seq, device, batch_id, bytes FROM rows WHERE room = ?1 AND seq > ?2 AND seq <= ?3
+                 ORDER BY seq LIMIT ?4",
+            )?;
+            let rows = st.query_map(params![room, after, upto, limit], |r| {
+                Ok(Row { seq: r.get(0)?, device: r.get(1)?, batch_id: r.get(2)?, bytes: r.get(3)? })
+            })?;
+            rows.collect()
+        })
+    }
+
     /// Store a checkpoint and delete rows it covers (guard: `seq_covered >= floor`).
+    ///
+    /// Callers must have verified that the snapshot contains every op in those rows
+    /// (`rooms::checkpoint_covers_store`): this deletes them for good.
     pub fn put_checkpoint(
         &self,
         room: &str,

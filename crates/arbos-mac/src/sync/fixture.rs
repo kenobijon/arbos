@@ -5175,15 +5175,13 @@ fn seed_people_chat_docs() -> Vec<ChatDoc> {
         "Deck v3 is in the shared folder. Sam, can you check the pricing slide before the run-through?",
         base + 300_000,
     ));
-    insert_message_via_core(
-        &group,
-        &human_message(
-            GROUP_LAUNCH,
-            &sam(),
-            "On it. @arbos pull the latest signup numbers into slide 4 while I read.",
-            base + 330_000,
-        ),
+    let ask = human_message(
+        GROUP_LAUNCH,
+        &sam(),
+        "On it. @arbos pull the latest signup numbers into slide 4 while I read.",
+        base + 330_000,
     );
+    insert_message_via_core(&group, &ask);
     let mut agent = human_message(GROUP_LAUNCH, &sam(), "", base + 360_000);
     agent.role = Role::Assistant;
     agent.sender = format!("agent:{PROJECT_ARBOS}");
@@ -5192,6 +5190,10 @@ fn seed_people_chat_docs() -> Vec<ChatDoc> {
     agent.sender_avatar = None;
     agent.asked_by_handle = Some("sam".into());
     agent.owner_handle = Some(ME_HANDLE.into());
+    // The relay threads a group reply to the asker's message (#1447), so the
+    // bubble opens with a quote header — the shape of Jacob's Oct 23 "Doug"
+    // screenshot (bubble-quote-width-2026-10-23).
+    agent.in_reply_to = Some(ask.id.clone());
     agent.parts = vec![text_part(
         "Done. Slide 4 now reads 1,284 signups this week (+18 %). The chart is in `deck/v3/slide-04.png`.",
     )];

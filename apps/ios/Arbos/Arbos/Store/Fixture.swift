@@ -139,6 +139,10 @@ extension AppModel {
             Message(id: "g1", chatId: "fx-group-launch", role: .user, sender: "user:fx-u3", status: .done, turn: nil, decision: nil, subagentId: nil,
                     subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 3 * 3_600_000, completedAt: nil, pending: false,
                     parts: [.text(id: "g1t", text: "Launch checklist is here: https://notion.so/arbos/launch-week")], hiddenCount: 0, senderHandle: "mira-k", senderName: "Mira Kaplan"),
+            // A mention of an agent and a person: both draw as chips (mention chips, Oct 23).
+            Message(id: "g1m", chatId: "fx-group-launch", role: .user, sender: "user:fx-u3", status: .done, turn: nil, decision: nil, subagentId: nil,
+                    subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 3 * 3_600_000 + 90_000, completedAt: nil, pending: false,
+                    parts: [.text(id: "g1mt", text: "@comms can you draft the embargo note? @unconst has the press list.")], hiddenCount: 0, senderHandle: "mira-k", senderName: "Mira Kaplan"),
             Message(id: "g2", chatId: "fx-group-launch", role: .user, sender: "user:fx-u4", status: .done, turn: nil, decision: nil, subagentId: nil,
                     subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 2 * 3_600_000, completedAt: nil, pending: false,
                     parts: [.attachment(id: "g2a", attachment: Attachment(name: "press-kit-v3.pdf", mime: "application/pdf", blobRef: "fixture-g2a"))], hiddenCount: 0, senderHandle: "sam", senderName: "Sam Okafor"),
