@@ -62,10 +62,13 @@ pub const CHAT_WASH_ALPHA_LIGHT: f32 = 0.85;
 pub const FROST_TINT_ALPHA: f32 = 0.50;
 pub const FROST_TINT_ALPHA_LIGHT: f32 = 0.72;
 /// Glass shell tint: how opaque the window wash is over the blur (Settings →
-/// Appearance → Opacity). Default is [`GLASS_ALPHA`] / [`GLASS_ALPHA_LIGHT`];
-/// range keeps text readable at the low end and still looks like glass at
-/// the high end.
-pub const GLASS_OPACITY_MIN: f32 = 0.30;
+/// Appearance → Opacity). Default is [`GLASS_ALPHA`] / [`GLASS_ALPHA_LIGHT`].
+/// Floor 0 %: the wash sits on macOS's own `UnderWindowBackground` blur
+/// material, which stays frosted and keeps text readable with no tint at all,
+/// so nothing needs a higher floor (#1425; it was 0.30 before, which Jacob hit
+/// — the thumb stopped at the track's left end on "30%"). The slider track
+/// maps 0…1 straight onto this range.
+pub const GLASS_OPACITY_MIN: f32 = 0.00;
 pub const GLASS_OPACITY_MAX: f32 = 1.00;
 const GLASS_OPACITY_FILE: &str = "glass_opacity";
 /// Type scale (iPhone 17/15/13 pt, scaled for a desktop viewing distance).
@@ -120,7 +123,7 @@ impl Surface {
     }
 }
 
-/// The user's glass opacity (0.30–1.00). Saved as a float string in
+/// The user's glass opacity (0.00–1.00). Saved as a float string in
 /// `<config>/glass_opacity` when moved in Settings; a missing file keeps the
 /// default for the appearance ([`GLASS_ALPHA`] dark, [`GLASS_ALPHA_LIGHT`]
 /// light). Only applied while Surface is Glass.
@@ -566,4 +569,41 @@ pub fn reapply_window_background(cx: &mut App) {
             });
         }
     });
+}
+
+#[cfg(test)]
+mod glass_opacity_tests {
+    use super::*;
+
+    /// #1425: the slider's floor is 0 % — the window's blur material carries
+    /// the frosted look on its own, so a fully clear tint is still usable.
+    #[test]
+    fn floor_is_fully_clear_and_ceiling_is_opaque() {
+        assert_eq!(GLASS_OPACITY_MIN, 0.0);
+        assert_eq!(GLASS_OPACITY_MAX, 1.0);
+        assert_eq!(GlassOpacity::clamp(-0.5), GLASS_OPACITY_MIN);
+        assert_eq!(GlassOpacity::clamp(0.0), 0.0);
+        assert_eq!(GlassOpacity::clamp(1.0), 1.0);
+        assert_eq!(GlassOpacity::clamp(1.7), GLASS_OPACITY_MAX);
+    }
+
+    /// Values Jacob could not reach before (anything under 30 %) pass through.
+    #[test]
+    fn values_below_the_old_floor_are_kept() {
+        for v in [0.01_f32, 0.10, 0.29] {
+            assert_eq!(GlassOpacity::clamp(v), v);
+        }
+    }
+
+    /// A `glass_opacity` file saved under the old 0.30 floor still reads back
+    /// as 0.30, and the appearance defaults sit inside the range.
+    #[test]
+    fn saved_and_default_values_stay_in_range() {
+        assert_eq!(GlassOpacity::clamp(0.30), 0.30);
+        for appearance in [Appearance::Dark, Appearance::Light] {
+            let d = GlassOpacity::default_for(appearance);
+            assert!((GLASS_OPACITY_MIN..=GLASS_OPACITY_MAX).contains(&d));
+            assert_eq!(GlassOpacity::clamp(d), d);
+        }
+    }
 }

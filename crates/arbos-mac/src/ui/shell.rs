@@ -314,6 +314,7 @@ impl Shell {
                 || v == "connectors"
                 || v == "notifications"
                 || v == "machine"
+                || v == "appearance"
                 || v.starts_with("secrets")
         });
         let settings_scroll = ScrollHandle::new();
@@ -693,6 +694,8 @@ impl Shell {
                 // Rig: `ARBOS_OPEN_SETTINGS=notifications|machine` — one-row cards.
                 Some("notifications") => SettingsPage::Notifications,
                 Some("machine") => SettingsPage::Machine,
+                // Rig: `ARBOS_OPEN_SETTINGS=appearance` — the Opacity slider (#1425).
+                Some("appearance") => SettingsPage::Appearance,
                 Some(v) if v.starts_with("secrets") => SettingsPage::Secrets,
                 _ => SettingsPage::Root,
             },
