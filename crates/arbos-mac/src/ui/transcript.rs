@@ -4121,7 +4121,14 @@ mod system_line_tests {
             failed: &failed,
             voice_mode: false,
         };
-        let rows = build_rows(&messages, false, speech, "gh_jacob", &HashSet::new());
+        let rows = build_rows(
+            &messages,
+            false,
+            speech,
+            "gh_jacob",
+            &HashSet::new(),
+            &Mentions::empty(),
+        );
         let sender_captions: Vec<&str> = rows
             .iter()
             .filter_map(|r| match &r.kind {
@@ -4196,7 +4203,14 @@ mod presence_rows_tests {
             failed: &failed,
             voice_mode: false,
         };
-        build_rows(messages, false, speech, "gh_me", &HashSet::new())
+        build_rows(
+            messages,
+            false,
+            speech,
+            "gh_me",
+            &HashSet::new(),
+            &Mentions::empty(),
+        )
     }
 
     #[test]
