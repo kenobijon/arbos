@@ -183,13 +183,35 @@ impl Llm {
         user: &str,
         max_tokens: u32,
     ) -> Result<(String, i64, Value)> {
+        let c = self
+            .complete_full(model, system, user, max_tokens, None)
+            .await?;
+        Ok((c.text, c.latency_ms, c.usage))
+    }
+
+    /// `complete_with_usage` plus the choice's `finish_reason` and optional extra body fields
+    /// (e.g. `{"reasoning": {"enabled": false}}` for a call that must spend its whole token
+    /// budget on visible text).
+    pub async fn complete_full(
+        &self,
+        model: &str,
+        system: &str,
+        user: &str,
+        max_tokens: u32,
+        extra: Option<&Value>,
+    ) -> Result<Completion> {
         let t0 = Instant::now();
-        let body = json!({
+        let mut body = json!({
             "model": model,
             "messages": [{ "role": "system", "content": system }, { "role": "user", "content": user }],
             "max_tokens": max_tokens,
             "temperature": 0,
         });
+        if let (Some(extra), Some(obj)) = (extra.and_then(Value::as_object), body.as_object_mut()) {
+            for (k, v) in extra {
+                obj.insert(k.clone(), v.clone());
+            }
+        }
         let resp = self
             .purpose_header(
                 self.http
@@ -210,7 +232,16 @@ impl Llm {
             .unwrap_or("")
             .to_owned();
         let usage = v.get("usage").cloned().unwrap_or(Value::Null);
-        Ok((text, t0.elapsed().as_millis() as i64, usage))
+        let finish_reason = v
+            .pointer("/choices/0/finish_reason")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        Ok(Completion {
+            text,
+            latency_ms: t0.elapsed().as_millis() as i64,
+            usage,
+            finish_reason,
+        })
     }
 
     /// A forced-JSON call: strips code fences and parses the first JSON object.
@@ -250,6 +281,30 @@ impl Llm {
             )
         })?;
         Ok((v, ms, usage))
+    }
+}
+
+/// One non-streaming completion, with what the caller needs to judge it.
+#[derive(Debug, Clone)]
+pub struct Completion {
+    pub text: String,
+    pub latency_ms: i64,
+    pub usage: Value,
+    /// `stop`, `length` (the `max_tokens` cap cut the answer), `content_filter`, … as the
+    /// provider reports it; `None` when absent.
+    pub finish_reason: Option<String>,
+}
+
+impl Completion {
+    /// The provider stopped because `max_tokens` was reached: the text is a fragment.
+    pub fn truncated(&self) -> bool {
+        matches!(
+            self.finish_reason
+                .as_deref()
+                .map(str::to_ascii_lowercase)
+                .as_deref(),
+            Some("length") | Some("max_tokens")
+        )
     }
 }
 
