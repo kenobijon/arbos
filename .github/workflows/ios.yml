@@ -110,6 +110,10 @@ jobs:
           gem_bins="$(echo "$HOME"/.local/share/gem/ruby/*/bin "$HOME"/.gem/ruby/*/bin | tr ' ' ':')"
           export PATH="/opt/homebrew/opt/ruby/bin:$gem_bins:$PATH"
           command -v fastlane >/dev/null || { echo "::error title=fastlane missing::install it for $(whoami): gem install --user-install fastlane"; exit 1; }
+          # The launchd-run runner has no locale, so Ruby's default encoding is US-ASCII and the
+          # Fastfile's log grep dies on the first curly quote in xcodebuild's output
+          # ("invalid byte sequence in US-ASCII", run 39962479813). Hosted images set LANG.
+          { echo "LANG=en_US.UTF-8"; echo "LC_ALL=en_US.UTF-8"; } >> "$GITHUB_ENV"
           fastlane --version | tail -1
       - name: Select Xcode
         run: |
