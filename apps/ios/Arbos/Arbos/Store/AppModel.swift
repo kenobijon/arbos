@@ -165,6 +165,12 @@ final class AppModel: ObservableObject {
         }
         // Leaving the foreground is the last safe moment to write before a kill.
         if !active { flushStore(all: true) }
+        // Foreground again: clear the 403/404 backoff so listed rooms can dial.
+        if active {
+            roomUnavailableFailures = [:]
+            roomUnavailableAt = [:]
+            recreateListedRooms()
+        }
     }
 
     /// Chat on screen *and* the app is in the foreground — the only case where
@@ -455,6 +461,19 @@ final class AppModel: ObservableObject {
     /// Newest value waiting for the throttle window to end.
     private var pendingReadPutValue: [Id: Int64] = [:]
     private var readPutTasks: [Id: Task<Void, Never>] = [:]
+    /// Consecutive HTTP 403/404 endings per room key (cleared when the room reaches live).
+    private var roomUnavailableFailures: [Id: Int] = [:]
+    private var roomUnavailableAt: [Id: Date] = [:]
+    /// When `ensureRoom` last created each room — prune skips keys younger than 60s.
+    private var roomCreatedAt: [Id: Date] = [:]
+    /// Cursor to hand back when recreating a room after unavailable (doc stays in `docs`).
+    private var roomRestoredCursors: [Id: Int64] = [:]
+    /// After this many unavailable endings in a row, skip recreate until backoff or foreground.
+    nonisolated static let roomUnavailableRetryLimit = 3
+    /// How long to wait after `roomUnavailableRetryLimit` before recreating again.
+    nonisolated static let roomUnavailableBackoffSeconds: TimeInterval = 600
+    /// Locally created chats are not pruned until the relay has had time to list them.
+    nonisolated static let roomRecentGraceSeconds: TimeInterval = 60
 
     var appearance: Appearance { Appearance(rawValue: appearanceSetting) ?? .default }
     var surface: Surface { Surface(rawValue: surfaceSetting) ?? .default }
@@ -1058,6 +1077,10 @@ final class AppModel: ObservableObject {
         lastReadPutValue = [:]
         lastReadPutAt = [:]
         pendingReadPutValue = [:]
+        roomUnavailableFailures = [:]
+        roomUnavailableAt = [:]
+        roomCreatedAt = [:]
+        roomRestoredCursors = [:]
         // Sign-out wipes everything this account had on the device.
         store?.close(wipe: true)
         store = nil
@@ -1164,6 +1187,25 @@ final class AppModel: ObservableObject {
                     ensureRoom(projectId: c.projectId, key: c.id, roomChat: c.id)
                 }
             }
+            // Drop rooms the relay no longer lists (deleted projects/chats). People
+            // rooms stay for refreshPeople. Skip keys created in the last 60s so a
+            // chat minted locally is not pruned before the relay lists it.
+            let listedChatIds = Set(newChats.values.flatMap { $0.map(\.id) })
+            let listedProjectIds = Set(newProjects.map(\.id))
+            let peopleKeys = Set(rooms.compactMap { key, room in room.projectId == peopleSlot ? key : nil })
+                .union(peopleChats.map(\.id))
+            let now = Date()
+            let recentKeys = Set(roomCreatedAt.compactMap { key, at in
+                now.timeIntervalSince(at) < Self.roomRecentGraceSeconds ? key : nil
+            })
+            let doomed = Self.roomsToPrune(
+                roomKeys: Set(rooms.keys).union(docs.keys),
+                listedChatIds: listedChatIds,
+                listedProjectIds: listedProjectIds,
+                peopleKeys: peopleKeys,
+                recentKeys: recentKeys
+            )
+            for key in doomed { wipeRoom(key) }
             firstLoginRegistryUpdated()
         } catch {
             if (error as? RelayError)?.isUnauthorized == true {
@@ -1352,6 +1394,39 @@ final class AppModel: ObservableObject {
 
     private func projectDocKey(_ projectId: Id) -> String { "proj:\(projectId)" }
 
+    /// Keys to drop after a successful registry refresh: not a listed project chat,
+    /// not a listed project's doc, not a people room, and not created in the last 60s.
+    nonisolated static func roomsToPrune(
+        roomKeys: Set<String>,
+        listedChatIds: Set<String>,
+        listedProjectIds: Set<String>,
+        peopleKeys: Set<String>,
+        recentKeys: Set<String>
+    ) -> Set<String> {
+        let listedProjectDocs = Set(listedProjectIds.map { "proj:\($0)" })
+        return Set(roomKeys.filter { key in
+            if recentKeys.contains(key) { return false }
+            if peopleKeys.contains(key) { return false }
+            if listedChatIds.contains(key) { return false }
+            if listedProjectDocs.contains(key) { return false }
+            return true
+        })
+    }
+
+    /// Whether to dial a room again after consecutive HTTP 403/404 endings.
+    /// True below the retry limit; false at the limit until `backoff` seconds pass.
+    nonisolated static func shouldRecreateRoom(
+        failures: Int,
+        lastFailureAt: Date?,
+        now: Date,
+        limit: Int = AppModel.roomUnavailableRetryLimit,
+        backoff: TimeInterval = AppModel.roomUnavailableBackoffSeconds
+    ) -> Bool {
+        if failures < limit { return true }
+        guard let lastFailureAt else { return true }
+        return now.timeIntervalSince(lastFailureAt) >= backoff
+    }
+
     // MARK: Rooms
 
     /// `restored`: a doc imported from the on-device store with the relay
@@ -1359,7 +1434,24 @@ final class AppModel: ObservableObject {
     private func ensureRoom(projectId: Id, key: Id, roomChat: String,
                             restored: (doc: CoreChatDoc, cursor: Int64, pending: [(String, Data)], messages: [Message]?)? = nil) {
         guard rooms[key] == nil else { return }
-        let doc = restored?.doc ?? CoreChatDoc(key: key)
+        guard Self.shouldRecreateRoom(
+            failures: roomUnavailableFailures[key] ?? 0,
+            lastFailureAt: roomUnavailableAt[key],
+            now: Date()
+        ) else { return }
+        // After an unavailable drop the doc/messages stay; reuse them with the
+        // saved cursor so history is not fetched again.
+        let effective: (doc: CoreChatDoc, cursor: Int64, pending: [(String, Data)], messages: [Message]?)?
+        if let restored {
+            effective = restored
+        } else if let kept = docs[key] {
+            let cursor = roomRestoredCursors.removeValue(forKey: key) ?? 0
+            let pending = store?.loadPending()[key] ?? []
+            effective = (kept, cursor, pending, messages[key])
+        } else {
+            effective = nil
+        }
+        let doc = effective?.doc ?? CoreChatDoc(key: key)
         let isProjectDoc = roomChat == projectDocChatId
         docs[key] = doc
         doc.onChange { [weak self] touched in
@@ -1395,7 +1487,7 @@ final class AppModel: ObservableObject {
             }
         }
         let room = SessionRoom(projectId: projectId, key: key, roomChat: roomChat, doc: doc, api: api,
-                               cursor: restored?.cursor ?? 0, pending: restored?.pending ?? []) { [weak self] in
+                               cursor: effective?.cursor ?? 0, pending: effective?.pending ?? []) { [weak self] in
             self?.deviceId ?? "ios:unpaired"
         }
         room.onCursorMoved = { [weak self] in self?.markDirty(key) }
@@ -1406,6 +1498,11 @@ final class AppModel: ObservableObject {
             // Backfill rows after a reconnect must not light unread; only live
             // rows after the next catch-up do (Loro is ahead of /me/unread).
             if l != .live { self.caughtUp.remove(key) }
+            // Real live (not the fake .live on 403/404, which skips onLink).
+            if l == .live {
+                self.roomUnavailableFailures[key] = nil
+                self.roomUnavailableAt[key] = nil
+            }
         }
         room.onLinkState = { [weak self] state in self?.setRoomLink(key, state) }
         room.presenceUser = { [weak self] in self?.user.map { ($0.id, $0.login) } }
@@ -1441,20 +1538,78 @@ final class AppModel: ObservableObject {
             }
         }
         room.onUnavailable = { [weak self] in
-            Task { await self?.refreshPeople() }
+            Task { @MainActor in self?.handleRoomUnavailable(key: key) }
         }
         rooms[key] = room
-        if let restored {
+        roomCreatedAt[key] = Date()
+        if let effective {
             // Paint from disk now; the room's backfill only adds what is new.
             if isProjectDoc {
                 applyProjectDoc(projectId)
-            } else if let list = restored.messages {
+            } else if let list = effective.messages {
                 messages[key] = list
             } else {
                 emitSnapshot(key)
             }
         }
         room.start()
+    }
+
+    /// HTTP 403/404: drop the dead room (keep doc/messages/store), count the
+    /// failure, then refresh lists so a still-listed chat gets a fresh room.
+    private func handleRoomUnavailable(key: Id) {
+        guard let room = rooms[key] else { return }
+        let projectId = room.projectId
+        roomRestoredCursors[key] = room.cursor
+        room.stop()
+        rooms[key] = nil
+        roomLinks[key] = nil
+        roomLinkSince[key] = nil
+        roomCreatedAt[key] = nil
+        caughtUp.remove(key)
+        roomUnavailableFailures[key, default: 0] += 1
+        roomUnavailableAt[key] = Date()
+        Task {
+            if projectId == peopleSlot {
+                await refreshPeople()
+                // Unlisted: refreshPeople only wipes live people rooms; the kept
+                // doc would otherwise sit forever with no room to prune.
+                if peopleChat(key) == nil, rooms[key] == nil { wipeRoom(key) }
+            } else {
+                await refreshRegistry()
+            }
+        }
+    }
+
+    /// Stop and clear a room that the relay no longer lists (docs and store too).
+    private func wipeRoom(_ key: Id) {
+        rooms[key]?.stop()
+        rooms[key] = nil
+        docs[key] = nil
+        messages[key] = nil
+        roomLinks[key] = nil
+        roomLinkSince[key] = nil
+        unacked[key] = nil
+        roomCreatedAt[key] = nil
+        roomRestoredCursors[key] = nil
+        roomUnavailableFailures[key] = nil
+        roomUnavailableAt[key] = nil
+        forgetDoc(key)
+    }
+
+    /// Re-dial every listed chat after the unavailable backoff was cleared.
+    private func recreateListedRooms() {
+        for p in projects {
+            ensureRoom(projectId: p.id, key: projectDocKey(p.id), roomChat: projectDocChatId)
+        }
+        for list in chats.values {
+            for c in list {
+                ensureRoom(projectId: c.projectId, key: c.id, roomChat: c.id)
+            }
+        }
+        for c in peopleChats {
+            ensureRoom(projectId: peopleSlot, key: c.id, roomChat: c.id)
+        }
     }
 
     /// A list change from the doc: re-read now when the room was quiet, else once
@@ -1868,16 +2023,14 @@ final class AppModel: ObservableObject {
             // Drop rooms/docs for people chats the relay no longer lists so a
             // restored chat cannot reconnect forever on HTTP 403.
             let listed = Set(list.map(\.id))
+            let now = Date()
             for key in Set(rooms.keys).union(docs.keys) {
                 guard !listed.contains(key) else { continue }
                 guard rooms[key]?.projectId == peopleSlot else { continue }
-                rooms[key]?.stop()
-                rooms[key] = nil
-                docs[key] = nil
-                messages[key] = nil
-                roomLinks[key] = nil
-                unacked[key] = nil
-                forgetDoc(key)
+                if let at = roomCreatedAt[key], now.timeIntervalSince(at) < Self.roomRecentGraceSeconds {
+                    continue
+                }
+                wipeRoom(key)
             }
             savePeopleCache(raw)
         } catch {
@@ -3730,6 +3883,14 @@ final class AppModel: ObservableObject {
         }) {
             path.removeAll()
         }
+        // Stop this project's chat rooms and its project-doc room at once so
+        // they do not keep dialing after the lists drop them.
+        var keys = Set((chats[projectId] ?? []).map(\.id))
+        keys.insert(projectDocKey(projectId))
+        for (key, room) in rooms where room.projectId == projectId {
+            keys.insert(key)
+        }
+        for key in keys { wipeRoom(key) }
         projects.removeAll { $0.id == projectId }
         chats[projectId] = nil
         if archivedProjectIds.contains(projectId) {
