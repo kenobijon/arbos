@@ -8,6 +8,7 @@ pub mod avatar;
 pub mod doc;
 pub mod ids;
 pub mod local;
+pub mod redact;
 pub mod route;
 pub mod rpc;
 pub mod skill;
