@@ -51,7 +51,8 @@
   "doc_checks": {
     "no_duplicate_status": true,
     "no_empty_result_rows": true,
-    "no_repeated_sentence": true
+    "no_repeated_sentence": true,
+    "no_truncated_reply": true
   },
   "regression": "busy-agent quick replies (bc-d117b386, #1349) + reply lost after act (#1355)"
 }

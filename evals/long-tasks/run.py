@@ -223,6 +223,8 @@ class Lane(threading.Thread):
                 reasons.append(f"{checks['empty_result_rows']} result row(s) with tool cards but no text (reply lost)")
             if dc.get("no_repeated_sentence") and checks["repeated_sentences"]:
                 reasons.append(f"a sentence appears twice in one bubble: {checks['repeated_sentences'][:2]}")
+            if dc.get("no_truncated_reply") and checks["truncated"]:
+                reasons.append(f"a done bubble ends mid-sentence: {checks['truncated'][:2]}")
             if dc.get("forbid_text_regex"):
                 hits = [t[:80] for t in checks["texts"] if re.search(dc["forbid_text_regex"], t, re.I)]
                 if hits:
@@ -271,7 +273,7 @@ class Lane(threading.Thread):
 def doc_checks(docs):
     """Whole-transcript checks over every chat doc a task touched (rows are deduplicated by id)."""
     handoffs = 0
-    dups, repeated, texts = [], [], []
+    dups, repeated, texts, truncated = [], [], [], []
     empty_result_rows = 0
     seen_rows = set()
     for doc in docs:
@@ -293,13 +295,17 @@ def doc_checks(docs):
             tools = [p for p in m.get("parts", []) if p.get("kind") == "tool"]
             if text:
                 texts.append(text)
+                # a finished bubble that stops on a comma / dash / mid-word (no closing punctuation,
+                # bracket, quote or code tick) was cut off (#1411)
+                if m.get("status") == "done" and len(text) > 30 and not re.search(r"[.!?…:)\]\"'`*_]\s*$|\n\s*[-•*\d].*$", text):
+                    truncated.append(text[-60:])
                 sentences = [x.strip() for x in re.split(r"(?<=[.!?])\s+", text) if len(x.strip()) > 25]
                 for x in sentences:
                     if sentences.count(x) > 1 and x[:60] not in repeated:
                         repeated.append(x[:60])
             elif tools and m.get("turnRole") != "ack" and m.get("status") == "done":
                 empty_result_rows += 1
-    return {"handoffs": handoffs, "dup_status": dups, "empty_result_rows": empty_result_rows, "repeated_sentences": repeated, "texts": texts}
+    return {"handoffs": handoffs, "dup_status": dups, "empty_result_rows": empty_result_rows, "repeated_sentences": repeated, "texts": texts, "truncated": truncated}
 
 
 def main():
