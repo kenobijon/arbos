@@ -148,6 +148,20 @@ RUN userdel -r node \
 # The commit and image version agentd reports in its box hello (relay admin `agentd.sha`).
 ARG AGENTD_SHA=unknown
 ARG IMAGE_VERSION=unknown
+
+# --- Self-reference (docs/agent-self-reference-repo.md): a read-only shallow checkout of the public
+# unarbos/arbos tree at this very commit, so an agent asked how Arbos works (encryption, privacy,
+# architecture) reads the real code and docs instead of guessing. Root-owned, every write bit off;
+# agentd (root) refreshes it to main's tip at boot (selfref.rs). Public repo: no token involved.
+# `safe.directory` lets the workspace users run `git log`/`git grep` on a root-owned tree.
+ARG ARBOS_SRC_REPO=https://github.com/unarbos/arbos.git
+RUN mkdir -p /opt/arbos/src && cd /opt/arbos/src \
+ && git init -q && git remote add origin "$ARBOS_SRC_REPO" \
+ && ref="$AGENTD_SHA" && case "$ref" in unknown|"") ref=main ;; esac \
+ && GIT_TERMINAL_PROMPT=0 git fetch -q --depth 1 origin "$ref" \
+ && git checkout -q -B main FETCH_HEAD \
+ && git config --system --add safe.directory /opt/arbos/src \
+ && chown -R root:root /opt/arbos/src && chmod -R a-w /opt/arbos/src
 ENV ARBOS_AGENTD_SHA=$AGENTD_SHA \
     ARBOS_IMAGE_VERSION=$IMAGE_VERSION
 
