@@ -49,6 +49,9 @@ struct ChatView: View {
     @State private var scroller: ScrollViewProxy?
     /// Scrolled more than ~120 pt above the end: show Grok's round chevron.
     @State private var awayFromBottom = false
+    /// Follow the end as rows stream / grow. Cleared when the user scrolls up;
+    /// restored when they return near the end or tap the chevron (Mac stick pin).
+    @State private var pinnedToBottom = true
     @State private var demoRan = false
     @State private var demoQueue: [String] = []
     @StateObject private var recorder = MemoRecorder()
@@ -766,6 +769,8 @@ struct ChatView: View {
     /// chevron, right-aligned with the composer, 18 pt above it.
     private var scrollToBottomButton: some View {
         Button {
+            pinnedToBottom = true
+            awayFromBottom = false
             withAnimation(.easeOut(duration: 0.3)) { scroller?.scrollTo("bottom", anchor: .bottom) }
         } label: {
             ZStack {
@@ -932,7 +937,11 @@ struct ChatView: View {
                 composerFocused = false
                 searchFocused = false
             }
-            .modifier(AwayFromBottomReporter(away: $awayFromBottom))
+            .modifier(AwayFromBottomReporter(away: $awayFromBottom, pinned: $pinnedToBottom) {
+                // Streaming / new-row growth while pinned: re-stick without animation so
+                // each delta glides with layout instead of fighting a scroll animation.
+                proxy.scrollTo("bottom", anchor: .bottom)
+            })
             // Nearing the top: the next older slice of rows joins the view tree; a channel
             // also asks the server for one older page.
             .modifier(NearTopReporter(enabled: true) {
@@ -952,11 +961,17 @@ struct ChatView: View {
                 }
             }
             .onAppear { settleToBottom(proxy) }
-            .onChange(of: rows.last?.id) { old, _ in
+            // `rows.last` (not only its id): a streaming reply keeps the same id while its
+            // text grows; pinning must follow that growth too (#1444 / lazy window #1399).
+            .onChange(of: rows.last) { old, new in
                 if old == nil {
                     settleToBottom(proxy)
-                } else {
-                    withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("bottom", anchor: .bottom) }
+                } else if pinnedToBottom {
+                    if old?.id != new?.id {
+                        withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("bottom", anchor: .bottom) }
+                    } else {
+                        proxy.scrollTo("bottom", anchor: .bottom)
+                    }
                 }
             }
             .onChange(of: rows.count) { old, new in
@@ -968,10 +983,13 @@ struct ChatView: View {
                 if ready { settleToBottom(proxy) }
             }
             .onChange(of: streaming) { _, _ in
+                guard pinnedToBottom else { return }
                 withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("bottom", anchor: .bottom) }
             }
             .onChange(of: composerFocused) { _, focused in
                 guard focused else { return }
+                pinnedToBottom = true
+                awayFromBottom = false
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
                     withAnimation(.easeOut(duration: 0.25)) { proxy.scrollTo("bottom", anchor: .bottom) }
                 }
@@ -983,6 +1001,8 @@ struct ChatView: View {
     /// `scrollTo` runs before layout knows the content size, so repeat after
     /// the next runloop turn and once more after the rows settle.
     private func settleToBottom(_ proxy: ScrollViewProxy) {
+        pinnedToBottom = true
+        awayFromBottom = false
         proxy.scrollTo("bottom", anchor: .bottom)
         DispatchQueue.main.async { proxy.scrollTo("bottom", anchor: .bottom) }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { proxy.scrollTo("bottom", anchor: .bottom) }
@@ -1720,6 +1740,9 @@ struct ChatView: View {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !pending.isEmpty else { return }
         Haptics.send()
+        // A send means follow the reply: re-pin even if the reader had scrolled up.
+        pinnedToBottom = true
+        awayFromBottom = false
         if isChannel {
             // Rule 3/9: the composer sends through the shared client's `sendText`.
             guard !text.isEmpty else { return }
@@ -2004,16 +2027,40 @@ private struct NearTopReporter: ViewModifier {
 }
 
 /// Reports when the scroll view sits more than 120 pt above its end (iOS 18+;
-/// earlier systems never show the chevron).
+/// earlier systems never show the chevron). While `pinned` is true, content
+/// growth (streaming row height, a new row) must not look like a user scroll-up:
+/// re-stick instead of flipping `away` and leaving the transcript stranded.
 private struct AwayFromBottomReporter: ViewModifier {
     @Binding var away: Bool
+    @Binding var pinned: Bool
+    var onStick: () -> Void
+
+    private struct Sample: Equatable {
+        var height: CGFloat
+        var distance: CGFloat
+    }
 
     func body(content: Content) -> some View {
         if #available(iOS 18, *) {
-            content.onScrollGeometryChange(for: Bool.self) { g in
-                g.contentOffset.y + g.containerSize.height < g.contentSize.height - 120
-            } action: { _, isAway in
+            content.onScrollGeometryChange(for: Sample.self) { g in
+                Sample(
+                    height: g.contentSize.height,
+                    distance: g.contentSize.height - g.contentOffset.y - g.containerSize.height
+                )
+            } action: { old, new in
+                let grew = new.height > old.height + 0.5
+                if pinned && grew {
+                    away = false
+                    onStick()
+                    return
+                }
+                let isAway = new.distance > 120
                 away = isAway
+                if isAway {
+                    pinned = false
+                } else {
+                    pinned = true
+                }
             }
         } else {
             content
