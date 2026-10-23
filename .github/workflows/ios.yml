@@ -26,7 +26,13 @@ name: iOS
 
 on:
   push:
-    branches: [main, arbos-v2, "feedback/**"]
+    # main and arbos-v2 only. feedback/** branches used to archive here too (#1295), but those
+    # archive-only runs share GitHub's hosted macos-15 pool with main's uploads: on the night of
+    # 2026-10-23 six branch runs sat queued ahead of main's one pending run and no TestFlight
+    # build processed for 90 min. The Rust gate already builds every feedback branch's iOS app
+    # on the EC2 Mac (scripts/feedback/ios-gate.sh); a branch archive here is on demand via
+    # workflow_dispatch.
+    branches: [main, arbos-v2]
     paths:
       - "apps/ios/**"
       - ".github/workflows/ios.yml"
@@ -66,7 +72,9 @@ concurrency:
 jobs:
   phone:
     name: Build and upload the phone app
-    runs-on: macos-15
+    # The repository variable ARBOS_IOS_RUNNER (e.g. `arbos-mac`, the self-hosted EC2 Mac) moves
+    # the lane off GitHub's hosted pool once that runner has fastlane; empty = macos-15.
+    runs-on: ${{ vars.ARBOS_IOS_RUNNER || 'macos-15' }}
     timeout-minutes: 45
     env:
       APP_DIR: apps/ios/Arbos
