@@ -7,6 +7,7 @@ pub mod channels;
 pub mod composer;
 pub mod connectors;
 pub mod create_entity;
+pub mod dropzone;
 pub mod feedback;
 pub mod frost;
 pub mod glass;
