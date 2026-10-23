@@ -38,6 +38,7 @@ use crate::ui::motion::{ease_out_cubic, PulseClock, COMPOSER_DROP_MS, SHAKE_MS};
 use crate::ui::onboarding;
 use crate::ui::people;
 use crate::ui::profiles;
+use crate::ui::react_menu;
 use crate::ui::routines::{RoutinesEvent, RoutinesPanel};
 use crate::ui::secrets::{SecretsEvent, SecretsPanel};
 use crate::ui::servers;
@@ -58,7 +59,7 @@ actions!(
 );
 
 /// Left inset for the conversation header while the sidebar is hidden: the window's traffic lights.
-/// The sidebar's collapse control sits at the same inset, so it never moves when the pane folds.
+/// The expand control (when the rail is folded) sits at this inset beside the lights.
 pub(crate) const TRAFFIC_LIGHTS_INSET: f32 = 72.0;
 
 /// What the shared name field (`agent_name_input`) renames when Return is pressed.
@@ -204,6 +205,12 @@ pub struct Shell {
         crate::model::Id,
         gpui::Point<gpui::Pixels>,
     )>,
+    /// The quick-react emoji bar (`react_menu`): (chat, message, the click).
+    pub(crate) react_menu: Option<(
+        crate::model::Id,
+        crate::model::Id,
+        gpui::Point<gpui::Pixels>,
+    )>,
     /// `ARBOS_RIG_MESSAGE_MENU=x,y` (screenshot rig): opens the menu once the
     /// open chat has a message; cleared when it has.
     rig_message_menu: Option<gpui::Point<gpui::Pixels>>,
@@ -226,9 +233,6 @@ pub struct Shell {
     /// app-01M5ATBWSY9E1HHBKH2QQVDEZX). Nothing renders it; escapes and
     /// click-outside still clear it so leftover true never sticks.
     pub(crate) menu_open: bool,
-    /// The left pane's search field is shown (the magnifier in the top strip
-    /// toggles it; it stays while a query is typed).
-    pub(crate) search_open: bool,
     /// D88: the name/invite/channel field of the server sheets and the inline channel rename
     /// on the server page; `channel_rename` is the channel being renamed there.
     pub(crate) server_input: Entity<ComposerInput>,
@@ -348,6 +352,15 @@ impl Shell {
                     this.message_menu = Some((chat_id.clone(), message_id.clone(), *position));
                     cx.notify();
                 }
+                TranscriptEvent::ReactMenu {
+                    chat_id,
+                    message_id,
+                    position,
+                } => {
+                    this.close_popovers(cx);
+                    this.react_menu = Some((chat_id.clone(), message_id.clone(), *position));
+                    cx.notify();
+                }
                 TranscriptEvent::Reply {
                     chat_id,
                     message_id,
@@ -410,7 +423,10 @@ impl Shell {
                 }
             }
             let st = state.read(cx);
-            if st.add_members_server.is_some() {
+            if st.add_members_secret.is_some() {
+                this.people_input
+                    .update(cx, |input, _| input.set_placeholder("Search people"));
+            } else if st.add_members_server.is_some() {
                 this.people_input
                     .update(cx, |input, _| input.set_placeholder("Add people"));
             } else if st.add_members_target.is_some() {
@@ -768,6 +784,7 @@ impl Shell {
             chat_menu: None,
             chat_delete_armed: false,
             message_menu: None,
+            react_menu: None,
             rig_message_menu: message_menu::rig_anchor(),
             renaming_tab: None,
             tab_rename_input,
@@ -785,7 +802,6 @@ impl Shell {
             fixture_drag_over: std::env::var("ARBOS_FIXTURE_DRAG_OVER").is_ok_and(|v| v == "1"),
             signing_in: false,
             menu_open: false,
-            search_open: false,
             server_input,
             channel_rename: None,
             invite_expires: false,
@@ -802,7 +818,10 @@ impl Shell {
             profile_scroll: ScrollHandle::new(),
             profile_scroll_epoch: 0,
             agent_pick_reveal: false,
-            settings_open_at_bottom: open_settings.as_deref() == Some("bottom"),
+            // `ARBOS_OPEN_SETTINGS_BOTTOM=1` does the same for any Settings page (a Secret
+            // page's People / Activity cards sit below the fold on the rig).
+            settings_open_at_bottom: open_settings.as_deref() == Some("bottom")
+                || std::env::var("ARBOS_OPEN_SETTINGS_BOTTOM").is_ok_and(|v| v == "1"),
             profile_edit_open: false,
             name_input,
             handle_input,
@@ -1840,16 +1859,14 @@ impl Shell {
             cx.notify();
             return;
         }
-        if self.search_open
-            && self
-                .search_input
-                .read(cx)
-                .focus_handle(cx)
-                .is_focused(window)
+        if self
+            .search_input
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window)
         {
-            // Escape in the search field clears and folds it.
+            // Escape in the Search field clears it and returns to the composer.
             self.search_input.update(cx, |i, cx| i.clear(cx));
-            self.search_open = false;
             Composer::focus(&self.composer, window, cx);
             cx.notify();
             return;
@@ -1886,7 +1903,8 @@ impl Shell {
             || self.tab_menu_open
             || self.row_menu.is_some()
             || self.chat_menu.is_some()
-            || self.message_menu.is_some();
+            || self.message_menu.is_some()
+            || self.react_menu.is_some();
         self.close_popovers(cx);
         if floating {
             return;
@@ -2042,6 +2060,7 @@ impl Shell {
         self.channel_menu = None;
         self.chat_menu = None;
         self.message_menu = None;
+        self.react_menu = None;
         self.member_remove_armed = None;
         self.member_menu = Some(member_menu::MemberMenu { space_id, key, at });
         cx.notify();
@@ -2058,6 +2077,7 @@ impl Shell {
             || self.channel_menu.is_some()
             || self.chat_menu.is_some()
             || self.message_menu.is_some()
+            || self.react_menu.is_some()
             || self.member_menu.is_some()
         {
             self.menu_open = false;
@@ -2074,6 +2094,7 @@ impl Shell {
             self.chat_menu = None;
             self.chat_delete_armed = false;
             self.message_menu = None;
+            self.react_menu = None;
             cx.notify();
         }
     }
@@ -3598,6 +3619,9 @@ impl Render for Shell {
             }
         }
         if let Some(menu) = message_menu::render(self, window, cx) {
+            root = root.child(menu);
+        }
+        if let Some(menu) = react_menu::render(self, window, cx) {
             root = root.child(menu);
         }
         // Rig: the hook asked for the first other member's row menu on the group pane.
