@@ -22,7 +22,8 @@ use crate::model::{
     new_id, now_ms, Attachment, AttachmentKind, BoxState, ChannelSel, ChannelsView, Chat, ChatKind,
     ConnectorsView, Effort, Id, Link, LinkState, LocalView, Machine, Message, MessageStatus,
     NewSecret, Part, Project, ProjectDocView, ProjectSecrets, QuestionState, Role, Routine,
-    RoutineRun, RoutineTrigger, SecretsView, ServerInfo, Skill, StatusKind,
+    RoutineRun, RoutineTrigger, SecretDirector, SecretScope, SecretsView, ServerInfo, Skill,
+    StatusKind,
 };
 use crate::sign_in;
 use crate::sync::{ClientCommand, SyncEvent, SyncSource};
@@ -70,7 +71,11 @@ pub struct AddTarget {
     pub handles: Vec<String>,
     /// Agents already in (groups only; servers have none).
     pub agents: Vec<Id>,
+    /// People only: no agent rows (servers, and a secret's People list).
     pub is_server: bool,
+    /// Opened from a Secret page's "Give a person access…" (spec §7.7): the sheet is titled
+    /// for that and Add puts the picks on the secret's People list.
+    pub is_secret: bool,
 }
 
 /// Which server sheet is open over the shell (D88).
@@ -364,11 +369,16 @@ pub struct AppState {
     awaiting_group: Option<Vec<String>>,
     /// The sheet invites into this project instead of starting a DM (step 3).
     pub invite_target: Option<Id>,
+    /// "Who may message X" (agent-to-agent messaging): the agent whose grant list a pick in
+    /// the people sheet adds to.
+    pub message_grant_target: Option<Id>,
     /// The group picker adds to this people group instead of creating one
     /// (the group pane's "Add members").
     pub add_members_target: Option<Id>,
     /// Server pane › Members › Add members (D88): the server the picks go into.
     pub add_members_server: Option<Id>,
+    /// Secret page › People › "Give a person access…": the secret the picks go onto.
+    pub add_members_secret: Option<Id>,
     /// An invite code handed over by `arbos://join/<code>`; the shell puts it in the Join sheet.
     pub pending_join_code: Option<String>,
     /// Avatar reply reaction window per project (ms): plays once after a turn.
@@ -757,8 +767,10 @@ impl AppState {
             awaiting_dm: None,
             awaiting_group: None,
             invite_target: None,
+            message_grant_target: None,
             add_members_target: None,
             add_members_server: None,
+            add_members_secret: None,
             pending_join_code: None,
             avatar_reply_until: HashMap::new(),
             avatar_picker: None,
@@ -3020,6 +3032,7 @@ impl AppState {
                 subagent_id: None,
                 subagent_name: None,
                 handoff_messages: None,
+                agent_reply_to: None,
                 reactions: Default::default(),
                 in_reply_to: None,
                 routine_name: None,
@@ -3743,6 +3756,7 @@ impl AppState {
                 subagent_id: None,
                 subagent_name: None,
                 handoff_messages: None,
+                agent_reply_to: None,
                 reactions: Default::default(),
                 in_reply_to: None,
                 routine_name: None,
@@ -4135,6 +4149,7 @@ impl AppState {
                 subagent_id: None,
                 subagent_name: None,
                 handoff_messages: None,
+                agent_reply_to: None,
                 reactions: Default::default(),
                 in_reply_to: None,
                 usage: None,
@@ -4734,6 +4749,15 @@ impl AppState {
             }
             p.name = name.clone();
         }
+        // People-group AgentMember.handle is the @mention slug; refresh it so
+        // a mid-chat rename does not leave mentions pointed at the old name.
+        let handle = Project::mention_slug(&name);
+        for space in self.projects.iter_mut().filter(|p| p.is_people()) {
+            if let Some(a) = space.agents.iter_mut().find(|a| a.project_id == project_id) {
+                a.name = name.clone();
+                a.handle = handle.clone();
+            }
+        }
         self.renaming_project = None;
         self.profile_editing_name = false;
         self.command(ClientCommand::SetProjectName { project_id, name });
@@ -5260,6 +5284,7 @@ impl AppState {
                 subagent_id: None,
                 subagent_name: None,
                 handoff_messages: None,
+                agent_reply_to: None,
                 reactions: Default::default(),
                 in_reply_to: None,
                 routine_name: None,
@@ -5947,8 +5972,10 @@ impl AppState {
         self.new_group_picked.clear();
         self.new_group_agents.clear();
         self.invite_target = None;
+        self.message_grant_target = None;
         self.add_members_target = None;
         self.add_members_server = None;
+        self.add_members_secret = None;
         self.people_query.clear();
         self.people_error = None;
         // First frame = the known directory; the refetch behind it only repaints a change.
@@ -5977,6 +6004,50 @@ impl AppState {
         cx.notify();
     }
 
+    /// Agent pane › "Give a person access…": the same sheet; a pick lets that person's agents
+    /// message this agent (`PUT /projects/{id}/message-access`).
+    pub fn open_message_grant_picker(&mut self, project_id: Id, cx: &mut Context<Self>) {
+        self.open_new_chat(cx);
+        self.message_grant_target = Some(project_id);
+        cx.notify();
+    }
+
+    pub fn set_message_grant(
+        &mut self,
+        project_id: Id,
+        grantee: String,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == project_id) {
+            if let Some(g) = p.message_grants.iter_mut().find(|g| g.grantee == grantee) {
+                g.enabled = enabled;
+            }
+        }
+        self.command(ClientCommand::SetMessageGrant {
+            project_id,
+            grantee,
+            enabled,
+        });
+        cx.notify();
+    }
+
+    pub fn remove_message_grant(
+        &mut self,
+        project_id: Id,
+        grantee: String,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == project_id) {
+            p.message_grants.retain(|g| g.grantee != grantee);
+        }
+        self.command(ClientCommand::RemoveMessageGrant {
+            project_id,
+            grantee,
+        });
+        cx.notify();
+    }
+
     pub fn close_new_chat(&mut self, cx: &mut Context<Self>) {
         self.new_chat_open = false;
         self.new_group_open = false;
@@ -5985,8 +6056,22 @@ impl AppState {
         self.awaiting_dm = None;
         self.awaiting_group = None;
         self.invite_target = None;
+        self.message_grant_target = None;
         self.add_members_target = None;
         self.add_members_server = None;
+        self.add_members_secret = None;
+        cx.notify();
+    }
+
+    /// Secret page › People → "Give a person access…": the same picker, people only, whose
+    /// Add puts the picks on the secret's People list (spec §7.7).
+    pub fn open_secret_people_picker(&mut self, secret_id: Id, cx: &mut Context<Self>) {
+        if !self.secrets.secrets.iter().any(|s| s.id == secret_id) {
+            return;
+        }
+        self.open_new_chat(cx);
+        self.new_group_open = true;
+        self.add_members_secret = Some(secret_id);
         cx.notify();
     }
 
@@ -6002,8 +6087,25 @@ impl AppState {
         cx.notify();
     }
 
-    /// Who the Add members picker adds to (a group or a server), with who is already in.
+    /// Who the Add members picker adds to (a group, a server, or a secret's People list),
+    /// with who is already in.
     pub fn add_members_target_info(&self) -> Option<AddTarget> {
+        if let Some(secret) = self
+            .add_members_secret
+            .as_deref()
+            .and_then(|id| self.secrets.secrets.iter().find(|s| s.id == id))
+        {
+            let mut handles: Vec<String> =
+                secret.directors.iter().map(|d| d.handle.clone()).collect();
+            handles.push(self.me_handle());
+            return Some(AddTarget {
+                name: secret.env.clone(),
+                handles,
+                agents: Vec::new(),
+                is_server: true,
+                is_secret: true,
+            });
+        }
         if let Some(server) = self
             .add_members_server
             .as_deref()
@@ -6017,6 +6119,7 @@ impl AppState {
                 handles,
                 agents: Vec::new(),
                 is_server: true,
+                is_secret: false,
             });
         }
         let group = self.add_members_group()?;
@@ -6027,6 +6130,7 @@ impl AppState {
             handles,
             agents: group.agents.iter().map(|a| a.project_id.clone()).collect(),
             is_server: false,
+            is_secret: false,
         })
     }
 
@@ -6056,6 +6160,9 @@ impl AppState {
     /// the relay's next list confirms. Returns whether the calls were sent (the
     /// sheet closes then; an empty pick keeps it open with a line why).
     pub fn add_members_to_group(&mut self, cx: &mut Context<Self>) -> bool {
+        if let Some(secret_id) = self.add_members_secret.clone() {
+            return self.add_people_to_secret(secret_id, cx);
+        }
         if let Some(server_id) = self.add_members_server.clone() {
             return self.add_members_to_server(server_id, cx);
         }
@@ -6089,6 +6196,50 @@ impl AppState {
             agent_ids: plan.agent_ids,
         });
         cx.notify();
+        true
+    }
+
+    /// "Add" in the picker opened from a Secret page: `POST /secrets/{id}/people` per new
+    /// person; people already on the list are skipped. The card shows them at once (rows on,
+    /// no note yet); the relay's next list confirms.
+    fn add_people_to_secret(&mut self, secret_id: Id, cx: &mut Context<Self>) -> bool {
+        let Some(secret) = self.secrets.secrets.iter().find(|s| s.id == secret_id) else {
+            return false;
+        };
+        let me = self.me_handle();
+        let new: Vec<Person> = self
+            .new_group_picked
+            .iter()
+            .filter(|p| {
+                !p.handle.eq_ignore_ascii_case(&me)
+                    && !secret
+                        .directors
+                        .iter()
+                        .any(|d| d.user_id == p.id || d.handle.eq_ignore_ascii_case(&p.handle))
+            })
+            .cloned()
+            .collect();
+        if new.is_empty() {
+            self.people_error = Some("Pick someone who is not on the list yet".into());
+            cx.notify();
+            return false;
+        }
+        let handles: Vec<String> = new.iter().map(|p| p.handle.clone()).collect();
+        if let Some(s) = self.secrets.secrets.iter_mut().find(|s| s.id == secret_id) {
+            s.directors.extend(new.into_iter().map(|p| SecretDirector {
+                user_id: p.id,
+                handle: p.handle,
+                name: p.name,
+                avatar_url: Some(p.avatar_url),
+                note: String::new(),
+                created_at: now_ms() as i64,
+                enabled: true,
+                disabled_at: None,
+                scope: SecretScope::default(),
+                last_asked_at: None,
+            }));
+        }
+        self.secret_people_add(secret_id, handles, cx);
         true
     }
 
@@ -6250,6 +6401,19 @@ impl AppState {
             {
                 self.toggle_group_person(person, cx);
             }
+            return;
+        }
+        if let Some(project_id) = self.message_grant_target.take() {
+            self.new_chat_open = false;
+            let handle = handle.trim().trim_start_matches('@').to_string();
+            if !handle.is_empty() {
+                self.command(ClientCommand::SetMessageGrant {
+                    project_id,
+                    grantee: format!("@{handle}"),
+                    enabled: true,
+                });
+            }
+            cx.notify();
             return;
         }
         match self.invite_target.clone() {
@@ -6868,6 +7032,9 @@ impl AppState {
             if let Some(n) = body.get("note").and_then(|v| v.as_str()) {
                 s.note = n.to_string();
             }
+            if let Some(o) = body.get("others_ask").and_then(|v| v.as_str()) {
+                s.others_ask = o.to_string();
+            }
         }
         self.command(ClientCommand::SecretPatch { id, body });
         cx.notify();
@@ -6918,6 +7085,50 @@ impl AppState {
             enabled,
             note,
         });
+        cx.notify();
+    }
+
+    /// One People row's switch or note. Optimistic; the relay's view follows.
+    pub fn secret_person(
+        &mut self,
+        id: Id,
+        user_id: Id,
+        enabled: bool,
+        note: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(s) = self.secrets.secrets.iter_mut().find(|s| s.id == id) {
+            if let Some(d) = s.directors.iter_mut().find(|d| d.user_id == user_id) {
+                d.enabled = enabled;
+                d.disabled_at = (!enabled).then(|| now_ms() as i64);
+                if let Some(n) = &note {
+                    d.note = n.clone();
+                }
+            }
+        }
+        self.command(ClientCommand::SecretPerson {
+            id,
+            user_id,
+            enabled,
+            note,
+        });
+        cx.notify();
+    }
+
+    /// People picked in the member picker join the list (rows on, no note yet).
+    pub fn secret_people_add(&mut self, id: Id, handles: Vec<String>, cx: &mut Context<Self>) {
+        if handles.is_empty() {
+            return;
+        }
+        self.command(ClientCommand::SecretPeopleAdd { id, handles });
+        cx.notify();
+    }
+
+    pub fn secret_person_remove(&mut self, id: Id, user_id: Id, cx: &mut Context<Self>) {
+        if let Some(s) = self.secrets.secrets.iter_mut().find(|s| s.id == id) {
+            s.directors.retain(|d| d.user_id != user_id);
+        }
+        self.command(ClientCommand::SecretPersonRemove { id, user_id });
         cx.notify();
     }
 
@@ -7395,6 +7606,10 @@ impl AppState {
 
     pub fn toggle_call_mute(&mut self, cx: &mut Context<Self>) {
         if let Some(c) = self.my_call.as_mut() {
+            // Hosted group calls: listen-only until the host invites you to speak.
+            if c.call.can_speak == Some(false) {
+                return;
+            }
             c.muted = !c.muted;
             let _ = self.call_commands.send(CallCmd::SetMuted(c.muted));
             cx.notify();
@@ -7470,10 +7685,11 @@ impl AppState {
             cx.notify();
             return;
         };
+        let listen_only = call.can_speak == Some(false);
         let active = self.my_call.get_or_insert_with(|| ActiveCall {
             call: call.clone(),
             status: CallStatus::Connecting,
-            muted: false,
+            muted: listen_only,
             camera,
             participants: Vec::new(),
             local_video: None,
@@ -7486,6 +7702,9 @@ impl AppState {
         });
         active.call = call.clone();
         active.status = CallStatus::Connecting;
+        if listen_only {
+            active.muted = true;
+        }
         if created {
             active.outgoing = true;
             active.reachable = reachable_line(&reachable);
@@ -7495,6 +7714,9 @@ impl AppState {
             token,
             camera,
         });
+        if listen_only {
+            let _ = self.call_commands.send(CallCmd::SetMuted(true));
+        }
         self.incoming_call = None;
         self.sync_tones();
         cx.notify();
@@ -7899,14 +8121,36 @@ pub fn decode_image(bytes: &[u8]) -> Option<RenderImage> {
     decode_rgba(bytes).and_then(bgra_frame)
 }
 
+/// Longest side kept for chat-bubble (and lightbox) bitmaps.
+/// Bubbles paint at most ~360×420 pt; 2× covers Retina. Caps GPU memory so
+/// scrolling a chat full of screenshots stays smooth (feedback
+/// app-01M5MXPJZARN5QMCE3EZ3EMSGW).
+pub const CHAT_IMAGE_MAX_SIDE: u32 = 840;
+
+/// Shrink `img` so its longer side is at most `CHAT_IMAGE_MAX_SIDE`.
+pub fn downscale_for_chat(img: image::RgbaImage) -> image::RgbaImage {
+    let (w, h) = img.dimensions();
+    let long = w.max(h);
+    if long <= CHAT_IMAGE_MAX_SIDE {
+        return img;
+    }
+    let scale = CHAT_IMAGE_MAX_SIDE as f32 / long as f32;
+    let nw = ((w as f32) * scale).round().max(1.0) as u32;
+    let nh = ((h as f32) * scale).round().max(1.0) as u32;
+    image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Triangle)
+}
+
 /// The picture, plus a copy with its uniform border trimmed when there is one
 /// (feedback chat-preview-cards-2026-10-23: a screenshot's empty page margin
-/// must not become a white band in the bubble). The viewer shows the full picture.
+/// must not become a white band in the bubble). The viewer shows the untrimmed
+/// picture. Both are capped to [`CHAT_IMAGE_MAX_SIDE`] so the transcript can
+/// scroll without holding full-resolution textures.
 pub fn decode_image_pair(bytes: &[u8]) -> Option<(RenderImage, Option<RenderImage>)> {
     let rgba = decode_rgba(bytes)?;
     let trimmed = trim_rect(&rgba)
-        .map(|(x, y, w, h)| image::imageops::crop_imm(&rgba, x, y, w, h).to_image());
-    let full = bgra_frame(rgba)?;
+        .map(|(x, y, w, h)| image::imageops::crop_imm(&rgba, x, y, w, h).to_image())
+        .map(downscale_for_chat);
+    let full = bgra_frame(downscale_for_chat(rgba))?;
     Some((full, trimmed.and_then(bgra_frame)))
 }
 
@@ -8351,5 +8595,31 @@ mod trim_tests {
             }
         });
         assert!(trim_rect(&img).is_none());
+    }
+}
+
+#[cfg(test)]
+mod chat_image_scale_tests {
+    use super::{downscale_for_chat, CHAT_IMAGE_MAX_SIDE};
+    use image::{Rgba, RgbaImage};
+
+    #[test]
+    fn a_small_picture_is_left_alone() {
+        let img = RgbaImage::from_pixel(320, 200, Rgba([10, 20, 30, 255]));
+        let out = downscale_for_chat(img);
+        assert_eq!(out.dimensions(), (320, 200));
+    }
+
+    #[test]
+    fn a_huge_screenshot_fits_the_chat_budget() {
+        // Typical Retina capture: far past the bubble's paint size.
+        let img = RgbaImage::from_pixel(3024, 1964, Rgba([40, 40, 40, 255]));
+        let out = downscale_for_chat(img);
+        let (w, h) = out.dimensions();
+        assert_eq!(w.max(h), CHAT_IMAGE_MAX_SIDE);
+        assert!(w.min(h) < CHAT_IMAGE_MAX_SIDE);
+        // Aspect ≈ 3024/1964.
+        let ratio = w as f32 / h as f32;
+        assert!((ratio - 3024.0 / 1964.0).abs() < 0.02);
     }
 }

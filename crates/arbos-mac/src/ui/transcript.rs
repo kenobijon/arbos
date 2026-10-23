@@ -331,6 +331,11 @@ pub enum RowKind {
         names: Vec<String>,
         total: u32,
     },
+    /// Agent-to-agent messaging: this reply went back to the agent that wrote in —
+    /// "Replied to ◉ hjkb", the same line style as a hand-off.
+    RepliedTo {
+        name: String,
+    },
     /// An image or file in the chat (agent or user). `mine` right-aligns my sends.
     Attachment {
         attachment: Attachment,
@@ -444,9 +449,16 @@ pub const STICK_THRESHOLD_PX: f32 = 70.0;
 const JUMP_BUTTON_AFTER_PX: f32 = 160.0;
 
 /// Right-click on a bubble: the shell opens the message menu there.
+/// Hover face-smile: the shell opens the quick-react emoji bar there.
 /// Hover reply: the shell sets the composer's reply target.
 pub enum TranscriptEvent {
     MessageMenu {
+        chat_id: Id,
+        message_id: Id,
+        position: gpui::Point<gpui::Pixels>,
+    },
+    /// Hover react glyph → the six-emoji bar (`react_menu`).
+    ReactMenu {
         chat_id: Id,
         message_id: Id,
         position: gpui::Point<gpui::Pixels>,
@@ -944,8 +956,9 @@ impl Transcript {
             })
     }
 
-    /// Hover-only reply + copy glyphs beside a bubble (fade with the row).
-    /// After a successful copy the glyph becomes a checkmark for a moment.
+    /// Hover-only reply · copy · react glyphs beside a bubble (fade with the
+    /// row). After a successful copy the glyph becomes a checkmark for a
+    /// moment. The face-smile opens the six-emoji bar (`react_menu`).
     fn hover_reply_copy(
         &self,
         row_id: &str,
@@ -957,6 +970,8 @@ impl Transcript {
         let chat_id = self.chat_id.clone();
         let reply_msg = message_id.clone();
         let copy_msg = message_id.clone();
+        let react_chat = self.chat_id.clone();
+        let react_msg = message_id.clone();
         let just_copied = self.copied_feedback.as_ref().is_some_and(|(id, at)| {
             id == message_id && at.elapsed() < Duration::from_millis(COPY_FEEDBACK_MS)
         });
@@ -1010,6 +1025,25 @@ impl Transcript {
                     copy_color,
                 )
                 .on_click(cx.listener(move |this, _, _, cx| this.copy_message(&copy_msg, cx))),
+            )
+            .child(
+                btn(
+                    SharedString::from(format!("{row_id}#react")),
+                    "face-smile",
+                    opacity,
+                    theme.text_muted,
+                )
+                .on_click(cx.listener(
+                    move |_, event: &gpui::ClickEvent, _, cx| {
+                        if let Some(chat_id) = react_chat.clone() {
+                            cx.emit(TranscriptEvent::ReactMenu {
+                                chat_id,
+                                message_id: react_msg.clone(),
+                                position: event.position(),
+                            });
+                        }
+                    },
+                )),
             )
     }
 
@@ -1079,6 +1113,71 @@ impl Transcript {
             image,
             project_id: agent_pid,
         }
+    }
+
+    /// Grok's centred agent line: `lead` then "◉ A, ◉ B and ◉ C" with 16 pt discs. A name that
+    /// is one of my agents is a link to that agent's chat (the "open Doug" affordance).
+    fn agent_line(
+        &self,
+        lead: &str,
+        names: &[String],
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let state = self.state.read(cx);
+        let mut line = div()
+            .flex()
+            .items_center()
+            .gap(px(5.0))
+            .text_size(px(TEXT_SMALL))
+            .text_color(theme.text_muted)
+            .child(lead.to_owned());
+        let n = names.len();
+        for (i, name) in names.iter().enumerate() {
+            let mine = state
+                .projects
+                .iter()
+                .find(|p| p.name.eq_ignore_ascii_case(name) && p.kind == SpaceKind::Project);
+            let glyph: AnyElement = match mine {
+                Some(space) => crate::ui::avatars::project(space, 16.0, theme).into_any_element(),
+                // Not one of my projects (a subagent): initials on the name's gradient.
+                None => {
+                    crate::ui::avatars::element(name, name, None, 16.0, theme).into_any_element()
+                }
+            };
+            let mut who = div()
+                .id(SharedString::from(format!("agent-line-{lead}-{i}-{name}")))
+                .flex()
+                .items_center()
+                .gap(px(5.0))
+                .child(glyph)
+                .child(div().child(name.clone()));
+            if let Some(space) = mine {
+                let pid = space.id.clone();
+                let state_entity = self.state.clone();
+                who = who
+                    .cursor_pointer()
+                    .hover(|el| el.text_color(theme.text))
+                    .on_click(move |_, _, cx| {
+                        let pid = pid.clone();
+                        state_entity.update(cx, |s, cx| s.select_project(pid, cx));
+                    });
+            }
+            line = line.child(who);
+            if n >= 2 && i + 2 == n {
+                line = line.child(div().child("and"));
+            } else if i + 2 < n {
+                line = line.child(div().ml(px(-5.0)).child(","));
+            }
+        }
+        div()
+            .w_full()
+            .flex()
+            .justify_center()
+            .pt(px(10.0))
+            .pb(px(6.0))
+            .child(line)
+            .into_any_element()
     }
 
     /// The 24 pt disc for an agent's message in a people chat.
@@ -1266,8 +1365,7 @@ impl Transcript {
                 time_el,
             ));
         let (row_el, reveal) = self.hover_row(row_id, now, window, cx);
-        // Hover: reply + copy. The react glyph that opened the emoji bar is
-        // gone with the bar itself (#1370).
+        // Hover: reply · copy · react (face-smile opens the emoji bar).
         let hover_actions = (last && !live).then(|| {
             let actions = self.hover_reply_copy(row_id, message_id, reveal, theme, cx);
             div().flex().items_center().gap(px(2.0)).child(actions)
@@ -1686,49 +1784,14 @@ impl Transcript {
             RowKind::Handoff { names, total } => {
                 // "Messaged ◉ A" while only the brief went out; "N messages with
                 // ◉ A, ◉ B and ◉ C" once replies came back (Grok refs 13/58).
-                let state = self.state.read(cx);
                 let lead = if total <= names.len() as u32 {
                     "Messaged".to_string()
                 } else {
                     format!("{total} messages with")
                 };
-                let mut line = div()
-                    .flex()
-                    .items_center()
-                    .gap(px(5.0))
-                    .text_size(px(TEXT_SMALL))
-                    .text_color(theme.text_muted)
-                    .child(lead);
-                let n = names.len();
-                for (i, name) in names.iter().enumerate() {
-                    let glyph: AnyElement = match state
-                        .projects
-                        .iter()
-                        .find(|p| p.name.eq_ignore_ascii_case(name))
-                    {
-                        Some(space) => {
-                            crate::ui::avatars::project(space, 16.0, &theme).into_any_element()
-                        }
-                        // Not one of my projects (a subagent): initials on the name's gradient.
-                        None => crate::ui::avatars::element(name, name, None, 16.0, &theme)
-                            .into_any_element(),
-                    };
-                    line = line.child(glyph).child(div().child(name.clone()));
-                    if n >= 2 && i + 2 == n {
-                        line = line.child(div().child("and"));
-                    } else if i + 2 < n {
-                        line = line.child(div().ml(px(-5.0)).child(","));
-                    }
-                }
-                div()
-                    .w_full()
-                    .flex()
-                    .justify_center()
-                    .pt(px(10.0))
-                    .pb(px(6.0))
-                    .child(line)
-                    .into_any_element()
+                self.agent_line(&lead, &names, &theme, cx)
             }
+            RowKind::RepliedTo { name } => self.agent_line("Replied to", &[name], &theme, cx),
             RowKind::Attachment {
                 attachment,
                 part_id,
@@ -2753,6 +2816,21 @@ pub fn build_rows(
                         id: format!("{}#details", message.id),
                         message_id: message.id.clone(),
                         kind: RowKind::Details,
+                    });
+                }
+                // Agent-to-agent messaging: the reply went back to the agent that wrote in.
+                if let Some(name) = message
+                    .agent_reply_to
+                    .as_deref()
+                    .filter(|n| !streaming && !n.trim().is_empty())
+                {
+                    rows.push(Row {
+                        version: hash_version(&name, false),
+                        id: format!("{}#replied", message.id),
+                        message_id: message.id.clone(),
+                        kind: RowKind::RepliedTo {
+                            name: name.to_owned(),
+                        },
                     });
                 }
             }
