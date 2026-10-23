@@ -513,7 +513,7 @@ fn load_chat(state: &AppState, chat_id: &str) -> Result<ChatWithMembers, Box<Res
 }
 
 /// The chat, if the caller's user is a live member.
-fn member_chat(
+pub(crate) fn member_chat(
     state: &AppState,
     principal: &Principal,
     chat_id: &str,
@@ -2597,6 +2597,23 @@ pub fn notify_members(state: &AppState, cm: &ChatWithMembers, skip: &str, event:
         if uid != skip {
             let _ = state.db.push_user_event(&uid, event, None);
         }
+    }
+}
+
+/// After a project rename (#1481): every people chat that has this agent pushes
+/// `people_chat_updated` so clients refresh `AgentMember.handle` from the live name
+/// (handles are not stored on the membership row — they are derived at DTO time).
+pub fn notify_agent_renamed(state: &AppState, project_id: &str) {
+    let member = format!("agent:{project_id}");
+    let Ok(chats) = state.db.chats_of_member(&member) else {
+        return;
+    };
+    for cm in chats {
+        let event = PushEventDto::PeopleChatUpdated(PeopleChatUpdatedPayloadDto {
+            chat_id: cm.chat.id.clone(),
+        });
+        // Empty skip → every human member (including the renamer's other devices).
+        notify_members(state, &cm, "", &event);
     }
 }
 
