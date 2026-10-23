@@ -417,7 +417,7 @@ extension AppModel {
     /// every seventh, a relay membership line every fortieth (#1386), an image or file
     /// every twenty-fifth, a date break every three hundredth. Deterministic, so two
     /// launches render the same rows. Ends `before`; rows sit 40 s apart.
-    static func longGroupTranscript(rows: Int, before: Int64) -> [Message] {
+    nonisolated static func longGroupTranscript(rows: Int, before: Int64) -> [Message] {
         let chat = "fx-group-launch"
         let people: [(sender: String, handle: String, name: String)] = [
             ("user:fx-u3", "mira-k", "Mira Kaplan"), ("user:fx-u4", "sam", "Sam Okafor"),
