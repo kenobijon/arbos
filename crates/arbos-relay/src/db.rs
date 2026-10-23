@@ -1517,6 +1517,19 @@ impl Db {
         })
     }
 
+    /// Seq of a stored batch id, if any — used to ACK a resent push as `dup` before the people
+    /// gates (so a reconnect storm does not burn the message rate limit).
+    pub fn row_seq_for_batch(&self, room: &str, batch_id: &str) -> Result<Option<i64>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT seq FROM rows WHERE room = ?1 AND batch_id = ?2",
+                params![room, batch_id],
+                |r| r.get(0),
+            )
+            .optional()
+        })
+    }
+
     /// Append a row. Returns `(seq, dup)`; a duplicate batch id returns the existing seq (idempotent push).
     pub fn append_row(
         &self,

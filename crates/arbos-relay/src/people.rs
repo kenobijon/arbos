@@ -2501,22 +2501,33 @@ fn html_escape(s: &str) -> String {
 
 /// Why a row push into a people room was refused (sent back as an `error` frame).
 pub enum PushRefused {
-    RateLimited,
+    /// Over the message rate limit. `retry_s` is seconds until the oldest counted event leaves
+    /// the 60 s window (carried as `retryS` on the error frame).
+    RateLimited {
+        retry_s: i64,
+    },
     NotAvailable,
 }
 
 impl PushRefused {
     pub fn code(&self) -> &'static str {
         match self {
-            PushRefused::RateLimited => "rate_limited",
+            PushRefused::RateLimited { .. } => "rate_limited",
             PushRefused::NotAvailable => "not_available",
         }
     }
 
     pub fn message(&self) -> &'static str {
         match self {
-            PushRefused::RateLimited => "slow down",
+            PushRefused::RateLimited { .. } => "slow down",
             PushRefused::NotAvailable => "this chat is not available",
+        }
+    }
+
+    pub fn retry_s(&self) -> Option<i64> {
+        match self {
+            PushRefused::RateLimited { retry_s } => Some(*retry_s),
+            PushRefused::NotAvailable => None,
         }
     }
 }
@@ -2532,24 +2543,29 @@ pub fn on_room_push(
     let Principal::Device { user_id, .. } = principal else {
         return Ok(Vec::new()); // boxes (agents) are metered by their owner's credits, not here
     };
-    let limit = if young_account(state, user_id) {
-        MSGS_PER_MIN / 2
-    } else {
-        MSGS_PER_MIN
-    };
-    if state
-        .db
-        .rate_event(user_id, "msg", 60_000)
-        .is_ok_and(|n| n > limit)
-    {
-        return Err(PushRefused::RateLimited);
-    }
     let Ok(cm) = load_chat(state, chat_id) else {
         return Err(PushRefused::NotAvailable);
     };
     let humans = human_user_ids(&cm);
     if state.db.blocked_by_any(user_id, &humans).unwrap_or(false) {
         return Err(PushRefused::NotAvailable);
+    }
+    let limit = if young_account(state, user_id) {
+        MSGS_PER_MIN / 2
+    } else {
+        MSGS_PER_MIN
+    };
+    // Count first; insert only when this push is allowed. A refused reconnect storm must not
+    // keep the user over the limit forever.
+    match state.db.rate_check_and_note(user_id, "msg", 60_000, limit) {
+        Ok(true) => {}
+        Ok(false) => {
+            let retry_s = state.db.rate_retry_s(user_id, "msg", 60_000).unwrap_or(1);
+            return Err(PushRefused::RateLimited { retry_s });
+        }
+        Err(_) => {
+            return Err(PushRefused::RateLimited { retry_s: 1 });
+        }
     }
     let (head, _) = state.db.room_activity(&room_of(chat_id)).unwrap_or((0, 0));
     let event = PushEventDto::PeopleMessage(PeopleMessagePayloadDto {
@@ -2597,6 +2613,81 @@ pub fn notify_members(state: &AppState, cm: &ChatWithMembers, skip: &str, event:
         if uid != skip {
             let _ = state.db.push_user_event(&uid, event, None);
         }
+    }
+}
+
+#[cfg(test)]
+mod push_rate_tests {
+    //! Only accepted people pushes insert a rate event (#1570).
+
+    use super::tests_support::{dm, person};
+    use super::*;
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    #[test]
+    fn refused_push_adds_no_rate_event_and_push_after_window_is_accepted() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 1);
+        let (bob, _) = person(&state, 2);
+        let chat = dm(&state, &alice, &bob);
+        let limit = 3;
+        for _ in 0..limit {
+            assert!(state
+                .db
+                .rate_check_and_note(&alice, "msg", 60_000, limit)
+                .unwrap());
+        }
+        assert_eq!(state.db.rate_count(&alice, "msg", 60_000).unwrap(), limit);
+
+        // Directly at the gate: over the limit → RateLimited, count unchanged.
+        // on_room_push uses MSGS_PER_MIN (or half); fill that window instead.
+        let real_limit = MSGS_PER_MIN / 2; // young account
+        while state.db.rate_count(&alice, "msg", 60_000).unwrap() < real_limit {
+            assert!(state
+                .db
+                .rate_check_and_note(&alice, "msg", 60_000, real_limit)
+                .unwrap());
+        }
+        let before = state.db.rate_count(&alice, "msg", 60_000).unwrap();
+        let err = on_room_push(&state, &alice_dev, &chat).unwrap_err();
+        assert!(matches!(err, PushRefused::RateLimited { retry_s } if retry_s >= 1));
+        assert_eq!(
+            state.db.rate_count(&alice, "msg", 60_000).unwrap(),
+            before,
+            "refused push must not insert"
+        );
+
+        // Age every event out of the window, then a push is accepted and counted once.
+        state
+            .db
+            .with(|c| {
+                c.execute("UPDATE rate_events SET at = at - 120000", [])?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(state.db.rate_count(&alice, "msg", 60_000).unwrap(), 0);
+        assert!(on_room_push(&state, &alice_dev, &chat).is_ok());
+        assert_eq!(state.db.rate_count(&alice, "msg", 60_000).unwrap(), 1);
+    }
+
+    #[test]
+    fn rate_check_and_note_counts_first() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        assert!(state
+            .db
+            .rate_check_and_note(&alice, "msg", 60_000, 2)
+            .unwrap());
+        assert!(state
+            .db
+            .rate_check_and_note(&alice, "msg", 60_000, 2)
+            .unwrap());
+        assert!(!state
+            .db
+            .rate_check_and_note(&alice, "msg", 60_000, 2)
+            .unwrap());
+        assert_eq!(state.db.rate_count(&alice, "msg", 60_000).unwrap(), 2);
     }
 }
 
