@@ -692,24 +692,28 @@ impl Store {
         after_ms: i64,
         thread_id: Option<&str>,
         limit: i64,
-    ) -> Result<Vec<T3Row>> {
+    ) -> Result<Vec<(T3Row, Option<Value>)>> {
         self.with(|c| {
             let mut st = c.prepare(
-                "SELECT id, thread_id, subagent_id, session_id, kind, role, at, text, size FROM t3
+                "SELECT id, thread_id, subagent_id, session_id, kind, role, at, text, size, source FROM t3
                  WHERE at > ?1 AND (?2 IS NULL OR thread_id = ?2) ORDER BY at ASC, id ASC LIMIT ?3",
             )?;
             let rows = st.query_map(params![after_ms, thread_id, limit], |r| {
-                Ok(T3Row {
-                    id: r.get(0)?,
-                    thread_id: r.get(1)?,
-                    subagent_id: r.get(2)?,
-                    session_id: r.get(3)?,
-                    kind: r.get(4)?,
-                    role: r.get(5)?,
-                    at: r.get(6)?,
-                    text: r.get(7)?,
-                    size: r.get(8)?,
-                })
+                let source: Option<String> = r.get(9)?;
+                Ok((
+                    T3Row {
+                        id: r.get(0)?,
+                        thread_id: r.get(1)?,
+                        subagent_id: r.get(2)?,
+                        session_id: r.get(3)?,
+                        kind: r.get(4)?,
+                        role: r.get(5)?,
+                        at: r.get(6)?,
+                        text: r.get(7)?,
+                        size: r.get(8)?,
+                    },
+                    source.and_then(|s| serde_json::from_str::<Value>(&s).ok()),
+                ))
             })?;
             rows.collect()
         })

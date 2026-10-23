@@ -1894,20 +1894,27 @@ mod gate_record_tests {
         assert!(agent.people_wants(chat, &host, &for_me).await);
 
         let rows = agent.store.t3_after(0, Some(chat), 50).unwrap();
-        let gates: Vec<&crate::store::T3Row> = rows.iter().filter(|r| r.kind == "gate").collect();
+        let gates: Vec<&(crate::store::T3Row, Option<Value>)> =
+            rows.iter().filter(|(r, _)| r.kind == "gate").collect();
         assert_eq!(gates.len(), 2, "{rows:?}");
-        assert!(gates[0]
+        let (skip, skip_data) = gates[0];
+        assert!(skip
             .text
             .starts_with("gate skip: addressed to another agent only"));
-        assert!(gates[1].text.starts_with("gate reply: addressed to me"));
+        let skip_data = skip_data.as_ref().expect("gate row carries its facts");
+        assert_eq!(skip_data["reply"], false);
+        assert_eq!(skip_data["message_id"], for_other);
+        assert_eq!(skip_data["handle"], "doug");
+        let (reply, _) = gates[1];
+        assert!(reply.text.starts_with("gate reply: addressed to me"));
         // The window honours the chat filter and the time cursor.
         assert!(agent
             .store
             .t3_after(0, Some("other-chat"), 50)
             .unwrap()
             .is_empty());
-        let after = agent.store.t3_after(gates[1].at, Some(chat), 50).unwrap();
-        assert!(after.iter().all(|r| r.at > gates[1].at));
+        let after = agent.store.t3_after(reply.at, Some(chat), 50).unwrap();
+        assert!(after.iter().all(|(r, _)| r.at > reply.at));
         let _ = std::fs::remove_dir_all(&root);
     }
 }
