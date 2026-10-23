@@ -281,6 +281,10 @@ pub struct AppState {
     pub people_results: Vec<Person>,
     pub people_busy: bool,
     pub people_error: Option<String>,
+    /// Everyone on Arbos (`GET /users`), fetched once the account is known and
+    /// on every sheet open: the New Message sheet paints it on its first frame
+    /// instead of "Searching…" that the list then replaces.
+    pub people_directory: Vec<Person>,
     /// handle → until (ms) per chat; shown as "@sam is typing…".
     pub typing: HashMap<Id, (String, u64)>,
     /// Decoded avatars by `avatar_url`; `None` while a fetch is in flight.
@@ -661,6 +665,7 @@ impl AppState {
             people_results: Vec::new(),
             people_busy: false,
             people_error: None,
+            people_directory: Vec::new(),
             typing: HashMap::new(),
             avatars: HashMap::new(),
             accents: HashMap::new(),
@@ -1076,6 +1081,7 @@ impl AppState {
                 self.device_id = None;
                 self.room_links.clear();
                 self.relay_link = (LinkState::Live, 0);
+                self.people_directory.clear();
                 cx.notify();
             }
             SyncEvent::Paired { device_id } => {
@@ -1101,6 +1107,7 @@ impl AppState {
                 self.account = account;
                 if self.account.is_some() {
                     self.maybe_prompt_notifications();
+                    self.prefetch_directory();
                 }
                 if let Some(url) = self.account.as_ref().map(|a| a.avatar_url.clone()) {
                     self.want_avatar(url);
@@ -1108,17 +1115,18 @@ impl AppState {
                 cx.notify();
             }
             SyncEvent::PeopleSearch { query, results } => {
+                let urls: Vec<String> = results.iter().map(|p| p.avatar_url.clone()).collect();
+                for url in urls {
+                    self.want_avatar(url);
+                }
+                if is_directory_query(&query) {
+                    self.people_directory = results.clone();
+                }
                 if query == self.people_query {
-                    self.people_results = results;
-                    self.people_busy = false;
-                    let urls: Vec<String> = self
-                        .people_results
-                        .iter()
-                        .map(|p| p.avatar_url.clone())
-                        .collect();
-                    for url in urls {
-                        self.want_avatar(url);
+                    if let Some(changed) = directory_update(&self.people_results, results) {
+                        self.people_results = changed;
                     }
+                    self.people_busy = false;
                 }
                 cx.notify();
             }
@@ -5222,9 +5230,24 @@ impl AppState {
         self.add_members_target = None;
         self.add_members_server = None;
         self.people_query.clear();
-        self.people_results.clear();
         self.people_error = None;
-        self.search_people(String::new(), cx);
+        // First frame = the known directory; the refetch behind it only repaints a change.
+        let (results, busy) = sheet_first_paint(&self.people_directory);
+        self.people_results = results;
+        self.people_busy = busy;
+        self.command(ClientCommand::SearchPeople {
+            query: String::new(),
+        });
+        cx.notify();
+    }
+
+    /// Fetch the directory ahead of the first "+" (once the account is known).
+    fn prefetch_directory(&mut self) {
+        if self.people_directory.is_empty() && !self.new_chat_open {
+            self.command(ClientCommand::SearchPeople {
+                query: String::new(),
+            });
+        }
     }
 
     /// Project header "Invite": the same sheet, but a pick adds a member.
@@ -5711,6 +5734,8 @@ impl AppState {
         self.projects.clear();
         self.chats.clear();
         self.selected_project = None;
+        self.people_directory.clear();
+        self.people_results.clear();
         cx.notify();
     }
 
@@ -7268,6 +7293,93 @@ pub(crate) fn fork_title(source: &str) -> String {
         return base.to_owned();
     }
     format!("{base} (fork)")
+}
+
+/// An empty (or bare `@`) people query asks for the whole directory.
+pub(crate) fn is_directory_query(query: &str) -> bool {
+    query.trim().trim_start_matches('@').is_empty()
+}
+
+/// What the New Message sheet shows on its first frame: the known directory, and
+/// "Searching…" only when nothing is known yet (first open after sign-in, offline).
+pub(crate) fn sheet_first_paint(directory: &[Person]) -> (Vec<Person>, bool) {
+    (directory.to_vec(), directory.is_empty())
+}
+
+/// The list to show after a refresh — `None` when it equals what is on screen,
+/// so a refetch behind an open sheet never repaints an unchanged list.
+pub(crate) fn directory_update(current: &[Person], fresh: Vec<Person>) -> Option<Vec<Person>> {
+    (fresh != current).then_some(fresh)
+}
+
+#[cfg(test)]
+mod new_message_first_paint_tests {
+    //! Jacob, iPhone, 2026-10-22: the New Message sheet "loads weird" — it opened
+    //! on a spinner / "Searching…" and the people list arrived after it. The sheet
+    //! now opens on the directory it already has. Mirrors the iPhone's
+    //! `NewMessageSheetTests`.
+    use super::*;
+
+    fn person(id: &str, handle: &str) -> Person {
+        Person {
+            id: id.into(),
+            handle: handle.into(),
+            name: Some(handle.to_uppercase()),
+            ..Default::default()
+        }
+    }
+
+    fn directory() -> Vec<Person> {
+        vec![
+            person("gh_1", "allan"),
+            person("gh_2", "alw-one"),
+            person("test_3", "arbosdemo-alice"),
+        ]
+    }
+
+    #[test]
+    fn first_frame_is_the_known_directory_not_searching() {
+        let (rows, busy) = sheet_first_paint(&directory());
+        assert_eq!(rows, directory());
+        assert!(!busy, "no Searching… row over a known list");
+    }
+
+    #[test]
+    fn only_an_unknown_directory_says_searching() {
+        let (rows, busy) = sheet_first_paint(&[]);
+        assert!(rows.is_empty());
+        assert!(busy);
+    }
+
+    #[test]
+    fn unchanged_refresh_does_not_repaint() {
+        assert_eq!(directory_update(&directory(), directory()), None);
+        assert_eq!(
+            directory_update(&[], directory()),
+            Some(directory()),
+            "the first answer paints"
+        );
+        let mut renamed = directory();
+        renamed[1].name = Some("Al W.".into());
+        assert_eq!(
+            directory_update(&directory(), renamed.clone()),
+            Some(renamed)
+        );
+        let shorter = directory()[..2].to_vec();
+        assert_eq!(
+            directory_update(&directory(), shorter.clone()),
+            Some(shorter)
+        );
+    }
+
+    #[test]
+    fn directory_query_is_empty_or_a_bare_at() {
+        assert!(is_directory_query(""));
+        assert!(is_directory_query("  "));
+        assert!(is_directory_query("@"));
+        assert!(!is_directory_query("al"));
+        assert!(!is_directory_query("@al"));
+    }
 }
 
 #[cfg(test)]

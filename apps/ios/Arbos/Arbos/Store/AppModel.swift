@@ -57,6 +57,7 @@ private enum StoreKey {
     static let registry = "registry"
     static let people = "people"
     static let directory = "directory"
+    static let serversAvailable = "serversAvailable"
     static let me = "me"
     static let unread = "unread"
     static let lastChat = "lastChat"
@@ -1173,6 +1174,10 @@ final class AppModel: ObservableObject {
             directory = cached
             AvatarImageCache.shared.warm(urls: cached.map(\.avatarUrl))
         }
+        // The "+" sheet's New server row is decided before the first `GET /servers` answers.
+        if let data = store.get(StoreKey.serversAvailable) {
+            serversAvailable = data.first == 1
+        }
         if let data = store.get(StoreKey.unread), let counts = try? JSONDecoder().decode([String: Int].self, from: data) {
             unreadCounts = counts
         }
@@ -1223,6 +1228,12 @@ final class AppModel: ObservableObject {
     private func savePeopleCache(_ raw: [Any]) {
         guard let store, let data = try? JSONSerialization.data(withJSONObject: raw) else { return }
         store.put(StoreKey.people, data)
+    }
+
+    /// Remember whether this relay runs servers, so the next launch's "+" sheet
+    /// shows (or hides) New server on its first frame instead of after the first poll.
+    func rememberServersAvailable(_ on: Bool) {
+        store?.put(StoreKey.serversAvailable, Data([on ? 1 : 0]))
     }
 
     private func saveDirectoryCache() {

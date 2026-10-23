@@ -23,8 +23,18 @@ use crate::ui::theme::{Theme, PANEL_RADIUS, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
 /// The New Message / New group search field: side inset equal to the row
 /// content below it (cards 16 + row padding 14), and Grok Mac's ~14 pt
 /// placeholder (ref 57: 21 px ascender band at 2 px/pt).
-pub const SEARCH_INSET: f32 = 30.0;
+pub const SEARCH_INSET: f32 = CARD_INSET + ROW_PADDING_X;
 pub const SEARCH_FONT_SIZE: f32 = 14.0;
+
+/// One row geometry for the sheet's cards — the New agent / New group / New
+/// server rows and the people rows under them share it, so glyphs, pictures
+/// and text have one left edge and the sheet's first paint is its final layout.
+pub const CARD_INSET: f32 = 16.0;
+pub const ROW_PADDING_X: f32 = 14.0;
+pub const ROW_GLYPH: f32 = 40.0;
+pub const ROW_GAP: f32 = 12.0;
+/// Where the text column starts inside the card; the hairlines between rows start there too.
+pub const ROW_TEXT_INSET: f32 = ROW_PADDING_X + ROW_GLYPH + ROW_GAP;
 
 /// Members of a space with their decoded avatars (list rows, headers).
 pub type PeopleWithAvatars = Vec<(Person, Option<Arc<RenderImage>>)>;
@@ -176,13 +186,13 @@ pub fn new_chat_sheet(
                 .id("new-agent")
                 .flex()
                 .items_center()
-                .gap(px(12.0))
-                .px(px(14.0))
+                .gap(px(ROW_GAP))
+                .px(px(ROW_PADDING_X))
                 .py(px(10.0))
                 .cursor_pointer()
                 .hover(|st| st.bg(theme.surface_2))
                 .child(
-                    glass::circle("new-agent-glyph", 40.0, &theme)
+                    glass::circle("new-agent-glyph", ROW_GLYPH, &theme)
                         .child(icon("sparkles", 17.0, theme.text)),
                 )
                 .child(
@@ -218,13 +228,13 @@ pub fn new_chat_sheet(
                 .id("new-group")
                 .flex()
                 .items_center()
-                .gap(px(12.0))
-                .px(px(14.0))
+                .gap(px(ROW_GAP))
+                .px(px(ROW_PADDING_X))
                 .py(px(10.0))
                 .cursor_pointer()
                 .hover(|st| st.bg(theme.surface_2))
                 .child(
-                    glass::circle("new-group-glyph", 40.0, &theme)
+                    glass::circle("new-group-glyph", ROW_GLYPH, &theme)
                         .child(icon("people", 17.0, theme.text)),
                 )
                 .child(
@@ -253,10 +263,10 @@ pub fn new_chat_sheet(
             // expanded form is squeezed and clipped once the list below is long.
             let mut group = glass::group(&theme)
                 .flex_shrink_0()
-                .mx(px(16.0))
+                .mx(px(CARD_INSET))
                 .child(agent_row);
             group = group
-                .child(div().h(px(0.5)).ml(px(66.0)).bg(theme.border))
+                .child(div().h(px(0.5)).ml(px(ROW_TEXT_INSET)).bg(theme.border))
                 .child(group_row);
             // D88 rule 8: servers, when this relay runs them.
             if servers_available {
@@ -269,15 +279,15 @@ pub fn new_chat_sheet(
                         .id(id)
                         .flex()
                         .items_center()
-                        .gap(px(12.0))
-                        .px(px(14.0))
+                        .gap(px(ROW_GAP))
+                        .px(px(ROW_PADDING_X))
                         .py(px(10.0))
                         .cursor_pointer()
                         .hover(|st| st.bg(theme.surface_2))
                         .child(
                             glass::circle(
                                 ElementId::Name(SharedString::from(format!("{id}-glyph"))),
-                                40.0,
+                                ROW_GLYPH,
                                 &theme,
                             )
                             .child(icon(glyph, 17.0, theme.text)),
@@ -307,7 +317,7 @@ pub fn new_chat_sheet(
                         }))
                 };
                 group = group
-                    .child(div().h(px(0.5)).ml(px(66.0)).bg(theme.border))
+                    .child(div().h(px(0.5)).ml(px(ROW_TEXT_INSET)).bg(theme.border))
                     .child(server_row(
                         "new-server",
                         "hash",
@@ -322,7 +332,7 @@ pub fn new_chat_sheet(
         }
 
         // People.
-        let mut list = glass::group(&theme).mx(px(16.0));
+        let mut list = glass::group(&theme).mx(px(CARD_INSET));
         let mut any = false;
         if let Some(err) = error {
             any = true;
@@ -372,15 +382,15 @@ pub fn new_chat_sheet(
                     ))))
                     .flex()
                     .items_center()
-                    .gap(px(12.0))
-                    .px(px(14.0))
+                    .gap(px(ROW_GAP))
+                    .px(px(ROW_PADDING_X))
                     .py(px(9.0))
                     .when(i + 1 < count, |el| {
                         el.border_b_1().border_color(theme.border)
                     })
                     .cursor_pointer()
                     .hover(|st| st.bg(theme.surface_2))
-                    .child(avatar(image, &person, 40.0, &theme))
+                    .child(avatar(image, &person, ROW_GLYPH, &theme))
                     .child(
                         div()
                             .flex()
@@ -1418,4 +1428,30 @@ pub fn project_members_popover(
         .top(px(crate::ui::theme::TAB_BAR_HEIGHT + 6.0))
         .right(px(right))
         .child(frosted(PANEL_RADIUS, MENU_BLUR, card))
+}
+
+#[cfg(test)]
+mod first_paint_tests {
+    //! The New Message sheet's create rows and people rows share one geometry
+    //! (Jacob, 2026-10-22: the sheet "loads weird"); the search field's edges
+    //! line up with the row content under it.
+    use super::*;
+
+    #[test]
+    fn create_rows_and_people_rows_share_one_left_edge() {
+        assert_eq!(ROW_PADDING_X, 14.0);
+        assert_eq!(ROW_GLYPH, 40.0);
+        assert_eq!(ROW_GAP, 12.0);
+        assert_eq!(
+            ROW_TEXT_INSET, 66.0,
+            "text column and hairlines start 66 pt into the card"
+        );
+    }
+
+    #[test]
+    fn search_field_lines_up_with_the_row_content() {
+        assert_eq!(CARD_INSET, 16.0);
+        assert_eq!(SEARCH_INSET, CARD_INSET + ROW_PADDING_X);
+        assert_eq!(SEARCH_INSET, 30.0);
+    }
 }
