@@ -110,11 +110,14 @@ public struct CallDto: Codable {
 	public let app_version: String?
 	public let token: String?
 	public let token_expires_at: Int64?
+	/// `"open"` = anyone may speak; `"hosted"` = only the host and invited speakers (bigger groups).
 	public let speak_mode: String?
+	/// People the host invited to speak. The host is `started_by` and is not listed here.
 	public let invited_speakers: [SenderDto]?
+	/// Whether the requesting user may publish audio (set when a join token is minted).
 	public let can_speak: Bool?
 
-	public init(call_id: String, chat_id: String, project_id: String, kind: String, room: String, livekit_url: String?, max_participants: Int64, started_by: SenderDto, participants: [SenderDto], agents: [SenderDto], started_at: Int64, ended_at: Int64?, reason: String?, started_device: String?, platform: String?, app_version: String?, token: String?, token_expires_at: Int64?, speak_mode: String? = nil, invited_speakers: [SenderDto]? = nil, can_speak: Bool? = nil) {
+	public init(call_id: String, chat_id: String, project_id: String, kind: String, room: String, livekit_url: String?, max_participants: Int64, started_by: SenderDto, participants: [SenderDto], agents: [SenderDto], started_at: Int64, ended_at: Int64?, reason: String?, started_device: String?, platform: String?, app_version: String?, token: String?, token_expires_at: Int64?, speak_mode: String?, invited_speakers: [SenderDto]?, can_speak: Bool?) {
 		self.call_id = call_id
 		self.chat_id = chat_id
 		self.project_id = project_id
