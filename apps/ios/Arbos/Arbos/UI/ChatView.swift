@@ -354,6 +354,13 @@ struct ChatView: View {
             ZStack(alignment: .top) {
                 theme.bg.ignoresSafeArea()
                 transcript(width: geo.size.width, height: geo.size.height)
+                    // A tap on a mention chip (`arbos://mention/<kind>/<id>`, MentionChips.swift)
+                    // opens that entity's page; every other link goes to the system.
+                    .environment(\.openURL, OpenURLAction { url in
+                        guard let target = MentionTable.target(from: url, model: model) else { return .systemAction }
+                        model.showProfile(target)
+                        return .handled
+                    })
                 headerBlur
                 VStack(spacing: 8) {
                     header
@@ -539,6 +546,8 @@ struct ChatView: View {
                     case "voice": startCall(.voice)
                     case "model": showModelPicker = true
                     case "profile": openHeaderProfile()
+                    // `avatarpicker[-generate|-upload]`: the agent pane, which opens the sheet on that tab.
+                    case let s where s.hasPrefix("avatarpicker"): openHeaderProfile()
                     case "edit": showProfile = true
                     case "userprofile": if let c = counterpart { model.showProfile(.user(ProfilePerson(c))) }
                     // `addmembers`: the group pane opens its Add members sheet on appear.

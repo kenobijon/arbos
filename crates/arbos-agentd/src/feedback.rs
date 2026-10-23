@@ -108,19 +108,8 @@ fn read_user_image(a: &Agent, path: &str) -> Result<UserImage, String> {
 
 /// Secret values (D19 redaction) and secret placeholders / vault references, so a report never
 /// carries anything the owner's secrets system handed the agent.
-fn scrub(text: &str) -> String {
-    let mut out = crate::store::redact(text);
-    let patterns: [(&str, &str); 3] = [
-        (r"arbos-secret://[^\s\x22'`<>]+", "[secret placeholder]"),
-        (r"\bop://[^\s\x22'`<>]+", "[vault reference]"),
-        (r"\$\{?ARBOS_SECRET_[A-Z0-9_]+\}?", "[secret env]"),
-    ];
-    for (pat, rep) in patterns {
-        if let Ok(re) = regex_lite::Regex::new(pat) {
-            out = re.replace_all(&out, rep).into_owned();
-        }
-    }
-    out
+pub(crate) fn scrub(text: &str) -> String {
+    arbos_core::redact::redact_placeholders(&crate::store::redact(text))
 }
 
 fn clip(s: &str, max: usize) -> String {

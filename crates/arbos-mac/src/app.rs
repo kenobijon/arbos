@@ -311,6 +311,15 @@ pub struct ChatUi {
 /// Rows per history page the shared Matrix client fetches (`arbos_matrix::client::HISTORY_PAGE`).
 const CHANNEL_PAGE: usize = 50;
 
+/// The relay's answer to the avatar picker's Generate tab.
+#[derive(Clone, Debug)]
+pub struct AvatarGenerated {
+    pub project_id: Id,
+    pub image_key: Option<String>,
+    pub url: Option<String>,
+    pub error: Option<String>,
+}
+
 pub struct AppState {
     pub source_name: &'static str,
     pub pairing: Option<Pairing>,
@@ -467,7 +476,14 @@ pub struct AppState {
     /// its body at the top (a popped page keeps its saved scroll instead).
     pub profile_opened: u64,
     /// Agent page: the Appearance (tree + colour) section is unfolded.
-    pub profile_picker_open: bool,
+    /// Rig / sidebar: open the avatar picker sheet for this entity on this tab (the shell
+    /// drains it).
+    pub avatar_picker_request: Option<(
+        crate::ui::avatar_picker::Target,
+        crate::ui::avatar_picker::Tab,
+    )>,
+    /// The Generate tab's answer, for the shell's open picker.
+    pub avatar_generated: Option<AvatarGenerated>,
     /// Agent page: which settings row (model / reasoning / voice) is dropped down.
     pub agent_pick: Option<AgentPick>,
     /// Agent page: the owner is editing the description inline.
@@ -791,7 +807,8 @@ impl AppState {
             profile_tab: 0,
             profile_stack: Vec::new(),
             profile_opened: 0,
-            profile_picker_open: false,
+            avatar_picker_request: None,
+            avatar_generated: None,
             agent_pick: None,
             profile_editing_description: false,
             profile_editing_name: false,
@@ -980,8 +997,13 @@ impl AppState {
                 }
                 // A quiet "Retry" in the rail is not enough: say what went wrong and offer the
                 // download page.
+                let next = if message.ends_with('.') {
+                    " Press Retry"
+                } else {
+                    " — press Retry"
+                };
                 self.push_notice(format!(
-                    "Update failed: {message} — press Retry, or get the newest version from {}.",
+                    "Update failed: {message}{next}, or get the newest version from {}.",
                     update::DOWNLOAD_URL
                 ));
                 self.update.phase = UpdatePhase::Failed {
@@ -1275,6 +1297,23 @@ impl AppState {
                 }
                 cx.notify();
             }
+            SyncEvent::ProjectImageGenerated {
+                project_id,
+                image_key,
+                url,
+                error,
+            } => {
+                if let Some(u) = url.clone() {
+                    self.want_avatar(u);
+                }
+                self.avatar_generated = Some(AvatarGenerated {
+                    project_id,
+                    image_key,
+                    url,
+                    error,
+                });
+                cx.notify();
+            }
             SyncEvent::Avatar { url, bytes } => {
                 // One decode serves both the picture and the bubble-bar colour.
                 let rgba = decode_rgba(&bytes);
@@ -1437,6 +1476,9 @@ impl AppState {
                         self.want_avatar(url);
                     }
                     if let Some(url) = p.image_url.clone() {
+                        self.want_avatar(url);
+                    }
+                    for url in p.agents.iter().filter_map(|a| a.image_url.clone()) {
                         self.want_avatar(url);
                     }
                 }
@@ -1635,14 +1677,26 @@ impl AppState {
                     // `ARBOS_OPEN_SETTINGS=…` re-opens my pane on its Settings tab.
                     if let Ok(spec) = std::env::var("ARBOS_OPEN_PROFILE") {
                         if let Some(rest) = spec.strip_prefix("agent") {
-                            self.open_profile(ProfilePage::Agent { project_id }, cx);
+                            self.open_profile(
+                                ProfilePage::Agent {
+                                    project_id: project_id.clone(),
+                                },
+                                cx,
+                            );
                             self.agent_pick = rest.strip_prefix(':').and_then(AgentPick::parse);
                             if self.agent_pick == Some(AgentPick::Voice) {
                                 self.fetch_voices();
                             }
-                            // `agent:avatar` opens the D92 leaf picker under the hero.
-                            if rest == ":avatar" {
-                                self.profile_picker_open = true;
+                            // `agent:avatar[:generate|:upload]` opens the avatar picker sheet
+                            // (D92 amendment) on that tab.
+                            if let Some(tab) = rest.strip_prefix(":avatar") {
+                                use crate::ui::avatar_picker::{Tab, Target};
+                                let tab = match tab {
+                                    ":generate" => Tab::Generate,
+                                    ":upload" => Tab::Upload,
+                                    _ => Tab::Bot,
+                                };
+                                self.open_avatar_picker(Target::Agent(project_id), tab, cx);
                             }
                         } else if let Some(rest) = spec.strip_prefix("group") {
                             self.open_profile(
@@ -4449,21 +4503,6 @@ impl AppState {
         }
     }
 
-    /// D79: the owner's avatar gradient pick (`None` = automatic). Optimistic, then PATCH.
-    pub fn set_avatar_color_index(
-        &mut self,
-        project_id: Id,
-        index: Option<u8>,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(p) = self.projects.iter_mut().find(|p| p.id == project_id) {
-            p.avatar_color_override = index;
-            p.avatar_color_index = Some(crate::ui::avatars::index_for(&project_id, index));
-        }
-        self.command(ClientCommand::SetAvatarColorIndex { project_id, index });
-        cx.notify();
-    }
-
     /// D92: the owner's leaf and disc-colour picks (`None` = automatic). Optimistic, then PATCH.
     pub fn set_avatar_leaf(
         &mut self,
@@ -4481,6 +4520,57 @@ impl AppState {
             leaf,
             color,
         });
+        cx.notify();
+    }
+
+    /// D92 amendment: the agent's picture from the avatar picker (a file to upload, or a
+    /// generated key). The leaf stays stored underneath; the picture wins while set.
+    pub fn set_project_image(
+        &mut self,
+        project_id: Id,
+        source: crate::sync::PictureSource,
+        cx: &mut Context<Self>,
+    ) {
+        self.command(ClientCommand::SetProjectImage { project_id, source });
+        cx.notify();
+    }
+
+    /// Generate tab: ask the relay for a picture; the answer lands in `avatar_generated`.
+    pub fn generate_project_image(
+        &mut self,
+        project_id: Id,
+        prompt: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.command(ClientCommand::GenerateProjectImage { project_id, prompt });
+        cx.notify();
+    }
+
+    /// A group's leaf picture from the avatar picker (`None` = back to initials; also drops
+    /// the uploaded image so the leaf shows).
+    pub fn set_group_leaf(
+        &mut self,
+        chat_id: Id,
+        pick: Option<crate::ui::avatars::LeafPick>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == chat_id) {
+            p.avatar_leaf = pick.map(|l| l.leaf);
+            p.avatar_leaf_color = pick.map(|l| l.color);
+            p.image_url = None;
+        }
+        self.command(ClientCommand::SetGroupLeaf { chat_id, pick });
+        cx.notify();
+    }
+
+    /// Open the avatar picker sheet for an agent or a group (the shell hosts it).
+    pub fn open_avatar_picker(
+        &mut self,
+        target: crate::ui::avatar_picker::Target,
+        tab: crate::ui::avatar_picker::Tab,
+        cx: &mut Context<Self>,
+    ) {
+        self.avatar_picker_request = Some((target, tab));
         cx.notify();
     }
 
@@ -4561,7 +4651,6 @@ impl AppState {
         self.profile_opened = self.profile_opened.wrapping_add(1);
         self.profile_from_name = false;
         self.profile_tab = 0;
-        self.profile_picker_open = false;
         self.agent_pick = None;
         self.profile_editing_description = false;
         self.profile_editing_name = false;
@@ -4715,11 +4804,6 @@ impl AppState {
 
     pub fn set_profile_tab(&mut self, tab: usize, cx: &mut Context<Self>) {
         self.profile_tab = tab;
-        cx.notify();
-    }
-
-    pub fn toggle_profile_picker(&mut self, cx: &mut Context<Self>) {
-        self.profile_picker_open = !self.profile_picker_open;
         cx.notify();
     }
 

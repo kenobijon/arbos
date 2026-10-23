@@ -230,6 +230,9 @@ final class RelayAPI {
                 continue
             }
             var project = Arbos.Project(dto: detail.project)
+            if let key = project.imageKey {
+                project.imageURL = "\(endpoint.httpUrl)/blob/\(id)/\(key)?token=\(token())"
+            }
             // Prefer the detail's live box word when present (same as the old parse).
             project.state = Arbos.BoxState.from(state: detail.project.state, box: detail.box)
             project.stateSince = detail.box_since
@@ -841,22 +844,31 @@ final class RelayAPI {
         _ = try await request("PATCH", "/projects/\(projectId)", body: body)
     }
 
-    /// D79 `PATCH /projects/{id} {"avatar_color_index": 0–6|null}` (null = automatic). Returns the
-    /// relay's effective index when it echoes one.
-    func setProjectAvatarColorIndex(_ projectId: Id, index: Int?) async throws -> Int? {
-        let value: Any = index.map { $0 as Any } ?? NSNull()
-        let body: [String: Any] = ["avatar_color_index": value]
-        let p = try await decode(ProjectDto.self, "PATCH", "/projects/\(projectId)", body: body)
-        return Int(p.avatar_color_index_effective)
-    }
-
-    /// D92 `PATCH /projects/{id} {"avatar_leaf": 0–8|null, "avatar_leaf_color": 0–9|null}` (null = automatic).
+    /// D92 `PATCH /projects/{id} {"avatar_leaf": 0–8|null, "avatar_leaf_color": 0–9|null}` (null =
+    /// automatic). A leaf pick is "not a photo": the picture goes with it (`image_key: null`).
     func setProjectAvatarLeaf(_ projectId: Id, leaf: Int?, color: Int?) async throws {
         let body: [String: Any] = [
             "avatar_leaf": leaf.map { $0 as Any } ?? NSNull(),
             "avatar_leaf_color": color.map { $0 as Any } ?? NSNull(),
+            "image_key": NSNull(),
         ]
         _ = try await json("PATCH", "/projects/\(projectId)", body: body)
+    }
+
+    /// D92 amendment: `PATCH /projects/{id} {"image_key": key}` — a blob already in the project's
+    /// slot (uploaded with `putBlob`, or the Generate tab's answer) becomes the agent's picture.
+    func setProjectImageKey(_ projectId: Id, key: String) async throws {
+        _ = try await json("PATCH", "/projects/\(projectId)", body: ["image_key": key])
+    }
+
+    /// D92 amendment: `POST /projects/{id}/avatar/generate {prompt}` → the stored picture's key
+    /// (not yet set; "Set avatar" sends it through `setProjectImageKey`).
+    func generateProjectAvatar(_ projectId: Id, prompt: String) async throws -> String {
+        let v = try await json("POST", "/projects/\(projectId)/avatar/generate", body: ["prompt": prompt])
+        guard let d = v as? [String: Any], let key = d["image_key"] as? String, !key.isEmpty else {
+            throw RelayError(status: 0, message: "The relay sent no picture")
+        }
+        return key
     }
 
     /// §11 `PATCH /projects/{id} {"vision_enabled": bool}` — may the agent sample the camera on calls.
@@ -973,6 +985,20 @@ final class RelayAPI {
         if let muted { body["muted"] = muted }
         if let readReceipts { body["read_receipts"] = readReceipts }
         _ = try await request("PUT", "/chats/\(chatId)/settings", body: body)
+    }
+
+    /// D92 amendment: a group's leaf picture from the avatar picker — `PATCH /chats/{id}
+    /// {avatar_leaf, avatar_leaf_color, image_key: ""}` (nil = back to initials; the empty key
+    /// clears the uploaded picture so the leaf shows).
+    func setPeopleChatLeaf(_ chatId: String, pick: LeafPick?) async throws -> PeopleChat {
+        let body: [String: Any] = [
+            "avatar_leaf": pick.map { Int($0.leaf) as Any } ?? NSNull(),
+            "avatar_leaf_color": pick.map { Int($0.color) as Any } ?? NSNull(),
+            "image_key": "",
+        ]
+        let v = try await json("PATCH", "/chats/\(chatId)", body: body)
+        guard let chat = PeopleChat.parse(v) else { throw RelayError(status: 0, message: "The relay returned no chat") }
+        return chat
     }
 
     /// `PATCH /chats/{id} {title?, image_key?}` — custom group name and optional picture key.

@@ -12,8 +12,14 @@
 //! with a one-minute countdown. The open chat comes back after the relaunch
 //! (on-device store, `RestoreSelection`).
 //!
+//! Where the bytes come from: the stable channel reads the manifest the site serves
+//! (`https://arbos.life/updates/mac/appcast.xml`, a mirror of the GitHub release's appcast) and
+//! downloads the payload from `arbos.life/updates/mac/` first, the GitHub release asset second,
+//! with a 30 s connect timeout, five attempts and `Range` resume (`arbos_update::fetch`). The
+//! Ed25519 check over the complete bytes is the same whichever host served them.
+//!
 //! Environment (all optional):
-//!   ARBOS_UPDATE_FEED            feed URL (default: the GitHub release appcast)
+//!   ARBOS_UPDATE_FEED            feed URL (default: the site's stable appcast, or GitHub's edge one)
 //!   ARBOS_UPDATE_CHANNEL         `edge` (every green push to main) or `stable` (tags; the default of tag builds)
 //!   ARBOS_UPDATE_INTERVAL_SECS   poll interval (default 300; first poll after 5 s)
 //!   ARBOS_UPDATE_AUTO=0|1        override the Settings toggle for this run
@@ -71,7 +77,10 @@ pub fn os_version() -> String {
 
 pub const EDGE_FEED_URL: &str =
     "https://github.com/unarbos/arbos/releases/download/edge/appcast.xml";
-pub const STABLE_FEED_URL: &str = arbos_update::DEFAULT_FEED_URL;
+/// The stable manifest the site serves (`arbos.life/updates/mac/appcast.xml`, mirrored from the
+/// GitHub release on every publish); the GitHub feed is its fallback, and the payload is fetched
+/// from the same place first (`arbos_update::fetch`).
+pub const STABLE_FEED_URL: &str = arbos_update::SITE_FEED_URL;
 
 pub fn feed_url() -> String {
     if let Ok(url) = std::env::var("ARBOS_UPDATE_FEED") {
@@ -435,8 +444,7 @@ pub async fn run(
                         let _ = events.send(UpdateEvent::Installed(installed));
                     }
                     Err(err) => {
-                        log(format!("install failed: {err:#}"));
-                        let _ = events.send(UpdateEvent::Failed(format!("{err:#}")));
+                        let _ = events.send(UpdateEvent::Failed(failure_message(&err)));
                     }
                 }
             }
@@ -446,6 +454,25 @@ pub async fn run(
 
 /// Where a person can always get the newest build by hand (the fallback the failure notice offers).
 pub const DOWNLOAD_URL: &str = "https://arbos.life/download/mac";
+
+/// What the UI shows for a failed install. A download that gave up after its retries is one
+/// plain sentence (the per-attempt errors go to the log only); anything else keeps its chain.
+fn failure_message(err: &anyhow::Error) -> String {
+    match err.downcast_ref::<arbos_update::fetch::DownloadFailed>() {
+        Some(failed) => {
+            log(format!(
+                "install failed: {}\n{}",
+                failed.plain(),
+                failed.detail()
+            ));
+            failed.plain()
+        }
+        None => {
+            log(format!("install failed: {err:#}"));
+            format!("{err:#}")
+        }
+    }
+}
 
 fn log_path() -> std::path::PathBuf {
     let home = std::env::var_os("HOME")
@@ -585,8 +612,14 @@ async fn install(
     let progress: client::ProgressFn = Arc::new(move |got, total| {
         let _ = progress_tx.send(UpdateEvent::Progress { got, total });
     });
-    let payload = client::download(available, &key, &dir, Some(progress)).await?;
-    log(format!("downloaded and verified {}", payload.display()));
+    let downloaded = client::download(available, &key, &dir, Some(progress)).await?;
+    log(format!(
+        "downloaded and verified {} from {} (attempt {})",
+        downloaded.path.display(),
+        downloaded.url,
+        downloaded.attempts
+    ));
+    let payload = downloaded.path;
     let _ = events.send(UpdateEvent::Installing);
     // Staging reads a Mac bundle's layout (executable name). When the process was a bare
     // executable, stage against the install target (Applications/Arbos.app) instead.

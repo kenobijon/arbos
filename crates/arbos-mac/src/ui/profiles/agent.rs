@@ -8,7 +8,7 @@
 //! consistent, powerful); the avatar picker opens from the hero while the
 //! pane is up.
 
-use gpui::{div, prelude::*, px, Context, Div, ElementId, SharedString, Stateful};
+use gpui::{div, prelude::*, px, Context, Div, SharedString, Stateful};
 
 use crate::app::{AgentPick, ProfilePage};
 use crate::model::{Id, MachineState, Project};
@@ -18,7 +18,7 @@ use crate::ui::hoverpick;
 use crate::ui::motion::PulseClock;
 use crate::ui::shell::Shell;
 use crate::ui::sidebar::machine_dot;
-use crate::ui::theme::{Theme, TEXT_SMALL, TEXT_TINY};
+use crate::ui::theme::{Theme, TEXT_SMALL};
 
 use super::kit::{self, Leading};
 use super::pane::{self, Hero, Picture, ProfilePane, Section};
@@ -103,7 +103,6 @@ pub(super) fn page(
     } else {
         project.model.clone()
     };
-    let picker_open = state.profile_picker_open;
     let pick = state.agent_pick;
     let renaming = state.profile_editing_name && mine;
     let tab = state.profile_tab;
@@ -115,6 +114,12 @@ pub(super) fn page(
         collect(state, &chats)
     });
 
+    // D92 amendment: the uploaded / generated picture wins over the leaf (read while `state`
+    // is borrowed).
+    let hero_image = project
+        .image_url
+        .as_deref()
+        .and_then(|url| state.avatar(url));
     if avatar_state != AvatarState::Idle {
         PulseClock::request(cx);
     }
@@ -125,7 +130,20 @@ pub(super) fn page(
     let picture = div()
         .relative()
         .size(px(HERO_AVATAR))
-        .child(avatars::project_hero(&project, HERO_AVATAR, &theme))
+        .child(match hero_image {
+            Some(image) => div()
+                .size(px(HERO_AVATAR))
+                .flex_shrink_0()
+                .rounded_full()
+                .overflow_hidden()
+                .child(
+                    gpui::img(image)
+                        .size(px(HERO_AVATAR))
+                        .rounded_full()
+                        .object_fit(gpui::ObjectFit::Cover),
+                ),
+            None => avatars::project_hero(&project, HERO_AVATAR, &theme),
+        })
         .child(
             div()
                 .absolute()
@@ -145,9 +163,10 @@ pub(super) fn page(
                 ),
         )
         .into_any_element();
+    let p_pic = pid.clone();
     let pic_click = mine.then(|| {
-        let f = cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
-            this.state.update(cx, |s, cx| s.toggle_profile_picker(cx));
+        let f = cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
+            this.open_avatar_picker(crate::ui::avatar_picker::Target::Agent(p_pic.clone()), cx);
         });
         Box::new(f) as HeroClick
     });
@@ -194,51 +213,9 @@ pub(super) fn page(
         editor: None,
     };
 
-    // ----- appearance (avatar click) -------------------------------------------
-    // D92: the leaf picker (nine leaves, ten colours; the hero above is the live
-    // preview). With the flag off: Automatic + the seven D79 gradients. Shown
-    // only while the picker is open, on whichever tab is up, so it is not a
-    // permanent settings row.
-    let leafy = avatars::leaf_avatars_on();
-    let appearance: Option<Section> = (mine && picker_open).then(|| {
-        let header = kit::row(
-            "profile-appearance",
-            Leading::None,
-            if leafy { "Avatar" } else { "Avatar colour" },
-            None,
-            Some("pick".into()),
-            None,
-            true,
-            &theme,
-        )
-        .cursor_pointer()
-        .hover(|s| s.bg(theme.surface_2))
-        .on_click(cx.listener(|this, _, _, cx| {
-            this.state.update(cx, |s, cx| s.toggle_profile_picker(cx));
-        }))
-        .into_any_element();
-        let (swatches, note) = if leafy {
-            (
-                leaf_picker(&project, &theme, cx).into_any_element(),
-                "Automatic picks the leaf and colour from the agent's id, the same on every device; choose your own to make it yours.",
-            )
-        } else {
-            (
-                colour_row(&project, &theme, cx).into_any_element(),
-                "Automatic picks the colour from the agent's id, the same on every device; choose one to make it yours.",
-            )
-        };
-        Section::Picker {
-            header,
-            swatches,
-            note: note.into(),
-        }
-    });
-
     let description = project.description.clone().unwrap_or_default();
     let slug = format!("@{}", Project::mention_slug(&project.name));
     let mut body: Vec<Section> = Vec::new();
-    body.extend(appearance);
 
     match tab {
         0 => {
@@ -472,246 +449,4 @@ pub(super) fn page(
         shell,
         cx,
     ))
-}
-
-/// D92 picker: the nine leaves on the agent's current disc colour, the ten
-/// colours as plain discs, and an Automatic reset. Each click saves at once
-/// (optimistic, then `PATCH /projects/{id}`), so the hero is the live preview.
-fn leaf_picker(project: &Project, theme: &Theme, cx: &mut Context<Shell>) -> Div {
-    let current = avatars::project_leaf(project);
-    let picked_leaf = project.avatar_leaf;
-    let picked_color = project.avatar_leaf_color;
-    let automatic = picked_leaf.is_none() && picked_color.is_none();
-    let ring = |selected: bool, size: f32, theme: &Theme| {
-        div()
-            .size(px(size))
-            .rounded_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .border_2()
-            .border_color(if selected {
-                theme.text
-            } else {
-                gpui::transparent_black()
-            })
-            .cursor_pointer()
-            .hover(|st| st.border_color(theme.border_strong))
-    };
-    let label = |text: &'static str, theme: &Theme| {
-        div()
-            .px(px(16.0))
-            .pb(px(6.0))
-            .text_size(px(TEXT_TINY))
-            .text_color(theme.text_muted)
-            .child(text)
-    };
-
-    let mut leaves = div()
-        .flex()
-        .flex_wrap()
-        .items_center()
-        .gap(px(8.0))
-        .px(px(16.0))
-        .pb(px(12.0));
-    for (i, l) in avatars::leaf::LEAVES.iter().enumerate() {
-        let index = i as u8;
-        let pid = project.id.clone();
-        let pick = avatars::LeafPick {
-            leaf: index,
-            color: current.color,
-        };
-        leaves = leaves.child(
-            div()
-                .flex()
-                .flex_col()
-                .items_center()
-                .gap(px(3.0))
-                .child(
-                    ring(current.leaf == index, 50.0, theme)
-                        .id(ElementId::Name(SharedString::from(format!(
-                            "avatar-leaf-{index}"
-                        ))))
-                        .child(avatars::leaf_element(pick, 42.0))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            let p = pid.clone();
-                            this.state.update(cx, |st, cx| {
-                                st.set_avatar_leaf(p, Some(index), picked_color, cx)
-                            });
-                        })),
-                )
-                .child(
-                    div()
-                        .text_size(px(TEXT_TINY))
-                        .text_color(if current.leaf == index {
-                            theme.text
-                        } else {
-                            theme.text_muted
-                        })
-                        .child(l.name),
-                ),
-        );
-    }
-
-    let mut colours = div()
-        .flex()
-        .flex_wrap()
-        .items_center()
-        .gap(px(8.0))
-        .px(px(16.0))
-        .pb(px(10.0));
-    for index in 0..avatars::leaf::COLOR_COUNT {
-        let pid = project.id.clone();
-        colours = colours.child(
-            ring(current.color == index, 36.0, theme)
-                .id(ElementId::Name(SharedString::from(format!(
-                    "avatar-leaf-color-{index}"
-                ))))
-                .child(
-                    div()
-                        .size(px(28.0))
-                        .rounded_full()
-                        .bg(avatars::leaf_disc(index)),
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let p = pid.clone();
-                    this.state.update(cx, |st, cx| {
-                        st.set_avatar_leaf(p, picked_leaf, Some(index), cx)
-                    });
-                })),
-        );
-    }
-
-    let pid = project.id.clone();
-    let reset = div()
-        .id("avatar-leaf-auto")
-        .mx(px(16.0))
-        .mb(px(12.0))
-        .px(px(10.0))
-        .py(px(5.0))
-        .rounded(px(8.0))
-        .text_size(px(TEXT_SMALL))
-        .text_color(if automatic {
-            theme.text_muted
-        } else {
-            theme.text
-        })
-        .bg(theme.surface_2)
-        .cursor_pointer()
-        .hover(|st| st.bg(theme.border))
-        .child(if automatic {
-            "Automatic"
-        } else {
-            "Back to automatic"
-        })
-        .on_click(cx.listener(move |this, _, _, cx| {
-            let p = pid.clone();
-            this.state
-                .update(cx, |st, cx| st.set_avatar_leaf(p, None, None, cx));
-        }));
-
-    div()
-        .flex()
-        .flex_col()
-        .child(label("Leaf", theme))
-        .child(leaves)
-        .child(label("Colour", theme))
-        .child(colours)
-        .child(div().flex().child(reset))
-}
-
-fn colour_row(project: &Project, theme: &Theme, cx: &mut Context<Shell>) -> Div {
-    let mut colours = div()
-        .flex()
-        .flex_wrap()
-        .items_center()
-        .gap(px(10.0))
-        .px(px(16.0))
-        .pb(px(14.0));
-    let auto_index = avatars::color_index(&project.id);
-    let override_index = project.avatar_color_override;
-    let ring = |selected: bool, theme: &Theme| {
-        div()
-            .size(px(52.0))
-            .rounded_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .border_2()
-            .border_color(if selected {
-                theme.text
-            } else {
-                gpui::transparent_black()
-            })
-            .cursor_pointer()
-            .hover(|st| st.border_color(theme.border_strong))
-    };
-    // "Automatic": the id-derived gradient with the agent's initials.
-    {
-        let pid = project.id.clone();
-        colours = colours.child(
-            div()
-                .flex()
-                .flex_col()
-                .items_center()
-                .gap(px(4.0))
-                .child(
-                    ring(override_index.is_none(), theme)
-                        .id("avatar-color-auto")
-                        .child(avatars::element(
-                            &project.id,
-                            &project.name,
-                            None,
-                            44.0,
-                            theme,
-                        ))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            let p = pid.clone();
-                            this.state
-                                .update(cx, |st, cx| st.set_avatar_color_index(p, None, cx));
-                        })),
-                )
-                .child(
-                    div()
-                        .text_size(px(TEXT_TINY))
-                        .text_color(theme.text_muted)
-                        .child("Automatic"),
-                ),
-        );
-    }
-    for (i, g) in avatars::GRADIENTS.iter().enumerate() {
-        let index = i as u8;
-        let selected = override_index == Some(index);
-        let pid = project.id.clone();
-        colours = colours.child(
-            div()
-                .flex()
-                .flex_col()
-                .items_center()
-                .gap(px(4.0))
-                .child(
-                    ring(selected, theme)
-                        .id(ElementId::Name(SharedString::from(format!(
-                            "avatar-color-{index}"
-                        ))))
-                        .child(avatars::swatch(index, 44.0, theme))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            let p = pid.clone();
-                            this.state
-                                .update(cx, |st, cx| st.set_avatar_color_index(p, Some(index), cx));
-                        })),
-                )
-                .child(
-                    div()
-                        .text_size(px(TEXT_TINY))
-                        .text_color(if index == auto_index && override_index.is_none() {
-                            theme.text
-                        } else {
-                            theme.text_muted
-                        })
-                        .child(g.name),
-                ),
-        );
-    }
-    colours
 }

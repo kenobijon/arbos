@@ -15,7 +15,9 @@ use crate::app::SignInMode;
 use crate::app::{AppState, DetailsTarget, ProfilePage, ServerSheet};
 use crate::image_picker;
 use crate::model::{now_ms, CallKind, MachineState};
-use crate::ui::avatars;
+use crate::sync::PictureSource;
+use crate::ui::avatar_picker;
+use crate::ui::avatars::{self, leaf, LeafPick};
 use crate::ui::callview;
 use crate::ui::channels::{ChannelsEvent, ChannelsPanel};
 use crate::ui::composer::{Composer, ComposerEvent, ComposerInput};
@@ -175,6 +177,11 @@ pub struct Shell {
     pub(crate) create_leaf_color: Option<u8>,
     /// Create group, step 1 (picture + name) showing over the New Message backdrop.
     pub(crate) create_group_open: bool,
+    /// The avatar picker sheet (D92 amendment) while it is open: whose picture, which tab,
+    /// the pending choice.
+    pub(crate) avatar_picker: Option<avatar_picker::Picker>,
+    /// The Generate tab's prompt.
+    pub(crate) avatar_prompt_input: Entity<ComposerInput>,
     /// Sidebar search field.
     pub(crate) search_input: Entity<ComposerInput>,
     /// The media viewer's Forward picker search field (feedback media-viewer-2026-10-23).
@@ -377,6 +384,30 @@ impl Shell {
                 this.server_input
                     .update(cx, |input, cx| input.set_text(code, cx));
             }
+            // The avatar picker: a rig request to open it, and the Generate tab's answer.
+            if let Some((target, tab)) = state.update(cx, |s, _| s.avatar_picker_request.take()) {
+                this.open_avatar_picker(target, cx);
+                if let Some(pk) = this.avatar_picker.as_mut() {
+                    pk.tab = tab;
+                }
+            }
+            if let Some(done) = state.update(cx, |s, _| s.avatar_generated.take()) {
+                if let Some(pk) = this.avatar_picker.as_mut() {
+                    if pk.target.id() == &done.project_id {
+                        pk.generating = false;
+                        match (done.image_key, done.url) {
+                            (Some(key), Some(url)) => {
+                                pk.generated = Some((key, url));
+                                pk.error = None;
+                            }
+                            _ => {
+                                pk.error =
+                                    done.error.or_else(|| Some("No picture came back".into()))
+                            }
+                        }
+                    }
+                }
+            }
             let st = state.read(cx);
             if st.add_members_server.is_some() {
                 this.people_input
@@ -443,6 +474,18 @@ impl Shell {
                 }));
             });
         }
+        let avatar_prompt_input = cx.new(ComposerInput::new);
+        {
+            let weak = cx.weak_entity();
+            avatar_prompt_input.update(cx, |input, _| {
+                input.set_placeholder("A fox reading by a lamp");
+                input.on_submit = Some(Rc::new(move |_, cx| {
+                    let _ = weak.update(cx, |this, cx| this.generate_avatar(cx));
+                }));
+            });
+        }
+        cx.observe(&avatar_prompt_input, |_, _, cx| cx.notify())
+            .detach();
         let search_input = cx.new(ComposerInput::new);
         search_input.update(cx, |input, _| input.set_placeholder("Search"));
         let viewer_search = cx.new(ComposerInput::new);
@@ -687,6 +730,8 @@ impl Shell {
             create_leaf: None,
             create_leaf_color: None,
             create_group_open,
+            avatar_picker: None,
+            avatar_prompt_input,
             search_input,
             viewer_search,
             viewer_focus: cx.focus_handle(),
@@ -1061,6 +1106,136 @@ impl Shell {
         }
     }
 
+    /// The avatar picker (D92 amendment) over the window, for an agent or a group I can edit.
+    pub(crate) fn open_avatar_picker(
+        &mut self,
+        target: avatar_picker::Target,
+        cx: &mut Context<Self>,
+    ) {
+        self.avatar_prompt_input
+            .update(cx, |input, cx| input.set_text(String::new(), cx));
+        self.avatar_picker = Some(avatar_picker::Picker::new(target));
+        cx.notify();
+    }
+
+    pub(crate) fn close_avatar_picker(&mut self, cx: &mut Context<Self>) {
+        self.avatar_picker = None;
+        cx.notify();
+    }
+
+    /// Generate tab: ask the relay for a picture from the prompt (preview only; Set applies).
+    pub(crate) fn generate_avatar(&mut self, cx: &mut Context<Self>) {
+        let prompt = self.avatar_prompt_input.read(cx).text().trim().to_string();
+        let Some(pk) = self.avatar_picker.as_mut() else {
+            return;
+        };
+        if prompt.is_empty() || pk.generating {
+            return;
+        }
+        let avatar_picker::Target::Agent(project_id) = pk.target.clone() else {
+            return;
+        };
+        pk.generating = true;
+        pk.error = None;
+        pk.reset = false;
+        self.state.update(cx, |s, cx| {
+            s.generate_project_image(project_id, prompt, cx);
+        });
+        cx.notify();
+    }
+
+    /// Upload tab: the image-only panel; the choice previews until Set.
+    pub(crate) fn choose_avatar_file(&mut self, cx: &mut Context<Self>) {
+        let rx = image_picker::pick_image(cx, "Choose");
+        cx.spawn(async move |this, cx| {
+            let Ok(Some(path)) = rx.await else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
+                if let Some(pk) = this.avatar_picker.as_mut() {
+                    pk.upload = Some(path);
+                    pk.reset = false;
+                    pk.error = None;
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// "Set avatar": apply the sheet's pending choice and close it.
+    pub(crate) fn set_avatar(&mut self, cx: &mut Context<Self>) {
+        let Some(pk) = self.avatar_picker.take() else {
+            return;
+        };
+        let id = pk.target.id().clone();
+        self.state.update(cx, |s, cx| match &pk.target {
+            avatar_picker::Target::Agent(_) => {
+                if pk.reset {
+                    s.set_avatar_leaf(id, None, None, cx);
+                } else {
+                    match pk.tab {
+                        avatar_picker::Tab::Bot => {
+                            let current = s
+                                .projects
+                                .iter()
+                                .find(|p| p.id == id)
+                                .map(crate::ui::avatars::project_leaf)
+                                .unwrap_or_else(|| leaf::pick_for(&id, None, None));
+                            s.set_avatar_leaf(
+                                id,
+                                Some(pk.leaf.unwrap_or(current.leaf)),
+                                Some(pk.color.unwrap_or(current.color)),
+                                cx,
+                            );
+                        }
+                        avatar_picker::Tab::Generate => {
+                            if let Some((key, _)) = pk.generated {
+                                s.set_project_image(id, PictureSource::Key(key), cx);
+                            }
+                        }
+                        avatar_picker::Tab::Upload => {
+                            if let Some(path) = pk.upload {
+                                s.set_project_image(id, PictureSource::File(path), cx);
+                            }
+                        }
+                    }
+                }
+            }
+            avatar_picker::Target::Group(_) => {
+                if pk.reset {
+                    s.set_group_leaf(id, None, cx);
+                } else {
+                    match pk.tab {
+                        avatar_picker::Tab::Bot => {
+                            let current = s
+                                .projects
+                                .iter()
+                                .find(|p| p.id == id)
+                                .map(crate::ui::avatars::project_leaf)
+                                .unwrap_or_else(|| leaf::pick_for(&id, None, None));
+                            s.set_group_leaf(
+                                id,
+                                Some(LeafPick {
+                                    leaf: pk.leaf.unwrap_or(current.leaf),
+                                    color: pk.color.unwrap_or(current.color),
+                                }),
+                                cx,
+                            );
+                        }
+                        avatar_picker::Tab::Upload => {
+                            if let Some(path) = pk.upload {
+                                s.set_group_image(id, path, cx);
+                            }
+                        }
+                        avatar_picker::Tab::Generate => {}
+                    }
+                }
+            }
+        });
+        cx.notify();
+    }
+
     /// Double-click an agent's name: load it into the rename field and focus.
     pub(crate) fn start_rename_agent(
         &mut self,
@@ -1427,22 +1602,6 @@ impl Shell {
             };
             cx.update(|cx| {
                 state.update(cx, |s, cx| s.set_my_avatar(path, cx));
-            });
-        })
-        .detach();
-    }
-
-    /// The crayon on a group's picture: pick an image (images only in the
-    /// panel), upload it.
-    pub(crate) fn pick_group_image(&mut self, space_id: crate::model::Id, cx: &mut Context<Self>) {
-        let rx = image_picker::pick_image(cx, "Choose");
-        let state = self.state.clone();
-        cx.spawn(async move |_, cx| {
-            let Ok(Some(path)) = rx.await else {
-                return;
-            };
-            cx.update(|cx| {
-                state.update(cx, |s, cx| s.set_group_image(space_id, path, cx));
             });
         })
         .detach();
@@ -3480,6 +3639,9 @@ impl Render for Shell {
             if let Some(space) = selected.as_ref().filter(|s| !s.is_people()) {
                 root = root.child(voicepicker::sheet(self, space, cx));
             }
+        }
+        if let Some(picker) = self.avatar_picker.clone() {
+            root = root.child(avatar_picker::sheet(self, &picker, cx));
         }
         if new_chat_open {
             // D93: "New agent" / "New group" open the Create screen over the same backdrop
