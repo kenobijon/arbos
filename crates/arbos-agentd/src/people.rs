@@ -742,7 +742,13 @@ impl Agent {
                     .open_room_named(&chat_id, &room, PEOPLE_PROJECT)
                     .await
                 {
-                    Ok(_) => tracing::info!(chat = %chat_id, "joined a people chat"),
+                    Ok(_) => {
+                        if !full {
+                            // Added (or re-added) while running: the room's past is not ours.
+                            self.sync.mark_late_join(&chat_id).await;
+                        }
+                        tracing::info!(chat = %chat_id, late = !full, "joined a people chat");
+                    }
                     Err(e) => tracing::warn!(chat = %chat_id, error = %e, "people room"),
                 }
             }

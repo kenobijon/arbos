@@ -4309,12 +4309,30 @@ impl Agent {
             return Err("no turn is running".into());
         };
         t.route_attempts += 1;
+        let project_id = self.cfg.project_id.clone();
         let validated = validate(args).and_then(|r| {
             if t.reply_only && !matches!(r, ValidRoute::Reply { .. }) {
-                Err("this is a relay turn: route `reply` and write the update for the user; start no work here".to_owned())
-            } else {
-                Ok(r)
+                return Err("this is a relay turn: route `reply` and write the update for the user; start no work here".to_owned());
             }
+            // #1440: a reply that promises a secret request / approval card is not a reply —
+            // nothing was requested, so no card can ever appear. Make the model act instead.
+            if let ValidRoute::Reply { reply: Some(text) } = &r {
+                if !t.reply_only && crate::vault::promises_secret_request(text) {
+                    let have = crate::vault::enabled_grant_names(&project_id);
+                    let hint = if have.is_empty() {
+                        "route `act` and call secrets_request(name, purpose, use, host) now — the owner's card comes from that call, never from a sentence".to_owned()
+                    } else {
+                        format!(
+                            "you already have access to {} (secrets_list shows access on): route `act` and use it; a secret with access off needs secrets_request(name, purpose, use, host), not a sentence about it",
+                            have.join(", ")
+                        )
+                    };
+                    return Err(format!(
+                        "a reply must not promise a secret request or an approval card that was not made; {hint}"
+                    ));
+                }
+            }
+            Ok(r)
         });
         match validated {
             Ok(r) => {
