@@ -847,6 +847,13 @@ struct GroupProfileView: View {
             if let projectId { projectMembers = await model.projectMembers(projectId) }
         }
         .onAppear {
+            // Rig: `ARBOS_SHOW=removemember` arms the Remove confirm for the first other member.
+            if DebugHooks.show == "removemember", let r = rows.first(where: { canRemove($0) }) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                    pendingRemoveId = r.person.id
+                    pendingRemoveName = r.agent?.name ?? "@\(r.person.handle)"
+                }
+            }
             // Rig: `ARBOS_SHOW=addmembers` lands on the Add members picker;
             // `ARBOS_PANEL_TAB=Library` lands on the Library tab (the media grid).
             if DebugHooks.show == "addmembers", project == nil {
@@ -907,7 +914,7 @@ struct GroupProfileView: View {
         let remove: AnyView? = canRemove(r) ? AnyView(
             Button {
                 pendingRemoveId = r.person.id
-                pendingRemoveName = "@\(r.person.handle)"
+                pendingRemoveName = r.agent?.name ?? "@\(r.person.handle)"
             } label: {
                 Image(systemName: "xmark")
                     .font(theme.font(12, weight: .semibold))
@@ -926,12 +933,20 @@ struct GroupProfileView: View {
             PaneRow(leading: .avatar(avatar), title: title, subtitle: memberSubtitle(r), trailing: remove)
         }
         .buttonStyle(.borderless)
+        // Long-press (Jacob, 2026-10-22; the Mac's Shift-/right-click menu): View profile,
+        // and for whoever may remove this member a divider and Remove from group — which
+        // asks first (the confirm above) and then lets the relay write "<me> removed X".
+        // Your own row never offers Remove; leaving is the chat list's Delete.
         .contextMenu {
+            Button {
+                if let a = r.agent { model.showProfile(.agent(projectId: a.id)) } else { model.showProfile(.user(r.person)) }
+            } label: { Label("View profile", systemImage: "person.crop.circle") }
             if canRemove(r) {
-                Button("Remove from chat", role: .destructive) {
+                Divider()
+                Button(role: .destructive) {
                     pendingRemoveId = r.person.id
-                    pendingRemoveName = "@\(r.person.handle)"
-                }
+                    pendingRemoveName = r.agent?.name ?? "@\(r.person.handle)"
+                } label: { Label("Remove from group", systemImage: "xmark") }
             }
         }
     }

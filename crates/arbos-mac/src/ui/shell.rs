@@ -29,6 +29,7 @@ use crate::ui::header;
 use crate::ui::icons::icon;
 use crate::ui::local::{LocalEvent, LocalPanel};
 use crate::ui::media_viewer;
+use crate::ui::member_menu;
 use crate::ui::message_menu;
 use crate::ui::motion::{ease_out_cubic, PulseClock, COMPOSER_DROP_MS, SHAKE_MS};
 use crate::ui::onboarding;
@@ -249,6 +250,9 @@ pub struct Shell {
     /// Group pane › Members: the row whose ✕ was clicked (`user:<id>` or
     /// `agent:<project>`); it shows "Remove … ?" with Cancel / Remove.
     pub(crate) member_remove_armed: Option<String>,
+    /// A member row's menu on the group pane (Shift-click / right-click): View
+    /// profile, Remove from group → arms `member_remove_armed`.
+    pub(crate) member_menu: Option<member_menu::MemberMenu>,
     /// Right-click menu on a session row of the header's tab dropdown: the
     /// chat whose row carries it (#1256: anchored to the row, the dropdown
     /// stays open with the row highlighted).
@@ -699,6 +703,7 @@ impl Shell {
             row_delete_armed: false,
             agent_delete_armed: false,
             member_remove_armed: None,
+            member_menu: None,
             chat_menu: None,
             chat_delete_armed: false,
             message_menu: None,
@@ -1646,6 +1651,12 @@ impl Shell {
             self.close_server_sheet(window, cx);
             return;
         }
+        if self.member_menu.is_some() || self.member_remove_armed.is_some() {
+            self.member_menu = None;
+            self.member_remove_armed = None;
+            cx.notify();
+            return;
+        }
         if self.server_member_armed.is_some() || self.server_leave_armed {
             self.server_member_armed = None;
             self.server_leave_armed = false;
@@ -1841,6 +1852,24 @@ impl Shell {
         cx.notify();
     }
 
+    /// Shift-click / right-click on a member row of the group pane: its menu at the click.
+    pub(crate) fn open_member_menu(
+        &mut self,
+        space_id: crate::model::Id,
+        key: String,
+        at: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.menu_open = false;
+        self.row_menu = None;
+        self.channel_menu = None;
+        self.chat_menu = None;
+        self.message_menu = None;
+        self.member_remove_armed = None;
+        self.member_menu = Some(member_menu::MemberMenu { space_id, key, at });
+        cx.notify();
+    }
+
     /// Everything that floats closes on a click elsewhere.
     pub(crate) fn close_popovers(&mut self, cx: &mut Context<Self>) {
         self.close_agent_pick(None, cx);
@@ -1852,8 +1881,10 @@ impl Shell {
             || self.channel_menu.is_some()
             || self.chat_menu.is_some()
             || self.message_menu.is_some()
+            || self.member_menu.is_some()
         {
             self.menu_open = false;
+            self.member_menu = None;
             self.members_open = false;
             self.add_agent_open = false;
             self.tab_menu_open = false;
@@ -3332,6 +3363,33 @@ impl Render for Shell {
             }
         }
         if let Some(menu) = message_menu::render(self, window, cx) {
+            root = root.child(menu);
+        }
+        // Rig: the hook asked for the first other member's row menu on the group pane.
+        if let Some(armed) = self.state.update(cx, |s, _| s.rig_member_menu.take()) {
+            let target = {
+                let state = self.state.read(cx);
+                match state.profile.clone() {
+                    Some(ProfilePage::Group { space_id }) => state
+                        .project(&space_id)
+                        .and_then(|p| p.people.first().map(|m| format!("user:{}", m.id)))
+                        .map(|key| (space_id, key)),
+                    _ => None,
+                }
+            };
+            if let Some((space_id, key)) = target {
+                if armed {
+                    self.member_remove_armed = Some(key);
+                } else {
+                    self.member_menu = Some(member_menu::MemberMenu {
+                        space_id,
+                        key,
+                        at: gpui::point(px(980.0), px(330.0)),
+                    });
+                }
+            }
+        }
+        if let Some(menu) = member_menu::render(self, window, cx) {
             root = root.child(menu);
         }
         if let Some(space) = people_space {
