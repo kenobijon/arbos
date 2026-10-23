@@ -1,5 +1,6 @@
 pub mod approve;
 pub mod attachments;
+pub mod avatar_picker;
 pub mod avatars;
 pub mod callview;
 pub mod cards;
@@ -21,6 +22,7 @@ pub mod lottie;
 pub mod markdown;
 pub mod media_viewer;
 pub mod member_menu;
+pub mod mention;
 pub mod message_menu;
 pub mod motion;
 pub mod notify;

@@ -227,6 +227,10 @@ pub struct Project {
     /// Leaf avatar (D92): the owner's disc colour pick, 0–9; `None` = derived from the id.
     #[serde(default)]
     pub avatar_leaf_color: Option<i64>,
+    /// D92 amendment: an uploaded or generated picture (blob key in the project's own slot); wins
+    /// over the leaf. `None` = the leaf.
+    #[serde(default)]
+    pub image_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -517,6 +521,7 @@ impl Db {
             "ALTER TABLE projects ADD COLUMN avatar_leaf_color INTEGER",
             [],
         );
+        let _ = c.execute("ALTER TABLE projects ADD COLUMN image_key TEXT", []);
         // One box per user: devices and projects belong to a user; legacy sandboxes record where
         // their /work went.
         let _ = c.execute(
@@ -723,12 +728,13 @@ impl Db {
                    primary_chat_id TEXT,
                    avatar_color_index INTEGER,
                    avatar_leaf INTEGER,
-                   avatar_leaf_color INTEGER
+                   avatar_leaf_color INTEGER,
+                   image_key TEXT
                  );
                  INSERT INTO projects_new(id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily,
-                                          project_token_hash, color, user_id, workspace_state, avatar, deleted_at, avatar_color, description, primary_chat_id, avatar_color_index, avatar_leaf, avatar_leaf_color)
+                                          project_token_hash, color, user_id, workspace_state, avatar, deleted_at, avatar_color, description, primary_chat_id, avatar_color_index, avatar_leaf, avatar_leaf_color, image_key)
                    SELECT id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily,
-                          project_token_hash, color, user_id, workspace_state, avatar, deleted_at, avatar_color, description, primary_chat_id, avatar_color_index, avatar_leaf, avatar_leaf_color FROM projects;
+                          project_token_hash, color, user_id, workspace_state, avatar, deleted_at, avatar_color, description, primary_chat_id, avatar_color_index, avatar_leaf, avatar_leaf_color, image_key FROM projects;
                  DROP TABLE projects;
                  ALTER TABLE projects_new RENAME TO projects;
                  COMMIT;",
@@ -833,9 +839,9 @@ impl Db {
     pub fn insert_project(&self, p: &Project) -> Result<()> {
         self.with(|c| {
             c.execute(
-                "INSERT INTO projects(id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily, color, user_id, workspace_state, avatar, avatar_color, description, primary_chat_id, avatar_color_index, avatar_leaf, avatar_leaf_color)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
-                params![p.id, p.name, p.icon, p.instructions, p.models.to_string(), p.state, p.created_at, p.last_active_at, p.spend_cap_daily, p.color, p.user_id, p.workspace_state, p.avatar, p.avatar_color, p.description, p.primary_chat_id, p.avatar_color_index, p.avatar_leaf, p.avatar_leaf_color],
+                "INSERT INTO projects(id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily, color, user_id, workspace_state, avatar, avatar_color, description, primary_chat_id, avatar_color_index, avatar_leaf, avatar_leaf_color, image_key)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+                params![p.id, p.name, p.icon, p.instructions, p.models.to_string(), p.state, p.created_at, p.last_active_at, p.spend_cap_daily, p.color, p.user_id, p.workspace_state, p.avatar, p.avatar_color, p.description, p.primary_chat_id, p.avatar_color_index, p.avatar_leaf, p.avatar_leaf_color, p.image_key],
             )
             .map(|_| ())
         })
@@ -862,11 +868,12 @@ impl Db {
             avatar_color_index: r.get(16)?,
             avatar_leaf: r.get(17)?,
             avatar_leaf_color: r.get(18)?,
+            image_key: r.get(19)?,
         })
     }
 
     const PROJECT_COLS: &'static str =
-        "id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily, color, user_id, workspace_state, avatar, avatar_color, description, primary_chat_id, avatar_color_index, avatar_leaf, avatar_leaf_color";
+        "id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily, color, user_id, workspace_state, avatar, avatar_color, description, primary_chat_id, avatar_color_index, avatar_leaf, avatar_leaf_color, image_key";
 
     /// By id, else by name. Names are unique per user only, so a name lookup prefers the id
     /// match and otherwise returns the most recently active project with that name; callers that
@@ -1040,6 +1047,17 @@ impl Db {
                     params![id, color],
                 )?;
             }
+            Ok(())
+        })
+    }
+
+    /// D92 amendment: the agent's uploaded / generated picture (`None` clears it).
+    pub fn set_project_image_key(&self, id: &str, key: Option<&str>) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE projects SET image_key = ?2 WHERE id = ?1",
+                params![id, key],
+            )?;
             Ok(())
         })
     }
@@ -1545,7 +1563,24 @@ impl Db {
         })
     }
 
+    /// Rows with `after < seq <= upto`, oldest first (the checkpoint validation walk).
+    pub fn rows_between(&self, room: &str, after: i64, upto: i64, limit: i64) -> Result<Vec<Row>> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT seq, device, batch_id, bytes FROM rows WHERE room = ?1 AND seq > ?2 AND seq <= ?3
+                 ORDER BY seq LIMIT ?4",
+            )?;
+            let rows = st.query_map(params![room, after, upto, limit], |r| {
+                Ok(Row { seq: r.get(0)?, device: r.get(1)?, batch_id: r.get(2)?, bytes: r.get(3)? })
+            })?;
+            rows.collect()
+        })
+    }
+
     /// Store a checkpoint and delete rows it covers (guard: `seq_covered >= floor`).
+    ///
+    /// Callers must have verified that the snapshot contains every op in those rows
+    /// (`rooms::checkpoint_covers_store`): this deletes them for good.
     pub fn put_checkpoint(
         &self,
         room: &str,
@@ -1570,6 +1605,40 @@ impl Db {
             c.execute("DELETE FROM rows WHERE room = ?1 AND seq <= ?2", params![room, seq_covered])?;
             c.execute("INSERT INTO room_seq(room, head, floor) VALUES (?1, ?2, ?2) ON CONFLICT(room) DO UPDATE SET floor = ?2, head = MAX(head, ?2)", params![room, seq_covered])?;
             Ok(true)
+        })
+    }
+
+    /// `(seq, created_at, bytes)` of the room's checkpoint.
+    pub fn checkpoint_full(&self, room: &str) -> Result<Option<(i64, i64, Vec<u8>)>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT seq, created_at, bytes FROM checkpoints WHERE room = ?1",
+                params![room],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+        })
+    }
+
+    /// Announced messages the relay indexed for a chat (`chat_events`).
+    pub fn chat_events_count(&self, chat_id: &str) -> Result<i64> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT COUNT(*) FROM chat_events WHERE chat_id = ?1",
+                params![chat_id],
+                |r| r.get(0),
+            )
+        })
+    }
+
+    /// Messages the Matrix mirror holds for a chat (`matrix_events`).
+    pub fn matrix_events_count(&self, chat_id: &str) -> Result<i64> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT COUNT(*) FROM matrix_events WHERE chat_id = ?1",
+                params![chat_id],
+                |r| r.get(0),
+            )
         })
     }
 
@@ -1626,6 +1695,32 @@ impl Db {
                 params![project_id, now_ms(), api, model, input, output, cache_read, cache_write, usd, latency_ms, ttfb_ms],
             )
             .map(|_| ())
+        })
+    }
+
+    /// How many usage rows a project wrote since `since_ms` for one API whose model starts with
+    /// `model_prefix` (the avatar picker's daily generation count).
+    pub fn usage_count_since(
+        &self,
+        project_id: &str,
+        api: &str,
+        model_prefix: &str,
+        since_ms: i64,
+    ) -> Result<i64> {
+        self.with(|c| {
+            let n = c.query_row(
+                "SELECT COUNT(*) FROM usage WHERE project_id = ?1 AND api = ?2 AND at >= ?3
+                        AND (model LIKE ?4 OR model LIKE ?5)",
+                params![
+                    project_id,
+                    api,
+                    since_ms,
+                    format!("{model_prefix}%"),
+                    format!("mock:{model_prefix}%")
+                ],
+                |r| r.get(0),
+            )?;
+            Ok(n)
         })
     }
 
@@ -3289,7 +3384,7 @@ mod vault_scope_tests {
                    spend_cap_daily REAL NOT NULL DEFAULT 25.0, project_token_hash TEXT, color TEXT NOT NULL DEFAULT '#8b7cf6',
                    workspace_state TEXT NOT NULL DEFAULT 'stopped', avatar TEXT, deleted_at INTEGER, avatar_color TEXT,
                    description TEXT NOT NULL DEFAULT '', primary_chat_id TEXT, avatar_color_index INTEGER,
-                   avatar_leaf INTEGER, avatar_leaf_color INTEGER);
+                   avatar_leaf INTEGER, avatar_leaf_color INTEGER, image_key TEXT);
                  CREATE UNIQUE INDEX projects_user_name ON projects(user_id, name);
                  INSERT INTO projects(id, name, user_id) VALUES ('p_bob', 'Research', 'bob');
                  CREATE TABLE vault_items (
@@ -3354,6 +3449,7 @@ mod avatar_migration_tests {
             avatar_color_index: None,
             avatar_leaf: None,
             avatar_leaf_color: None,
+            image_key: None,
         }
     }
 

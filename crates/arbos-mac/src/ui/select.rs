@@ -12,14 +12,19 @@
 //! where the text layout is guaranteed to exist.
 
 use std::ops::Range;
+use std::rc::Rc;
 
 use gpui::{
-    point, px, App, Bounds, Context, CursorStyle, DispatchPhase, Element, ElementId, Entity,
-    FocusHandle, GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId, IntoElement,
-    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point,
-    SharedString, StyledText, TextLayout, TextRun, Window,
+    linear_color_stop, linear_gradient, point, px, size, App, Bounds, Context, Corners,
+    CursorStyle, DispatchPhase, Element, ElementId, Entity, FocusHandle, FontWeight,
+    GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId, IntoElement, LayoutId,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString,
+    StyledText, TextAlign, TextLayout, TextRun, TransformationMatrix, Window,
 };
 use unicode_segmentation::UnicodeSegmentation;
+
+use crate::ui::avatars;
+use crate::ui::mention::{self, Mention, Mentions};
 
 /// What one click, two clicks or three clicks select, and what a drag that
 /// started with them extends by.
@@ -244,6 +249,9 @@ pub struct Selectable {
     entity: Entity<TextSelection>,
     current: Option<(SharedString, SharedString, Range<usize>)>,
     color: Hsla,
+    /// Who `@name` runs resolve to, and the chip colours (accent text, pill).
+    mentions: Rc<Mentions>,
+    chip_colors: (Hsla, Hsla),
 }
 
 impl Selectable {
@@ -256,7 +264,17 @@ impl Selectable {
             entity: entity.clone(),
             current,
             color,
+            mentions: Mentions::empty(),
+            chip_colors: (Hsla::default(), Hsla::default()),
         }
+    }
+
+    /// Mention chips: `@Name` runs of a known entity draw as a chip (`accent`
+    /// text on a `pill`) and open its page on click.
+    pub fn with_mentions(mut self, mentions: Rc<Mentions>, accent: Hsla, pill: Hsla) -> Self {
+        self.mentions = mentions;
+        self.chip_colors = (accent, pill);
+        self
     }
 
     /// The same selection drawn in another colour (dark bubbles need more).
@@ -287,6 +305,8 @@ impl Selectable {
             text,
             range,
             color: self.color,
+            mentions: self.mentions.clone(),
+            chip_colors: self.chip_colors,
         }
     }
 }
@@ -300,6 +320,19 @@ pub struct BubbleSelectable {
     /// The current selection when it lives in this bubble.
     range: Option<Range<usize>>,
     color: Hsla,
+    mentions: Rc<Mentions>,
+    chip_colors: (Hsla, Hsla),
+}
+
+/// One mention chip inside a [`SelectableText`]: the `@Name` run (element-local
+/// bytes), what it shows and where a click goes.
+pub struct Chip {
+    pub range: Range<usize>,
+    /// Bytes of the picture cell at the start of the run (`@` or `@` + hair space).
+    pub cell: usize,
+    pub mention: Rc<Mention>,
+    pub mentions: Rc<Mentions>,
+    pub pill: Hsla,
 }
 
 impl BubbleSelectable {
@@ -318,6 +351,28 @@ impl BubbleSelectable {
             Some(text.as_ref()),
             "selectable text must be the bubble's plain text at its offset"
         );
+        // Mention chips first: the `@` glyph goes transparent (its cell holds
+        // the picture), the name takes the accent; the selection highlight
+        // then splits those runs like any other.
+        let found = self.mentions.find(&text);
+        let (accent, pill) = self.chip_colors;
+        let mut chips = Vec::with_capacity(found.len());
+        let mut runs = runs;
+        for (range, mention) in found {
+            let cell = if text[range.clone()].starts_with(mention::CELL) {
+                mention::CELL.len()
+            } else {
+                1
+            };
+            runs = chip_runs(runs, range.clone(), cell, accent);
+            chips.push(Chip {
+                range,
+                cell,
+                mention,
+                mentions: self.mentions.clone(),
+                pill,
+            });
+        }
         let runs = match &self.range {
             Some(range) => highlight(runs, local_range(range, at, text.len()), self.color),
             None => runs,
@@ -328,9 +383,49 @@ impl BubbleSelectable {
             bubble_text: self.text.clone(),
             at,
             links: Vec::new(),
+            chips,
             selection: self.entity.clone(),
         }
     }
+}
+
+/// Recolour the `@Name` run for a chip: the `@` (first byte) transparent, the
+/// name in `accent`, no underline; everything else untouched.
+pub fn chip_runs(
+    runs: Vec<TextRun>,
+    range: Range<usize>,
+    cell: usize,
+    accent: Hsla,
+) -> Vec<TextRun> {
+    let mut out = Vec::with_capacity(runs.len() + 3);
+    let mut pos = 0usize;
+    let at_end = range.start + cell;
+    for run in runs {
+        let run_end = pos + run.len;
+        let mut cursor = pos;
+        for cut in [range.start, at_end, range.end, run_end] {
+            if cut <= cursor || cut > run_end {
+                continue;
+            }
+            let color = if cursor >= range.start && cursor < at_end {
+                gpui::transparent_black()
+            } else if cursor >= at_end && cursor < range.end {
+                accent
+            } else {
+                run.color
+            };
+            let in_chip = cursor >= range.start && cursor < range.end;
+            out.push(TextRun {
+                len: cut - cursor,
+                color,
+                underline: if in_chip { None } else { run.underline },
+                ..run.clone()
+            });
+            cursor = cut;
+        }
+        pos = run_end;
+    }
+    out
 }
 
 /// The part of a bubble-wide `range` that falls inside the element starting
@@ -487,6 +582,7 @@ pub struct SelectableText {
     at: usize,
     styled: StyledText,
     links: Vec<(Range<usize>, String)>,
+    chips: Vec<Chip>,
     selection: Entity<TextSelection>,
 }
 
@@ -553,9 +649,16 @@ impl Element for SelectableText {
         window: &mut Window,
         cx: &mut App,
     ) {
+        let layout = self.styled.layout().clone();
+        let chips: Rc<Vec<Chip>> = Rc::new(std::mem::take(&mut self.chips));
+        for chip in chips.iter() {
+            paint_chip_pill(&layout, chip, window);
+        }
         self.styled
             .paint(None, inspector_id, bounds, state, &mut (), window, cx);
-        let layout = self.styled.layout().clone();
+        for chip in chips.iter() {
+            paint_chip_picture(&layout, chip, window, cx);
+        }
         let links = std::mem::take(&mut self.links);
         let selection = self.selection.clone();
         let focus_handle = selection.read(cx).focus_handle.clone();
@@ -564,7 +667,10 @@ impl Element for SelectableText {
         let over_link = hitbox.is_hovered(window)
             && layout
                 .index_for_position(window.mouse_position())
-                .is_ok_and(|ix| links.iter().any(|(r, _)| r.contains(&ix)));
+                .is_ok_and(|ix| {
+                    links.iter().any(|(r, _)| r.contains(&ix))
+                        || chips.iter().any(|c| c.range.contains(&ix))
+                });
         window.set_cursor_style(
             if over_link {
                 CursorStyle::PointingHand
@@ -661,7 +767,10 @@ impl Element for SelectableText {
                 });
                 if plain_click && event.click_count == 1 && hitbox.is_hovered(window) {
                     if let Ok(ix) = layout.index_for_position(event.position) {
-                        if let Some((_, href)) = links.iter().find(|(r, _)| r.contains(&ix)) {
+                        if let Some(chip) = chips.iter().find(|c| c.range.contains(&ix)) {
+                            chip.mentions.open(&chip.mention, cx);
+                        } else if let Some((_, href)) = links.iter().find(|(r, _)| r.contains(&ix))
+                        {
                             cx.open_url(href);
                         }
                     }
@@ -669,6 +778,135 @@ impl Element for SelectableText {
             }
         });
     }
+}
+
+/// The chip's pill: one rounded quad per line fragment the `@Name` run
+/// occupies, `PILL_PAD_X` wider than the glyphs on each side and
+/// `PILL_PAD_Y` taller above and below the line box. Painted before the text.
+fn paint_chip_pill(layout: &TextLayout, chip: &Chip, window: &mut Window) {
+    for (start, end, top) in chip_fragments(layout, &chip.range) {
+        let line_h = layout.line_height();
+        let bounds = Bounds::new(
+            point(
+                start - px(mention::PILL_PAD_X),
+                top - px(mention::PILL_PAD_Y),
+            ),
+            size(
+                end - start + px(mention::PILL_PAD_X * 2.0),
+                line_h + px(mention::PILL_PAD_Y * 2.0),
+            ),
+        );
+        window.paint_quad(gpui::quad(
+            bounds,
+            Corners::all(px(mention::PILL_RADIUS)),
+            chip.pill,
+            gpui::Edges::all(px(0.0)),
+            gpui::transparent_black(),
+            gpui::BorderStyle::default(),
+        ));
+    }
+}
+
+/// The entity's picture, a `PICTURE` pt disc centred in the `@` glyph's cell
+/// (which the run paints transparent). Painted over the text.
+fn paint_chip_picture(layout: &TextLayout, chip: &Chip, window: &mut Window, cx: &mut App) {
+    let Some(at) = layout.position_for_index(chip.range.start) else {
+        return;
+    };
+    let Some(after_at) = layout.position_for_index(chip.range.start + chip.cell) else {
+        return;
+    };
+    if after_at.y != at.y {
+        return;
+    }
+    let line_h = layout.line_height();
+    // The disc fills the cell's height budget and sits at the cell's left;
+    // the hair space after `@` keeps a gap to the name.
+    let d = px(mention::PICTURE).min(line_h);
+    let origin = point(at.x, at.y + (line_h - d) / 2.0);
+    let bounds = Bounds::new(origin, size(d, d));
+    let radii = Corners::all(d / 2.0);
+    match &chip.mention.picture {
+        mention::Picture::Image(image) => {
+            let _ = window.paint_image(bounds, radii, image.clone(), 0, false);
+        }
+        mention::Picture::Initials { text, top, bottom } => {
+            window.paint_quad(gpui::quad(
+                bounds,
+                radii,
+                linear_gradient(
+                    180.0,
+                    linear_color_stop(*top, 0.0),
+                    linear_color_stop(*bottom, 1.0),
+                ),
+                gpui::Edges::all(px(0.0)),
+                gpui::transparent_black(),
+                gpui::BorderStyle::default(),
+            ));
+            let font_size = d * avatars::INITIALS_SCALE;
+            let mut font = window.text_style().font();
+            font.weight = FontWeight::SEMIBOLD;
+            let run = TextRun {
+                len: text.len(),
+                font,
+                color: gpui::white(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            let line = window.text_system().shape_line(
+                SharedString::from(text.clone()),
+                font_size,
+                &[run],
+                None,
+            );
+            let x = origin.x + (d - line.width) / 2.0;
+            let _ = line.paint(point(x, origin.y), d, TextAlign::Left, None, window, cx);
+        }
+        mention::Picture::Leaf(pick) => {
+            window.paint_quad(gpui::quad(
+                bounds,
+                radii,
+                avatars::leaf_disc(pick.color),
+                gpui::Edges::all(px(0.0)),
+                gpui::transparent_black(),
+                gpui::BorderStyle::default(),
+            ));
+            let side = d * arbos_core::avatar::leaf::LEAF_SCALE;
+            let leaf = Bounds::new(
+                point(origin.x + (d - side) / 2.0, origin.y + (d - side) / 2.0),
+                size(side, side),
+            );
+            let _ = window.paint_svg(
+                leaf,
+                avatars::leaf_asset(pick.leaf),
+                None,
+                TransformationMatrix::unit(),
+                avatars::leaf_ink(),
+                cx,
+            );
+        }
+    }
+}
+
+/// The (start x, end x, line top) of each wrapped-line fragment a byte range
+/// covers. A range on one line is one fragment; one that soft-wraps gives the
+/// tail of the first line and the head of the next.
+fn chip_fragments(layout: &TextLayout, range: &Range<usize>) -> Vec<(Pixels, Pixels, Pixels)> {
+    let (Some(start), Some(end)) = (
+        layout.position_for_index(range.start),
+        layout.position_for_index(range.end),
+    ) else {
+        return Vec::new();
+    };
+    if start.y == end.y {
+        return vec![(start.x, end.x, start.y)];
+    }
+    let bounds = layout.bounds();
+    vec![
+        (start.x, bounds.right(), start.y),
+        (bounds.left(), end.x, end.y),
+    ]
 }
 
 #[cfg(test)]
@@ -889,6 +1127,104 @@ mod tests {
         sel.update(cx, |s, _| {
             assert!(!s.rig_select("k".into(), text.clone(), "nonsense"));
         });
+    }
+
+    /// A bubble whose text starts with a chip: `@Comms says hi`.
+    struct ChipBubble {
+        selection: Entity<TextSelection>,
+        mentions: Rc<Mentions>,
+    }
+
+    impl gpui::Render for ChipBubble {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            use gpui::{div, InteractiveElement as _, ParentElement as _, Styled as _};
+            let text: SharedString = "@Comms says hi".into();
+            let selectable = Selectable::new(&self.selection, Hsla::default(), cx).with_mentions(
+                self.mentions.clone(),
+                gpui::blue(),
+                gpui::transparent_black(),
+            );
+            let bubble = selectable.bubble("m1", text.clone());
+            div()
+                .w(px(400.0))
+                .h(px(100.0))
+                .p(px(20.0))
+                .text_size(px(15.0))
+                .child(
+                    div()
+                        .debug_selector(|| "chip-text".into())
+                        .child(bubble.text(0, text.clone(), vec![run(text.len())])),
+                )
+        }
+    }
+
+    #[gpui::test]
+    fn a_click_on_a_chip_opens_its_page_and_a_click_past_it_does_not(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::app::ProfilePage;
+        use std::cell::RefCell;
+        let opened: Rc<RefCell<Vec<ProfilePage>>> = Rc::new(RefCell::new(Vec::new()));
+        let record = opened.clone();
+        let mentions = Mentions::with_table(
+            vec![(
+                "comms",
+                crate::ui::mention::tests::stub(
+                    "Comms",
+                    ProfilePage::Agent {
+                        project_id: "p-comms".into(),
+                    },
+                ),
+            )],
+            move |page, _| record.borrow_mut().push(page.clone()),
+        );
+        let (_view, vcx) = cx.add_window_view(|_, cx| ChipBubble {
+            selection: cx.new(TextSelection::new),
+            mentions,
+        });
+        vcx.run_until_parked();
+        let bounds = vcx.debug_bounds("chip-text").expect("text drawn");
+        let y = bounds.origin.y + bounds.size.height / 2.0;
+        // Inside "@Comms": the second glyph.
+        let on_chip = point(bounds.origin.x + px(12.0), y);
+        vcx.simulate_click(on_chip, gpui::Modifiers::default());
+        vcx.run_until_parked();
+        assert_eq!(opened.borrow().len(), 1, "one click, one page");
+        assert!(matches!(
+            &opened.borrow()[0],
+            ProfilePage::Agent { project_id } if project_id == "p-comms"
+        ));
+        // Far right of the line, past "says hi": plain text, nothing opens.
+        let past = point(bounds.right() - px(4.0), y);
+        vcx.simulate_click(past, gpui::Modifiers::default());
+        vcx.run_until_parked();
+        assert_eq!(
+            opened.borrow().len(),
+            1,
+            "a click past the chip opens nothing"
+        );
+    }
+
+    #[test]
+    fn chip_runs_hide_the_at_and_colour_the_name() {
+        let runs = chip_runs(vec![run(14)], 0..6, 1, gpui::blue());
+        let lens: Vec<usize> = runs.iter().map(|r| r.len).collect();
+        assert_eq!(lens, vec![1, 5, 8]);
+        assert_eq!(runs[0].color, gpui::transparent_black());
+        assert_eq!(runs[1].color, gpui::blue());
+        assert_eq!(runs[2].color, Hsla::default());
+        // A chip in the middle of a run keeps the text before it.
+        let runs = chip_runs(vec![run(20)], 4..10, 1, gpui::blue());
+        let lens: Vec<usize> = runs.iter().map(|r| r.len).collect();
+        assert_eq!(lens, vec![4, 1, 5, 10]);
+        // With the hair-space cell (4 bytes), the transparent run is 4 long.
+        let runs = chip_runs(vec![run(20)], 0..9, 4, gpui::blue());
+        let lens: Vec<usize> = runs.iter().map(|r| r.len).collect();
+        assert_eq!(lens, vec![4, 5, 11]);
     }
 
     #[test]

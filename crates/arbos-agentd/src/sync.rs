@@ -440,6 +440,11 @@ impl SyncHub {
         probe_tick.tick().await;
         let mut dirty_since_persist = false;
         let mut head_seq_for_checkpoint: Option<(i64, i64, i64)> = None;
+        // False once a row of this session failed to import or was parked by Loro as pending
+        // (its deps are missing here): a snapshot of such a doc must never become the relay's
+        // checkpoint — the relay deletes the rows a checkpoint covers (Arbonites, 2026-10-23).
+        let mut imports_clean = true;
+        let mut healed = false;
 
         loop {
             tokio::select! {
@@ -470,17 +475,27 @@ impl SyncHub {
                                 }
                             }
                             after = after.max(st.checkpoint_seq.min(cursor));
-                            // Own rows are re-imported after a boot: the persisted snapshot may predate the last ack.
-                            let first_after_boot = !host.lock().await.ever_caught_up;
-                            let req = Frame::new(FrameType::RowsReq, serde_json::to_value(wire::RowsReq { after, exclude_own: !first_after_boot })?, Bytes::new());
+                            // Every row is requested, own device id included (`excludeOwn:false`,
+                            // the client opt-out of #1409): the device id `box:<sandbox>` is shared
+                            // by every workspace of the box, so two agents of one owner in the same
+                            // people chat are two replicas behind one id, and "own" rows are the
+                            // other agent's. Loro drops what this replica already has.
+                            imports_clean = true;
+                            let req = Frame::new(FrameType::RowsReq, serde_json::to_value(wire::RowsReq { after, exclude_own: false })?, Bytes::new());
                             sink.send(Message::Binary(req.encode())).await?;
                         }
                         FrameType::Row => {
                             let rh: wire::RowHeader = serde_json::from_value(f.header)?;
                             let cmds = {
                                 let mut h = host.lock().await;
-                                if rh.device != self.cfg.device_id || !h.ever_caught_up {
-                                    let _ = h.doc.import(&f.payload);
+                                // Imported whatever device the header names (see the ROWS_REQ note).
+                                match h.doc.import(&f.payload) {
+                                    Ok(status) if status.pending.is_none() => {}
+                                    Ok(_) => imports_clean = false,
+                                    Err(e) => {
+                                        imports_clean = false;
+                                        tracing::warn!(room = %room, seq = rh.seq, error = %e, "row import failed");
+                                    }
                                 }
                                 h.cursor = h.cursor.max(rh.seq);
                                 dirty_since_persist = true;
@@ -495,7 +510,22 @@ impl SyncHub {
                         }
                         FrameType::RowsDone => {
                             let head = f.header.get("headSeq").and_then(|v| v.as_i64()).unwrap_or(0);
-                            let cmds = {
+                            // History heal (#1518 follow-up): the payload is the relay's version
+                            // vector for the room. Ops this replica holds beyond it were lost on
+                            // the relay (a stale checkpoint); push them back once per session so
+                            // every other replica's parked rows can apply.
+                            if !healed && !f.payload.is_empty() {
+                                if let Some(relay_vv) = decode_vv(&f.payload) {
+                                    let missing = host.lock().await.doc.updates_beyond(&relay_vv);
+                                    if !missing.is_empty() && missing.len() <= wire::ROW_MAX {
+                                        healed = true;
+                                        tracing::info!(room = %room, bytes = missing.len(), "history heal: pushing ops the relay lacked");
+                                        let f = Frame::new(FrameType::Push, json!({ "batchId": ulid(), "heal": true }), Bytes::from(missing));
+                                        sink.send(Message::Binary(f.encode())).await?;
+                                    }
+                                }
+                            }
+                            let (covered, cmds) = {
                                 let mut h = host.lock().await;
                                 h.caught_up = true;
                                 if !h.ever_caught_up {
@@ -504,26 +534,35 @@ impl SyncHub {
                                     h.ever_caught_up = true;
                                 }
                                 h.cursor = h.cursor.max(head);
-                                h.new_pending()
+                                (h.cursor, h.new_pending())
                             };
                             let _ = self.persist(host).await;
                             let _ = self.incoming.send(Incoming::CaughtUp { chat_id: chat_id.clone(), head_seq: head }).await;
                             for cmd in cmds {
                                 let _ = self.incoming.send(Incoming::Command { chat_id: chat_id.clone(), cmd }).await;
                             }
-                            if let Some((head, rows, bytes)) = head_seq_for_checkpoint.take() {
-                                if rows > 200 || bytes > 512 * 1024 {
-                                    if let Err(e) = self.post_checkpoint(host, head).await {
+                            if let Some((_, rows, bytes)) = head_seq_for_checkpoint.take() {
+                                // The checkpoint covers what this replica has actually walked past
+                                // (ROWS_DONE `headSeq`, the cursor), never the room head from STATE:
+                                // rows appended since then arrive live and are not in the snapshot.
+                                // A session with a failed or parked import posts nothing.
+                                if (rows > 200 || bytes > 512 * 1024) && imports_clean {
+                                    if let Err(e) = self.post_checkpoint(host, covered).await {
                                         tracing::warn!(error = %e, "checkpoint post failed");
                                     }
+                                } else if !imports_clean {
+                                    tracing::warn!(room = %room, "checkpoint skipped: this replica's doc has rows it could not apply");
                                 }
                             }
                         }
                         FrameType::Ack => {
+                            // The cursor does not move on ACK: the relay acks from the frame
+                            // handler while rows from other sockets can still be queued for this
+                            // one; a cursor past them would skip them on the next ROWS_REQ and the
+                            // doc would freeze on their dependants (#1406, mirrored from the apps).
                             let ack: wire::Ack = serde_json::from_value(f.header)?;
                             let mut h = host.lock().await;
                             h.on_ack(&ack.batch_id);
-                            h.cursor = h.cursor.max(ack.seq);
                             dirty_since_persist = true;
                         }
                         FrameType::Status => {
@@ -535,7 +574,7 @@ impl SyncHub {
                             let code = f.header.get("code").and_then(|v| v.as_str()).unwrap_or("");
                             if code == "lagging" {
                                 let after = host.lock().await.cursor;
-                                let req = Frame::new(FrameType::RowsReq, serde_json::to_value(wire::RowsReq { after, exclude_own: true })?, Bytes::new());
+                                let req = Frame::new(FrameType::RowsReq, serde_json::to_value(wire::RowsReq { after, exclude_own: false })?, Bytes::new());
                                 sink.send(Message::Binary(req.encode())).await?;
                             } else {
                                 tracing::warn!(room = %room, header = %f.header, "relay error frame");

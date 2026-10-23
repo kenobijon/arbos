@@ -61,7 +61,9 @@
 		A1D8800000000000000000C2 /* Servers.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D8800000000000000000C1 /* Servers.swift */; };
 		A1D8800000000000000000C4 /* ServerStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D8800000000000000000C3 /* ServerStore.swift */; };
 		A1D8800000000000000000C6 /* ServerChannelsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D8800000000000000000C5 /* ServerChannelsView.swift */; };
+		A1DE700000000000000000B2 /* MentionChips.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1DE700000000000000000B1 /* MentionChips.swift */; };
 		A1D8800000000000000000D2 /* LeafAvatar.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D8800000000000000000D1 /* LeafAvatar.swift */; };
+		A1D8800000000000000000A8 /* AvatarPickerSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D8800000000000000000A7 /* AvatarPickerSheet.swift */; };
 		A1D8800000000000000000F2 /* MediaViewer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D8800000000000000000F1 /* MediaViewer.swift */; };
 		A115819FE05076AF542EABF0 /* SecretsAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1112911C0D615A9C335C0EF /* SecretsAPI.swift */; };
 		A1BB7C8BDA3465CD63AA1284 /* SecretsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C69DB7C444253D783D4156 /* SecretsStore.swift */; };
@@ -73,6 +75,7 @@
 		A1BC00000000000000000002 /* MessageMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BC00000000000000000001 /* MessageMenu.swift */; };
 		A1BC00000000000000000004 /* MessageMenuTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BC00000000000000000003 /* MessageMenuTests.swift */; };
 		A1BE00000000000000000002 /* LongTranscriptPerfTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BE00000000000000000001 /* LongTranscriptPerfTests.swift */; };
+		A1C100000000000000000002 /* SenderNameRowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C100000000000000000001 /* SenderNameRowTests.swift */; };
 		A1BD00000000000000000002 /* NewMessageSheetTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BD00000000000000000001 /* NewMessageSheetTests.swift */; };
 		A15A00000000000000000031 /* ProfilePaneStructureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000030 /* ProfilePaneStructureTests.swift */; };
 		A15C0000000000000000000B /* SessionRoomTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15C0000000000000000000A /* SessionRoomTests.swift */; };
@@ -179,7 +182,9 @@
 		A1D8800000000000000000C1 /* Servers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Servers.swift; sourceTree = "<group>"; };
 		A1D8800000000000000000C3 /* ServerStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerStore.swift; sourceTree = "<group>"; };
 		A1D8800000000000000000C5 /* ServerChannelsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerChannelsView.swift; sourceTree = "<group>"; };
+		A1DE700000000000000000B1 /* MentionChips.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MentionChips.swift; sourceTree = "<group>"; };
 		A1D8800000000000000000D1 /* LeafAvatar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LeafAvatar.swift; sourceTree = "<group>"; };
+		A1D8800000000000000000A7 /* AvatarPickerSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AvatarPickerSheet.swift; sourceTree = "<group>"; };
 		A1D8800000000000000000F1 /* MediaViewer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaViewer.swift; sourceTree = "<group>"; };
 		A1112911C0D615A9C335C0EF /* SecretsAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecretsAPI.swift; sourceTree = "<group>"; };
 		A1C69DB7C444253D783D4156 /* SecretsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecretsStore.swift; sourceTree = "<group>"; };
@@ -192,6 +197,7 @@
 		A1BC00000000000000000001 /* MessageMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageMenu.swift; sourceTree = "<group>"; };
 		A1BC00000000000000000003 /* MessageMenuTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageMenuTests.swift; sourceTree = "<group>"; };
 		A1BE00000000000000000001 /* LongTranscriptPerfTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LongTranscriptPerfTests.swift; sourceTree = "<group>"; };
+		A1C100000000000000000001 /* SenderNameRowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SenderNameRowTests.swift; sourceTree = "<group>"; };
 		A1BD00000000000000000001 /* NewMessageSheetTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewMessageSheetTests.swift; sourceTree = "<group>"; };
 		A15A00000000000000000030 /* ProfilePaneStructureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfilePaneStructureTests.swift; sourceTree = "<group>"; };
 		A15C0000000000000000000A /* SessionRoomTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionRoomTests.swift; sourceTree = "<group>"; };
@@ -361,7 +367,9 @@
 				A1D8200000000000000000A1,
 				A1D8800000000000000000C5,
 				A1D8800000000000000000D1,
+				A1D8800000000000000000A7 /* AvatarPickerSheet.swift */,
 				A1C1E00000000000000000A1 /* PresenceRow.swift */,
+				A1DE700000000000000000B1 /* MentionChips.swift */,
 			);
 			path = UI;
 			sourceTree = "<group>";
@@ -389,6 +397,7 @@
 				A1BC00000000000000000003 /* MessageMenuTests.swift */,
 				A1BD00000000000000000001 /* NewMessageSheetTests.swift */,
 				A1BE00000000000000000001 /* LongTranscriptPerfTests.swift */,
+				A1C100000000000000000001 /* SenderNameRowTests.swift */,
 			);
 			path = ArbosTests;
 			sourceTree = "<group>";
@@ -548,7 +557,9 @@
 				A17DC1D0E22C9438EC90011C /* AppModel.swift in Sources */,
 				A1D8800000000000000000C4 /* ServerStore.swift in Sources */,
 				A1D8800000000000000000C6 /* ServerChannelsView.swift in Sources */,
+				A1DE700000000000000000B2 /* MentionChips.swift in Sources */,
 				A1D8800000000000000000D2 /* LeafAvatar.swift in Sources */,
+				A1D8800000000000000000A8 /* AvatarPickerSheet.swift in Sources */,
 				A1D8800000000000000000F2 /* MediaViewer.swift in Sources */,
 				A1D0C5B0E1F2A3B4C5D6E703 /* LaunchClock.swift in Sources */,
 				A1BF00000000000000000002 /* PerfLog.swift in Sources */,
@@ -617,6 +628,7 @@
 				A1BC00000000000000000004 /* MessageMenuTests.swift in Sources */,
 				A1BD00000000000000000002 /* NewMessageSheetTests.swift in Sources */,
 				A1BE00000000000000000002 /* LongTranscriptPerfTests.swift in Sources */,
+				A1C100000000000000000002 /* SenderNameRowTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

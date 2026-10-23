@@ -18,8 +18,11 @@
 
 pub mod appcast;
 pub mod client;
+pub mod fetch;
 pub mod sign;
 pub mod version;
+
+pub use fetch::{SITE_FEED_URL, SITE_UPDATES_BASE};
 
 /// `ed25519 <base64 public key>`: the key every payload must verify against.
 pub const PUBLIC_KEY_LINE: &str = include_str!("../update-key.pub");
@@ -30,9 +33,11 @@ pub fn public_key() -> Option<sign::PublicKey> {
     sign::PublicKey::parse_line(PUBLIC_KEY_LINE).ok()
 }
 
-/// The default feed: the `appcast.xml` asset of the newest GitHub release.
+/// The GitHub feed: the `appcast.xml` asset of the newest GitHub release.
 /// `releases/latest/download/<asset>` is a stable URL that follows the
 /// release marked latest, so the app never needs to learn a new address.
+/// The Mac app checks [`SITE_FEED_URL`] (the site's mirror of this file) first
+/// and falls back to this one; see [`fetch`].
 pub const DEFAULT_FEED_URL: &str =
     "https://github.com/unarbos/arbos/releases/latest/download/appcast.xml";
 
