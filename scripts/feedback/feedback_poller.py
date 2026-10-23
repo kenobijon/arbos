@@ -2520,6 +2520,21 @@ class Loop:
                 if mac_ok:
                     self.ship(fid, st)
                     return
+            # The carrying run may have flipped green in the same second the budget ran out (#1488, 2026-10-23
+            # 15:0x: failed "nothing shipped" while its TestFlight run had just completed): a successful run
+            # that contains the fix means the build exists and the ship checks adopt it on a later tick. Keep
+            # waiting for a bounded while (the processing-time budget) instead of failing.
+            carried = None
+            if st.get("expects_ios") and not st.get("ios_done"):
+                carried = self.gh.later_ios_build(sha, since)
+            if carried is None and st.get("expects_ci") and not st.get("release_done"):
+                carried = self.gh.later_release(sha, since)
+            if carried and waited <= self.cfg.ship_timeout_min + 45:
+                if st.get("ship_wait_noted") != carried["html_url"]:
+                    st["ship_wait_noted"] = carried["html_url"]
+                    log(f"[{fid}] ship budget passed but a green carrying run exists: {carried['html_url']}; waiting for the build to be adopted")
+                self.store.save_state(fid, st)
+                return
             if st.get("ios_done") or st.get("release_done"):
                 # Once per item: the partial ship leaves the item `pushed` so later ticks keep looking for the
                 # processed build, and must not repeat the "Shipped (partially)" comment every two minutes.
