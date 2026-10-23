@@ -301,6 +301,8 @@ struct Project: Identifiable, Equatable, Codable {
     var machineClass: String? = nil
     var machineSnapshot: String? = nil
     var machineAlwaysOn: Bool = false
+    /// Per-user sidebar archive (`archived_at` on `GET /projects`); nil = in the list.
+    var archivedAt: Int64? = nil
 
     var shortModel: String { Project.shortModel(model) }
 
@@ -347,6 +349,7 @@ extension Project {
         self.machineClass = dto.machine.`class`
         self.machineSnapshot = dto.machine.snapshot
         self.machineAlwaysOn = dto.machine.always_on
+        self.archivedAt = dto.archived_at.flatMap { $0 }
     }
 }
 
