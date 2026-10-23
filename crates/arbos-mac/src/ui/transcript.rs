@@ -15,8 +15,8 @@ use gpui::{
 
 use crate::app::{AppEvent, AppState, DetailsTarget};
 use crate::model::{
-    now_ms, Attachment, AttachmentKind, Id, Message, MessageStatus, Part, Person, Role, StatusKind,
-    TurnKind,
+    now_ms, Attachment, AttachmentKind, Chat, Id, Message, MessageStatus, Part, Person, Project,
+    Role, SpaceKind, StatusKind, TurnKind,
 };
 use crate::ui::approve::{approval_card, ApprovalView};
 use crate::ui::attachments;
@@ -250,8 +250,9 @@ pub enum RowKind {
         pending: bool,
         /// Caption for prompts not typed by the user (a routine, another project).
         sender_label: Option<String>,
-        /// Another person's bubble shows their name above it only when the sender
-        /// changed (Grok Bot's group style).
+        /// Another person's bubble carries their name inside it, at the top, when
+        /// the chat names its senders (group / channel, see [`names_senders`]) and
+        /// the sender changed (Grok Bot's group style for the run).
         named: bool,
         /// Another person in a people chat (D72): left bubble with their
         /// avatar and handle instead of my right bubble.
@@ -277,19 +278,23 @@ pub enum RowKind {
         fill: bool,
         /// "9:41 PM", revealed next to the react glyph on hover.
         time: Option<String>,
-        /// In a people chat the message has a sender row above it: every block
+        /// In a people chat the message speaks in a sender lane: every block
         /// leaves the avatar lane free and the last one draws the sender's disc
         /// at the bubble's bottom-left (redesign mocks a/f). The sender seed.
         lane: Option<String>,
+        /// First block of a message whose sender changed, in a chat that names
+        /// its senders: the agent's name sits inside this bubble, at the top.
+        named: bool,
     },
     /// A finished reply with no words, cards or attachments: one plain line in the
     /// agent's bubble. `name` is the row's `senderName`; the agent id in `seed` resolves
-    /// the name when the row carries none (older boxes), like the sender header does.
+    /// the name when the row carries none (older boxes), like the in-bubble name does.
     NoAnswer {
         seed: String,
         name: Option<String>,
         time: Option<String>,
         lane: Option<String>,
+        named: bool,
     },
     /// Centered muted time line ("Today 9:39 PM").
     Stamp {
@@ -350,17 +355,6 @@ pub enum RowKind {
     },
     /// Debug-only "Show details" disclosure under a finished reply.
     Details,
-    /// F6: who speaks next — another Project's glyph and name above its message.
-    Sender {
-        name: String,
-        icon: Option<String>,
-        /// Stable seed for the chip colour (the sender id).
-        seed: String,
-        /// Tree-character slug the relay put on the reply (`senderAvatar`).
-        avatar: Option<String>,
-        /// Its colour (`senderAvatarColor`); `None` = look it up / mono.
-        avatar_color: Option<String>,
-    },
     /// F11: small speaker under a reply; click speaks it (again).
     Speaker {
         /// The speech is already cached (instant replay) vs. will be synthesised.
@@ -480,6 +474,9 @@ pub struct Transcript {
     /// Messages whose sender differs from the one before: their first row opens
     /// the wider turn gap.
     turn_starts: HashSet<Id>,
+    /// The open chat names its senders (group / channel, [`names_senders`]):
+    /// others' bubbles carry the name inside and the time after the text.
+    multi_party: bool,
     /// Message whose hover copy glyph is showing a checkmark, and when it started.
     copied_feedback: Option<(Id, Instant)>,
     /// `ARBOS_RIG_SELECT=all|<from>..<to>|word@<i>|para@<i>` (screenshot rig):
@@ -528,6 +525,7 @@ impl Transcript {
             hover: HoverFade::default(),
             selection,
             turn_starts: HashSet::new(),
+            multi_party: false,
             copied_feedback: None,
             rig_select: std::env::var("ARBOS_RIG_SELECT").ok().map(|spec| {
                 let after = std::env::var("ARBOS_RIG_SELECT_AFTER_MS")
@@ -700,7 +698,20 @@ impl Transcript {
         };
         let me_id = state.me_id();
         let thumb_keys: HashSet<&str> = state.thumbnails.keys().map(|k| k.as_str()).collect();
-        let new_rows = build_rows(&messages, show_details, speech, &me_id, &thumb_keys);
+        let multi_party = names_senders(
+            state.selected(),
+            state.active_chat(),
+            state.selected_channel.is_some(),
+        );
+        let new_rows = build_rows(
+            &messages,
+            show_details,
+            speech,
+            &me_id,
+            &thumb_keys,
+            multi_party,
+        );
+        self.multi_party = multi_party;
         self.turn_starts = messages
             .windows(2)
             .filter(|w| (w[0].role, &w[0].sender) != (w[1].role, &w[1].sender))
@@ -1056,6 +1067,47 @@ impl Transcript {
         )
     }
 
+    /// The sender's name inside a group / channel bubble (Jacob's Discord-style
+    /// reference, 2026-10-23): semibold in the sender's identity colour, with a
+    /// small `agent` tag for agents. The caller adds the click → profile.
+    fn sender_name_label(
+        &self,
+        row_id: &str,
+        name: String,
+        color: gpui::Hsla,
+        agent: bool,
+    ) -> Stateful<Div> {
+        div()
+            .id(SharedString::from(format!("{row_id}#who")))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .child(
+                div()
+                    .text_size(px(CHAT_BODY))
+                    .line_height(px(CHAT_LINE_HEIGHT))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(color)
+                    .child(name),
+            )
+            .when(agent, |el| {
+                el.child(
+                    div()
+                        .h(px(16.0))
+                        .px(px(5.0))
+                        .flex()
+                        .items_center()
+                        .rounded(px(4.0))
+                        .bg(Theme::with_alpha(color, 0.16))
+                        .text_size(px(10.0))
+                        .line_height(px(12.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(color)
+                        .child("agent"),
+                )
+            })
+    }
+
     /// One assistant bubble block (the Markdown row and the no-answer line share it).
     #[allow(clippy::too_many_arguments)]
     fn markdown_bubble(
@@ -1070,6 +1122,7 @@ impl Transcript {
         fill: bool,
         time: Option<String>,
         lane: Option<String>,
+        named: bool,
         now: Instant,
         theme: &Theme,
         selectable: &Selectable,
@@ -1089,10 +1142,43 @@ impl Transcript {
         // rounds the top, the last the bottom, the rest run straight.
         // People-chat agent bubbles get the same coloured left-edge
         // sliver as person messages, from the agent's disc colour.
-        let agent_accent = lane.as_deref().map(|seed| {
-            let a = self.agent_identity_full(seed, "Agent", cx);
-            avatars::agent_accent(&a.seed, a.color_index, a.leaf.0, a.leaf.1, theme)
-        });
+        let identity = lane
+            .as_deref()
+            .map(|seed| self.agent_identity_full(seed, "Agent", cx));
+        let agent_accent = identity
+            .as_ref()
+            .map(|a| avatars::agent_accent(&a.seed, a.color_index, a.leaf.0, a.leaf.1, theme));
+        // Group / channel: the agent's name inside its first bubble, in its
+        // colour, with the `agent` tag; the time after the last block's text.
+        let name_el = match (&identity, agent_accent) {
+            (Some(a), Some(color)) if named => {
+                let open_state = self.state.clone();
+                let pid = a.project_id.clone();
+                Some(
+                    self.sender_name_label(row_id, a.name.clone(), color, true)
+                        .when_some(pid, |el, pid| {
+                            el.cursor_pointer().on_click(move |_, _, cx| {
+                                let pid = pid.clone();
+                                open_state.update(cx, |s, cx| {
+                                    s.push_profile(
+                                        crate::app::ProfilePage::Agent { project_id: pid },
+                                        cx,
+                                    )
+                                });
+                            })
+                        })
+                        .into_any_element(),
+                )
+            }
+            _ => None,
+        };
+        let inline_time = self.multi_party && lane.is_some() && last && !live;
+        let time_el = inline_time
+            .then(|| {
+                time.clone()
+                    .map(|t| inline_time_label(t, theme).into_any_element())
+            })
+            .flatten();
         let r = px(BUBBLE_RADIUS);
         let bubble = self
             .menu_target(
@@ -1119,14 +1205,19 @@ impl Transcript {
             .when_some(agent_accent, |el, color| {
                 el.border_l_2().border_color(Theme::with_alpha(color, 0.7))
             })
-            .child(render_block(
-                row_id,
-                &block,
-                bubble_text.at,
-                veil.as_ref(),
-                now,
-                theme,
-                &selectable.bubble(format!("{message_id}#text"), bubble_text.text),
+            .child(sender_bubble_column(
+                name_el,
+                None,
+                render_block(
+                    row_id,
+                    &block,
+                    bubble_text.at,
+                    veil.as_ref(),
+                    now,
+                    theme,
+                    &selectable.bubble(format!("{message_id}#text"), bubble_text.text),
+                ),
+                time_el,
             ));
         let (row_el, reveal) = self.hover_row(row_id, now, window, cx);
         // Hover: reply + copy. The react glyph that opened the emoji bar is
@@ -1135,8 +1226,9 @@ impl Transcript {
             let actions = self.hover_reply_copy(row_id, message_id, reveal, theme, cx);
             div().flex().items_center().gap(px(2.0)).child(actions)
         });
-        // Messages for Mac: the bubble's time shows beside the glyph on hover.
-        let hover_time = (last && !live)
+        // Messages for Mac: the bubble's time shows beside the glyph on hover
+        // (1:1 chats; a group / channel bubble already carries it after the text).
+        let hover_time = (last && !live && !inline_time)
             .then(|| hover_time(time, reveal, theme).map(|t| t.ml(px(8.0))))
             .flatten();
         // The rail hangs off the bubble's right edge, out of the flow: it
@@ -1225,15 +1317,61 @@ impl Transcript {
                 // Bare `http(s)://…` URLs are still accented and clickable.
                 let body =
                     user_message_body(&row.id, &text, text_color, &theme, &bubble_selectable);
+                // Someone else's bubble in a group / channel: their name inside
+                // it (their colour), the time after the text (`multi_party`).
+                let (image, color) = match &from {
+                    Some(person) => {
+                        let state = self.state.read(cx);
+                        (
+                            state.avatar(&person.avatar_url),
+                            Some(state.sender_accent(person, &theme)),
+                        )
+                    }
+                    None => (None, None),
+                };
+                let open_person = |this: &Self, person: &Person, cx: &Context<Self>| {
+                    let open_state = this.state.clone();
+                    let handle = person.handle.clone();
+                    let sid = this.chat_id.as_ref().and_then(|c| {
+                        this.state.read(cx).chats.iter().find_map(|(pid, tabs)| {
+                            tabs.iter().any(|t| &t.id == c).then(|| pid.clone())
+                        })
+                    });
+                    move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut App| {
+                        let (handle, sid) = (handle.clone(), sid.clone());
+                        open_state.update(cx, |s, cx| {
+                            s.push_profile(
+                                crate::app::ProfilePage::User {
+                                    handle,
+                                    space_id: sid,
+                                },
+                                cx,
+                            )
+                        });
+                    }
+                };
+                let name_el = match (&from, color) {
+                    (Some(person), Some(color)) if named => Some(
+                        self.sender_name_label(&row.id, person.display_name(), color, false)
+                            .cursor_pointer()
+                            .on_click(open_person(self, person, cx))
+                            .into_any_element(),
+                    ),
+                    _ => None,
+                };
+                let inline_time = self.multi_party && from.is_some();
+                let time_el = inline_time
+                    .then(|| {
+                        time.clone()
+                            .map(|t| inline_time_label(t, &theme).into_any_element())
+                    })
+                    .flatten();
                 let bubble = self
                     .menu_target(
                         div().id(SharedString::from(format!("{}#bubble", row.id))),
                         &row.message_id,
                         cx,
                     )
-                    .flex()
-                    .flex_col()
-                    .gap(px(6.0))
                     .max_w(relative_width(0.72))
                     .px(px(BUBBLE_PAD_X))
                     .py(px(BUBBLE_PAD_Y))
@@ -1242,64 +1380,26 @@ impl Transcript {
                     .text_color(theme.bubble_text())
                     .text_size(px(CHAT_BODY))
                     .line_height(px(CHAT_LINE_HEIGHT))
-                    .children(quote_header)
-                    .child(body);
+                    .child(sender_bubble_column(
+                        name_el,
+                        quote_header.map(|q| q.into_any_element()),
+                        body,
+                        time_el,
+                    ));
                 if let Some(person) = from {
-                    // Someone else: left-aligned, their avatar and name above.
+                    // Someone else: left-aligned, their avatar beside the bubble.
                     // A small coloured left-edge sliver marks a person message
                     // so it reads apart from an agent bubble: the dominant
                     // colour of their picture, else their D79 disc colour.
                     // Must not early-return: the match arm still needs the
                     // COLUMN_MARGIN wrapper (same padding as agent bubbles).
-                    let (image, color) = {
-                        let state = self.state.read(cx);
-                        (
-                            state.avatar(&person.avatar_url),
-                            state.sender_accent(&person, &theme),
-                        )
-                    };
+                    let color = color.unwrap_or(theme.text_muted);
                     div()
                         .w_full()
                         .flex()
                         .flex_col()
                         .items_start()
-                        .gap(px(6.0))
                         .py(px(ROW_GAP_HALF))
-                        .when(named, |el| {
-                            el.child({
-                                // Click the caption → the person's profile page (pushed; ‹ returns).
-                                let open_state = self.state.clone();
-                                let handle = person.handle.clone();
-                                let sid = self.chat_id.as_ref().and_then(|c| {
-                                    self.state.read(cx).chats.iter().find_map(|(pid, tabs)| {
-                                        tabs.iter().any(|t| &t.id == c).then(|| pid.clone())
-                                    })
-                                });
-                                // The caption starts where the bubble's text does.
-                                div()
-                                    .id(SharedString::from(format!("{}#who", row.id)))
-                                    .pl(px(SENDER_LANE + BUBBLE_PAD_X))
-                                    .cursor_pointer()
-                                    .child(
-                                        div()
-                                            .text_size(px(TEXT_TINY))
-                                            .text_color(theme.text_muted)
-                                            .child(person.display_name()),
-                                    )
-                                    .on_click(move |_, _, cx| {
-                                        let (handle, sid) = (handle.clone(), sid.clone());
-                                        open_state.update(cx, |s, cx| {
-                                            s.push_profile(
-                                                crate::app::ProfilePage::User {
-                                                    handle,
-                                                    space_id: sid,
-                                                },
-                                                cx,
-                                            )
-                                        });
-                                    })
-                            })
-                        })
                         .child({
                             let (row_el, reveal) = self.hover_row(&row.id, now, window, cx);
                             let actions =
@@ -1308,33 +1408,15 @@ impl Transcript {
                                 .justify_start()
                                 .items_end()
                                 .gap(px(SENDER_DISC_GAP))
-                                .child({
+                                .child(
                                     // The disc opens the same profile as the name.
-                                    let open_state = self.state.clone();
-                                    let handle = person.handle.clone();
-                                    let sid = self.chat_id.as_ref().and_then(|c| {
-                                        self.state.read(cx).chats.iter().find_map(|(pid, tabs)| {
-                                            tabs.iter().any(|t| &t.id == c).then(|| pid.clone())
-                                        })
-                                    });
                                     div()
                                         .id(SharedString::from(format!("{}#disc", row.id)))
                                         .flex_shrink_0()
                                         .cursor_pointer()
                                         .child(people::avatar(image, &person, SENDER_DISC, &theme))
-                                        .on_click(move |_, _, cx| {
-                                            let (handle, sid) = (handle.clone(), sid.clone());
-                                            open_state.update(cx, |s, cx| {
-                                                s.push_profile(
-                                                    crate::app::ProfilePage::User {
-                                                        handle,
-                                                        space_id: sid,
-                                                    },
-                                                    cx,
-                                                )
-                                            });
-                                        })
-                                })
+                                        .on_click(open_person(self, &person, cx)),
+                                )
                                 .child(
                                     div()
                                         .flex_1()
@@ -1351,7 +1433,12 @@ impl Transcript {
                                         )
                                         .child(actions.ml(px(6.0)))
                                         .children(
-                                            hover_time(time, reveal, &theme).map(|t| t.ml(px(8.0))),
+                                            (!inline_time)
+                                                .then(|| {
+                                                    hover_time(time, reveal, &theme)
+                                                        .map(|t| t.ml(px(8.0)))
+                                                })
+                                                .flatten(),
                                         ),
                                 )
                         })
@@ -1396,6 +1483,7 @@ impl Transcript {
                 fill,
                 time,
                 lane,
+                named,
             } => self.markdown_bubble(
                 &row.id,
                 &row.message_id,
@@ -1407,6 +1495,7 @@ impl Transcript {
                 fill,
                 time,
                 lane,
+                named,
                 now,
                 &theme,
                 &selectable,
@@ -1418,6 +1507,7 @@ impl Transcript {
                 name,
                 time,
                 lane,
+                named,
             } => {
                 let hint = name.as_deref().unwrap_or("Agent");
                 let (resolved, _, _, _) = self.agent_identity(&seed, hint, cx);
@@ -1439,6 +1529,7 @@ impl Transcript {
                     false,
                     time,
                     lane,
+                    named,
                     now,
                     &theme,
                     &selectable,
@@ -1778,50 +1869,6 @@ impl Transcript {
                     .opacity(fade)
                     .into_any_element()
             }
-            RowKind::Sender {
-                name,
-                icon,
-                seed,
-                avatar,
-                avatar_color,
-            } => {
-                let _ = (&avatar, &avatar_color, &icon);
-                let (name, _disc_seed, _color_index, agent_pid) =
-                    self.agent_identity(&seed, &name, cx);
-                // The caption starts where the bubble's text does; the disc sits
-                // at the bubble's bottom-left (last Markdown row, mocks a/f).
-                let open_state = self.state.clone();
-                let caption = div()
-                    .id(SharedString::from(format!("{}#chip", row.id)))
-                    .w_full()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .pl(px(SENDER_LANE + BUBBLE_PAD_X))
-                    // Same rhythm as a person's caption: the row gap above, 6 pt
-                    // to the bubble below (mock a).
-                    .pt(px(ROW_GAP_HALF))
-                    .pb(px(6.0 - ROW_GAP_HALF))
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(theme.text_muted)
-                            .child(name),
-                    )
-                    .when(agent_pid.is_some(), |el| {
-                        el.cursor_pointer().on_click(move |_, _, cx| {
-                            if let Some(pid) = agent_pid.clone() {
-                                open_state.update(cx, |s, cx| {
-                                    s.push_profile(
-                                        crate::app::ProfilePage::Agent { project_id: pid },
-                                        cx,
-                                    )
-                                });
-                            }
-                        })
-                    });
-                caption.into_any_element()
-            }
             RowKind::Details => {
                 let state = self.state.clone();
                 let chat_id = self.chat_id.clone().unwrap_or_default();
@@ -2136,6 +2183,7 @@ pub fn build_rows(
     speech: SpeechRows<'_>,
     me_id: &str,
     thumb_keys: &HashSet<&str>,
+    names_senders: bool,
 ) -> Vec<Row> {
     let mine = |m: &Message| {
         m.sender == "user" || m.sender.is_empty() || m.sender == format!("user:{me_id}")
@@ -2150,8 +2198,9 @@ pub fn build_rows(
         .iter()
         .rposition(|m| m.role == Role::Assistant && !m.is_streaming());
     let mut last_stamp_at: u64 = 0;
-    // Who spoke last in a people chat: a name sits above a bubble only when the sender
-    // changed or a date stamp broke the run (Grok Bot's group style).
+    // Who spoke last in a people chat: a bubble carries its sender's name only when
+    // the sender changed or a date stamp broke the run (Grok Bot's group style), and
+    // only in chats that name their senders at all (`names_senders`).
     let mut prev_sender: Option<String> = None;
     for (mix, message) in messages.iter().enumerate() {
         let streaming = message.is_streaming();
@@ -2207,7 +2256,9 @@ pub fn build_rows(
                 } else {
                     sender_caption(message)
                 };
-                let named = prev_sender.as_deref() != Some(message.sender.as_str());
+                let named = names_senders
+                    && from.is_some()
+                    && prev_sender.as_deref() != Some(message.sender.as_str());
                 // Image preview / file card rows (same cards as agent attachments).
                 let is_mine = from.is_none();
                 // A forwarded attachment's "Forwarded from …" line is the card's
@@ -2347,45 +2398,17 @@ pub fn build_rows(
                 let in_people =
                     message.sender.starts_with("agent:") && message.asked_by_handle.is_some();
                 if message.role == Role::Project || in_people {
-                    // A people-chat agent (or another Project, F6) speaks in its own lane. The
-                    // name sits above the bubble only when the sender changed (Grok Bot's group
-                    // style); the disc on the last block names it otherwise. No meta line —
-                    // "answering @x · owned by @y" moved to the profile pane (Jacob, 2026-10-22).
+                    // A people-chat agent (or another Project, F6) speaks in its own lane;
+                    // the disc on the last block names it. No meta line — "answering
+                    // @x · owned by @y" moved to the profile pane (Jacob, 2026-10-22).
                     lane = Some(message.sender.clone());
-                    if prev_sender.as_deref() != Some(message.sender.as_str()) {
-                        let fallback = if message.role == Role::Project {
-                            message
-                                .sender
-                                .strip_prefix("project:")
-                                .map(str::to_owned)
-                                .unwrap_or_else(|| "Project".to_owned())
-                        } else {
-                            "Agent".to_owned()
-                        };
-                        let name = message.sender_name.clone().unwrap_or(fallback);
-                        rows.push(Row {
-                            version: hash_version(
-                                &(&name, &message.sender_icon, &message.sender_avatar_color),
-                                false,
-                            ),
-                            id: format!("{}#sender", message.id),
-                            message_id: message.id.clone(),
-                            kind: RowKind::Sender {
-                                name,
-                                icon: message.sender_icon.clone(),
-                                seed: message.sender.clone(),
-                                avatar: message
-                                    .sender_avatar
-                                    .clone()
-                                    .filter(|a| !a.is_empty() && !a.contains("://")),
-                                avatar_color: message
-                                    .sender_avatar_color
-                                    .clone()
-                                    .filter(|a| !a.is_empty()),
-                            },
-                        });
-                    }
                 }
+                // Group / channel: the agent's name sits inside its first bubble when
+                // the sender changed (the name itself resolves at render time from the
+                // seed, like the disc).
+                let sender_named = names_senders
+                    && lane.is_some()
+                    && prev_sender.as_deref() != Some(message.sender.as_str());
                 let last_text_part = message
                     .parts
                     .iter()
@@ -2452,8 +2475,12 @@ pub fn build_rows(
                                     bubble_texts.get(block_ix).cloned().unwrap_or_else(|| {
                                         BubbleText::single(block_plain(&block, false))
                                     });
+                                let named = sender_named && first;
                                 rows.push(Row {
-                                    version: hash_version(&(&block, first, last, fill), live),
+                                    version: hash_version(
+                                        &(&block, first, last, fill, named),
+                                        live,
+                                    ),
                                     id: format!("{}#{}.{}", message.id, id, bix),
                                     message_id: message.id.clone(),
                                     kind: RowKind::Markdown {
@@ -2465,6 +2492,7 @@ pub fn build_rows(
                                         fill,
                                         time: clock_label(message.created_at),
                                         lane: lane.clone(),
+                                        named,
                                     },
                                 });
                                 block_ix += 1;
@@ -2628,12 +2656,14 @@ pub fn build_rows(
                             fill: false,
                             time: clock_label(message.created_at),
                             lane: lane.clone(),
+                            named: sender_named,
                         },
                         None => RowKind::NoAnswer {
                             seed: message.sender.clone(),
                             name: message.sender_name.clone().filter(|n| !n.trim().is_empty()),
                             time: clock_label(message.created_at),
                             lane: lane.clone(),
+                            named: sender_named,
                         },
                     };
                     rows.push(Row {
@@ -2642,6 +2672,7 @@ pub fn build_rows(
                                 &message.sender,
                                 &message.sender_name,
                                 errors.first().map(|(_, _, text)| text),
+                                sender_named,
                             ),
                             false,
                         ),
@@ -3569,6 +3600,90 @@ mod selection_tests {
     }
 }
 
+/// Gap from the sender's name to the text (Jacob's reference: tight) and from
+/// the reply quote header to the text (#1393).
+const NAME_TO_TEXT_GAP: f32 = 2.0;
+const QUOTE_TO_TEXT_GAP: f32 = 6.0;
+
+/// The inside of a bubble, in this order: sender name (group / channel,
+/// someone else) → reply quote header → the text, with the time after it.
+/// A short text keeps the time on its line; a wrapped one pushes it to the
+/// right of the next line.
+fn sender_bubble_column(
+    name: Option<AnyElement>,
+    quote: Option<AnyElement>,
+    body: AnyElement,
+    time: Option<AnyElement>,
+) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .min_w_0()
+        .children(name.map(|n| {
+            div()
+                .pb(px(NAME_TO_TEXT_GAP))
+                .debug_selector(|| "bubble-name".into())
+                .child(n)
+        }))
+        .children(quote.map(|q| {
+            div()
+                .pb(px(QUOTE_TO_TEXT_GAP))
+                .debug_selector(|| "bubble-quote".into())
+                .child(q)
+        }))
+        .child(
+            div()
+                .flex()
+                .flex_wrap()
+                .items_end()
+                .min_w_0()
+                .child(
+                    div()
+                        .min_w_0()
+                        .debug_selector(|| "bubble-text".into())
+                        .child(body),
+                )
+                .children(time.map(|t| {
+                    div()
+                        .ml_auto()
+                        .pl(px(8.0))
+                        .debug_selector(|| "bubble-time".into())
+                        .child(t)
+                })),
+        )
+}
+
+/// "8:05 AM" after a group / channel bubble's text.
+fn inline_time_label(time: String, theme: &Theme) -> Div {
+    div()
+        .text_size(px(TEXT_TINY))
+        .line_height(px(CHAT_LINE_HEIGHT))
+        .text_color(theme.text_faint)
+        .whitespace_nowrap()
+        .child(time)
+}
+
+/// Whether the open chat shows who sent each bubble (Jacob, 2026-10-23):
+/// group chats and server channels do, people and agents alike; a 1:1 chat —
+/// me and a person, or me and an agent — never labels the other side. A DM
+/// with an agent added, an agent group, or a project with other humans in it
+/// has three parties and counts as a group.
+pub fn names_senders(space: Option<&Project>, chat: Option<&Chat>, channel: bool) -> bool {
+    if channel {
+        return true;
+    }
+    let Some(space) = space else {
+        return false;
+    };
+    match space.kind {
+        SpaceKind::Group => true,
+        SpaceKind::Dm => !space.agents.is_empty(),
+        SpaceKind::Project => {
+            chat.is_some_and(Chat::is_group) || space.shared || !space.people.is_empty()
+        }
+    }
+}
+
 #[cfg(test)]
 mod layout_tests {
     //! Pixel parity with Grok Bot's Mac chat (refs 57/58; Jacob's crops of
@@ -3733,6 +3848,65 @@ mod layout_tests {
         assert!((e.bubble_width - 612.0).abs() <= 1.0, "{}", e.bubble_width);
     }
 
+    struct NamedBubble;
+
+    impl gpui::Render for NamedBubble {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let line = |h: f32| div().w(px(120.0)).h(px(h));
+            div().w(px(400.0)).h(px(300.0)).child(
+                div()
+                    .px(px(BUBBLE_PAD_X))
+                    .py(px(BUBBLE_PAD_Y))
+                    .child(sender_bubble_column(
+                        Some(line(CHAT_LINE_HEIGHT).into_any_element()),
+                        Some(line(32.0).into_any_element()),
+                        line(CHAT_LINE_HEIGHT).into_any_element(),
+                        Some(div().w(px(40.0)).h(px(CHAT_LINE_HEIGHT)).into_any_element()),
+                    )),
+            )
+        }
+    }
+
+    /// Jacob, 2026-10-23 (Discord-style reference): inside a group / channel
+    /// bubble the order is name → reply quote → text, 2 pt from the name to
+    /// what follows, 6 from the quote; the time sits after the text.
+    #[gpui::test]
+    fn a_named_bubble_stacks_name_quote_text_and_puts_the_time_after(cx: &mut TestAppContext) {
+        let (_view, vcx) = cx.add_window_view(|_, _| NamedBubble);
+        vcx.run_until_parked();
+        let name = vcx.debug_bounds("bubble-name").expect("name drawn");
+        let quote = vcx.debug_bounds("bubble-quote").expect("quote drawn");
+        let text = vcx.debug_bounds("bubble-text").expect("text drawn");
+        let time = vcx.debug_bounds("bubble-time").expect("time drawn");
+        let bottom = |b: gpui::Bounds<gpui::Pixels>| f32::from(b.origin.y + b.size.height);
+        let top = |b: gpui::Bounds<gpui::Pixels>| f32::from(b.origin.y);
+        assert_eq!(
+            bottom(name),
+            top(quote),
+            "name, then the quote (2 pt inside the name box)"
+        );
+        assert_eq!(
+            bottom(name) - top(name),
+            CHAT_LINE_HEIGHT + NAME_TO_TEXT_GAP,
+            "name box = one line + the 2 pt gap"
+        );
+        assert_eq!(bottom(quote), top(text), "quote, then the text");
+        assert_eq!(
+            bottom(quote) - top(quote),
+            32.0 + QUOTE_TO_TEXT_GAP,
+            "quote box = its height + the 6 pt gap"
+        );
+        assert_eq!(top(time), top(text), "the time shares the text's line");
+        assert!(
+            f32::from(time.origin.x) >= f32::from(text.origin.x + text.size.width) + 8.0,
+            "the time follows the text"
+        );
+    }
+
     #[test]
     fn the_column_is_the_composers_geometry() {
         let m = [
@@ -3793,7 +3967,7 @@ mod system_line_tests {
             failed: &failed,
             voice_mode: false,
         };
-        let rows = build_rows(&messages, false, speech, "gh_me", &HashSet::new());
+        let rows = build_rows(&messages, false, speech, "gh_me", &HashSet::new(), true);
         let kinds: Vec<&RowKind> = rows.iter().map(|r| &r.kind).collect();
         // Date stamp, Bob (named), the notice, Bob again (named again).
         let bubbles: Vec<(bool, &str)> = kinds
@@ -3819,5 +3993,155 @@ mod system_line_tests {
             rows.iter().all(|r| r.id != "m-1700000001000#user"),
             "no bubble for the system row"
         );
+    }
+
+    fn speech<'a>(spoken: &'a HashSet<Id>, failed: &'a HashMap<Id, String>) -> SpeechRows<'a> {
+        SpeechRows {
+            enabled: false,
+            spoken,
+            failed,
+            voice_mode: false,
+        }
+    }
+
+    /// Which bubbles carry a sender name: `(named, text)` for people, `(named, first)`
+    /// for agent blocks.
+    fn names(rows: &[Row]) -> Vec<(&str, bool)> {
+        rows.iter()
+            .filter_map(|r| match &r.kind {
+                RowKind::User {
+                    named, text, from, ..
+                } => Some((text.as_str(), *named && from.is_some())),
+                RowKind::Markdown { named, first, .. } if *first => Some(("agent", *named)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn agent_message(sender: &str, text: &str, at: u64) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": format!("m-{at}"),
+            "chatId": "chat_testing",
+            "role": "assistant",
+            "sender": sender,
+            "senderName": "Doug",
+            "senderHandle": "doug",
+            "askedByHandle": "jacob",
+            "status": "done",
+            "createdAt": at,
+            "parts": [{ "id": format!("p-{at}"), "kind": "text", "text": text }],
+        }))
+        .expect("message")
+    }
+
+    /// Jacob, 2026-10-23: the sender's name sits inside the bubble in group chats and
+    /// channels — people and agents alike, when the sender changed — and never on my
+    /// own bubble.
+    #[test]
+    fn group_and_channel_bubbles_name_their_sender_but_not_mine() {
+        let t = 1_700_000_000_000u64;
+        let messages = [
+            message("user", "user:gh_bob", "hi all", t),
+            message("user", "user:gh_bob", "second", t + 1_000),
+            message("user", "user:gh_me", "mine", t + 2_000),
+            agent_message("agent:doug", "on it", t + 3_000),
+            agent_message("agent:doug", "done", t + 4_000),
+        ];
+        let (spoken, failed) = (HashSet::new(), HashMap::new());
+        let rows = build_rows(
+            &messages,
+            false,
+            speech(&spoken, &failed),
+            "gh_me",
+            &HashSet::new(),
+            true,
+        );
+        assert_eq!(
+            names(&rows),
+            [
+                ("hi all", true),
+                ("second", false),
+                ("mine", false),
+                ("agent", true),
+                ("agent", false),
+            ]
+        );
+    }
+
+    /// … and a 1:1 chat (me ↔ person, me ↔ agent) labels nobody.
+    #[test]
+    fn dm_and_agent_chat_bubbles_carry_no_name() {
+        let t = 1_700_000_000_000u64;
+        let messages = [
+            message("user", "user:gh_bob", "hi", t),
+            message("user", "user:gh_me", "hey", t + 1_000),
+            agent_message("agent:doug", "hello", t + 2_000),
+        ];
+        let (spoken, failed) = (HashSet::new(), HashMap::new());
+        let rows = build_rows(
+            &messages,
+            false,
+            speech(&spoken, &failed),
+            "gh_me",
+            &HashSet::new(),
+            false,
+        );
+        assert_eq!(
+            names(&rows),
+            [("hi", false), ("hey", false), ("agent", false)]
+        );
+        assert!(
+            !rows.iter().any(|r| r.id.ends_with("#sender")),
+            "no sender header row above a bubble any more"
+        );
+    }
+
+    /// The chat-kind rule behind `names_senders`.
+    #[test]
+    fn names_senders_follows_the_chat_kind() {
+        let dm = Project {
+            kind: SpaceKind::Dm,
+            ..Default::default()
+        };
+        let dm_with_agent = Project {
+            kind: SpaceKind::Dm,
+            agents: vec![Default::default()],
+            ..Default::default()
+        };
+        let group = Project {
+            kind: SpaceKind::Group,
+            ..Default::default()
+        };
+        let agent = Project::default();
+        let shared = Project {
+            shared: true,
+            ..Default::default()
+        };
+        let agent_group = Chat {
+            id: "c".into(),
+            project_id: "p".into(),
+            title: "Launch sync".into(),
+            is_pinned: false,
+            is_system: false,
+            kind: crate::model::ChatKind::Group,
+            participants: Vec::new(),
+            unread: false,
+            last_message_at: 0,
+            archived_at: None,
+        };
+        assert!(!names_senders(Some(&dm), None, false), "1:1 DM");
+        assert!(!names_senders(Some(&agent), None, false), "me ↔ agent");
+        assert!(names_senders(Some(&group), None, false), "people group");
+        assert!(
+            names_senders(Some(&dm_with_agent), None, false),
+            "DM + agent"
+        );
+        assert!(names_senders(Some(&shared), None, false), "shared project");
+        assert!(
+            names_senders(Some(&agent), Some(&agent_group), false),
+            "agent group"
+        );
+        assert!(names_senders(None, None, true), "channel");
+        assert!(!names_senders(None, None, false), "nothing open");
     }
 }
