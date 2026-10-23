@@ -557,8 +557,9 @@ struct MessageReaction: Equatable, Hashable {
     var emoji: String
     var senders: [String]
 
-    /// iMessage-style set that renders cleanly in SwiftUI context menus.
-    static let palette: [String] = ["👍", "❤️", "😂", "😮", "😢", "🙏"]
+    /// Quick-react set on the long-press menu (Discord / Telegram / WhatsApp
+    /// style). Renders cleanly in SwiftUI `ControlGroup`s, three per row.
+    static let palette: [String] = ["❤️", "👍🏽", "💪🏽", "👎🏻", "👌🏾", "🤝", "🔥", "💯"]
 
     /// Toggle `sender` on/off for `emoji`, keeping other emoji reactions intact.
     static func toggling(_ list: [MessageReaction], emoji: String, sender: String) -> [MessageReaction] {

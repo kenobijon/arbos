@@ -978,6 +978,11 @@ struct ChatView: View {
                                 }
                             }
                             .contextMenu {
+                                if canReact(to: row) {
+                                    MessageReactionBar { emoji in
+                                        model.toggleReaction(chatId: chatId, messageId: row.messageId, emoji: emoji)
+                                    }
+                                }
                                 MessageMenuContent(items: MessageMenu.items(forMessage: canReply)) { item in
                                     runMessageMenu(item, row: row)
                                 }
@@ -1115,6 +1120,13 @@ struct ChatView: View {
         case .user, .other, .member, .assistant, .file, .voiceMemo, .image:
             return messageById[row.messageId] != nil
         }
+    }
+
+    /// Emoji reactions on long-press: someone else's bubble only (not yours),
+    /// and not date / join / system / channel rows.
+    private func canReact(to row: Row) -> Bool {
+        guard isMessageRow(row) else { return false }
+        return row.role != .user
     }
 
     /// The long-press menu's actions (`MessageMenu`): Copy the text, Reply

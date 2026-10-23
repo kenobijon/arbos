@@ -1,8 +1,9 @@
 import XCTest
 @testable import Arbos
 
-/// The bubble's long-press menu is Copy / Reply / Delete and nothing else
-/// (#1370) — no emoji row, no Mention; a non-message row copies only.
+/// The bubble's action items are Copy / Reply / Delete (#1370) — reactions
+/// sit in a separate `MessageReactionBar`, not as menu items; a non-message
+/// row copies only.
 final class MessageMenuTests: XCTestCase {
     func testItemsAreExactlyCopyReplyDelete() {
         XCTAssertEqual(MessageMenu.items, [.copy, .reply, .delete])
