@@ -834,11 +834,13 @@ struct ChatView: View {
     }
 
     private func handleChatSwipe(_ value: DragGesture.Value) {
+        // Selecting or dragging in the focused composer is a horizontal pan;
+        // do not treat it as swipe-right → Home.
+        guard !composerFocused else { return }
         let dx = value.translation.width
         let absX = abs(dx), absY = abs(value.translation.height)
         let vx = value.velocity.width, vy = value.velocity.height
         if dx > 0, absX > 70, absX > absY * 1.25, abs(vx) >= abs(vy) || absX > 120 {
-            composerFocused = false
             dismiss()
         }
     }
