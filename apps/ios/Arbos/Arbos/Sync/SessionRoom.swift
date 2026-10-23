@@ -98,8 +98,15 @@ final class SessionRoom {
     private var cleanClose = false
     /// How long after a clean server close the room redials.
     static let restartRedialMs: UInt64 = 1_500
+    /// Match `arbos_client::HELLO_DEADLINE` / Mac dial timeout: abandon a hung
+    /// WebSocket upgrade or a STATE that never arrives.
+    static let helloDeadlineNs: UInt64 = 15_000_000_000
+    /// Host clock tick while dialing / waiting for HELLO (Mac uses 1 s).
+    static let tickEveryNs: UInt64 = 1_000_000_000
     private var checkpointTask: Task<Void, Never>?
     private var sendChain: Task<Void, Never>?
+    /// Wall clock when the current `connect()` began (dial watchdog).
+    private var connectStartedAt: Date?
 
     /// Production path: wiring `RelayAPI` into the three closures the
     /// designated init uses for tests.
@@ -190,6 +197,15 @@ final class SessionRoom {
         drain()
     }
 
+    /// Scene returned from `.background` (lock unlock). iOS often leaves
+    /// URLSession WebSockets half-dead: a dial stays on Syncing… forever, or a
+    /// "live" socket never errors and stops delivering rows. `recreateListedRooms`
+    /// only creates missing rooms — always drop the current attempt and dial now.
+    func resumeAfterForeground() {
+        guard started, !stopped else { return }
+        redialNow(fault: .reconnecting)
+    }
+
     // MARK: - Connect
 
     private func connect() {
@@ -199,6 +215,8 @@ final class SessionRoom {
         cancelTasks()
         socket?.cancel()
         socket = nil
+        sawOpen = false
+        connectStartedAt = Date()
 
         let room = roomName(projectId, roomChat)
         guard let url = roomURL(room) else {
@@ -218,6 +236,7 @@ final class SessionRoom {
         }
         sock.resume()
         startReceive(gen: gen, socket: sock)
+        startTick(gen: gen)
     }
 
     private func handleOpen(gen: Int) {
@@ -225,12 +244,6 @@ final class SessionRoom {
         session.onOpen(nowMs: sessionNowMs())
         // Presence right after onOpen — core holds it until Live.
         sendPresence()
-        tickTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 15_000_000_000)
-            guard let self, self.generation == gen, !Task.isCancelled else { return }
-            self.session.onTick(nowMs: self.sessionNowMs())
-            self.drain()
-        }
         presenceTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 15_000_000_000)
@@ -238,6 +251,55 @@ final class SessionRoom {
                 self.sendPresence()
             }
         }
+    }
+
+    /// 1 s host ticks while this generation's socket is up: dial timeout before
+    /// `didOpen`, HELLO deadline after (same as Mac `run_session`).
+    private func startTick(gen: Int) {
+        tickTask?.cancel()
+        tickTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: SessionRoom.tickEveryNs)
+                guard let self, self.generation == gen, !Task.isCancelled else { return }
+                if !self.sawOpen {
+                    let deadlineSec = Double(SessionRoom.helloDeadlineNs) / 1_000_000_000
+                    if let started = self.connectStartedAt,
+                       Date().timeIntervalSince(started) >= deadlineSec {
+                        self.pendingFault = LinkState.fault(URLError(.timedOut))
+                        self.session.onClose(nowMs: self.sessionNowMs())
+                        self.drain()
+                        return
+                    }
+                    continue
+                }
+                self.session.onTick(nowMs: self.sessionNowMs())
+                self.drain()
+            }
+        }
+    }
+
+    /// Tear down the current attempt (or a sleeping reconnect) and dial at once.
+    private func redialNow(fault: LinkState) {
+        guard !stopped else { return }
+        reconnects += 1
+        onLink?(.reconnecting)
+        onLinkState?(fault)
+        pendingFault = nil
+        sawOpen = false
+        cleanClose = false
+        connectStartedAt = nil
+        // Fresh session keeps cursor + pending and resets backoff (same as a
+        // clean relay restart), so a long hung dial does not keep doubling.
+        session = ArbosFFI.RoomSession(
+            deviceId: deviceId(),
+            room: session.room(),
+            cursor: session.cursor(),
+            pending: session.pending()
+        )
+        cancelTasks()
+        socket?.cancel()
+        socket = nil
+        connect()
     }
 
     private func startReceive(gen: Int, socket: RoomSocket) {

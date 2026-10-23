@@ -49,7 +49,7 @@ use super::dto::{
     transcript_text, voices_from_dto,
 };
 use super::store::{self, Store};
-use super::{ClientCommand, SyncEvent, SyncSource};
+use super::{ClientCommand, PictureSource, SyncEvent, SyncSource};
 use crate::model::{
     new_id, now_ms, AccountView, Attachment, AttachmentKind, BoxState, Call, CallEnded, CallLeft,
     CallMissed, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelsView, Chat, Effort, Id,
@@ -2138,6 +2138,13 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
             .find(|x| x.id == id)
             .cloned();
         let mut project = project_from_dto(&detail, members.as_ref());
+        // D92 amendment: the agent's uploaded / generated picture, fetched like a group's.
+        project.image_url = project_image_url(
+            &shared.http_url,
+            &shared.token(),
+            &id,
+            detail.project.image_key.as_deref(),
+        );
         // list_projects extras (shared / owner_handle) live on the list row.
         if let Some(shared_flag) = list_shared {
             project.shared = shared_flag;
@@ -3317,6 +3324,17 @@ fn send_wake(shared: &Arc<Shared>, project_id: &str, reason: &'static str) {
 /// here; HEIC (Photos exports, iPhone shots) goes through macOS's own `sips` first, since
 /// the `image` crate has no HEIF decoder. Anything that is not an image is an error with a
 /// plain message.
+/// An agent's picture as the avatar loader fetches it: the blob in the project's own slot.
+fn project_image_url(
+    http_url: &str,
+    token: &str,
+    project_id: &str,
+    key: Option<&str>,
+) -> Option<String> {
+    let key = key.map(str::trim).filter(|k| !k.is_empty())?;
+    Some(format!("{http_url}/blob/{project_id}/{key}?token={token}"))
+}
+
 fn picture_jpeg(path: &Path) -> Result<Vec<u8>> {
     let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
     match avatar_jpeg(&bytes) {
@@ -4878,6 +4896,31 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 }
             });
         }
+        ClientCommand::SetGroupLeaf { chat_id, pick } => {
+            {
+                let mut projects = shared.projects.lock().unwrap();
+                if let Some(p) = projects.iter_mut().find(|p| p.id == chat_id) {
+                    p.avatar_leaf = pick.map(|l| l.leaf);
+                    p.avatar_leaf_color = pick.map(|l| l.color);
+                    p.image_url = None;
+                }
+                let snapshot = projects.clone();
+                drop(projects);
+                let _ = shared.events.send(SyncEvent::Projects(snapshot));
+            }
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                // `PATCH /chats` clears the picture on an empty key.
+                let body = json!({
+                    "avatar_leaf": pick.map(|l| l.leaf),
+                    "avatar_leaf_color": pick.map(|l| l.color),
+                    "image_key": "",
+                });
+                if let Err(err) = shared.patch_json(&format!("/chats/{chat_id}"), body).await {
+                    shared.notice(format!("Group picture not saved: {}", people_error(&err)));
+                }
+            });
+        }
         ClientCommand::SetGroupImage { chat_id, path } => {
             let shared = shared.clone();
             tokio::spawn(async move {
@@ -5168,34 +5211,6 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 }
             });
         }
-        ClientCommand::SetAvatarColorIndex { project_id, index } => {
-            {
-                let mut projects = shared.projects.lock().unwrap();
-                if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
-                    p.avatar_color_override = index;
-                    p.avatar_color_index = Some(crate::ui::avatars::index_for(&project_id, index));
-                }
-                let snapshot = projects.clone();
-                drop(projects);
-                let _ = shared.events.send(SyncEvent::Projects(snapshot));
-            }
-            let shared = shared.clone();
-            tokio::spawn(async move {
-                let body = json!({ "avatar_color_index": index });
-                match shared
-                    .patch_json(&format!("/projects/{project_id}"), body)
-                    .await
-                {
-                    Ok(_) => {}
-                    Err(err) => {
-                        if !err.to_string().contains("HTTP 404") {
-                            shared
-                                .notice(format!("Avatar colour not saved: {}", people_error(&err)));
-                        }
-                    }
-                }
-            });
-        }
         ClientCommand::SetAvatarLeaf {
             project_id,
             leaf,
@@ -5206,6 +5221,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
                     p.avatar_leaf = leaf;
                     p.avatar_leaf_color = color;
+                    // A leaf pick is "not a photo": the picture goes with it.
+                    p.image_url = None;
                 }
                 let snapshot = projects.clone();
                 drop(projects);
@@ -5213,7 +5230,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             }
             let shared = shared.clone();
             tokio::spawn(async move {
-                let body = json!({ "avatar_leaf": leaf, "avatar_leaf_color": color });
+                let body =
+                    json!({ "avatar_leaf": leaf, "avatar_leaf_color": color, "image_key": null });
                 match shared
                     .patch_json(&format!("/projects/{project_id}"), body)
                     .await
@@ -5227,6 +5245,117 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         }
                     }
                 }
+            });
+        }
+        ClientCommand::SetProjectImage { project_id, source } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let key = match source {
+                    PictureSource::Key(key) => key,
+                    PictureSource::File(path) => {
+                        let jpeg =
+                            match tokio::task::spawn_blocking(move || picture_jpeg(&path)).await {
+                                Ok(Ok(j)) => j,
+                                Ok(Err(err)) => {
+                                    shared.notice(format!("Picture not uploaded: {err:#}"));
+                                    return;
+                                }
+                                Err(_) => return,
+                            };
+                        let key = format!("avatar-{}.jpg", new_id().to_lowercase());
+                        let put = shared
+                            .http
+                            .put(format!("{}/blob/{}/{}", shared.http_url, project_id, key))
+                            .bearer_auth(shared.token())
+                            .header("content-type", "image/jpeg")
+                            .body(jpeg)
+                            .send()
+                            .await;
+                        match put {
+                            Ok(r) if r.status().is_success() => key,
+                            Ok(r) => {
+                                shared
+                                    .notice(format!("Picture upload failed: HTTP {}", r.status()));
+                                return;
+                            }
+                            Err(err) => {
+                                shared.notice(format!("Picture upload failed: {err}"));
+                                return;
+                            }
+                        }
+                    }
+                };
+                match shared
+                    .patch_json(
+                        &format!("/projects/{project_id}"),
+                        json!({ "image_key": key }),
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        let url = project_image_url(
+                            &shared.http_url,
+                            &shared.token(),
+                            &project_id,
+                            Some(&key),
+                        );
+                        let mut projects = shared.projects.lock().unwrap();
+                        if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
+                            p.image_url = url;
+                        }
+                        let snapshot = projects.clone();
+                        drop(projects);
+                        let _ = shared.events.send(SyncEvent::Projects(snapshot));
+                    }
+                    Err(err) => {
+                        shared.notice(format!("Picture not saved: {}", people_error(&err)));
+                    }
+                }
+            });
+        }
+        ClientCommand::GenerateProjectImage { project_id, prompt } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let result = shared
+                    .post_json(
+                        &format!("/projects/{project_id}/avatar/generate"),
+                        json!({ "prompt": prompt }),
+                    )
+                    .await;
+                let event = match result {
+                    Ok(v) => {
+                        let key = v
+                            .get("image_key")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned);
+                        match key {
+                            Some(key) => SyncEvent::ProjectImageGenerated {
+                                project_id: project_id.clone(),
+                                url: project_image_url(
+                                    &shared.http_url,
+                                    &shared.token(),
+                                    &project_id,
+                                    Some(&key),
+                                ),
+                                image_key: Some(key),
+                                error: None,
+                            },
+                            None => SyncEvent::ProjectImageGenerated {
+                                project_id,
+                                image_key: None,
+                                url: None,
+                                error: Some("The relay sent no picture".to_owned()),
+                            },
+                        }
+                    }
+                    Err(err) => SyncEvent::ProjectImageGenerated {
+                        project_id,
+                        image_key: None,
+                        url: None,
+                        error: Some(people_error(&err)),
+                    },
+                };
+                let _ = shared.events.send(event);
             });
         }
         ClientCommand::SetMyAvatar { path } => {

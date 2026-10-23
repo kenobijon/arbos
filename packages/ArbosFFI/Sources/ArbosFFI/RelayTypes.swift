@@ -463,11 +463,13 @@ public struct ChatMemberProjectDto: Codable {
 	/// Always sent by relays with D92; optional so older relays still decode.
 	public let avatar_leaf_effective: Int64?
 	public let avatar_leaf_color_effective: Int64?
+	/// D92 amendment: the agent's uploaded / generated picture (blob name in `/blob/{id}/…`).
+	public let image_key: String?
 	public let description: String
 	public let model: String?
 	public let owner: ProjectOwnerDto
 
-	public init(id: String, name: String, icon: String, color: String, avatar: String, avatar_color: String, avatar_color_index: Int64?, avatar_color_index_effective: Int64, avatar_leaf: Int64?, avatar_leaf_color: Int64?, avatar_leaf_effective: Int64?, avatar_leaf_color_effective: Int64?, description: String, model: String?, owner: ProjectOwnerDto) {
+	public init(id: String, name: String, icon: String, color: String, avatar: String, avatar_color: String, avatar_color_index: Int64?, avatar_color_index_effective: Int64, avatar_leaf: Int64?, avatar_leaf_color: Int64?, avatar_leaf_effective: Int64?, avatar_leaf_color_effective: Int64?, image_key: String?, description: String, model: String?, owner: ProjectOwnerDto) {
 		self.id = id
 		self.name = name
 		self.icon = icon
@@ -480,6 +482,7 @@ public struct ChatMemberProjectDto: Codable {
 		self.avatar_leaf_color = avatar_leaf_color
 		self.avatar_leaf_effective = avatar_leaf_effective
 		self.avatar_leaf_color_effective = avatar_leaf_color_effective
+		self.image_key = image_key
 		self.description = description
 		self.model = model
 		self.owner = owner
@@ -736,6 +739,9 @@ public struct ProjectDto: Codable {
 	/// Always sent by relays with D92; optional so older relays still decode.
 	public let avatar_leaf_effective: Int64?
 	public let avatar_leaf_color_effective: Int64?
+	/// D92 amendment: the agent's uploaded / generated picture, a blob name in the project's own
+	/// slot (`GET /blob/{project}/{key}`); wins over the leaf. Absent on older relays.
+	public let image_key: String?
 	public let primary_chat_id: String?
 	public let owner: ProjectOwnerDto
 	public let model: String?
@@ -750,7 +756,7 @@ public struct ProjectDto: Codable {
 	/// owner allowed; empty for everyone but the owner's own clients.
 	public let message_grants: [MessageGrantDto]?
 
-	public init(id: String, name: String, icon: String, color: String, instructions: String, avatar: String, avatar_color: String, state: String, box: String, box_since: Int64, spend_today_usd: Double, spend_cap_usd: Double, created_at: Int64, last_active_at: Int64, description: String, voice: String?, vision_enabled: Bool, avatar_color_index: Int64?, avatar_color_index_effective: Int64, avatar_leaf: Int64?, avatar_leaf_color: Int64?, avatar_leaf_effective: Int64?, avatar_leaf_color_effective: Int64?, primary_chat_id: String?, owner: ProjectOwnerDto, model: String?, machine: MachineDto, shared: Bool?, my_role: String?, owner_handle: String??, message_grants: [MessageGrantDto]?) {
+	public init(id: String, name: String, icon: String, color: String, instructions: String, avatar: String, avatar_color: String, state: String, box: String, box_since: Int64, spend_today_usd: Double, spend_cap_usd: Double, created_at: Int64, last_active_at: Int64, description: String, voice: String?, vision_enabled: Bool, avatar_color_index: Int64?, avatar_color_index_effective: Int64, avatar_leaf: Int64?, avatar_leaf_color: Int64?, avatar_leaf_effective: Int64?, avatar_leaf_color_effective: Int64?, image_key: String?, primary_chat_id: String?, owner: ProjectOwnerDto, model: String?, machine: MachineDto, shared: Bool?, my_role: String?, owner_handle: String??, message_grants: [MessageGrantDto]?) {
 		self.id = id
 		self.name = name
 		self.icon = icon
@@ -774,6 +780,7 @@ public struct ProjectDto: Codable {
 		self.avatar_leaf_color = avatar_leaf_color
 		self.avatar_leaf_effective = avatar_leaf_effective
 		self.avatar_leaf_color_effective = avatar_leaf_color_effective
+		self.image_key = image_key
 		self.primary_chat_id = primary_chat_id
 		self.owner = owner
 		self.model = model

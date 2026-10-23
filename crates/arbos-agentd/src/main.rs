@@ -14,6 +14,7 @@ mod harness;
 mod hooks;
 mod http;
 mod identity;
+mod inspect;
 mod isolation;
 mod llm;
 mod local;
@@ -43,6 +44,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use serde_json::{json, Value};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::config::BoxConfig;
 use crate::workspace::Supervisor;
@@ -120,11 +123,13 @@ enum Cmd {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
+    tracing_subscriber::registry()
+        .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "info,loro_internal=warn,arbos_agentd=debug".into()),
         )
+        .with(tracing_subscriber::fmt::layer())
+        .with(inspect::WarnRing)
         .init();
     let args = Args::parse();
     match args.cmd {

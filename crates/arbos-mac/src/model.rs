@@ -864,6 +864,10 @@ pub struct AgentMember {
     pub avatar_leaf: Option<u8>,
     #[serde(default)]
     pub avatar_leaf_color: Option<u8>,
+    /// D92 amendment: the agent's uploaded / generated picture, as a URL the avatar loader
+    /// fetches; wins over the leaf.
+    #[serde(default)]
+    pub image_url: Option<String>,
     /// API §9: the agent's description and talking model.
     #[serde(default)]
     pub description: Option<String>,
@@ -935,6 +939,7 @@ impl From<AgentMemberWire> for AgentMember {
             ),
             avatar_leaf: w.avatar_leaf_effective.or(w.avatar_leaf),
             avatar_leaf_color: w.avatar_leaf_color_effective.or(w.avatar_leaf_color),
+            image_url: None,
             description: w.description,
             model: w.model,
             owner: w.owner,

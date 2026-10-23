@@ -83,6 +83,12 @@ case "$cmd" in
   start-batch)
     launch "$1" "$2" "${3:-1}" "${4:-mac}"
     ;;
+  start-ios)
+    # The iOS half (ios-gate.sh <branch> <sha>) as a background run like the Mac half, so the poller
+    # tick is never blocked on an Xcode build (a 10-member batch held one tick for 13 min, 2026-10-23
+    # 17:51-18:04, and every push / merge / launch waited behind it).
+    launch "$1" _ios "$2" "$3"
+    ;;
   status)
     id=$1; log=$runs/$id.log; rc=$runs/$id.rc
     if [ ! -f "$log" ]; then echo infra; echo "no run $id"; exit 0; fi
@@ -90,8 +96,8 @@ case "$cmd" in
     case "$(cat "$rc")" in 0) echo ok;; 1) echo fail;; *) echo infra;; esac
     # Summary lines, then compiler/fmt/test diagnostics only; paths relative to the repo.
     grep -E "^== " "$log" | head -n 60
-    grep -E "^(error|warning)(\[|:)|^\s+--> |^Diff in |^test .* FAILED|^failures:|panicked at" "$log" \
-      | sed "s#$repo/##g" | head -n 150
+    grep -E "^(error|warning)(\[|:)|^\s+--> |^Diff in |^test .* FAILED|^failures:|panicked at|: error: |\*\* BUILD FAILED" "$log" \
+      | sed "s#$repo/##g;s#$HOME/arbos-gate/##g" | head -n 150
     ;;
   abort)
     id=$1
@@ -107,6 +113,13 @@ case "$cmd" in
     id=$1; tree=$2; mac=$3; mode=$4
     rc=$runs/$id.rc
     finish() { echo "$1" >"$rc"; exit "$1"; }
+    if [ "$tree" = "_ios" ]; then
+      # start-ios: $mac = branch, $mode = sha. ios-gate.sh exits 0 ok / 1 fail / 2 infrastructure.
+      echo "== ios-gate $mac $mode"
+      bash "$HOME/arbos-gate/ios-gate.sh" "$mac" "$mode"; s=$?
+      echo "== done rc=$s"
+      finish "$s"
+    fi
     cd "$repo" || finish 2
     git merge --abort 2>/dev/null
     git checkout -q -f --detach HEAD 2>/dev/null

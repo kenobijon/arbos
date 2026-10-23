@@ -149,11 +149,24 @@ final class AppModel: ObservableObject {
     }
     /// Scene is `.active`. Focus and in-app banner suppression only apply then.
     private var appActive = true
+    /// True once the scene has been `.background` since the last `.active`.
+    /// Unlock goes background → inactive → active; the immediate previous phase
+    /// on unlock is `.inactive`, so we cannot key the redial off that alone.
+    private var wasBackgrounded = false
 
-    /// Called from the root scene: leaving `.active` drops `focused_chat` on
-    /// the relay (and stops swallowing banners) so APNs can fire.
-    func setAppActive(_ active: Bool) {
-        guard appActive != active else { return }
+    /// Called from the root scene on every `scenePhase` change.
+    /// Leaving `.active` drops `focused_chat` on the relay (and stops swallowing
+    /// banners) so APNs can fire. Returning to `.active` after `.background`
+    /// redials rooms ([feedback app-01M5MVNNNBZHJWSRCZ81S04C8E]).
+    func noteScenePhase(_ phase: ScenePhase) {
+        if phase == .background { wasBackgrounded = true }
+        let active = phase == .active
+        let resumeRooms = active && wasBackgrounded
+        if active { wasBackgrounded = false }
+
+        let becameActive = active && !appActive
+        let becameInactive = !active && appActive
+        guard becameActive || becameInactive else { return }
         appActive = active
         if let id = visibleChatId {
             rooms[id]?.focused = active
@@ -165,13 +178,24 @@ final class AppModel: ObservableObject {
             }
         }
         // Leaving the foreground is the last safe moment to write before a kill.
-        if !active { flushStore(all: true) }
-        // Foreground again: clear the 403/404 backoff so listed rooms can dial.
-        if active {
+        if becameInactive { flushStore(all: true) }
+        // Foreground again: clear the 403/404 backoff so listed rooms can dial,
+        // create any that are missing, and — after a real background — redial
+        // sockets iOS left half-dead.
+        if becameActive {
             roomUnavailableFailures = [:]
             roomUnavailableAt = [:]
+            let existing = Array(rooms.values)
             recreateListedRooms()
+            if resumeRooms {
+                for room in existing { room.resumeAfterForeground() }
+            }
         }
+    }
+
+    /// Test / call-site alias: only flips the active bit (no background redial).
+    func setAppActive(_ active: Bool) {
+        noteScenePhase(active ? .active : .inactive)
     }
 
     /// Chat on screen *and* the app is in the foreground — the only case where
@@ -366,6 +390,9 @@ final class AppModel: ObservableObject {
 
     // MARK: Home pins (device-local)
 
+    /// How many home rows may sit pinned at once (agents + people chats).
+    static let maxHomePins = 5
+
     /// Home-list keys (`p:<projectId>` / `c:<peopleChatId>`) kept at the top.
     @Published private(set) var pinnedHomeIds: Set<String> = {
         Set(UserDefaults.standard.stringArray(forKey: "pinnedHome") ?? [])
@@ -390,6 +417,11 @@ final class AppModel: ObservableObject {
     private func setHomePinned(_ key: String, _ pinned: Bool) {
         if pinned {
             guard !pinnedHomeIds.contains(key) else { return }
+            // Cap at five so the top of Home stays a short favourites strip.
+            guard pinnedHomeIds.count < Self.maxHomePins else {
+                notice = Notice(text: "You can pin up to five chats.")
+                return
+            }
             pinnedHomeIds.insert(key)
         } else {
             guard pinnedHomeIds.contains(key) else { return }
@@ -2276,31 +2308,12 @@ final class AppModel: ObservableObject {
 
     // MARK: Avatar colour (D79)
 
-    /// The owner picks one of the seven palette colours, or Automatic (nil).
-    func pickAvatarColorIndex(_ projectId: Id, index: Int?) {
-        if let i = projects.firstIndex(where: { $0.id == projectId }) {
-            projects[i].avatarColorIndex = index
-            projects[i].avatarColorIndexEffective = index
-        }
-        guard !isFixture else { return }
-        Task {
-            do {
-                let kept = try await api.setProjectAvatarColorIndex(projectId, index: index)
-                if let i = projects.firstIndex(where: { $0.id == projectId }) {
-                    projects[i].avatarColorIndexEffective = kept
-                }
-            } catch {
-                notice = Notice(text: "Avatar colour: \(error.localizedDescription)")
-                await refreshRegistry()
-            }
-        }
-    }
-
     /// D92: the owner's leaf and disc colour picks (nil = automatic). Optimistic, then PATCH.
     func pickAvatarLeaf(_ projectId: Id, leaf: Int?, color: Int?) {
         if let i = projects.firstIndex(where: { $0.id == projectId }) {
             projects[i].avatarLeaf = leaf
             projects[i].avatarLeafColor = color
+            projects[i].imageKey = nil
         }
         guard !isFixture else { return }
         Task {
@@ -2745,6 +2758,69 @@ final class AppModel: ObservableObject {
             return true
         } catch {
             notice = Notice(text: "Could not update group: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    /// D92 amendment: the agent's picture as the avatar loader fetches it.
+    func projectImageURL(_ project: Project) -> URL? {
+        guard let key = project.imageKey, !key.isEmpty else { return nil }
+        return blobURL(projectId: project.id, key: key)
+    }
+
+    /// D92 amendment: upload an agent picture into the project's own blob slot and set it.
+    func setProjectImage(projectId: Id, jpeg: Data) async -> Bool {
+        let key = "avatar-\(Int(Date().timeIntervalSince1970 * 1000)).jpg"
+        if isFixture {
+            if let i = projects.firstIndex(where: { $0.id == projectId }) { projects[i].imageKey = key }
+            return true
+        }
+        do {
+            _ = try await api.putBlob(projectId: projectId, key: key, mime: "image/jpeg", data: jpeg)
+            return await setProjectImageKey(projectId: projectId, key: key)
+        } catch {
+            notice = Notice(text: "Could not upload the picture: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    /// D92 amendment: a blob the relay already holds (the Generate tab's answer) becomes the picture.
+    func setProjectImageKey(projectId: Id, key: String) async -> Bool {
+        if let i = projects.firstIndex(where: { $0.id == projectId }) { projects[i].imageKey = key }
+        guard !isFixture else { return true }
+        do {
+            try await api.setProjectImageKey(projectId, key: key)
+            return true
+        } catch {
+            notice = Notice(text: "Picture not saved: \(error.localizedDescription)")
+            await refreshRegistry()
+            return false
+        }
+    }
+
+    /// D92 amendment: the Generate tab — the relay paints one picture and answers with its key.
+    func generateProjectAvatar(projectId: Id, prompt: String) async throws -> String {
+        if isFixture {
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            return "fixture-gen-\(prompt.lowercased().replacingOccurrences(of: " ", with: "-"))"
+        }
+        return try await api.generateProjectAvatar(projectId, prompt: prompt)
+    }
+
+    /// D92 amendment: a group's leaf picture (nil = initials); drops the uploaded picture.
+    func setGroupLeaf(chatId: String, pick: LeafPick?) async -> Bool {
+        if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
+            peopleChats[i].avatarLeaf = pick.map { Int($0.leaf) }
+            peopleChats[i].avatarLeafColor = pick.map { Int($0.color) }
+            peopleChats[i].imageKey = nil
+        }
+        guard !isFixture else { return true }
+        do {
+            let chat = try await api.setPeopleChatLeaf(chatId, pick: pick)
+            if let i = peopleChats.firstIndex(where: { $0.id == chatId }) { peopleChats[i] = chat }
+            return true
+        } catch {
+            notice = Notice(text: "Group picture not saved: \(error.localizedDescription)")
             return false
         }
     }

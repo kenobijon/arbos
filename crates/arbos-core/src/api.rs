@@ -91,6 +91,10 @@ pub struct ProjectDto {
     pub avatar_leaf_effective: Option<i64>,
     #[typeshare(serialized_as = "Option<I54>")]
     pub avatar_leaf_color_effective: Option<i64>,
+    /// D92 amendment: the agent's uploaded / generated picture, a blob name in the project's own
+    /// slot (`GET /blob/{project}/{key}`); wins over the leaf. Absent on older relays.
+    #[serde(default)]
+    pub image_key: Option<String>,
     pub primary_chat_id: Option<String>,
     pub owner: ProjectOwnerDto,
     pub model: Option<String>,
@@ -177,6 +181,9 @@ pub struct ChatMemberProjectDto {
     pub avatar_leaf_effective: Option<i64>,
     #[typeshare(serialized_as = "Option<I54>")]
     pub avatar_leaf_color_effective: Option<i64>,
+    /// D92 amendment: the agent's uploaded / generated picture (blob name in `/blob/{id}/…`).
+    #[serde(default)]
+    pub image_key: Option<String>,
     pub description: String,
     pub model: Option<String>,
     pub owner: ProjectOwnerDto,

@@ -275,6 +275,12 @@ struct Project: Identifiable, Equatable, Codable {
     /// `avatar_leaf_effective` / `avatar_leaf_color_effective`.
     var avatarLeaf: Int? = nil
     var avatarLeafColor: Int? = nil
+    /// D92 amendment: the agent's uploaded / generated picture — a blob name in the project's own
+    /// slot (`/blob/{id}/{key}`); wins over the leaf while set.
+    var imageKey: String? = nil
+    /// `imageKey` as a fetchable URL (the relay's `/blob/{id}/{key}?token=…`), filled in by the
+    /// relay client; nil in the fixture.
+    var imageURL: String? = nil
     /// Private standing instructions (owner only).
     var instructions: String = ""
     /// §9 public one-paragraph description (≤500), `PATCH {description}`.
@@ -330,6 +336,7 @@ extension Project {
         self.avatarColorIndexEffective = Int(dto.avatar_color_index_effective)
         self.avatarLeaf = dto.avatar_leaf.map(Int.init)
         self.avatarLeafColor = dto.avatar_leaf_color.map(Int.init)
+        self.imageKey = dto.image_key.flatMap { $0.isEmpty ? nil : $0 }
         self.instructions = dto.instructions
         self.description = dto.description
         self.ownerName = dto.owner.name
