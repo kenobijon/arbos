@@ -7,6 +7,7 @@ mod calls;
 mod image_picker;
 mod model;
 mod onboarding;
+mod search;
 mod sync;
 mod ui;
 mod update;

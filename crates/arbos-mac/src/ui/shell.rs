@@ -565,6 +565,14 @@ impl Shell {
         if std::env::var("ARBOS_OPEN_NEW_CHAT").is_ok_and(|v| v == "1") {
             state.update(cx, |s, cx| s.open_new_chat(cx));
         }
+        // Rig: `ARBOS_SEARCH=<text>` opens the sidebar search with that query
+        // (synthetic key events do not reach the GPUI field on the shared display).
+        let search_query = std::env::var("ARBOS_SEARCH")
+            .ok()
+            .filter(|q| !q.trim().is_empty());
+        if let Some(q) = &search_query {
+            search_input.update(cx, |input, cx| input.set_text(q.clone(), cx));
+        }
         if std::env::var("ARBOS_OPEN_NEW_AGENT").is_ok_and(|v| v == "1") {
             state.update(cx, |s, cx| {
                 s.open_new_chat(cx);
@@ -739,7 +747,7 @@ impl Shell {
             fixture_drag_over: std::env::var("ARBOS_FIXTURE_DRAG_OVER").is_ok_and(|v| v == "1"),
             signing_in: false,
             menu_open: false,
-            search_open: false,
+            search_open: search_query.is_some(),
             server_input,
             channel_rename: None,
             invite_expires: false,
