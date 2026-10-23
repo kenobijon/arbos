@@ -206,6 +206,7 @@ class Lane(threading.Thread):
                 turn.get("timeout_s", task.get("timeout_s", 600)),
                 until_first_reply=bool(turn.get("background")),
                 on_poll=on_poll if turn.get("secret_decide") else None,
+                skip_secret_cards=bool(turn.get("secret_decide")),
             )
             res["secret_requests_decided"] = decided
             if turn.get("after_s"):
