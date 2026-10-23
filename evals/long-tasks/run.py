@@ -150,7 +150,11 @@ class Lane(threading.Thread):
         all_docs = []
         first_chat = None
         for i, turn in enumerate(task["turns"], 1):
-            prompt = turn["prompt"].replace("{D}", D).replace("{FIXTURES}", FIXTURES).replace("{TAG}", tag_up)
+            base_prompt = turn["prompt"]
+            if turn.get("prompt_variants"):
+                # rotate per run so the memory tree cannot answer from the last run's reply
+                base_prompt = turn["prompt_variants"][sum(map(ord, tag)) % len(turn["prompt_variants"])]
+            prompt = base_prompt.replace("{D}", D).replace("{FIXTURES}", FIXTURES).replace("{TAG}", tag_up)
             if turn.get("seed"):
                 code, out = self.box.run_as_ws(self.project, turn["seed"].replace("{D}", D).replace("{P}", proj_dir), env=env, timeout=180)
                 if "fatal" in out.lower() or (code not in (0, None)):
