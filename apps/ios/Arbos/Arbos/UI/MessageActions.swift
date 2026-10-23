@@ -53,13 +53,13 @@ struct MessageActionsOverlay<Bubble: View>: View {
     @State private var picked = ""
 
     private var mine: Bool { row.role == .user }
-    private static let gap: CGFloat = 8
-    private static let menuWidth: CGFloat = 250
+    private var gap: CGFloat { 8 }
+    private var menuWidth: CGFloat { 250 }
     private var menuHeight: CGFloat { CGFloat(items.count) * 44 + (items.contains(.delete) ? 8 : 0) }
 
     var body: some View {
-        let groupHeight = ReactionCapsule.height + Self.gap + frame.height + Self.gap + menuHeight
-        let wanted = frame.minY - ReactionCapsule.height - Self.gap
+        let groupHeight = ReactionCapsule.height + gap + frame.height + gap + menuHeight
+        let wanted = frame.minY - ReactionCapsule.height - gap
         let lowest = max(safeTop + 8, height - safeBottom - 8 - groupHeight)
         let top = min(max(wanted, safeTop + 8), lowest)
         ZStack(alignment: .topLeading) {
@@ -68,7 +68,7 @@ struct MessageActionsOverlay<Bubble: View>: View {
                 .overlay(Color.black.opacity(theme.isDark ? 0.35 : 0.12))
                 .ignoresSafeArea()
                 .onTapGesture { onDismiss() }
-            VStack(alignment: mine ? .trailing : .leading, spacing: Self.gap) {
+            VStack(alignment: mine ? .trailing : .leading, spacing: gap) {
                 capsule
                 bubble()
                     .frame(width: width)
@@ -151,7 +151,7 @@ struct MessageActionsOverlay<Bubble: View>: View {
                 }
             }
         }
-        .frame(width: Self.menuWidth)
+        .frame(width: menuWidth)
         .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(theme.card))
         .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(theme.separator, lineWidth: 1))
         .shadow(color: .black.opacity(0.35), radius: 14, y: 6)
