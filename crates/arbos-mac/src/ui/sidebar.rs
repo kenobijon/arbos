@@ -256,6 +256,29 @@ fn channel_last_line(row: &arbos_matrix::ChannelRow) -> String {
 /// Without a query every row is a `Title` hit, so the list is by activity.
 type RowKey = (search::HitKind, std::cmp::Reverse<u64>);
 
+/// The chats list's top and bottom fade (Jacob likes it, Oct 23). The band
+/// sits under the strip's bottom edge: the scroll box is pulled up by the band
+/// and the list pads by the same amount, so at rest the first row starts where
+/// the fade ends and only rows that scroll under the strip cross it (the pane
+/// rule from #1365 / #1424). The bottom band stays over the list's end.
+pub const LIST_FADE_BAND: f32 = 14.0;
+
+/// The wrapper is a flex column: the list inside keeps `flex_1 / min_h_0`, so
+/// it stays bounded and scrolls. (#1497's first try used a block div here —
+/// the list took its content height and painted through the account row,
+/// #1528; `row_bounds_tests` pins this.)
+pub(crate) fn faded_list(list: impl IntoElement) -> gpui::AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h_0()
+        .mt(px(-LIST_FADE_BAND))
+        .debug_selector(|| "sidebar-list-frame".into())
+        .child(edge_faded(LIST_FADE_BAND, true, true, list))
+        .into_any_element()
+}
+
 pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
     let theme = Theme::of(cx).clone();
     let state = shell.state.read(cx);
@@ -474,7 +497,7 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         .flex_1()
         .min_h_0()
         .px(px(8.0))
-        .pt(px(6.0))
+        .pt(px(LIST_FADE_BAND + 6.0))
         .pb(px(12.0))
         .overflow_y_scroll();
     // D89: the host that runs everyone's computer is full; this account is in line. Chats and
@@ -723,10 +746,8 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         .child(strip)
         .child(match open_server.as_ref() {
             // Inside a server the left pane shows its channels (mockup h).
-            Some(server) => {
-                edge_faded(14.0, true, true, server_channels(server, shell, &theme, cx))
-            }
-            None => edge_faded(14.0, true, true, list),
+            Some(server) => faded_list(server_channels(server, shell, &theme, cx)),
+            None => faded_list(list),
         });
     if let Some(update) = shell.render_update_button(cx) {
         column = column.child(div().px(px(12.0)).pb(px(8.0)).child(update));
@@ -940,7 +961,7 @@ fn server_channels(
         .flex_1()
         .min_h_0()
         .px(px(8.0))
-        .pt(px(6.0))
+        .pt(px(LIST_FADE_BAND + 6.0))
         .pb(px(12.0))
         .overflow_y_scroll()
         .child(back);
@@ -1888,8 +1909,7 @@ pub fn chat_menu(
 mod row_bounds_tests {
     use gpui::{div, prelude::*, px, ScrollHandle, TestAppContext};
 
-    use super::top_strip;
-    use crate::ui::frost::edge_faded;
+    use super::{faded_list, top_strip, LIST_FADE_BAND};
 
     const ROWS: usize = 12;
     const ROW_H: f32 = 58.0;
@@ -1907,7 +1927,10 @@ mod row_bounds_tests {
             _: &mut gpui::Window,
             _: &mut gpui::Context<Self>,
         ) -> impl IntoElement {
-            let strip = div().h(px(top_strip())).flex_shrink_0();
+            let strip = div()
+                .h(px(top_strip()))
+                .flex_shrink_0()
+                .debug_selector(|| "sidebar-strip".into());
             let mut list = div()
                 .id("chat-list")
                 .flex()
@@ -1915,7 +1938,7 @@ mod row_bounds_tests {
                 .flex_1()
                 .min_h_0()
                 .px(px(8.0))
-                .pt(px(6.0))
+                .pt(px(LIST_FADE_BAND + 6.0))
                 .pb(px(12.0))
                 .overflow_y_scroll()
                 .track_scroll(&self.scroll)
@@ -1940,7 +1963,7 @@ mod row_bounds_tests {
                 .flex()
                 .flex_col()
                 .child(strip)
-                .child(edge_faded(14.0, true, true, list))
+                .child(faded_list(list))
                 .child(account)
         }
     }
@@ -1969,6 +1992,25 @@ mod row_bounds_tests {
                 list_bottom <= account_top + 0.5,
                 "{pass}: list bottom {list_bottom} runs into the account row at {account_top}"
             );
+            if pass == "top" {
+                // #1497: the fade band ends at the strip's bottom edge and the
+                // first row starts its 6 pt under it, clear of the fade.
+                let frame = vcx.debug_bounds("sidebar-list-frame").expect("frame");
+                let strip = vcx.debug_bounds("sidebar-strip").expect("strip");
+                let first = vcx.debug_bounds("row-0").expect("first row");
+                let fade_bottom: f32 = f32::from(frame.origin.y) + LIST_FADE_BAND;
+                let strip_bottom: f32 = strip.bottom().into();
+                let row_top: f32 = first.origin.y.into();
+                assert!(
+                    (fade_bottom - strip_bottom).abs() <= 0.5,
+                    "fade band ends at {fade_bottom}, strip at {strip_bottom}"
+                );
+                assert!(
+                    (row_top - (strip_bottom + 6.0)).abs() <= 0.5,
+                    "first row at {row_top}, strip + 6 = {}",
+                    strip_bottom + 6.0
+                );
+            }
             let mut spans: Vec<(f32, f32)> = Vec::new();
             for i in 0..ROWS {
                 let sel: &'static str = Box::leak(format!("row-{i}").into_boxed_str());
