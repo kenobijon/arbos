@@ -737,6 +737,8 @@ struct RowView: View {
     var onReply: (() -> Void)? = nil
     /// ChatView sets this while a reply swipe is locked so swipe-right-to-back does not fire.
     var replySwipeActive: Binding<Bool> = .constant(false)
+    /// Mention chips (Oct 23): who `@handle` resolves to.
+    private var mentions: MentionTable { MentionTable(model: model, theme: theme) }
 
     /// Trailing column width for swipe-revealed times (fits "12:59 PM").
     static let timeRevealWidth: CGFloat = 56
@@ -861,7 +863,7 @@ struct RowView: View {
                     if let quote {
                         quoteHeader(quote, color: theme.userText)
                     }
-                    Text(Markdown.inline(text, color: theme.userText, link: theme.accent, codeChip: theme.userCodeChip))
+                    Markdown.inlineText(text, color: theme.userText, link: theme.accent, codeChip: theme.userCodeChip, mentions: mentions)
                         .font(theme.font(Theme.body))
                         .lineSpacing(Theme.bodyLineSpacing)
                         .tint(theme.accent)
@@ -895,7 +897,7 @@ struct RowView: View {
                         if let quote {
                             quoteHeader(quote, color: theme.text)
                         }
-                        Text(Markdown.inline(text, color: theme.text, link: theme.accent, codeChip: theme.codeChip))
+                        Markdown.inlineText(text, color: theme.text, link: theme.accent, codeChip: theme.codeChip, mentions: mentions)
                             .font(theme.font(Theme.body))
                             .lineSpacing(Theme.bodyLineSpacing)
                             .tint(theme.accent)
@@ -1205,9 +1207,12 @@ struct RowView: View {
 }
 
 struct BlockView: View {
+    @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
     let block: Block
     let live: Bool
+    /// Mention chips (Oct 23): who `@handle` resolves to.
+    private var mentions: MentionTable { MentionTable(model: model, theme: theme) }
 
     var body: some View {
         switch block {
@@ -1216,7 +1221,7 @@ struct BlockView: View {
                 StreamingText(text: text, font: .system(size: Theme.body), color: theme.text)
                     .lineSpacing(Theme.bodyLineSpacing)
             } else {
-                Text(Markdown.inline(text, color: theme.text, link: theme.accent, codeChip: theme.codeChip))
+                Markdown.inlineText(text, color: theme.text, link: theme.accent, codeChip: theme.codeChip, mentions: mentions)
                     .font(theme.font(Theme.body))
                     .lineSpacing(Theme.bodyLineSpacing)
                     .tint(theme.accent)
@@ -1241,7 +1246,7 @@ struct BlockView: View {
                             StreamingText(text: item, font: .system(size: Theme.body), color: theme.text)
                                 .fixedSize(horizontal: false, vertical: true)
                         } else {
-                            Text(Markdown.inline(item, color: theme.text, link: theme.accent, codeChip: theme.codeChip))
+                            Markdown.inlineText(item, color: theme.text, link: theme.accent, codeChip: theme.codeChip, mentions: mentions)
                                 .font(theme.font(Theme.body))
                                 .tint(theme.accent)
                                 .fixedSize(horizontal: false, vertical: true)

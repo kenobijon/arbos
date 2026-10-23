@@ -27,6 +27,7 @@ use crate::ui::icons::icon;
 use crate::ui::markdown::{
     has_fenced_code, inline_plain, inline_spans, polish_assistant_prose, split_blocks, Block,
 };
+use crate::ui::mention::Mentions;
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
 use crate::ui::select::{BubbleSelectable, Selectable, TextSelection};
@@ -469,6 +470,9 @@ pub struct Transcript {
     chat_id: Option<Id>,
     list: ListState,
     rows: Vec<Row>,
+    /// Who `@handle` resolves to in this chat's bubbles (mention chips),
+    /// rebuilt with the rows.
+    mentions: Rc<Mentions>,
     /// Whether the right pane was open at the last sync: its opening or
     /// closing changes the column width, and the cached row layouts must go.
     pane_open: bool,
@@ -525,6 +529,7 @@ impl Transcript {
             chat_id: None,
             list,
             rows: Vec::new(),
+            mentions: Mentions::empty(),
             pane_open: false,
             veils: HashMap::new(),
             cards: HashMap::new(),
@@ -686,6 +691,8 @@ impl Transcript {
     }
 
     pub fn sync(&mut self, cx: &mut Context<Self>) {
+        let theme = Theme::of(cx).clone();
+        self.mentions = Mentions::from_state(&self.state, &theme, cx);
         let state = self.state.read(cx);
         let chat_id = state.active_chat_id();
         let chat_changed = chat_id != self.chat_id;
@@ -707,7 +714,14 @@ impl Transcript {
         };
         let me_id = state.me_id();
         let thumb_keys: HashSet<&str> = state.thumbnails.keys().map(|k| k.as_str()).collect();
-        let new_rows = build_rows(&messages, show_details, speech, &me_id, &thumb_keys);
+        let new_rows = build_rows(
+            &messages,
+            show_details,
+            speech,
+            &me_id,
+            &thumb_keys,
+            &self.mentions,
+        );
         // A sender change opens the turn gap. So does every new assistant /
         // project message — consecutive replies from the same agent (quick ack
         // then the answer, or two answers in a row) must not read as one bubble
@@ -1218,7 +1232,11 @@ impl Transcript {
         };
         let theme = Theme::of(cx).clone();
         let now = Instant::now();
-        let selectable = Selectable::new(&self.selection, theme.accent_soft, cx);
+        let selectable = Selectable::new(&self.selection, theme.accent_soft, cx).with_mentions(
+            self.mentions.clone(),
+            theme.accent,
+            Theme::with_alpha(theme.accent, 0.14),
+        );
         let inner: AnyElement = match row.kind {
             RowKind::User {
                 text,
@@ -2098,6 +2116,7 @@ pub fn build_rows(
     speech: SpeechRows<'_>,
     me_id: &str,
     thumb_keys: &HashSet<&str>,
+    mentions: &Mentions,
 ) -> Vec<Row> {
     let mine = |m: &Message| {
         m.sender == "user" || m.sender.is_empty() || m.sender == format!("user:{me_id}")
@@ -2132,7 +2151,9 @@ pub fn build_rows(
         let rows_before_message = rows.len();
         match message.role {
             Role::User => {
-                let text = message.plain_text();
+                // `@handle` → `@Display Name` so the chip shows the name and a copy
+                // carries it (mention chips, Oct 23).
+                let text = mentions.display(&message.plain_text());
                 let attachment_parts: Vec<(String, Attachment)> = message
                     .parts
                     .iter()
@@ -2377,7 +2398,9 @@ pub fn build_rows(
                     .parts
                     .iter()
                     .filter_map(|p| match p {
-                        Part::Text { id, text } => Some((id.clone(), polish_assistant_prose(text))),
+                        Part::Text { id, text } => {
+                            Some((id.clone(), mentions.display(&polish_assistant_prose(text))))
+                        }
                         _ => None,
                     })
                     .collect();
@@ -4043,7 +4066,14 @@ mod system_line_tests {
             failed: &failed,
             voice_mode: false,
         };
-        let rows = build_rows(&messages, false, speech, "gh_me", &HashSet::new());
+        let rows = build_rows(
+            &messages,
+            false,
+            speech,
+            "gh_me",
+            &HashSet::new(),
+            &Mentions::empty(),
+        );
         let kinds: Vec<&RowKind> = rows.iter().map(|r| &r.kind).collect();
         // Date stamp, Bob (named), the notice, Bob again (named again).
         let bubbles: Vec<(bool, &str)> = kinds
@@ -4093,7 +4123,14 @@ mod system_line_tests {
             failed: &failed,
             voice_mode: false,
         };
-        let rows = build_rows(&messages, false, speech, "gh_jacob", &HashSet::new());
+        let rows = build_rows(
+            &messages,
+            false,
+            speech,
+            "gh_jacob",
+            &HashSet::new(),
+            &Mentions::empty(),
+        );
         let sender_captions: Vec<&str> = rows
             .iter()
             .filter_map(|r| match &r.kind {
@@ -4168,7 +4205,14 @@ mod presence_rows_tests {
             failed: &failed,
             voice_mode: false,
         };
-        build_rows(messages, false, speech, "gh_me", &HashSet::new())
+        build_rows(
+            messages,
+            false,
+            speech,
+            "gh_me",
+            &HashSet::new(),
+            &Mentions::empty(),
+        )
     }
 
     #[test]
