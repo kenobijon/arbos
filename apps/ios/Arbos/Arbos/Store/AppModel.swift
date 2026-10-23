@@ -408,6 +408,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var connectorsBusy = false
     /// Settings → Secrets (D83). `nil` until the first `GET /secrets`.
     @Published var secrets: SecretsOverview?
+    /// Settings → Devices (`GET /auth/devices`, Oct 23).
+    @Published var devices: [AuthDevice] = []
+    @Published var devicesLoaded = false
+    @Published var devicesError: String?
     /// Agent profile → Secrets, per project.
     @Published var projectSecrets: [Id: ProjectSecrets] = [:]
     /// Fixture only: the Vault page's item list (the relay answers this live).

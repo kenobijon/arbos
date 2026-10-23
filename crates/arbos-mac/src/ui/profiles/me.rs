@@ -7,12 +7,13 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui::{
-    canvas, div, prelude::*, px, Bounds, Context, Div, DragMoveEvent, IntoElement, MouseButton,
-    MouseDownEvent, Pixels, Render, Stateful, Window,
+    canvas, div, prelude::*, px, Bounds, Context, Div, DragMoveEvent, ElementId, IntoElement,
+    MouseButton, MouseDownEvent, Pixels, Render, SharedString, Stateful, Window,
 };
 
 use crate::app::ProfilePage;
 use crate::model::{now_ms, MachineState};
+use crate::ui::devices;
 use crate::ui::glass;
 use crate::ui::icons::icon;
 use crate::ui::motion::PulseClock;
@@ -25,6 +26,9 @@ use crate::ui::theme::{
     AppearancePref, Surface, Theme, GLASS_OPACITY_MAX, GLASS_OPACITY_MIN, TEXT_BODY, TEXT_SMALL,
     TEXT_TINY,
 };
+
+/// Where a device row's kind tag sits: left of the trailing Sign out / "This Mac".
+const INSET_TAG_RIGHT: f32 = 92.0;
 
 /// Drag payload for the Appearance glass-opacity slider (no preview view).
 #[derive(Clone)]
@@ -68,6 +72,12 @@ impl Shell {
             state.secrets.row_value()
         } else {
             String::new()
+        };
+        let devices_view = state.devices.clone();
+        let devices_summary = match state.devices.items.len() {
+            0 => String::new(),
+            1 => "1 device".to_string(),
+            n => format!("{n} devices"),
         };
         let store_usage = state.store_usage;
         let update = state.update.clone();
@@ -700,6 +710,128 @@ impl Shell {
                 ))
         };
 
+        // ----- Devices page body (Oct 23) -----------------------------------------
+        // One card, a row per signed-in device; this Mac first and marked; every
+        // other row has Sign out, which asks first and then revokes on the relay.
+        let devices_body = {
+            let view = devices_view;
+            let armed = self.device_revoke_armed.clone();
+            let mut body = div().flex().flex_col().gap(px(22.0));
+            if let Some(why) = view.error.clone().filter(|_| view.items.is_empty()) {
+                body = body
+                    .child(settings_group(&theme).child(
+                        glass::row("Devices", &theme).child(value("Could not load".into(), &theme)),
+                    ))
+                    .child(footnote(
+                        format!("{why}. Pull to try again: reopen Devices."),
+                        &theme,
+                    ));
+            } else if !view.loaded && view.items.is_empty() {
+                body = body.child(kit::empty("Loading…", &theme));
+            } else if view.items.is_empty() {
+                body = body.child(kit::empty("No devices yet", &theme));
+            } else {
+                let mut rows: Vec<gpui::AnyElement> = Vec::new();
+                for r in devices::rows(&view.items, now_ms() as i64) {
+                    if armed.as_deref() == Some(r.id.as_str()) {
+                        let id = r.id.clone();
+                        rows.push(
+                            kit::confirm_row(
+                                &devices::confirm_question(&r.name),
+                                "Sign out",
+                                kit::confirm_button(
+                                    "device-revoke-cancel",
+                                    "Cancel",
+                                    false,
+                                    &theme,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.device_revoke_armed = None;
+                                        cx.notify();
+                                    },
+                                )),
+                                kit::confirm_button("device-revoke-go", "Sign out", true, &theme)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.device_revoke_armed = None;
+                                        let id = id.clone();
+                                        this.state.update(cx, |s, cx| s.revoke_device(id, cx));
+                                    })),
+                                &theme,
+                            )
+                            .into_any_element(),
+                        );
+                        continue;
+                    }
+                    let title: SharedString = r.name.clone().into();
+                    let trailing: Option<gpui::AnyElement> = if !r.revokable() {
+                        Some(
+                            div()
+                                .flex_shrink_0()
+                                .text_size(px(TEXT_SMALL))
+                                .text_color(theme.text_muted)
+                                .child("This Mac")
+                                .into_any_element(),
+                        )
+                    } else {
+                        let id = r.id.clone();
+                        Some(
+                            link_button("device-revoke", "Sign out", true, &theme)
+                                .id(ElementId::Name(SharedString::from(format!(
+                                    "device-revoke-{}",
+                                    r.id
+                                ))))
+                                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                    cx.stop_propagation()
+                                })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.device_revoke_armed = Some(id.clone());
+                                    cx.notify();
+                                }))
+                                .into_any_element(),
+                        )
+                    };
+                    let mut row = kit::row(
+                        ElementId::Name(SharedString::from(format!("device-{}", r.id))),
+                        kit::Leading::Tile(r.glyph),
+                        title,
+                        Some(r.subtitle.clone().into()),
+                        None,
+                        trailing,
+                        false,
+                        &theme,
+                    );
+                    if let Some(tag) = r.tag {
+                        row = row.child(
+                            div()
+                                .absolute()
+                                .top(px(7.0))
+                                .right(px(INSET_TAG_RIGHT))
+                                .px(px(6.0))
+                                .py(px(1.0))
+                                .rounded_full()
+                                .bg(theme.surface_2)
+                                .text_size(px(TEXT_TINY))
+                                .text_color(theme.text_muted)
+                                .child(tag),
+                        );
+                    }
+                    rows.push(row.into_any_element());
+                }
+                body = body.child(
+                    kit::section(rows, kit::INSET + 30.0 + kit::GAP, &theme)
+                        .mx(px(0.0))
+                        .mb(px(0.0)),
+                );
+                body = body.child(footnote(
+                    "Every GitHub sign-in is a device. Signing one out ends its session at once; it can sign in again. This Mac signs out from the Settings tab."
+                        .into(),
+                    &theme,
+                ));
+            }
+            body
+        };
+
         let page = self.settings_page;
         let tab = profile_tab;
         let pane_width = profiles::SHEET_WIDTH.max(page.sheet_width());
@@ -717,6 +849,7 @@ impl Shell {
                     SettingsPage::Notifications => notifications_body,
                     SettingsPage::Updates => updates_body,
                     SettingsPage::About => about_body,
+                    SettingsPage::Devices => devices_body,
                     SettingsPage::Root
                     | SettingsPage::Connectors
                     | SettingsPage::Routines
@@ -740,7 +873,8 @@ impl Shell {
                     | SettingsPage::Appearance
                     | SettingsPage::Notifications
                     | SettingsPage::Updates
-                    | SettingsPage::About => unreachable!("handled above"),
+                    | SettingsPage::About
+                    | SettingsPage::Devices => unreachable!("handled above"),
                     SettingsPage::Connectors => self.connectors.clone().into_any_element(),
                     SettingsPage::Routines => self.routines.clone().into_any_element(),
                     SettingsPage::Channels => self.channels.clone().into_any_element(),
@@ -936,16 +1070,27 @@ impl Shell {
                 )
                 .into_any_element(),
             ]));
-            // Secrets (Credits · Connected apps hidden until implemented).
-            body.push(Section::Card(vec![page_row(
-                "settings-secrets",
-                "key",
-                SettingsPage::Secrets,
-                Some(secrets_value),
-                &theme,
-                cx,
-            )
-            .into_any_element()]));
+            // Secrets · Devices (Credits · Connected apps hidden until implemented).
+            body.push(Section::Card(vec![
+                page_row(
+                    "settings-secrets",
+                    "key",
+                    SettingsPage::Secrets,
+                    Some(secrets_value),
+                    &theme,
+                    cx,
+                )
+                .into_any_element(),
+                page_row(
+                    "settings-devices",
+                    "laptop",
+                    SettingsPage::Devices,
+                    Some(devices_summary),
+                    &theme,
+                    cx,
+                )
+                .into_any_element(),
+            ]));
             // On this Mac (Routines · Channels · Skills hidden until implemented).
             body.push(Section::Card(vec![kit::nav_row(
                 "settings-local",

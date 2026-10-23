@@ -2148,6 +2148,31 @@ pub struct NewSecret {
     pub inject_env: bool,
 }
 
+/// One signed-in device of my account (`GET /auth/devices`, Oct 23).
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+pub struct DeviceView {
+    pub id: String,
+    pub name: String,
+    /// `github` (a GitHub sign-in), `paircode`, `reader` (read-only, Grok Bot) …
+    #[serde(default)]
+    pub kind: String,
+    pub created_at: i64,
+    #[serde(default)]
+    pub last_seen_at: Option<i64>,
+    /// The device that made the request — this Mac.
+    #[serde(default)]
+    pub current: bool,
+}
+
+/// Settings → Devices state.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DevicesView {
+    pub items: Vec<DeviceView>,
+    pub loaded: bool,
+    /// Why the list could not be read, when it could not.
+    pub error: Option<String>,
+}
+
 /// Settings → Secrets state (`GET /secrets` + `GET /secrets/requests`).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SecretsView {
