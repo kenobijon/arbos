@@ -2004,6 +2004,45 @@ class Loop:
             log(f"Rust gate Mac unreachable: {str(e)[-200:]}")
             return None
 
+    def merge_revert_probe(self, fid: str, head: str) -> list[str]:
+        """Cheap pre-integration check (2026-10-23 23:3x, #1532's be8ab46): the branch's diff against main must
+        only touch files its own non-merge commits touch. A file that differs from main although no commit of
+        the branch edited it was changed by a MERGE commit — i.e. the merge resolution reverted main's version
+        (12 agentd files came back stale that way; the gate would have carried them into main). Such a branch
+        goes back to its owner with the file list instead of into the integration tree."""
+        st = self.store.state(fid)
+        if st.get("merge_revert_checked") == head:
+            return []
+        try:
+            cmp = self.gh.compare("main", head)
+        except HttpError:
+            return []
+        files = {f["filename"] for f in cmp.get("files", [])}
+        commits = cmp.get("commits", [])
+        if not files or not commits or not any(len(c.get("parents") or []) > 1 for c in commits):
+            return []  # no merge commit on the branch: nothing a merge could have reverted
+        own: set[str] = set()
+        for c in commits:
+            if len(c.get("parents") or []) > 1:
+                continue
+            try:
+                own |= {f["filename"] for f in self.gh.commit(c["sha"]).get("files", [])}
+            except HttpError:
+                return []
+        stray = sorted(files - own)
+        st["merge_revert_checked"] = head
+        self.store.save_state(fid, st)
+        if not stray:
+            return []
+        log(f"[{fid}] merge-revert probe: {len(stray)} file(s) differ from main that no commit of the branch edited; not integrated")
+        self.store.event(fid, "merge_revert", head=head, files=stray[:50])
+        self.gate_followup(fid, st, "rust",
+                           "Pre-integration probe: these files differ from `main` on your branch although no commit of the branch edits them — "
+                           "a merge commit on the branch resolved them to a stale copy, i.e. it reverts main's changes. Redo the merge of "
+                           "`origin/main` taking main's side for them (or `git checkout origin/main -- <files>` and commit), then push.\n\n"
+                           + "\n".join(stray[:60]) + ("\n…" if len(stray) > 60 else ""))
+        return stray
+
     def rust_gate_start(self, members: dict[str, str]) -> None:
         """Build the integration branch gate/<run> on GitHub (main + every member, in order); CI starts on the
         push; the Mac release build starts if the Mac answers (else it is started on a later tick)."""
@@ -2014,6 +2053,10 @@ class Loop:
         merged: list[str] = []
         conflicts: dict[str, str] = {}
         for n, (fid, head) in enumerate(members.items()):
+            stray = self.merge_revert_probe(fid, head)
+            if stray:
+                conflicts[fid] = "merge-revert"
+                continue
             res = self.gh.merge_into(branch, head, f"gate: merge feedback/{fid} [gate {run_id}]")
             if res is None:
                 # A conflict after a sibling merged may still be a conflict with MAIN (the branch is stale): probe
@@ -2048,6 +2091,8 @@ class Loop:
                             "ios": "pending" if ios else "skipped", "mac_started": None}
         self.store.save_cursor(cur)
         for fid, kind in conflicts.items():
+            if kind == "merge-revert":
+                continue  # already sent back by merge_revert_probe
             self.rust_gate_conflict(fid, members[fid], kind, run_id)
         if not merged:
             self.gh.delete_branch(branch)
