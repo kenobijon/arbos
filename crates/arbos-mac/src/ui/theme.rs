@@ -13,10 +13,48 @@ use gpui::{hsla, rgb, rgba, App, Global, Hsla, WindowAppearance, WindowBackgroun
 
 use crate::sync::credentials::config_dir;
 
-/// Chat-list sidebar (the iPhone home list, one column).
+/// Chat-list sidebar (the iPhone home list, one column). Default width; the
+/// user can drag the right edge between [`SIDEBAR_WIDTH_MIN`] and
+/// [`SIDEBAR_WIDTH_MAX`] ([feedback app-01M5MJ9Y91W9ZET71KTCE7PS65]).
 pub const SIDEBAR_WIDTH: f32 = 296.0;
+/// Narrowest the chat-list column may be dragged (avatar + short name).
+pub const SIDEBAR_WIDTH_MIN: f32 = 200.0;
+/// Widest the chat-list column may be dragged.
+pub const SIDEBAR_WIDTH_MAX: f32 = 480.0;
+/// Hit target on the sidebar's right edge for the resize drag.
+pub const SIDEBAR_RESIZE_HANDLE: f32 = 6.0;
 /// Kept for the settings sub-panels, which open just right of the sidebar.
 pub const RAIL_WIDTH: f32 = SIDEBAR_WIDTH;
+
+const SIDEBAR_WIDTH_FILE: &str = "sidebar_width";
+
+/// The user's chat-list column width. Saved as a float string in
+/// `<config>/sidebar_width` when dragged; a missing file keeps
+/// [`SIDEBAR_WIDTH`].
+pub struct SidebarWidth;
+
+impl SidebarWidth {
+    pub fn clamp(v: f32) -> f32 {
+        v.round().clamp(SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX)
+    }
+
+    pub fn load() -> f32 {
+        std::fs::read_to_string(config_dir().join(SIDEBAR_WIDTH_FILE))
+            .ok()
+            .and_then(|s| s.trim().parse::<f32>().ok())
+            .map(Self::clamp)
+            .unwrap_or(SIDEBAR_WIDTH)
+    }
+
+    pub fn save(v: f32) {
+        let dir = config_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(
+            dir.join(SIDEBAR_WIDTH_FILE),
+            format!("{:.0}", Self::clamp(v)),
+        );
+    }
+}
 /// The conversation header (the centred title pill) — also the window-drag
 /// catchment at the top of the chat pane. Grok Mac, measured on the real app
 /// (ref 57, 2 px/pt): the hairline sits at 44 pt and the title row is centred
@@ -460,7 +498,7 @@ impl Theme {
         self.surface == Surface::Glass
     }
 
-    fn is_light(&self) -> bool {
+    pub fn is_light(&self) -> bool {
         self.appearance == Appearance::Light
     }
 

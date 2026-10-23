@@ -44,7 +44,7 @@ use super::doc::ChatDoc;
 use super::dto::{
     account_view_from_me, apply_machine_status, chat_from_create, chat_from_dto,
     connectors_view_from_dto, credentials_from_token, local_view_from_dto, merge_chats,
-    merged_unread, model_ids_from_dto, people_space_from, project_from_dto,
+    merged_unread, model_ids_from_dto, people_space_from, project_from_dto, relay_unread_for,
     remap_queued_send_targets, routine_from_dto, secrets_view_from_dto, skill_from_dto,
     transcript_text, voices_from_dto,
 };
@@ -462,10 +462,18 @@ impl Shared {
     /// product bugs.
     fn diagnostic(self: &Arc<Self>, kind: &'static str, detail: impl Into<String>) {
         let detail = detail.into();
-        log::warn!(target: "arbos_mac::diagnostic", "{kind}: {detail}");
         if diagnostics::is_transient(&detail) {
+            log::warn!(target: "arbos_mac::diagnostic", "{kind}: {detail}");
             return;
         }
+        self.diagnostic_always(kind, detail);
+    }
+
+    /// `diagnostic` without the transient filter: for failures of an explicit user action, where
+    /// a timeout is exactly what we want to hear about (once a week per signature as usual).
+    fn diagnostic_always(self: &Arc<Self>, kind: &'static str, detail: impl Into<String>) {
+        let detail = detail.into();
+        log::warn!(target: "arbos_mac::diagnostic", "{kind}: {detail}");
         let signature = diagnostics::signature(kind, &detail);
         if !self.diagnostics.should_report(&signature) {
             return;
@@ -1454,8 +1462,21 @@ fn parse_server(v: Value) -> Result<ServerInfo> {
 }
 
 /// A server write failed: the sheet shows it inline and a toast says it too.
+/// A server action the user asked for (Create / Join / Add members / invite links) failed. The
+/// sheet and the banner get plain words; the full chain goes to the log and — unlike background
+/// polls — to a diagnostic even when the cause is a timeout, so a "timed out" nobody can
+/// reproduce still leaves a signature (Jacob, 2026-10-23 14:34 UTC).
 fn server_error(shared: &Arc<Shared>, err: &anyhow::Error) {
-    let text = people_error(err);
+    let chain = format!("{err:#}");
+    log::warn!(target: "arbos_mac::relay", "server action failed: {chain}");
+    let text = if err.downcast_ref::<RelayError>().is_some() {
+        people_error(err)
+    } else if diagnostics::is_transient(&chain) {
+        "The relay did not answer in time. Check your connection and try again.".to_string()
+    } else {
+        people_error(err)
+    };
+    shared.diagnostic_always("server-action", chain);
     let _ = shared.events.send(SyncEvent::ServerError(text.clone()));
     shared.notice(text);
 }
@@ -1710,11 +1731,18 @@ fn handle_server_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             let server_id = server_id.clone();
             let user_ids = user_ids.clone();
             tokio::spawn(async move {
+                // All picks at once: one slow answer costs one timeout budget, not one per person;
+                // the first failure is shown once the rest are done.
                 let path = format!("/servers/{server_id}/members");
-                for uid in user_ids {
-                    if let Err(err) = shared.post_json(&path, json!({ "user_id": uid })).await {
-                        server_error(&shared, &err);
-                    }
+                let calls = user_ids
+                    .into_iter()
+                    .map(|uid| shared.post_json(&path, json!({ "user_id": uid })));
+                let first_err = futures::future::join_all(calls)
+                    .await
+                    .into_iter()
+                    .find_map(Result::err);
+                if let Some(err) = first_err {
+                    server_error(&shared, &err);
                 }
                 fetch_server_detail(&shared, &server_id).await;
             });
@@ -1978,26 +2006,55 @@ fn people_error(err: &anyhow::Error) -> String {
 }
 
 /// `GET /projects` then `GET /projects/{id}` for chats, models and spend.
-/// `GET /me/unread` → chat id → has unread. Empty on older relays (404) or decode errors.
-async fn fetch_unread_map(shared: &Arc<Shared>) -> HashMap<Id, bool> {
+/// `GET /me/unread` → chat id → has unread, for every chat the relay counts unread in. The
+/// list is the user's one read cursor (shared by all their devices; own messages never
+/// count), so a chat it does not name has nothing unread. `None` when the relay did not
+/// answer it (older relay, transport error): the per-chat flag decides then.
+async fn fetch_unread_map(shared: &Arc<Shared>) -> Option<HashMap<Id, bool>> {
     match shared.get_json("/me/unread").await {
         Ok(v) => match serde_json::from_value::<UnreadDto>(v) {
-            Ok(dto) => dto
-                .chats
-                .into_iter()
-                .map(|c| (c.chat_id, c.unread > 0))
-                .collect(),
+            Ok(dto) => Some(
+                dto.chats
+                    .into_iter()
+                    .map(|c| (c.chat_id, c.unread > 0))
+                    .collect(),
+            ),
             Err(err) => {
                 log::warn!(target: "arbos_mac::relay", "UnreadDto: {err}");
-                HashMap::new()
+                None
             }
         },
         Err(err) => {
             if !format!("{err:#}").contains("HTTP 404") {
                 shared.diagnostic("me-unread", format!("{err:#}"));
             }
-            HashMap::new()
+            None
         }
+    }
+}
+
+/// Rig: `ARBOS_OPEN_CHAT=<chat id>` opens that chat (people or agent) once the registry lists
+/// it, once per launch — the iPhone's hook of the same name; `ARBOS_FIXTURE_OPEN` is the
+/// fixture source's.
+fn apply_open_chat_hook(shared: &Arc<Shared>) {
+    static APPLIED: std::sync::Once = std::sync::Once::new();
+    let Ok(chat_id) = std::env::var("ARBOS_OPEN_CHAT") else {
+        return;
+    };
+    let project_id = shared
+        .chats
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|c| c.id == chat_id)
+        .map(|c| c.project_id.clone());
+    if let Some(project_id) = project_id {
+        APPLIED.call_once(|| {
+            let _ = shared.events.send(SyncEvent::RestoreSelection {
+                project_id,
+                chat_id,
+            });
+        });
     }
 }
 
@@ -2212,7 +2269,7 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
             &pending_ids,
         );
         for c in &mut merged {
-            let relay_unread = unread_by_chat.get(&c.id).copied().unwrap_or(c.unread);
+            let relay_unread = relay_unread_for(unread_by_chat.as_ref(), &c.id, c.unread);
             let local_read = local_reads.get(&c.id).copied();
             c.unread = merged_unread(relay_unread, local_read, c.last_message_at as i64);
         }
@@ -2222,6 +2279,7 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
     let _ = shared.events.send(SyncEvent::Projects(projects.clone()));
     log_first_paint("relay", projects.len());
     emit_chats(shared);
+    apply_open_chat_hook(shared);
     save_registry(shared);
     for p in projects.iter().filter(|p| !p.is_people()) {
         ensure_room(shared, &p.id, &project_doc_key(&p.id), PROJECT_DOC_CHAT_ID);
@@ -2508,7 +2566,17 @@ async fn forward_changes(
     }
 }
 
+/// True when `lower` has `@token` as a whole mention (not a longer `@token…` handle).
+fn text_has_at_token(lower: &str, token: &str) -> bool {
+    let t = format!("@{token}");
+    lower.match_indices(&t).any(|(i, _)| {
+        let after = lower[i + t.len()..].chars().next();
+        after.is_none_or(|c| !(c.is_alphanumeric() || c == '-' || c == '_'))
+    })
+}
+
 /// `@slug` / `@handle` in the text → `agent:<project>` / `user:<id>` (API §3).
+/// Group/server owners may also use `@here` (every human) and `@agents` (every agent).
 fn mentions_for(shared: &Shared, chat_id: &str, text: &str) -> Vec<String> {
     let lower = text.to_lowercase();
     let projects = shared.projects.lock().unwrap();
@@ -2516,14 +2584,41 @@ fn mentions_for(shared: &Shared, chat_id: &str, text: &str) -> Vec<String> {
         return Vec::new();
     };
     let mut out = Vec::new();
+    let me_handle = shared.me_handle();
+    let i_own_group =
+        space.is_people_group() && space.owner_handle.as_deref().is_none_or(|o| o == me_handle);
+    if i_own_group {
+        if text_has_at_token(&lower, "here") {
+            for p in &space.people {
+                let id = format!("user:{}", p.id);
+                if !out.iter().any(|x| x == &id) {
+                    out.push(id);
+                }
+            }
+        }
+        if text_has_at_token(&lower, "agents") {
+            for a in &space.agents {
+                let id = format!("agent:{}", a.project_id);
+                if !out.iter().any(|x| x == &id) {
+                    out.push(id);
+                }
+            }
+        }
+    }
     for a in &space.agents {
         if lower.contains(&format!("@{}", a.handle.to_lowercase())) {
-            out.push(format!("agent:{}", a.project_id));
+            let id = format!("agent:{}", a.project_id);
+            if !out.iter().any(|x| x == &id) {
+                out.push(id);
+            }
         }
     }
     for p in &space.people {
         if lower.contains(&format!("@{}", p.handle.to_lowercase())) {
-            out.push(format!("user:{}", p.id));
+            let id = format!("user:{}", p.id);
+            if !out.iter().any(|x| x == &id) {
+                out.push(id);
+            }
         }
     }
     out

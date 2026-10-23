@@ -394,6 +394,9 @@ async fn handle_frame(
                                 &chat.chat_id,
                                 chat.project_id.as_deref(),
                             );
+                            // A person's own row is read by definition: their per-user cursor
+                            // moves to it, so no device of theirs sees it as unread.
+                            let _ = state.db.advance_user_cursor(user_id, &chat.chat_id, seq);
                             crate::notify::on_row_from_device(state, chat, user_id, seq);
                         }
                     }

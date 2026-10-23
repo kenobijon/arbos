@@ -8,8 +8,7 @@ use std::time::Duration;
 
 use gpui::{
     actions, div, prelude::*, px, Animation, AnimationExt, AnyElement, App, Context, Div, Entity,
-    ExternalPaths, FocusHandle, Focusable, FontWeight, Render, ScrollHandle, SharedString,
-    Stateful, Window,
+    FocusHandle, Focusable, FontWeight, Render, ScrollHandle, SharedString, Stateful, Window,
 };
 
 use crate::app::SignInMode;
@@ -22,6 +21,7 @@ use crate::ui::channels::{ChannelsEvent, ChannelsPanel};
 use crate::ui::composer::{Composer, ComposerEvent, ComposerInput};
 use crate::ui::connectors::{ConnectorsEvent, ConnectorsPanel};
 use crate::ui::create_entity::{self, Kind as CreateKind};
+use crate::ui::dropzone;
 use crate::ui::feedback::{FeedbackSheet, SendFeedback};
 use crate::ui::frost::{frosted, MENU_BLUR, PANEL_BLUR};
 use crate::ui::glass::{self, WindowDrag};
@@ -43,8 +43,7 @@ use crate::ui::skills::{self, SkillsPanel};
 use crate::ui::theme::{
     reapply_window_background, AppearancePref, GlassOpacity, Surface, Theme, COLUMN_MARGIN,
     COMPOSER_BOTTOM, COMPOSER_WIDTH, DRAWER_WIDTH, GLASS_OPACITY_MAX, GLASS_OPACITY_MIN,
-    HEADER_HEIGHT, LINE_HEIGHT, PANEL_RADIUS, SIDEBAR_WIDTH, TAB_BAR_HEIGHT, TEXT_BODY, TEXT_SMALL,
-    TEXT_TINY,
+    HEADER_HEIGHT, LINE_HEIGHT, PANEL_RADIUS, TAB_BAR_HEIGHT, TEXT_BODY, TEXT_SMALL, TEXT_TINY,
 };
 use crate::ui::transcript::{column_row, Transcript, TranscriptEvent};
 use crate::ui::voice::Voice;
@@ -206,6 +205,13 @@ pub struct Shell {
     pub(crate) channels: Entity<ChannelsPanel>,
     pub(crate) secrets: Entity<SecretsPanel>,
     shake_started_at: Option<u64>,
+    /// A Finder drag is over the chat pane: the whole pane lights up
+    /// (`ui::dropzone`). Set from the pane's own drag-move bounds check, so it
+    /// does not depend on GPUI hover state; cleared on drop, exit and release.
+    file_drop_over: bool,
+    /// Rig: `ARBOS_FIXTURE_DRAG_OVER=1` holds the highlight on without a real
+    /// drag (synthetic pointer events do not reach the GUI session).
+    fixture_drag_over: bool,
     /// True while the sign-in screen is up; its clearing focuses the composer.
     signing_in: bool,
     /// Flag of the header's former "…" menu (removed, feedback
@@ -729,6 +735,8 @@ impl Shell {
             channels,
             secrets,
             shake_started_at: None,
+            file_drop_over: false,
+            fixture_drag_over: std::env::var("ARBOS_FIXTURE_DRAG_OVER").is_ok_and(|v| v == "1"),
             signing_in: false,
             menu_open: false,
             search_open: false,
@@ -2090,21 +2098,22 @@ impl Shell {
                     this.state.update(cx, |s, cx| s.close_sidebar_overlay(cx));
                 }),
             )
-            .child(
+            .child({
+                let width = self.state.read(cx).sidebar_width;
                 div()
                     .id("sidebar-overlay-panel")
                     .absolute()
                     .left_0()
                     .top_0()
                     .h_full()
-                    .w(px(SIDEBAR_WIDTH))
+                    .w(px(width))
                     .bg(theme.shell())
                     .border_r_1()
                     .border_color(theme.border)
                     .shadow_lg()
                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(frosted(0.0, PANEL_BLUR, sidebar::render(self, cx))),
-            )
+                    .child(frosted(0.0, PANEL_BLUR, sidebar::render(self, cx)))
+            })
     }
 
     // ----- conversation pane ---------------------------------------------------
@@ -2259,20 +2268,14 @@ impl Shell {
                         .child("Only admins post here"),
                 )
             };
-            return Self::chat_frame(
+            let column = Self::chat_frame(
                 column,
                 header_bar,
                 pre,
                 self.transcript.clone().into_any_element(),
                 vec![bottom.into_any_element()],
-            )
-            .group("chat-drop")
-            .can_drop(|dragged, _, _| dragged.is::<ExternalPaths>())
-            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
-                this.composer.update(cx, |c, cx| {
-                    c.add_paths(paths.paths().iter().cloned(), cx);
-                });
-            }));
+            );
+            return self.file_drop_target(column, &theme, cx);
         }
 
         let Some(space) = project else {
@@ -2474,17 +2477,39 @@ impl Shell {
                 vec![self.voice.clone().into_any_element(), composer_row],
             );
         }
-        // Accept Finder / file drops anywhere over the conversation (transcript,
-        // empty hero, or composer) — not only the input field. The composer
-        // field uses `group_drag_over("chat-drop")` for the accent highlight.
-        column
-            .group("chat-drop")
-            .can_drop(|dragged, _, _| dragged.is::<ExternalPaths>())
-            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+        self.file_drop_target(column, &theme, cx)
+    }
+
+    /// Finder / file drops land anywhere over the conversation (transcript,
+    /// empty hero, header or composer — the sidebar and right pane are not
+    /// part of it), and the whole pane lights up while the drag is over it
+    /// ([feedback chat-drop-highlight-2026-10-23], `ui::dropzone`).
+    fn file_drop_target(
+        &self,
+        column: Stateful<Div>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let over = self.fixture_drag_over || (self.file_drop_over && cx.has_active_drag());
+        dropzone::target(
+            column,
+            over,
+            theme,
+            cx,
+            Self::set_file_drop_over,
+            |this, paths, _, cx| {
                 this.composer.update(cx, |c, cx| {
                     c.add_paths(paths.paths().iter().cloned(), cx);
                 });
-            }))
+            },
+        )
+    }
+
+    fn set_file_drop_over(&mut self, over: bool, cx: &mut Context<Self>) {
+        if self.file_drop_over != over {
+            self.file_drop_over = over;
+            cx.notify();
+        }
     }
 
     fn render_details(&self, target: &DetailsTarget, cx: &mut Context<Self>) -> impl IntoElement {

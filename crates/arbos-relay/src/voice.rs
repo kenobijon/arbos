@@ -25,8 +25,8 @@
 //! within the same caps as a second `voice` ledger line with `ref = call:<id>#vision`. A `look`
 //! handed to the agent carries `attachments` (blobs the worker uploaded) through `voice_tool`.
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -899,9 +899,52 @@ pub struct EventsBody {
     pub events: Vec<Value>,
 }
 
-/// `POST /voice/calls/{id}/events` — transcript lines and system lines go to the box as chat
-/// rows; judge decisions are kept for the admin view and the owner's Details drawer; joined/left
-/// keep the participant list honest. Answers `{ accepted, forwarded }`.
+/// (call, agent) pairs in which a human has said something the worker transcribed. An agent
+/// line before that is its greeting — call audio, not a chat row (#1430). Entries leave when
+/// the agent leaves the call.
+static VOICE_HEARD: LazyLock<std::sync::Mutex<HashSet<String>>> =
+    LazyLock::new(|| std::sync::Mutex::new(HashSet::new()));
+
+fn heard_key(call_id: &str, project_id: &str) -> String {
+    format!("{call_id}:{project_id}")
+}
+
+/// Which of the worker's events become chat rows on the box. A call is a call event, not a
+/// chat message (#1430, Jacob 2026-10-23): what people and the agent **say to each other** on
+/// the call is kept in the chat (spec §4); the agent's greeting (anything it says before a
+/// human has spoken), its goodbye, and "joined / left / muted" notes are not. `human_lines`
+/// is the number of human transcript lines seen earlier in this (call, agent); the return
+/// carries the rows and the updated count.
+pub fn chat_rows_of(events: &[Value], mut human_lines: usize) -> (Vec<Value>, usize) {
+    let mut rows = Vec::new();
+    let mut leaving = false;
+    for ev in events {
+        match ev["kind"].as_str().unwrap_or_default() {
+            "left" => leaving = true,
+            "transcript" => {
+                let speaker = &ev["speaker"];
+                let is_agent = speaker.is_null() || speaker["kind"].as_str() == Some("agent");
+                if is_agent {
+                    if human_lines > 0 && !leaving {
+                        rows.push(ev.clone());
+                    }
+                } else {
+                    human_lines += 1;
+                    rows.push(ev.clone());
+                }
+            }
+            // "system" (older workers: "<agent> joined the call") and "call_note" are call
+            // events: logged, never rows.
+            _ => {}
+        }
+    }
+    (rows, human_lines)
+}
+
+/// `POST /voice/calls/{id}/events` — what people and the agent say to each other goes to the
+/// box as chat rows (`chat_rows_of`); judge decisions are kept for the admin view and the
+/// owner's Details drawer; joined/left keep the participant list honest; call notes (joined,
+/// left, muted, stop) are logged. Answers `{ accepted, forwarded }`.
 pub async fn call_events(
     State(state): State<AppState>,
     principal: Principal,
@@ -915,13 +958,26 @@ pub async fn call_events(
         Ok(v) => v,
         Err(r) => return *r,
     };
-    let mut rows = Vec::new();
+    let key = heard_key(&call.id, &project.id);
+    let heard_before = VOICE_HEARD
+        .lock()
+        .map(|h| h.contains(&key))
+        .unwrap_or(false);
+    let (rows, heard_now) = chat_rows_of(&b.events, usize::from(heard_before));
+    if heard_now > 0 && !heard_before {
+        if let Ok(mut h) = VOICE_HEARD.lock() {
+            h.insert(key.clone());
+        }
+    }
     let mut accepted = 0usize;
     for ev in &b.events {
         accepted += 1;
         let at = ev["at"].as_i64().unwrap_or_else(now_ms);
         match ev["kind"].as_str().unwrap_or_default() {
-            "transcript" | "system" => rows.push(ev.clone()),
+            "transcript" => {}
+            "system" | "call_note" => {
+                tracing::info!(call = %call.id, project = %project.id, note = %ev["text"], "voice: call note");
+            }
             "decision" => {
                 let d = VoiceDecision {
                     speaker: ev["speaker"].as_str().map(str::to_owned),
@@ -945,6 +1001,9 @@ pub async fn call_events(
             }
             "left" => {
                 let _ = state.db.call_agent_leave(&call.id, &project.id);
+                if let Ok(mut h) = VOICE_HEARD.lock() {
+                    h.remove(&key);
+                }
             }
             "metric" | "tool" | "vision" => {
                 tracing::info!(call = %call.id, project = %project.id, event = %ev, "voice event");
@@ -1275,4 +1334,71 @@ pub fn admin_json(state: &AppState) -> Value {
         },
         "recent": recent,
     })
+}
+
+#[cfg(test)]
+mod chat_row_tests {
+    //! #1430: a call is a call event. Only what people and the agent say to each other
+    //! becomes chat rows; the greeting, the goodbye and the join/leave/mute notes do not.
+
+    use serde_json::json;
+
+    use super::chat_rows_of;
+
+    fn agent(text: &str) -> serde_json::Value {
+        json!({ "kind": "transcript", "speaker": { "kind": "agent" }, "text": text })
+    }
+
+    fn human(text: &str) -> serde_json::Value {
+        json!({ "kind": "transcript", "speaker": { "kind": "user", "id": "u1", "handle": "alice" }, "text": text })
+    }
+
+    #[test]
+    fn greeting_and_notes_are_not_rows() {
+        let events = vec![
+            json!({ "kind": "joined", "mode": "duplex" }),
+            json!({ "kind": "system", "text": "Home joined the call" }),
+            json!({ "kind": "call_note", "text": "Home joined the call" }),
+            agent("Hey — Home here. What do you need?"),
+            json!({ "kind": "metric", "ttfa_ms": 700 }),
+        ];
+        let (rows, heard) = chat_rows_of(&events, 0);
+        assert!(rows.is_empty(), "{rows:?}");
+        assert_eq!(heard, 0);
+    }
+
+    #[test]
+    fn what_people_and_the_agent_say_to_each_other_stays() {
+        let events = vec![
+            agent("Hey — Home here. What do you need?"),
+            human("What is the weather in Lisbon?"),
+            agent("Sunny, twenty-two degrees."),
+            json!({ "kind": "call_note", "text": "Home muted" }),
+        ];
+        let (rows, heard) = chat_rows_of(&events, 0);
+        assert_eq!(heard, 1);
+        let texts: Vec<&str> = rows.iter().map(|r| r["text"].as_str().unwrap()).collect();
+        assert_eq!(
+            texts,
+            vec![
+                "What is the weather in Lisbon?",
+                "Sunny, twenty-two degrees."
+            ]
+        );
+    }
+
+    #[test]
+    fn a_later_batch_remembers_that_someone_spoke_and_the_goodbye_is_audio_only() {
+        let (rows, heard) = chat_rows_of(&[agent("Anything else?")], 2);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(heard, 2);
+        let (rows, _) = chat_rows_of(
+            &[
+                json!({ "kind": "left", "reason": "asked" }),
+                agent("Okay, leaving. Bye."),
+            ],
+            2,
+        );
+        assert!(rows.is_empty(), "the goodbye is call audio: {rows:?}");
+    }
 }

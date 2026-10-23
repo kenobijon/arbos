@@ -637,7 +637,7 @@ impl Agent {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -784,7 +784,7 @@ mod tests {
         }))
     }
 
-    async fn test_agent() -> (Arc<Agent>, std::path::PathBuf) {
+    pub(crate) async fn test_agent() -> (Arc<Agent>, std::path::PathBuf) {
         let app = axum::Router::new().route(
             "/proxy/v1/chat/completions",
             axum::routing::post(mock_quick),

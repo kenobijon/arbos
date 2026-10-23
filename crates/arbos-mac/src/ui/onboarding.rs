@@ -16,9 +16,7 @@ use crate::app::AppState;
 use crate::onboarding::{Onboarding, Stage};
 use crate::ui::motion::PulseClock;
 use crate::ui::shell::Shell;
-use crate::ui::theme::{
-    Theme, BUBBLE_RADIUS, COLUMN_MARGIN, HEADER_HEIGHT, SIDEBAR_WIDTH, TEXT_BODY, TEXT_SMALL,
-};
+use crate::ui::theme::{Theme, BUBBLE_RADIUS, COLUMN_MARGIN, HEADER_HEIGHT, TEXT_BODY, TEXT_SMALL};
 use crate::ui::transcript::{ASSISTANT_RIGHT_GAP, COLUMN_MAX_WIDTH};
 
 const CARD_W: f32 = 256.0;
@@ -97,8 +95,8 @@ fn alpha(c: Hsla, a: f32) -> Hsla {
 /// in the chat column (the composer's own: 16 pt margins, 876 cap — on a
 /// 1180×780 window left 312; bottom 74.5 above the window edge, 42.5 tall
 /// for one line).
-fn bubble_target(viewport: gpui::Size<Pixels>, sidebar: bool, text_px: f32) -> Bounds<Pixels> {
-    let left = if sidebar { SIDEBAR_WIDTH } else { 0.0 };
+fn bubble_target(viewport: gpui::Size<Pixels>, sidebar_width: f32, text_px: f32) -> Bounds<Pixels> {
+    let left = sidebar_width;
     let center_w = f32::from(viewport.width) - left;
     let column_w = (center_w - 2.0 * COLUMN_MARGIN).min(COLUMN_MAX_WIDTH);
     let column_x = left + (center_w - column_w) / 2.0;
@@ -145,11 +143,15 @@ pub fn render(
         o.agent_name
     );
     let text_px = greeting.chars().count() as f32 * 6.75;
-    let sidebar_shown = {
+    let sidebar_width = {
         let s = state.read(cx);
-        !(s.rail_collapsed || s.window_is_narrow(vw))
+        if s.rail_collapsed || s.window_is_narrow(vw) {
+            0.0
+        } else {
+            s.sidebar_width
+        }
     };
-    let target = bubble_target(viewport, sidebar_shown, text_px);
+    let target = bubble_target(viewport, sidebar_width, text_px);
 
     let p = o.finish_progress(now).map(ease);
     let reduce = o.reduce_motion;

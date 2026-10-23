@@ -16,10 +16,10 @@ use std::sync::Arc;
 use gpui::{
     actions, div, fill, img, point, prelude::*, px, relative, size, App, Bounds, ClipboardItem,
     Context, CursorStyle, Div, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler,
-    EventEmitter, ExternalPaths, FocusHandle, Focusable, FontWeight, GlobalElementId,
-    InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ObjectFit, PaintQuad, Pixels, Point, Render, RenderImage, SharedString, Style,
-    TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine,
+    EventEmitter, FocusHandle, Focusable, FontWeight, GlobalElementId, InspectorElementId,
+    IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
+    PaintQuad, Pixels, Point, Render, RenderImage, SharedString, Style, TextAlign, TextRun,
+    UTF16Selection, UnderlineStyle, Window, WrappedLine,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -1711,18 +1711,46 @@ impl Composer {
 
     /// People and agents of the current space matching the `@token`:
     /// (handle, label, is_agent). Typing after `@` filters by handle or name.
+    /// Group/server owners also get `@here` (all humans) and `@agents` (all agents).
     fn mention_candidates(&self, cx: &App) -> Vec<(String, String, bool)> {
         let Some(query) = self.mention_query(cx) else {
             return Vec::new();
         };
         let state = self.state.read(cx);
+        let me_handle = state.me_handle();
+        let mut out: Vec<(String, String, bool)> = Vec::new();
+
+        if let Some((server, _)) = state.selected_channel_info() {
+            // Server channel: owner-only collective mentions (no per-member picker yet).
+            if server.is_owner() {
+                if query.is_empty() || "here".starts_with(&query) {
+                    out.push(("here".into(), "notify all humans".into(), false));
+                }
+                if query.is_empty() || "agents".starts_with(&query) {
+                    out.push(("agents".into(), "notify all agents".into(), true));
+                }
+            }
+            out.truncate(6);
+            return out;
+        }
+
         let Some(space) = state.selected() else {
             return Vec::new();
         };
         if !space.is_people() && space.people.is_empty() {
             return Vec::new();
         }
-        let mut out: Vec<(String, String, bool)> = Vec::new();
+        // People group: owner-only `@here` / `@agents` at the top of the list.
+        let i_own_group =
+            space.is_people_group() && space.owner_handle.as_deref().is_none_or(|o| o == me_handle);
+        if i_own_group {
+            if query.is_empty() || "here".starts_with(&query) {
+                out.push(("here".into(), "notify all humans".into(), false));
+            }
+            if query.is_empty() || "agents".starts_with(&query) {
+                out.push(("agents".into(), "notify all agents".into(), true));
+            }
+        }
         for a in &space.agents {
             let handle_l = a.handle.to_lowercase();
             let name_l = a.name.to_lowercase();
@@ -2141,8 +2169,6 @@ impl Render for Composer {
                 .child(self.input.clone())
         };
 
-        let drop_border = theme.accent;
-        let drop_fill = theme.accent_soft;
         // Match the iPhone: mic (transcribe) + phone (call) while the field is
         // idle and empty; send / stop / hang-up replace the phone as needed.
         let staged = !self.attachments.is_empty();
@@ -2165,8 +2191,8 @@ impl Render for Composer {
         // Stop (memo) / send / stop (turn) / hang-up.
         trailing = trailing.child(primary_button);
         let field_radius = if staged { CARD_RADIUS } else { COMPOSER_RADIUS };
-        // Highlight when a file is dragged over the chat pane (`group("chat-drop")`
-        // on `shell::render_center`), not only when the pointer is over this field.
+        // A file dragged over the chat lights up the whole pane
+        // (`shell::file_drop_target`), not this field alone.
         let field_base = div()
             .id("composer-field")
             .flex_1()
@@ -2174,10 +2200,7 @@ impl Render for Composer {
             .rounded(px(field_radius))
             .bg(theme.field)
             .border_1()
-            .border_color(border_color)
-            .group_drag_over::<ExternalPaths>("chat-drop", move |style| {
-                style.border_color(drop_border).bg(drop_fill)
-            });
+            .border_color(border_color);
         let field = if staged {
             // Redesign mock e: with files pending the pill opens into a card —
             // the tiles above the text, "+" bottom-left, mic / send bottom-right.
@@ -2227,9 +2250,9 @@ impl Render for Composer {
                 .child(trailing)
         };
 
-        // Drop acceptance lives on the chat pane (`shell::render_center`) so a
-        // file hovered anywhere over the conversation — not only this field —
-        // stages into the composer. `drag_over` below still highlights the field.
+        // Drop acceptance lives on the chat pane (`shell::file_drop_target`) so
+        // a file hovered anywhere over the conversation — not only this field —
+        // stages into the composer.
         let mut column = div()
             .id("composer")
             .relative()
