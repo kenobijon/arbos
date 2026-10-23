@@ -206,19 +206,28 @@ def main():
             m = re.search(r"\[sent message (\w{26})", busy_err.read())
             return m.group(1) if m else None
 
+        seen_streaming = {"ids": set()}
+
         def long_turn_state():
-            """`running` once the long turn's own (non-quick) row streams in chat1, `done` when
-            it finished, `waiting` while the box has not started it (another turn may hold the
-            agent, in which case the busy message itself only got a quick acknowledgement)."""
+            """`running` once the long turn's own row has been streaming across two polls in
+            chat1 (a quick acknowledgement is also briefly `streaming` while its two pushes
+            land, so one sighting is not enough), `done` when a finished non-quick row exists
+            and nothing streams, `waiting` otherwise (the box may still be on an earlier turn,
+            in which case the busy message got only a quick acknowledgement so far)."""
             mid = busy_msg_id()
             if not mid:
                 return "waiting"
             rows = [m for m in dump(cfgs[1], chat1)
-                    if m.get("role") == "assistant" and m.get("inReplyTo") == mid
-                    and m.get("decision") != "quick"]
-            if not rows:
-                return "waiting"
-            return "running" if any(m.get("status") != "done" for m in rows) else "done"
+                    if m.get("role") == "assistant" and m.get("inReplyTo") == mid]
+            streaming = {m.get("id") for m in rows if m.get("status") != "done"}
+            finished_real = [m for m in rows if m.get("status") == "done" and m.get("decision") != "quick"]
+            again = streaming & seen_streaming["ids"]
+            seen_streaming["ids"] = streaming
+            if again:
+                return "running"
+            if finished_real and not streaming:
+                return "done"
+            return "waiting"
 
         # Probe only once the long turn itself is streaming: a box still busy with an earlier
         # turn answers the busy prompt with a quick acknowledgement first (the harness must not
@@ -258,7 +267,7 @@ def main():
             busy.kill()
         # Leave the agent idle for the next run: wait for the long turn to finish.
         t_end = time.time()
-        while long_turn_state() == "running" and time.time() - t_end < args.busy_seconds + 120:
+        while long_turn_state() != "done" and time.time() - t_end < args.busy_seconds + 180:
             time.sleep(3)
         busy_err.close()
         report.update({
