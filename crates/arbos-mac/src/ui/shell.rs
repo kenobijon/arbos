@@ -410,7 +410,10 @@ impl Shell {
                 }
             }
             let st = state.read(cx);
-            if st.add_members_server.is_some() {
+            if st.add_members_secret.is_some() {
+                this.people_input
+                    .update(cx, |input, _| input.set_placeholder("Search people"));
+            } else if st.add_members_server.is_some() {
                 this.people_input
                     .update(cx, |input, _| input.set_placeholder("Add people"));
             } else if st.add_members_target.is_some() {
@@ -802,7 +805,10 @@ impl Shell {
             profile_scroll: ScrollHandle::new(),
             profile_scroll_epoch: 0,
             agent_pick_reveal: false,
-            settings_open_at_bottom: open_settings.as_deref() == Some("bottom"),
+            // `ARBOS_OPEN_SETTINGS_BOTTOM=1` does the same for any Settings page (a Secret
+            // page's People / Activity cards sit below the fold on the rig).
+            settings_open_at_bottom: open_settings.as_deref() == Some("bottom")
+                || std::env::var("ARBOS_OPEN_SETTINGS_BOTTOM").is_ok_and(|v| v == "1"),
             profile_edit_open: false,
             name_input,
             handle_input,

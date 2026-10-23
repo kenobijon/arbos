@@ -6108,6 +6108,56 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 refresh_secrets(&shared).await;
             });
         }
+        ClientCommand::SecretPerson {
+            id,
+            user_id,
+            enabled,
+            note,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let mut body = json!({ "enabled": enabled });
+                if let Some(n) = note {
+                    body["note"] = Value::String(n);
+                }
+                if let Err(err) = shared
+                    .put_json(&format!("/secrets/{id}/people/{user_id}"), body)
+                    .await
+                {
+                    shared.notice(format!("Secrets: {}", relay_message(&err)));
+                }
+                refresh_secrets(&shared).await;
+            });
+        }
+        ClientCommand::SecretPeopleAdd { id, handles } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                for handle in handles {
+                    if let Err(err) = shared
+                        .post_json(
+                            &format!("/secrets/{id}/people"),
+                            json!({ "handle": handle }),
+                        )
+                        .await
+                    {
+                        shared.notice(format!("Secrets: @{handle}: {}", relay_message(&err)));
+                    }
+                }
+                refresh_secrets(&shared).await;
+            });
+        }
+        ClientCommand::SecretPersonRemove { id, user_id } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Err(err) = shared
+                    .delete(&format!("/secrets/{id}/people/{user_id}"))
+                    .await
+                {
+                    shared.notice(format!("Secrets: {}", relay_message(&err)));
+                }
+                refresh_secrets(&shared).await;
+            });
+        }
         ClientCommand::SecretsPause { paused } => {
             let shared = shared.clone();
             tokio::spawn(async move {
