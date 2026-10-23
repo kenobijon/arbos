@@ -1036,7 +1036,7 @@ struct ChatView: View {
                                 }
                             }
                             .contextMenu {
-                                MessageMenuContent(items: MessageMenu.items(forMessage: canReply)) { item in
+                                MessageMenuContent(items: MessageMenu.items(forMessage: canReply, canDelete: canDelete(row))) { item in
                                     runMessageMenu(item, row: row)
                                 }
                             }
@@ -1192,6 +1192,24 @@ struct ChatView: View {
     /// The long-press menu's actions (`MessageMenu`): Copy the text, Reply
     /// (in a people chat the agent that wrote it becomes the recipient),
     /// Forward to another chat, Delete for everyone.
+    /// The relay's delete rule for this row (`MessageDeleteRule`): owners moderate; members
+    /// delete their own and their own agents'.
+    private func canDelete(_ row: Row) -> Bool {
+        guard let m = messageById[row.messageId] else { return false }
+        let meId = model.user?.id
+        let moderates: Bool
+        var agentOwners: [String: String] = [:]
+        if let people {
+            moderates = people.myRole == "owner" || people.myRole == "admin"
+            for a in people.agents { if let owner = a.ownerId { agentOwners[a.id] = owner } }
+        } else if isChannel {
+            moderates = false
+        } else {
+            moderates = !(project?.shared ?? false)
+        }
+        return MessageDeleteRule.mayDelete(sender: m.sender, meId: meId, moderates: moderates, agentOwnerIds: agentOwners)
+    }
+
     private func runMessageMenu(_ item: MessageMenuItem, row: Row) {
         switch item {
         case .copy:
@@ -1201,7 +1219,7 @@ struct ChatView: View {
         case .forward:
             beginForward(row)
         case .delete:
-            model.deleteMessage(chatId: chatId, messageId: row.messageId)
+            model.deleteMessage(chatId: chatId, messageId: row.messageId, projectId: isPeople ? nil : projectId)
         }
     }
 
