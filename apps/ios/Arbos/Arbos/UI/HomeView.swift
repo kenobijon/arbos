@@ -9,7 +9,6 @@ import SwiftUI
 struct HomeView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
-    @State private var showSettings = false
     @State private var showNewChat = false
     @State private var searching = false
     @State private var query = ""
@@ -310,9 +309,6 @@ struct HomeView: View {
                     .environmentObject(model)
                     .environment(\.theme, theme)
             }
-            .sheet(isPresented: $showSettings) {
-                SettingsView().environmentObject(model).environment(\.theme, theme)
-            }
             .sheet(isPresented: $showNewChat) {
                 NewChatSheet().environmentObject(model).environment(\.theme, theme)
             }
@@ -515,7 +511,7 @@ struct HomeView: View {
 
     private var topBar: some View {
         HStack(spacing: 10) {
-            Button { showSettings = true } label: {
+            Button { model.mainTab = .settings } label: {
                 ZStack(alignment: .bottomTrailing) {
                     PersonAvatar(url: model.user?.avatarUrl, handle: model.user?.login ?? "?", size: Theme.control, name: model.user?.name, id: model.user?.id, colorIndex: model.user?.avatarColorIndexEffective)
                     Circle()
@@ -1076,6 +1072,7 @@ struct HiddenChatsView: View {
             .padding(.top, 6)
         }
         .toolbar(.hidden, for: .navigationBar)
+        .toolbar(.hidden, for: .tabBar)
         .confirmationDialog(
             "Delete \(deleteProject?.name ?? "this agent")?",
             isPresented: Binding(
