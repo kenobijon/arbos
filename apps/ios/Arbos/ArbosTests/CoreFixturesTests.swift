@@ -685,6 +685,23 @@ final class CoreFixturesTests: XCTestCase {
         XCTAssertFalse(AppModel.shouldDeferRoomOpen(hasStore: false, storeDocsLoaded: true))
     }
 
+    /// #1438: the sidebar count comes from the relay's per-user cursor (`/me/unread` and the
+    /// per-chat flag), never from `head_seq - read_seq` — own rows and system lines bumped
+    /// that and painted false blue dots. On screen nothing is ever unread.
+    func testPeopleUnreadCountFollowsTheUserCursorNotRowSeqs() {
+        // Own message (any device): the relay lists nothing and the flag is off → clear.
+        XCTAssertEqual(AppModel.peopleUnreadCount(remote: nil, flagged: false, watching: false), 0)
+        // Message read while viewing: on screen → clear even if the remote count lags.
+        XCTAssertEqual(AppModel.peopleUnreadCount(remote: 2, flagged: true, watching: true), 0)
+        // Genuine unseen content from someone else, off screen.
+        XCTAssertEqual(AppModel.peopleUnreadCount(remote: 3, flagged: false, watching: false), 3)
+        XCTAssertEqual(AppModel.peopleUnreadCount(remote: nil, flagged: true, watching: false), 1)
+        // Live row lit the flag before /me/unread caught up: a stale remote 0 never hides it.
+        XCTAssertEqual(AppModel.peopleUnreadCount(remote: 0, flagged: true, watching: false), 1)
+        // Relay cleared it (read on another device): nothing local keeps it lit.
+        XCTAssertEqual(AppModel.peopleUnreadCount(remote: 0, flagged: false, watching: false), 0)
+    }
+
     /// Mark-read PUT: skip same value, send after the window, delay inside it.
     /// With `force`, an unchanged value still sends outside the window / delays inside it.
     func testReadPutPlan() {

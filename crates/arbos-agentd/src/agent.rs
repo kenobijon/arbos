@@ -1358,6 +1358,12 @@ pub struct Agent {
     pub goals_cache: std::sync::Mutex<String>,
     /// D87: the project-memory text last written into the system prompt and when (debounce).
     pub prompt_memory: std::sync::Mutex<Option<(String, Instant)>>,
+    /// Live name / handle / rename history from the relay's project record (#1431); the system
+    /// prompt, the per-turn notes and the group preludes read this, never `cfg.project_name`.
+    pub identity: crate::identity::IdentityState,
+    /// A rename (or instructions change) landed while a turn was running: the pi session must
+    /// re-read the system prompt before the next turn (the supervisor loop does it).
+    pub(crate) prompt_refresh_pending: AtomicBool,
     /// D91 soft-compaction hysteresis per chat: `None` right after a compaction (the floor is
     /// not known yet), then the window observed on the first turn after it.
     compaction_floor: std::sync::Mutex<HashMap<String, Option<i64>>>,
@@ -1369,6 +1375,9 @@ pub struct Agent {
     pub(crate) side_notes: std::sync::Mutex<HashMap<String, Vec<String>>>,
     /// Per chat: when quick-reply model calls were made (rate limit, `status.rs`).
     pub(crate) quick_calls: std::sync::Mutex<HashMap<String, Vec<Instant>>>,
+    /// Per chat: `TurnState::started` of the busy turn we already wrote a status note for
+    /// (at most one note per waiting period; see `status.rs`, #1448).
+    pub(crate) quick_noted: std::sync::Mutex<HashMap<String, Instant>>,
 }
 
 impl Agent {
@@ -1442,10 +1451,13 @@ impl Agent {
             turn_images: std::sync::Mutex::new(Vec::new()),
             goals_cache: std::sync::Mutex::new(String::new()),
             prompt_memory: std::sync::Mutex::new(None),
+            identity: crate::identity::IdentityState::load(&cfg_for_settings),
+            prompt_refresh_pending: AtomicBool::new(false),
             compaction_floor: std::sync::Mutex::new(HashMap::new()),
             pending_sends: std::sync::atomic::AtomicUsize::new(0),
             side_notes: std::sync::Mutex::new(HashMap::new()),
             quick_calls: std::sync::Mutex::new(HashMap::new()),
+            quick_noted: std::sync::Mutex::new(HashMap::new()),
         })
     }
 
@@ -1506,6 +1518,12 @@ impl Agent {
         }
     }
 
+    /// The agent's current display name as the relay has it (#1431). `cfg.project_name` is only
+    /// the value at box start; a renamed agent must speak as its new self on the next turn.
+    pub(crate) fn name(&self) -> String {
+        self.identity.name()
+    }
+
     /// Live model slots (registry/doc writes land here; `cfg` only holds the boot values).
     pub(crate) async fn live_models(&self) -> (String, String) {
         let m = self.settings.models.read().await;
@@ -1532,16 +1550,24 @@ impl Agent {
             .map(|m| m.talking.id.clone())
             .unwrap_or_else(|_| self.cfg.talking_model.clone());
         // One box, many workspaces (D70): the project's files live in its own folder, not /work.
-        s.push_str(&project_section(
-            &self.cfg.project_name,
+        // Identity and instructions are the relay's current ones (#1431), not the boot config.
+        s.push_str(&crate::identity::project_section(
+            &self.identity.snapshot(),
+            &self.cfg.project_id,
             &self.cfg.work_dir.display().to_string(),
             &talking,
         ));
         s.push('\n');
         s.push_str(&crate::media::prompt_section(&self.cfg));
-        if !self.cfg.instructions.trim().is_empty() {
+        let instructions = self
+            .settings
+            .state
+            .try_read()
+            .map(|st| st.instructions.clone())
+            .unwrap_or_else(|_| self.cfg.instructions.clone());
+        if !instructions.trim().is_empty() {
             s.push_str("\n\n## Project instructions\n\n");
-            s.push_str(self.cfg.instructions.trim());
+            s.push_str(instructions.trim());
             s.push('\n');
         }
         // D87 stable prefix: project memory changes after most memory passes; inside the system
@@ -1699,6 +1725,17 @@ impl Agent {
                         tracing::error!(error = %e, "pi respawn failed");
                         tokio::time::sleep(Duration::from_secs(5)).await;
                     }
+                } else if alive
+                    && me.prompt_refresh_pending.load(Ordering::SeqCst)
+                    && !me.turn_running.load(Ordering::SeqCst)
+                {
+                    // A rename landed mid-turn (#1431): pi reads the system prompt at spawn, so
+                    // the session restarts now that the turn is over.
+                    me.prompt_refresh_pending.store(false, Ordering::SeqCst);
+                    if let Err(e) = me.respawn_pi_current().await {
+                        tracing::warn!(error = %e, "pi respawn for the identity refresh failed");
+                        me.prompt_refresh_pending.store(true, Ordering::SeqCst);
+                    }
                 }
             }
         });
@@ -1846,7 +1883,26 @@ impl Agent {
         // for this agent is left pending for whoever it is for; humans' own sends are theirs.
         // Shared addresses ("hey agents", several @agents) stay `taken` until each addressed
         // agent has replied — see `people_shared_send_open` / sync `new_pending`.
-        let people_msg_id = if cmd.kind == "send" && self.people.is_people_chat(chat_id) {
+        // Every human command carries the mention rule, not only `send`: a `steer` the Mac
+        // sends while another agent's turn runs ("@gigchadagent you still borked?") is for the
+        // named agent, not for whoever happens to be busy.
+        // A card answered in a shared people room reaches every agent in it; only the agent
+        // that posted the card owns the approval — the others leave the command alone (a
+        // "unknown approval" failure from them would race the owner's `done`).
+        if matches!(cmd.kind.as_str(), "approve" | "reject") && self.people.is_people_chat(chat_id)
+        {
+            let approval_id = cmd
+                .payload
+                .get("approvalId")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if !matches!(self.store.approval(approval_id), Ok(Some(_))) {
+                return Ok(());
+            }
+        }
+        let people_msg_id = if matches!(cmd.kind.as_str(), "send" | "steer" | "guide" | "answer")
+            && self.people.is_people_chat(chat_id)
+        {
             let msg_id = cmd
                 .payload
                 .get("messageId")
@@ -4304,12 +4360,30 @@ impl Agent {
             return Err("no turn is running".into());
         };
         t.route_attempts += 1;
+        let project_id = self.cfg.project_id.clone();
         let validated = validate(args).and_then(|r| {
             if t.reply_only && !matches!(r, ValidRoute::Reply { .. }) {
-                Err("this is a relay turn: route `reply` and write the update for the user; start no work here".to_owned())
-            } else {
-                Ok(r)
+                return Err("this is a relay turn: route `reply` and write the update for the user; start no work here".to_owned());
             }
+            // #1440: a reply that promises a secret request / approval card is not a reply —
+            // nothing was requested, so no card can ever appear. Make the model act instead.
+            if let ValidRoute::Reply { reply: Some(text) } = &r {
+                if !t.reply_only && crate::vault::promises_secret_request(text) {
+                    let have = crate::vault::enabled_grant_names(&project_id);
+                    let hint = if have.is_empty() {
+                        "route `act` and call secrets_request(name, purpose, use, host) now — the owner's card comes from that call, never from a sentence".to_owned()
+                    } else {
+                        format!(
+                            "you already have access to {} (secrets_list shows access on): route `act` and use it; a secret with access off needs secrets_request(name, purpose, use, host), not a sentence about it",
+                            have.join(", ")
+                        )
+                    };
+                    return Err(format!(
+                        "a reply must not promise a secret request or an approval card that was not made; {hint}"
+                    ));
+                }
+            }
+            Ok(r)
         });
         match validated {
             Ok(r) => {
@@ -5743,23 +5817,6 @@ pub fn base_system_prompt(code_mode: bool) -> String {
     s
 }
 
-/// The "This project" block of the system prompt. The user sees this agent under the
-/// project's name (the sidebar row "Doug" is the agent), so the model is told that name is
-/// its own — not a place to work "in" — and that "Arbos" is the app, never the user.
-pub fn project_section(project_name: &str, work_dir: &str, talking_model: &str) -> String {
-    let name = project_name.trim();
-    let identity = if name.is_empty() || name.eq_ignore_ascii_case("arbos") {
-        "You are this user's agent in Arbos.".to_owned()
-    } else {
-        format!(
-            "You are {name}, this user's agent in Arbos; the user sees you as \"{name}\". \"{name}\" is your own name — not a place, a workspace or a product — so never say \"in {name}\" or \"on {name}\"."
-        )
-    };
-    format!(
-        "\n\n## This project\n\n{identity} Arbos is the app you run in; it is never the user's name — call the user by the name given with their message. Your folder is `{work_dir}`: every file you create or read for this project goes there (relative paths resolve there; do not use `/work` itself, other folders under `/work` belong to other projects). You run on model `{talking_model}`.\n"
-    )
-}
-
 #[cfg(test)]
 impl Agent {
     /// Test seam: hold the turn lock as a running act turn of `chat_id` would, with a turn state
@@ -5784,26 +5841,6 @@ impl Agent {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Feedback 2026-10-22: "Hello, Arbos. What do you want to work on in Doug?" — the prompt
-    /// must present the project name as the agent's own name and Arbos as the app.
-    #[test]
-    fn project_section_names_the_agent_not_a_place() {
-        let s = project_section("Doug", "/work/01HPROJ", "anthropic/claude-haiku-5.5");
-        assert!(s.starts_with("\n\n## This project\n\n"));
-        assert!(s.contains("You are Doug, this user's agent in Arbos"));
-        assert!(s.contains("never say \"in Doug\" or \"on Doug\""));
-        assert!(s.contains("it is never the user's name"));
-        assert!(s.contains("Your folder is `/work/01HPROJ`"));
-        assert!(s.contains("You run on model `anthropic/claude-haiku-5.5`."));
-        assert!(!s.contains("Project \"Doug\""));
-        // An agent literally called Arbos (or unnamed) gets no self line that contradicts the app.
-        let s = project_section("Arbos", "/work/p", "m");
-        assert!(s.contains("You are this user's agent in Arbos."));
-        assert!(!s.contains("never say \"in Arbos\""));
-        let s = project_section("  ", "/work/p", "m");
-        assert!(s.contains("You are this user's agent in Arbos."));
-    }
 
     /// D91: the window size pi would start the next turn from, as pi counts it.
     #[test]
