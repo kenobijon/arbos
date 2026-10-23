@@ -7815,14 +7815,36 @@ pub fn decode_image(bytes: &[u8]) -> Option<RenderImage> {
     decode_rgba(bytes).and_then(bgra_frame)
 }
 
+/// Longest side kept for chat-bubble (and lightbox) bitmaps.
+/// Bubbles paint at most ~360×420 pt; 2× covers Retina. Caps GPU memory so
+/// scrolling a chat full of screenshots stays smooth (feedback
+/// app-01M5MXPJZARN5QMCE3EZ3EMSGW).
+pub const CHAT_IMAGE_MAX_SIDE: u32 = 840;
+
+/// Shrink `img` so its longer side is at most `CHAT_IMAGE_MAX_SIDE`.
+pub fn downscale_for_chat(img: image::RgbaImage) -> image::RgbaImage {
+    let (w, h) = img.dimensions();
+    let long = w.max(h);
+    if long <= CHAT_IMAGE_MAX_SIDE {
+        return img;
+    }
+    let scale = CHAT_IMAGE_MAX_SIDE as f32 / long as f32;
+    let nw = ((w as f32) * scale).round().max(1.0) as u32;
+    let nh = ((h as f32) * scale).round().max(1.0) as u32;
+    image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Triangle)
+}
+
 /// The picture, plus a copy with its uniform border trimmed when there is one
 /// (feedback chat-preview-cards-2026-10-23: a screenshot's empty page margin
-/// must not become a white band in the bubble). The viewer shows the full picture.
+/// must not become a white band in the bubble). The viewer shows the untrimmed
+/// picture. Both are capped to [`CHAT_IMAGE_MAX_SIDE`] so the transcript can
+/// scroll without holding full-resolution textures.
 pub fn decode_image_pair(bytes: &[u8]) -> Option<(RenderImage, Option<RenderImage>)> {
     let rgba = decode_rgba(bytes)?;
     let trimmed = trim_rect(&rgba)
-        .map(|(x, y, w, h)| image::imageops::crop_imm(&rgba, x, y, w, h).to_image());
-    let full = bgra_frame(rgba)?;
+        .map(|(x, y, w, h)| image::imageops::crop_imm(&rgba, x, y, w, h).to_image())
+        .map(downscale_for_chat);
+    let full = bgra_frame(downscale_for_chat(rgba))?;
     Some((full, trimmed.and_then(bgra_frame)))
 }
 
@@ -8267,5 +8289,31 @@ mod trim_tests {
             }
         });
         assert!(trim_rect(&img).is_none());
+    }
+}
+
+#[cfg(test)]
+mod chat_image_scale_tests {
+    use super::{downscale_for_chat, CHAT_IMAGE_MAX_SIDE};
+    use image::{Rgba, RgbaImage};
+
+    #[test]
+    fn a_small_picture_is_left_alone() {
+        let img = RgbaImage::from_pixel(320, 200, Rgba([10, 20, 30, 255]));
+        let out = downscale_for_chat(img);
+        assert_eq!(out.dimensions(), (320, 200));
+    }
+
+    #[test]
+    fn a_huge_screenshot_fits_the_chat_budget() {
+        // Typical Retina capture: far past the bubble's paint size.
+        let img = RgbaImage::from_pixel(3024, 1964, Rgba([40, 40, 40, 255]));
+        let out = downscale_for_chat(img);
+        let (w, h) = out.dimensions();
+        assert_eq!(w.max(h), CHAT_IMAGE_MAX_SIDE);
+        assert!(w.min(h) < CHAT_IMAGE_MAX_SIDE);
+        // Aspect ≈ 3024/1964.
+        let ratio = w as f32 / h as f32;
+        assert!((ratio - 3024.0 / 1964.0).abs() < 0.02);
     }
 }
