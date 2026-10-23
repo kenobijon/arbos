@@ -17,6 +17,7 @@ use crate::ui::frost::{frosted, MENU_BLUR};
 use crate::ui::glass;
 use crate::ui::groups::project_color;
 use crate::ui::icons::icon;
+use crate::ui::identity;
 use crate::ui::shell::Shell;
 use crate::ui::theme::{Theme, PANEL_RADIUS, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
 
@@ -32,7 +33,7 @@ pub const SEARCH_FONT_SIZE: f32 = 14.0;
 pub const CARD_INSET: f32 = 16.0;
 pub const ROW_PADDING_X: f32 = 14.0;
 pub const ROW_GLYPH: f32 = 40.0;
-pub const ROW_GAP: f32 = 12.0;
+pub const ROW_GAP: f32 = identity::ROW_GAP;
 /// Where the text column starts inside the card; the hairlines between rows start there too.
 pub const ROW_TEXT_INSET: f32 = ROW_PADDING_X + ROW_GLYPH + ROW_GAP;
 
@@ -669,7 +670,7 @@ fn new_group_body(
                     ))))
                     .flex()
                     .items_center()
-                    .gap(px(12.0))
+                    .gap(px(identity::ROW_GAP))
                     .px(px(14.0))
                     .py(px(9.0))
                     .when(i + 1 < count, |el| {
@@ -767,7 +768,7 @@ fn new_group_body(
                 ))))
                 .flex()
                 .items_center()
-                .gap(px(12.0))
+                .gap(px(identity::ROW_GAP))
                 .px(px(14.0))
                 .py(px(9.0))
                 .when(i + 1 < count, |el| {
@@ -1441,10 +1442,11 @@ mod first_paint_tests {
     fn create_rows_and_people_rows_share_one_left_edge() {
         assert_eq!(ROW_PADDING_X, 14.0);
         assert_eq!(ROW_GLYPH, 40.0);
-        assert_eq!(ROW_GAP, 12.0);
+        assert_eq!(ROW_GAP, identity::ROW_GAP, "the shared picture + name gap");
+        assert_eq!(ROW_GAP, 10.0);
         assert_eq!(
-            ROW_TEXT_INSET, 66.0,
-            "text column and hairlines start 66 pt into the card"
+            ROW_TEXT_INSET, 64.0,
+            "text column and hairlines start 64 pt into the card"
         );
     }
 

@@ -10,7 +10,7 @@ Secret notes: each secret the owner stored comes with their note (`use_notes` in
 
 ## Feedback and bug reports
 
-`submit_feedback(description, expected?)` on the `arbos` MCP server files the user's feedback or bug report for them: it captures their screen from their app, attaches the recent conversation and tool calls (scrubbed of secrets), adds platform and version details, and returns a reference id. Use it whenever the user asks to submit, send or report feedback or a bug; never tell them to use a menu, a settings screen or another channel instead.
+`submit_feedback(description, expected?)` on the `arbos` MCP server files the user's feedback or bug report for them: it captures their screen from their app, attaches the recent conversation and tool calls (scrubbed of secrets), adds platform and version details, and returns a reference id. Filing is irreversible from the chat. Use it when the user asks to submit, send or report feedback or a bug and they have said what to report; when they only ask to file with no content, ask what to include (or propose a one-line description and wait for yes) before calling. Never tell them to use a menu, a settings screen or another channel instead.
 
 ## Producing files
 

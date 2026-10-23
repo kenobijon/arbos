@@ -28,6 +28,7 @@ use arbos_core::wire;
 use crate::auth::Principal;
 use crate::blobs::{no_such_image, not_an_image, stored_image, StoredImage};
 use crate::db_people::{ChatWithMembers, Invite, Membership, PeopleChat};
+use crate::notices;
 use crate::signin::api_error;
 use crate::state::AppState;
 
@@ -1171,12 +1172,19 @@ pub async fn chat_leave(
         &cm,
         &me,
         &PushEventDto::PeopleMemberRemoved(PeopleMemberRemovedPayloadDto {
-            chat_id: id,
+            chat_id: id.clone(),
             user_id: me.clone(),
             handle: handle_of(&state, &me),
             by_handle: handle_of(&state, &me),
         }),
     );
+    // Only a group keeps a chat for the others to read; a DM just ends.
+    if cm.chat.kind == "group" {
+        let line = notices::left_line(&notices::person_name(&state, &me));
+        if let Err(e) = notices::post_people_notice(&state, &id, &line).await {
+            tracing::warn!(chat = %id, error = %e, "membership notice not written");
+        }
+    }
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -1413,11 +1421,37 @@ pub async fn agent_add(
         let _ = state.db.set_people_chat_kind(&id, "group");
     }
     state.matrix.touch_chat(&state, &id, None);
-    let _ = state
-        .db
-        .enqueue_push(&project.id, "people_agent_added", &json!({ "chat_id": id }));
-    crate::boxes::ensure_awake(&state, &project.user_id, "people").await;
-    // Agents already in the chat re-read members so they see the newcomer by handle.
+    agent_joined(&state, &cm, &me, &id, &project).await;
+    let line = notices::added_line(
+        &notices::person_name(&state, &me),
+        std::slice::from_ref(&project.name),
+    );
+    if let Some(line) = line {
+        if let Err(e) = notices::post_people_notice(&state, &id, &line).await {
+            tracing::warn!(chat = %id, error = %e, "membership notice not written");
+        }
+    }
+    match load_chat(&state, &id) {
+        Ok(cm) => Json(chat_json(&state, &cm, &me, &device_of(&principal))).into_response(),
+        Err(r) => *r,
+    }
+}
+
+/// After an agent's membership row exists: wake its box, tell the agents already in the chat
+/// to re-read members (they see the newcomer by handle), and push `people_agent_added`.
+async fn agent_joined(
+    state: &AppState,
+    cm: &ChatWithMembers,
+    me: &str,
+    chat_id: &str,
+    project: &crate::db::Project,
+) {
+    let _ = state.db.enqueue_push(
+        &project.id,
+        "people_agent_added",
+        &json!({ "chat_id": chat_id }),
+    );
+    crate::boxes::ensure_awake(state, &project.user_id, "people").await;
     for m in &cm.members {
         let Some(pid) = m.project_id() else { continue };
         if pid == project.id {
@@ -1425,24 +1459,20 @@ pub async fn agent_add(
         }
         let _ = state
             .db
-            .enqueue_push(pid, "people_agent_added", &json!({ "chat_id": id }));
-        crate::boxes::ensure_awake_project(&state, pid, "people").await;
+            .enqueue_push(pid, "people_agent_added", &json!({ "chat_id": chat_id }));
+        crate::boxes::ensure_awake_project(state, pid, "people").await;
     }
     notify_members(
-        &state,
-        &cm,
-        &me,
+        state,
+        cm,
+        me,
         &PushEventDto::PeopleAgentAdded(PeopleAgentAddedPayloadDto {
-            chat_id: id.clone(),
+            chat_id: chat_id.to_owned(),
             project_id: project.id.clone(),
-            by_handle: handle_of(&state, &me),
+            by_handle: handle_of(state, me),
         }),
     );
-    tracing::info!(chat = %id, project = %project.id, %me, "agent added to a people chat");
-    match load_chat(&state, &id) {
-        Ok(cm) => Json(chat_json(&state, &cm, &me, &device_of(&principal))).into_response(),
-        Err(r) => *r,
-    }
+    tracing::info!(chat = %chat_id, project = %project.id, %me, "agent added to a people chat");
 }
 
 #[derive(Deserialize)]
@@ -1581,21 +1611,40 @@ pub async fn agent_remove(
         &cm,
         &me,
         &PushEventDto::PeopleAgentRemoved(PeopleAgentRemovedPayloadDto {
-            chat_id: id,
-            project_id,
+            chat_id: id.clone(),
+            project_id: project_id.clone(),
             by_handle: handle_of(&state, &me),
         }),
     );
+    let line = notices::removed_line(
+        &notices::person_name(&state, &me),
+        &[notices::agent_name(&state, &project_id)],
+    );
+    if let Some(line) = line {
+        if let Err(e) = notices::post_people_notice(&state, &id, &line).await {
+            tracing::warn!(chat = %id, error = %e, "membership notice not written");
+        }
+    }
     StatusCode::NO_CONTENT.into_response()
 }
 
 #[derive(Deserialize)]
 pub struct AddMemberBody {
-    pub handle: String,
+    /// One person (older clients).
+    #[serde(default)]
+    pub handle: Option<String>,
+    /// Several people at once — one membership notice for the batch (#1349).
+    #[serde(default)]
+    pub handles: Vec<String>,
+    /// The caller's own projects to add as agents, in the same batch.
+    #[serde(default)]
+    pub agent_ids: Vec<String>,
 }
 
-/// `POST /chats/{id}/members {"handle"}` — any human member adds another person. A DM becomes a
-/// group when a third person joins so the two can still open a fresh DM later.
+/// `POST /chats/{id}/members {"handle"}` or `{"handles": […], "agent_ids": […]}` — any human
+/// member adds people (and their own agents). Everything is checked before anything is written;
+/// one "<me> added A, B and C" line goes into the chat for the whole batch. A DM becomes a group
+/// when a third member joins so the two can still open a fresh DM later.
 pub async fn member_add(
     State(state): State<AppState>,
     principal: Principal,
@@ -1606,69 +1655,135 @@ pub async fn member_add(
         Ok(v) => v,
         Err(r) => return *r,
     };
-    let Some(handle) = normalize_handle(&b.handle) else {
+    let raw_handles: Vec<&str> = b
+        .handle
+        .iter()
+        .map(String::as_str)
+        .chain(b.handles.iter().map(String::as_str))
+        .collect();
+    let mut people: Vec<UserCardDto> = Vec::new();
+    for raw in raw_handles {
+        let Some(handle) = normalize_handle(raw) else {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "bad_handle",
+                "that is not a GitHub login",
+            );
+        };
+        let Some(other) = find_person(&state, &handle).await else {
+            return api_error(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "no GitHub account with that login",
+            );
+        };
+        let other_id = other.id.clone();
+        if other_id == me {
+            return api_error(StatusCode::BAD_REQUEST, "bad_handle", "that is you");
+        }
+        if people.iter().any(|p| p.id == other_id) {
+            continue;
+        }
+        if cm
+            .members
+            .iter()
+            .any(|m| m.user_id() == Some(other_id.as_str()))
+        {
+            return api_error(
+                StatusCode::CONFLICT,
+                "already_member",
+                "already in this chat",
+            );
+        }
+        if state.db.blocked_either_way(&me, &other_id).unwrap_or(false) {
+            return api_error(
+                StatusCode::FORBIDDEN,
+                "not_available",
+                "this person is not available",
+            );
+        }
+        let humans = human_user_ids(&cm);
+        if state.db.blocked_by_any(&other_id, &humans).unwrap_or(false) {
+            return api_error(
+                StatusCode::FORBIDDEN,
+                "not_available",
+                "this person is not available",
+            );
+        }
+        people.push(other);
+    }
+    let mut agents: Vec<crate::db::Project> = Vec::new();
+    for pid in &b.agent_ids {
+        if agents.iter().any(|p| &p.id == pid) {
+            continue;
+        }
+        let project = match own_project(&state, &me, pid) {
+            Ok(p) => p,
+            Err(r) => return *r,
+        };
+        if cm
+            .members
+            .iter()
+            .any(|m| m.project_id() == Some(project.id.as_str()))
+        {
+            return api_error(
+                StatusCode::CONFLICT,
+                "already_member",
+                "that agent is already in this chat",
+            );
+        }
+        agents.push(project);
+    }
+    if people.is_empty() && agents.is_empty() {
         return api_error(
             StatusCode::BAD_REQUEST,
-            "bad_handle",
-            "that is not a GitHub login",
-        );
-    };
-    let Some(other) = find_person(&state, &handle).await else {
-        return api_error(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            "no GitHub account with that login",
-        );
-    };
-    let other_id = other.id.clone();
-    if other_id == me {
-        return api_error(StatusCode::BAD_REQUEST, "bad_handle", "that is you");
-    }
-    if cm
-        .members
-        .iter()
-        .any(|m| m.user_id() == Some(other_id.as_str()))
-    {
-        return api_error(
-            StatusCode::CONFLICT,
-            "already_member",
-            "already in this chat",
+            "need_members",
+            "name at least one person or one of your agents",
         );
     }
-    if state.db.blocked_either_way(&me, &other_id).unwrap_or(false) {
-        return api_error(
-            StatusCode::FORBIDDEN,
-            "not_available",
-            "this person is not available",
-        );
+    let mut names: Vec<String> = Vec::new();
+    for other in &people {
+        let other_id = other.id.clone();
+        if let Err(e) =
+            state
+                .db
+                .add_member(&id, &format!("user:{other_id}"), "member", &me, &json!({}))
+        {
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
+        }
+        let event = PushEventDto::PeopleMemberAdded(PeopleMemberAddedPayloadDto {
+            chat_id: id.clone(),
+            user_id: other_id.clone(),
+            handle: handle_of(&state, &other_id),
+            by_handle: handle_of(&state, &me),
+        });
+        let _ = state.db.push_user_event(&other_id, &event, Some(&id));
+        notify_members(&state, &cm, &me, &event);
+        tracing::info!(chat = %id, user = %other_id, %me, "person added to a people chat");
+        names.push(notices::person_name(&state, &other_id));
     }
-    let humans = human_user_ids(&cm);
-    if state.db.blocked_by_any(&other_id, &humans).unwrap_or(false) {
-        return api_error(
-            StatusCode::FORBIDDEN,
-            "not_available",
-            "this person is not available",
-        );
-    }
-    if let Err(e) = state
-        .db
-        .add_member(&id, &format!("user:{other_id}"), "member", &me, &json!({}))
-    {
-        return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
+    for project in &agents {
+        if let Err(e) = state.db.add_member(
+            &id,
+            &format!("agent:{}", project.id),
+            "agent",
+            &me,
+            &default_agent_settings(),
+        ) {
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
+        }
+        agent_joined(&state, &cm, &me, &id, project).await;
+        names.push(project.name.clone());
     }
     if cm.chat.kind == "dm" {
         let _ = state.db.set_people_chat_kind(&id, "group");
     }
     state.matrix.touch_chat(&state, &id, None);
-    let event = PushEventDto::PeopleMemberAdded(PeopleMemberAddedPayloadDto {
-        chat_id: id.clone(),
-        user_id: other_id.clone(),
-        handle: handle_of(&state, &other_id),
-        by_handle: handle_of(&state, &me),
-    });
-    let _ = state.db.push_user_event(&other_id, &event, Some(&id));
-    notify_members(&state, &cm, &me, &event);
-    tracing::info!(chat = %id, user = %other_id, %me, "person added to a people chat");
+    if let Some(line) = notices::added_line(&notices::person_name(&state, &me), &names) {
+        if let Err(e) = notices::post_people_notice(&state, &id, &line).await {
+            tracing::warn!(chat = %id, error = %e, "membership notice not written");
+        }
+    }
     match load_chat(&state, &id) {
         Ok(cm) => Json(chat_json(&state, &cm, &me, &device_of(&principal))).into_response(),
         Err(r) => *r,
@@ -1717,6 +1832,15 @@ pub async fn member_remove(
     });
     let _ = state.db.push_user_event(&user_id, &event, None);
     notify_members(&state, &cm, &me, &event);
+    let line = notices::removed_line(
+        &notices::person_name(&state, &me),
+        &[notices::person_name(&state, &user_id)],
+    );
+    if let Some(line) = line {
+        if let Err(e) = notices::post_people_notice(&state, &id, &line).await {
+            tracing::warn!(chat = %id, error = %e, "membership notice not written");
+        }
+    }
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -2848,6 +2972,140 @@ mod agent_tests {
         )
         .await;
         assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    }
+}
+
+#[cfg(test)]
+mod membership_notice_tests {
+    //! #1349: every membership change writes one system line into the group's chat — one per
+    //! add batch, one per remove, "<who> left" on leave — as device `relay`, role `system`,
+    //! so no client invents it and no agent answers it.
+
+    use axum::extract::{Path, State};
+    use axum::http::StatusCode;
+    use axum::Json;
+
+    use super::tests_support::{person, project_of};
+    use super::*;
+    use crate::matrix::backfill::load_doc;
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    fn system_lines(state: &AppState, chat: &str) -> Vec<String> {
+        load_doc(state, chat, None)
+            .expect("doc")
+            .map(|d| {
+                d.messages()
+                    .into_iter()
+                    .filter(|m| m.role == "system")
+                    .map(|m| m.text())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn one_line_per_batch_add_remove_and_leave() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 1);
+        let (bob, bob_dev) = person(&state, 2);
+        let (_carol, _) = person(&state, 3);
+        let home = project_of(&state, &alice, "Home");
+        let doug = project_of(&state, &alice, "Doug");
+
+        // Alice creates a group with Bob.
+        let r = chats_create_group(
+            State(state.clone()),
+            alice_dev.clone(),
+            Json(CreateGroupBody {
+                kind: "group".into(),
+                members: vec!["user2".into()],
+                agent_ids: vec![],
+                title: None,
+                avatar_leaf: None,
+                avatar_leaf_color: None,
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let chat = state
+            .db
+            .chats_of_member(&format!("user:{alice}"))
+            .unwrap()
+            .into_iter()
+            .find(|cm| cm.chat.kind == "group")
+            .expect("the group")
+            .chat
+            .id;
+        assert!(
+            system_lines(&state, &chat).is_empty(),
+            "creation writes no notice"
+        );
+
+        // One batch: Carol plus two agents → one line naming all three.
+        let r = member_add(
+            State(state.clone()),
+            alice_dev.clone(),
+            Path(chat.clone()),
+            Json(AddMemberBody {
+                handle: None,
+                handles: vec!["user3".into()],
+                agent_ids: vec![home.clone(), doug.clone()],
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let lines = system_lines(&state, &chat);
+        assert_eq!(lines.len(), 1, "one notice for the whole batch: {lines:?}");
+        assert_eq!(lines[0], "@user1 added @user3, Home and Doug");
+        // The line is the relay's, not the adder's message.
+        let doc = load_doc(&state, &chat, None).unwrap().unwrap();
+        let m = doc
+            .messages()
+            .into_iter()
+            .find(|m| m.role == "system")
+            .unwrap();
+        assert_eq!(m.rest["sender"], "system");
+        assert_eq!(m.rest["deviceId"], crate::notices::RELAY_DEVICE);
+
+        // Remove an agent, remove a person: one line each.
+        let r = agent_remove(
+            State(state.clone()),
+            alice_dev.clone(),
+            Path((chat.clone(), doug.clone())),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::NO_CONTENT);
+        let carol_id = state.db.user_by_handle("user3").unwrap().unwrap().id;
+        let r = member_remove(
+            State(state.clone()),
+            alice_dev.clone(),
+            Path((chat.clone(), carol_id)),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::NO_CONTENT);
+
+        // Bob leaves.
+        let r = chat_leave(State(state.clone()), bob_dev.clone(), Path(chat.clone())).await;
+        assert_eq!(r.status(), StatusCode::NO_CONTENT);
+        let _ = bob;
+
+        let lines = system_lines(&state, &chat);
+        assert_eq!(
+            lines,
+            [
+                "@user1 added @user3, Home and Doug",
+                "@user1 removed Doug",
+                "@user1 removed @user3",
+                "@user2 left",
+            ]
+        );
+        // Every notice is its own row, signed by the relay.
+        let rows = state.db.rows_after(&room_of(&chat), 0, None, 100).unwrap();
+        assert_eq!(rows.len(), 4);
+        assert!(rows
+            .iter()
+            .all(|r| r.device == crate::notices::RELAY_DEVICE));
     }
 }
 

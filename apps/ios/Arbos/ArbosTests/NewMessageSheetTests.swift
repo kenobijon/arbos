@@ -17,14 +17,16 @@ final class NewMessageSheetTests: XCTestCase {
     }
 
     func testCreateRowsAndPeopleRowsShareOneLeftEdge() {
-        // Card 16 in, row content 14 in, a 44 pt glyph / picture, 14 to the text:
-        // the same numbers for New agent / New group / New server and every person row.
+        // Card 16 in, row content 14 in, a 44 pt glyph / picture, the pane kit's gap to
+        // the text: the same numbers for New agent / New group / New server and every
+        // person row, and the hairline starts where the text does.
         XCTAssertEqual(SheetRow.cardInset, 16)
         XCTAssertEqual(SheetRow.paddingX, 14)
         XCTAssertEqual(SheetRow.avatar, 44)
-        XCTAssertEqual(SheetRow.gap, 14)
-        XCTAssertEqual(SheetRow.textInset, 72, "divider and text start 72 pt into the card")
-        XCTAssertEqual(SheetRow.textLeading, 88, "text column 88 pt from the sheet edge")
+        XCTAssertEqual(SheetRow.gap, PaneKit.gap)
+        XCTAssertEqual(SheetRow.gap, 10)
+        XCTAssertEqual(SheetRow.textInset, 68, "divider and text start 68 pt into the card")
+        XCTAssertEqual(SheetRow.textLeading, 84, "text column 84 pt from the sheet edge")
     }
 
     func testDirectoryCacheRoundTrip() throws {

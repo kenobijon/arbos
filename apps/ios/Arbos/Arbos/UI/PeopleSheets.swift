@@ -17,7 +17,7 @@ enum SheetRow {
     /// Glyph circle / picture diameter.
     static let avatar: CGFloat = 44
     /// Picture → text gap.
-    static let gap: CGFloat = 14
+    static let gap: CGFloat = PaneKit.gap
     /// Where the text column starts inside the card; the row divider starts there too.
     static var textInset: CGFloat { paddingX + avatar + gap }
     /// The text column's distance from the sheet edge.
@@ -1036,7 +1036,7 @@ struct ProjectMembersSheet: View {
                         if !trimmed.isEmpty {
                             ForEach(suggestions) { p in
                                 Button { invite(p.handle) } label: {
-                                    HStack(spacing: 12) {
+                                    HStack(spacing: PaneKit.gap) {
                                         PersonAvatar(url: p.avatarUrl, handle: p.handle, size: 40, name: p.name, id: p.id, colorIndex: p.avatarColorIndex)
                                         VStack(alignment: .leading, spacing: 2) {
                                             Text(p.displayName).foregroundStyle(theme.text)
@@ -1063,7 +1063,7 @@ struct ProjectMembersSheet: View {
                 }
                 Section("Members") {
                     ForEach(members) { m in
-                        HStack(spacing: 12) {
+                        HStack(spacing: PaneKit.gap) {
                             Button { model.showProfile(.user(ProfilePerson(m))) } label: { PersonAvatar(url: m.avatarUrl, handle: m.handle, size: 40, name: m.name, id: m.id, colorIndex: m.avatarColorIndex) }.buttonStyle(.plain)
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(m.name?.isEmpty == false ? m.name! : m.handle).foregroundStyle(theme.text)

@@ -33,6 +33,7 @@ mod livekit;
 mod local;
 mod matrix;
 mod migrate;
+mod notices;
 mod notify;
 mod people;
 mod proxy;

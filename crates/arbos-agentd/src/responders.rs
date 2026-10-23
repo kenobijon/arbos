@@ -35,6 +35,8 @@ Pick an agent when the message asks for their help, names or mentions them, cont
 
 Pick none when people are talking to each other — including short pings by first name or @handle ("Yo Jen", "Ken"), inviting humans to a call or meet-up ("Call?", "you free?"), or continuing that human thread after such a ping; when the message addresses only humans or people (for example "all humans…", "humans say…", "people only…") even if an agent just spoke; or when the message is only a remark that needs no agent reply. Use `people` (when present) to tell humans from agents. Staying quiet means an empty responders list — do not pick an agent so it can announce it will stay quiet.
 
+When the message is only a cancel, hold or stop aimed at work one agent just announced (for example "no don't do it yet", "hold off", "stop"), pick only that agent — never every agent so they can each say "Understood".
+
 Output: {"responders":["agent_id",...],"reason":"one line","confidence":0-1}
 Use the agent ids from the list. An empty responders list means nobody replies."#;
 
@@ -166,14 +168,14 @@ pub fn jev_questions(room: &Room) -> Value {
             json!({
                 "type": "noul",
                 "instructions": format!(
-                    "Should the agent \"{name}\" reply to `message`? Several agents may reply to one message; judge {name} on its own, from its name and role in `agents`, from `people` (the humans in the room, when listed), from `recent_messages`, and from who `message` is from and what it asks. Prefer false when `message` is for humans or people rather than agents — including short name pings and call invites between people — staying quiet means no reply at all, not a reply that says you will stay quiet."
+                    "Should the agent \"{name}\" reply to `message`? Several agents may reply to one message; judge {name} on its own, from its name and role in `agents`, from `people` (the humans in the room, when listed), from `recent_messages`, and from who `message` is from and what it asks. Prefer false when `message` is for humans or people rather than agents — including short name pings and call invites between people — staying quiet means no reply at all, not a reply that says you will stay quiet. Prefer false for {name} when `message` is only a cancel/hold/stop of work another agent just announced — only that agent should reply, not a pile of \"Understood\"."
                 ),
                 "criteria": {
                     "true": format!(
-                        "`message` asks {name} for something, directly or as part of a request to several or all agents (for example \"all agents…\"); names or mentions {name}; continues a thread {name} was just speaking in, unless this `message` is now addressed only to humans or people; answers a question {name} asked; or asks for work that belongs to {name}'s role."
+                        "`message` asks {name} for something, directly or as part of a request to several or all agents (for example \"all agents…\"); names or mentions {name}; continues a thread {name} was just speaking in, unless this `message` is now addressed only to humans or people; answers a question {name} asked; asks for work that belongs to {name}'s role; or is a cancel/hold/stop of work {name} just announced in `recent_messages` (for example \"no don't do it yet\" after {name} said they were filing or starting something)."
                     ),
                     "false": format!(
-                        "`message` is people talking to each other (greeting or pinging someone by first name or @handle, inviting humans to a call or meet-up, or continuing that thread — for example \"Yo Jen\", \"Ken\", \"Call?\" after naming a person) even if short or informal; addresses only humans or people (for example \"all humans…\", \"humans say…\", \"people only…\") even if {name} just spoke; is addressed only to other agents; nothing in it belongs to {name}'s role; or it is only a remark, reaction or acknowledgement that needs no agent reply."
+                        "`message` is people talking to each other (greeting or pinging someone by first name or @handle, inviting humans to a call or meet-up, or continuing that thread — for example \"Yo Jen\", \"Ken\", \"Call?\" after naming a person) even if short or informal; addresses only humans or people (for example \"all humans…\", \"humans say…\", \"people only…\") even if {name} just spoke; is addressed only to other agents; nothing in it belongs to {name}'s role; is only a remark, reaction or acknowledgement that needs no agent reply; or is only a cancel/hold/stop aimed at work another agent (not {name}) just announced — do not reply just to say you understood or will stay quiet."
                     ),
                 },
             }),

@@ -87,6 +87,7 @@
     { "id": "c46", "roster": "people2", "from": "@jacob", "text": "All humans say hi", "recent": [{ "from": "@jacob", "text": "All agents say hi" }, { "from": "@research (agent)", "text": "Hi everyone — research here." }], "expected": [], "note": "humans only; prior agent greeting must not continue" },
     { "id": "c47", "roster": "people2", "from": "@jacob", "text": "Call?", "recent": [{ "from": "@jacob", "text": "Yo Jen" }, { "from": "@jacob", "text": "Ken" }], "expected": [], "note": "short call invite after pinging people by name; agents stay quiet" },
     { "id": "c48", "roster": "people2", "from": "@sam", "text": "Ken", "recent": [{ "from": "@sam", "text": "Yo Jen" }], "expected": [], "note": "first-name ping to a person, nobody" },
-    { "id": "c49", "roster": "people3", "from": "@cem", "text": "you free for a quick call?", "recent": [{ "from": "@cem", "text": "hey Ben" }], "expected": [], "note": "call invite to a person after a human greeting" }
+    { "id": "c49", "roster": "people3", "from": "@cem", "text": "you free for a quick call?", "recent": [{ "from": "@cem", "text": "hey Ben" }], "expected": [], "note": "call invite to a person after a human greeting" },
+    { "id": "c50", "roster": "launch", "from": "the user", "text": "no dont do it yet", "recent": [{ "from": "the user", "text": "Ops, can you file a feedback report?" }, { "from": "Project Ops", "text": "Filing that feedback report now." }], "expected": ["ops"], "note": "cancel aimed at the agent that just started; no Understood pile-on from the others" }
   ]
 }

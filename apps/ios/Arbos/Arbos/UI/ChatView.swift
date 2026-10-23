@@ -233,19 +233,9 @@ struct ChatView: View {
         }
     }
 
-    /// Rebuild transcript rows, including "@handle joined" lines for people-chat members.
+    /// Rebuild transcript rows. Membership lines ("Jacob added Home, hjkb and Doug",
+    /// "Alice left") are system messages the relay writes into the doc (#1349).
     private func refreshRows() {
-        // Agents are always added after the chat exists (never founders), so every agent
-        // gets a centred "@handle joined" line at its membership time. Humans who join
-        // later (after create) get the same line; founders (joined_at ≈ created_at) do not.
-        let createdAt = people?.createdAt ?? 0
-        let joins: [Transcript.Join] = (people?.members ?? []).compactMap { m in
-            guard m.joinedAt > 0 else { return nil }
-            if !m.isAgent, m.joinedAt <= createdAt + 5_000 { return nil }
-            let handle = m.isAgent ? mentionSlug(m.project?.name ?? m.handle) : m.handle
-            guard !handle.isEmpty else { return nil }
-            return Transcript.Join(id: m.id, handle: handle, at: m.joinedAt)
-        }
         // A channel is a people-style transcript: my lines right, everyone else by name.
         let slot = isPeople ? "\(peopleSlot):\(chatId)" : isChannel ? "\(channelSlot):\(chatId)" : projectId
         var agentNames: [String: String] = [:]
@@ -255,7 +245,7 @@ struct ChatView: View {
         }
         rows = Transcript.rows(messages, projectId: slot,
                                me: isChannel ? model.channelMe : model.myUserId,
-                               people: isPeople || isChannel, joins: joins, agentNames: agentNames)
+                               people: isPeople || isChannel, agentNames: agentNames)
     }
 
     var body: some View {
@@ -588,7 +578,7 @@ struct ChatView: View {
                     if let channel {
                         // Rule 3: the unified pill — the server's disc, the `#` glyph and the
                         // name (never "#name": the glyph shows it, #1317).
-                        HStack(spacing: 8) {
+                        HStack(spacing: Theme.headerPillGap) {
                             if let s = channelServer {
                                 ServerAvatar(server: s, size: Theme.avatar)
                             }
@@ -609,7 +599,7 @@ struct ChatView: View {
                     } else if let people {
                         // One pill for every chat (2026-10-20): avatar + name,
                         // no member cluster, counts or agent lines.
-                        HStack(spacing: 8) {
+                        HStack(spacing: Theme.headerPillGap) {
                             if people.isGroup, let url = groupImageURL(people) {
                                 // Custom group picture.
                                 PersonAvatar(url: url, handle: people.title, size: Theme.avatar, name: people.title, id: people.id)
@@ -645,7 +635,7 @@ struct ChatView: View {
                         .accessibilityAddTraits(.isButton)
                         .accessibilityHint(people.isGroup ? "Opens group info" : "Opens the profile")
                     } else {
-                        HStack(spacing: 8) {
+                        HStack(spacing: Theme.headerPillGap) {
                             if let project {
                                 AgentAvatar(project: project, theme: theme, size: Theme.avatar, dot: machineDotColor(model.machine.state, theme: theme), working: streaming)
                             }

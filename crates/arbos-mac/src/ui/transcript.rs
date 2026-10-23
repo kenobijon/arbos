@@ -2122,7 +2122,10 @@ pub fn build_rows(
                 push_reactions(&mut rows, message, mine(message));
             }
             Role::System => {
-                // Call lines and other system notes: one centred muted line.
+                // Call lines and membership notices ("Jacob added Home, hjkb and
+                // Doug", #1349): one centred muted line, never a bubble. Like a
+                // date stamp it breaks the sender run — the next bubble names its
+                // sender again (Telegram / Grok Bot).
                 let text = message.plain_text();
                 let line = text.lines().next().unwrap_or_default().trim().to_string();
                 if !line.is_empty() {
@@ -2132,6 +2135,7 @@ pub fn build_rows(
                         message_id: message.id.clone(),
                         kind: RowKind::Stamp { label: line },
                     });
+                    prev_sender = None;
                 }
             }
             Role::Assistant | Role::Project => {
@@ -3254,5 +3258,78 @@ mod layout_tests {
         assert_eq!(margin, composer_margin, "one side margin");
         assert_eq!(margin, 16.0, "Grok: 16 pt from the pane");
         assert_eq!(cap, input + 2.0 * circle, "the pill at its widest");
+    }
+}
+
+#[cfg(test)]
+mod system_line_tests {
+    //! #1349: a relay-written membership notice (`role: system`, `sender: system`) is a
+    //! centred stamp between the bubbles — never a message from the adder — and the
+    //! bubble after it names its sender again.
+    use std::collections::{HashMap, HashSet};
+
+    use super::*;
+
+    fn message(role: &str, sender: &str, text: &str, at: u64) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": format!("m-{at}"),
+            "chatId": "chat_testing",
+            "role": role,
+            "sender": sender,
+            "senderHandle": if sender.starts_with("user:") { "bob" } else { "" },
+            "status": "done",
+            "createdAt": at,
+            "parts": [{ "id": format!("p-{at}"), "kind": "text", "text": text }],
+        }))
+        .expect("message")
+    }
+
+    #[test]
+    fn membership_notice_is_a_centred_stamp_that_breaks_the_sender_run() {
+        let t = 1_700_000_000_000u64;
+        let messages = [
+            message("user", "user:gh_bob", "hi all", t),
+            message(
+                "system",
+                "system",
+                "Jacob added Home, hjkb and Doug",
+                t + 1_000,
+            ),
+            message("user", "user:gh_bob", "welcome", t + 2_000),
+        ];
+        let spoken = HashSet::new();
+        let failed = HashMap::new();
+        let speech = SpeechRows {
+            enabled: false,
+            spoken: &spoken,
+            failed: &failed,
+            voice_mode: false,
+        };
+        let rows = build_rows(&messages, false, speech, "gh_me", &HashSet::new());
+        let kinds: Vec<&RowKind> = rows.iter().map(|r| &r.kind).collect();
+        // Date stamp, Bob (named), the notice, Bob again (named again).
+        let bubbles: Vec<(bool, &str)> = kinds
+            .iter()
+            .filter_map(|k| match k {
+                RowKind::User { named, text, .. } => Some((*named, text.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(bubbles, [(true, "hi all"), (true, "welcome")]);
+        let stamps: Vec<&str> = kinds
+            .iter()
+            .filter_map(|k| match k {
+                RowKind::Stamp { label } => Some(label.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            stamps.contains(&"Jacob added Home, hjkb and Doug"),
+            "the notice is a stamp row: {stamps:?}"
+        );
+        assert!(
+            rows.iter().all(|r| r.id != "m-1700000001000#user"),
+            "no bubble for the system row"
+        );
     }
 }

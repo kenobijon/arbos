@@ -97,7 +97,10 @@ struct ProfileTopBar<Trailing: View>: View {
 enum PaneKit {
     static let rowHeight: CGFloat = 48
     static let inset: CGFloat = 16
-    static let gap: CGFloat = 14
+    /// Picture → name on a row: Grok Bot's sidebar / members rows measure 11–12 pt
+    /// ink to ink (Mac refs 45, 39); the Mac's `identity::ROW_GAP`. Jacob, 2026-10-22:
+    /// "names pulled closer to the avatar".
+    static let gap: CGFloat = 10
     static let tile: CGFloat = 30
     static let avatar: CGFloat = 36
     /// The hero picture (a free constant: a static on the generic PaneHeader cannot be named without its type parameter).

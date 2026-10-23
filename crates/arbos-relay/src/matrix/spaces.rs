@@ -219,6 +219,39 @@ impl Worker {
         Ok(())
     }
 
+    /// Membership notice in a channel (#1349): "Jacob added Doug" as an `m.notice` from the
+    /// server owner with `life.arbos.sender: system` — the apps' row mapper makes that a
+    /// centred system line, never a message from the owner. A channel without a room yet
+    /// gets its sync first and the notice is dropped (nothing was there to read it).
+    pub(super) async fn channel_notice(
+        &self,
+        channel_id: &str,
+        text: &str,
+        notice_id: &str,
+    ) -> MxResult<()> {
+        let Some(channel) = self.state.db.channel(channel_id).ok().flatten() else {
+            return Ok(());
+        };
+        let Some(server) = self.state.db.server(&channel.server_id).ok().flatten() else {
+            return Ok(());
+        };
+        let Some(room) = channel.room_id.clone() else {
+            self.state.matrix.touch_channel(&self.state, channel_id);
+            return Ok(());
+        };
+        let creator = self.state.matrix.cfg.user_mxid(&server.owner_user_id);
+        let content = json!({
+            "msgtype": "m.notice",
+            "body": text,
+            "life.arbos.id": notice_id,
+            "life.arbos.sender": "system",
+        });
+        self.client
+            .send(&room, &creator, "m.room.message", notice_id, &content, None)
+            .await?;
+        Ok(())
+    }
+
     async fn create_channel_room(
         &self,
         spec: &ServerSpec,
