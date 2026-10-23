@@ -220,7 +220,7 @@ def patch_project(project, body):
 
 def project_name(project):
     st, v = relay("GET", f"/projects/{project}")
-    return (v or {}).get("name") if st == 200 else None
+    return ((v or {}).get("project") or v or {}).get("name") if st == 200 else None
 
 
 def create_secret(name, value, note=""):

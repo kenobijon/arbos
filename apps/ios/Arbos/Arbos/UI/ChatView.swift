@@ -24,14 +24,15 @@ struct ChatView: View {
     /// How many of the newest rows are in the view tree. The transcript is a plain
     /// VStack (see `transcript`), so every row it holds is built and laid out at once;
     /// a long group chat put thousands in it and the open took seconds (long-chat-perf,
-    /// 2026-10-23). Older rows join as the user nears the top (`growWindow`).
+    /// 2026-10-23). Cap stays modest so finger-scrolling stays smooth; older rows join
+    /// as the user nears the top (`growWindow`).
     @State private var windowCount = ChatView.windowInitial
     /// iOS 17 has no scroll-geometry callback to grow the window with, so it keeps every row.
     static let windowInitial: Int = {
-        if #available(iOS 18, *) { return 160 }
+        if #available(iOS 18, *) { return 80 }
         return Int.max
     }()
-    static let windowStep = 120
+    static let windowStep = 60
     @State private var showModelPicker = false
     /// Rig: the media viewer opened by `ARBOS_SHOW=media…` (media-viewer-2026-10-23).
     @State private var rigViewer: MediaViewerState?
@@ -49,6 +50,9 @@ struct ChatView: View {
     @State private var scroller: ScrollViewProxy?
     /// Scrolled more than ~120 pt above the end: show Grok's round chevron.
     @State private var awayFromBottom = false
+    /// Follow the end as rows stream / grow. Cleared when the user scrolls up;
+    /// restored when they return near the end or tap the chevron (Mac stick pin).
+    @State private var pinnedToBottom = true
     @State private var demoRan = false
     @State private var demoQueue: [String] = []
     @StateObject private var recorder = MemoRecorder()
@@ -71,6 +75,8 @@ struct ChatView: View {
     @State private var timeReveal: CGFloat = 0
     /// Once the pan is more horizontal-left than vertical, lock so scroll does not steal it.
     @State private var timeRevealLocked = false
+    /// True while a message's swipe-right-to-reply is locked — blocks swipe-right-to-Home.
+    @State private var replySwipeActive = false
 
     /// Rows after the in-chat search filter (profile "search").
     private var visibleRows: [Row] {
@@ -345,6 +351,13 @@ struct ChatView: View {
             ZStack(alignment: .top) {
                 theme.bg.ignoresSafeArea()
                 transcript(width: geo.size.width, height: geo.size.height)
+                    // A tap on a mention chip (`arbos://mention/<kind>/<id>`, MentionChips.swift)
+                    // opens that entity's page; every other link goes to the system.
+                    .environment(\.openURL, OpenURLAction { url in
+                        guard let target = MentionTable.target(from: url, model: model) else { return .systemAction }
+                        model.showProfile(target)
+                        return .handled
+                    })
                 headerBlur
                 VStack(spacing: 8) {
                     header
@@ -530,6 +543,8 @@ struct ChatView: View {
                     case "voice": startCall(.voice)
                     case "model": showModelPicker = true
                     case "profile": openHeaderProfile()
+                    // `avatarpicker[-generate|-upload]`: the agent pane, which opens the sheet on that tab.
+                    case let s where s.hasPrefix("avatarpicker"): openHeaderProfile()
                     case "edit": showProfile = true
                     case "userprofile": if let c = counterpart { model.showProfile(.user(ProfilePerson(c))) }
                     // `addmembers`: the group pane opens its Add members sheet on appear.
@@ -825,6 +840,8 @@ struct ChatView: View {
     /// chevron, right-aligned with the composer, 18 pt above it.
     private var scrollToBottomButton: some View {
         Button {
+            pinnedToBottom = true
+            awayFromBottom = false
             withAnimation(.easeOut(duration: 0.3)) { scroller?.scrollTo("bottom", anchor: .bottom) }
         } label: {
             ZStack {
@@ -854,6 +871,8 @@ struct ChatView: View {
         // Selecting or dragging in the focused composer is a horizontal pan;
         // do not treat it as swipe-right → Home.
         guard !composerFocused else { return }
+        // A message reply swipe owns this drag; do not leave the chat.
+        guard !replySwipeActive else { return }
         let dx = value.translation.width
         let absX = abs(dx), absY = abs(value.translation.height)
         let vx = value.velocity.width, vy = value.velocity.height
@@ -944,14 +963,22 @@ struct ChatView: View {
                     }
                     let shown = windowedRows
                     ForEach(Array(shown.enumerated()), id: \.element.id) { i, row in
+                        let canReply = isMessageRow(row)
                         RowView(row: row, chatId: chatId, width: width, timeReveal: timeReveal,
                                 onQuoteTap: { revealQuoted($0) },
-                                highlighted: highlightedMessage == row.messageId)
+                                highlighted: highlightedMessage == row.messageId,
+                                onReply: canReply ? { beginReply(to: row) } : nil,
+                                replySwipeActive: $replySwipeActive)
                             .padding(.top, gap(before: i, in: shown))
                             .id(row.id)
-                            .onAppear { LaunchClock.mark("chat-first-row", detail: "shown=\(shown.count) rows=\(rows.count) messages=\(messages.count)") }
+                            .onAppear {
+                                // Once per open — not on every row (group chats fire this dozens of times).
+                                if i == 0 {
+                                    LaunchClock.mark("chat-first-row", detail: "shown=\(shown.count) rows=\(rows.count) messages=\(messages.count)")
+                                }
+                            }
                             .contextMenu {
-                                MessageMenuContent(items: MessageMenu.items(forMessage: isMessageRow(row))) { item in
+                                MessageMenuContent(items: MessageMenu.items(forMessage: canReply)) { item in
                                     runMessageMenu(item, row: row)
                                 }
                             }
@@ -983,7 +1010,11 @@ struct ChatView: View {
                 composerFocused = false
                 searchFocused = false
             }
-            .modifier(AwayFromBottomReporter(away: $awayFromBottom))
+            .modifier(AwayFromBottomReporter(away: $awayFromBottom, pinned: $pinnedToBottom) {
+                // Streaming / new-row growth while pinned: re-stick without animation so
+                // each delta glides with layout instead of fighting a scroll animation.
+                proxy.scrollTo("bottom", anchor: .bottom)
+            })
             // Nearing the top: the next older slice of rows joins the view tree; a channel
             // also asks the server for one older page.
             .modifier(NearTopReporter(enabled: true) {
@@ -993,22 +1024,21 @@ struct ChatView: View {
                     model.loadOlderChannel(chatId)
                 }
             })
-            // Mask stays in the scroll view's bounds — `ignoresSafeArea` on the
-            // mask mis-samples the fade when the composer/keyboard inset changes
-            // and can blank the whole transcript (white screen mid-type).
-            .mask {
-                VStack(spacing: 0) {
-                    LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom).frame(height: 110)
-                    Color.black
-                }
-            }
+            // Top fade is `headerBlur` over the transcript — a ScrollView `.mask`
+            // forced an offscreen pass of every row on each scroll frame and made
+            // long / group chats feel sticky (feedback app-01M5MQ2GFB1681YXNJMZV4EK7J).
             .onAppear { settleToBottom(proxy) }
-            .onChange(of: rows.last?.id) { old, _ in
+            // `rows.last` (not only its id): a streaming reply keeps the same id while its
+            // text grows; pinning must follow that growth too (#1444 / lazy window #1399).
+            .onChange(of: rows.last) { old, new in
                 if old == nil {
                     settleToBottom(proxy)
-                } else if !awayFromBottom {
-                    // Stick only while the user is near the end; leave history alone.
-                    withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("bottom", anchor: .bottom) }
+                } else if pinnedToBottom {
+                    if old?.id != new?.id {
+                        withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("bottom", anchor: .bottom) }
+                    } else {
+                        proxy.scrollTo("bottom", anchor: .bottom)
+                    }
                 }
             }
             .onChange(of: rows.count) { old, new in
@@ -1020,11 +1050,13 @@ struct ChatView: View {
                 if ready { settleToBottom(proxy) }
             }
             .onChange(of: streaming) { _, _ in
-                guard !awayFromBottom else { return }
+                guard pinnedToBottom else { return }
                 withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("bottom", anchor: .bottom) }
             }
             .onChange(of: composerFocused) { _, focused in
                 guard focused else { return }
+                pinnedToBottom = true
+                awayFromBottom = false
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
                     withAnimation(.easeOut(duration: 0.25)) { proxy.scrollTo("bottom", anchor: .bottom) }
                 }
@@ -1036,6 +1068,8 @@ struct ChatView: View {
     /// `scrollTo` runs before layout knows the content size, so repeat after
     /// the next runloop turn and once more after the rows settle.
     private func settleToBottom(_ proxy: ScrollViewProxy) {
+        pinnedToBottom = true
+        awayFromBottom = false
         proxy.scrollTo("bottom", anchor: .bottom)
         DispatchQueue.main.async { proxy.scrollTo("bottom", anchor: .bottom) }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { proxy.scrollTo("bottom", anchor: .bottom) }
@@ -1091,15 +1125,21 @@ struct ChatView: View {
         case .copy:
             UIPasteboard.general.string = m_text(row)
         case .reply:
-            guard let m = messageById[row.messageId] else { return }
-            replyTo = m
-            if isPeople, let member = agentMember(for: m)?.member {
-                talkTo = [member]
-            }
-            composerFocused = true
+            beginReply(to: row)
         case .delete:
             model.deleteMessage(chatId: chatId, messageId: row.messageId)
         }
+    }
+
+    /// Reply to this row: composer preview + focus (people chats also address the agent).
+    /// Shared by the long-press Reply item and swipe-right-to-reply on the bubble.
+    private func beginReply(to row: Row) {
+        guard let m = messageById[row.messageId] else { return }
+        replyTo = m
+        if isPeople, let member = agentMember(for: m)?.member {
+            talkTo = [member]
+        }
+        composerFocused = true
     }
 
     /// Spacing: 8 pt between blocks of one message, 24 pt around sender changes,
@@ -1773,6 +1813,9 @@ struct ChatView: View {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !pending.isEmpty else { return }
         Haptics.send()
+        // A send means follow the reply: re-pin even if the reader had scrolled up.
+        pinnedToBottom = true
+        awayFromBottom = false
         if isChannel {
             // Rule 3/9: the composer sends through the shared client's `sendText`.
             guard !text.isEmpty else { return }
@@ -2057,16 +2100,40 @@ private struct NearTopReporter: ViewModifier {
 }
 
 /// Reports when the scroll view sits more than 120 pt above its end (iOS 18+;
-/// earlier systems never show the chevron).
+/// earlier systems never show the chevron). While `pinned` is true, content
+/// growth (streaming row height, a new row) must not look like a user scroll-up:
+/// re-stick instead of flipping `away` and leaving the transcript stranded.
 private struct AwayFromBottomReporter: ViewModifier {
     @Binding var away: Bool
+    @Binding var pinned: Bool
+    var onStick: () -> Void
+
+    private struct Sample: Equatable {
+        var height: CGFloat
+        var distance: CGFloat
+    }
 
     func body(content: Content) -> some View {
         if #available(iOS 18, *) {
-            content.onScrollGeometryChange(for: Bool.self) { g in
-                g.contentOffset.y + g.containerSize.height < g.contentSize.height - 120
-            } action: { _, isAway in
+            content.onScrollGeometryChange(for: Sample.self) { g in
+                Sample(
+                    height: g.contentSize.height,
+                    distance: g.contentSize.height - g.contentOffset.y - g.containerSize.height
+                )
+            } action: { old, new in
+                let grew = new.height > old.height + 0.5
+                if pinned && grew {
+                    away = false
+                    onStick()
+                    return
+                }
+                let isAway = new.distance > 120
                 away = isAway
+                if isAway {
+                    pinned = false
+                } else {
+                    pinned = true
+                }
             }
         } else {
             content

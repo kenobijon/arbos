@@ -103,6 +103,7 @@ class Lane(threading.Thread):
             if st.get("old_name") is None:
                 st["old_name"] = rl.project_name(self.project)
             rl.patch_project(self.project, {"name": act["name"]})
+            st["renamed_at_ms"] = int(time.time() * 1000)
             time.sleep(act.get("settle_s", 8))
         elif kind == "restore_name":
             if st.get("old_name"):
@@ -137,8 +138,10 @@ class Lane(threading.Thread):
         usage0 = rl.usage_all(self.project)
         gen_truth = {}
         task_state = {"D": D, "secret_value": None, "group_chat": None, "old_name": None}
+        tag_up = re.sub(r"[^A-Za-z0-9]", "_", tag).upper()
         if task.get("setup_actions"):
             for act in task["setup_actions"]:
+                act = {k: (v.replace("{TAG}", tag_up) if isinstance(v, str) else v) for k, v in act.items()}
                 self.driver_action(act, task_state)
         chat_id = None
         if task.get("same_chat_as"):
@@ -147,7 +150,7 @@ class Lane(threading.Thread):
         all_docs = []
         first_chat = None
         for i, turn in enumerate(task["turns"], 1):
-            prompt = turn["prompt"].replace("{D}", D).replace("{FIXTURES}", FIXTURES)
+            prompt = turn["prompt"].replace("{D}", D).replace("{FIXTURES}", FIXTURES).replace("{TAG}", tag_up)
             if turn.get("seed"):
                 code, out = self.box.run_as_ws(self.project, turn["seed"].replace("{D}", D).replace("{P}", proj_dir), env=env, timeout=180)
                 if "fatal" in out.lower() or (code not in (0, None)):
@@ -206,6 +209,7 @@ class Lane(threading.Thread):
                 turn.get("timeout_s", task.get("timeout_s", 600)),
                 until_first_reply=bool(turn.get("background")),
                 on_poll=on_poll if turn.get("secret_decide") else None,
+                skip_secret_cards=bool(turn.get("secret_decide")),
             )
             res["secret_requests_decided"] = decided
             if turn.get("after_s"):
@@ -294,7 +298,7 @@ class Lane(threading.Thread):
             all_docs.append(doc)
         dc = task.get("doc_checks")
         if dc:
-            checks = doc_checks(all_docs)
+            checks = doc_checks(all_docs, after_ms=task_state.get("renamed_at_ms"))
             if dc.get("max_handoffs") is not None and checks["handoffs"] > dc["max_handoffs"]:
                 reasons.append(f"{checks['handoffs']} handoffs (continue-act) > {dc['max_handoffs']}")
             if dc.get("no_duplicate_status") and checks["dup_status"]:
@@ -305,6 +309,14 @@ class Lane(threading.Thread):
                 reasons.append(f"a sentence appears twice in one bubble: {checks['repeated_sentences'][:2]}")
             if dc.get("no_truncated_reply") and checks["truncated"]:
                 reasons.append(f"a done bubble ends mid-sentence: {checks['truncated'][:2]}")
+            if dc.get("no_wrong_self_identity"):
+                # a bubble from the renamed agent must never introduce itself by the old name
+                old_name = task_state.get("old_name") or dc.get("old_name")
+                if old_name:
+                    rx = r"\b(I['’]m|I am|my name is|call me|this is|you['’]re talking to|speaking)\s+" + re.escape(old_name) + r"\b|\b" + re.escape(old_name) + r" here\b"
+                    hits = [t[:80] for t in checks["texts_after_rename"] if re.search(rx, t, re.I)]
+                    if hits:
+                        reasons.append(f"a bubble after the rename still says it is {old_name!r}: {hits[:2]}")
             if dc.get("forbid_text_regex"):
                 hits = [t[:80] for t in checks["texts"] if re.search(dc["forbid_text_regex"], t, re.I)]
                 if hits:
@@ -355,10 +367,10 @@ class Lane(threading.Thread):
         return rec
 
 
-def doc_checks(docs):
+def doc_checks(docs, after_ms=None):
     """Whole-transcript checks over every chat doc a task touched (rows are deduplicated by id)."""
     handoffs = 0
-    dups, repeated, texts, truncated = [], [], [], []
+    dups, repeated, texts, truncated, texts_after = [], [], [], [], []
     empty_result_rows = 0
     seen_rows = set()
     for doc in docs:
@@ -380,6 +392,8 @@ def doc_checks(docs):
             tools = [p for p in m.get("parts", []) if p.get("kind") == "tool"]
             if text:
                 texts.append(text)
+                if after_ms and (m.get("createdAt") or 0) >= after_ms:
+                    texts_after.append(text)
                 # a finished bubble that stops on a comma / dash / mid-word (no closing punctuation,
                 # bracket, quote or code tick) was cut off (#1411)
                 if m.get("status") == "done" and len(text) > 30 and not re.search(r"[.!?…:)\]\"'`*_]\s*$|\n\s*[-•*\d].*$", text):
@@ -390,7 +404,7 @@ def doc_checks(docs):
                         repeated.append(x[:60])
             elif tools and m.get("turnRole") != "ack" and m.get("status") == "done":
                 empty_result_rows += 1
-    return {"handoffs": handoffs, "dup_status": dups, "empty_result_rows": empty_result_rows, "repeated_sentences": repeated, "texts": texts, "truncated": truncated}
+    return {"handoffs": handoffs, "dup_status": dups, "empty_result_rows": empty_result_rows, "repeated_sentences": repeated, "texts": texts, "truncated": truncated, "texts_after_rename": texts_after}
 
 
 def main():

@@ -536,7 +536,9 @@ fn people_ping_not_for_agents(msg: &MessageView, info: &PeopleChatInfo) -> bool 
 }
 
 /// What a reply in a people chat carries: message fields for the clients.
-/// Clients show `inReplyTo` / `askedByHandle` as a reply chip; the prose stays clean.
+/// `replyTo` is the platform quote/reply (clients show Grok's quote header on
+/// the bubble). `inReplyTo` is turn linkage (retry, "already replied"). Both
+/// point at the asker's message; the prose stays clean.
 pub struct ReplyAttribution {
     pub fields: Vec<(&'static str, Value)>,
 }
@@ -1388,6 +1390,10 @@ impl Agent {
             ("askedBy", json!(format!("user:{}", asker.user_id))),
             ("askedByHandle", json!(asker.handle)),
             ("inReplyTo", json!(asker.message_id)),
+            // Platform reply feature: thread this bubble to the asker's message
+            // so everyone sees which line is being answered (feedback
+            // app-01M5MPKJ9K6HGHFH6BZWR9CME0).
+            ("replyTo", json!(asker.message_id)),
         ];
         Some(ReplyAttribution { fields })
     }

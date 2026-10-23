@@ -27,7 +27,7 @@ use crate::model::{
 };
 
 use super::doc::ChatDoc;
-use super::{ClientCommand, SyncEvent, SyncSource};
+use super::{ClientCommand, PictureSource, SyncEvent, SyncSource};
 use crate::model::{
     new_id, now_ms, ApprovalRisk, ApprovalState, Attachment, AttachmentKind, BoxState,
     ChannelBinding, ChannelPairing, ChannelPlatform, ChannelPlatformState, ChannelsView, Chat,
@@ -489,6 +489,9 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         | ClientCommand::DeletePeopleChat { .. }
         | ClientCommand::RenameGroup { .. }
         | ClientCommand::SetGroupImage { .. }
+        | ClientCommand::SetGroupLeaf { .. }
+        | ClientCommand::SetProjectImage { .. }
+        | ClientCommand::GenerateProjectImage { .. }
         | ClientCommand::CloseChat { .. } => {}
         // D88 servers live on the relay only; the fixture has none.
         ClientCommand::ServersRefresh
@@ -971,16 +974,6 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             set_machine(shared, MachineState::Stopped, Some("Stopped by you"), None);
         }
         ClientCommand::FocusChat { .. } => {}
-        ClientCommand::SetAvatarColorIndex { project_id, index } => {
-            {
-                let mut projects = shared.projects.lock().unwrap();
-                if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
-                    p.avatar_color_override = index;
-                    p.avatar_color_index = Some(crate::ui::avatars::index_for(&project_id, index));
-                }
-            }
-            emit_projects(shared);
-        }
         ClientCommand::SetAvatarLeaf {
             project_id,
             leaf,
@@ -991,6 +984,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
                     p.avatar_leaf = leaf;
                     p.avatar_leaf_color = color;
+                    p.image_url = None;
                 }
             }
             emit_projects(shared);
@@ -4865,6 +4859,7 @@ fn launch_week() -> Project {
         avatar_color_index: None,
         avatar_leaf: None,
         avatar_leaf_color: None,
+        image_url: None,
         description: None,
         model: None,
         owner: None,
@@ -4887,6 +4882,7 @@ fn launch_week() -> Project {
             avatar_color_index: Some(color),
             avatar_leaf: Some(leaf),
             avatar_leaf_color: Some(color),
+            image_url: None,
             description: None,
             model: None,
             owner: None,
@@ -5101,15 +5097,13 @@ fn seed_people_chat_docs() -> Vec<ChatDoc> {
         "Deck v3 is in the shared folder. Sam, can you check the pricing slide before the run-through?",
         base + 300_000,
     ));
-    insert_message_via_core(
-        &group,
-        &human_message(
-            GROUP_LAUNCH,
-            &sam(),
-            "On it. @arbos pull the latest signup numbers into slide 4 while I read.",
-            base + 330_000,
-        ),
+    let ask = human_message(
+        GROUP_LAUNCH,
+        &sam(),
+        "On it. @arbos pull the latest signup numbers into slide 4 while I read.",
+        base + 330_000,
     );
+    insert_message_via_core(&group, &ask);
     let mut agent = human_message(GROUP_LAUNCH, &sam(), "", base + 360_000);
     agent.role = Role::Assistant;
     agent.sender = format!("agent:{PROJECT_ARBOS}");
@@ -5118,6 +5112,10 @@ fn seed_people_chat_docs() -> Vec<ChatDoc> {
     agent.sender_avatar = None;
     agent.asked_by_handle = Some("sam".into());
     agent.owner_handle = Some(ME_HANDLE.into());
+    // The relay threads a group reply to the asker's message (#1447), so the
+    // bubble opens with a quote header — the shape of Jacob's Oct 23 "Doug"
+    // screenshot (bubble-quote-width-2026-10-23).
+    agent.in_reply_to = Some(ask.id.clone());
     agent.parts = vec![text_part(
         "Done. Slide 4 now reads 1,284 signups this week (+18 %). The chart is in `deck/v3/slide-04.png`.",
     )];
@@ -5502,6 +5500,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                                 avatar_color_index: p.avatar_color_index,
                                 avatar_leaf: p.avatar_leaf,
                                 avatar_leaf_color: p.avatar_leaf_color,
+                                image_url: None,
                                 description: None,
                                 model: None,
                                 owner: None,
@@ -5595,6 +5594,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                         avatar_color_index: p.avatar_color_index,
                         avatar_leaf: p.avatar_leaf,
                         avatar_leaf_color: p.avatar_leaf_color,
+                        image_url: None,
                         description: None,
                         model: None,
                         owner: None,
@@ -5666,6 +5666,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                             avatar_color_index: p.avatar_color_index,
                             avatar_leaf: p.avatar_leaf,
                             avatar_leaf_color: p.avatar_leaf_color,
+                            image_url: None,
                             description: None,
                             model: None,
                             owner: None,
@@ -5789,6 +5790,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                                 avatar_color_index: p.avatar_color_index,
                                 avatar_leaf: p.avatar_leaf,
                                 avatar_leaf_color: p.avatar_leaf_color,
+                                image_url: None,
                                 description: None,
                                 model: None,
                                 owner: None,
@@ -5851,6 +5853,58 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             }
             emit_avatar(shared, &url);
             emit_projects(shared);
+            true
+        }
+        ClientCommand::SetGroupLeaf { chat_id, pick } => {
+            {
+                let mut projects = shared.projects.lock().unwrap();
+                if let Some(p) = projects.iter_mut().find(|p| p.id == *chat_id) {
+                    p.avatar_leaf = pick.map(|l| l.leaf);
+                    p.avatar_leaf_color = pick.map(|l| l.color);
+                    p.image_url = None;
+                }
+            }
+            emit_projects(shared);
+            true
+        }
+        ClientCommand::SetProjectImage { project_id, source } => {
+            // No blob store in the demo: the picked file (or the "generated" key) becomes a
+            // seeded picture, like a group's.
+            let seed = match source {
+                PictureSource::File(path) => path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("picture")
+                    .to_owned(),
+                PictureSource::Key(key) => key.clone(),
+            };
+            let url = format!("fixture://avatar/agent-{seed}");
+            {
+                let mut projects = shared.projects.lock().unwrap();
+                if let Some(p) = projects.iter_mut().find(|p| p.id == *project_id) {
+                    p.image_url = Some(url.clone());
+                }
+            }
+            emit_avatar(shared, &url);
+            emit_projects(shared);
+            true
+        }
+        ClientCommand::GenerateProjectImage { project_id, prompt } => {
+            // The demo "generates" after a short wait: a seeded picture named after the prompt.
+            let key = format!("gen-{}", prompt.trim().to_lowercase().replace(' ', "-"));
+            let url = format!("fixture://avatar/agent-{key}");
+            let shared = shared.clone();
+            let project_id = project_id.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(1400)).await;
+                emit_avatar(&shared, &url);
+                let _ = shared.events.send(SyncEvent::ProjectImageGenerated {
+                    project_id,
+                    image_key: Some(key),
+                    url: Some(url),
+                    error: None,
+                });
+            });
             true
         }
         _ => false,

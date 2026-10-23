@@ -98,7 +98,7 @@ pub(super) fn page(
     let sid_pic = space.id.clone();
     let pic_click = editable.then(|| {
         let f = cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
-            this.pick_group_image(sid_pic.clone(), cx);
+            this.open_avatar_picker(crate::ui::avatar_picker::Target::Group(sid_pic.clone()), cx);
         });
         Box::new(f) as HeroClick
     });

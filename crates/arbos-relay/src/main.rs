@@ -25,6 +25,7 @@ mod db_secrets;
 mod db_voice;
 mod debug_api;
 mod diag;
+mod export;
 mod features;
 mod feedback;
 mod fleet;
@@ -386,7 +387,13 @@ async fn main() -> anyhow::Result<()> {
         .route("/auth/token", post(signin::token))
         .route("/auth/refresh", post(signin::refresh))
         .route("/auth/logout", post(signin::logout))
-        .route("/auth/devices", get(signin::devices_list))
+        .route(
+            "/auth/devices",
+            get(signin::devices_list).post(export::mint_reader),
+        )
+        .route("/chats/{id}/export", get(export::export_chat))
+        .route("/chats/{id}/messages", post(export::send_message))
+        .route("/export/blob/{chat}/{key}", get(export::signed_blob))
         .route("/auth/devices/{id}", delete(signin::device_revoke))
         .route("/me", get(signin::me).patch(signin::patch_me))
         .route(
@@ -748,6 +755,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/bootstrap/{file}", get(blobs::bootstrap))
         .route("/proxy/v1/models", get(proxy::openai_models))
         .route("/proxy/v1/images/generations", post(images::generations))
+        .route(
+            "/projects/{id}/avatar/generate",
+            post(images::avatar_generate),
+        )
         .route(
             "/proxy/v1/audio/transcriptions",
             post(proxy::audio_transcriptions),
