@@ -335,8 +335,9 @@ pub struct AppState {
     /// on every sheet open: the New Message sheet paints it on its first frame
     /// instead of "Searching…" that the list then replaces.
     pub people_directory: Vec<Person>,
-    /// handle → until (ms) per chat; shown as "@sam is typing…".
-    pub typing: HashMap<Id, (String, u64)>,
+    /// Per chat: (handle, until ms) for everyone typing; the presence row over
+    /// the composer reads it (`ui::presence`), newest first.
+    pub typing: HashMap<Id, Vec<(String, u64)>>,
     /// Decoded avatars by `avatar_url`; `None` while a fetch is in flight.
     pub avatars: HashMap<String, Option<Arc<RenderImage>>>,
     /// The dominant colour of each decoded avatar (by URL; the relay's URL
@@ -1264,10 +1265,10 @@ impl AppState {
                 handle,
                 active,
             } => {
+                let entry = self.typing.entry(chat_id).or_default();
+                entry.retain(|(h, _)| *h != handle);
                 if active {
-                    self.typing.insert(chat_id, (handle, now_ms() + 6_000));
-                } else {
-                    self.typing.remove(&chat_id);
+                    entry.push((handle, now_ms() + 6_000));
                 }
                 cx.notify();
             }
@@ -6108,11 +6109,16 @@ impl AppState {
         }
     }
 
-    pub fn typing_in(&self, chat_id: &str) -> Option<String> {
-        self.typing
+    /// Handles typing in `chat_id` right now, the most recently seen first.
+    pub fn typing_in(&self, chat_id: &str) -> Vec<String> {
+        let now = now_ms();
+        let mut live: Vec<&(String, u64)> = self
+            .typing
             .get(chat_id)
-            .filter(|(_, until)| *until > now_ms())
-            .map(|(handle, _)| handle.clone())
+            .map(|v| v.iter().filter(|(_, until)| *until > now).collect())
+            .unwrap_or_default();
+        live.sort_by_key(|(_, until)| std::cmp::Reverse(*until));
+        live.into_iter().map(|(handle, _)| handle.clone()).collect()
     }
 
     fn project_of_chat(&self, chat_id: &str) -> Option<&Project> {

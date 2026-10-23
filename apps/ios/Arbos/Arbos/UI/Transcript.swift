@@ -803,11 +803,12 @@ struct RowView: View {
                 .opacity(pending ? 0.6 : 1)
             }
         case .other(let text, let handle, let avatar, let named, let quote):
-            HStack(alignment: .bottom, spacing: 8) {
+            HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
                 Button { model.openPersonProfile(handle: handle, avatarUrl: avatar, chatId: chatId) } label: {
-                    PersonAvatar(url: avatar, handle: handle, size: 26, name: model.personName(handle: handle), id: model.personId(handle: handle))
+                    PersonAvatar(url: avatar, handle: handle, size: Theme.memberAvatar, name: model.personName(handle: handle), id: model.personId(handle: handle))
                 }
                 .buttonStyle(.plain)
+                .padding(.leading, Theme.avatarColumnInset)
                 .accessibilityLabel("@\(handle), profile")
                 VStack(alignment: .leading, spacing: 3) {
                     if named {
@@ -834,7 +835,7 @@ struct RowView: View {
                     .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
                     .senderBar(personAccent(handle: handle, avatar: avatar))
                 }
-                .frame(maxWidth: maxBubble - 34, alignment: .leading)
+                .frame(maxWidth: maxBubble - Theme.memberLane, alignment: .leading)
                 Spacer(minLength: 0)
             }
             .task(id: avatar) { accents.load(url: avatar) }
@@ -843,8 +844,9 @@ struct RowView: View {
                 if let agentId { model.showProfile(.agent(projectId: agentId)) }
                 else { model.openPersonProfile(handle: handle, avatarUrl: avatar, chatId: chatId) }
             }
-            HStack(alignment: .bottom, spacing: 8) {
+            HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
                 Button(action: openMember) { peopleAvatar(handle: handle, avatar: avatar) }
+                    .padding(.leading, Theme.avatarColumnInset)
                     .buttonStyle(.plain)
                     .accessibilityLabel("@\(handle), profile")
                 VStack(alignment: .leading, spacing: 3) {
@@ -867,7 +869,7 @@ struct RowView: View {
                     .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
                     .senderBar(memberAccent(handle: handle, avatar: avatar))
                 }
-                .frame(maxWidth: maxBubble - 34, alignment: .leading)
+                .frame(maxWidth: maxBubble - Theme.memberLane, alignment: .leading)
                 Spacer(minLength: 0)
             }
             .task(id: avatar) { if memberProject(handle: handle) == nil { accents.load(url: avatar) } }
@@ -1000,7 +1002,7 @@ struct RowView: View {
     /// Match the avatar offset used by people-chat bubbles (26 pt + 8 pt gap).
     private var reactionLeading: CGFloat {
         switch row.kind {
-        case .other, .member: return 34
+        case .other, .member: return Theme.memberLane
         default: return 0
         }
     }
@@ -1014,11 +1016,11 @@ struct RowView: View {
     @ViewBuilder
     private func peopleAvatar(handle: String, avatar: String?) -> some View {
         if let project = memberProject(handle: handle) {
-            AgentAvatar(project: project, theme: theme, size: 26, still: true)
+            AgentAvatar(project: project, theme: theme, size: Theme.memberAvatar, still: true)
         } else if let avatar, avatar.contains("://") {
-            PersonAvatar(url: avatar, handle: handle, size: 26, name: model.personName(handle: handle), id: model.personId(handle: handle))
+            PersonAvatar(url: avatar, handle: handle, size: Theme.memberAvatar, name: model.personName(handle: handle), id: model.personId(handle: handle))
         } else {
-            PersonAvatar(url: nil, handle: handle, size: 26, name: model.personName(handle: handle), id: model.personId(handle: handle))
+            PersonAvatar(url: nil, handle: handle, size: Theme.memberAvatar, name: model.personName(handle: handle), id: model.personId(handle: handle))
         }
     }
 

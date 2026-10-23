@@ -1583,6 +1583,7 @@ final class AppModel: ObservableObject {
         if !isProjectDoc {
             room.onPresence = { [weak self] header in
                 self?.notePresence(header)
+                self?.noteTyping(header, chatId: key)
                 if let callId = header["in_call"] as? String { self?.peerInCall(callId, chatId: key) }
             }
         }
@@ -2827,6 +2828,10 @@ final class AppModel: ObservableObject {
     private var composerDrafts: [Id: String] = [:]
     /// Last presence time per user id, from room presence frames this session.
     @Published private(set) var lastSeen: [String: Int64] = [:]
+    /// Who is typing per chat (handle → until ms), from room presence frames
+    /// with `typing`; the presence row over the composer reads it
+    /// ([feedback typing-indicator-left-2026-10-23], Mac `AppState.typing`).
+    @Published var typing: [Id: [String: Int64]] = [:]
 
     /// Draft text for a chat, or `""` when none.
     func composerDraft(for chatId: Id) -> String {
@@ -2905,6 +2910,30 @@ final class AppModel: ObservableObject {
         guard let user = header["user"] as? String else { return }
         let at = (header["at"] as? NSNumber)?.int64Value ?? nowMs()
         if (lastSeen[user] ?? 0) < at { lastSeen[user] = at }
+    }
+
+    /// A presence frame's `typing` flag for `chatId`: on → the handle types for
+    /// 6 s (the sender refreshes every 3 s), off → gone at once.
+    func noteTyping(_ header: [String: Any], chatId: Id) {
+        guard let handle = header["handle"] as? String, !handle.isEmpty,
+              let active = header["typing"] as? Bool else { return }
+        if handle == user?.login { return }
+        var chat = typing[chatId] ?? [:]
+        if active {
+            chat[handle] = nowMs() + 6_000
+        } else {
+            chat[handle] = nil
+        }
+        typing[chatId] = chat.isEmpty ? nil : chat
+    }
+
+    /// Handles typing in `chatId` right now, the most recently seen first.
+    func typingHandles(in chatId: Id) -> [String] {
+        let now = nowMs()
+        return (typing[chatId] ?? [:])
+            .filter { $0.value > now }
+            .sorted { $0.value > $1.value }
+            .map(\.key)
     }
 
     /// `PUT /chats/{id}/settings {muted}` per member; local flag updated first.

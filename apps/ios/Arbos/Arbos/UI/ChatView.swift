@@ -196,10 +196,49 @@ struct ChatView: View {
         if let chat, chat.isSystem { return "\(project?.name ?? "Arbos") · Projects" }
         return project?.name ?? "Arbos"
     }
-    /// Who is working: the streaming agent's handle in a people chat.
-    private var workingName: String {
-        if isPeople, let m = messages.last(where: { $0.role == .assistant && $0.isStreaming }), let h = m.senderHandle { return h }
-        return name
+    /// Everyone on the presence row over the composer, newest first: people
+    /// typing (room presence) and agents working (a fresh stream or an open
+    /// hand-off, one entry per agent) — [feedback typing-indicator-left-2026-10-23].
+    private var presenceParticipants: [PresenceParticipant] {
+        var out: [PresenceParticipant] = []
+        for handle in model.typingHandles(in: chatId) {
+            let m = people?.members.first { !$0.isAgent && $0.handle == handle }
+            out.append(PresenceParticipant(
+                id: "typing:\(handle)",
+                name: m?.name.flatMap { $0.isEmpty ? nil : $0 } ?? "@\(handle)",
+                activity: .typing,
+                picture: AnyView(PersonAvatar(url: m?.avatarUrl, handle: handle, size: PresenceRow.avatar,
+                                              name: m?.name, id: m?.id, colorIndex: m?.avatarColorIndex))
+            ))
+        }
+        guard streaming else { return out }
+        if isPeople {
+            let recent = nowMs() - 15 * 60 * 1000
+            var seen = Set<String>()
+            for m in messages.reversed() where m.role == .assistant && m.isStreaming && m.createdAt >= recent {
+                let key = m.senderHandle ?? m.senderName ?? m.sender
+                guard seen.insert(key).inserted else { continue }
+                let agent = people?.agents.first { mentionSlug($0.project?.name ?? "") == key || $0.handle == key }
+                if let p = agent?.project {
+                    out.append(PresenceParticipant(
+                        id: "working:\(key)", name: p.name, activity: .working,
+                        picture: AnyView(AgentAvatar(project: p, theme: theme, size: PresenceRow.avatar, working: true))
+                    ))
+                } else {
+                    let shown = m.senderName ?? key
+                    out.append(PresenceParticipant(
+                        id: "working:\(key)", name: shown, activity: .working,
+                        picture: AnyView(InitialsAvatar(name: shown, handle: key, id: m.sender, size: PresenceRow.avatar))
+                    ))
+                }
+            }
+        } else if let project {
+            out.append(PresenceParticipant(
+                id: "working:\(project.id)", name: project.name, activity: .working,
+                picture: AnyView(AgentAvatar(project: project, theme: theme, size: PresenceRow.avatar, working: true))
+            ))
+        }
+        return out
     }
 
     /// Agent member ids currently selected on the conversation chips.
@@ -351,22 +390,25 @@ struct ChatView: View {
         }
         .animation(.easeOut(duration: 0.2), value: awayFromBottom)
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            Group {
-                if isChannel, !model.channelCanPost(chatId) {
-                    // Rule 9: a restricted channel I cannot post in — one quiet line, no composer.
-                    Text("Only admins post here")
-                        .font(theme.font(Theme.small))
-                        .foregroundStyle(theme.muted)
-                        .frame(maxWidth: .infinity)
-                        .frame(height: Theme.fieldHeight)
-                        .accessibilityIdentifier("channel-read-only")
-                } else {
-                    composer
+            VStack(spacing: 0) {
+                presenceRow
+                Group {
+                    if isChannel, !model.channelCanPost(chatId) {
+                        // Rule 9: a restricted channel I cannot post in — one quiet line, no composer.
+                        Text("Only admins post here")
+                            .font(theme.font(Theme.small))
+                            .foregroundStyle(theme.muted)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: Theme.fieldHeight)
+                            .accessibilityIdentifier("channel-read-only")
+                    } else {
+                        composer
+                    }
                 }
+                // Grok: 31 pt side inset with the keyboard down, 19 pt with it up.
+                .padding(.horizontal, composerSideInset)
+                .animation(.easeOut(duration: 0.25), value: composerFocused)
             }
-            // Grok: 31 pt side inset with the keyboard down, 19 pt with it up.
-            .padding(.horizontal, composerSideInset)
-            .animation(.easeOut(duration: 0.25), value: composerFocused)
             .padding(.top, 8)
             .padding(.bottom, composerFocused ? 8 : 2)
             .background(alignment: .top) {
@@ -895,18 +937,10 @@ struct ChatView: View {
                                 }
                             }
                     }
-                    if model.isStreaming(chatId) || model.hasOpenSubagent(chatId) || model.isAwaitingReply(chatId) {
-                        // Tick once a second so time-capped working states
-                        // (stale stream, hand-off grace, awaiting-reply cheat)
-                        // expire without a stuck "<name> is working" line.
-                        TimelineView(.periodic(from: .now, by: 1)) { _ in
-                            if model.isStreaming(chatId) || model.hasOpenSubagent(chatId) || model.isAwaitingReply(chatId) {
-                                workingLine.padding(.top, 20)
-                            }
-                        }
-                    }
+                    // Who is working is the presence row over the composer
+                    // (`PresenceRow`), not a transcript row.
                     // Clears the 24 pt fade above the composer, so the last row
-                    // (and "<name> is working") is never under the chat bar.
+                    // is never under the chat bar.
                     Color.clear.frame(height: 28).id("bottom")
                 }
                 .padding(.horizontal, 16)
@@ -1195,27 +1229,21 @@ struct ChatView: View {
         .fixedSize(horizontal: false, vertical: true)
     }
 
-    /// "Cloning RaoFoundation/subtensor" when the harness says what it is doing, else "<name> is working".
-    private var workingText: String {
-        if let a = model.currentActivity(chatId) { return a }
-        return "\(workingName) is working"
-    }
-
-    private var workingLine: some View {
-        HStack(spacing: 10) {
-            if isPeople, let m = messages.last(where: { $0.role == .assistant && $0.isStreaming }),
-               let agent = people?.agents.first(where: { mentionSlug($0.project?.name ?? "") == m.senderHandle || $0.handle == m.senderHandle }),
-               let p = agent.project {
-                AgentAvatar(project: p, theme: theme, size: 26, working: true)
-            } else if let project {
-                AgentAvatar(project: project, theme: theme, size: 26, working: true)
+    /// The presence row over the composer: ticks once a second so time-capped
+    /// states (stale stream, hand-off grace, awaiting-reply cheat, a typing
+    /// mark's 6 s) expire without a stuck line. Left edge = the bubbles' 16 pt.
+    @ViewBuilder
+    private var presenceRow: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { _ in
+            let participants = presenceParticipants
+            if !participants.isEmpty {
+                PresenceRow(participants: participants,
+                            detail: model.currentActivity(chatId),
+                            queued: false)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 4)
             }
-            WorkingStatusText(text: workingText, color: theme.muted)
-                .id(workingText)
-            Spacer(minLength: 0)
         }
-        .accessibilityLabel(workingText)
-        .animation(.easeInOut(duration: 0.25), value: workingText)
     }
 
     // MARK: Composer
@@ -1760,8 +1788,8 @@ struct ChatView: View {
     }
 }
 
-/// Soft fade + streaming shimmer on "<name> is working" (Mac `working_line`).
-private struct WorkingStatusText: View {
+/// Soft fade + streaming shimmer on the presence row's line (Mac `presence::row`).
+struct WorkingStatusText: View {
     @Environment(\.theme) private var theme
     let text: String
     let color: Color
