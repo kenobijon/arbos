@@ -488,6 +488,8 @@ struct ChatView: View {
                     case "voice": startCall(.voice)
                     case "model": showModelPicker = true
                     case "profile": openHeaderProfile()
+                    // `avatarpicker[-generate|-upload]`: the agent pane, which opens the sheet on that tab.
+                    case let s where s.hasPrefix("avatarpicker"): openHeaderProfile()
                     case "edit": showProfile = true
                     case "userprofile": if let c = counterpart { model.showProfile(.user(ProfilePerson(c))) }
                     // `addmembers`: the group pane opens its Add members sheet on appear.
