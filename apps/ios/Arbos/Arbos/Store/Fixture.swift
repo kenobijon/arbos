@@ -92,6 +92,11 @@ extension AppModel {
         ]
         chats = allChats
         messages = allMessages
+        // `ARBOS_FIXTURE_LONG_REPLY=1`: the opened chat ends with a several-block
+        // agent reply, the shape of Jacob's bubble in #1389 (selection / copy rigs).
+        if DebugHooks.fixtureLongReply, let c = DebugHooks.openChat {
+            messages[c, default: []].append(assistant("fx-long", c, Self.longReply, at: now - 60_000))
+        }
         machine = Machine(state: .awake, since: now - 3_600_000, spec: "Daytona · 4 vCPU · 8 GiB · 10 GiB disk · arbos-agent-0.2.0",
                           provider: "daytona", sandboxId: "fixture-box", spendTodayUsd: 1.6, spendCapUsd: 25,
                           workspaces: Dictionary(uniqueKeysWithValues: list.map { ($0.id, $0.id == "fx-comms" ? WorkspaceState.active : .idle) }),
@@ -329,6 +334,22 @@ extension AppModel {
             : "Done. Short replies from now on, and I'll keep anything that goes out on Discord to one or two casual lines in your voice."
         append(bubble(resultText))
     }
+
+    /// A several-paragraph agent answer with a list and a code span — the shape
+    /// of Jacob's bubble in #1389 (`ARBOS_FIXTURE_LONG_REPLY`, tests).
+    static let longReply = """
+    I can't see anything in my records that points to an app bug, so I wouldn't blame the app without more evidence.
+
+    The likeliest cause is a prompt that never told the agents to wait for everyone and to keep quiet between turns:
+
+    - post only the number
+    - call `I won` only for the lowest
+    - wait for every player before the next round
+
+    The app side plays a part too: several agents answer the same message at once, and some of my filings went out before you could stop them.
+
+    Do you want me to post a clear rule summary to the group before the next round?
+    """
 
     private func user(_ id: Id, _ chat: Id, _ text: String, at: Int64) -> Message {
         Message(id: id, chatId: chat, role: .user, sender: "user", status: .done, turn: nil, decision: nil, subagentId: nil,
