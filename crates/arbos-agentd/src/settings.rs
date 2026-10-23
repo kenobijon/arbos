@@ -432,7 +432,7 @@ impl Agent {
         tracing::info!(from = %r.from, to = %r.to, "project renamed; identity refreshed");
         self.append_audit(
             "renamed",
-            json!({ "from": r.from, "to": r.to, "at": r.at_ms }),
+            json!({ "from": r.from, "to": r.to, "handle": self.identity.handle(), "at": r.at_ms }),
         );
         let note = format!(
             "This agent was renamed from \"{}\" to \"{}\"; notes and messages that say \"{}\" refer to it. It introduces itself as \"{}\".",
