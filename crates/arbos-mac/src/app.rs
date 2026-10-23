@@ -420,6 +420,9 @@ pub struct AppState {
     /// The relay's HTTP reachability (registry poll) and when it last changed.
     pub relay_link: (LinkState, u64),
     pub rail_collapsed: bool,
+    /// Chat-list column width (pt). Dragged on the right edge; persisted in
+    /// `<config>/sidebar_width` ([feedback app-01M5MJ9Y91W9ZET71KTCE7PS65]).
+    pub sidebar_width: f32,
     /// Below [`NARROW_WINDOW`](crate::ui::theme::NARROW_WINDOW) the sidebar
     /// auto-hides; the header toggle (or ⌘B) floats it over the chat instead.
     pub sidebar_overlay: bool,
@@ -761,6 +764,7 @@ impl AppState {
             room_links: HashMap::new(),
             relay_link: (LinkState::Live, 0),
             rail_collapsed: false,
+            sidebar_width: crate::ui::theme::SidebarWidth::load(),
             sidebar_overlay: false,
             details_open: None,
             media_viewer: None,
@@ -4364,6 +4368,17 @@ impl AppState {
             self.rail_collapsed = !self.rail_collapsed;
             self.sidebar_overlay = false;
         }
+        cx.notify();
+    }
+
+    /// Drag on the chat-list column's right edge: set width and persist it.
+    pub fn set_sidebar_width(&mut self, width: f32, cx: &mut Context<Self>) {
+        let width = crate::ui::theme::SidebarWidth::clamp(width);
+        if (self.sidebar_width - width).abs() < 0.5 {
+            return;
+        }
+        self.sidebar_width = width;
+        crate::ui::theme::SidebarWidth::save(width);
         cx.notify();
     }
 
