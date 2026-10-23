@@ -6,13 +6,14 @@
 //!
 //! Gaps are Grok Bot's, measured on the real Mac app (ink to ink, 2 px/pt):
 //! the chat title's blob → name is 5 pt (ref 57); a sidebar / members row's
-//! blob → name is 11–12 pt (refs 45, 39). Text starts about 1 pt of side
-//! bearing after its box, so the box gaps below land on those.
+//! blob → name is 11–12 pt (refs 45, 39). Measured on our builds, the 13 pt
+//! semibold header name starts flush with its box and the 15 pt row name
+//! about 1 pt in, so the box gaps below land on Grok's ink gaps.
 
 use gpui::{div, prelude::*, px, AnyElement, Div};
 
 /// Picture → name in the chat header pill (Grok: 5 pt ink).
-pub const HEADER_GAP: f32 = 4.0;
+pub const HEADER_GAP: f32 = 5.0;
 /// Picture → name in a list row — sidebar, members, people (Grok: 11–12 pt ink).
 pub const ROW_GAP: f32 = 10.0;
 
@@ -168,8 +169,9 @@ mod tests {
             std::hint::black_box(HEADER_GAP),
             std::hint::black_box(ROW_GAP),
         );
-        // Ref 57: 5 pt ink; ref 45 / 39: 11–12 pt ink; ≈ 1 pt of side bearing.
-        assert!((4.0..=5.0).contains(&header), "header gap {header}");
+        // Ref 57: 5 pt ink (no bearing at 13 pt semibold); refs 45 / 39:
+        // 11–12 pt ink with ≈ 1 pt of bearing at 15 pt.
+        assert!((4.5..=5.5).contains(&header), "header gap {header}");
         assert!((10.0..=11.0).contains(&row), "row gap {row}");
     }
 }
