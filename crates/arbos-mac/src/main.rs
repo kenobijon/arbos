@@ -222,10 +222,12 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-w", shell::CloseTab, None),
         KeyBinding::new("ctrl-w", shell::CloseTab, None),
         KeyBinding::new("cmd-t", shell::NewTab, None),
-        KeyBinding::new("cmd-shift-[", shell::PrevTab, None),
-        KeyBinding::new("cmd-shift-]", shell::NextTab, None),
-        KeyBinding::new("cmd-shift-{", shell::PrevTab, None),
-        KeyBinding::new("cmd-shift-}", shell::NextTab, None),
+        // ⌘⇧{ / ⌘⇧}: macOS reports these as cmd-{ / cmd-} with shift
+        // cleared for punctuation — same as Zed pane tab switching.
+        KeyBinding::new("cmd-{", shell::PrevTab, None),
+        KeyBinding::new("cmd-}", shell::NextTab, None),
+        KeyBinding::new("ctrl-{", shell::PrevTab, None),
+        KeyBinding::new("ctrl-}", shell::NextTab, None),
         KeyBinding::new("ctrl-t", shell::NewTab, None),
         KeyBinding::new("cmd-b", shell::ToggleRail, None),
         KeyBinding::new("ctrl-b", shell::ToggleRail, None),

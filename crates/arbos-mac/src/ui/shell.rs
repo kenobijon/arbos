@@ -1538,7 +1538,7 @@ impl Shell {
         }
     }
 
-    /// ⌘⇧[ / ⌘⇧]: the previous / next tab in dropdown order, wrapping.
+    /// ⌘⇧{ and ⌘⇧}: the previous / next tab in dropdown order, wrapping.
     fn step_tab(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
         let next = {
             let state = self.state.read(cx);
