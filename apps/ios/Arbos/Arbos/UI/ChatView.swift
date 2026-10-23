@@ -10,6 +10,13 @@ import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
+/// Long-press → Forward payload for the chat picker sheet.
+private struct PendingForward: Identifiable, Equatable {
+    let id = UUID()
+    let text: String
+    let from: String
+}
+
 struct ChatView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
@@ -77,6 +84,8 @@ struct ChatView: View {
     @State private var timeRevealLocked = false
     /// True while a message's swipe-right-to-reply is locked — blocks swipe-right-to-Home.
     @State private var replySwipeActive = false
+    /// Long-press → Forward: the text to send and who wrote it (Forward sheet).
+    @State private var pendingForward: PendingForward?
 
     /// Rows after the in-chat search filter (profile "search").
     private var visibleRows: [Row] {
@@ -451,6 +460,17 @@ struct ChatView: View {
         }
         .sheet(isPresented: $showProfile) {
             AgentEditSheet(projectId: projectId).environmentObject(model).environment(\.theme, theme)
+        }
+        .sheet(item: $pendingForward) { pending in
+            ForwardSheet(fromName: pending.from) { target in
+                pendingForward = nil
+                model.forwardText(pending.text, to: target)
+                model.notice = Notice(text: "Forwarded to \(target.title)")
+            }
+            .environmentObject(model)
+            .environment(\.theme, theme)
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
         }
         .task {
             guard DebugHooks.liveDemo, !model.demoStarted, DebugHooks.openChat == chatId || DebugHooks.openChat == nil, let text = DebugHooks.autoSend else { return }
@@ -1096,8 +1116,8 @@ struct ChatView: View {
     }
 
     /// A real message in the shared chat doc (the full menu: Copy, Reply,
-    /// Delete) — not a date / join / system line. Channels carry no replies
-    /// or deletes yet (C1 scope): Copy only.
+    /// Forward, Delete) — not a date / join / system line. Channels carry no
+    /// replies or deletes yet (C1 scope): Copy only.
     private func isMessageRow(_ row: Row) -> Bool {
         if isChannel { return false }
         switch row.kind {
@@ -1110,16 +1130,27 @@ struct ChatView: View {
 
     /// The long-press menu's actions (`MessageMenu`): Copy the text, Reply
     /// (in a people chat the agent that wrote it becomes the recipient),
-    /// Delete for everyone.
+    /// Forward to another chat, Delete for everyone.
     private func runMessageMenu(_ item: MessageMenuItem, row: Row) {
         switch item {
         case .copy:
             UIPasteboard.general.string = m_text(row)
         case .reply:
             beginReply(to: row)
+        case .forward:
+            beginForward(row)
         case .delete:
             model.deleteMessage(chatId: chatId, messageId: row.messageId)
         }
+    }
+
+    /// Long-press → Forward: open the chat picker with this row's text.
+    private func beginForward(_ row: Row) {
+        guard let m = messageById[row.messageId] else { return }
+        let text = m.plainText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        let from = MediaAlbum.senderName(m) { model.project($0)?.name }
+        pendingForward = PendingForward(text: text, from: from)
     }
 
     /// Reply to this row: composer preview + focus (people chats also address the agent).
