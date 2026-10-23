@@ -75,6 +75,9 @@ const STAMP_PAD_BOTTOM: f32 = 24.0 - ROW_GAP_HALF - 7.0;
 const BOTTOM_INSET: f32 = 54.0 - ROW_GAP_HALF - 6.0;
 /// People chats (redesign mocks a/f): a 24 pt sender disc at the bubble's
 /// bottom-left, 8 pt from it; captions and earlier blocks keep the lane free.
+/// The avatar column over the composer's `+` (Jacob, 2026-10-23) lands with
+/// the presence row (#1429: `AVATAR_COLUMN_INSET`, `SENDER_DISC = PLUS_BUTTON`,
+/// `SENDER_DISC_GAP` 14) — these follow it then.
 const SENDER_DISC: f32 = 24.0;
 const SENDER_DISC_GAP: f32 = 8.0;
 const SENDER_LANE: f32 = SENDER_DISC + SENDER_DISC_GAP;
