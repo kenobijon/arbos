@@ -4,7 +4,7 @@
 import Foundation
 import ArbosFFI
 
-struct Person: Identifiable, Equatable, Hashable {
+struct Person: Identifiable, Equatable, Hashable, Codable {
     var id: String
     var handle: String
     var avatarUrl: String?

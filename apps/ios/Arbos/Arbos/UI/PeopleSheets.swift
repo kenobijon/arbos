@@ -5,6 +5,25 @@
 import ArbosFFI
 import SwiftUI
 
+/// One row geometry for every card row in these sheets — the New agent / New group /
+/// New server rows and the people, agent and server rows under them — so the
+/// glyphs, pictures and text share one left edge and the sheet's first paint is
+/// its final layout.
+enum SheetRow {
+    /// The card's inset from the sheet edge.
+    static let cardInset: CGFloat = 16
+    /// Row content inset inside the card.
+    static let paddingX: CGFloat = 14
+    /// Glyph circle / picture diameter.
+    static let avatar: CGFloat = 44
+    /// Picture → text gap.
+    static let gap: CGFloat = 14
+    /// Where the text column starts inside the card; the row divider starts there too.
+    static var textInset: CGFloat { paddingX + avatar + gap }
+    /// The text column's distance from the sheet edge.
+    static var textLeading: CGFloat { cardInset + textInset }
+}
+
 /// "+" on home — Telegram's "New Message" sheet in Grok's dark skin: rises
 /// from the bottom, search on top, then New agent / New group, then your
 /// agents, then every other Arbos user. Typing filters agents, servers and the
@@ -111,7 +130,7 @@ struct NewChatSheet: View {
                                 // by name from the server's Members tab.
                             }
                         }
-                        .padding(.horizontal, 16)
+                        .padding(.horizontal, SheetRow.cardInset)
                         .padding(.bottom, 22)
                     }
 
@@ -124,7 +143,7 @@ struct NewChatSheet: View {
                                 if i < agents.count - 1 { rowDivider }
                             }
                         }
-                        .padding(.horizontal, 16)
+                        .padding(.horizontal, SheetRow.cardInset)
                         .padding(.bottom, 22)
                     }
 
@@ -137,7 +156,7 @@ struct NewChatSheet: View {
                                 if i < servers.count - 1 { rowDivider }
                             }
                         }
-                        .padding(.horizontal, 16)
+                        .padding(.horizontal, SheetRow.cardInset)
                         .padding(.bottom, 22)
                     }
 
@@ -155,7 +174,7 @@ struct NewChatSheet: View {
                                     if i < people.count - 1 { rowDivider }
                                 }
                             }
-                            .padding(.horizontal, 16)
+                            .padding(.horizontal, SheetRow.cardInset)
                         }
                     }
                     Color.clear.frame(height: 40)
@@ -236,12 +255,12 @@ struct NewChatSheet: View {
     }
 
     private var rowDivider: some View {
-        Rectangle().fill(theme.separator).frame(height: 0.5).padding(.leading, 72)
+        Rectangle().fill(theme.separator).frame(height: 0.5).padding(.leading, SheetRow.textInset)
     }
 
     private func actionRow(icon: String, title: String, subtitle: String) -> some View {
-        HStack(spacing: 14) {
-            GlassCircle(size: 44) {
+        HStack(spacing: SheetRow.gap) {
+            GlassCircle(size: SheetRow.avatar) {
                 Image(systemName: icon).font(.system(size: 17, weight: .semibold)).foregroundStyle(theme.text)
             }
             VStack(alignment: .leading, spacing: 2) {
@@ -251,7 +270,7 @@ struct NewChatSheet: View {
             Spacer()
             Image(systemName: "chevron.right").font(.system(size: 13, weight: .semibold)).foregroundStyle(theme.muted.opacity(0.7))
         }
-        .padding(.horizontal, 14)
+        .padding(.horizontal, SheetRow.paddingX)
         .padding(.vertical, 10)
         .contentShape(Rectangle())
     }
@@ -346,8 +365,8 @@ struct ServerPickRow: View {
     let server: Server
 
     var body: some View {
-        HStack(spacing: 14) {
-            ServerAvatar(server: server, size: 44)
+        HStack(spacing: SheetRow.gap) {
+            ServerAvatar(server: server, size: SheetRow.avatar)
             VStack(alignment: .leading, spacing: 2) {
                 Text(server.name).font(theme.font(Theme.body, weight: .medium)).foregroundStyle(theme.text).lineLimit(1)
                 Text(server.isMember
@@ -364,7 +383,7 @@ struct ServerPickRow: View {
                     .background(Capsule().fill(theme.field))
             }
         }
-        .padding(.horizontal, 14)
+        .padding(.horizontal, SheetRow.paddingX)
         .padding(.vertical, 9)
         .contentShape(Rectangle())
     }
@@ -377,8 +396,8 @@ struct AgentPickRow: View {
     var trailing: AnyView? = nil
 
     var body: some View {
-        HStack(spacing: 14) {
-            AgentAvatar(project: project, theme: theme, size: 44, still: true)
+        HStack(spacing: SheetRow.gap) {
+            AgentAvatar(project: project, theme: theme, size: SheetRow.avatar, still: true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(project.name).font(theme.font(Theme.body, weight: .medium)).foregroundStyle(theme.text).lineLimit(1)
                 Text("@\(mentionSlug(project.name))").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted).lineLimit(1)
@@ -386,7 +405,7 @@ struct AgentPickRow: View {
             Spacer()
             if let trailing { trailing }
         }
-        .padding(.horizontal, 14)
+        .padding(.horizontal, SheetRow.paddingX)
         .padding(.vertical, 9)
         .contentShape(Rectangle())
     }
@@ -399,8 +418,8 @@ struct PersonRow: View {
     var trailing: AnyView? = nil
 
     var body: some View {
-        HStack(spacing: 14) {
-            PersonAvatar(url: person.avatarUrl, handle: person.handle, size: 44, name: person.name, id: person.id, colorIndex: person.avatarColorIndex)
+        HStack(spacing: SheetRow.gap) {
+            PersonAvatar(url: person.avatarUrl, handle: person.handle, size: SheetRow.avatar, name: person.name, id: person.id, colorIndex: person.avatarColorIndex)
             VStack(alignment: .leading, spacing: 2) {
                 Text(person.displayName).font(theme.font(Theme.body, weight: .medium)).foregroundStyle(theme.text).lineLimit(1)
                 Text("@\(person.handle)").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted).lineLimit(1)
@@ -416,7 +435,7 @@ struct PersonRow: View {
                     .background(Capsule().fill(theme.field))
             }
         }
-        .padding(.horizontal, 14)
+        .padding(.horizontal, SheetRow.paddingX)
         .padding(.vertical, 9)
         .contentShape(Rectangle())
     }
@@ -822,7 +841,7 @@ struct NewGroupView: View {
                                 .buttonStyle(.plain)
                                 .disabled(already)
                                 .opacity(already ? 0.5 : 1)
-                                if i < agentCandidates.count - 1 { Rectangle().fill(theme.separator).frame(height: 0.5).padding(.leading, 72) }
+                                if i < agentCandidates.count - 1 { Rectangle().fill(theme.separator).frame(height: 0.5).padding(.leading, SheetRow.textInset) }
                             }
                         }
                         .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(theme.card))
@@ -848,7 +867,7 @@ struct NewGroupView: View {
                                 .buttonStyle(.plain)
                                 .disabled(already)
                                 .opacity(already ? 0.5 : 1)
-                                if i < candidates.count - 1 { Rectangle().fill(theme.separator).frame(height: 0.5).padding(.leading, 72) }
+                                if i < candidates.count - 1 { Rectangle().fill(theme.separator).frame(height: 0.5).padding(.leading, SheetRow.textInset) }
                             }
                             if candidates.isEmpty {
                                 Text(trimmed.isEmpty ? "No one else on Arbos yet. Search a GitHub username." : "No one matches @\(trimmed).")
