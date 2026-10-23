@@ -1879,7 +1879,26 @@ impl Agent {
         // for this agent is left pending for whoever it is for; humans' own sends are theirs.
         // Shared addresses ("hey agents", several @agents) stay `taken` until each addressed
         // agent has replied — see `people_shared_send_open` / sync `new_pending`.
-        let people_msg_id = if cmd.kind == "send" && self.people.is_people_chat(chat_id) {
+        // Every human command carries the mention rule, not only `send`: a `steer` the Mac
+        // sends while another agent's turn runs ("@gigchadagent you still borked?") is for the
+        // named agent, not for whoever happens to be busy.
+        // A card answered in a shared people room reaches every agent in it; only the agent
+        // that posted the card owns the approval — the others leave the command alone (a
+        // "unknown approval" failure from them would race the owner's `done`).
+        if matches!(cmd.kind.as_str(), "approve" | "reject") && self.people.is_people_chat(chat_id)
+        {
+            let approval_id = cmd
+                .payload
+                .get("approvalId")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if !matches!(self.store.approval(approval_id), Ok(Some(_))) {
+                return Ok(());
+            }
+        }
+        let people_msg_id = if matches!(cmd.kind.as_str(), "send" | "steer" | "guide" | "answer")
+            && self.people.is_people_chat(chat_id)
+        {
             let msg_id = cmd
                 .payload
                 .get("messageId")
@@ -4337,12 +4356,30 @@ impl Agent {
             return Err("no turn is running".into());
         };
         t.route_attempts += 1;
+        let project_id = self.cfg.project_id.clone();
         let validated = validate(args).and_then(|r| {
             if t.reply_only && !matches!(r, ValidRoute::Reply { .. }) {
-                Err("this is a relay turn: route `reply` and write the update for the user; start no work here".to_owned())
-            } else {
-                Ok(r)
+                return Err("this is a relay turn: route `reply` and write the update for the user; start no work here".to_owned());
             }
+            // #1440: a reply that promises a secret request / approval card is not a reply —
+            // nothing was requested, so no card can ever appear. Make the model act instead.
+            if let ValidRoute::Reply { reply: Some(text) } = &r {
+                if !t.reply_only && crate::vault::promises_secret_request(text) {
+                    let have = crate::vault::enabled_grant_names(&project_id);
+                    let hint = if have.is_empty() {
+                        "route `act` and call secrets_request(name, purpose, use, host) now — the owner's card comes from that call, never from a sentence".to_owned()
+                    } else {
+                        format!(
+                            "you already have access to {} (secrets_list shows access on): route `act` and use it; a secret with access off needs secrets_request(name, purpose, use, host), not a sentence about it",
+                            have.join(", ")
+                        )
+                    };
+                    return Err(format!(
+                        "a reply must not promise a secret request or an approval card that was not made; {hint}"
+                    ));
+                }
+            }
+            Ok(r)
         });
         match validated {
             Ok(r) => {

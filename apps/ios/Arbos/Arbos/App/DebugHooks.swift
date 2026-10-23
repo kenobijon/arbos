@@ -6,6 +6,8 @@ import Foundation
 enum DebugHooks {
     static var openProject: Id? { value("ARBOS_OPEN_PROJECT") }
     static var openChat: Id? { value("ARBOS_OPEN_CHAT") }
+    /// Live relay rig: open this people chat (DM or group) once the list has it.
+    static var openPeople: Id? { value("ARBOS_OPEN_PEOPLE") }
     /// D88: `<name or id>[:list|:home|:page|:page-settings|:#channel]` — land in a server (screenshot rig).
     static var openServer: String? { value("ARBOS_OPEN_SERVER") }
     /// With `ARBOS_OPEN_SERVER=…:panel`: the server page's tab to land on (Channels | Members | Settings).
