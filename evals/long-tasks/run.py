@@ -103,6 +103,7 @@ class Lane(threading.Thread):
             if st.get("old_name") is None:
                 st["old_name"] = rl.project_name(self.project)
             rl.patch_project(self.project, {"name": act["name"]})
+            st["renamed_at_ms"] = int(time.time() * 1000)
             time.sleep(act.get("settle_s", 8))
         elif kind == "restore_name":
             if st.get("old_name"):
@@ -294,7 +295,7 @@ class Lane(threading.Thread):
             all_docs.append(doc)
         dc = task.get("doc_checks")
         if dc:
-            checks = doc_checks(all_docs)
+            checks = doc_checks(all_docs, after_ms=task_state.get("renamed_at_ms"))
             if dc.get("max_handoffs") is not None and checks["handoffs"] > dc["max_handoffs"]:
                 reasons.append(f"{checks['handoffs']} handoffs (continue-act) > {dc['max_handoffs']}")
             if dc.get("no_duplicate_status") and checks["dup_status"]:
@@ -305,6 +306,14 @@ class Lane(threading.Thread):
                 reasons.append(f"a sentence appears twice in one bubble: {checks['repeated_sentences'][:2]}")
             if dc.get("no_truncated_reply") and checks["truncated"]:
                 reasons.append(f"a done bubble ends mid-sentence: {checks['truncated'][:2]}")
+            if dc.get("no_wrong_self_identity"):
+                # a bubble from the renamed agent must never introduce itself by the old name
+                old_name = task_state.get("old_name") or dc.get("old_name")
+                if old_name:
+                    rx = r"\b(I['’]m|I am|my name is|call me|this is|you['’]re talking to|speaking)\s+" + re.escape(old_name) + r"\b|\b" + re.escape(old_name) + r" here\b"
+                    hits = [t[:80] for t in checks["texts_after_rename"] if re.search(rx, t, re.I)]
+                    if hits:
+                        reasons.append(f"a bubble after the rename still says it is {old_name!r}: {hits[:2]}")
             if dc.get("forbid_text_regex"):
                 hits = [t[:80] for t in checks["texts"] if re.search(dc["forbid_text_regex"], t, re.I)]
                 if hits:
@@ -355,10 +364,10 @@ class Lane(threading.Thread):
         return rec
 
 
-def doc_checks(docs):
+def doc_checks(docs, after_ms=None):
     """Whole-transcript checks over every chat doc a task touched (rows are deduplicated by id)."""
     handoffs = 0
-    dups, repeated, texts, truncated = [], [], [], []
+    dups, repeated, texts, truncated, texts_after = [], [], [], [], []
     empty_result_rows = 0
     seen_rows = set()
     for doc in docs:
@@ -380,6 +389,8 @@ def doc_checks(docs):
             tools = [p for p in m.get("parts", []) if p.get("kind") == "tool"]
             if text:
                 texts.append(text)
+                if after_ms and (m.get("createdAt") or 0) >= after_ms:
+                    texts_after.append(text)
                 # a finished bubble that stops on a comma / dash / mid-word (no closing punctuation,
                 # bracket, quote or code tick) was cut off (#1411)
                 if m.get("status") == "done" and len(text) > 30 and not re.search(r"[.!?…:)\]\"'`*_]\s*$|\n\s*[-•*\d].*$", text):
@@ -390,7 +401,7 @@ def doc_checks(docs):
                         repeated.append(x[:60])
             elif tools and m.get("turnRole") != "ack" and m.get("status") == "done":
                 empty_result_rows += 1
-    return {"handoffs": handoffs, "dup_status": dups, "empty_result_rows": empty_result_rows, "repeated_sentences": repeated, "texts": texts, "truncated": truncated}
+    return {"handoffs": handoffs, "dup_status": dups, "empty_result_rows": empty_result_rows, "repeated_sentences": repeated, "texts": texts, "truncated": truncated, "texts_after_rename": texts_after}
 
 
 def main():
