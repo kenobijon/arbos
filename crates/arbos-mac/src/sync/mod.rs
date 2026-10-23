@@ -316,6 +316,12 @@ pub enum SyncEvent {
         local_id: String,
         error: String,
     },
+    /// A chat send never reached the doc (no room yet, or NewChat failed); mark it failed.
+    MessageSendFailed {
+        chat_id: Id,
+        message_id: Id,
+        error: String,
+    },
 }
 
 /// Something the user did; the source writes it into the doc / outbox.

@@ -2044,6 +2044,21 @@ impl AppState {
                 log::warn!("servers: send to {room_id} failed: {error}");
                 self.on_channel_send_failed(room_id, local_id, cx)
             }
+            SyncEvent::MessageSendFailed {
+                chat_id,
+                message_id,
+                error,
+            } => {
+                log::warn!("send to {chat_id} failed: {error}");
+                if let Some(list) = self.messages.get_mut(&chat_id) {
+                    if let Some(m) = list.iter_mut().find(|m| m.id == message_id) {
+                        m.pending = false;
+                        m.status = MessageStatus::Error;
+                    }
+                }
+                cx.emit(AppEvent::TranscriptChanged { chat_id });
+                cx.notify();
+            }
         }
     }
 

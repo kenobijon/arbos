@@ -43,9 +43,10 @@ use super::diagnostics;
 use super::doc::ChatDoc;
 use super::dto::{
     account_view_from_me, apply_machine_status, chat_from_create, chat_from_dto,
-    connectors_view_from_dto, credentials_from_token, local_view_from_dto, merged_unread,
-    model_ids_from_dto, people_space_from, project_from_dto, routine_from_dto,
-    secrets_view_from_dto, skill_from_dto, transcript_text, voices_from_dto,
+    connectors_view_from_dto, credentials_from_token, local_view_from_dto, merge_chats,
+    merged_unread, model_ids_from_dto, people_space_from, project_from_dto,
+    remap_queued_send_targets, routine_from_dto, secrets_view_from_dto, skill_from_dto,
+    transcript_text, voices_from_dto,
 };
 use super::store::{self, Store};
 use super::{ClientCommand, SyncEvent, SyncSource};
@@ -142,6 +143,17 @@ struct Room {
     task: JoinHandle<()>,
 }
 
+/// A send that arrived while `NewChat` for its local chat id is still in flight.
+struct QueuedSend {
+    message_id: Id,
+    text: String,
+    attachments: Vec<Outgoing>,
+    voice_wav: Option<Arc<Vec<u8>>>,
+    command: &'static str,
+    answer: Option<(String, serde_json::Value)>,
+    reply_to: Option<String>,
+}
+
 struct Shared {
     http: reqwest::Client,
     http_url: String,
@@ -165,6 +177,12 @@ struct Shared {
     /// When this device last sent `PUT /chats/{id}/read` (ms). Used so a
     /// registry refresh does not resurrect unread before the relay catches up.
     local_read_at: Mutex<HashMap<Id, i64>>,
+    /// When this Mac last archived or renamed a chat (ms). A refresh that
+    /// started earlier must not overwrite that field with the relay's older value.
+    local_changed_at: Mutex<HashMap<Id, u64>>,
+    /// Local chat ids whose `POST .../chats` is still in flight, and any sends
+    /// that arrived before the room doc existed.
+    pending_new_chats: Mutex<HashMap<Id, Vec<QueuedSend>>>,
     /// Avatars already fetched (by URL).
     avatars_done: Mutex<HashSet<String>>,
     /// `/me` user when the stored credentials carry none (env token, legacy adv_).
@@ -667,6 +685,8 @@ impl SyncSource for RelaySource {
                 people: Mutex::new(HashSet::new()),
                 room_seq: Mutex::new(HashMap::new()),
                 local_read_at: Mutex::new(HashMap::new()),
+                local_changed_at: Mutex::new(HashMap::new()),
+                pending_new_chats: Mutex::new(HashMap::new()),
                 avatars_done: Mutex::new(HashSet::new()),
                 me: Mutex::new(None),
                 store: Mutex::new(None),
@@ -1983,6 +2003,8 @@ async fn fetch_unread_map(shared: &Arc<Shared>) -> HashMap<Id, bool> {
 
 async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
     shared.ensure_me().await;
+    // Snapshot time: field edits after this must win over the relay's older list.
+    let refresh_started_at = now_ms();
     // Per-chat unread counts (people + agent). Older relays answer 404.
     let unread_by_chat = fetch_unread_map(shared).await;
     let list = shared.get_json("/projects").await?;
@@ -2003,7 +2025,36 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
             .and_then(Value::as_str)
             .filter(|h| !h.is_empty())
             .map(str::to_owned);
-        let detail_val = shared.get_json(&format!("/projects/{id}")).await?;
+        let detail_val = match shared.get_json(&format!("/projects/{id}")).await {
+            Ok(v) => v,
+            Err(err) => {
+                // One bad project must not abort the whole refresh (reconnect loop).
+                log::warn!(
+                    target: "arbos_mac::relay",
+                    "GET /projects/{id}: {err:#}; keeping last good entry"
+                );
+                if let Some(prev) = shared
+                    .projects
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|x| x.id == id)
+                    .cloned()
+                {
+                    projects.push(prev);
+                }
+                let prev_chats: Vec<Chat> = shared
+                    .chats
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|c| c.project_id == id)
+                    .cloned()
+                    .collect();
+                all_chats.extend(prev_chats);
+                continue;
+            }
+        };
         let detail: GetProjectResponseDto = match serde_json::from_value(detail_val) {
             Ok(d) => d,
             Err(err) => {
@@ -2140,24 +2191,30 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
             .collect();
         s.put_json(store::KEY_ARCHIVED_CHATS, &ids);
     });
-    // Keep local-only tabs (minted, not yet created). Unread comes from
-    // GET /me/unread (and people `dto.unread`) merged with local read marks.
+    // Keep local-only tabs (minted, not yet created) and recent local edits.
+    // Unread comes from GET /me/unread (and people `dto.unread`) merged with local read marks.
     let local_reads = shared.local_read_at.lock().unwrap().clone();
+    let local_changed = shared.local_changed_at.lock().unwrap().clone();
+    let pending_ids: HashSet<Id> = shared
+        .pending_new_chats
+        .lock()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
     {
         let mut local = shared.chats.lock().unwrap();
-        let mut merged: Vec<Chat> = Vec::new();
-        for c in &all_chats {
-            let mut c = c.clone();
-            if let Some(prev) = local.iter().find(|x| x.id == c.id) {
-                c.last_message_at = c.last_message_at.max(prev.last_message_at);
-                if c.title == "New chat" && prev.title != "New chat" {
-                    c.title = prev.title.clone();
-                }
-            }
+        let mut merged = merge_chats(
+            &all_chats,
+            &local,
+            refresh_started_at,
+            &local_changed,
+            &pending_ids,
+        );
+        for c in &mut merged {
             let relay_unread = unread_by_chat.get(&c.id).copied().unwrap_or(c.unread);
             let local_read = local_reads.get(&c.id).copied();
             c.unread = merged_unread(relay_unread, local_read, c.last_message_at as i64);
-            merged.push(c);
         }
         *local = merged;
     }
@@ -3334,6 +3391,25 @@ fn outgoing_paths(paths: Vec<PathBuf>) -> Vec<Outgoing> {
     paths.into_iter().map(Outgoing::Path).collect()
 }
 
+/// NewChat POST failed (or the body did not decode): drop the mint, notify, mark queued sends failed.
+fn fail_pending_new_chat(shared: &Shared, local_id: &str, notice: String) {
+    shared.chats.lock().unwrap().retain(|c| c.id != local_id);
+    let queued = shared
+        .pending_new_chats
+        .lock()
+        .unwrap()
+        .remove(local_id)
+        .unwrap_or_default();
+    shared.notice(notice.clone());
+    for q in queued {
+        let _ = shared.events.send(SyncEvent::MessageSendFailed {
+            chat_id: local_id.to_owned(),
+            message_id: q.message_id,
+            error: notice.clone(),
+        });
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn send_message(
     shared: Arc<Shared>,
@@ -3346,6 +3422,33 @@ async fn send_message(
     answer: Option<(String, serde_json::Value)>,
     reply_to: Option<String>,
 ) {
+    // No room doc yet: queue while NewChat is in flight, otherwise fail visibly.
+    if !shared.docs.lock().unwrap().contains_key(&chat_id) {
+        {
+            let mut pending = shared.pending_new_chats.lock().unwrap();
+            if let Some(queue) = pending.get_mut(&chat_id) {
+                queue.push(QueuedSend {
+                    message_id,
+                    text,
+                    attachments,
+                    voice_wav,
+                    command,
+                    answer,
+                    reply_to,
+                });
+                return;
+            }
+        }
+        let error = "chat is not ready".to_string();
+        shared.notice(format!("Message not sent: {error}"));
+        let _ = shared.events.send(SyncEvent::MessageSendFailed {
+            chat_id,
+            message_id,
+            error,
+        });
+        return;
+    }
+
     let project_id = project_of(&shared, &chat_id).unwrap_or_default();
     // People chats keep their blobs under `people:<chat_id>`; project chats under the
     // project id (same slot agentd and the thumbnail fetch use). `blob_slot` expects a
@@ -3446,6 +3549,16 @@ async fn send_message(
     {
         let docs = shared.docs.lock().unwrap();
         let Some(doc) = docs.get(&chat_id) else {
+            // Room torn down between the early check and now — fail visibly.
+            drop(docs);
+            shared.unacked.lock().unwrap().remove(&message_id);
+            let error = "chat is not ready".to_string();
+            shared.notice(format!("Message not sent: {error}"));
+            let _ = shared.events.send(SyncEvent::MessageSendFailed {
+                chat_id,
+                message_id,
+                error,
+            });
             return;
         };
         let me = shared.me_user();
@@ -3511,6 +3624,11 @@ async fn send_message(
             {
                 c.title = title;
             }
+            shared
+                .local_changed_at
+                .lock()
+                .unwrap()
+                .insert(chat_id.clone(), now_ms());
         }
     }
     mark_activity(&shared, &chat_id);
@@ -4703,6 +4821,11 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     c.title = title.clone();
                 }
             }
+            shared
+                .local_changed_at
+                .lock()
+                .unwrap()
+                .insert(chat_id.clone(), now_ms());
             emit_chats(shared);
             {
                 let docs = shared.docs.lock().unwrap();
@@ -4730,6 +4853,29 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             project_id,
             chat_id: local_id,
         } => {
+            // Mint stays in the registry until POST answers (refresh must not drop it).
+            {
+                let mut chats = shared.chats.lock().unwrap();
+                if !chats.iter().any(|c| c.id == local_id) {
+                    chats.push(Chat {
+                        id: local_id.clone(),
+                        project_id: project_id.clone(),
+                        title: "New chat".into(),
+                        is_pinned: false,
+                        is_system: false,
+                        kind: crate::model::ChatKind::Chat,
+                        participants: Vec::new(),
+                        unread: false,
+                        last_message_at: now_ms(),
+                        archived_at: None,
+                    });
+                }
+            }
+            shared
+                .pending_new_chats
+                .lock()
+                .unwrap()
+                .insert(local_id.clone(), Vec::new());
             let shared = shared.clone();
             tokio::spawn(async move {
                 match shared
@@ -4747,19 +4893,55 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                                     target: "arbos_mac::relay",
                                     "CreateChatResponseDto: {err}"
                                 );
-                                shared.notice("Relay returned no chat");
+                                fail_pending_new_chat(
+                                    &shared,
+                                    &local_id,
+                                    "Relay returned no chat".into(),
+                                );
                                 return;
                             }
                         };
-                        shared.chats.lock().unwrap().push(chat.clone());
+                        {
+                            let mut chats = shared.chats.lock().unwrap();
+                            chats.retain(|c| c.id != local_id);
+                            chats.push(chat.clone());
+                        }
                         ensure_room(&shared, &project_id, &chat.id, &chat.id);
+                        let queued = shared
+                            .pending_new_chats
+                            .lock()
+                            .unwrap()
+                            .remove(&local_id)
+                            .unwrap_or_default();
+                        let message_ids: Vec<Id> =
+                            queued.iter().map(|q| q.message_id.clone()).collect();
+                        let targets = remap_queued_send_targets(&chat.id, &message_ids);
                         let _ = shared.events.send(SyncEvent::ChatCreated {
                             project_id: project_id.clone(),
                             local_id,
-                            chat,
+                            chat: chat.clone(),
                         });
+                        for ((real_id, _), q) in targets.into_iter().zip(queued) {
+                            tokio::spawn(send_message(
+                                shared.clone(),
+                                real_id,
+                                q.message_id,
+                                q.text,
+                                q.attachments,
+                                q.voice_wav,
+                                q.command,
+                                q.answer,
+                                q.reply_to,
+                            ));
+                        }
                     }
-                    Err(err) => shared.notice(format!("New chat failed: {err:#}")),
+                    Err(err) => {
+                        fail_pending_new_chat(
+                            &shared,
+                            &local_id,
+                            format!("New chat failed: {err:#}"),
+                        );
+                    }
                 }
             });
         }
@@ -4814,6 +4996,11 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     c.archived_at = archived.then(now_ms);
                     c.project_id.clone()
                 });
+            shared
+                .local_changed_at
+                .lock()
+                .unwrap()
+                .insert(chat_id.clone(), now_ms());
             let Some(project_id) = project_id else {
                 return;
             };

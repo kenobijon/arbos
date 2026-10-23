@@ -688,6 +688,63 @@ pub(crate) fn merged_unread(
     relay_unread
 }
 
+/// Merge the relay's chat list with what this Mac already holds.
+///
+/// - Keeps a local tab whose `NewChat` POST is still in flight (`pending_local_ids`).
+/// - Keeps a local `archived_at` / `title` when that field was edited after
+///   `refresh_started_at` (the relay answer is older than the edit).
+/// - Drops a chat the relay no longer lists when it has no pending local create.
+pub(crate) fn merge_chats(
+    relay: &[Chat],
+    local: &[Chat],
+    refresh_started_at: u64,
+    local_changed_at: &std::collections::HashMap<String, u64>,
+    pending_local_ids: &std::collections::HashSet<String>,
+) -> Vec<Chat> {
+    use std::collections::{HashMap, HashSet};
+
+    let local_by_id: HashMap<&str, &Chat> = local.iter().map(|c| (c.id.as_str(), c)).collect();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut out: Vec<Chat> = Vec::with_capacity(relay.len() + pending_local_ids.len());
+
+    for r in relay {
+        let mut c = r.clone();
+        if let Some(l) = local_by_id.get(c.id.as_str()) {
+            c.last_message_at = c.last_message_at.max(l.last_message_at);
+            let changed = local_changed_at.get(&c.id).copied().unwrap_or(0);
+            if changed > refresh_started_at {
+                c.archived_at = l.archived_at;
+                c.title = l.title.clone();
+            } else if c.title == "New chat" && l.title != "New chat" {
+                c.title = l.title.clone();
+            }
+        }
+        seen.insert(c.id.clone());
+        out.push(c);
+    }
+
+    for l in local {
+        if seen.contains(&l.id) {
+            continue;
+        }
+        if pending_local_ids.contains(&l.id) {
+            out.push(l.clone());
+        }
+    }
+    out
+}
+
+/// After `NewChat` succeeds, queued sends keep their message ids and target the created chat.
+pub(crate) fn remap_queued_send_targets(
+    created_chat_id: &str,
+    queued_message_ids: &[String],
+) -> Vec<(String, String)> {
+    queued_message_ids
+        .iter()
+        .map(|mid| (created_chat_id.to_owned(), mid.clone()))
+        .collect()
+}
+
 /// `ChatDto` / create-chat nested chat → [`Chat`].
 pub(crate) fn chat_from_dto(dto: &ChatDto) -> Chat {
     Chat {
@@ -1044,7 +1101,7 @@ mod tests {
     use arbos_core::api::{
         ChatMemberDto, GroupDto, MeResponseDto, ProjectDto, UnreadChatDto, UnreadDto,
     };
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::fs;
     use std::path::PathBuf;
 
@@ -1120,6 +1177,78 @@ mod tests {
             Some(1_699_999_999_000),
             1_700_000_000_000
         ));
+    }
+
+    fn sample_chat(id: &str, project_id: &str, title: &str, archived_at: Option<u64>) -> Chat {
+        Chat {
+            id: id.into(),
+            project_id: project_id.into(),
+            title: title.into(),
+            is_pinned: false,
+            is_system: false,
+            kind: ChatKind::Chat,
+            participants: Vec::new(),
+            unread: false,
+            last_message_at: 1_000,
+            archived_at,
+        }
+    }
+
+    #[test]
+    fn merge_chats_keeps_pending_local_tab() {
+        let relay = vec![sample_chat("r1", "p", "Hello", None)];
+        let local = vec![
+            sample_chat("r1", "p", "Hello", None),
+            sample_chat("local_tab", "p", "New chat", None),
+        ];
+        let pending = HashSet::from(["local_tab".into()]);
+        let merged = merge_chats(&relay, &local, 5_000, &HashMap::new(), &pending);
+        assert!(merged.iter().any(|c| c.id == "local_tab"));
+        assert!(merged.iter().any(|c| c.id == "r1"));
+    }
+
+    #[test]
+    fn merge_chats_keeps_local_archive_after_refresh_start() {
+        let relay = vec![sample_chat("c1", "p", "Hello", None)];
+        let local = vec![sample_chat("c1", "p", "Hello", Some(9_000))];
+        let changed = HashMap::from([("c1".into(), 8_000u64)]);
+        let merged = merge_chats(&relay, &local, 5_000, &changed, &HashSet::new());
+        assert_eq!(merged[0].archived_at, Some(9_000));
+    }
+
+    #[test]
+    fn merge_chats_takes_relay_when_local_change_is_older() {
+        let relay = vec![sample_chat("c1", "p", "Relay title", None)];
+        let local = vec![sample_chat("c1", "p", "Old local", Some(9_000))];
+        let changed = HashMap::from([("c1".into(), 3_000u64)]);
+        let merged = merge_chats(&relay, &local, 5_000, &changed, &HashSet::new());
+        assert_eq!(merged[0].title, "Relay title");
+        assert!(merged[0].archived_at.is_none());
+    }
+
+    #[test]
+    fn merge_chats_drops_relay_gone_without_pending() {
+        let relay = vec![sample_chat("r1", "p", "Hello", None)];
+        let local = vec![
+            sample_chat("r1", "p", "Hello", None),
+            sample_chat("gone", "p", "Bye", None),
+        ];
+        let merged = merge_chats(&relay, &local, 5_000, &HashMap::new(), &HashSet::new());
+        assert!(merged.iter().all(|c| c.id != "gone"));
+        assert_eq!(merged.len(), 1);
+    }
+
+    #[test]
+    fn remap_queued_sends_keeps_message_ids() {
+        let ids = vec!["msg_a".into(), "msg_b".into()];
+        let mapped = remap_queued_send_targets("chat_real", &ids);
+        assert_eq!(
+            mapped,
+            vec![
+                ("chat_real".into(), "msg_a".into()),
+                ("chat_real".into(), "msg_b".into()),
+            ]
+        );
     }
 
     #[test]
