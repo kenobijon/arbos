@@ -955,7 +955,8 @@ struct ChatView: View {
             .onChange(of: rows.last?.id) { old, _ in
                 if old == nil {
                     settleToBottom(proxy)
-                } else {
+                } else if !awayFromBottom {
+                    // Stick only while the user is near the end; leave history alone.
                     withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("bottom", anchor: .bottom) }
                 }
             }
@@ -968,6 +969,7 @@ struct ChatView: View {
                 if ready { settleToBottom(proxy) }
             }
             .onChange(of: streaming) { _, _ in
+                guard !awayFromBottom else { return }
                 withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("bottom", anchor: .bottom) }
             }
             .onChange(of: composerFocused) { _, focused in
