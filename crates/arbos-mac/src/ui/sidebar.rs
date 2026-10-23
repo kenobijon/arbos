@@ -258,6 +258,23 @@ fn server_matches_query(server: &ServerInfo, query: &str) -> bool {
             .any(|c| c.name.to_lowercase().contains(query))
 }
 
+/// The chats list's top and bottom fade (Jacob likes it, Oct 23). The band
+/// sits under the strip's bottom edge: the scroll box is pulled up by the band
+/// and the list pads by the same amount, so at rest the first row starts where
+/// the fade ends and only rows that scroll under the strip cross it (the pane
+/// rule from #1365 / #1424). The bottom band stays over the list's end.
+pub const LIST_FADE_BAND: f32 = 14.0;
+
+fn faded_list(list: impl IntoElement) -> gpui::AnyElement {
+    div()
+        .flex_1()
+        .min_h_0()
+        .mt(px(-LIST_FADE_BAND))
+        .debug_selector(|| "sidebar-list-frame".into())
+        .child(edge_faded(LIST_FADE_BAND, true, true, list))
+        .into_any_element()
+}
+
 pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
     let theme = Theme::of(cx).clone();
     let state = shell.state.read(cx);
@@ -501,7 +518,7 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         .flex_1()
         .min_h_0()
         .px(px(8.0))
-        .pt(px(6.0))
+        .pt(px(LIST_FADE_BAND + 6.0))
         .pb(px(12.0))
         .overflow_y_scroll();
     // D89: the host that runs everyone's computer is full; this account is in line. Chats and
@@ -751,10 +768,8 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         .when(search_shown && open_server.is_none(), |el| el.child(search))
         .child(match open_server.as_ref() {
             // Inside a server the left pane shows its channels (mockup h).
-            Some(server) => {
-                edge_faded(14.0, true, true, server_channels(server, shell, &theme, cx))
-            }
-            None => edge_faded(14.0, true, true, list),
+            Some(server) => faded_list(server_channels(server, shell, &theme, cx)),
+            None => faded_list(list),
         });
     if let Some(update) = shell.render_update_button(cx) {
         column = column.child(div().px(px(12.0)).pb(px(8.0)).child(update));
@@ -968,7 +983,7 @@ fn server_channels(
         .flex_1()
         .min_h_0()
         .px(px(8.0))
-        .pt(px(6.0))
+        .pt(px(LIST_FADE_BAND + 6.0))
         .pb(px(12.0))
         .overflow_y_scroll()
         .child(back);
@@ -1910,4 +1925,78 @@ pub fn chat_menu(
         return None;
     }
     Some(glass::frosted_menu(CHAT_MENU_WIDTH, &theme, body).into_any_element())
+}
+
+#[cfg(test)]
+mod fade_tests {
+    use gpui::{div, prelude::*, px, TestAppContext};
+
+    use super::{faded_list, top_strip, LIST_FADE_BAND};
+
+    /// The sidebar's shape: the strip, then the faded list whose first row
+    /// carries a selector. Mirrors `render`'s column.
+    struct Column;
+
+    impl gpui::Render for Column {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let strip = div()
+                .h(px(top_strip()))
+                .flex_shrink_0()
+                .debug_selector(|| "sidebar-strip".into());
+            let list = div()
+                .id("chat-list")
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .px(px(8.0))
+                .pt(px(LIST_FADE_BAND + 6.0))
+                .pb(px(12.0))
+                .overflow_y_scroll()
+                .child(
+                    div()
+                        .h(px(58.0))
+                        .debug_selector(|| "first-row".into())
+                        .child("Arbonites"),
+                )
+                .child(div().h(px(900.0)));
+            div()
+                .w(px(280.0))
+                .h(px(600.0))
+                .flex()
+                .flex_col()
+                .child(strip)
+                .child(faded_list(list))
+        }
+    }
+
+    #[gpui::test]
+    fn the_fade_band_ends_at_the_strip_and_the_first_row_is_clear_at_rest(cx: &mut TestAppContext) {
+        let (_view, vcx) = cx.add_window_view(|_, _| Column);
+        vcx.run_until_parked();
+        let strip = vcx.debug_bounds("sidebar-strip").expect("strip");
+        let frame = vcx.debug_bounds("sidebar-list-frame").expect("list frame");
+        let row = vcx.debug_bounds("first-row").expect("first row");
+        let strip_bottom: f32 = strip.bottom().into();
+        let frame_top: f32 = frame.origin.y.into();
+        let fade_bottom = frame_top + LIST_FADE_BAND;
+        let row_top: f32 = row.origin.y.into();
+        assert!(
+            fade_bottom <= strip_bottom + 0.5,
+            "fade band bottom {fade_bottom} must sit at or above the strip's bottom {strip_bottom}"
+        );
+        assert!(
+            row_top >= fade_bottom - 0.5,
+            "first row top {row_top} is inside the fade (ends {fade_bottom})"
+        );
+        // And the row still starts its 6 pt under the strip, as before.
+        assert!(
+            (row_top - (strip_bottom + 6.0)).abs() <= 0.5,
+            "row at strip + 6 ({row_top})"
+        );
+    }
 }
