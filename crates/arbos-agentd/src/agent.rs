@@ -1846,7 +1846,12 @@ impl Agent {
         // for this agent is left pending for whoever it is for; humans' own sends are theirs.
         // Shared addresses ("hey agents", several @agents) stay `taken` until each addressed
         // agent has replied — see `people_shared_send_open` / sync `new_pending`.
-        let people_msg_id = if cmd.kind == "send" && self.people.is_people_chat(chat_id) {
+        // Every human command carries the mention rule, not only `send`: a `steer` the Mac
+        // sends while another agent's turn runs ("@gigchadagent you still borked?") is for the
+        // named agent, not for whoever happens to be busy.
+        let people_msg_id = if matches!(cmd.kind.as_str(), "send" | "steer" | "guide" | "answer")
+            && self.people.is_people_chat(chat_id)
+        {
             let msg_id = cmd
                 .payload
                 .get("messageId")
