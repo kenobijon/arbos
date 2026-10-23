@@ -69,6 +69,14 @@ pub enum SyncEvent {
         url: String,
         bytes: Arc<Vec<u8>>,
     },
+    /// The avatar picker's generated picture is ready to preview (`url` fetches it; `image_key`
+    /// is what "Set avatar" sends), or the generation failed (`error`).
+    ProjectImageGenerated {
+        project_id: Id,
+        image_key: Option<String>,
+        url: Option<String>,
+        error: Option<String>,
+    },
     /// Error from a people-chat action (search, DM, members), shown inline.
     PeopleError(String),
     /// `CreatePeopleGroup` succeeded: the new group's id, sent after the
@@ -326,6 +334,15 @@ pub enum SyncEvent {
     },
 }
 
+/// Where an agent's new picture comes from (`ClientCommand::SetProjectImage`).
+#[derive(Clone, Debug, PartialEq)]
+pub enum PictureSource {
+    /// A file the owner chose; uploaded as a 512 px JPEG.
+    File(std::path::PathBuf),
+    /// A blob the relay already stores under the project (a generated picture).
+    Key(String),
+}
+
 /// Something the user did; the source writes it into the doc / outbox.
 #[derive(Clone, Debug)]
 pub enum ClientCommand {
@@ -528,11 +545,30 @@ pub enum ClientCommand {
         chat_id: Id,
         title: String,
     },
+    /// A group's leaf picture from the avatar picker: `PATCH /chats/{id} {avatar_leaf,
+    /// avatar_leaf_color, image_key: null}` (`None` = initials).
+    SetGroupLeaf {
+        chat_id: Id,
+        pick: Option<crate::ui::avatars::LeafPick>,
+    },
     /// Give a people group a picture: the file is uploaded to the chat's blob
     /// slot, then `PATCH /chats/{id} {image_key}`.
     SetGroupImage {
         chat_id: Id,
         path: std::path::PathBuf,
+    },
+    /// D92 amendment: an agent's picture from the avatar picker — a file to upload into the
+    /// project's blob slot, or a key the relay already holds (the Generate tab's preview); then
+    /// `PATCH /projects/{id} {image_key}`.
+    SetProjectImage {
+        project_id: Id,
+        source: PictureSource,
+    },
+    /// The avatar picker's Generate tab: `POST /projects/{id}/avatar/generate {prompt}`; the
+    /// answer arrives as `SyncEvent::ProjectImageGenerated` (not set until "Set avatar").
+    GenerateProjectImage {
+        project_id: Id,
+        prompt: String,
     },
     /// My own picture (`PUT /me/avatar`, JPEG ≤ 2 MB): overrides the GitHub
     /// avatar everywhere the relay serves me.
@@ -619,12 +655,6 @@ pub enum ClientCommand {
     SetMuted {
         space_id: Id,
         muted: bool,
-    },
-    /// Avatar picker (D79): `PATCH /projects/{id} {avatar_color_index: 0–6|null}`;
-    /// `None` = automatic (derived from the project id).
-    SetAvatarColorIndex {
-        project_id: Id,
-        index: Option<u8>,
     },
     /// Leaf picker (D92): `PATCH /projects/{id} {avatar_leaf: 0–8|null, avatar_leaf_color: 0–9|null}`;
     /// `None` = automatic (derived from the project id).

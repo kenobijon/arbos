@@ -15,6 +15,7 @@ struct AgentEditSheet: View {
     @State private var editingName = false
     @State private var showModel = false
     @State private var showVoice = false
+    @State private var showAvatarPicker = false
     @FocusState private var nameFocused: Bool
 
     private var project: Project? { model.project(projectId) }
@@ -28,26 +29,12 @@ struct AgentEditSheet: View {
                     VStack(spacing: 0) {
                         hero(project)
                         card {
-                            VStack(alignment: .leading, spacing: 12) {
-                                if LeafAvatarsFlag.shared.on {
-                                    // D92: leaf + colour; the hero above is the live preview.
-                                    Text("Avatar").font(theme.font(Theme.body, weight: .medium)).foregroundStyle(theme.text)
-                                    LeafPicker(project: project) { leaf, color in
-                                        guard !project.shared else { return }
-                                        model.pickAvatarLeaf(projectId, leaf: leaf, color: color)
-                                    }
-                                    .disabled(project.shared)
-                                } else {
-                                    Text("Avatar colour").font(theme.font(Theme.body, weight: .medium)).foregroundStyle(theme.text)
-                                    AvatarColorPicker(name: project.name, id: project.id, current: project.effectiveAvatarColorIndex == project.avatarColorIndex ? project.avatarColorIndex : project.avatarColorIndex) { index in
-                                        guard !project.shared else { return }
-                                        model.pickAvatarColorIndex(projectId, index: index)
-                                    }
-                                    .disabled(project.shared)
-                                }
+                            // D92 amendment: the avatar picker sheet (Bot | Generate | Upload).
+                            Button { if !project.shared { showAvatarPicker = true } } label: {
+                                row(icon: "photo.circle", title: "Avatar", value: project.imageKey != nil ? "Picture" : LeafArt.names[Int(LeafArt.pick(project).leaf)])
                             }
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 12)
+                            .buttonStyle(.plain)
+                            .disabled(project.shared)
                         }
                         .padding(.horizontal, 16)
                         .padding(.top, 26)
@@ -105,6 +92,9 @@ struct AgentEditSheet: View {
             }
             .sheet(isPresented: $showVoice) {
                 if let project { VoicePickerView(project: project).environmentObject(model).environment(\.theme, theme) }
+            }
+            .sheet(isPresented: $showAvatarPicker) {
+                AvatarPickerSheet(target: .agent(projectId)).environmentObject(model).environment(\.theme, theme)
             }
             .onAppear { name = project?.name ?? "" }
         }
@@ -230,6 +220,9 @@ struct AgentProfileView: View {
     /// `agent.rs`). Kinds share the structure, not a tab count (22:32 UTC).
     @State private var tab = "Profile"
     @State private var showEdit = false
+    /// The avatar picker sheet (D92 amendment), from the hero's crayon; the rig's
+    /// `ARBOS_SHOW=avatarpicker[-generate|-upload]` opens it on that tab.
+    @State private var showAvatarPicker: AvatarPickerTab? = nil
     @State private var showModel = false
     @State private var showDescription = false
     @State private var descriptionDraft = ""
@@ -282,6 +275,15 @@ struct AgentProfileView: View {
         .sheet(isPresented: $showEdit) {
             AgentEditSheet(projectId: projectId).environmentObject(model).environment(\.theme, theme)
         }
+        .sheet(item: $showAvatarPicker) { initial in
+            AvatarPickerSheet(target: .agent(projectId), initialTab: initial).environmentObject(model).environment(\.theme, theme)
+        }
+        .onAppear {
+            if isMine, let show = DebugHooks.show, show.hasPrefix("avatarpicker") {
+                let tab: AvatarPickerTab = show.hasSuffix("generate") ? .generate : (show.hasSuffix("upload") ? .upload : .bot)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { showAvatarPicker = tab }
+            }
+        }
         .sheet(isPresented: $showReasoning) {
             if let project = model.project(projectId) { ReasoningPickerView(project: project).environmentObject(model).environment(\.theme, theme) }
         }
@@ -296,13 +298,13 @@ struct AgentProfileView: View {
     @ViewBuilder
     private func heroPicture(_ project: Project) -> some View {
         if isMine {
-            Button { showEdit = true } label: {
+            Button { showAvatarPicker = .bot } label: {
                 AgentAvatar(project: project, theme: theme, size: PaneKit.heroAvatar, working: model.isStreaming(project: project.id), idle: true)
                     .paneCrayon()
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Edit agent")
+            .accessibilityLabel("Change avatar")
         } else {
             AgentAvatar(project: project, theme: theme, size: PaneKit.heroAvatar, working: model.isStreaming(project: project.id), idle: true)
         }

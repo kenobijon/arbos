@@ -65,7 +65,20 @@ struct AgentAvatar: View {
 
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
-            if flag.on {
+            if let url = project.imageURL.flatMap(URL.init(string:)) {
+                // D92 amendment: the uploaded / generated picture wins over the leaf.
+                AsyncImage(url: url) { phase in
+                    if let image = phase.image {
+                        image.resizable().scaledToFill()
+                    } else if flag.on {
+                        LeafAvatar(pick: LeafArt.pick(project), size: size)
+                    } else {
+                        Circle().fill(theme.field)
+                    }
+                }
+                .frame(width: size, height: size)
+                .clipShape(Circle())
+            } else if flag.on {
                 LeafAvatar(pick: LeafArt.pick(project), size: size, idle: idle && !still, gust: gust)
                     .onChange(of: working) { _, now in
                         if now && !still { gust += 1 }
@@ -85,50 +98,6 @@ struct AgentAvatar: View {
             }
         }
         .frame(width: size, height: size)
-    }
-}
-
-/// "Automatic" plus the seven swatches; the chosen one is ringed.
-struct AvatarColorPicker: View {
-    @Environment(\.theme) private var theme
-    /// Preview initials / id for the automatic swatch.
-    let name: String
-    let id: String
-    let current: Int?
-    let onPick: (Int?) -> Void
-
-    private var automaticIndex: Int { AvatarPalette.index(for: id) }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 9) {
-                swatch(index: automaticIndex, selected: current == nil, label: "Automatic", automatic: true) { onPick(nil) }
-                ForEach(0..<AvatarPalette.count, id: \.self) { i in
-                    swatch(index: i, selected: current == i, label: AvatarPalette.names[i], automatic: false) { onPick(i) }
-                }
-            }
-            Text(current == nil ? "Automatic: the colour comes from the agent's id, the same on every device." : "\(AvatarPalette.names[current!]), chosen by you.")
-                .font(.system(size: Theme.tiny)).foregroundStyle(theme.muted)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-    }
-
-    private func swatch(index: Int, selected: Bool, label: String, automatic: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            ZStack {
-                Circle().fill(AvatarPalette.gradient(index, dark: theme.isDark))
-                if automatic {
-                    Text("A").font(.system(size: 12, weight: .semibold)).foregroundStyle(.white)
-                }
-                if selected {
-                    Circle().strokeBorder(theme.text, lineWidth: 2).frame(width: 32, height: 32)
-                }
-            }
-            .frame(width: 32, height: 32)
-            .contentShape(Circle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(label + (selected ? ", selected" : ""))
     }
 }
 

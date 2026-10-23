@@ -24,14 +24,15 @@ struct ChatView: View {
     /// How many of the newest rows are in the view tree. The transcript is a plain
     /// VStack (see `transcript`), so every row it holds is built and laid out at once;
     /// a long group chat put thousands in it and the open took seconds (long-chat-perf,
-    /// 2026-10-23). Older rows join as the user nears the top (`growWindow`).
+    /// 2026-10-23). Cap stays modest so finger-scrolling stays smooth; older rows join
+    /// as the user nears the top (`growWindow`).
     @State private var windowCount = ChatView.windowInitial
     /// iOS 17 has no scroll-geometry callback to grow the window with, so it keeps every row.
     static let windowInitial: Int = {
-        if #available(iOS 18, *) { return 160 }
+        if #available(iOS 18, *) { return 80 }
         return Int.max
     }()
-    static let windowStep = 120
+    static let windowStep = 60
     @State private var showModelPicker = false
     /// Rig: the media viewer opened by `ARBOS_SHOW=media…` (media-viewer-2026-10-23).
     @State private var rigViewer: MediaViewerState?
@@ -350,6 +351,13 @@ struct ChatView: View {
             ZStack(alignment: .top) {
                 theme.bg.ignoresSafeArea()
                 transcript(width: geo.size.width, height: geo.size.height)
+                    // A tap on a mention chip (`arbos://mention/<kind>/<id>`, MentionChips.swift)
+                    // opens that entity's page; every other link goes to the system.
+                    .environment(\.openURL, OpenURLAction { url in
+                        guard let target = MentionTable.target(from: url, model: model) else { return .systemAction }
+                        model.showProfile(target)
+                        return .handled
+                    })
                 headerBlur
                 VStack(spacing: 8) {
                     header
@@ -535,6 +543,8 @@ struct ChatView: View {
                     case "voice": startCall(.voice)
                     case "model": showModelPicker = true
                     case "profile": openHeaderProfile()
+                    // `avatarpicker[-generate|-upload]`: the agent pane, which opens the sheet on that tab.
+                    case let s where s.hasPrefix("avatarpicker"): openHeaderProfile()
                     case "edit": showProfile = true
                     case "userprofile": if let c = counterpart { model.showProfile(.user(ProfilePerson(c))) }
                     // `addmembers`: the group pane opens its Add members sheet on appear.
@@ -961,7 +971,12 @@ struct ChatView: View {
                                 replySwipeActive: $replySwipeActive)
                             .padding(.top, gap(before: i, in: shown))
                             .id(row.id)
-                            .onAppear { LaunchClock.mark("chat-first-row", detail: "shown=\(shown.count) rows=\(rows.count) messages=\(messages.count)") }
+                            .onAppear {
+                                // Once per open — not on every row (group chats fire this dozens of times).
+                                if i == 0 {
+                                    LaunchClock.mark("chat-first-row", detail: "shown=\(shown.count) rows=\(rows.count) messages=\(messages.count)")
+                                }
+                            }
                             .contextMenu {
                                 MessageMenuContent(items: MessageMenu.items(forMessage: canReply)) { item in
                                     runMessageMenu(item, row: row)
@@ -1009,15 +1024,9 @@ struct ChatView: View {
                     model.loadOlderChannel(chatId)
                 }
             })
-            // Mask stays in the scroll view's bounds — `ignoresSafeArea` on the
-            // mask mis-samples the fade when the composer/keyboard inset changes
-            // and can blank the whole transcript (white screen mid-type).
-            .mask {
-                VStack(spacing: 0) {
-                    LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom).frame(height: 110)
-                    Color.black
-                }
-            }
+            // Top fade is `headerBlur` over the transcript — a ScrollView `.mask`
+            // forced an offscreen pass of every row on each scroll frame and made
+            // long / group chats feel sticky (feedback app-01M5MQ2GFB1681YXNJMZV4EK7J).
             .onAppear { settleToBottom(proxy) }
             // `rows.last` (not only its id): a streaming reply keeps the same id while its
             // text grows; pinning must follow that growth too (#1444 / lazy window #1399).

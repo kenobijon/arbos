@@ -345,8 +345,14 @@ async fn main() -> anyhow::Result<()> {
                 return Ok(());
             };
             eprintln!("downloading {} ({} bytes)", available.url, available.length);
-            let payload = client::download(&available, &key, &dir, None).await?;
-            eprintln!("verified {}", payload.display());
+            let downloaded = client::download(&available, &key, &dir, None).await?;
+            eprintln!(
+                "verified {} (from {}, attempt {})",
+                downloaded.path.display(),
+                downloaded.url,
+                downloaded.attempts
+            );
+            let payload = downloaded.path;
             let install = match install_path {
                 Some(path) if path.extension().is_some_and(|e| e == "app") => {
                     Install::MacBundle(path)

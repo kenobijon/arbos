@@ -2280,31 +2280,12 @@ final class AppModel: ObservableObject {
 
     // MARK: Avatar colour (D79)
 
-    /// The owner picks one of the seven palette colours, or Automatic (nil).
-    func pickAvatarColorIndex(_ projectId: Id, index: Int?) {
-        if let i = projects.firstIndex(where: { $0.id == projectId }) {
-            projects[i].avatarColorIndex = index
-            projects[i].avatarColorIndexEffective = index
-        }
-        guard !isFixture else { return }
-        Task {
-            do {
-                let kept = try await api.setProjectAvatarColorIndex(projectId, index: index)
-                if let i = projects.firstIndex(where: { $0.id == projectId }) {
-                    projects[i].avatarColorIndexEffective = kept
-                }
-            } catch {
-                notice = Notice(text: "Avatar colour: \(error.localizedDescription)")
-                await refreshRegistry()
-            }
-        }
-    }
-
     /// D92: the owner's leaf and disc colour picks (nil = automatic). Optimistic, then PATCH.
     func pickAvatarLeaf(_ projectId: Id, leaf: Int?, color: Int?) {
         if let i = projects.firstIndex(where: { $0.id == projectId }) {
             projects[i].avatarLeaf = leaf
             projects[i].avatarLeafColor = color
+            projects[i].imageKey = nil
         }
         guard !isFixture else { return }
         Task {
@@ -2749,6 +2730,69 @@ final class AppModel: ObservableObject {
             return true
         } catch {
             notice = Notice(text: "Could not update group: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    /// D92 amendment: the agent's picture as the avatar loader fetches it.
+    func projectImageURL(_ project: Project) -> URL? {
+        guard let key = project.imageKey, !key.isEmpty else { return nil }
+        return blobURL(projectId: project.id, key: key)
+    }
+
+    /// D92 amendment: upload an agent picture into the project's own blob slot and set it.
+    func setProjectImage(projectId: Id, jpeg: Data) async -> Bool {
+        let key = "avatar-\(Int(Date().timeIntervalSince1970 * 1000)).jpg"
+        if isFixture {
+            if let i = projects.firstIndex(where: { $0.id == projectId }) { projects[i].imageKey = key }
+            return true
+        }
+        do {
+            _ = try await api.putBlob(projectId: projectId, key: key, mime: "image/jpeg", data: jpeg)
+            return await setProjectImageKey(projectId: projectId, key: key)
+        } catch {
+            notice = Notice(text: "Could not upload the picture: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    /// D92 amendment: a blob the relay already holds (the Generate tab's answer) becomes the picture.
+    func setProjectImageKey(projectId: Id, key: String) async -> Bool {
+        if let i = projects.firstIndex(where: { $0.id == projectId }) { projects[i].imageKey = key }
+        guard !isFixture else { return true }
+        do {
+            try await api.setProjectImageKey(projectId, key: key)
+            return true
+        } catch {
+            notice = Notice(text: "Picture not saved: \(error.localizedDescription)")
+            await refreshRegistry()
+            return false
+        }
+    }
+
+    /// D92 amendment: the Generate tab — the relay paints one picture and answers with its key.
+    func generateProjectAvatar(projectId: Id, prompt: String) async throws -> String {
+        if isFixture {
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            return "fixture-gen-\(prompt.lowercased().replacingOccurrences(of: " ", with: "-"))"
+        }
+        return try await api.generateProjectAvatar(projectId, prompt: prompt)
+    }
+
+    /// D92 amendment: a group's leaf picture (nil = initials); drops the uploaded picture.
+    func setGroupLeaf(chatId: String, pick: LeafPick?) async -> Bool {
+        if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
+            peopleChats[i].avatarLeaf = pick.map { Int($0.leaf) }
+            peopleChats[i].avatarLeafColor = pick.map { Int($0.color) }
+            peopleChats[i].imageKey = nil
+        }
+        guard !isFixture else { return true }
+        do {
+            let chat = try await api.setPeopleChatLeaf(chatId, pick: pick)
+            if let i = peopleChats.firstIndex(where: { $0.id == chatId }) { peopleChats[i] = chat }
+            return true
+        } catch {
+            notice = Notice(text: "Group picture not saved: \(error.localizedDescription)")
             return false
         }
     }
