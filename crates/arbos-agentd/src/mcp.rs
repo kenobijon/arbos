@@ -491,7 +491,7 @@ async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
         "projects_send" => {
             let to = s("to").unwrap_or_default();
             let text = s("text").unwrap_or_default();
-            let body = json!({ "kind": "message", "payload": { "from": a.cfg.project_id, "from_name": a.cfg.project_name, "text": text, "trace_id": arbos_core::ids::ulid(), "depth": 1 } });
+            let body = json!({ "kind": "message", "payload": { "from": a.cfg.project_id, "from_name": a.name(), "text": text, "trace_id": arbos_core::ids::ulid(), "depth": 1 } });
             match reqwest::Client::new()
                 .post(format!("{}/projects/{}/push", a.cfg.relay_url, to))
                 .bearer_auth(&a.cfg.box_token)

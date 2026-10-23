@@ -381,10 +381,14 @@ impl Agent {
             self.settings.state.write().await.last_registry_models = Some(incoming.clone());
             self.adopt_models(&incoming, "registry").await?;
         }
+        let mut prompt_changed = false;
         {
             let mut st = self.settings.state.write().await;
             if let Some(n) = project.get("name").and_then(Value::as_str) {
                 st.name = n.to_owned();
+            }
+            if let Some(i) = project.get("instructions").and_then(Value::as_str) {
+                prompt_changed |= st.instructions.trim() != i.trim();
             }
             if let Some(i) = project.get("icon").and_then(Value::as_str) {
                 st.icon = i.to_owned();
@@ -407,7 +411,86 @@ impl Agent {
         }
         self.write_settings_doc().await;
         self.write_chats_index(chats).await;
+        // Identity (#1431): the relay's name is the agent's name, at every poll.
+        if let Some(name) = project.get("name").and_then(Value::as_str) {
+            if let Some(r) = self.identity.observe(name) {
+                self.on_renamed(&r).await;
+                prompt_changed = false;
+            }
+        }
+        if prompt_changed {
+            self.refresh_session_prompt("instructions changed").await;
+        }
         Ok(())
+    }
+
+    /// The relay renamed this project while the box runs: every place that spoke the old name
+    /// now speaks the new one on the next turn (system prompt, owner note, group prelude, quick
+    /// reply), the memory tree gets a one-line fact so later walks attribute the old name to
+    /// this agent, and the pi session re-reads its prompt.
+    pub async fn on_renamed(self: &Arc<Self>, r: &crate::identity::Rename) {
+        tracing::info!(from = %r.from, to = %r.to, "project renamed; identity refreshed");
+        self.append_audit(
+            "renamed",
+            json!({ "from": r.from, "to": r.to, "at": r.at_ms }),
+        );
+        let note = format!(
+            "This agent was renamed from \"{}\" to \"{}\"; notes and messages that say \"{}\" refer to it. It introduces itself as \"{}\".",
+            r.from, r.to, r.from, r.to
+        );
+        if let Err(e) = self.store.memory_add(
+            "T1",
+            None,
+            "project",
+            "project",
+            &note,
+            Some(&json!({ "kind": "rename", "from": r.from, "to": r.to })),
+            Some(r.at_ms),
+            1.0,
+            9,
+            &[],
+        ) {
+            tracing::warn!(error = %e, "rename note into memory");
+        }
+        let _ = self.store.t3_append(
+            PROJECT_DOC_CHAT_ID,
+            None,
+            None,
+            "renamed",
+            Some("system"),
+            &note,
+            Some(&json!({ "from": r.from, "to": r.to })),
+        );
+        // The prompt's memory block is debounced (D87); a rename is worth the prefix rewrite.
+        if let Ok(mut held) = self.prompt_memory.lock() {
+            *held = None;
+        }
+        self.refresh_session_prompt("renamed").await;
+    }
+
+    /// Rewrite the system prompt file and make the live pi session read it: at once when no turn
+    /// runs, else as soon as the running turn ends (supervisor loop, `prompt_refresh_pending`).
+    pub async fn refresh_session_prompt(self: &Arc<Self>, why: &str) {
+        if let Err(e) = self.write_system_prompt() {
+            tracing::warn!(error = %e, why, "system prompt rewrite");
+            return;
+        }
+        if self.turn_running.load(std::sync::atomic::Ordering::SeqCst)
+            || !self.pi_ready.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            self.prompt_refresh_pending
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            tracing::info!(why, "system prompt refresh deferred to the end of the turn");
+            return;
+        }
+        match self.respawn_pi_current().await {
+            Ok(()) => tracing::info!(why, "pi session restarted on the refreshed system prompt"),
+            Err(e) => {
+                tracing::warn!(error = %e, why, "pi respawn for the prompt refresh failed");
+                self.prompt_refresh_pending
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
     }
 
     /// Switch the live pi session's model / thinking level and remember the new slots.

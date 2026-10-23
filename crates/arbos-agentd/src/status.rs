@@ -500,7 +500,7 @@ impl Agent {
         let mut used_model = false;
         let (kind, text) = if self.quick_call_allowed(chat_id) {
             used_model = true;
-            let system = quick_system_prompt(&self.cfg.project_name, address.as_deref());
+            let system = quick_system_prompt(&self.name(), address.as_deref());
             let user = snap.render(&user_text);
             let llm = self.llm.with_purpose("quick-reply");
             // No hidden reasoning on this call: with it on, the model's thinking counted
