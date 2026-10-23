@@ -233,10 +233,10 @@ impl Agent {
             let host_name =
                 str_field(&msg.rest, "hostName").unwrap_or_else(|| host_project_id.clone());
             let prelude = format!(
-                "[Group “{title}”, hosted by Project {host_name} — participants: {}. This message is from {}. You are Project {}; your reply is shown to the whole group.]\n\n",
+                "[Group “{title}”, hosted by Project {host_name} — participants: {}. This message is from {}. You are Project {} (id `{me}`); your reply is shown to the whole group.]\n\n",
                 names(&participants, &host_project_id),
                 sender_label(&participants, &from),
-                self.cfg.project_name,
+                self.name(),
             );
             let ids = participant_ids(&participants);
             return Some(GroupTurn {
@@ -274,9 +274,9 @@ impl Agent {
             .unwrap_or_default();
         let from = str_field(&msg.rest, "sender").unwrap_or_else(|| "user".into());
         let mut prelude = format!(
-            "[Group “{title}” — participants: {}. You are Project {} and host this group; the user and the other Projects' agents read what you write here. This message is from {}.]\n",
+            "[Group “{title}” — participants: {}. You are Project {} (id `{me}`) and host this group; the user and the other Projects' agents read what you write here. This message is from {}.]\n",
             names(&participants, &me),
-            self.cfg.project_name,
+            self.name(),
             sender_label(&participants, &from),
         );
         let recent = recent_project_messages(&messages, user_msg_id);
@@ -300,7 +300,7 @@ impl Agent {
             &messages,
             user_msg_id,
             &participants,
-            &self.cfg.project_name,
+            &self.name(),
             PRELUDE_RECENT_MAX,
         );
         Some(GroupTurn {

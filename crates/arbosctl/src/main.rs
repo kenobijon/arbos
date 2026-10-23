@@ -1587,6 +1587,11 @@ fn urlencode(s: &str) -> String {
 }
 
 async fn resolve_project(relay: &Relay, id_or_name: &str) -> Result<String> {
+    // People chats (DMs and groups) live under the `people` pseudo-project: `chat send people
+    // <chat-id> …` writes into `people/<chat-id>` like a device does.
+    if id_or_name == "people" {
+        return Ok(id_or_name.to_owned());
+    }
     let v = relay.get(&format!("/projects/{id_or_name}")).await?;
     v.pointer("/project/id")
         .and_then(Value::as_str)

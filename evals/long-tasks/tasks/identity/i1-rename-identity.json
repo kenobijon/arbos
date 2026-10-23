@@ -21,7 +21,7 @@
       "timeout_s": 120
     },
     {
-      "prompt": "Hi — who am I talking to?",
+      "prompt": "Hi — who am I talking to? Please introduce yourself by name.",
       "new_chat": true,
       "reply_regex": "Quill",
       "reply_regex_not": "I['’]m {OLD_NAME}|I am {OLD_NAME}|my name is {OLD_NAME}|{OLD_NAME} here",
@@ -35,6 +35,7 @@
   ],
   "regression": "agent identity drift after rename (bc-eca4dc4f)",
   "doc_checks": {
-    "no_truncated_reply": true
+    "no_truncated_reply": true,
+    "no_wrong_self_identity": true
   }
 }
