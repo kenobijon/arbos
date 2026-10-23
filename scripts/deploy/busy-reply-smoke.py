@@ -184,12 +184,53 @@ def main():
         stamp = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime())
         chat1 = open_chat(cfgs[0], f"busy-reply smoke {stamp}")
         busy_env = dict(env, ARBOSCTL_CONFIG=cfgs[0])
+        busy_err = open(os.path.join(work, "busy.stderr"), "w+")
         busy = subprocess.Popen(
             ["arbosctl", "chat", "send", project, chat1,
              BUSY_PROMPT.format(n=args.busy_seconds, t=args.busy_seconds + 60),
              "--stream", "--timeout", str(args.busy_seconds + 240)],
-            env=busy_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            env=busy_env, stdout=subprocess.DEVNULL, stderr=busy_err)
         chat2 = open_chat(cfgs[2], f"busy-reply smoke (other chat) {stamp}")
+
+        def dump(cfg, chat):
+            out = subprocess.run(["arbosctl", "chat", "dump", project, chat],
+                                 env=dict(env, ARBOSCTL_CONFIG=cfg), capture_output=True,
+                                 text=True, timeout=60)
+            try:
+                return json.loads(out.stdout).get("messages", [])
+            except json.JSONDecodeError:
+                return []
+
+        def busy_msg_id():
+            busy_err.seek(0)
+            m = re.search(r"\[sent message (\w{26})", busy_err.read())
+            return m.group(1) if m else None
+
+        def long_turn_state():
+            """`running` once the long turn's own (non-quick) row streams in chat1, `done` when
+            it finished, `waiting` while the box has not started it (another turn may hold the
+            agent, in which case the busy message itself only got a quick acknowledgement)."""
+            mid = busy_msg_id()
+            if not mid:
+                return "waiting"
+            rows = [m for m in dump(cfgs[1], chat1)
+                    if m.get("role") == "assistant" and m.get("inReplyTo") == mid
+                    and m.get("decision") != "quick"]
+            if not rows:
+                return "waiting"
+            return "running" if any(m.get("status") != "done" for m in rows) else "done"
+
+        # Probe only once the long turn itself is streaming: a box still busy with an earlier
+        # turn answers the busy prompt with a quick acknowledgement first (the harness must not
+        # mistake that for the long turn).
+        t_wait = time.time()
+        state = long_turn_state()
+        while state != "running" and time.time() - t_wait < 180:
+            if state == "done":
+                break
+            time.sleep(2)
+            state = long_turn_state()
+        report["long_turn_started_after_s"] = round(time.time() - t_wait, 1)
         time.sleep(args.probe_delay)
         # Both probes run while the long turn is still going: the same-chat one first, the
         # new-chat one 10 s later, each under its own arbosctl config (own room replica).
@@ -197,7 +238,7 @@ def main():
         running_at = {}
 
         def probe(name, cfg, chat, text):
-            running_at[name] = busy.poll() is None
+            running_at[name] = long_turn_state() == "running"
             env_p = dict(os.environ, ARBOSCTL_CONFIG=cfg)
             results[name] = Timed(["arbosctl", "chat", "send", project, chat, text,
                                    "--stream", "--timeout", "150"], log, env_p).run()
@@ -215,6 +256,11 @@ def main():
             busy.wait(timeout=args.busy_seconds + 300)
         except subprocess.TimeoutExpired:
             busy.kill()
+        # Leave the agent idle for the next run: wait for the long turn to finish.
+        t_end = time.time()
+        while long_turn_state() == "running" and time.time() - t_end < args.busy_seconds + 120:
+            time.sleep(3)
+        busy_err.close()
         report.update({
             "chat_busy": chat1,
             "chat_other": chat2,
