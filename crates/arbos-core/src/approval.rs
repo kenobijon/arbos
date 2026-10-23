@@ -272,13 +272,107 @@ pub const RISKY_RULES: &[RiskyRule] = &[
     },
 ];
 
-/// Why a call needs a card.
+/// Why a call needs a card. `path_class` is set for shell rules whose targets are paths
+/// (`rm-recursive`): the class a standing grant must cover to skip the card.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RiskMatch {
     pub class: &'static str,
     pub risk: Risk,
     pub why: &'static str,
+    pub path_class: Option<PathClass>,
 }
+
+/// Where a shell command's filesystem targets live, widest last. A standing grant for a class
+/// covers every narrower class (#1544: "always allow in /tmp" never covers the workspace).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PathClass {
+    /// `/tmp` and `/work/tmp`: the box scratch area.
+    Scratch,
+    /// The agent's own workspace (`/work`).
+    Workspace,
+    /// Anything else on the box.
+    Anywhere,
+}
+
+/// The agent's workspace in the box.
+pub const WORKSPACE_ROOT: &str = "/work";
+/// Scratch roots: deletes under these never raise a card.
+pub const SCRATCH_ROOTS: &[&str] = &["/tmp", "/work/tmp"];
+
+impl PathClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PathClass::Scratch => "scratch",
+            PathClass::Workspace => "workspace",
+            PathClass::Anywhere => "anywhere",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<PathClass> {
+        match s {
+            "scratch" => Some(PathClass::Scratch),
+            "workspace" => Some(PathClass::Workspace),
+            "anywhere" => Some(PathClass::Anywhere),
+            _ => None,
+        }
+    }
+
+    /// Short label for the card option and the Settings row ("Always allow Doug in /tmp").
+    pub fn label(self) -> &'static str {
+        match self {
+            PathClass::Scratch => "/tmp",
+            PathClass::Workspace => "its workspace",
+            PathClass::Anywhere => "anywhere",
+        }
+    }
+
+    /// One plain line for the option hint / Settings subtitle.
+    pub fn describe(self) -> &'static str {
+        match self {
+            PathClass::Scratch => "scratch only: /tmp and /work/tmp",
+            PathClass::Workspace => "the agent's own /work folder, including scratch",
+            PathClass::Anywhere => "any folder of its box",
+        }
+    }
+
+    /// A grant for `self` lets a command whose targets fall in `other` run without a card.
+    pub fn covers(self, other: PathClass) -> bool {
+        self >= other
+    }
+}
+
+/// One standing shell grant as the relay stores it (`shell_grants`): "<agent> may run
+/// `rule_class` commands whose targets are within `path_class` without a card", optionally
+/// only in one chat. Revoked rows are not listed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShellGrant {
+    pub id: String,
+    pub project_id: String,
+    pub rule_class: String,
+    pub path_class: PathClass,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_id: Option<String>,
+    pub granted_by: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_id: Option<String>,
+    pub created_at: i64,
+}
+
+impl ShellGrant {
+    /// Whether this grant lets `hit` (raised in `chat_id`) run without a card.
+    pub fn covers(&self, hit: &RiskMatch, chat_id: Option<&str>) -> bool {
+        let Some(class) = hit.path_class else {
+            return false;
+        };
+        self.rule_class == hit.class
+            && self.path_class.covers(class)
+            && self.chat_id.as_deref().is_none_or(|c| Some(c) == chat_id)
+    }
+}
+
+/// Rule classes a standing grant may cover: shell rules whose risk is in filesystem paths.
+pub const GRANTABLE_CLASSES: &[&str] = &["rm-recursive"];
 
 fn regex(pattern: &str) -> Option<regex_lite::Regex> {
     regex_lite::RegexBuilder::new(pattern)
@@ -287,37 +381,150 @@ fn regex(pattern: &str) -> Option<regex_lite::Regex> {
         .ok()
 }
 
-/// Paths an `rm -r` may delete without a card: the box scratch area.
-fn rm_targets_are_scratch(command: &str) -> bool {
-    let Some(re) = regex(r"(^|[;&|]\s*|\s)rm\s+((-\w+\s+)+)(.*)$") else {
-        return false;
+/// `cwd` + `target` as a normalized absolute path (`.`/`..` folded). `~` and `$HOME` resolve
+/// nowhere we classify, so they come back as-is and classify as `Anywhere`.
+fn resolve_path(cwd: &str, target: &str) -> String {
+    let t = target.trim_matches(|c| c == '"' || c == '\'');
+    if t.starts_with('~') || t.starts_with('$') {
+        return t.to_owned();
+    }
+    let joined = if t.starts_with('/') {
+        t.to_owned()
+    } else if cwd.starts_with('/') {
+        format!("{cwd}/{t}")
+    } else {
+        return format!("{cwd}/{t}");
     };
-    let mut saw_any = false;
-    for cap in re.captures_iter(command) {
-        let rest = cap.get(4).map(|m| m.as_str()).unwrap_or("");
-        for target in rest.split_whitespace() {
-            if target.starts_with('-') {
-                continue;
+    let mut out: Vec<&str> = Vec::new();
+    for seg in joined.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                out.pop();
             }
-            if matches!(target, "&&" | "||" | ";" | "|") {
-                break;
-            }
-            saw_any = true;
-            let t = target.trim_matches(|c| c == '"' || c == '\'');
-            let scratch = t.starts_with("/work/tmp/")
-                || t == "/work/tmp"
-                || t.starts_with("tmp/")
-                || t.starts_with("./tmp/")
-                || t.starts_with("/tmp/");
-            if !scratch {
-                return false;
-            }
+            s => out.push(s),
         }
     }
-    saw_any
+    format!("/{}", out.join("/"))
 }
 
-/// Flag a shell command when it matches a destructive pattern.
+fn under(path: &str, root: &str) -> bool {
+    path == root || path.starts_with(&format!("{root}/"))
+}
+
+/// Class of one absolute path. A glob keeps the class of its fixed prefix.
+pub fn classify_path(path: &str) -> PathClass {
+    if !path.starts_with('/') {
+        return PathClass::Anywhere;
+    }
+    if SCRATCH_ROOTS.iter().any(|r| under(path, r)) {
+        return PathClass::Scratch;
+    }
+    if under(path, WORKSPACE_ROOT) {
+        return PathClass::Workspace;
+    }
+    PathClass::Anywhere
+}
+
+/// Split a command line into simple commands at `;`, `&&`, `||`, `|` and newlines, keeping
+/// order so a leading `cd` applies to what follows.
+fn simple_commands(command: &str) -> Vec<Vec<String>> {
+    let mut cmds = Vec::new();
+    let mut cur: Vec<String> = Vec::new();
+    let mut word = String::new();
+    let mut quote: Option<char> = None;
+    let mut chars = command.chars().peekable();
+    let flush_word = |word: &mut String, cur: &mut Vec<String>| {
+        if !word.is_empty() {
+            cur.push(std::mem::take(word));
+        }
+    };
+    while let Some(c) = chars.next() {
+        match quote {
+            Some(q) => {
+                if c == q {
+                    quote = None;
+                } else {
+                    word.push(c);
+                }
+            }
+            None => match c {
+                '\'' | '"' => quote = Some(c),
+                ';' | '\n' | '|' | '&' => {
+                    if (c == '|' || c == '&') && chars.peek() == Some(&c) {
+                        chars.next();
+                    }
+                    flush_word(&mut word, &mut cur);
+                    if !cur.is_empty() {
+                        cmds.push(std::mem::take(&mut cur));
+                    }
+                }
+                c if c.is_whitespace() => flush_word(&mut word, &mut cur),
+                c => word.push(c),
+            },
+        }
+    }
+    flush_word(&mut word, &mut cur);
+    if !cur.is_empty() {
+        cmds.push(cur);
+    }
+    cmds
+}
+
+fn is_recursive_flag(w: &str) -> bool {
+    w == "--recursive"
+        || (w.starts_with('-') && !w.starts_with("--") && w[1..].contains(['r', 'R']))
+}
+
+/// The widest class among the targets of every `rm` in `command` (a leading `cd` moves the
+/// working directory; the default is the workspace), and whether any of them is recursive.
+/// `None` when the command deletes nothing.
+pub fn rm_targets(command: &str) -> Option<(PathClass, bool)> {
+    let mut cwd = WORKSPACE_ROOT.to_owned();
+    let mut widest: Option<PathClass> = None;
+    let mut recursive = false;
+    for cmd in simple_commands(command) {
+        let mut words = cmd.iter().map(String::as_str).peekable();
+        let mut head = words.next()?;
+        while matches!(head, "sudo" | "env" | "time" | "nice" | "nohup") {
+            head = words.next()?;
+        }
+        match head {
+            "cd" => {
+                cwd = match words.find(|w| !w.starts_with('-')) {
+                    Some(dir) => resolve_path(&cwd, dir),
+                    None => "~".to_owned(),
+                };
+            }
+            "pushd" => {
+                if let Some(dir) = words.find(|w| !w.starts_with('-')) {
+                    cwd = resolve_path(&cwd, dir);
+                }
+            }
+            "rm" => {
+                let mut saw_dashdash = false;
+                for w in words {
+                    if !saw_dashdash && w == "--" {
+                        saw_dashdash = true;
+                        continue;
+                    }
+                    if !saw_dashdash && w.starts_with('-') {
+                        recursive |= is_recursive_flag(w);
+                        continue;
+                    }
+                    let class = classify_path(&resolve_path(&cwd, w));
+                    widest = Some(widest.map_or(class, |c| c.max(class)));
+                }
+            }
+            _ => {}
+        }
+    }
+    widest.map(|c| (c, recursive))
+}
+
+/// Flag a shell command when it matches a destructive pattern. An `rm` whose targets all sit in
+/// scratch is not destructive; a non-recursive `rm -f` of files in the agent's own workspace is
+/// an edit of its working tree, not a card (#1544).
 pub fn classify_shell(command: &str) -> Option<RiskMatch> {
     for rule in RISKY_RULES {
         if rule.subject != Subject::ShellCommand {
@@ -329,13 +536,20 @@ pub fn classify_shell(command: &str) -> Option<RiskMatch> {
         if !re.is_match(command) {
             continue;
         }
-        if rule.class == "rm-recursive" && rm_targets_are_scratch(command) {
-            continue;
+        let mut path_class = None;
+        if rule.class == "rm-recursive" {
+            match rm_targets(command) {
+                Some((PathClass::Scratch, _)) => continue,
+                Some((PathClass::Workspace, false)) => continue,
+                Some((class, _)) => path_class = Some(class),
+                None => path_class = Some(PathClass::Anywhere),
+            }
         }
         return Some(RiskMatch {
             class: rule.class,
             risk: rule.risk,
             why: rule.why,
+            path_class,
         });
     }
     None
@@ -388,6 +602,7 @@ pub fn classify_tool(tool: &str, args: &Value) -> Option<RiskMatch> {
                 class: rule.class,
                 risk: rule.risk,
                 why: rule.why,
+                path_class: None,
             });
         }
     }
@@ -573,6 +788,68 @@ mod tests {
                 "{tool} {args} is not risky"
             );
         }
+    }
+
+    /// #1544: a leading `cd` into scratch makes relative targets scratch; a non-recursive `rm -f`
+    /// inside the workspace is not a card; the class names where the targets are.
+    #[test]
+    fn rm_classes_follow_cd_and_target_paths() {
+        for cmd in [
+            "cd /tmp && rm -rf arbos-src && git clone --depth 1 https://x/y arbos-src",
+            "cd /work/tmp; rm -r build",
+            "pushd /tmp && rm -rf ./cache",
+            "rm -f out/*.png",
+            "rm -f /work/out/a.png /work/out/b.png",
+            "rm -- -weird-file",
+        ] {
+            assert_eq!(classify_shell(cmd), None, "{cmd} needs no card");
+        }
+        let ws = classify_shell("rm -rf build").expect("workspace recursive delete cards");
+        assert_eq!(ws.path_class, Some(PathClass::Workspace));
+        let ws2 = classify_shell("cd /work/app && rm -rf node_modules").expect("cards");
+        assert_eq!(ws2.path_class, Some(PathClass::Workspace));
+        let any = classify_shell("cd /tmp && rm -rf ../etc/foo").expect("escapes scratch");
+        assert_eq!(any.path_class, Some(PathClass::Anywhere));
+        let any2 = classify_shell("rm -rf ~/Library").expect("home cards");
+        assert_eq!(any2.path_class, Some(PathClass::Anywhere));
+        let mixed = classify_shell("rm -rf /tmp/a /work/b").expect("widest target wins");
+        assert_eq!(mixed.path_class, Some(PathClass::Workspace));
+        let plain_f = classify_shell("rm -f /etc/hosts").expect("forced delete outside /work");
+        assert_eq!(plain_f.path_class, Some(PathClass::Anywhere));
+        assert_eq!(
+            classify_shell("git push --force origin main")
+                .expect("force push")
+                .path_class,
+            None
+        );
+    }
+
+    /// A standing grant covers its class and every narrower one, for its chat or all chats.
+    #[test]
+    fn shell_grant_covers_narrower_classes_only() {
+        let grant = |class: PathClass, chat: Option<&str>| ShellGrant {
+            id: "g".into(),
+            project_id: "p".into(),
+            rule_class: "rm-recursive".into(),
+            path_class: class,
+            chat_id: chat.map(str::to_owned),
+            granted_by: "u".into(),
+            approval_id: None,
+            created_at: 0,
+        };
+        let ws = classify_shell("rm -rf build").unwrap();
+        let any = classify_shell("rm -rf /etc/x").unwrap();
+        assert!(grant(PathClass::Workspace, None).covers(&ws, Some("c1")));
+        assert!(!grant(PathClass::Workspace, None).covers(&any, Some("c1")));
+        assert!(grant(PathClass::Anywhere, None).covers(&any, None));
+        assert!(!grant(PathClass::Scratch, None).covers(&ws, None));
+        assert!(grant(PathClass::Anywhere, Some("c1")).covers(&ws, Some("c1")));
+        assert!(!grant(PathClass::Anywhere, Some("c1")).covers(&ws, Some("c2")));
+        let push = classify_shell("git push -f").unwrap();
+        assert!(!grant(PathClass::Anywhere, None).covers(&push, None));
+        assert!(PathClass::Anywhere.covers(PathClass::Scratch));
+        assert!(!PathClass::Scratch.covers(PathClass::Workspace));
+        assert_eq!(PathClass::parse("workspace"), Some(PathClass::Workspace));
     }
 
     /// Invariant: a `send`-kind action with no `approved` outcome is never dispatched.

@@ -84,6 +84,8 @@ struct Shared {
     connectors: Mutex<ConnectorsView>,
     channels: Mutex<ChannelsView>,
     secrets: Mutex<SecretsView>,
+    /// Standing shell approvals per agent (#1544): Doug starts with one for /tmp.
+    shell_grants: Mutex<HashMap<Id, Vec<crate::model::ShellGrant>>>,
     routines: Mutex<Vec<Routine>>,
     routine_runs: Mutex<HashMap<Id, Vec<RoutineRun>>>,
     local: Mutex<LocalView>,
@@ -129,6 +131,7 @@ impl SyncSource for FixtureSource {
                 connectors: Mutex::new(seed_connectors()),
                 channels: Mutex::new(seed_channels()),
                 secrets: Mutex::new(seed_secrets()),
+                shell_grants: Mutex::new(seed_shell_grants()),
                 routines: Mutex::new(seed_routines()),
                 routine_runs: Mutex::new(seed_routine_runs()),
                 local: Mutex::new(seed_local()),
@@ -800,7 +803,17 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         ClientCommand::Approve {
             chat_id,
             approval_id,
-        } => decide_approval(shared, chat_id, approval_id, ApprovalState::Approved, None),
+            grant,
+        } => {
+            if let Some(class) = grant {
+                with_doc(shared, &chat_id, |doc| {
+                    doc.core.transact(|d| {
+                        d.set_approval_grant(&approval_id, &class);
+                    });
+                });
+            }
+            decide_approval(shared, chat_id, approval_id, ApprovalState::Approved, None)
+        }
         ClientCommand::Reject {
             chat_id,
             approval_id,
@@ -1266,6 +1279,16 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             emit_connectors(shared);
         }
         ClientCommand::SecretsRefresh => emit_secrets(shared),
+        ClientCommand::ShellGrantsRefresh { project_id } => emit_shell_grants(shared, &project_id),
+        ClientCommand::ShellGrantRevoke {
+            project_id,
+            grant_id,
+        } => {
+            if let Some(list) = shared.shell_grants.lock().unwrap().get_mut(&project_id) {
+                list.retain(|g| g.id != grant_id);
+            }
+            emit_shell_grants(shared, &project_id);
+        }
         ClientCommand::ProjectSecretsRefresh { project_id } => {
             let view = shared.secrets.lock().unwrap().clone();
             let items = view
@@ -3280,6 +3303,7 @@ fn approval_card(
         decided_at,
         decided_by: decided_at.map(|_| DEVICE.to_string()),
         reason: None,
+        grant: None,
     }
 }
 
@@ -3494,6 +3518,39 @@ fn membership_notice(shared: &Arc<Shared>, chat_id: &str, text: &str) {
             let _ = d.append_system_line(&new_id(), text, "relay", None);
         });
     });
+}
+
+fn emit_shell_grants(shared: &Arc<Shared>, project_id: &str) {
+    let items = shared
+        .shell_grants
+        .lock()
+        .unwrap()
+        .get(project_id)
+        .cloned()
+        .unwrap_or_default();
+    let _ = shared.events.send(SyncEvent::ShellGrants {
+        project_id: project_id.to_string(),
+        items,
+    });
+}
+
+/// #1544: the first agent has one standing grant (so the Settings row and its switch show).
+fn seed_shell_grants() -> HashMap<Id, Vec<crate::model::ShellGrant>> {
+    let mut m = HashMap::new();
+    m.insert(
+        PROJECT_ARBOS.to_string(),
+        vec![crate::model::ShellGrant {
+            id: "grant-scratch".into(),
+            rule_class: "rm-recursive".into(),
+            path_class: "scratch".into(),
+            chat_id: None,
+            granted_by: "dev-mac".into(),
+            created_at: now_ms() - 3 * 60 * 60 * 1000,
+            label: "Destructive shell in /tmp".into(),
+            detail: "scratch only: /tmp and /work/tmp".into(),
+        }],
+    );
+    m
 }
 
 fn with_doc<R>(shared: &Arc<Shared>, chat_id: &str, f: impl FnOnce(&ChatDoc) -> R) -> Option<R> {

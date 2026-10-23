@@ -570,6 +570,7 @@ impl Db {
         Self::migrate_vault_items_per_user(&c)?;
         c.execute_batch(crate::db_secrets::SECRETS_SCHEMA)?;
         crate::db_secrets::migrate_secrets(&c);
+        crate::shell_grants::ensure_schema(&c);
         c.execute_batch(crate::matrix::db::MATRIX_SCHEMA)?;
         crate::matrix::db::migrate_matrix(&c);
         c.execute_batch(crate::matrix::servers_db::SERVERS_SCHEMA)?;

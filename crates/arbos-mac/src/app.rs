@@ -456,6 +456,8 @@ pub struct AppState {
     pub secrets: SecretsView,
     /// Agent profile → Secrets, per project.
     pub project_secrets: std::collections::HashMap<Id, ProjectSecrets>,
+    /// Standing shell approvals per agent (#1544), loaded when the agent pane opens.
+    pub shell_grants: std::collections::HashMap<Id, Vec<crate::model::ShellGrant>>,
     /// Settings → Routines, per project (F3).
     pub routines: HashMap<Id, Vec<Routine>>,
     /// Run history per routine, newest first.
@@ -798,6 +800,7 @@ impl AppState {
             connectors: ConnectorsView::default(),
             secrets: SecretsView::default(),
             project_secrets: std::collections::HashMap::new(),
+            shell_grants: std::collections::HashMap::new(),
             routines: HashMap::new(),
             routine_runs: HashMap::new(),
             notifier: Notifier::new(),
@@ -2038,6 +2041,10 @@ impl AppState {
             }
             SyncEvent::ProjectSecrets { project_id, view } => {
                 self.project_secrets.insert(project_id, view);
+            }
+            SyncEvent::ShellGrants { project_id, items } => {
+                self.shell_grants.insert(project_id, items);
+                cx.notify();
             }
             SyncEvent::Secrets(view) => {
                 self.secrets = view;
@@ -4265,9 +4272,12 @@ impl AppState {
                 reason: Some("denied".into()),
             });
         } else {
+            // #1544: "grant:<path class>" is a destructive-shell card's standing option.
+            let grant = choice.strip_prefix("grant:").map(str::to_owned);
             self.command(ClientCommand::Approve {
                 chat_id,
                 approval_id,
+                grant,
             });
         }
         cx.notify();
@@ -4279,6 +4289,7 @@ impl AppState {
         self.command(ClientCommand::Approve {
             chat_id,
             approval_id,
+            grant: None,
         });
         cx.notify();
     }
@@ -4641,6 +4652,11 @@ impl AppState {
             ProfilePage::Agent { project_id } => Some(project_id.clone()),
             _ => None,
         };
+        if let ProfilePage::Agent { project_id } = &page {
+            self.command(ClientCommand::ShellGrantsRefresh {
+                project_id: project_id.clone(),
+            });
+        }
         if let ProfilePage::Server { server_id } | ProfilePage::Channel { server_id, .. } = &page {
             // Members only come with the detail route.
             self.command(ClientCommand::ServerFetch {
@@ -6239,7 +6255,7 @@ impl AppState {
         live.into_iter().map(|(handle, _)| handle.clone()).collect()
     }
 
-    fn project_of_chat(&self, chat_id: &str) -> Option<&Project> {
+    pub fn project_of_chat(&self, chat_id: &str) -> Option<&Project> {
         let pid = self
             .chats
             .values()
@@ -6758,6 +6774,25 @@ impl AppState {
 
     pub fn project_secrets_refresh(&mut self, project_id: Id, cx: &mut Context<Self>) {
         self.command(ClientCommand::ProjectSecretsRefresh { project_id });
+        cx.notify();
+    }
+
+    /// #1544: the agent pane opened — load its standing shell approvals.
+    pub fn shell_grants_refresh(&mut self, project_id: Id, cx: &mut Context<Self>) {
+        self.command(ClientCommand::ShellGrantsRefresh { project_id });
+        cx.notify();
+    }
+
+    /// Settings › Shell approvals: switch a grant off. The row goes at once; the relay's list
+    /// confirms it.
+    pub fn shell_grant_revoke(&mut self, project_id: Id, grant_id: String, cx: &mut Context<Self>) {
+        if let Some(list) = self.shell_grants.get_mut(&project_id) {
+            list.retain(|g| g.id != grant_id);
+        }
+        self.command(ClientCommand::ShellGrantRevoke {
+            project_id,
+            grant_id,
+        });
         cx.notify();
     }
 

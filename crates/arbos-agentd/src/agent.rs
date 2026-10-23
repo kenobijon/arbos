@@ -1971,8 +1971,13 @@ impl Agent {
                             .map(str::to_owned),
                     }
                 };
-                self.decide_approval(&approval_id, outcome, &cmd.issued_by)
-                    .await
+                self.decide_approval_from_command(
+                    &approval_id,
+                    outcome,
+                    &cmd.issued_by,
+                    &cmd.payload,
+                )
+                .await
             }
             (other, _) => Err(anyhow!("unknown command kind {other}")),
         };

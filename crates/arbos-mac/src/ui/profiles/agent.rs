@@ -377,6 +377,77 @@ pub(super) fn page(
                     Some(open) => Section::Reveal { rows, open },
                     None => Section::Card(rows),
                 });
+                // ----- Permissions · Shell approvals (#1544) --------------------------
+                // The standing choices made on destructive-shell cards, one switch each;
+                // off = revoked, the agent asks again next time.
+                let grants: Vec<crate::model::ShellGrant> = shell
+                    .state
+                    .read(cx)
+                    .shell_grants
+                    .get(&project.id)
+                    .cloned()
+                    .unwrap_or_default();
+                body.push(Section::Title("Permissions".into()));
+                body.push(Section::Card(vec![kit::row(
+                    "agent-shell-approvals-row",
+                    Leading::Tile("terminal"),
+                    "Shell approvals",
+                    None,
+                    Some(crate::model::ShellGrant::summary(&grants).into()),
+                    None,
+                    false,
+                    &theme,
+                )
+                .into_any_element()]));
+                body.push(Section::Footnote(
+                    format!(
+                        "{} asks before destructive shell commands outside /work/tmp. Standing answers from the cards land here.",
+                        project.name
+                    )
+                    .into(),
+                ));
+                if !grants.is_empty() {
+                    body.push(Section::Title(
+                        format!("Shell approvals · {}", project.name).into(),
+                    ));
+                    let mut rows: Vec<gpui::AnyElement> = Vec::new();
+                    for g in &grants {
+                        let pid = project.id.clone();
+                        let gid = g.id.clone();
+                        let mut sub = format!("{} · {}", g.rule_class, g.detail);
+                        if g.chat_id.is_some() {
+                            sub.push_str(" · this chat only");
+                        }
+                        rows.push(
+                            kit::row(
+                                gpui::ElementId::Name(format!("shell-grant-{}", g.id).into()),
+                                Leading::Glyph("terminal"),
+                                g.label.clone(),
+                                Some(sub.into()),
+                                None,
+                                Some(glass::switch(true, &theme).into_any_element()),
+                                false,
+                                &theme,
+                            )
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme.surface_2))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let (pid, gid) = (pid.clone(), gid.clone());
+                                this.state
+                                    .update(cx, |s, cx| s.shell_grant_revoke(pid, gid, cx));
+                            }))
+                            .into_any_element(),
+                        );
+                    }
+                    body.push(Section::Card(rows));
+                    body.push(Section::Footnote(
+                        format!(
+                            "Turn one off and {} asks again next time. Every allowed run is in Activity.",
+                            project.name
+                        )
+                        .into(),
+                    ));
+                }
             } else {
                 body.push(Section::Card(vec![kit::value_row(
                     "agent-model-row",

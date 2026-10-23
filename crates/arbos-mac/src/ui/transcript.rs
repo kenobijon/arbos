@@ -1816,8 +1816,14 @@ impl Transcript {
                     .child(assistant_slot(card))
                     .into_any_element()
             }
-            RowKind::Approval { view } => {
+            RowKind::Approval { mut view } => {
                 let chat_id = self.chat_id.clone().unwrap_or_default();
+                // #1544: the standing rows name the agent ("Always allow Doug in /tmp").
+                view.agent = self
+                    .state
+                    .read(cx)
+                    .project_of_chat(&chat_id)
+                    .map(|p| p.name.clone());
                 let approval_id = view.approval_id.clone();
                 let (state_a, chat_a, id_a) =
                     (self.state.clone(), chat_id.clone(), approval_id.clone());
@@ -2591,6 +2597,7 @@ pub fn build_rows(
                             state,
                             decided_by,
                             reason,
+                            grant,
                             ..
                         } => {
                             let view = ApprovalView {
@@ -2602,10 +2609,12 @@ pub fn build_rows(
                                 payload: payload.clone(),
                                 decided_by: decided_by.clone(),
                                 reason: reason.clone(),
+                                grant: grant.clone(),
+                                agent: None,
                             };
                             rows.push(Row {
                                 version: hash_version(
-                                    &(approval_id, title, state.label(), decided_by, reason),
+                                    &(approval_id, title, state.label(), decided_by, reason, grant),
                                     false,
                                 ),
                                 id: format!("{}#{}", message.id, id),
