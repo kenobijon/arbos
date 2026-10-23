@@ -569,6 +569,7 @@ impl Db {
         crate::db_voice::migrate_voice(&c);
         Self::migrate_vault_items_per_user(&c)?;
         c.execute_batch(crate::db_secrets::SECRETS_SCHEMA)?;
+        c.execute_batch(crate::agent_messages::SCHEMA)?;
         crate::db_secrets::migrate_secrets(&c);
         c.execute_batch(crate::matrix::db::MATRIX_SCHEMA)?;
         crate::matrix::db::migrate_matrix(&c);
@@ -1563,7 +1564,24 @@ impl Db {
         })
     }
 
+    /// Rows with `after < seq <= upto`, oldest first (the checkpoint validation walk).
+    pub fn rows_between(&self, room: &str, after: i64, upto: i64, limit: i64) -> Result<Vec<Row>> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT seq, device, batch_id, bytes FROM rows WHERE room = ?1 AND seq > ?2 AND seq <= ?3
+                 ORDER BY seq LIMIT ?4",
+            )?;
+            let rows = st.query_map(params![room, after, upto, limit], |r| {
+                Ok(Row { seq: r.get(0)?, device: r.get(1)?, batch_id: r.get(2)?, bytes: r.get(3)? })
+            })?;
+            rows.collect()
+        })
+    }
+
     /// Store a checkpoint and delete rows it covers (guard: `seq_covered >= floor`).
+    ///
+    /// Callers must have verified that the snapshot contains every op in those rows
+    /// (`rooms::checkpoint_covers_store`): this deletes them for good.
     pub fn put_checkpoint(
         &self,
         room: &str,
@@ -1588,6 +1606,40 @@ impl Db {
             c.execute("DELETE FROM rows WHERE room = ?1 AND seq <= ?2", params![room, seq_covered])?;
             c.execute("INSERT INTO room_seq(room, head, floor) VALUES (?1, ?2, ?2) ON CONFLICT(room) DO UPDATE SET floor = ?2, head = MAX(head, ?2)", params![room, seq_covered])?;
             Ok(true)
+        })
+    }
+
+    /// `(seq, created_at, bytes)` of the room's checkpoint.
+    pub fn checkpoint_full(&self, room: &str) -> Result<Option<(i64, i64, Vec<u8>)>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT seq, created_at, bytes FROM checkpoints WHERE room = ?1",
+                params![room],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+        })
+    }
+
+    /// Announced messages the relay indexed for a chat (`chat_events`).
+    pub fn chat_events_count(&self, chat_id: &str) -> Result<i64> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT COUNT(*) FROM chat_events WHERE chat_id = ?1",
+                params![chat_id],
+                |r| r.get(0),
+            )
+        })
+    }
+
+    /// Messages the Matrix mirror holds for a chat (`matrix_events`).
+    pub fn matrix_events_count(&self, chat_id: &str) -> Result<i64> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT COUNT(*) FROM matrix_events WHERE chat_id = ?1",
+                params![chat_id],
+                |r| r.get(0),
+            )
         })
     }
 
