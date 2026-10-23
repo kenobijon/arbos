@@ -1,12 +1,13 @@
 //! An agent's page on the shared profile pane (D93): one [`ProfilePane`]
 //! spec — hero (leaf / photo with the owner's crayon, editable name,
 //! "working" or "Agent · run by @owner"), the tabs **Profile** (name, handle,
-//! description) | **Settings** (model, reasoning) | **Library** (images,
-//! files, links from the agent's chats), and a Delete agent footer for the
-//! owner. The same three tabs as the iPhone's agent page. Voice, Share
+//! description) | **Settings** (model, reasoning, call voice) | **Library**
+//! (images, files, links from the agent's chats), and a Delete agent footer
+//! for the owner. The same three tabs as the iPhone's agent page. Share
 //! project and Add to this chat left the pane on 2026-10-22 (Jacob: simple,
-//! consistent, powerful); the avatar picker opens from the hero while the
-//! pane is up.
+//! consistent, powerful); the Voice row came back on 2026-10-23 (the call
+//! voice — spoken replies stay behind the voice-mode switch); the avatar
+//! picker opens from the hero while the pane is up.
 
 use gpui::{div, prelude::*, px, Context, Div, SharedString, Stateful};
 
@@ -103,6 +104,7 @@ pub(super) fn page(
     } else {
         project.model.clone()
     };
+    let voice_text = crate::ui::voicepicker::current_label(&project, &state.voices);
     let pick = state.agent_pick;
     let renaming = state.profile_editing_name && mine;
     let tab = state.profile_tab;
@@ -338,12 +340,15 @@ pub(super) fn page(
             }
         }
         _ => {
-            // ----- Settings: how the agent runs — Model · Reasoning ---------------------
-            // (Voice, Share project and Add to this chat left the pane on
-            // 2026-10-22 — Jacob: simple, consistent, powerful.)
+            // ----- Settings: how the agent runs — Model · Reasoning · Voice -------------
+            // Voice is the agent's call voice (the same picker as the voice
+            // sheet); spoken replies in chat stay behind the voice-mode kill
+            // switch. Share project and Add to this chat left the pane on
+            // 2026-10-22 — Jacob: simple, consistent, powerful.
             if mine {
                 let model_open = pick == Some(AgentPick::Model);
                 let reasoning_open = pick == Some(AgentPick::Reasoning);
+                let voice_open = pick == Some(AgentPick::Voice);
                 let rows = vec![
                     hoverpick::row(
                         "Model",
@@ -365,13 +370,23 @@ pub(super) fn page(
                         cx,
                     )
                     .into_any_element(),
+                    hoverpick::row(
+                        "Voice",
+                        voice_text,
+                        AgentPick::Voice,
+                        voice_open,
+                        voice_open.then(|| hoverpick::voice_panel(shell, &project, cx)),
+                        &theme,
+                        cx,
+                    )
+                    .into_any_element(),
                 ];
                 // When a row has just opened, the pane scrolls so its list is
-                // in view (Section::Reveal).
-                let open = pick.and_then(|open| match open {
-                    AgentPick::Model => Some(0),
-                    AgentPick::Reasoning => Some(1),
-                    AgentPick::Voice => None,
+                // in view (Section::Reveal). Rows are children 0 / 1 / 2.
+                let open = pick.map(|open| match open {
+                    AgentPick::Model => 0,
+                    AgentPick::Reasoning => 1,
+                    AgentPick::Voice => 2,
                 });
                 body.push(match open {
                     Some(open) => Section::Reveal { rows, open },

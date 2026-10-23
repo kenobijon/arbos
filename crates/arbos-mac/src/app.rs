@@ -1449,8 +1449,8 @@ impl AppState {
                 // Signed in and synced (also the path without a sign-in event).
                 if !projects.is_empty() {
                     self.maybe_prompt_notifications();
-                    // The "Voice · <name>" label needs the list once (only with voice mode on).
-                    if !self.voices_requested && self.voice_mode_feature {
+                    // The agent pane's "Voice · <name>" row needs the list once.
+                    if !self.voices_requested {
                         self.voices_requested = true;
                         self.fetch_voices();
                     }
@@ -4384,12 +4384,9 @@ impl AppState {
         cx.notify();
     }
 
-    /// Ask the relay for the voice list (the picker opening).
+    /// Ask the relay for the voice list (the agent pane's Voice row and the
+    /// call-voice picker need it; the list is independent of voice mode).
     pub fn fetch_voices(&mut self) {
-        // No voice picker while the feature is off: nothing needs the list.
-        if !self.voice_mode_feature {
-            return;
-        }
         self.command(ClientCommand::FetchVoices);
     }
 
