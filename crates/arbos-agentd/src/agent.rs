@@ -408,14 +408,15 @@ impl ProseFilter {
         Self::is_thought_sentence(rest)
     }
 
-    /// Drop leading blank-line-separated paragraphs that contain thought sentences.
-    /// CoT often lands as its own paragraph before the real answer.
+    /// Drop leading blank-line-separated paragraphs that contain thought sentences or that
+    /// are pure tool-narration / boilerplate. CoT and "Let me check…" often land as their
+    /// own paragraph before the real answer.
     fn strip_leading_thought_paragraphs(text: &str) -> String {
         let mut rest = text.trim_start();
         while let Some(i) = rest.find("\n\n") {
             let para = &rest[..i];
             let after = rest[i..].trim_start();
-            if !Self::paragraph_has_thought(para) {
+            if !Self::paragraph_has_thought(para) && !Self::is_boilerplate(para.trim()) {
                 break;
             }
             rest = after;
@@ -522,7 +523,7 @@ impl ProseFilter {
             let Some((sentence, after)) = Self::split_first_sentence(&rest) else {
                 break;
             };
-            if !Self::is_thought_sentence(sentence) {
+            if !Self::is_thought_sentence(sentence) && !Self::is_boilerplate(sentence) {
                 break;
             }
             rest = after.trim_start().to_string();
@@ -530,8 +531,10 @@ impl ProseFilter {
         if rest.is_empty() {
             return String::new();
         }
-        if Self::is_thought_sentence(&rest) && Self::split_first_sentence(&rest).is_none() {
-            // Whole remainder is one thought sentence (no answer after).
+        if (Self::is_thought_sentence(&rest) || Self::is_boilerplate(&rest))
+            && Self::split_first_sentence(&rest).is_none()
+        {
+            // Whole remainder is one thought / narration sentence (no answer after).
             return String::new();
         }
         format!("{rest}{nl}")
@@ -651,7 +654,8 @@ impl ProseFilter {
     }
 
     /// True when `chars[i]` (lowercase) is glued to an uppercase letter that starts a new
-    /// sentence/word ("findingsDon't"), not mid-camelCase ("GitHub", "iPhone").
+    /// sentence ("findingsDon't"), not a camelCase identifier ("fetchData", "useState",
+    /// "GitHub", "iPhone", "macOS").
     fn is_glued_word_break(chars: &[char], i: usize) -> bool {
         let Some(next) = chars.get(i + 1) else {
             return false;
@@ -659,7 +663,7 @@ impl ProseFilter {
         if !chars[i].is_lowercase() || !next.is_uppercase() {
             return false;
         }
-        // Next must continue as a word ("Don't", "Auditing"), not an acronym ("USA").
+        // Next must continue as a word ("Don't"), not an acronym ("USA").
         let continues = match chars.get(i + 2) {
             None => true,
             Some(n) => n.is_lowercase() || *n == '\'',
@@ -676,32 +680,116 @@ impl ProseFilter {
             return false;
         }
         // "iPhone": single leading lowercase after a boundary — leave it.
-        (i + 1 - run_start) >= 2
+        if (i + 1 - run_start) < 2 {
+            return false;
+        }
+        // Only split when the capital word has an apostrophe ("Don't", "It's"). Plain
+        // camelCase (fetchData, useState) and stack names (macOS) stay intact.
+        let mut j = i + 1;
+        while j < chars.len() && (chars[j].is_alphabetic() || chars[j] == '\'') {
+            if chars[j] == '\'' {
+                return true;
+            }
+            j += 1;
+        }
+        false
+    }
+
+    /// Whitespace-delimited token around `i` looks like a URL or path: leave it alone.
+    fn token_is_url_or_path(chars: &[char], i: usize) -> bool {
+        let mut start = i;
+        while start > 0 && !chars[start - 1].is_whitespace() {
+            start -= 1;
+        }
+        let mut end = i;
+        while end + 1 < chars.len() && !chars[end + 1].is_whitespace() {
+            end += 1;
+        }
+        let token: String = chars[start..=end].iter().collect();
+        if token.contains("://") || token.contains('/') {
+            return true;
+        }
+        // Dotted path / module form ("struct.Mutex.html"): a "." between letters where the
+        // uppercase run is followed by another "." or similar — not sentence glue
+        // ("have.Checking").
+        let tchars: Vec<char> = token.chars().collect();
+        for k in 0..tchars.len() {
+            if tchars[k] != '.' {
+                continue;
+            }
+            if k == 0 {
+                continue;
+            }
+            let Some(prev) = tchars.get(k - 1) else {
+                continue;
+            };
+            let Some(next) = tchars.get(k + 1) else {
+                continue;
+            };
+            if !prev.is_ascii_alphabetic() || !next.is_ascii_alphabetic() {
+                continue;
+            }
+            // Both sides lowercase → foo.bar path/module.
+            if prev.is_ascii_lowercase() && next.is_ascii_lowercase() {
+                return true;
+            }
+            // word.Mutex.html — capital run then another separator.
+            if next.is_ascii_uppercase() {
+                let mut j = k + 1;
+                while j < tchars.len() && tchars[j].is_alphabetic() {
+                    j += 1;
+                }
+                if matches!(tchars.get(j), Some('.' | '/' | '_' | '-')) {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// Insert a space after `.` / `!` / `?` when the next character is an uppercase letter
     /// ("have.Checking" → "have. Checking"), and between a lowercase run and an uppercase
-    /// sentence start ("findingsDon't" → "findings Don't"). Skips `e.g.` / `i.e.` and
-    /// camelCase like `GitHub`.
+    /// contraction ("findingsDon't" → "findings Don't"). Skips inline code, fenced code,
+    /// URL/path tokens, `e.g.` / `i.e.`, and camelCase like `useState` / `GitHub`.
     fn fix_glued_spaces(text: &str) -> String {
         let chars: Vec<char> = text.chars().collect();
         let mut out = String::with_capacity(text.len() + 8);
         let mut i = 0;
+        let mut in_inline = false;
+        let mut in_fence = false;
         while i < chars.len() {
+            // Fence open/close: three backticks.
+            if chars[i] == '`' && chars.get(i + 1) == Some(&'`') && chars.get(i + 2) == Some(&'`') {
+                out.push_str("```");
+                i += 3;
+                in_fence = !in_fence;
+                in_inline = false;
+                continue;
+            }
+            if !in_fence && chars[i] == '`' {
+                in_inline = !in_inline;
+                out.push('`');
+                i += 1;
+                continue;
+            }
             let c = chars[i];
             out.push(c);
-            if matches!(c, '.' | '!' | '?') {
-                let abbrev =
-                    c == '.' && i >= 2 && chars[i - 1].is_ascii_lowercase() && chars[i - 2] == '.';
-                if !abbrev {
-                    if let Some(next) = chars.get(i + 1) {
-                        if next.is_uppercase() {
-                            out.push(' ');
+            if !in_fence && !in_inline && !Self::token_is_url_or_path(&chars, i) {
+                if matches!(c, '.' | '!' | '?') {
+                    let abbrev = c == '.'
+                        && i >= 2
+                        && chars[i - 1].is_ascii_lowercase()
+                        && chars[i - 2] == '.';
+                    if !abbrev {
+                        if let Some(next) = chars.get(i + 1) {
+                            if next.is_uppercase() {
+                                out.push(' ');
+                            }
                         }
                     }
+                } else if Self::is_glued_word_break(&chars, i) {
+                    out.push(' ');
                 }
-            } else if Self::is_glued_word_break(&chars, i) {
-                out.push(' ');
             }
             i += 1;
         }
@@ -770,6 +858,12 @@ impl ProseFilter {
                 None
             };
         }
+        // After the first kept prose line, later lines stream unchanged. Thought / boilerplate
+        // stripping is leading-only here; trailing narration is strip_trailing_narration and
+        // the hold in feed.
+        if self.started {
+            return Some(line.to_owned());
+        }
         if Self::is_boilerplate(line) {
             return None;
         }
@@ -795,29 +889,38 @@ impl ProseFilter {
         let p = self.pending.trim_start();
         let could_be_fence = p.is_empty() || "```".starts_with(p) || p.starts_with("```");
         if self.started && !self.in_fence && !could_be_fence {
-            // Emit through the last finished sentence (cleaned); hold a trailing fragment
-            // that still looks like tool-narration so "Checking…" never lands mid-stream.
+            // Emit finished sentences without mid-reply thought/boilerplate stripping; hold a
+            // trailing fragment that still looks like tool-narration so "Checking…" never
+            // lands mid-stream. A finished narration sentence with nothing after stays held
+            // for flush / strip_trailing_narration.
             let raw = std::mem::take(&mut self.pending);
             if let Some((complete, rest)) = Self::split_at_last_sentence_end(&raw) {
-                if complete.chars().any(char::is_alphabetic) {
-                    out.push_str(&Self::with_outer_ws(complete, &Self::clean_prose(complete)));
+                if rest.trim().is_empty()
+                    && complete.chars().any(char::is_alphabetic)
+                    && (Self::is_boilerplate(complete) || Self::is_thought_sentence(complete))
+                {
+                    self.pending = raw;
                 } else {
-                    out.push_str(complete);
-                }
-                if !rest.is_empty() && Self::could_be_narration_prefix(rest) {
-                    self.pending = rest.to_string();
-                } else if !rest.is_empty() {
-                    let rest = Self::fix_glued_spaces(rest);
-                    if !rest.is_empty() {
-                        if !out.is_empty()
-                            && !out.ends_with([' ', '\n', '\r'])
-                            && rest.chars().next().is_some_and(|c| c.is_uppercase())
-                            && (out.ends_with(['.', '!', '?'])
-                                || out.chars().last().is_some_and(|c| c.is_lowercase()))
-                        {
-                            out.push(' ');
+                    if complete.chars().any(char::is_alphabetic) {
+                        out.push_str(&Self::fix_glued_spaces(complete));
+                    } else {
+                        out.push_str(complete);
+                    }
+                    if !rest.is_empty() && Self::could_be_narration_prefix(rest) {
+                        self.pending = rest.to_string();
+                    } else if !rest.is_empty() {
+                        let rest = Self::fix_glued_spaces(rest);
+                        if !rest.is_empty() {
+                            if !out.is_empty()
+                                && !out.ends_with([' ', '\n', '\r'])
+                                && rest.chars().next().is_some_and(|c| c.is_uppercase())
+                                && (out.ends_with(['.', '!', '?'])
+                                    || out.chars().last().is_some_and(|c| c.is_lowercase()))
+                            {
+                                out.push(' ');
+                            }
+                            out.push_str(&rest);
                         }
-                        out.push_str(&rest);
                     }
                 }
             } else if Self::could_be_narration_prefix(&raw) {
@@ -856,6 +959,15 @@ impl ProseFilter {
             let hidden = self.fence_hidden;
             self.fence_hidden = false;
             return if hidden { String::new() } else { rest };
+        }
+        if self.started {
+            // Trailing span only: drop narration / thought tails; keep real prose.
+            let fixed = Self::fix_glued_spaces(&rest);
+            let stripped = Self::strip_trailing_narration(&fixed);
+            if stripped.trim().is_empty() {
+                return String::new();
+            }
+            return Self::with_outer_ws(&rest, &stripped);
         }
         self.take_line(&rest).unwrap_or_default()
     }
@@ -6131,5 +6243,133 @@ mod tests {
         }
         out.push_str(&f.flush());
         assert_eq!(out, "All four tests pass. Nothing else changed.\n");
+    }
+
+    /// Feed `text` in `sizes`-byte chunks (char-boundary safe), then flush. Mirrors how the
+    /// turn stages deltas before the final `clean_prose` on the bubble.
+    fn feed_chunked(text: &str, sizes: &[usize]) -> String {
+        let mut f = ProseFilter::default();
+        let mut out = String::new();
+        let mut i = 0;
+        let mut k = 0;
+        let bytes = text.as_bytes();
+        while i < bytes.len() {
+            let mut end = (i + sizes[k % sizes.len()]).min(bytes.len());
+            while end < bytes.len() && !text.is_char_boundary(end) {
+                end += 1;
+            }
+            out.push_str(&f.feed(&text[i..end]));
+            i = end;
+            k += 1;
+        }
+        out.push_str(&f.flush());
+        out
+    }
+
+    /// Assert `clean_prose` and chunked `feed`+`flush` (then `clean_prose`, as the final
+    /// bubble path does) both yield `expected` (trailing whitespace ignored).
+    fn assert_prose_clean_and_feed(raw: &str, expected: &str) {
+        assert_eq!(
+            ProseFilter::clean_prose(raw).trim_end(),
+            expected.trim_end(),
+            "clean_prose mismatch"
+        );
+        for sizes in [
+            vec![1usize],
+            vec![3],
+            vec![7, 1, 13, 2],
+            vec![raw.len().max(1)],
+        ] {
+            let fed = feed_chunked(raw, &sizes);
+            // Production runs clean_prose on the staged buffer after feed/flush.
+            assert_eq!(
+                ProseFilter::clean_prose(&fed).trim_end(),
+                expected.trim_end(),
+                "feed chunking {sizes:?}: fed={fed:?}"
+            );
+        }
+    }
+
+    /// Mid-reply lines that look like tool narration must stay (leading/trailing only).
+    #[test]
+    fn prose_keeps_mid_reply_narration_lookalikes() {
+        let raw = "Here is what I found.\n\nRunning shoes are best for flat roads.\n\nChecking accounts have no fees.\n\nFirst, install Node.\n\nCalling the API twice is safe.\n\nThat is the lot.";
+        assert_prose_clean_and_feed(raw, raw);
+    }
+
+    /// A later paragraph that opens with a thought-shaped sentence keeps both sentences.
+    #[test]
+    fn prose_keeps_mid_paragraph_user_is_sentence() {
+        let raw = "Sure.\n\nThe user is seeing a crash on login. Restart fixes it.";
+        assert_prose_clean_and_feed(raw, raw);
+    }
+
+    /// Identifiers, URLs and stack names are not split by glued-space repair.
+    #[test]
+    fn prose_keeps_identifiers_urls_and_stack_names() {
+        let raw = "Use `useState` and fetchData on https://doc.rust-lang.org/std/sync/struct.Mutex.html under macOS.";
+        assert_prose_clean_and_feed(raw, raw);
+        assert_eq!(
+            ProseFilter::fix_glued_spaces(
+                "see useState and fetchData on macOS and tvOS and GitHub"
+            ),
+            "see useState and fetchData on macOS and tvOS and GitHub"
+        );
+        assert_eq!(
+            ProseFilter::fix_glued_spaces(
+                "link https://doc.rust-lang.org/std/sync/struct.Mutex.html here"
+            ),
+            "link https://doc.rust-lang.org/std/sync/struct.Mutex.html here"
+        );
+        assert_eq!(
+            ProseFilter::fix_glued_spaces("path docs/struct.Mutex.html ok"),
+            "path docs/struct.Mutex.html ok"
+        );
+        assert_eq!(
+            ProseFilter::fix_glued_spaces("code `useState` and `fetchData`"),
+            "code `useState` and `fetchData`"
+        );
+    }
+
+    /// Stream-join glued cases still get a space.
+    #[test]
+    fn prose_still_repairs_glued_stream_joins() {
+        assert_eq!(
+            ProseFilter::fix_glued_spaces("have.Checking"),
+            "have. Checking"
+        );
+        assert_eq!(
+            ProseFilter::fix_glued_spaces("findingsDon't"),
+            "findings Don't"
+        );
+        assert_prose_clean_and_feed(
+            "Baseline is done.Accum sweep is still running.",
+            "Baseline is done. Accum sweep is still running.",
+        );
+        assert_prose_clean_and_feed(
+            "I have good data.Checking the latest experiment results.",
+            "I have good data.",
+        );
+    }
+
+    /// Opening tool-narration still drops; trailing tool-narration still drops.
+    #[test]
+    fn prose_still_strips_leading_and_trailing_narration() {
+        assert_prose_clean_and_feed(
+            "Let me check the logs.\n\nThe service is up.",
+            "The service is up.",
+        );
+        assert_prose_clean_and_feed(
+            "The service is up.\n\nRunning the tests now.",
+            "The service is up.",
+        );
+        // feed alone: opening line dropped before started; trailing held then flushed away.
+        let mut f = ProseFilter::default();
+        let mut out = String::new();
+        out.push_str(&f.feed("Let me check the logs.\n"));
+        out.push_str(&f.feed("The service is up.\n"));
+        out.push_str(&f.feed("Running the tests now."));
+        out.push_str(&f.flush());
+        assert_eq!(out, "The service is up.\n");
     }
 }
