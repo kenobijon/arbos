@@ -21,7 +21,7 @@ use arbos_core::api::{
     ModelListDto, PairResponseDto, PeopleChatDto, ProjectMembersDto, ProjectSecretsDto,
     PushEventDto, PushItemDto, RoutineDto, RoutineRunDto, SecretEnvelopeDto, SecretRequestsDto,
     SecretsOverviewDto, SkillDto, StartCallResponseDto, TokenResponseDto, TranscriptionDto,
-    UserCardDto, UsersPageDto, VaultEnvelopeDto, VoiceCatalogDto,
+    UnreadDto, UserCardDto, UsersPageDto, VaultEnvelopeDto, VoiceCatalogDto,
 };
 use arbos_core::doc::{UserAttachment, UserMessageOpts};
 use arbos_core::wire::{BoxState as WireBox, PROJECT_DOC_CHAT_ID};
@@ -43,9 +43,9 @@ use super::diagnostics;
 use super::doc::ChatDoc;
 use super::dto::{
     account_view_from_me, apply_machine_status, chat_from_create, chat_from_dto,
-    connectors_view_from_dto, credentials_from_token, local_view_from_dto, model_ids_from_dto,
-    people_space_from, project_from_dto, routine_from_dto, secrets_view_from_dto, skill_from_dto,
-    transcript_text, voices_from_dto,
+    connectors_view_from_dto, credentials_from_token, local_view_from_dto, merged_unread,
+    model_ids_from_dto, people_space_from, project_from_dto, routine_from_dto,
+    secrets_view_from_dto, skill_from_dto, transcript_text, voices_from_dto,
 };
 use super::store::{self, Store};
 use super::{ClientCommand, SyncEvent, SyncSource};
@@ -162,6 +162,9 @@ struct Shared {
     people: Mutex<HashSet<Id>>,
     /// Highest relay seq seen per room key (read marks, D61).
     room_seq: Mutex<HashMap<Id, i64>>,
+    /// When this device last sent `PUT /chats/{id}/read` (ms). Used so a
+    /// registry refresh does not resurrect unread before the relay catches up.
+    local_read_at: Mutex<HashMap<Id, i64>>,
     /// Avatars already fetched (by URL).
     avatars_done: Mutex<HashSet<String>>,
     /// `/me` user when the stored credentials carry none (env token, legacy adv_).
@@ -663,6 +666,7 @@ impl SyncSource for RelaySource {
                 refresh_lock: tokio::sync::Mutex::new(()),
                 people: Mutex::new(HashSet::new()),
                 room_seq: Mutex::new(HashMap::new()),
+                local_read_at: Mutex::new(HashMap::new()),
                 avatars_done: Mutex::new(HashSet::new()),
                 me: Mutex::new(None),
                 store: Mutex::new(None),
@@ -1954,8 +1958,33 @@ fn people_error(err: &anyhow::Error) -> String {
 }
 
 /// `GET /projects` then `GET /projects/{id}` for chats, models and spend.
+/// `GET /me/unread` → chat id → has unread. Empty on older relays (404) or decode errors.
+async fn fetch_unread_map(shared: &Arc<Shared>) -> HashMap<Id, bool> {
+    match shared.get_json("/me/unread").await {
+        Ok(v) => match serde_json::from_value::<UnreadDto>(v) {
+            Ok(dto) => dto
+                .chats
+                .into_iter()
+                .map(|c| (c.chat_id, c.unread > 0))
+                .collect(),
+            Err(err) => {
+                log::warn!(target: "arbos_mac::relay", "UnreadDto: {err}");
+                HashMap::new()
+            }
+        },
+        Err(err) => {
+            if !format!("{err:#}").contains("HTTP 404") {
+                shared.diagnostic("me-unread", format!("{err:#}"));
+            }
+            HashMap::new()
+        }
+    }
+}
+
 async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
     shared.ensure_me().await;
+    // Per-chat unread counts (people + agent). Older relays answer 404.
+    let unread_by_chat = fetch_unread_map(shared).await;
     let list = shared.get_json("/projects").await?;
     let items = list.as_array().cloned().unwrap_or_default();
     let mut projects: Vec<Project> = Vec::new();
@@ -2074,17 +2103,8 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
                         continue;
                     }
                 };
-                let (space, mut chat) =
+                let (space, chat) =
                     people_space_from(&dto, &me_id, &me_handle, &shared.http_url, &token);
-                if let Some(prev) = shared
-                    .chats
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .find(|c| c.id == chat.id)
-                {
-                    chat.unread = prev.unread;
-                }
                 ids.insert(space.id.clone());
                 projects.push(space);
                 all_chats.push(chat);
@@ -2120,19 +2140,23 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
             .collect();
         s.put_json(store::KEY_ARCHIVED_CHATS, &ids);
     });
-    // Keep local-only tabs (minted, not yet created) and unread flags.
+    // Keep local-only tabs (minted, not yet created). Unread comes from
+    // GET /me/unread (and people `dto.unread`) merged with local read marks.
+    let local_reads = shared.local_read_at.lock().unwrap().clone();
     {
         let mut local = shared.chats.lock().unwrap();
         let mut merged: Vec<Chat> = Vec::new();
         for c in &all_chats {
             let mut c = c.clone();
             if let Some(prev) = local.iter().find(|x| x.id == c.id) {
-                c.unread = prev.unread;
                 c.last_message_at = c.last_message_at.max(prev.last_message_at);
                 if c.title == "New chat" && prev.title != "New chat" {
                     c.title = prev.title.clone();
                 }
             }
+            let relay_unread = unread_by_chat.get(&c.id).copied().unwrap_or(c.unread);
+            let local_read = local_reads.get(&c.id).copied();
+            c.unread = merged_unread(relay_unread, local_read, c.last_message_at as i64);
             merged.push(c);
         }
         *local = merged;
@@ -3866,6 +3890,11 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     c.unread = false;
                 }
             }
+            shared
+                .local_read_at
+                .lock()
+                .unwrap()
+                .insert(chat_id.clone(), now_ms() as i64);
             // Next cold launch reopens this chat first (and evicts it last);
             // selecting the agent again on this Mac opens it too.
             if let Some(project_id) = project_of(shared, &chat_id) {

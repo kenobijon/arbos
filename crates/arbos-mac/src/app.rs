@@ -1762,6 +1762,7 @@ impl AppState {
                 }
                 self.chats.insert(project_id.clone(), chats);
                 self.enforce_tab(&project_id);
+                self.sync_badge();
                 self.onboarding_tick(cx);
                 cx.notify();
             }
@@ -1834,6 +1835,13 @@ impl AppState {
                 for m in &arrived {
                     self.notify_for_message(&chat_id, m, false, false, true);
                 }
+                let chat_visible = self.chat_visible_in_active_window(&chat_id);
+                if arrived
+                    .iter()
+                    .any(|m| marks_unread_on_arrival(chat_visible, self.is_mine(m)))
+                {
+                    self.mark_chat_unread(&chat_id);
+                }
                 self.request_thumbnails(&chat_id);
                 if self.onboarding.is_some() {
                     self.onboarding_tick(cx);
@@ -1886,6 +1894,14 @@ impl AppState {
                     had_open_question,
                     is_new,
                 );
+                if is_new
+                    && marks_unread_on_arrival(
+                        self.chat_visible_in_active_window(&chat_id),
+                        self.is_mine(&message),
+                    )
+                {
+                    self.mark_chat_unread(&chat_id);
+                }
                 if text_only && appended > 0 {
                     cx.emit(AppEvent::TranscriptText { chat_id });
                 } else {
@@ -5129,9 +5145,28 @@ impl AppState {
         Gate {
             streaming: self.project_is_streaming(project_id),
             // Muted spaces are treated as "already seen": dropped, not queued.
+            // Honour the relay's per-chat muted (people) as well as muted.json.
             visible: (self.window_active && project_shown && chat_shown)
-                || self.muted.contains(project_id),
+                || self.is_muted(project_id),
         }
+    }
+
+    /// Is `chat_id` the chat on screen in a focused window?
+    fn chat_visible_in_active_window(&self, chat_id: &str) -> bool {
+        self.window_active && self.active_chat_id().as_deref() == Some(chat_id)
+    }
+
+    /// Light the unread dot (and Dock badge) until the next refresh confirms.
+    fn mark_chat_unread(&mut self, chat_id: &str) {
+        if let Some(chat) = self
+            .chats
+            .values_mut()
+            .flat_map(|v| v.iter_mut())
+            .find(|c| c.id == chat_id)
+        {
+            chat.unread = true;
+        }
+        self.sync_badge();
     }
 
     fn notify(&mut self, project_id: Id, chat_id: Option<&str>, kind: NotifyKind, detail: String) {
@@ -7662,6 +7697,12 @@ fn preview(m: &Message) -> String {
     }
 }
 
+/// Light unread when someone else's message lands in a chat that is not on
+/// screen in an active window. Own messages never mark unread.
+pub(crate) fn marks_unread_on_arrival(chat_visible: bool, message_own: bool) -> bool {
+    !chat_visible && !message_own
+}
+
 pub fn init_source(cx: &mut App) -> Box<dyn SyncSource> {
     let _ = cx;
     crate::sync::source_from_env()
@@ -7739,6 +7780,23 @@ pub(crate) fn sheet_first_paint(directory: &[Person]) -> (Vec<Person>, bool) {
 /// so a refetch behind an open sheet never repaints an unchanged list.
 pub(crate) fn directory_update(current: &[Person], fresh: Vec<Person>) -> Option<Vec<Person>> {
     (fresh != current).then_some(fresh)
+}
+
+#[cfg(test)]
+mod unread_arrival_tests {
+    use super::marks_unread_on_arrival;
+
+    #[test]
+    fn someone_elses_message_in_hidden_chat_marks_unread() {
+        assert!(marks_unread_on_arrival(false, false));
+    }
+
+    #[test]
+    fn visible_chat_or_own_message_does_not() {
+        assert!(!marks_unread_on_arrival(true, false));
+        assert!(!marks_unread_on_arrival(false, true));
+        assert!(!marks_unread_on_arrival(true, true));
+    }
 }
 
 #[cfg(test)]

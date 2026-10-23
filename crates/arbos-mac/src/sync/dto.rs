@@ -673,6 +673,21 @@ pub(crate) fn project_from_dto(
     }
 }
 
+/// Merge the relay's unread flag with a local read mark.
+///
+/// The relay wins, except when this device marked the chat read at or after
+/// the relay's last activity (our `PUT /read` has not landed yet).
+pub(crate) fn merged_unread(
+    relay_unread: bool,
+    local_read_at: Option<i64>,
+    last_activity_at: i64,
+) -> bool {
+    if local_read_at.is_some_and(|at| at >= last_activity_at) {
+        return false;
+    }
+    relay_unread
+}
+
 /// `ChatDto` / create-chat nested chat → [`Chat`].
 pub(crate) fn chat_from_dto(dto: &ChatDto) -> Chat {
     Chat {
@@ -1026,7 +1041,10 @@ pub fn local_view_from_dto(d: &LocalDevicesDto, relay_url: &str) -> LocalView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arbos_core::api::{ChatMemberDto, GroupDto, MeResponseDto, ProjectDto, UnreadDto};
+    use arbos_core::api::{
+        ChatMemberDto, GroupDto, MeResponseDto, ProjectDto, UnreadChatDto, UnreadDto,
+    };
+    use std::collections::HashMap;
     use std::fs;
     use std::path::PathBuf;
 
@@ -1080,6 +1098,59 @@ mod tests {
         let unread: UnreadDto = load_json("unread.json");
         assert_eq!(unread.total, 2);
         assert_eq!(unread.chats[0].chat_id, "people_dm");
+    }
+
+    #[test]
+    fn merged_unread_relay_and_local_read() {
+        assert!(merged_unread(true, None, 1_700_000_000_000));
+        assert!(!merged_unread(
+            true,
+            Some(1_700_000_000_100),
+            1_700_000_000_000
+        ));
+        assert!(!merged_unread(false, None, 1_700_000_000_000));
+        assert!(!merged_unread(
+            false,
+            Some(1_700_000_000_100),
+            1_700_000_000_000
+        ));
+        // Local read before the latest activity: relay still wins.
+        assert!(merged_unread(
+            true,
+            Some(1_699_999_999_000),
+            1_700_000_000_000
+        ));
+    }
+
+    #[test]
+    fn unread_dto_maps_onto_agent_chats() {
+        let mut unread: UnreadDto = load_json("unread.json");
+        // Agent chats get their counts from the same GET /me/unread payload.
+        unread.chats.push(UnreadChatDto {
+            chat_id: "chat_fixture".into(),
+            project_id: "proj_fixture".into(),
+            unread: 3,
+        });
+        let by_id: HashMap<&str, bool> = unread
+            .chats
+            .iter()
+            .map(|c| (c.chat_id.as_str(), c.unread > 0))
+            .collect();
+        assert_eq!(by_id.get("people_dm"), Some(&true));
+        assert_eq!(by_id.get("chat_fixture"), Some(&true));
+
+        let dto: ChatDto = load_json("chat_json_for.json");
+        let mut chat = chat_from_dto(&dto);
+        assert!(!chat.unread);
+        let relay = by_id.get(chat.id.as_str()).copied().unwrap_or(false);
+        chat.unread = merged_unread(relay, None, chat.last_message_at as i64);
+        assert!(chat.unread);
+        chat.unread = merged_unread(
+            relay,
+            Some(chat.last_message_at as i64 + 1),
+            chat.last_message_at as i64,
+        );
+        assert!(!chat.unread);
     }
 
     #[test]
