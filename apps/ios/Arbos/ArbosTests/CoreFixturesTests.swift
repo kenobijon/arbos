@@ -286,6 +286,25 @@ final class CoreFixturesTests: XCTestCase {
         )
     }
 
+    func testAnswerPlanFulfillThenJoinOrFail() {
+        XCTAssertEqual(
+            answerPlan(hasIncoming: true, micDenied: false),
+            .fulfillThenJoin
+        )
+        XCTAssertEqual(
+            answerPlan(hasIncoming: false, micDenied: false),
+            .fail
+        )
+        XCTAssertEqual(
+            answerPlan(hasIncoming: true, micDenied: true),
+            .fail
+        )
+        XCTAssertEqual(
+            answerPlan(hasIncoming: false, micDenied: true),
+            .fail
+        )
+    }
+
     func testCallParseFixtures() throws {
         let live = try XCTUnwrap(Call.parse(try apiFixtureJSON("call_live_with_token.json")))
         XCTAssertEqual(live.callId, "call_fixture")
