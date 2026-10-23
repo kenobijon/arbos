@@ -63,13 +63,20 @@ pub fn row(
     // (popovers, the profile pop-up) must not see them. No hover listener —
     // the list opens only on a click, so moving the pointer across rows does
     // not change what is open.
+    //
+    // The header's hung hairline separates it from the panel while open, and
+    // from the next row while closed. When open, hang one more under the
+    // whole block so the next row still gets a card-style divider (the pane
+    // card no longer interleaves section separators on kit rows).
     div()
         .id(id)
+        .relative()
         .flex()
         .flex_col()
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .child(header)
         .children(panel)
+        .when(open, |el| el.child(kit::hairline_below(kit::INSET, theme)))
 }
 
 impl Shell {
