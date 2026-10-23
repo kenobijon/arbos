@@ -432,6 +432,94 @@ fn text_addresses_agents_collectively(msg: &MessageView) -> bool {
     false
 }
 
+/// True when the message explicitly addresses one or more agents in this chat — by `mentions`
+/// (`agent:<id>`), by `@slug` in the prose, or by an agent's bare name at the start — and this
+/// agent is not among them. Such a message belongs to the named agent(s): this agent stays
+/// silent, and the group decision model is not asked (it must never hand "@gigchadagent you
+/// still borked?" to hjkb).
+fn addressed_to_other_agents_only(
+    msg: &MessageView,
+    info: &PeopleChatInfo,
+    project_id: &str,
+) -> bool {
+    let me = format!("agent:{project_id}");
+    let mentioned = mentioned_agent_ids(msg);
+    if !mentioned.is_empty() {
+        return !mentioned.iter().any(|id| *id == project_id);
+    }
+    let text = msg.text().to_lowercase();
+    let has = |token: &str| {
+        let t = format!("@{token}");
+        text.match_indices(&t).any(|(i, _)| {
+            let after = text[i + t.len()..].chars().next();
+            after.is_none_or(|c| !(c.is_alphanumeric() || c == '-' || c == '_'))
+        })
+    };
+    let leading = leading_address_token(&msg.text());
+    let mut names_other = false;
+    for m in &info.members {
+        let Some(member) = m["member"].as_str() else {
+            continue;
+        };
+        if !member.starts_with("agent:") || member == me {
+            continue;
+        }
+        let handle = m["handle"].as_str().unwrap_or("").to_lowercase();
+        let name = m["project"]["name"]
+            .as_str()
+            .or_else(|| m["name"].as_str())
+            .unwrap_or("")
+            .trim()
+            .to_lowercase();
+        let slug = name.replace(' ', "-");
+        if (!handle.is_empty() && has(&handle)) || (!slug.is_empty() && has(&slug)) {
+            names_other = true;
+        }
+        if let Some(t) = &leading {
+            if (!handle.is_empty() && handle == *t)
+                || (!name.is_empty() && (name == *t || slug == *t))
+            {
+                names_other = true;
+            }
+        }
+    }
+    if !names_other {
+        return false;
+    }
+    // Named another agent and not this one (by any of the same rules).
+    !(text_mentions_this_agent(msg, info, project_id)
+        || text_names_this_agent(msg, info, project_id))
+}
+
+/// True when the prose `@`-mentions this agent (its slug or handle).
+fn text_mentions_this_agent(msg: &MessageView, info: &PeopleChatInfo, project_id: &str) -> bool {
+    let text = msg.text().to_lowercase();
+    let has = |token: &str| {
+        let t = format!("@{token}");
+        text.match_indices(&t).any(|(i, _)| {
+            let after = text[i + t.len()..].chars().next();
+            after.is_none_or(|c| !(c.is_alphanumeric() || c == '-' || c == '_'))
+        })
+    };
+    if !info.slug.is_empty() && has(&info.slug) {
+        return true;
+    }
+    let me = format!("agent:{project_id}");
+    info.members.iter().any(|m| {
+        if m["member"].as_str() != Some(me.as_str()) {
+            return false;
+        }
+        let handle = m["handle"].as_str().unwrap_or("").to_lowercase();
+        let name = m["project"]["name"]
+            .as_str()
+            .or_else(|| m["name"].as_str())
+            .unwrap_or("")
+            .trim()
+            .to_lowercase();
+        (!handle.is_empty() && has(&handle)) || (!name.is_empty() && has(&name.replace(' ', "-")))
+    })
+}
+
 /// Leading person ping in the prose (or a people chip / leading `@handle`) and no agent `@`
 /// in the text. Sticky chip / reply-to agent mentions must not wake an agent for "Allan?".
 /// Mid-line `@person` alone is not a people ping — see `addressed_only_to_people`.
@@ -654,7 +742,13 @@ impl Agent {
                     .open_room_named(&chat_id, &room, PEOPLE_PROJECT)
                     .await
                 {
-                    Ok(_) => tracing::info!(chat = %chat_id, "joined a people chat"),
+                    Ok(_) => {
+                        if !full {
+                            // Added (or re-added) while running: the room's past is not ours.
+                            self.sync.mark_late_join(&chat_id).await;
+                        }
+                        tracing::info!(chat = %chat_id, late = !full, "joined a people chat");
+                    }
                     Err(e) => tracing::warn!(chat = %chat_id, error = %e, "people room"),
                 }
             }
@@ -836,6 +930,11 @@ impl Agent {
             || text_addresses_agents_collectively(&msg)
         {
             return true;
+        }
+        // Addressed to another agent by mention, @slug or name: theirs, not ours — even when
+        // that agent is silent, and even for a steer while this agent's own turn is running.
+        if addressed_to_other_agents_only(&msg, &info, &self.cfg.project_id) {
+            return false;
         }
         // A person chip or leading @handle with no agent address is for humans — stay quiet
         // even in a group (the decision model must not wake an agent to decline a call meant
@@ -1107,7 +1206,7 @@ impl Agent {
         let msg = host.lock().await.doc.message(user_msg_id)?;
         let name = msg.rest.get("senderName").and_then(Value::as_str);
         let handle = msg.rest.get("senderHandle").and_then(Value::as_str);
-        owner_address_note_text(name, handle, &self.cfg.project_name)
+        owner_address_note_text(name, handle, &self.name())
     }
 }
 
@@ -1228,8 +1327,8 @@ impl Agent {
             .and_then(|m| m["project"]["name"].as_str().or_else(|| m["name"].as_str()))
             .map(str::trim)
             .filter(|n| !n.is_empty())
-            .unwrap_or(self.cfg.project_name.as_str())
-            .to_owned();
+            .map(str::to_owned)
+            .unwrap_or_else(|| self.name());
         let fields = vec![
             ("sender", json!(format!("agent:{}", self.cfg.project_id))),
             ("senderHandle", json!(info.slug)),
@@ -1590,6 +1689,82 @@ mod tests {
             &group
         )
         .is_empty());
+    }
+
+    /// Arbonites, 2026-10-23 (#vault-approval-card): "@gigchadagent you still borked?" reached
+    /// hjkb as a steer while its own turn ran, and hjkb answered. A message that names another
+    /// agent — by resolved mention, by @slug, or by its bare name at the start — is that agent's
+    /// alone: this agent stays silent and the decision model is not asked. Naming this agent too
+    /// (both, or "hey agents") still counts as addressed.
+    #[test]
+    fn message_for_another_agent_is_not_ours() {
+        let arbonites = PeopleChatInfo {
+            members: vec![
+                json!({ "member": "agent:01HPROJ", "handle": "hjkb", "project": { "name": "hjkb" } }),
+                json!({ "member": "agent:GIG", "handle": "gigchadagent", "project": { "name": "GigChadAgent" } }),
+                json!({ "member": "user:gh_2", "handle": "unarbos", "name": "Arbos" }),
+            ],
+            slug: "hjkb".into(),
+            kind: "group".into(),
+            ..Default::default()
+        };
+        // Resolved mention of the other agent (what the Mac composer sends).
+        assert!(addressed_to_other_agents_only(
+            &msg(
+                "@gigchadagent you still borked?",
+                json!({ "mentions": ["agent:GIG"] })
+            ),
+            &arbonites,
+            P
+        ));
+        // Prose-only @slug of the other agent; bare name at the start; the display-name slug.
+        assert!(addressed_to_other_agents_only(
+            &msg("hey @gigchadagent use your engy key", json!({})),
+            &arbonites,
+            P
+        ));
+        assert!(addressed_to_other_agents_only(
+            &msg("GigChadAgent, are you there?", json!({})),
+            &arbonites,
+            P
+        ));
+        assert!(addressed_to_other_agents_only(
+            &msg("ping @GigChadAgent", json!({})),
+            &arbonites,
+            P
+        ));
+        // Both named, or this agent named: not "other only".
+        assert!(!addressed_to_other_agents_only(
+            &msg("hi", json!({ "mentions": ["agent:GIG", "agent:01HPROJ"] })),
+            &arbonites,
+            P
+        ));
+        assert!(!addressed_to_other_agents_only(
+            &msg("@gigchadagent and @hjkb both try", json!({})),
+            &arbonites,
+            P
+        ));
+        assert!(!addressed_to_other_agents_only(
+            &msg("@hjkb try to use that engy key now", json!({})),
+            &arbonites,
+            P
+        ));
+        // Nobody named (plain group chatter) — the decision model may still run.
+        assert!(!addressed_to_other_agents_only(
+            &msg("done yet?", json!({})),
+            &arbonites,
+            P
+        ));
+        // A mid-line reference to the other agent, with no address to anyone, is chatter too
+        // ("ive borked @gigchadagent in this chat it seems" names it — theirs, not ours).
+        assert!(addressed_to_other_agents_only(
+            &msg(
+                "ive borked @gigchadagent in this chat it seems",
+                json!({ "mentions": ["agent:GIG"] })
+            ),
+            &arbonites,
+            P
+        ));
     }
 
     #[test]

@@ -123,7 +123,8 @@ final class AppModel: ObservableObject {
     @Published var waitlistPosition: Int?
     /// People chats (D72): DMs I am a member of, newest activity first.
     @Published var peopleChats: [PeopleChat] = []
-    /// Chat ids with unread rows (per device, from head_seq > read_seq and pushes).
+    /// Chat ids with unread rows: the relay's per-user `unread` flag plus live rows from
+    /// others that landed while the chat was off screen (never `head_seq > read_seq`, #1438).
     @Published var peopleUnread: Set<String> = []
     @Published private(set) var blocked: [Person] = []
     /// Every Arbos user the relay knows (members + invited), for the New Message sheet.
@@ -838,13 +839,25 @@ final class AppModel: ObservableObject {
     }
 
     func unreadCount(for chat: PeopleChat) -> Int {
-        // On screen: never show a stale remote count (notify can lag behind Loro).
-        if chat.id == visibleChatId { return 0 }
-        let bySeq = Int(max(0, chat.headSeq - chat.readSeq))
-        let local = bySeq > 0 ? bySeq : (peopleUnread.contains(chat.id) ? 1 : 0)
-        // Loro can light peopleUnread before GET /me/unread catches up — never let a
+        Self.peopleUnreadCount(
+            remote: unreadCounts[chat.id],
+            flagged: chat.unread || peopleUnread.contains(chat.id),
+            watching: chat.id == visibleChatId
+        )
+    }
+
+    /// #1438: one read cursor per user, kept by the relay. `remote` is `GET /me/unread`'s
+    /// count for the chat (nil when it lists nothing for it); `flagged` is the relay's
+    /// per-chat `unread` (same cursor) or a live row from someone else that landed while the
+    /// chat was off screen; `watching` = on screen in the foreground. Row sequence numbers
+    /// (`head_seq` / `read_seq`) are not consulted: they counted the user's own rows and
+    /// system lines, which is what painted the false blue dots.
+    nonisolated static func peopleUnreadCount(remote: Int?, flagged: Bool, watching: Bool) -> Int {
+        if watching { return 0 }
+        let local = flagged ? 1 : 0
+        // Loro can light the flag before GET /me/unread catches up — never let a
         // stale remote 0 hide the blue circle / count.
-        if let n = unreadCounts[chat.id] { return max(n, local) }
+        if let n = remote { return max(n, local) }
         return local
     }
 
@@ -1583,6 +1596,7 @@ final class AppModel: ObservableObject {
         if !isProjectDoc {
             room.onPresence = { [weak self] header in
                 self?.notePresence(header)
+                self?.noteTyping(header, chatId: key)
                 if let callId = header["in_call"] as? String { self?.peerInCall(callId, chatId: key) }
             }
         }
@@ -1754,11 +1768,13 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// A live Loro row landed while this chat is not on screen: show the blue
-    /// circle immediately and drain `/me/pushes` so the banner does not wait
-    /// for the 15 s registry poll (notify / APNs can lag the row).
+    /// A live Loro row from someone else landed. Chat on screen in the foreground: the
+    /// user has seen it, so the per-user read cursor on the relay advances (#1438) and
+    /// nothing lights. Otherwise: show the blue circle immediately and drain
+    /// `/me/pushes` so the banner does not wait for the 15 s registry poll (notify /
+    /// APNs can lag the row). Own rows and system lines do neither.
     private func noteLiveUnread(chatId: Id) {
-        guard !isWatching(chatId), !isHiddenChat(chatId) else { return }
+        guard !isHiddenChat(chatId) else { return }
         if let last = messages[chatId]?.last {
             if last.pending { return }
             if last.role == .system { return }
@@ -1767,6 +1783,10 @@ final class AppModel: ObservableObject {
             if peopleChat(chatId) == nil, last.role == .user, last.sender == "user" || last.sender.isEmpty {
                 return
             }
+        }
+        if isWatching(chatId) {
+            if peopleChat(chatId) != nil { markPeopleRead(chatId, force: true) } else { markRead(chatId: chatId, force: true) }
+            return
         }
         var changed = false
         if peopleChat(chatId) != nil {
@@ -2827,6 +2847,10 @@ final class AppModel: ObservableObject {
     private var composerDrafts: [Id: String] = [:]
     /// Last presence time per user id, from room presence frames this session.
     @Published private(set) var lastSeen: [String: Int64] = [:]
+    /// Who is typing per chat (handle → until ms), from room presence frames
+    /// with `typing`; the presence row over the composer reads it
+    /// ([feedback typing-indicator-left-2026-10-23], Mac `AppState.typing`).
+    @Published var typing: [Id: [String: Int64]] = [:]
 
     /// Draft text for a chat, or `""` when none.
     func composerDraft(for chatId: Id) -> String {
@@ -2905,6 +2929,30 @@ final class AppModel: ObservableObject {
         guard let user = header["user"] as? String else { return }
         let at = (header["at"] as? NSNumber)?.int64Value ?? nowMs()
         if (lastSeen[user] ?? 0) < at { lastSeen[user] = at }
+    }
+
+    /// A presence frame's `typing` flag for `chatId`: on → the handle types for
+    /// 6 s (the sender refreshes every 3 s), off → gone at once.
+    func noteTyping(_ header: [String: Any], chatId: Id) {
+        guard let handle = header["handle"] as? String, !handle.isEmpty,
+              let active = header["typing"] as? Bool else { return }
+        if handle == user?.login { return }
+        var chat = typing[chatId] ?? [:]
+        if active {
+            chat[handle] = nowMs() + 6_000
+        } else {
+            chat[handle] = nil
+        }
+        typing[chatId] = chat.isEmpty ? nil : chat
+    }
+
+    /// Handles typing in `chatId` right now, the most recently seen first.
+    func typingHandles(in chatId: Id) -> [String] {
+        let now = nowMs()
+        return (typing[chatId] ?? [:])
+            .filter { $0.value > now }
+            .sorted { $0.value > $1.value }
+            .map(\.key)
     }
 
     /// `PUT /chats/{id}/settings {muted}` per member; local flag updated first.

@@ -340,6 +340,11 @@ pub async fn announce(
         )
         .ok()
         .flatten()?;
+    // Writing in a chat is reading it: the sender's own cursor moves past everything so far,
+    // on every one of their devices (the cursor is per user).
+    if let Some(u) = sender.user_id.as_deref() {
+        let _ = state.db.mark_chat_read(u, &chat.chat_id);
+    }
     let member = match sender.kind {
         "agent" => format!("agent:{}", sender.id),
         _ => format!("user:{}", sender.id),

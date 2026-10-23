@@ -51,6 +51,11 @@ pub struct DocHost {
     ever_caught_up: bool,
     /// Set by `close_room`: the session ends and is not reopened.
     pub closed: bool,
+    /// Commands issued before this instant are not ours to run: a host opened after the
+    /// workspace started (the agent was re-added to a people chat) must not replay the room's
+    /// recent history into the agent loop (#1440: ~40 old sends re-dispatched on a re-join).
+    /// `0` for hosts opened at start, which do recover their own interrupted turns.
+    pub ignore_before_ms: i64,
 }
 
 impl DocHost {
@@ -100,13 +105,18 @@ impl DocHost {
     /// is recent, so each addressed agent can reply. `handle_command` skips agents that do not
     /// want the message or that already wrote a reply.
     fn new_pending(&mut self) -> Vec<CommandView> {
-        let recovering = !self.recovered;
+        // A late-opened host (re-join) has nothing of its own to recover.
+        let recovering = !self.recovered && self.ignore_before_ms == 0;
         self.recovered = true;
         let now = now_ms();
         // How long a `taken` people `send` stays claimable by other agents (shared address).
         const SHARED_SEND_OPEN_MS: i64 = 15 * 60 * 1000;
         let mut out = Vec::new();
         for c in self.doc.commands() {
+            if c.issued_at < self.ignore_before_ms {
+                self.seen_commands.insert(c.id.clone());
+                continue;
+            }
             let mut eligible = c.status == "pending" || (recovering && c.status == "taken");
             if !eligible
                 && c.kind == "send"
@@ -166,7 +176,7 @@ pub struct SyncHub {
     pub incoming: mpsc::Sender<Incoming>,
     pub peer_id: u64,
     /// The room client tasks, so a stopped workspace takes its sockets down with it.
-    room_tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    room_tasks: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
 }
 
 /// Backoff while the relay refuses a room outright (HTTP 403 / 404: the project was deleted,
@@ -202,7 +212,7 @@ impl SyncHub {
             hosts: Arc::new(Mutex::new(HashMap::new())),
             incoming,
             peer_id,
-            room_tasks: Arc::new(Mutex::new(Vec::new())),
+            room_tasks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -249,6 +259,7 @@ impl SyncHub {
             recovered: false,
             ever_caught_up: false,
             closed: false,
+            ignore_before_ms: 0,
         }));
         self.hosts
             .lock()
@@ -257,10 +268,26 @@ impl SyncHub {
         let hub = self.clone();
         let h2 = host.clone();
         let task = tokio::spawn(async move { hub.run_room(h2).await });
-        let mut tasks = self.room_tasks.lock().await;
-        tasks.retain(|t| !t.is_finished());
-        tasks.push(task);
+        if let Some(old) = self
+            .room_tasks
+            .lock()
+            .await
+            .insert(chat_id.to_owned(), task)
+        {
+            old.abort();
+        }
         Ok(host)
+    }
+
+    /// The agent was (re-)added to this chat while the workspace was running: what happened in
+    /// the room before now is history, not work — nothing issued before this instant is run.
+    pub async fn mark_late_join(&self, chat_id: &str) {
+        if let Some(h) = self.hosts.lock().await.get(chat_id) {
+            let mut h = h.lock().await;
+            if h.ignore_before_ms == 0 {
+                h.ignore_before_ms = now_ms();
+            }
+        }
     }
 
     /// The workspace is stopping (its project was deleted, or it is held for a migration): close
@@ -272,16 +299,22 @@ impl SyncHub {
         for h in &hosts {
             h.lock().await.closed = true;
         }
-        for t in self.room_tasks.lock().await.drain(..) {
+        for (_, t) in self.room_tasks.lock().await.drain() {
             t.abort();
         }
     }
 
     /// Leave a room for good (the agent was removed from a people chat): the session closes and
-    /// is not reopened; the local snapshot stays until the next persist sweep ignores it.
+    /// is not reopened; the local snapshot stays until the next persist sweep ignores it. The
+    /// socket task is aborted too — the `closed` flag alone only took effect at the next
+    /// reconnect, so an old session kept importing rows and handing commands to the agent loop
+    /// beside the host that replaced it (#1440).
     pub async fn close_room(&self, chat_id: &str) {
         if let Some(h) = self.hosts.lock().await.remove(chat_id) {
             h.lock().await.closed = true;
+        }
+        if let Some(t) = self.room_tasks.lock().await.remove(chat_id) {
+            t.abort();
         }
     }
 
@@ -561,5 +594,68 @@ impl SyncHub {
             status.insert("since", now_ms()).ok();
             h.doc.doc.commit();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arbos_core::doc::CommandStatus;
+
+    fn host_with(doc: ChatDoc) -> DocHost {
+        DocHost {
+            chat_id: "c1".into(),
+            room: "people/c1".into(),
+            doc,
+            cursor: 0,
+            acked_vv: VersionVector::default(),
+            inflight: None,
+            caught_up: true,
+            seen_commands: Default::default(),
+            recovered: false,
+            ever_caught_up: true,
+            closed: false,
+            ignore_before_ms: 0,
+        }
+    }
+
+    /// #1440: GigChadAgent was removed and re-added to a group; the fresh host replayed ~40
+    /// recent `taken` sends (the 15-minute shared window plus "recovery") into the agent loop.
+    /// A late-joined host runs nothing issued before it joined; a host opened at start still
+    /// recovers its own interrupted turns.
+    #[test]
+    fn late_join_runs_nothing_from_before_it_joined() {
+        let doc = ChatDoc::new(Some(7), true);
+        let old_pending = doc.push_command("send", serde_json::json!({ "messageId": "m1" }), "mac");
+        let old_taken = doc.push_command("send", serde_json::json!({ "messageId": "m2" }), "mac");
+        doc.set_command_status(&old_taken, CommandStatus::Taken, None);
+
+        let copy =
+            |d: &ChatDoc| ChatDoc::from_snapshot(Some(9), true, &d.snapshot()).expect("copy");
+        let mut at_start = host_with(copy(&doc));
+        let ids: Vec<String> = at_start.new_pending().into_iter().map(|c| c.id).collect();
+        assert!(
+            ids.contains(&old_pending),
+            "a host opened at start runs pending commands"
+        );
+        assert!(ids.contains(&old_taken), "…and recovers taken ones");
+
+        let mut late = host_with(copy(&doc));
+        late.ignore_before_ms = now_ms() + 1;
+        assert!(
+            late.new_pending().is_empty(),
+            "a late-joined host leaves the room's past alone"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        let fresh = late
+            .doc
+            .push_command("send", serde_json::json!({ "messageId": "m3" }), "mac");
+        let ids: Vec<String> = late.new_pending().into_iter().map(|c| c.id).collect();
+        assert_eq!(
+            ids,
+            vec![fresh],
+            "but it runs what arrives after the join, once"
+        );
+        assert!(late.new_pending().is_empty());
     }
 }
