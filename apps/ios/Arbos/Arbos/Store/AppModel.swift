@@ -421,6 +421,14 @@ final class AppModel: ObservableObject {
     /// Client-minted message ids whose push the relay has not `ACK`ed (S3),
     /// keyed by chat id so one room's ACK cannot leave another chat's bubble faint.
     private var unacked: [Id: Set<Id>] = [:]
+    /// Rooms with a full re-read scheduled by `requestSnapshot` (one per coalesce window).
+    private var snapshotPending: Set<Id> = []
+    /// When each room's transcript was last re-read from its doc (`Date` seconds).
+    private var snapshotLastAt: [Id: TimeInterval] = [:]
+    /// A backfill delivers one row per frame and each import reports a list change.
+    /// Re-reading the transcript at most this often keeps the paint moving and the
+    /// decode cost linear in the backfill, not quadratic.
+    static let snapshotCoalesceMs = 80
     private var registryTask: Task<Void, Never>?
 
     // MARK: On-device store (#929)
@@ -1330,12 +1338,17 @@ final class AppModel: ObservableObject {
                 if isProjectDoc {
                     self.applyProjectDoc(projectId)
                 } else if touched.listChanged {
-                    self.emitSnapshot(key)
-                    self.markActivity(chatId: key)
-                    // Loro is live; /me/pushes and /me/unread can lag — light the
-                    // blue circle and drain the push queue as soon as a new row lands.
                     if self.caughtUp.contains(key) {
+                        self.emitSnapshot(key)
+                        self.markActivity(chatId: key)
+                        // Loro is live; /me/pushes and /me/unread can lag — light the
+                        // blue circle and drain the push queue as soon as a new row lands.
                         self.noteLiveUnread(chatId: key)
+                    } else {
+                        // Catching up: the relay sends one row per frame; re-read the
+                        // transcript once per window, not once per row.
+                        self.requestSnapshot(key)
+                        self.markActivity(chatId: key)
                     }
                 } else if !touched.messages.isEmpty {
                     self.emitMessages(key, indexes: touched.messages)
@@ -1413,7 +1426,27 @@ final class AppModel: ObservableObject {
         room.start()
     }
 
+    /// A list change from the doc: re-read now when the room was quiet, else once
+    /// at the end of the coalesce window. Direct `emitSnapshot` callers (catch-up,
+    /// checkpoint paint, ACK) still read at once and clear a pending request.
+    private func requestSnapshot(_ chatId: Id) {
+        guard !snapshotPending.contains(chatId) else { return }
+        let window = Double(Self.snapshotCoalesceMs) / 1000
+        let since = Date().timeIntervalSince1970 - (snapshotLastAt[chatId] ?? 0)
+        guard since < window else {
+            emitSnapshot(chatId)
+            return
+        }
+        snapshotPending.insert(chatId)
+        DispatchQueue.main.asyncAfter(deadline: .now() + (window - since)) { [weak self] in
+            guard let self, self.snapshotPending.contains(chatId) else { return }
+            self.emitSnapshot(chatId)
+        }
+    }
+
     private func emitSnapshot(_ chatId: Id) {
+        snapshotPending.remove(chatId)
+        snapshotLastAt[chatId] = Date().timeIntervalSince1970
         guard let doc = docs[chatId] else { return }
         var list = doc.readAll()
         let pendingIds = unacked[chatId] ?? []

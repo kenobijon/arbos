@@ -528,17 +528,25 @@ impl ChatDoc {
     /// projections cannot drift apart.
     pub fn projected_rows(&self) -> Vec<Value> {
         let list = self.messages_list();
-        let mut rows = Vec::with_capacity(list.len());
-        for i in 0..list.len() {
-            let Some(ValueOrContainer::Container(Container::Map(m))) = list.get(i) else {
-                continue;
-            };
-            let mut json = serde_json::to_value(m.get_deep_value()).unwrap_or(Value::Null);
-            project_hidden_parts(&mut json);
-            project_reactions(&mut json);
-            rows.push(json);
-        }
-        rows
+        (0..list.len())
+            .filter_map(|i| Self::projected_row_in(&list, i))
+            .collect()
+    }
+
+    /// One projected message row by list index: the only row that is read and
+    /// converted. Reading a long transcript one row at a time stays linear.
+    pub fn projected_row(&self, index: usize) -> Option<Value> {
+        Self::projected_row_in(&self.messages_list(), index)
+    }
+
+    fn projected_row_in(list: &LoroList, index: usize) -> Option<Value> {
+        let Some(ValueOrContainer::Container(Container::Map(m))) = list.get(index) else {
+            return None;
+        };
+        let mut json = serde_json::to_value(m.get_deep_value()).unwrap_or(Value::Null);
+        project_hidden_parts(&mut json);
+        project_reactions(&mut json);
+        Some(json)
     }
 
     fn find_map(list: &LoroList, id: &str) -> Option<LoroMap> {
