@@ -995,13 +995,17 @@ struct GroupProfileView: View {
         let media = items.filter { $0.kind == .media }
         let files = items.filter { $0.kind == .file }
         let voice = items.filter { $0.kind == .voice }
-        if media.isEmpty && files.isEmpty && voice.isEmpty {
+        // Links shared in the group, as in the agent pane's Library (DaWizzaa's ask,
+        // [feedback group-library-links-2026-10-23]).
+        let links = items.filter { $0.kind == .link }
+        if media.isEmpty && files.isEmpty && voice.isEmpty && links.isEmpty {
             return [.empty("Nothing shared here yet.")]
         }
         var out: [PaneSection] = []
         if !media.isEmpty { out += [.title("Images · \(media.count)"), .grid(media)] }
         if !files.isEmpty { out += [.title("Files · \(files.count)"), .files(files)] }
         if !voice.isEmpty { out += [.title("Voice · \(voice.count)"), .voice(voice)] }
+        if !links.isEmpty { out += [.title("Links · \(links.count)"), .links(links)] }
         return out
     }
 
