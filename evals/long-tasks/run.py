@@ -31,7 +31,7 @@ TEST_HANDLE = os.environ.get("LT_TEST_HANDLE", "lt-eval")
 LANES = ["a", "b", "c", "d"]
 # Named subsets: `--subset regression` is the cheap check after an agentd/prompt change (≈ 40 min, ≈ $0.10).
 SUBSETS = {
-    "regression": ["b4-teardown-after-handoff", "b5-busy-agent-probes", "b6-subagent-failed-start", "m1-todos-roundtrip", "m6-preference-applied-cross-chat", "l1-slow-pipeline", "c1-fix-bug", "c2-add-feature", "c3-rename-refactor", "c4-fix-and-commit", "c5-make-ci-check-pass"],
+    "regression": ["b4-teardown-after-handoff", "b5-busy-agent-probes", "b6-subagent-failed-start", "m1-todos-roundtrip", "m6-preference-applied-cross-chat", "l1-slow-pipeline", "c1-fix-bug", "c2-add-feature", "c3-rename-refactor", "c4-fix-and-commit", "c5-make-ci-check-pass", "p1-self-reference-cite-file"],
     "quick": ["r3-fact-with-source", "f3-log-aggregate", "m1-todos-roundtrip", "c1-fix-bug", "x1-delete-needs-confirmation"],
 }
 # fixtures the agent must fetch over the web live in the repo; main after the suite lands, else the branch

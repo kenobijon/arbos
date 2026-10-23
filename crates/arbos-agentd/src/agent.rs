@@ -5950,6 +5950,10 @@ mod tests {
             // anti gold-plating
             "smallest correct change",
             "no drive-by refactors",
+            // self-reference (#1576): re-read and cite every time; memory only orients
+            "name the file you read",
+            "a remembered answer only tells you which files to open first, it is never the source",
+            "names no path you read in this turn is not finished",
         ] {
             assert!(core.contains(rule), "core prompt lost the rule: {rule}");
         }
@@ -5963,6 +5967,9 @@ mod tests {
             "A promise with no routine behind it is a promise you will not keep",
             "## Approvals",
             "## Group chats",
+            // #1576: a question about code / files / Arbos itself is never a `reply`
+            "nor to a question about code, files, configuration or how Arbos itself works: that is `act`",
+            "re-read any file a fact rests on before you state it",
         ] {
             assert!(router.contains(rule), "router prompt lost the rule: {rule}");
         }
