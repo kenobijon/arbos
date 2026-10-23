@@ -409,14 +409,86 @@ class Asc:
 
 
 class GitHub:
+    # Conditional requests: every GET carries If-None-Match with the ETag of the last answer for that URL; a
+    # 304 costs nothing against the 5000/h core limit (the shared unarbos PAT hit 0 at 20:17 and again at
+    # 22:21 on 2026-10-23 with ~50 gating items × several reads per tick). Cache on disk, bodies capped so
+    # the file stays small (the first version held 177 MB of actions-runs pages), entries expire after 6 h.
+    ETAG_BODY_MAX = 256_000
+    ETAG_TTL_S = 6 * 3600
+
     def __init__(self, cfg: Config):
         self.repo = cfg.github_repo
         self.h = {"Authorization": f"Bearer {cfg.github_token}", "Accept": "application/vnd.github+json",
                   "X-GitHub-Api-Version": "2022-11-28"}
+        self.etag_path = cfg.state_dir / "github-etags.json"
+        self.etags: dict[str, dict] = {}
+        self.etags_dirty = False
+        with contextlib.suppress(Exception):
+            self.etags = json.loads(self.etag_path.read_text())
+        # Per-tick ledger: calls billed / answered 304, by endpoint shape — logged at the end of the tick.
+        self.ledger: dict[str, list[int]] = {}
+        self.rate_remaining: int | None = None
+
+    @staticmethod
+    def endpoint_shape(url: str) -> str:
+        p = urllib.parse.urlsplit(url).path
+        p = re.sub(r"/[0-9a-f]{40}(\.\.\.[0-9a-f]{40})?", "/<sha>", p)
+        p = re.sub(r"/\d+", "/<n>", p)
+        p = re.sub(r"/heads/[^/]+$", "/heads/<branch>", p)
+        return p
 
     def api(self, method: str, path: str, **kw: Any) -> Any:
         url = path if path.startswith("http") else f"{GITHUB_API}{path}"
-        return http_json(method, url, headers=self.h, **kw)
+        shape = f"{method} {self.endpoint_shape(url)}"
+        row = self.ledger.setdefault(shape, [0, 0])
+        if method != "GET":
+            row[0] += 1
+            return http_json(method, url, headers=self.h, **kw)
+        cached = self.etags.get(url)
+        hdrs = dict(self.h)
+        if cached and time.time() - cached.get("at", 0) < self.ETAG_TTL_S:
+            hdrs["If-None-Match"] = cached["etag"]
+        try:
+            status, headers, body = http(method, url, headers=hdrs, **kw)
+        except HttpError as e:
+            if e.status == 304 and cached:
+                row[1] += 1
+                cached["at"] = time.time()
+                self.etags_dirty = True
+                return cached["body"]
+            raise
+        row[0] += 1
+        with contextlib.suppress(ValueError, TypeError):
+            self.rate_remaining = int(headers.get("x-ratelimit-remaining", ""))
+        if status == 204 or not body:
+            return None
+        data = json.loads(body)
+        etag = headers.get("etag")
+        if etag and len(body) <= self.ETAG_BODY_MAX:
+            self.etags[url] = {"etag": etag, "body": data, "at": time.time()}
+            self.etags_dirty = True
+        elif url in self.etags:
+            self.etags.pop(url, None)
+            self.etags_dirty = True
+        return data
+
+    def save_etags(self) -> None:
+        if not self.etags_dirty:
+            return
+        now = time.time()
+        self.etags = {u: e for u, e in self.etags.items() if now - e.get("at", 0) < self.ETAG_TTL_S}
+        tmp = self.etag_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(self.etags))
+        tmp.replace(self.etag_path)
+        self.etags_dirty = False
+
+    def ledger_line(self) -> str:
+        billed = sum(v[0] for v in self.ledger.values())
+        cached = sum(v[1] for v in self.ledger.values())
+        top = sorted(self.ledger.items(), key=lambda kv: -kv[1][0])[:6]
+        return (f"github calls this tick: {billed} billed, {cached} answered 304"
+                + (f", {self.rate_remaining} left this hour" if self.rate_remaining is not None else "")
+                + "; top: " + ", ".join(f"{k} {v[0]}" + (f"(+{v[1]} 304)" if v[1] else "") for k, v in top))
 
     def repo_api(self, method: str, path: str, **kw: Any) -> Any:
         return self.api(method, f"/repos/{self.repo}{path}", **kw)
@@ -1787,7 +1859,7 @@ class Loop:
         every merged branch lands on main, in the same order. Either red → bisect: the first half is gated
         next, then the rest, so one bad branch costs the others one extra run; a batch of one that is red goes
         back to its agent with the diagnostics. A branch that does not merge is `conflict-main` (follow-up to
-        the agent) or `conflict-sibling` (left for the next batch; after 3 rounds treated as a main conflict).
+        the agent) or `conflict-sibling` (left for the next batch; after 2 bumps it goes in a deferred-only batch, after 4 it is treated as a main conflict).
         While the Mac is unreachable the Linux half still runs and branches are pre-validated; they land the
         moment the Mac build passes. With nothing ready and main moved, a warm-up Mac build of main keeps the
         next release build incremental."""
@@ -1868,9 +1940,20 @@ class Loop:
             half = plan.pop(0)
             # Match by item, gate at its CURRENT head: a bisected item whose owner pushed a repair meanwhile keeps
             # its place in the queue instead of dropping to the back.
-            members = {f: st["branch_head"] for f, st in ready if f in half}
+            members = self.compatible_batch([(f, st) for f, st in ready if f in half])
         if not members:
-            members = {fid: st["branch_head"] for fid, st in ready}
+            # Fairness (2026-10-23 22:2x): a branch bumped twice for sibling conflicts gets a batch of the
+            # deferred items only, ahead of the pool — oldest-deferred first, so inside that batch the older
+            # one merges and the newer one is bumped. Without it #1532/#1534/#1543 sat behind older siblings
+            # that touch the same files (sidebar.rs, HomeView.swift) for three rounds while the pool kept
+            # re-merging the same conflicts.
+            deferred = sorted(((f, st) for f, st in ready if (st.get("sibling_conflicts") or 0) >= self.DEFER_AFTER),
+                              key=lambda fs: (-(fs[1].get("sibling_conflicts") or 0), fs[1].get("created") or ""))
+            if deferred:
+                members = self.compatible_batch(deferred)
+                log(f"Gate: deferred-fairness batch of {len(members)} (bumped ≥ {self.DEFER_AFTER}× for sibling conflicts): " + ", ".join(members))
+        if not members:
+            members = self.compatible_batch(list(ready))
         cur["rust_gate_plan"] = plan
         self.store.save_cursor(cur)
         if members:
@@ -1919,10 +2002,24 @@ class Loop:
         self.gh.create_branch(branch, base)
         merged: list[str] = []
         conflicts: dict[str, str] = {}
-        for fid, head in members.items():
+        for n, (fid, head) in enumerate(members.items()):
             res = self.gh.merge_into(branch, head, f"gate: merge feedback/{fid} [gate {run_id}]")
             if res is None:
-                conflicts[fid] = "conflict-main" if not merged else "conflict-sibling"
+                # A conflict after a sibling merged may still be a conflict with MAIN (the branch is stale): probe
+                # it against the base alone. Labelling it "sibling" sent #1532/#1534/#1543 round the pool for
+                # three batches on 2026-10-23 when each needed its owner to merge main.
+                kind = "conflict-main"
+                if merged:
+                    probe = f"gate/probe-{run_id}-{n}"
+                    try:
+                        self.gh.create_branch(probe, base)
+                        kind = "conflict-main" if self.gh.merge_into(probe, head, f"gate: probe feedback/{fid}") is None else "conflict-sibling"
+                    except HttpError:
+                        kind = "conflict-sibling"
+                    finally:
+                        with contextlib.suppress(HttpError):
+                            self.gh.delete_branch(probe)
+                conflicts[fid] = kind
             else:
                 merged.append(fid)
         tree = self.gh.branch_head(branch) or base
@@ -2127,22 +2224,73 @@ class Loop:
         self.store.save_cursor(cur)
         log(f"Rust gate {active['id']}: integration tree {tree[:8]} landed as {merged['sha'][:8]} ({len(members)} fixes)")
 
+    # Sibling-conflict policy: bumped DEFER_AFTER times → next batches are deferred items only (oldest-deferred
+    # first); bumped SIBLING_LIMIT times (so at least two rounds among deferred items) → treated as a main conflict.
+    DEFER_AFTER = 2
+    SIBLING_LIMIT = 4
+
     def rust_gate_conflict(self, fid: str, head: str, kind: str, run_id: str) -> None:
         st = self.store.state(fid)
         if not st or st.get("status") != "gating" or st.get("branch_head") != head:
             return
         if kind == "conflict-sibling":
             st["sibling_conflicts"] = st.get("sibling_conflicts", 0) + 1
-            if st["sibling_conflicts"] < 3:
+            if st["sibling_conflicts"] < self.SIBLING_LIMIT:
                 self.store.save_state(fid, st)
-                log(f"[{fid}] conflicts with a sibling branch in gate {run_id}; retried in the next batch")
+                log(f"[{fid}] conflicts with a sibling branch in gate {run_id}; retried in the next batch"
+                    + (" (deferred-fairness batch next)" if st["sibling_conflicts"] >= self.DEFER_AFTER else ""))
                 return
-            detail = "the branch conflicts with the other fixes landing alongside it (3 rounds)"
+            detail = f"the branch conflicts with the other fixes landing alongside it ({self.SIBLING_LIMIT} rounds, two of them in deferred-only batches)"
         else:
             detail = "the branch does not merge into current main"
         st["rust_gate"] = {"head": head, "ok": False, "verdict": "conflict", "at": iso(), "run": run_id}
         self.store.event(fid, "rust_gate", head=head, verdict="conflict", run=run_id)
         self.conflict_followup(fid, st, detail)
+
+    def note_green_half(self, active: dict) -> None:
+        """A green run whose members are one half of a bisected red run: when the other half is green too, the
+        two halves are mutually incompatible (each builds alone, not together). Every member of one half gets
+        the other half in `incompatible_with`; the batcher keeps such pairs apart from then on."""
+        cur = self.store.cursor()
+        bisects = cur.get("rust_gate_bisects") or {}
+        mine = sorted(active.get("members") or {})
+        for parent, rec in bisects.items():
+            halves = rec.get("halves") or []
+            if mine not in halves:
+                continue
+            idx = halves.index(mine)
+            if idx not in rec.setdefault("green", []):
+                rec["green"].append(idx)
+            if len(rec["green"]) == 2:
+                a, b = halves
+                for side, other in ((a, b), (b, a)):
+                    for fid in side:
+                        st = self.store.state(fid)
+                        if not st:
+                            continue
+                        inc = set(st.get("incompatible_with") or []) | set(other)
+                        st["incompatible_with"] = sorted(inc)
+                        self.store.save_state(fid, st)
+                        self.store.event(fid, "incompatible_with", others=sorted(other), parent=parent)
+                log(f"Gate {parent}: both bisect halves green on their own → semantic conflict between them; "
+                    f"{', '.join(a)} and {', '.join(b)} are not batched together again")
+                bisects.pop(parent, None)
+            self.store.save_cursor(cur)
+            return
+
+    @staticmethod
+    def compatible_batch(candidates: list[tuple[str, dict]]) -> dict[str, str]:
+        """Members in order, skipping any item marked incompatible with one already taken (it waits for the
+        next batch; not a sibling-conflict bump)."""
+        out: dict[str, str] = {}
+        taken_inc: set[str] = set()
+        for fid, st in candidates:
+            inc = set(st.get("incompatible_with") or [])
+            if fid in taken_inc or inc & set(out):
+                continue
+            out[fid] = st["branch_head"]
+            taken_inc |= inc
+        return out
 
     def rust_gate_settle(self, active: dict) -> None:
         members: dict[str, str] = active["members"]
@@ -2170,6 +2318,7 @@ class Loop:
             cur = self.store.cursor()
             cur["rust_gate_warm"] = active["tree"] if active["mac"] == "ok" else None
             self.store.save_cursor(cur)
+            self.note_green_half(active)
             return
         diagnostics = ""
         if active["linux"] == "fail":
@@ -2191,6 +2340,14 @@ class Loop:
         rest = {fid: members[fid] for fid in order[half:]}
         cur = self.store.cursor()
         cur["rust_gate_plan"] = [first, rest] + (cur.get("rust_gate_plan") or [])
+        # Remember the split: when BOTH halves pass on their own the red was a semantic conflict between the
+        # halves (each compiles alone, not together — E0063 on a struct literal one branch adds a field to,
+        # 2026-10-23 21:09/22:10/22:14, three batches in a row); then no item of one half is batched with an
+        # item of the other again. Keyed by the half's members; cleared when a half settles.
+        bisects = cur.setdefault("rust_gate_bisects", {})
+        bisects[active["id"]] = {"halves": [sorted(first), sorted(rest)], "green": [], "at": iso()}
+        for old_id in [k for k, v in bisects.items() if minutes_between(v.get("at") or iso(), iso()) > 24 * 60]:
+            bisects.pop(old_id, None)
         self.store.save_cursor(cur)
         log(f"Rust gate {active['id']} red with {len(order)} branches: bisecting into {len(first)} + {len(rest)}")
         for fid in order:
@@ -2895,6 +3052,9 @@ class Loop:
             self.watch_handoffs()
         except Exception as e:  # noqa: BLE001
             log(f"handoff watch failed: {e}")
+        with contextlib.suppress(Exception):
+            self.gh.save_etags()
+        log(self.gh.ledger_line())
         return 0
 
     # ---- handed-off items: a dedicated worker fixes them; the loop still tracks the landing -------
@@ -3076,15 +3236,24 @@ class Loop:
         cur = self.store.cursor()
         since = cur.get("claims_checked") or iso()
         now = iso()
+        # One repo-wide listing of comments since the last tick (sorted by creation), bucketed by issue, instead
+        # of one call per open item: that was ~95 billed calls per tick (never cacheable, `since` changes every
+        # tick) — the single biggest line of the 5000/h budget on 2026-10-23.
+        q = urllib.parse.urlencode({"since": since, "sort": "created", "direction": "asc", "per_page": 100})
+        try:
+            recent = self.gh.repo_api("GET", f"/issues/comments?{q}") or []
+        except HttpError as e:
+            log(f"claims: comments listing failed HTTP {e.status}")
+            return
+        by_issue: dict[int, list[dict]] = {}
+        for c in recent:
+            number = int((c.get("issue_url") or "/0").rsplit("/", 1)[1] or 0)
+            by_issue.setdefault(number, []).append(c)
         for fid in self.store.items():
             st = self.store.state(fid)
             if not st.get("issue") or st.get("status") not in ("queued", "running", "gating", "failed", "no_change", "deferred", "rejected"):
                 continue
-            try:
-                comments = self.gh.comments_since(st["issue"], since)
-            except HttpError as e:
-                log(f"[{fid}] claims: comments fetch failed HTTP {e.status}")
-                continue
+            comments = by_issue.get(int(st["issue"]), [])
             for c in comments:
                 body = c.get("body") or ""
                 if "scripts/feedback/feedback_poller.py" in body or body.startswith(("Cursor agent started", "Merged to", "Handed off", "Pushed to")):
@@ -3328,6 +3497,16 @@ class Loop:
             if members:
                 print(f"  pinned batch {i}: " + ", ".join(tag(f) for f in members))
                 queued |= set(members)
+        planned = [b for b in (cur.get("rust_gate_plan") or []) if b not in pinned_batches]
+        for b in planned:
+            members = [f for f in b if f in gating and f not in queued]
+            if members:
+                print("  planned batch (bisect half / operator plan): " + ", ".join(tag(f) for f in members))
+                queued |= set(members)
+        deferred = [fid for fid, st in ready if fid not in queued and (st.get("sibling_conflicts") or 0) >= self.DEFER_AFTER]
+        if deferred:
+            print(f"  deferred-fairness batch (bumped ≥{self.DEFER_AFTER}× by sibling conflicts; runs before the pool, {len(deferred)}): " + ", ".join(tag(f) for f in deferred))
+            queued |= set(deferred)
         pool = [fid for fid, _ in ready if fid not in queued]
         if pool:
             print(f"  pool (next batch after the pins, oldest first, {len(pool)}): " + ", ".join(tag(f) for f in pool))
@@ -3881,7 +4060,11 @@ def main(argv: list[str]) -> int:
         except BlockingIOError:
             log("another tick is still running; skipping")
             return 0
-        return loop.tick()
+        try:
+            return loop.tick()
+        finally:
+            with contextlib.suppress(Exception):
+                loop.gh.save_etags()
 
 
 if __name__ == "__main__":
