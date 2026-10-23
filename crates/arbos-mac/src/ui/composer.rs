@@ -2483,17 +2483,15 @@ pub fn reply_preview_bar(
                 .object_fit(ObjectFit::Cover),
         );
     }
+    // A block (not a flex) slot: GPUI's text only truncates with an ellipsis when
+    // its parent hands it a definite width, which a flex item's max-content
+    // measure pass does not (first cut rendered a hard clip, no "…").
     row.child(
         div()
             .id("composer-reply-line")
             .debug_selector(|| "composer-reply-line".into())
             .flex_1()
             .min_w_0()
-            .h(px(REPLY_PREVIEW_HEIGHT))
-            .flex()
-            .items_center()
-            .overflow_hidden()
-            .whitespace_nowrap()
             .text_size(px(TEXT_TINY))
             .text_color(theme.text)
             .truncate()
@@ -2556,12 +2554,21 @@ mod reply_preview_tests {
                 .child(reply_preview_bar(
                     &preview,
                     &theme,
-                    div().size(px(18.0)).flex_shrink_0(),
+                    div()
+                        .debug_selector(|| "composer-reply-clear".into())
+                        .size(px(18.0))
+                        .flex_shrink_0(),
                 ))
         }
     }
 
-    fn measure(cx: &mut TestAppContext, text: String) -> (f32, f32) {
+    struct Measured {
+        bar: gpui::Bounds<Pixels>,
+        line: gpui::Bounds<Pixels>,
+        clear: gpui::Bounds<Pixels>,
+    }
+
+    fn measure(cx: &mut TestAppContext, text: String) -> Measured {
         cx.update(|cx| {
             if !cx.has_global::<Theme>() {
                 let theme = Theme::for_pref(AppearancePref::Dark, Surface::Matte, cx);
@@ -2570,20 +2577,57 @@ mod reply_preview_tests {
         });
         let (_view, vcx) = cx.add_window_view(|_, _| Bar { text });
         vcx.run_until_parked();
-        let bar = vcx.debug_bounds("composer-reply").expect("bar drawn");
-        let line = vcx.debug_bounds("composer-reply-line").expect("line drawn");
-        (bar.size.height.into(), line.size.height.into())
+        Measured {
+            bar: vcx.debug_bounds("composer-reply").expect("bar drawn"),
+            line: vcx.debug_bounds("composer-reply-line").expect("line drawn"),
+            clear: vcx
+                .debug_bounds("composer-reply-clear")
+                .expect("clear drawn"),
+        }
     }
 
     #[gpui::test]
     fn the_bar_is_the_same_height_for_one_line_and_twenty(cx: &mut TestAppContext) {
-        let (short, short_line) = measure(cx, ONE_LINE.to_owned());
-        let (long, long_line) = measure(cx, twenty_lines());
-        assert_eq!(short, REPLY_PREVIEW_HEIGHT, "one-line bar height");
-        assert_eq!(long, REPLY_PREVIEW_HEIGHT, "twenty-line bar height");
-        assert_eq!(short, long, "the bar never fits itself to the message");
-        assert_eq!(short_line, REPLY_PREVIEW_HEIGHT);
-        assert_eq!(long_line, REPLY_PREVIEW_HEIGHT);
+        let short = measure(cx, ONE_LINE.to_owned());
+        let long = measure(cx, twenty_lines());
+        let short_h: f32 = short.bar.size.height.into();
+        let long_h: f32 = long.bar.size.height.into();
+        assert_eq!(short_h, REPLY_PREVIEW_HEIGHT, "one-line bar height");
+        assert_eq!(long_h, REPLY_PREVIEW_HEIGHT, "twenty-line bar height");
+        assert_eq!(short_h, long_h, "the bar never fits itself to the message");
+        // The text slot is one line inside the bar, for either message.
+        let short_line: f32 = short.line.size.height.into();
+        let long_line: f32 = long.line.size.height.into();
+        assert!(
+            short_line > 0.0 && short_line <= REPLY_PREVIEW_HEIGHT,
+            "{short_line}"
+        );
+        assert_eq!(
+            short_line, long_line,
+            "the twenty-line quote takes one line"
+        );
+    }
+
+    #[gpui::test]
+    fn the_quoted_line_stays_inside_the_bar_whatever_its_length(cx: &mut TestAppContext) {
+        // A quoted line far wider than the bar neither widens the row nor
+        // pushes the × out: the bar is the column's width and the text slot
+        // ends where the × begins, with the text clipped (ellipsis) inside it.
+        let m = measure(cx, twenty_lines());
+        let bar_w: f32 = m.bar.size.width.into();
+        assert!((bar_w - 852.0).abs() <= 1.0, "bar width {bar_w}");
+        let line_right: f32 = (m.line.origin.x + m.line.size.width).into();
+        let clear_left: f32 = m.clear.origin.x.into();
+        let bar_right: f32 = (m.bar.origin.x + m.bar.size.width).into();
+        assert!(
+            line_right <= clear_left + 0.5,
+            "line ends {line_right}, × at {clear_left}"
+        );
+        let clear_right: f32 = (m.clear.origin.x + m.clear.size.width).into();
+        assert!(
+            clear_right <= bar_right - 13.0,
+            "× right {clear_right} inside the 14 pt padding of {bar_right}"
+        );
     }
 
     #[test]
