@@ -1,0 +1,389 @@
+{
+ "meta": {
+  "run_id": "20261022T2352-regression2",
+  "started_at": "2026-10-22T23:51:59Z",
+  "image": "arbos-agent-0.1.79",
+  "agentd": "arbos-agentd 0.6.143",
+  "provider": "gvisor",
+  "user": "test_01M5JHWC586GYNTC3KCZZKS7NF",
+  "projects": {
+   "a": "01M5JHWMMJ65A7CXQW47G9NCPA",
+   "c": "01M5JHWMV6VQA2RXCAHDS5XDJQ",
+   "d": "01M5JJYHN4880E4VS90CSY0DF4"
+  },
+  "tasks": 3,
+  "budget_usd": 8.0,
+  "spent_today_at_start": 0.941363415,
+  "judge_model": "anthropic/claude-haiku-5.5",
+  "ended_at": "2026-10-23T00:28:27Z",
+  "spent_today_at_end": 0.024341082,
+  "run_cost_usd": -0.917,
+  "judge_cost_usd": 0.0002
+ },
+ "summary": {
+  "tasks": 3,
+  "run": 3,
+  "passed": 2,
+  "failed": 1,
+  "skipped": 0,
+  "pass_pct": 66.7,
+  "ttfr_p50_s": 3.92,
+  "ttfr_all_p50_s": 3.32,
+  "total_p50_s": 193.1,
+  "tool_errors": 0,
+  "stalls": 0,
+  "cost_usd": 0.0403,
+  "run_cost_usd": -0.917,
+  "judge_cost_usd": 0.0002,
+  "categories": {
+   "managing": {
+    "tasks": 1,
+    "passed": 0,
+    "pass_pct": 0.0
+   },
+   "background": {
+    "tasks": 1,
+    "passed": 1,
+    "pass_pct": 100.0
+   },
+   "long": {
+    "tasks": 1,
+    "passed": 1,
+    "pass_pct": 100.0
+   }
+  }
+ },
+ "results": [
+  {
+   "task": "m6-preference-applied-cross-chat",
+   "title": "A stated preference is applied in a later chat",
+   "category": "managing",
+   "categories": [
+    "managing"
+   ],
+   "lane": "a",
+   "regression": null,
+   "success": false,
+   "reasons": [
+    "t2: reply does not match /^\\s*\u2022[^\\n]+\\n\\s*\u2022[^\\n]+\\n\\s*\u2022[^\\n]+\\s*$/"
+   ],
+   "ttfr_s": 2.45,
+   "ttfr_all_s": [
+    2.45,
+    2.72
+   ],
+   "total_s": 68.3,
+   "tool_errors": 0,
+   "stalls": 0,
+   "cost_usd": 0.007486,
+   "judge_usd": 0,
+   "relay": {
+    "calls": 17,
+    "input": 31754,
+    "output": 5896,
+    "cache_read": 12309,
+    "cache_write": 17182,
+    "usd": 0.007486
+   },
+   "rubric_min": null,
+   "turns": [
+    {
+     "turn": 1,
+     "chat_id": "01M5K0EP999THQTN7891Z3MEWB",
+     "prompt": "A preference for all our future chats: whenever I ask you to summarise something, answer with exactly three bullet points, each starting with the \u2022 character, and nothing else.",
+     "ok": true,
+     "reasons": [],
+     "ttfr_s": 2.45,
+     "first_status_s": 0.41,
+     "wall_s": 6.6,
+     "timed_out": false,
+     "stalls": 0,
+     "approvals_rejected": [],
+     "routes": [
+      "reply"
+     ],
+     "tool_calls": 1,
+     "tool_errors": 0,
+     "model_calls": 1,
+     "compactions": 0,
+     "audit_denied": 0,
+     "rubric": null,
+     "truth": {},
+     "verify_out": "",
+     "reply": "Noted. From now on, whenever you ask me to summarise something, I'll answer with exactly three bullet points, each starting with \u2022, and nothing else.",
+     "excerpt": "**User:** A preference for all our future chats: whenever I ask you to summarise something, answer with exactly three bullet points, each starting with the \u2022 character, and nothing else.\n\n**Assistant** (result, route=reply, status=done)\n\nNoted. From now on, whenever you ask me to summarise something, I'll answer with exactly three bullet points, each starting with \u2022, and nothing else.\n\nmain-agent tool calls: route (errors 0)"
+    },
+    {
+     "turn": 2,
+     "chat_id": "01M5K0GB3NEQJ48VS2HG1VBEWB",
+     "prompt": "Summarise this: The Cedar Hollow community garden opens at 7:00 and closes at dusk. Odd-numbered plots water on Monday, Wednesday and Friday; even-numbered plots on Tuesday, Thursday and Saturday. Sunday is a shared workday from 9:00 to 11:00 with compost turning and path mulching. Garlic planting i",
+     "ok": false,
+     "reasons": [
+      "reply does not match /^\\s*\u2022[^\\n]+\\n\\s*\u2022[^\\n]+\\n\\s*\u2022[^\\n]+\\s*$/"
+     ],
+     "ttfr_s": 2.72,
+     "first_status_s": 0.44,
+     "wall_s": 6.5,
+     "timed_out": false,
+     "stalls": 0,
+     "approvals_rejected": [],
+     "routes": [
+      "reply"
+     ],
+     "tool_calls": 1,
+     "tool_errors": 0,
+     "model_calls": 1,
+     "compactions": 0,
+     "audit_denied": 0,
+     "rubric": null,
+     "truth": {},
+     "verify_out": "",
+     "reply": "\u2022 The garden opens at 7:00 and closes at dusk; odd-numbered plots water Monday, Wednesday and Friday, even-numbered plots Tuesday, Thursday and Saturday.\n\u2022 Sunday 9:00\u201311:00 is a shared workday for compost turning and path mulching; garlic planting is 1 November and leaf-mould day is 15 November\u2022 The season closes 30 November, when the water is turned off.",
+     "excerpt": "**User:** Summarise this: The Cedar Hollow community garden opens at 7:00 and closes at dusk. Odd-numbered plots water on Monday, Wednesday and Friday; even-numbered plots on Tuesday, Thursday and Saturday. Sunday is a shared workday from 9:00 to 11:00 with compost turning and path mulching. Garlic planting is on 1 November, leaf-mould day on 15 November, and the season closes on 30 November when the water is turned off.\n\n**Assistant** (result, route=reply, status=done)\n\n\u2022 The garden opens at 7:00 and closes at dusk; odd-numbered plots water Monday, Wednesday and Friday, even-numbered plots Tuesday, Thursday and Saturday.\n\u2022 Sunday 9:00\u201311:00 is a shared workday for compost turning and path mulching; garlic planting is 1 November and leaf-mould day is 15 November\u2022 The season closes 30 November, when the water is turned off.\n\nmain-agent tool calls: route (errors 0)"
+    }
+   ],
+   "background": null,
+   "dir": "/work/01M5JHWMMJ65A7CXQW47G9NCPA/lt-m6-preference-applied-cross-chat-20261022T2352-regression2"
+  },
+  {
+   "task": "b5-busy-agent-probes",
+   "title": "Probes in the busy chat and in a new chat answer within 5 s while a long act turn runs",
+   "category": "background",
+   "categories": [
+    "background"
+   ],
+   "lane": "c",
+   "regression": "busy-agent quick replies (bc-d117b386, #1349) + reply lost after act (#1355)",
+   "success": true,
+   "reasons": [],
+   "ttfr_s": 3.92,
+   "ttfr_all_s": [
+    3.92,
+    3.24,
+    3.39,
+    0.32,
+    6.39
+   ],
+   "total_s": 193.1,
+   "tool_errors": 0,
+   "stalls": 0,
+   "cost_usd": 0.008747,
+   "judge_usd": 7e-05,
+   "relay": {
+    "calls": 23,
+    "input": 85943,
+    "output": 5865,
+    "cache_read": 121432,
+    "cache_write": 25306,
+    "usd": 0.008747
+   },
+   "rubric_min": 5,
+   "turns": [
+    {
+     "turn": 1,
+     "chat_id": "01M5K0EQMRE0YDSPJGV3YHN5K8",
+     "prompt": "Run this exact command with your shell tool and wait for it to finish in the foreground (do not background it), then tell me what it printed: `sleep 95 && echo SLEEP_FINISHED`.",
+     "ok": true,
+     "reasons": [],
+     "ttfr_s": 3.92,
+     "first_status_s": 0.44,
+     "wall_s": 13.8,
+     "timed_out": false,
+     "stalls": 0,
+     "approvals_rejected": [],
+     "routes": [],
+     "tool_calls": 2,
+     "tool_errors": 0,
+     "model_calls": 2,
+     "compactions": 0,
+     "audit_denied": 0,
+     "rubric": null,
+     "truth": {},
+     "verify_out": "",
+     "reply": "",
+     "excerpt": "**User:** Run this exact command with your shell tool and wait for it to finish in the foreground (do not background it), then tell me what it printed: `sleep 95 && echo SLEEP_FINISHED`.\n\n**Assistant** (ack, route=None, status=done)\n\nOn it.\n\n**Assistant** (result, route=None, status=streaming)\n\nmain-agent tool calls: route, bash (errors 0)"
+    },
+    {
+     "turn": 2,
+     "chat_id": "01M5K0EQMRE0YDSPJGV3YHN5K8",
+     "prompt": "what is going on now?",
+     "ok": true,
+     "reasons": [],
+     "ttfr_s": 3.24,
+     "first_status_s": 1.92,
+     "wall_s": 6.5,
+     "timed_out": false,
+     "stalls": 0,
+     "approvals_rejected": [],
+     "routes": [
+      "quick"
+     ],
+     "tool_calls": 2,
+     "tool_errors": 0,
+     "model_calls": 2,
+     "compactions": 0,
+     "audit_denied": 0,
+     "rubric": {
+      "score": 5,
+      "reason": "Reply describes the in-progress 95-second sleep command, its elapsed time, and that it will report output on completion. Fully addresses the criteria.",
+      "usd": 6.9e-05
+     },
+     "truth": {},
+     "verify_out": "",
+     "reply": "I'm running the command you asked for, the 95-second sleep followed by the echo, in the foreground. It has been going for about 20 seconds, so it's roughly a fifth of the way through. Once it finishes I'll tell you what it printed.",
+     "excerpt": "**User:** what is going on now?\n\n**Assistant** (result, route=quick, status=done)\n\nI'm running the command you asked for, the 95-second sleep followed by the echo, in the foreground. It has been going for about 20 seconds, so it's roughly a fifth of the way through. Once it finishes I'll tell you what it printed.\n\nmain-agent tool calls: route, bash (errors 0)"
+    },
+    {
+     "turn": 3,
+     "chat_id": "01M5K0G3QHQFZVZNRKFQ526KBA",
+     "prompt": "hello? are you there?",
+     "ok": true,
+     "reasons": [],
+     "ttfr_s": 3.39,
+     "first_status_s": 1.95,
+     "wall_s": 6.7,
+     "timed_out": false,
+     "stalls": 0,
+     "approvals_rejected": [],
+     "routes": [
+      "quick"
+     ],
+     "tool_calls": 0,
+     "tool_errors": 0,
+     "model_calls": 0,
+     "compactions": 0,
+     "audit_denied": 0,
+     "rubric": null,
+     "truth": {},
+     "verify_out": "",
+     "reply": "Yes, I'm here. I'm still working on the request from your other conversation, about 45 seconds in, and it isn't finished yet.",
+     "excerpt": "**User:** hello? are you there?\n\n**Assistant** (result, route=quick, status=done)\n\nYes, I'm here. I'm still working on the request from your other conversation, about 45 seconds in, and it isn't finished yet."
+    },
+    {
+     "turn": 4,
+     "chat_id": "01M5K0EQMRE0YDSPJGV3YHN5K8",
+     "prompt": "Did the sleep command finish? What did it print?",
+     "ok": true,
+     "reasons": [],
+     "ttfr_s": 0.32,
+     "first_status_s": 0.39,
+     "wall_s": 6.6,
+     "timed_out": false,
+     "stalls": 0,
+     "approvals_rejected": [],
+     "routes": [
+      "reply"
+     ],
+     "tool_calls": 1,
+     "tool_errors": 0,
+     "model_calls": 1,
+     "compactions": 0,
+     "audit_denied": 0,
+     "rubric": null,
+     "truth": {},
+     "verify_out": "",
+     "reply": "Yes, it finished. I ran `sleep 95 && echo SLEEP_FINISHED` in the foreground in this chat, and it printed `SLEEP_FINISHED`. Nothing is still running from it. The \"still in progress\" replies in the earlier threads were out of date, so you can disregard them.",
+     "excerpt": "**User:** Did the sleep command finish? What did it print?\n\n**Assistant** (result, route=reply, status=done)\n\nYes, it finished. I ran `sleep 95 && echo SLEEP_FINISHED` in the foreground in this chat, and it printed `SLEEP_FINISHED`. Nothing is still running from it. The \"still in progress\" replies in the earlier threads were out of date, so you can disregard them.\n\nmain-agent tool calls: route (errors 0)"
+    },
+    {
+     "turn": 5,
+     "chat_id": "01M5K0EQMRE0YDSPJGV3YHN5K8",
+     "prompt": "Thanks. Anything still running on your side?",
+     "ok": true,
+     "reasons": [],
+     "ttfr_s": 6.39,
+     "first_status_s": 0.38,
+     "wall_s": 13.7,
+     "timed_out": false,
+     "stalls": 0,
+     "approvals_rejected": [],
+     "routes": [
+      "act"
+     ],
+     "tool_calls": 2,
+     "tool_errors": 0,
+     "model_calls": 3,
+     "compactions": 0,
+     "audit_denied": 0,
+     "rubric": null,
+     "truth": {},
+     "verify_out": "",
+     "reply": "Nothing of mine is still running. Both background loggers have stopped: the 20:27 one and the 22:20 one. Their last log lines are 20:27:14Z and 22:20:13Z, and the tick routines were deleted.\n\nOne process is running that I did not start: a `sleep 100` that has been going for about a minute. It is not from my runs here, so I have left it alone. Do you want me to stop it?",
+     "excerpt": "**User:** Thanks. Anything still running on your side?\n\n**Assistant** (ack, route=None, status=done)\n\nOn it.\n\n**Assistant** (result, route=act, status=done) tools: bash\n\nNothing of mine is still running. Both background loggers have stopped: the 20:27 one and the 22:20 one. Their last log lines are 20:27:14Z and 22:20:13Z, and the tick routines were deleted.\n\nOne process is running that I did not start: a `sleep 100` that has been going for about a minute. It is not from my runs here, so I have left it alone. Do you want me to stop it?\n\nmain-agent tool calls: route, bash (errors 0)"
+    }
+   ],
+   "background": null,
+   "dir": "/work/01M5JHWMV6VQA2RXCAHDS5XDJQ/lt-b5-busy-agent-probes-20261022T2352-regression2"
+  },
+  {
+   "task": "l1-slow-pipeline",
+   "title": "A 33-minute pipeline with progress notes",
+   "category": "long",
+   "categories": [
+    "long"
+   ],
+   "lane": "d",
+   "regression": null,
+   "success": true,
+   "reasons": [],
+   "ttfr_s": 3.93,
+   "ttfr_all_s": [
+    3.93
+   ],
+   "total_s": 2187.5,
+   "tool_errors": 0,
+   "stalls": 0,
+   "cost_usd": 0.024035,
+   "judge_usd": 0.00012,
+   "relay": {
+    "calls": 31,
+    "input": 85679,
+    "output": 6357,
+    "cache_read": 335824,
+    "cache_write": 124924,
+    "usd": 0.024035
+   },
+   "rubric_min": null,
+   "turns": [
+    {
+     "turn": 1,
+     "chat_id": "01M5K0ET7139GSQ1ADMW573P92",
+     "prompt": "Process the 20 files in /work/01M5JJYHN4880E4VS90CSY0DF4/lt-l1-slow-pipeline-20261022T2352-regression2/chunks one at a time: for each chunk-NN.txt, wait 100 seconds (simulating slow processing), then write its line count to /work/01M5JJYHN4880E4VS90CSY0DF4/lt-l1-slow-pipeline-20261022T2352-regressio",
+     "ok": true,
+     "reasons": [],
+     "ttfr_s": 3.93,
+     "first_status_s": 0.57,
+     "wall_s": 13.7,
+     "timed_out": false,
+     "stalls": 0,
+     "approvals_rejected": [],
+     "routes": [
+      "act"
+     ],
+     "tool_calls": 4,
+     "tool_errors": 0,
+     "model_calls": 5,
+     "compactions": 0,
+     "audit_denied": 0,
+     "rubric": null,
+     "truth": {},
+     "verify_out": "",
+     "reply": "The 20-chunk job is running in the background in `lt-l1-slow-pipeline-20261022T2352-regression2/`. It started at 23:52 and writes one `out/chunk-NN.count` file every 100 seconds, so it should finish around 00:26.\n\nI've set check-ins for about 5, 10 and 15 chunks (roughly 00:01, 00:10 and 00:18), plus a final summary check after that, so you'll get a short note at each point.",
+     "excerpt": "**User:** Process the 20 files in /work/01M5JJYHN4880E4VS90CSY0DF4/lt-l1-slow-pipeline-20261022T2352-regression2/chunks one at a time: for each chunk-NN.txt, wait 100 seconds (simulating slow processing), then write its line count to /work/01M5JJYHN4880E4VS90CSY0DF4/lt-l1-slow-pipeline-20261022T2352-regression2/out/chunk-NN.count. Run this in the background and send me a short progress note after every 5 chunks, then a final summary when all 20 are done.\n\n**Assistant** (ack, route=None, status=done)\n\nStarting the 20-chunk background job now.\n\n**Assistant** (result, route=act, status=done) tools: bash, bash, mcp__arbos__routines_create, mcp__arbos__routines_create, mcp__arbos__routines_create, mcp__arbos__routines_create, codemode\n\nThe 20-chunk job is running in the background in `lt-l1-slow-pipeline-20261022T2352-regression2/`. It started at 23:52 and writes one `out/chunk-NN.count` file every 100 seconds, so it should finish around 00:26.\n\nI've set check-ins for about 5, 10 and 15 chunks (roughly 00:01, 00:10 and 00:18), plus a final summary check after that, so you'll get a short note at each point.\n\nmain-agent tool calls: route, bash, bash, codemode (errors 0)"
+    }
+   ],
+   "background": {
+    "verify_out": "SHOW counts=20\nPASS\n",
+    "waited_s": 2160.7,
+    "progress_rows": 10,
+    "all_text": "Starting the 20-chunk background job now.\n\nThe 20-chunk job is running in the background in `lt-l1-slow-pipeline-20261022T2352-regression2/`. It started at 23:52 and writes one `out/chunk-NN.count` file every 100 seconds, so it should finish around 00:26.\n\nI've set check-ins for about 5, 10 and 15 chunks (roughly 00:01, 00:10 and 00:18), plus a final summary check after that, so you'll get a short note at each point.\n\nOn it.\n\nProgress at 5 of 20 chunks: chunk-05 finished at 00:00:34, and all five count files are in `out/`. The remaining 15 should finish around 00:26.\n\nOn it.\n\nProgress at 10 of 20 chunks: chunk-10 finished at 00:08:54, and all ten count files are in `out/`. The remaining ten should finish around 00:26.\n\nOn it.\n\nProgress at 15 of 20 chunks: chunk-15 finished at 00:17:14, and all fifteen count files are in `out/`. The last five should finish around 00:26.\n\nOn it.\n\nAll 20 chunks are done (ALL_DONE at 00:25:34). The `out/` folder in `lt-l1-slow-pipeline-20261022T2352-regression2/` has 20 `chunk-NN.count` files, and each one matches the line count of its chunk.",
+    "rubric": {
+     "score": 3,
+     "reason": "Three progress notes and a final summary covering all 20 chunks are present, but notes are duplicated with repeated 'On it.' lines and the first note is just a plan, not progress.",
+     "usd": 0.000122
+    }
+   },
+   "dir": "/work/01M5JJYHN4880E4VS90CSY0DF4/lt-l1-slow-pipeline-20261022T2352-regression2"
+  }
+ ]
+}
