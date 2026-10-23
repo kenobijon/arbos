@@ -1247,9 +1247,13 @@ impl ModelError {
     }
 
     /// One short line for the chat, first person like the limit announcements (#1037).
-    pub fn chat_line(&self) -> String {
+    /// `owner` names whose budget ran out for budget refusals ("Jacob's daily Arbos budget…").
+    pub fn chat_line_for(&self, owner: &str) -> String {
         if self.refusal {
             return "I couldn't answer that: the model provider declined the request. Ask me again in a moment.".to_owned();
+        }
+        if let Some(b) = crate::budget::Refusal::classify(&self.detail) {
+            return b.chat_line(owner);
         }
         if let Some((notice, _)) = classify_hard_limit(&self.detail) {
             return notice.to_owned();
@@ -1378,6 +1382,9 @@ pub struct Agent {
     /// Per chat: `TurnState::started` of the busy turn we already wrote a status note for
     /// (at most one note per waiting period; see `status.rs`, #1448).
     pub(crate) quick_noted: std::sync::Mutex<HashMap<String, Instant>>,
+    /// Per chat: budget refusals (daily cap, credits, read-only) and the short block that stops
+    /// every send from costing a refused model call (`budget.rs`).
+    pub(crate) budget: crate::budget::BudgetState,
 }
 
 impl Agent {
@@ -1458,6 +1465,7 @@ impl Agent {
             side_notes: std::sync::Mutex::new(HashMap::new()),
             quick_calls: std::sync::Mutex::new(HashMap::new()),
             quick_noted: std::sync::Mutex::new(HashMap::new()),
+            budget: crate::budget::BudgetState::default(),
         })
     }
 
@@ -1924,6 +1932,36 @@ impl Agent {
                 .await
                 .doc
                 .set_command_status(&cmd.id, CommandStatus::Taken, None);
+        }
+        // Inside a budget block (the owner's cap / credits / read-only relay, `budget.rs`): the
+        // chat already carries the one line that says so; a model call would only be refused
+        // again. The command is done, nothing is written, the next send after the block probes.
+        if matches!(cmd.kind.as_str(), "send" | "answer" | "retry") {
+            if let Some(refusal) = self.budget.active(chat_id) {
+                tracing::info!(
+                    chat_id,
+                    code = refusal.code(),
+                    "send skipped: budget block active"
+                );
+                if self.budget.notice_due(chat_id) {
+                    self.write_budget_line(chat_id, refusal, "block active")
+                        .await;
+                }
+                let _ = self.store.t3_append(
+                    chat_id,
+                    None,
+                    Some(chat_id),
+                    "budget_skip",
+                    Some("system"),
+                    &format!("send skipped: {} block active", refusal.code()),
+                    Some(&json!({ "message_id": people_msg_id, "command_id": cmd.id, "code": refusal.code() })),
+                );
+                host.lock()
+                    .await
+                    .doc
+                    .set_command_status(&cmd.id, CommandStatus::Done, None);
+                return Ok(());
+            }
         }
         // Busy agent (a turn holds the lock): the message gets its quick reply first — a status
         // answer ends here, guidance goes into the running turn, anything else queues as before
@@ -3198,6 +3236,13 @@ impl Agent {
             final_status = MessageStatus::Error;
         }
         let (talking_model, _) = self.live_models().await;
+        let owner_label = self.owner_label(chat_id);
+        // A budget refusal arms the block (`budget.rs`); the line goes in this bubble below.
+        if let Some(m) = &model_failed {
+            self.note_budget_refusal(chat_id, &m.detail, true).await;
+        } else if turn.metrics.model_calls > 0 {
+            self.budget.clear(chat_id);
+        }
         let room_name;
         {
             let h = host.lock().await;
@@ -3206,7 +3251,7 @@ impl Agent {
             }
             if let Some(m) = &model_failed {
                 h.doc
-                    .add_error_part(&assistant_msg_id, m.code(), &m.chat_line());
+                    .add_error_part(&assistant_msg_id, m.code(), &m.chat_line_for(&owner_label));
                 h.doc.add_hidden_part(
                     &assistant_msg_id,
                     "model_error_detail",

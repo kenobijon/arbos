@@ -56,7 +56,15 @@ pub struct DocHost {
     /// recent history into the agent loop (#1440: ~40 old sends re-dispatched on a re-join).
     /// `0` for hosts opened at start, which do recover their own interrupted turns.
     pub ignore_before_ms: i64,
+    /// `agent:<project_id>` — this agent as a people-chat member, for the catch-up ordering.
+    me: String,
 }
+
+/// A pending people-chat `send` older than this at catch-up is history, not work: nobody asked
+/// this agent by name and the conversation has moved on, so it is not even gated (each gate of
+/// an unaddressed group message costs a decision-model call; 2026-10-23 a box restart replayed
+/// 530 of them in a row and a fresh @mention waited eight minutes behind them).
+pub const BACKLOG_MAX_AGE_MS: i64 = 10 * 60 * 1000;
 
 impl DocHost {
     /// Export the next frame if anything changed and nothing is in flight.
@@ -104,6 +112,11 @@ impl DocHost {
     /// The first box marks the command `taken`; others must still see it while the user message
     /// is recent, so each addressed agent can reply. `handle_command` skips agents that do not
     /// want the message or that already wrote a reply.
+    ///
+    /// People chats, catch-up order: sends that name this agent (`agent:<me>` mention, a reply to
+    /// it, or any `@` in the text — the gate sorts those out without a model call) go first,
+    /// newest first; unaddressed sends older than [`BACKLOG_MAX_AGE_MS`] are skipped outright;
+    /// the rest follow in doc order.
     fn new_pending(&mut self) -> Vec<CommandView> {
         // A late-opened host (re-join) has nothing of its own to recover.
         let recovering = !self.recovered && self.ignore_before_ms == 0;
@@ -111,7 +124,10 @@ impl DocHost {
         let now = now_ms();
         // How long a `taken` people `send` stays claimable by other agents (shared address).
         const SHARED_SEND_OPEN_MS: i64 = 15 * 60 * 1000;
-        let mut out = Vec::new();
+        let people = self.room.starts_with("people/");
+        let mut addressed = Vec::new();
+        let mut rest = Vec::new();
+        let mut skipped = 0usize;
         for c in self.doc.commands() {
             if c.issued_at < self.ignore_before_ms {
                 self.seen_commands.insert(c.id.clone());
@@ -129,10 +145,55 @@ impl DocHost {
                 if recovering && c.status == "taken" {
                     self.mark_interrupted(&c);
                 }
-                out.push(c);
+                if people && c.kind == "send" && c.status == "pending" {
+                    if self.names_me(&c) {
+                        addressed.push(c);
+                        continue;
+                    }
+                    if now.saturating_sub(c.issued_at) > BACKLOG_MAX_AGE_MS {
+                        skipped += 1;
+                        continue;
+                    }
+                }
+                rest.push(c);
             }
         }
-        out
+        if skipped > 0 {
+            tracing::info!(room = %self.room, skipped, addressed = addressed.len(), live = rest.len(), "catch-up: stale unaddressed people sends skipped");
+        }
+        addressed.sort_by_key(|c| std::cmp::Reverse(c.issued_at));
+        addressed.extend(rest);
+        addressed
+    }
+
+    /// Does this `send` name this agent — a resolved `agent:<me>` mention, a reply to one of its
+    /// rows, or any `@` in the prose (the gate decides cheaply whether that `@` is for it)?
+    fn names_me(&self, c: &CommandView) -> bool {
+        let Some(id) = c
+            .payload
+            .get("messageId")
+            .and_then(serde_json::Value::as_str)
+        else {
+            return false;
+        };
+        let Some(m) = self.doc.message(id) else {
+            return false;
+        };
+        if m.rest
+            .get("mentions")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|a| a.iter().any(|v| v.as_str() == Some(self.me.as_str())))
+        {
+            return true;
+        }
+        if m.rest
+            .get("replyTo")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
+        {
+            return true;
+        }
+        m.text().contains('@')
     }
 
     /// A reply that was streaming when the box died: close it as cancelled so the UI settles.
@@ -260,6 +321,7 @@ impl SyncHub {
             ever_caught_up: false,
             closed: false,
             ignore_before_ms: 0,
+            me: format!("agent:{}", self.cfg.project_id),
         }));
         self.hosts
             .lock()
@@ -655,6 +717,7 @@ mod tests {
             ever_caught_up: true,
             closed: false,
             ignore_before_ms: 0,
+            me: "agent:ME".into(),
         }
     }
 
@@ -696,5 +759,99 @@ mod tests {
             "but it runs what arrives after the join, once"
         );
         assert!(late.new_pending().is_empty());
+    }
+
+    /// 2026-10-23 21:17: a box restart replayed 530 unaddressed group sends of the day through
+    /// the decision model (one call each) and Jacob's fresh "@testagent …" waited eight minutes
+    /// behind them. At catch-up, sends that name this agent come first (newest first), stale
+    /// unaddressed ones are dropped without a gate, recent ones follow in order.
+    #[test]
+    fn catch_up_puts_mentions_first_and_drops_stale_backlog() {
+        let doc = ChatDoc::new(Some(7), true);
+        let now = now_ms();
+        let hour_ago = now - 60 * 60 * 1000;
+        let msg = |id: &str, text: &str, mentions: Vec<&str>| {
+            doc.append_user_message(
+                id,
+                text,
+                "mac",
+                &arbos_core::doc::UserMessageOpts {
+                    mentions: mentions.into_iter().map(str::to_owned).collect(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        };
+        msg("old-chatter", "lfg", vec![]);
+        msg("old-mention", "@testagent try again", vec!["agent:ME"]);
+        msg("old-other", "@affinity hi", vec!["user:aff"]);
+        msg("recent-chatter", "bullish", vec![]);
+        msg(
+            "new-mention",
+            "@testagent do you have credits now?",
+            vec!["agent:ME"],
+        );
+        let stale_chatter = doc.push_command_at(
+            "send",
+            serde_json::json!({ "messageId": "old-chatter" }),
+            "mac",
+            hour_ago,
+        );
+        let old_mention = doc.push_command_at(
+            "send",
+            serde_json::json!({ "messageId": "old-mention" }),
+            "mac",
+            hour_ago + 1,
+        );
+        let old_other = doc.push_command_at(
+            "send",
+            serde_json::json!({ "messageId": "old-other" }),
+            "mac",
+            hour_ago + 2,
+        );
+        let recent_chatter = doc.push_command_at(
+            "send",
+            serde_json::json!({ "messageId": "recent-chatter" }),
+            "mac",
+            now - 60_000,
+        );
+        let new_mention = doc.push_command_at(
+            "send",
+            serde_json::json!({ "messageId": "new-mention" }),
+            "mac",
+            now - 1_000,
+        );
+        let stale_stop = doc.push_command_at("stop", serde_json::json!({}), "mac", hour_ago);
+
+        let mut host = host_with(doc);
+        let ids: Vec<String> = host.new_pending().into_iter().map(|c| c.id).collect();
+        assert_eq!(
+            ids,
+            vec![new_mention, old_other, old_mention, recent_chatter, stale_stop],
+            "mentions newest-first (an @person line still reaches the cheap gate), then the rest in doc order"
+        );
+        assert!(
+            !ids.contains(&stale_chatter),
+            "an hour-old unaddressed send is not gated at all"
+        );
+        assert!(host.new_pending().is_empty(), "handed over once");
+
+        // A project chat (not people/) keeps every pending send: the owner's backlog is work.
+        let doc = ChatDoc::new(Some(7), true);
+        let old = doc.push_command_at(
+            "send",
+            serde_json::json!({ "messageId": "x" }),
+            "mac",
+            hour_ago,
+        );
+        let mut host = host_with(doc);
+        host.room = "01PROJECT/c1".into();
+        assert_eq!(
+            host.new_pending()
+                .into_iter()
+                .map(|c| c.id)
+                .collect::<Vec<_>>(),
+            vec![old]
+        );
     }
 }

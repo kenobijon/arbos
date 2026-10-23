@@ -77,6 +77,16 @@ impl PeopleChatInfo {
         self.handle_of(&self.owner_user)
     }
 
+    /// "Jacob's" — whose budget this agent spends, for the budget notice (`budget.rs`).
+    pub fn owner_spoken_possessive(&self) -> String {
+        let name = self.spoken_name_of(&self.owner_user);
+        if name.ends_with('s') {
+            format!("{name}'")
+        } else {
+            format!("{name}'s")
+        }
+    }
+
     /// How to speak to / about this person: display name, else bare handle (no `@`).
     fn spoken_name_of(&self, user_id: &str) -> String {
         self.members
@@ -1064,6 +1074,14 @@ impl Agent {
             }
             Err(errors) => {
                 self.log_responder_decision(&room, &msg.id, Err(&errors), Some(("SKIP", &[])));
+                // A budget refusal is not an outage: say so once in the chat and stop asking
+                // the model for every message until the block lapses (`budget.rs`).
+                if let Some(e) = errors
+                    .iter()
+                    .find(|e| crate::budget::Refusal::classify(e).is_some())
+                {
+                    self.note_budget_refusal(chat_id, e, false).await;
+                }
                 false
             }
         }

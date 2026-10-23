@@ -2,6 +2,7 @@ mod activity;
 mod agent;
 mod approval;
 mod attachments;
+mod budget;
 mod channels;
 mod config;
 mod connectors;
