@@ -445,6 +445,8 @@ pub struct AppState {
     pub media_viewer: Option<MediaViewer>,
     /// Bumped on every open so the shell focuses the viewer once per opening.
     pub media_viewer_generation: u64,
+    /// Message menu → Forward: (source chat, message) while the picker is open.
+    pub message_forward: Option<(Id, Id)>,
     pub new_project_open: bool,
     /// Debug: per-message "Show details" disclosures in the transcript.
     pub show_details: bool,
@@ -792,6 +794,7 @@ impl AppState {
             details_open: None,
             media_viewer: None,
             media_viewer_generation: 0,
+            message_forward: None,
             new_project_open: false,
             show_details: false,
             machine: Machine::default(),
@@ -5283,9 +5286,148 @@ impl AppState {
             chat_id: target.chat_id.clone(),
             message_id,
             from_slot,
-            attachment,
+            attachments: vec![attachment],
             text,
         });
+        self.push_notice(format!("Forwarded to {}", target.name));
+        cx.emit(AppEvent::TranscriptChanged {
+            chat_id: target.chat_id,
+        });
+        cx.notify();
+    }
+
+    /// Message menu → Forward: open the chat picker for `message_id`.
+    pub fn open_message_forward(&mut self, chat_id: Id, message_id: Id, cx: &mut Context<Self>) {
+        self.message_forward = Some((chat_id, message_id));
+        cx.notify();
+    }
+
+    pub fn close_message_forward(&mut self, cx: &mut Context<Self>) {
+        if self.message_forward.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Forward the open message menu target to `target`: text and any
+    /// attachments land there as one new user row (optimistic), then the
+    /// source copies blobs and writes the send.
+    pub fn forward_message_to(&mut self, target: ForwardTarget, cx: &mut Context<Self>) {
+        let Some((from_chat, src_id)) = self.message_forward.take() else {
+            return;
+        };
+        let Some(m) = self
+            .messages_of(&from_chat)
+            .iter()
+            .find(|m| m.id == src_id)
+            .cloned()
+        else {
+            return;
+        };
+        let text = m.plain_text();
+        let attachments: Vec<crate::model::Attachment> = m
+            .parts
+            .iter()
+            .filter_map(|p| match p {
+                Part::Attachment { attachment, .. } => Some(attachment.clone()),
+                _ => None,
+            })
+            .collect();
+        if text.trim().is_empty() && attachments.is_empty() {
+            self.push_notice("Nothing to forward");
+            cx.notify();
+            return;
+        }
+        if attachments.iter().any(|a| {
+            a.blob_ref
+                .as_deref()
+                .is_some_and(|k| k.starts_with("local:"))
+        }) {
+            self.message_forward = Some((from_chat, src_id));
+            self.push_notice("Still uploading — try again in a moment");
+            cx.notify();
+            return;
+        }
+        let by = self.viewer_sender_name(&m);
+        let from_slot = self.space_of_chat(&from_chat);
+        let message_id = new_id();
+        let send_text = if text.trim().is_empty() {
+            forwarded_from_text(&by)
+        } else {
+            text
+        };
+        let mut parts = Vec::new();
+        let mut out_attachments = Vec::new();
+        for attachment in attachments {
+            let mut attachment = attachment;
+            attachment.title = None;
+            out_attachments.push(attachment.clone());
+            parts.push(Part::Attachment {
+                id: new_id(),
+                attachment,
+            });
+        }
+        parts.push(Part::Text {
+            id: new_id(),
+            text: send_text.clone(),
+        });
+        self.messages
+            .entry(target.chat_id.clone())
+            .or_default()
+            .push(Message {
+                id: message_id.clone(),
+                chat_id: target.chat_id.clone(),
+                role: Role::User,
+                sender: "user".into(),
+                status: MessageStatus::Queued,
+                turn: None,
+                decision: None,
+                subagent_id: None,
+                subagent_name: None,
+                handoff_messages: None,
+                reactions: Default::default(),
+                in_reply_to: None,
+                routine_name: None,
+                sender_name: None,
+                sender_icon: None,
+                sender_handle: None,
+                sender_avatar: None,
+                sender_avatar_color: None,
+                mentions: Vec::new(),
+                reply_to: None,
+                asked_by_handle: None,
+                owner_handle: None,
+                usage: None,
+                return_contract: None,
+                waiting_user: false,
+                waiting_approval: false,
+                model: None,
+                effort: None,
+                created_at: now_ms(),
+                completed_at: None,
+                call_id: None,
+                activity: None,
+                pending: true,
+                parts,
+                hidden_parts: Vec::new(),
+                greeting: false,
+            });
+        if out_attachments.is_empty() {
+            self.command(ClientCommand::Send {
+                chat_id: target.chat_id.clone(),
+                message_id,
+                text: send_text,
+                attachments: Vec::new(),
+                reply_to: None,
+            });
+        } else {
+            self.command(ClientCommand::Forward {
+                chat_id: target.chat_id.clone(),
+                message_id,
+                from_slot,
+                attachments: out_attachments,
+                text: send_text,
+            });
+        }
         self.push_notice(format!("Forwarded to {}", target.name));
         cx.emit(AppEvent::TranscriptChanged {
             chat_id: target.chat_id,

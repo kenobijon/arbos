@@ -627,13 +627,13 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         ClientCommand::Forward {
             chat_id,
             message_id,
-            attachment,
+            attachments,
             text,
             ..
         } => {
             // No blob store to copy between: the row lands in the destination
             // chat with the same key, so its picture is already cached.
-            send_user(shared, chat_id, message_id, text, vec![attachment], None);
+            send_user(shared, chat_id, message_id, text, attachments, None);
         }
         ClientCommand::OpenAttachment {
             key,

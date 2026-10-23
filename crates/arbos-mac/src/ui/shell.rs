@@ -1799,6 +1799,12 @@ impl Shell {
     /// Escape stops a recording memo (keeping its transcript), then closes
     /// whatever floats: menus, then sheets.
     fn escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
+        if self.state.read(cx).message_forward.is_some() {
+            self.state.update(cx, |s, cx| s.close_message_forward(cx));
+            self.viewer_search.update(cx, |input, cx| input.clear(cx));
+            Composer::focus(&self.composer, window, cx);
+            return;
+        }
         if let Some(viewer) = self.state.read(cx).media_viewer.as_ref() {
             // Esc closes the Forward picker first, then the viewer.
             if viewer.forward_open {
@@ -3399,6 +3405,7 @@ impl Render for Shell {
         let details = state.details_open.clone();
         let viewer_open = state.media_viewer.is_some();
         let viewer_forward_open = state.media_viewer.as_ref().is_some_and(|v| v.forward_open);
+        let message_forward_open = state.message_forward.is_some();
         let viewer_generation = state.media_viewer_generation;
         let pairing = state.pairing.clone();
         let new_chat_open = state.new_chat_open;
@@ -3559,6 +3566,13 @@ impl Render for Shell {
         if let Some(menu) = message_menu::render(self, window, cx) {
             root = root.child(menu);
         }
+        if message_forward_open {
+            let search = self.viewer_search.read(cx).focus_handle(cx);
+            if !search.is_focused(window) {
+                window.focus(&search, cx);
+            }
+            root = root.child(message_menu::forward_picker(self, &theme, cx));
+        }
         // Rig: the hook asked for the first other member's row menu on the group pane.
         if let Some(armed) = self.state.update(cx, |s, _| s.rig_member_menu.take()) {
             let target = {
@@ -3680,14 +3694,16 @@ impl Render for Shell {
                 window.focus(&self.viewer_focus, cx);
             }
             root = root.child(media_viewer::overlay(self, &self.viewer_focus, cx));
-        } else if self.viewer_focus.is_focused(window)
-            || self
-                .viewer_search
-                .read(cx)
-                .focus_handle(cx)
-                .is_focused(window)
+        } else if !message_forward_open
+            && (self.viewer_focus.is_focused(window)
+                || self
+                    .viewer_search
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window))
         {
             // Closed by × / the backdrop / Forward: typing goes back to the composer.
+            // Message-menu Forward reuses viewer_search — leave it alone while open.
             Composer::focus(&self.composer, window, cx);
         }
         // Collapsed video call: the camera keeps showing in a draggable tile.

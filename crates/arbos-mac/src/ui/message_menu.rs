@@ -1,27 +1,40 @@
 //! The message bubble's menu — right-click on the Mac, the iPhone's
-//! long-press (`MessageMenu.swift`): **Copy, Reply, Delete** and nothing else
-//! (Jacob, #1370; the emoji reaction row is gone, not moved). One builder for
-//! every bubble, and one placement rule: the menu always sits fully inside
-//! the window — flipped to the other side of the click near the right or
-//! bottom edge, clamped to the edge margin when neither side fits.
+//! long-press (`MessageMenu.swift`): **Copy, Reply, Forward, Delete**
+//! (Jacob, #1370 dropped the emoji reaction row; Forward is
+//! feedback app-01M5MXRZ7609S70P9S9P2RZDDF). One builder for every bubble,
+//! and one placement rule: the menu always sits fully inside the window —
+//! flipped to the other side of the click near the right or bottom edge,
+//! clamped to the edge margin when neither side fits.
 
-use gpui::{div, point, prelude::*, px, size, Div, Pixels, Point, Size, Window};
+use gpui::{
+    div, point, prelude::*, px, size, Div, ElementId, FontWeight, MouseButton, Pixels, Point, Size,
+    Window,
+};
 
+use crate::app::ForwardTarget;
 use crate::model::Id;
+use crate::ui::avatars;
 use crate::ui::glass::{
     self, MENU_CARD_BORDER, MENU_CARD_PADDING, MENU_DIVIDER_HEIGHT, MENU_GAP, MENU_ROW_HEIGHT,
 };
+use crate::ui::icons::icon;
 use crate::ui::shell::Shell;
-use crate::ui::theme::Theme;
+use crate::ui::theme::{Theme, TEXT_SMALL, TEXT_TINY};
 
 pub const MESSAGE_MENU_WIDTH: f32 = 180.0;
 /// Space kept between the menu and every window edge.
 pub const MENU_EDGE_MARGIN: f32 = 8.0;
 
+/// Forward picker card (same size as the media viewer's).
+const PICKER_WIDTH: f32 = 360.0;
+const PICKER_HEIGHT: f32 = 420.0;
+const PICKER_ROW: f32 = 52.0;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MessageMenuItem {
     Copy,
     Reply,
+    Forward,
     Delete,
 }
 
@@ -30,6 +43,7 @@ impl MessageMenuItem {
         match self {
             MessageMenuItem::Copy => "Copy",
             MessageMenuItem::Reply => "Reply",
+            MessageMenuItem::Forward => "Forward",
             MessageMenuItem::Delete => "Delete",
         }
     }
@@ -38,6 +52,7 @@ impl MessageMenuItem {
         match self {
             MessageMenuItem::Copy => "copy",
             MessageMenuItem::Reply => "reply",
+            MessageMenuItem::Forward => "forward",
             MessageMenuItem::Delete => "trash",
         }
     }
@@ -49,9 +64,10 @@ impl MessageMenuItem {
 
 /// The menu's items, in order. One list for every bubble: the set is the
 /// contract, not a per-row choice.
-pub const ITEMS: [MessageMenuItem; 3] = [
+pub const ITEMS: [MessageMenuItem; 4] = [
     MessageMenuItem::Copy,
     MessageMenuItem::Reply,
+    MessageMenuItem::Forward,
     MessageMenuItem::Delete,
 ];
 
@@ -158,6 +174,177 @@ pub fn render(shell: &Shell, window: &Window, cx: &mut Context<Shell>) -> Option
     )
 }
 
+/// The Forward picker overlay: searchable list of DMs, agents and groups.
+pub fn forward_picker(shell: &Shell, theme: &Theme, cx: &mut Context<Shell>) -> impl IntoElement {
+    let query = shell.viewer_search.read(cx).text().to_string();
+    let targets: Vec<ForwardTarget> = shell.state.read(cx).forward_targets(&query);
+    let close = shell.state.clone();
+    let close_x = shell.state.clone();
+    let search = div()
+        .flex()
+        .items_center()
+        .gap(px(7.0))
+        .h(px(30.0))
+        .mx(px(12.0))
+        .px(px(10.0))
+        .rounded(px(8.0))
+        .bg(theme.surface_2)
+        .cursor_text()
+        .child(icon("search", 13.0, theme.text_muted))
+        .child(div().flex_1().min_w_0().child(shell.viewer_search.clone()));
+    let mut list = div()
+        .id("message-forward-list")
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h_0()
+        .overflow_y_scroll()
+        .px(px(8.0))
+        .py(px(6.0));
+    if targets.is_empty() {
+        list = list.child(
+            div()
+                .px(px(12.0))
+                .py(px(10.0))
+                .text_size(px(TEXT_SMALL))
+                .text_color(theme.text_muted)
+                .child(if query.trim().is_empty() {
+                    "No chats yet.".to_string()
+                } else {
+                    format!("No chat matches “{}”.", query.trim())
+                }),
+        );
+    }
+    for (i, target) in targets.into_iter().enumerate() {
+        let avatar = shell
+            .state
+            .read(cx)
+            .project(&target.space_id)
+            .map(|p| avatars::project_hero(p, 36.0, theme))
+            .unwrap_or_else(|| avatars::element(&target.space_id, &target.name, None, 36.0, theme));
+        let pick = target.clone();
+        list = list.child(
+            div()
+                .id(ElementId::NamedInteger(
+                    "message-forward-row".into(),
+                    i as u64,
+                ))
+                .h(px(PICKER_ROW))
+                .px(px(8.0))
+                .rounded(px(8.0))
+                .flex()
+                .items_center()
+                .gap(px(12.0))
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.surface_2))
+                .child(avatar)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(1.0))
+                        .child(
+                            div()
+                                .text_size(px(13.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.text)
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .child(target.name.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.5))
+                                .text_color(theme.text_muted)
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .child(target.subtitle.clone()),
+                        ),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    let pick = pick.clone();
+                    this.state
+                        .update(cx, |s, cx| s.forward_message_to(pick, cx));
+                    this.viewer_search.update(cx, |input, cx| input.clear(cx));
+                })),
+        );
+    }
+    let footnote = div()
+        .px(px(16.0))
+        .py(px(10.0))
+        .border_t_1()
+        .border_color(theme.border)
+        .text_size(px(TEXT_TINY))
+        .text_color(theme.text_muted)
+        .child("Sends it as a new message in that chat.");
+    let card = div()
+        .id("message-forward")
+        .w(px(PICKER_WIDTH))
+        .h(px(PICKER_HEIGHT))
+        .rounded(px(14.0))
+        .bg(theme.surface_1)
+        .border_1()
+        .border_color(theme.border_strong)
+        .flex()
+        .flex_col()
+        .overflow_hidden()
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .pl(px(16.0))
+                .pr(px(12.0))
+                .pt(px(12.0))
+                .pb(px(10.0))
+                .child(
+                    div()
+                        .text_size(px(14.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.text)
+                        .child("Forward to"),
+                )
+                .child(
+                    div()
+                        .id("message-forward-close")
+                        .size(px(24.0))
+                        .rounded_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme.surface_2))
+                        .child(icon("xmark", 11.0, theme.text_muted))
+                        .on_click(move |_, _, cx| {
+                            cx.stop_propagation();
+                            close_x.update(cx, |s, cx| s.close_message_forward(cx));
+                        }),
+                ),
+        )
+        .child(search)
+        .child(list)
+        .child(footnote);
+    div()
+        .id("message-forward-backdrop")
+        .absolute()
+        .inset_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(Theme::with_alpha(gpui::black(), 0.35))
+        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+            cx.stop_propagation();
+            close.update(cx, |s, cx| s.close_message_forward(cx));
+        })
+        .child(card)
+}
+
 fn run(
     shell: &mut Shell,
     item: MessageMenuItem,
@@ -175,6 +362,12 @@ fn run(
             shell
                 .state
                 .update(cx, |s, cx| s.set_reply_to(chat_id, message_id, cx));
+        }
+        MessageMenuItem::Forward => {
+            shell.viewer_search.update(cx, |input, cx| input.clear(cx));
+            shell
+                .state
+                .update(cx, |s, cx| s.open_message_forward(chat_id, message_id, cx));
         }
         MessageMenuItem::Delete => {
             shell
@@ -198,9 +391,9 @@ mod tests {
     }
 
     #[test]
-    fn items_are_exactly_copy_reply_delete() {
+    fn items_are_exactly_copy_reply_forward_delete() {
         let labels: Vec<&str> = ITEMS.iter().map(|i| i.label()).collect();
-        assert_eq!(labels, ["Copy", "Reply", "Delete"]);
+        assert_eq!(labels, ["Copy", "Reply", "Forward", "Delete"]);
         // No emoji row: every label is plain ASCII text.
         assert!(ITEMS.iter().all(|i| i.label().is_ascii()));
     }

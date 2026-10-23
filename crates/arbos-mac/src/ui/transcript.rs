@@ -869,7 +869,7 @@ impl Transcript {
         }
     }
 
-    /// Right-click → the message menu (Copy / Reply / Delete, `message_menu`).
+    /// Right-click → the message menu (Copy / Reply / Forward / Delete, `message_menu`).
     /// Control-click → copy the message text.
     fn menu_target(
         &self,

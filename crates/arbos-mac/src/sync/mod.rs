@@ -685,14 +685,15 @@ pub enum ClientCommand {
         name: String,
         quick_look: bool,
     },
-    /// Media viewer → Forward: copy the blob `attachment.blob_ref` from
-    /// `from_slot` into `chat_id`'s slot and write a user row carrying it plus
-    /// `text` ("Forwarded from …"). `message_id` is the optimistic row's id.
+    /// Media viewer / message menu → Forward: copy each blob's `blob_ref` from
+    /// `from_slot` into `chat_id`'s slot and write a user row carrying them plus
+    /// `text` (message body, or "Forwarded from …" for media). `message_id` is
+    /// the optimistic row's id.
     Forward {
         chat_id: Id,
         message_id: Id,
         from_slot: Id,
-        attachment: Attachment,
+        attachments: Vec<Attachment>,
         text: String,
     },
     /// Settings → Connectors opened or asked for a refresh.

@@ -4682,18 +4682,22 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             chat_id,
             message_id,
             from_slot,
-            attachment,
+            attachments,
             text,
         } => {
+            let outgoing = attachments
+                .into_iter()
+                .map(|attachment| Outgoing::Copy {
+                    from_slot: from_slot.clone(),
+                    attachment,
+                })
+                .collect();
             tokio::spawn(send_message(
                 shared.clone(),
                 chat_id,
                 message_id,
                 text,
-                vec![Outgoing::Copy {
-                    from_slot,
-                    attachment,
-                }],
+                outgoing,
                 None,
                 "send",
                 None,
