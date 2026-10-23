@@ -18,6 +18,7 @@ pub mod identity;
 pub mod local;
 pub mod lottie;
 pub mod markdown;
+pub mod member_menu;
 pub mod message_menu;
 pub mod motion;
 pub mod notify;

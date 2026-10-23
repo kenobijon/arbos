@@ -493,6 +493,9 @@ pub struct AppState {
     /// Rig: `ARBOS_OPEN_SERVER=…:menu|:menu-delete` — the shell opens the selected channel's
     /// row menu on its next render (`true` = with the Delete confirmation armed).
     pub rig_channel_menu: Option<bool>,
+    /// Rig: `ARBOS_OPEN_PROFILE=group:member-menu[:confirm]` — the shell opens the first
+    /// other member's row menu on the group pane (`true` = with the Remove confirm armed).
+    pub rig_member_menu: Option<bool>,
     /// D88: the room list from the homeserver (previews, unread, `can_post`).
     pub matrix_snapshot: Snapshot,
     pub matrix_connected: bool,
@@ -768,6 +771,7 @@ impl AppState {
             servers_available: false,
             open_server_hook_done: false,
             rig_channel_menu: None,
+            rig_member_menu: None,
             servers: Vec::new(),
             matrix_snapshot: Snapshot::default(),
             matrix_connected: false,
@@ -1531,6 +1535,8 @@ impl AppState {
                             } else if rest == ":add-members" {
                                 // The pane's Add members sheet over the Members tab.
                                 self.open_add_members(project_id, cx);
+                            } else if let Some(menu) = rest.strip_prefix(":member-menu") {
+                                self.rig_member_menu = Some(menu == ":confirm");
                             } else if rest == ":member" {
                                 // `:member` lands on the first other member, pushed
                                 // over the group as a click on its row would.
