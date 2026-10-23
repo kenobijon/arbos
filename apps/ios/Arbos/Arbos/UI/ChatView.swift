@@ -288,10 +288,14 @@ struct ChatView: View {
         let next = Transcript.rows(list, byId: byId, projectId: slot,
                                    me: isChannel ? model.channelMe : model.myUserId,
                                    people: isPeople || isChannel, agentNames: agentNames)
-        // Rows that arrived (new messages, an older page) join the window, so the oldest
-        // row on screen does not fall out of the view tree when a new one lands.
-        if windowCount < next.count, next.count > rows.count {
-            windowCount = min(next.count, windowCount + (next.count - rows.count))
+        // Rows appended after the last one we had (new messages) join the window, so the
+        // oldest row on screen does not fall out of the view tree when a new one lands.
+        // History that arrives above it — the first snapshot, a backfill, an older
+        // channel page — does not widen the window.
+        if windowCount < next.count, let lastId = rows.last?.id,
+           let j = next.lastIndex(where: { $0.id == lastId }) {
+            let appended = next.count - 1 - j
+            if appended > 0 { windowCount = min(next.count, windowCount + appended) }
         }
         messageById = byId
         rows = next
