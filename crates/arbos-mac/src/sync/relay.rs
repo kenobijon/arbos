@@ -4976,12 +4976,34 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             chat_id,
             message_id,
         } => {
-            let docs = shared.docs.lock().unwrap();
-            if let Some(doc) = docs.get(&chat_id) {
-                if let Err(e) = doc.core.transact(|d| d.delete_message(&message_id)) {
-                    eprintln!("relay: delete message: {e:#}");
+            // The relay decides and edits the doc (`DELETE /room/{project}/{chat}/
+            // messages/{id}`); the deletion comes back as a relay-signed row. A
+            // refusal (403 `not_yours`) is told once; the message stays.
+            let project_id = shared
+                .chats
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|c| c.id == chat_id)
+                .map(|c| c.project_id.clone())
+                .unwrap_or_else(|| chat_id.clone());
+            let is_people = shared.is_people(&chat_id);
+            let room = room::room_path(&project_id, &chat_id, is_people);
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Err(err) = shared
+                    .delete(&format!("/room/{room}/messages/{message_id}"))
+                    .await
+                {
+                    let why = match err.downcast_ref::<RelayError>() {
+                        Some(e) if e.status == 403 => {
+                            "You can only delete your own messages.".to_owned()
+                        }
+                        _ => format!("Could not delete the message: {}", people_error(&err)),
+                    };
+                    shared.notice(why);
                 }
-            }
+            });
         }
         ClientCommand::Approve {
             chat_id,
