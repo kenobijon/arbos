@@ -261,6 +261,9 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-t", shell::NewTab, None),
         KeyBinding::new("cmd-b", shell::ToggleRail, None),
         KeyBinding::new("ctrl-b", shell::ToggleRail, None),
+        // ⌘F expands the chat list's round search button into its field.
+        KeyBinding::new("cmd-f", shell::FocusSearch, None),
+        KeyBinding::new("ctrl-f", shell::FocusSearch, None),
         KeyBinding::new("escape", shell::Escape, None),
         // Media viewer: ← → page through the album (Esc closes via the shell).
         KeyBinding::new("left", media_viewer::Prev, Some("MediaViewer")),

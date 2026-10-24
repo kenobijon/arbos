@@ -55,7 +55,16 @@ use crate::ui::voicepicker;
 
 actions!(
     shell,
-    [CloseTab, NewTab, PrevTab, NextTab, ToggleRail, Escape, Quit]
+    [
+        CloseTab,
+        NewTab,
+        PrevTab,
+        NextTab,
+        ToggleRail,
+        FocusSearch,
+        Escape,
+        Quit
+    ]
 );
 
 /// Left inset for the conversation header while the sidebar is hidden: the window's traffic lights.
@@ -244,6 +253,12 @@ pub struct Shell {
     /// app-01M5ATBWSY9E1HHBKH2QQVDEZX). Nothing renders it; escapes and
     /// click-outside still clear it so leftover true never sticks.
     pub(crate) menu_open: bool,
+    /// The chat list's top strip: whether the round search button has
+    /// expanded into its field (click or ⌘F), and which segment of the
+    /// All · Agents · People · Servers filter is selected
+    /// ([feedback sidebar-strip-filter-2026-10-24]).
+    pub(crate) search_strip: sidebar::SearchStrip,
+    pub(crate) list_filter: sidebar::ListFilter,
     /// Sidebar: the "Hidden chats" list is showing instead of the chat list
     /// (Jacob 2026-10-23; the footer opens it, ‹ back returns).
     pub(crate) hidden_open: bool,
@@ -831,6 +846,16 @@ impl Shell {
             fixture_drag_over: std::env::var("ARBOS_FIXTURE_DRAG_OVER").is_ok_and(|v| v == "1"),
             signing_in: false,
             menu_open: false,
+            // A rig query (`ARBOS_SEARCH`) shows the field open, as a typed one would.
+            search_strip: sidebar::SearchStrip {
+                open: search_query.is_some()
+                    || std::env::var("ARBOS_SEARCH_OPEN").is_ok_and(|v| v == "1"),
+            },
+            // Rig: `ARBOS_SIDEBAR_FILTER=all|agents|people|servers` selects a segment at launch.
+            list_filter: std::env::var("ARBOS_SIDEBAR_FILTER")
+                .ok()
+                .and_then(|v| sidebar::ListFilter::parse(&v))
+                .unwrap_or_default(),
             hidden_open: false,
             server_input,
             channel_rename: None,
@@ -1895,6 +1920,29 @@ impl Shell {
         });
     }
 
+    /// ⌘F: the round search button in the chat list's strip expands into its
+    /// field and takes focus ([feedback sidebar-strip-filter-2026-10-24]).
+    fn focus_search(&mut self, _: &FocusSearch, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_search(window, cx);
+    }
+
+    pub(crate) fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.menu_open = false;
+        self.search_strip.focus();
+        let handle = self.search_input.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
+    /// The search field folds back into its round button; a typed query is
+    /// dropped and the composer takes focus again.
+    pub(crate) fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search_strip.fold();
+        self.search_input.update(cx, |i, cx| i.clear(cx));
+        Composer::focus(&self.composer, window, cx);
+        cx.notify();
+    }
+
     /// Escape stops a recording memo (keeping its transcript), then closes
     /// whatever floats: menus, then sheets.
     fn escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
@@ -1944,10 +1992,9 @@ impl Shell {
             .focus_handle(cx)
             .is_focused(window)
         {
-            // Escape in the Search field clears it and returns to the composer.
-            self.search_input.update(cx, |i, cx| i.clear(cx));
-            Composer::focus(&self.composer, window, cx);
-            cx.notify();
+            // Escape in the Search field clears it, folds it back into its
+            // round button and returns to the composer.
+            self.close_search(window, cx);
             return;
         }
         let editing_agent = {
@@ -3556,6 +3603,7 @@ impl Render for Shell {
             .on_action(cx.listener(Self::prev_tab))
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::toggle_rail))
+            .on_action(cx.listener(Self::focus_search))
             .on_action(cx.listener(Self::escape))
             .on_action(cx.listener(Self::send_feedback))
             .on_action(cx.listener(Self::paste_into_chat))
