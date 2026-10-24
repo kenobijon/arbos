@@ -414,14 +414,16 @@ struct ChatView: View {
                 newMessagesPill
                     .padding(.bottom, 10)
                     .transition(.opacity.combined(with: .scale(scale: 0.92)))
-            } else if awayFromBottom {
-                HStack {
-                    Spacer(minLength: 0)
-                    scrollToBottomButton
-                        .padding(.trailing, composerSideInset)
-                }
-                .padding(.bottom, 10)
-                .transition(.opacity.combined(with: .scale(scale: 0.8)))
+            }
+        }
+        // Trailing-only overlay so the hit target is just the disc (not a full-width
+        // bar). UIKit tap inside the disc still works while the transcript decelerates.
+        .overlay(alignment: .bottomTrailing) {
+            if newBelowCount == 0, awayFromBottom {
+                scrollToBottomButton
+                    .padding(.trailing, composerSideInset)
+                    .padding(.bottom, 10)
+                    .transition(.opacity.combined(with: .scale(scale: 0.8)))
             }
         }
         .animation(.easeOut(duration: 0.2), value: awayFromBottom)
@@ -890,42 +892,47 @@ struct ChatView: View {
 
     /// Grok's scroll-to-bottom control: a 36 pt field-coloured circle with a
     /// chevron, right-aligned with the composer, 18 pt above it.
+    /// UIKit `UIControl` (not SwiftUI `Button`) so a tap still fires while the
+    /// transcript is decelerating — SwiftUI button gestures lose to UIScrollView.
     private var scrollToBottomButton: some View {
-        Button(action: jumpToLatest) {
-            ZStack {
-                Circle().fill(theme.field)
-                Circle().strokeBorder(theme.fieldBorder, lineWidth: 1)
-                Image(systemName: "chevron.down")
-                    .font(theme.font(15, weight: .medium))
-                    .foregroundStyle(theme.text)
-            }
-            .frame(width: Theme.voiceButton, height: Theme.voiceButton)
-            .contentShape(Circle().inset(by: -(44 - Theme.voiceButton) / 2))
+        ZStack {
+            Circle().fill(theme.field)
+            Circle().strokeBorder(theme.fieldBorder, lineWidth: 1)
+            Image(systemName: "chevron.down")
+                .font(theme.font(15, weight: .medium))
+                .foregroundStyle(theme.text)
+            ScrollInterruptTap(action: jumpToLatest)
+                .frame(width: 44, height: 44)
         }
-        .buttonStyle(.plain)
+        .frame(width: Theme.voiceButton, height: Theme.voiceButton)
+        .contentShape(Circle().inset(by: -(44 - Theme.voiceButton) / 2))
+        .accessibilityElement(children: .ignore)
         .accessibilityLabel("Scroll to bottom")
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction { jumpToLatest() }
     }
 
     /// Shown when rows land below while the reader is up in history — tap jumps
     /// to the end (iMessage / Slack style; Grok's bare chevron stays for scroll-up alone).
     private var newMessagesPill: some View {
-        Button(action: jumpToLatest) {
-            HStack(spacing: 6) {
-                Image(systemName: "chevron.down")
-                    .font(theme.font(13, weight: .semibold))
-                Text(newBelowCount == 1 ? "New message" : "New messages")
-                    .font(theme.font(Theme.small, weight: .semibold))
-            }
-            .foregroundStyle(theme.text)
-            .padding(.horizontal, 14)
-            .frame(height: Theme.voiceButton)
-            .background(Capsule().fill(theme.field))
-            .overlay(Capsule().strokeBorder(theme.fieldBorder, lineWidth: 1))
-            .contentShape(Capsule().inset(by: -4))
+        HStack(spacing: 6) {
+            Image(systemName: "chevron.down")
+                .font(theme.font(13, weight: .semibold))
+            Text(newBelowCount == 1 ? "New message" : "New messages")
+                .font(theme.font(Theme.small, weight: .semibold))
         }
-        .buttonStyle(.plain)
+        .foregroundStyle(theme.text)
+        .padding(.horizontal, 14)
+        .frame(height: Theme.voiceButton)
+        .background(Capsule().fill(theme.field))
+        .overlay(Capsule().strokeBorder(theme.fieldBorder, lineWidth: 1))
+        .contentShape(Capsule().inset(by: -4))
+        .overlay { ScrollInterruptTap(action: jumpToLatest) }
+        .accessibilityElement(children: .ignore)
         .accessibilityLabel("New messages")
         .accessibilityHint("Scrolls to the latest message")
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction { jumpToLatest() }
     }
 
     // MARK: Chat navigation swipes
@@ -2020,6 +2027,50 @@ struct WorkingStatusText: View {
         Text(text)
             .font(theme.font(Theme.small))
             .foregroundStyle(style)
+    }
+}
+
+/// Clear `UIControl` that runs `action` on touch-down. SwiftUI `Button` /
+/// `TapGesture` often fail while a `ScrollView` is still decelerating; UIKit
+/// controls in an overlay above the scroll view keep receiving the touch.
+private struct ScrollInterruptTap: UIViewRepresentable {
+    var action: () -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(action: action) }
+
+    func makeUIView(context: Context) -> UIControl {
+        let control = UIControl()
+        control.backgroundColor = .clear
+        control.isExclusiveTouch = true
+        // Touch-down: stop deceleration and jump immediately so the action is not
+        // lost if SwiftUI tears the control down when the scroll view settles.
+        control.addTarget(context.coordinator, action: #selector(Coordinator.touchDown(_:)), for: .touchDown)
+        return control
+    }
+
+    func updateUIView(_ uiView: UIControl, context: Context) {
+        context.coordinator.action = action
+    }
+
+    final class Coordinator: NSObject {
+        var action: () -> Void
+        init(action: @escaping () -> Void) { self.action = action }
+
+        @objc func touchDown(_ sender: UIControl) {
+            if let root = sender.window {
+                Self.stopDeceleratingScrollViews(in: root)
+            }
+            action()
+        }
+
+        private static func stopDeceleratingScrollViews(in view: UIView) {
+            if let scroll = view as? UIScrollView, scroll.isDecelerating || scroll.isDragging {
+                scroll.setContentOffset(scroll.contentOffset, animated: false)
+            }
+            for child in view.subviews {
+                stopDeceleratingScrollViews(in: child)
+            }
+        }
     }
 }
 
