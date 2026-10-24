@@ -570,7 +570,7 @@ pub fn people_chat_dto(
     }
 }
 
-fn load_chat(state: &AppState, chat_id: &str) -> Result<ChatWithMembers, Box<Response>> {
+pub(crate) fn load_chat(state: &AppState, chat_id: &str) -> Result<ChatWithMembers, Box<Response>> {
     let chat = state
         .db
         .people_chat(chat_id)
