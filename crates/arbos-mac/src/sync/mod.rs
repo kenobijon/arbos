@@ -55,9 +55,12 @@ pub enum SyncEvent {
     },
     /// Someone in a people chat started/stopped typing (room presence).
     /// Someone's device sent a presence frame in a room we share (API §7c
-    /// frames carry `handle`): they are online right now.
+    /// frames carry `handle`): they are online right now. Optional `seen` is
+    /// the message id they last looked at (read receipts).
     Presence {
         handle: String,
+        chat_id: Option<Id>,
+        seen: Option<Id>,
     },
     Typing {
         chat_id: Id,
@@ -675,6 +678,14 @@ pub enum ClientCommand {
     SetMuted {
         space_id: Id,
         muted: bool,
+    },
+    /// Settings → Notifications: send and show Presence `{seen}` read receipts
+    /// in people chats (default on). Local preference; presence frames omit
+    /// `seen` when off. When `persist` is true (the Settings toggle), also
+    /// `PUT /chats/{id}/settings {read_receipts}` for every people chat.
+    SetReadReceipts {
+        enabled: bool,
+        persist: bool,
     },
     /// Leaf picker (D92): `PATCH /projects/{id} {avatar_leaf: 0–8|null, avatar_leaf_color: 0–9|null}`;
     /// `None` = automatic (derived from the project id).
