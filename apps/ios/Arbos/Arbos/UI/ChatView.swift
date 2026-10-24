@@ -104,11 +104,20 @@ struct ChatView: View {
     @State private var memoFinishWhenPermission = false
     /// When the current mic press began (for hold-vs-tap).
     @State private var memoPressStartedAt: Date?
+    /// Hold-to-talk: finger slid left far enough to discard on release.
+    @State private var memoCancelArmed = false
+    /// Hold-to-talk: horizontal drag (≤ 0) while the mic is pressed.
+    @State private var memoDragX: CGFloat = 0
     @FocusState private var composerFocused: Bool
+
+    /// Hold-to-talk: slide the mic this far left to discard instead of send.
+    private static let memoCancelDistance: CGFloat = 56
 
     @State private var showProfile = false
     @State private var showSearch = false
     @State private var searchText = ""
+    /// Group chats: pick members to call, or call everyone.
+    @State private var showGroupCallPicker = false
     @FocusState private var searchFocused: Bool
     @ObservedObject private var calls = CallManager.shared
     /// iMessage-style: drag the transcript left to peek message times (0…`RowView.timeRevealWidth`).
@@ -250,9 +259,22 @@ struct ChatView: View {
     private var headerExtra: CGFloat { (hasCallBar ? 52 : 0) + (hasInCallBar ? 56 : 0) + (showSearch ? 46 : 0) }
     /// Member chips under the header: groups only. A 1:1 DM already names the peer in the pill.
     private var showsMemberChips: Bool { people?.isGroup == true }
+    /// Header phone for groups: opens the pick-members / call-everyone sheet.
+    private var showsGroupCallButton: Bool {
+        people?.isGroup == true && !isChannel && !hasCallBar && !hasInCallBar && !calls.isActive
+    }
 
-    private func startCall(_ kind: CallKind) {
-        Task { await calls.start(chatId: chatId, projectId: isPeople ? nil : projectId, kind: kind, title: callTitle) }
+    private func startCall(_ kind: CallKind, ring: [String]? = nil) {
+        Task { await calls.start(chatId: chatId, projectId: isPeople ? nil : projectId, kind: kind, title: callTitle, ring: ring) }
+    }
+
+    /// Groups open the picker; DMs and agent chats start at once.
+    private func requestCall(_ kind: CallKind) {
+        if people?.isGroup == true {
+            showGroupCallPicker = true
+        } else {
+            startCall(kind)
+        }
     }
     @State private var replyTo: Message?
     /// Long-press → Edit: the own message whose text is in the composer.
@@ -300,7 +322,9 @@ struct ChatView: View {
     private var presenceParticipants: [PresenceParticipant] {
         var out: [PresenceParticipant] = []
         for handle in model.typingHandles(in: chatId) {
-            let m = people?.members.first { !$0.isAgent && $0.handle == handle }
+            let m = people?.members.first {
+                !$0.isAgent && $0.handle.caseInsensitiveCompare(handle) == .orderedSame
+            }
             out.append(PresenceParticipant(
                 id: "typing:\(handle)",
                 name: m?.name.flatMap { $0.isEmpty ? nil : $0 } ?? "@\(handle)",
@@ -314,26 +338,21 @@ struct ChatView: View {
             let recent = nowMs() - 15 * 60 * 1000
             var seen = Set<String>()
             for m in messages.reversed() where m.role == .assistant && m.isStreaming && m.createdAt >= recent {
-                let key = m.senderHandle ?? m.senderName ?? m.sender
-                guard seen.insert(key).inserted else { continue }
-                let agent = people?.agents.first { mentionSlug($0.project?.name ?? "") == key || $0.handle == key }
-                if let p = agent?.project {
-                    out.append(PresenceParticipant(
-                        id: "working:\(key)", name: p.name, activity: .working,
-                        picture: AnyView(AgentAvatar(project: p, theme: theme, size: PresenceRow.avatar, working: true))
-                    ))
-                } else {
-                    let shown = m.senderName ?? key
-                    out.append(PresenceParticipant(
-                        id: "working:\(key)", name: shown, activity: .working,
-                        picture: AnyView(InitialsAvatar(name: shown, handle: key, id: m.sender, size: PresenceRow.avatar))
-                    ))
-                }
+                // The same question the bubble asks (#1592): the row's sender, handle and
+                // name through `AppModel.agent` — one identity, so the row's picture is the
+                // bubble's disc and its words the bubble's caption, never the raw handle.
+                let p = model.agent(sender: m.sender, handle: m.senderHandle, name: m.senderName, chatId: chatId)
+                guard seen.insert(p.id).inserted else { continue }
+                out.append(PresenceParticipant(
+                    id: "working:\(p.id)", name: p.name, activity: .working,
+                    picture: AnyView(AgentAvatar(project: p, theme: theme, size: PresenceRow.avatar, working: true))
+                ))
             }
         } else if let project {
+            let p = model.agent(id: project.id, name: project.name)
             out.append(PresenceParticipant(
-                id: "working:\(project.id)", name: project.name, activity: .working,
-                picture: AnyView(AgentAvatar(project: project, theme: theme, size: PresenceRow.avatar, working: true))
+                id: "working:\(p.id)", name: p.name, activity: .working,
+                picture: AnyView(AgentAvatar(project: p, theme: theme, size: PresenceRow.avatar, working: true))
             ))
         }
         return out
@@ -505,14 +524,16 @@ struct ChatView: View {
                 newMessagesPill
                     .padding(.bottom, 10)
                     .transition(.opacity.combined(with: .scale(scale: 0.92)))
-            } else if awayFromBottom {
-                HStack {
-                    Spacer(minLength: 0)
-                    scrollToBottomButton
-                        .padding(.trailing, composerSideInset)
-                }
-                .padding(.bottom, 10)
-                .transition(.opacity.combined(with: .scale(scale: 0.8)))
+            }
+        }
+        // Trailing-only overlay so the hit target is just the disc (not a full-width
+        // bar). UIKit tap inside the disc still works while the transcript decelerates.
+        .overlay(alignment: .bottomTrailing) {
+            if newBelowCount == 0, awayFromBottom {
+                scrollToBottomButton
+                    .padding(.trailing, composerSideInset)
+                    .padding(.bottom, 10)
+                    .transition(.opacity.combined(with: .scale(scale: 0.8)))
             }
         }
         .animation(.easeOut(duration: 0.2), value: awayFromBottom)
@@ -592,8 +613,10 @@ struct ChatView: View {
         .toolbar(.hidden, for: .navigationBar)
         .toolbar(.hidden, for: .tabBar)
         .navigationBarBackButtonHidden(true)
-        // Hiding the system back button also disables the edge-swipe pop; re-enable it.
-        .background(InteractivePopGestureEnabler())
+        // Hiding the system back button also disables the edge-swipe pop; re-enable it
+        // except while the composer is focused (or a reply swipe is locked) so editing
+        // / selecting text in the bar cannot edge-swipe back to Home.
+        .background(InteractivePopGestureEnabler(enabled: !composerFocused && !replySwipeActive))
         // Full-chat swipes: right → previous agent chat (or Home), left → next (or create), up → archive + previous.
         .simultaneousGesture(chatNavSwipe)
         .fullScreenCover(item: $rigViewer) { v in
@@ -614,6 +637,14 @@ struct ChatView: View {
         }
         .sheet(isPresented: $showSettings) {
             SettingsView().environmentObject(model).environment(\.theme, theme)
+        }
+        .sheet(isPresented: $showGroupCallPicker) {
+            if let people {
+                GroupCallPickerSheet(people: people, meId: model.user?.id) { ring in
+                    startCall(.voice, ring: ring)
+                }
+                .environment(\.theme, theme)
+            }
         }
         .sheet(isPresented: $showProfile) {
             AgentEditSheet(projectId: projectId).environmentObject(model).environment(\.theme, theme)
@@ -707,6 +738,11 @@ struct ChatView: View {
                 // Keep the draft while the view is still up so a process kill mid-type
                 // is not required — leaving the thread saves on disappear too.
                 model.setComposerDraft(d, for: chatId)
+                // People chats (DM + group): tell the room we are typing so peers
+                // see names on the presence row ([feedback app-01M5N7WSA1VCYHE9BE3CX4V0R6]).
+                if isPeople, !d.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    model.typedIn(chatId: chatId)
+                }
                 let everyone = AppModel.addressesEveryone(d)
                 if everyone != draftAddressesEveryone { draftAddressesEveryone = everyone }
                 // `@` completion: the token the caret is in (approximated by the last token).
@@ -957,6 +993,10 @@ struct ChatView: View {
                 }
             }
             .buttonStyle(.plain)
+            // Groups put call + search on the right; this twin keeps the title centred.
+            if showsGroupCallButton {
+                Color.clear.frame(width: Theme.control + 8).allowsHitTesting(false)
+            }
             Spacer()
             GlassPill {
                 HStack(spacing: 6) {
@@ -1041,26 +1081,39 @@ struct ChatView: View {
                 .contentShape(Capsule())
             }
             Spacer()
-            // Same-size circle as the back button keeps the title pill centred.
-            Button {
-                if showSearch {
-                    showSearch = false
-                    searchText = ""
-                    searchFocused = false
-                } else {
-                    withAnimation(.easeOut(duration: 0.18)) { showSearch = true }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { searchFocused = true }
+            HStack(spacing: 8) {
+                if showsGroupCallButton {
+                    Button { showGroupCallPicker = true } label: {
+                        GlassCircle {
+                            Image(systemName: "phone.fill")
+                                .font(theme.font(16, weight: .semibold))
+                                .foregroundStyle(theme.text)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Start a call")
+                    .accessibilityIdentifier("chat-call-button")
                 }
-            } label: {
-                GlassCircle {
-                    Image(systemName: "magnifyingglass")
-                        .font(theme.font(17, weight: .medium))
-                        .foregroundStyle(theme.text)
+                Button {
+                    if showSearch {
+                        showSearch = false
+                        searchText = ""
+                        searchFocused = false
+                    } else {
+                        withAnimation(.easeOut(duration: 0.18)) { showSearch = true }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { searchFocused = true }
+                    }
+                } label: {
+                    GlassCircle {
+                        Image(systemName: "magnifyingglass")
+                            .font(theme.font(17, weight: .medium))
+                            .foregroundStyle(theme.text)
+                    }
                 }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Search in chat")
+                .accessibilityIdentifier("chat-search-button")
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Search in chat")
-            .accessibilityIdentifier("chat-search-button")
         }
         .padding(.horizontal, 16)
         .padding(.top, 6)
@@ -1081,42 +1134,47 @@ struct ChatView: View {
 
     /// Grok's scroll-to-bottom control: a 36 pt field-coloured circle with a
     /// chevron, right-aligned with the composer, 18 pt above it.
+    /// UIKit `UIControl` (not SwiftUI `Button`) so a tap still fires while the
+    /// transcript is decelerating — SwiftUI button gestures lose to UIScrollView.
     private var scrollToBottomButton: some View {
-        Button(action: jumpToLatest) {
-            ZStack {
-                Circle().fill(theme.field)
-                Circle().strokeBorder(theme.fieldBorder, lineWidth: 1)
-                Image(systemName: "chevron.down")
-                    .font(theme.font(15, weight: .medium))
-                    .foregroundStyle(theme.text)
-            }
-            .frame(width: Theme.voiceButton, height: Theme.voiceButton)
-            .contentShape(Circle().inset(by: -(44 - Theme.voiceButton) / 2))
+        ZStack {
+            Circle().fill(theme.field)
+            Circle().strokeBorder(theme.fieldBorder, lineWidth: 1)
+            Image(systemName: "chevron.down")
+                .font(theme.font(15, weight: .medium))
+                .foregroundStyle(theme.text)
+            ScrollInterruptTap(action: jumpToLatest)
+                .frame(width: 44, height: 44)
         }
-        .buttonStyle(.plain)
+        .frame(width: Theme.voiceButton, height: Theme.voiceButton)
+        .contentShape(Circle().inset(by: -(44 - Theme.voiceButton) / 2))
+        .accessibilityElement(children: .ignore)
         .accessibilityLabel("Scroll to bottom")
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction { jumpToLatest() }
     }
 
     /// Shown when rows land below while the reader is up in history — tap jumps
     /// to the end (iMessage / Slack style; Grok's bare chevron stays for scroll-up alone).
     private var newMessagesPill: some View {
-        Button(action: jumpToLatest) {
-            HStack(spacing: 6) {
-                Image(systemName: "chevron.down")
-                    .font(theme.font(13, weight: .semibold))
-                Text(newBelowCount == 1 ? "New message" : "New messages")
-                    .font(theme.font(Theme.small, weight: .semibold))
-            }
-            .foregroundStyle(theme.text)
-            .padding(.horizontal, 14)
-            .frame(height: Theme.voiceButton)
-            .background(Capsule().fill(theme.field))
-            .overlay(Capsule().strokeBorder(theme.fieldBorder, lineWidth: 1))
-            .contentShape(Capsule().inset(by: -4))
+        HStack(spacing: 6) {
+            Image(systemName: "chevron.down")
+                .font(theme.font(13, weight: .semibold))
+            Text(newBelowCount == 1 ? "New message" : "New messages")
+                .font(theme.font(Theme.small, weight: .semibold))
         }
-        .buttonStyle(.plain)
+        .foregroundStyle(theme.text)
+        .padding(.horizontal, 14)
+        .frame(height: Theme.voiceButton)
+        .background(Capsule().fill(theme.field))
+        .overlay(Capsule().strokeBorder(theme.fieldBorder, lineWidth: 1))
+        .contentShape(Capsule().inset(by: -4))
+        .overlay { ScrollInterruptTap(action: jumpToLatest) }
+        .accessibilityElement(children: .ignore)
         .accessibilityLabel("New messages")
         .accessibilityHint("Scrolls to the latest message")
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction { jumpToLatest() }
     }
 
     // MARK: Chat navigation swipes
@@ -1690,8 +1748,8 @@ struct ChatView: View {
                         editing = nil
                     } label: {
                         HStack(spacing: 6) {
-                            if m.isAgent, let p = m.project {
-                                AgentAvatar(project: p, theme: theme, size: 18, still: true)
+                            if m.isAgent {
+                                AgentAvatar(project: model.agent(member: m, chatId: chatId), theme: theme, size: 18, still: true)
                             } else {
                                 PersonAvatar(url: m.avatarUrl, handle: m.handle, size: 18, name: m.name, id: m.id, colorIndex: m.avatarColorIndex)
                             }
@@ -1917,34 +1975,53 @@ struct ChatView: View {
             isChannel: isChannel,
             needsAnswer: needsAnswer,
             hasPending: !pending.isEmpty,
+            memoHoldActive: memoHoldActive,
+            memoCancelArmed: memoCancelArmed,
+            memoDragX: memoDragX,
+            cancelDistance: Self.memoCancelDistance,
             prompt: { composerPrompt(for: $0) },
-            onCancelRecording: {
-                memoHoldActive = false
-                memoIgnoreRelease = false
-                memoFinishWhenPermission = false
-                memoPressStartedAt = nil
-                recorder.cancel()
-            },
-            onMicPress: {
-                guard !memoHoldActive else { return }
-                memoHoldActive = true
-                memoPressStartedAt = Date()
-                memoFinishWhenPermission = false
-                if recorder.recording {
-                    memoIgnoreRelease = true
-                    finishMemoHold()
-                } else {
-                    memoIgnoreRelease = false
-                    Haptics.recordStart()
-                    recorder.start()
+            onCancelRecording: cancelMemoRecording,
+            onMicDrag: { value in
+                if !memoHoldActive {
+                    memoHoldActive = true
+                    memoPressStartedAt = Date()
+                    memoFinishWhenPermission = false
+                    memoCancelArmed = false
+                    memoDragX = 0
+                    if recorder.recording {
+                        memoIgnoreRelease = true
+                        finishMemoHold()
+                    } else {
+                        memoIgnoreRelease = false
+                        Haptics.recordStart()
+                        recorder.start()
+                    }
+                }
+                // Slide left while holding to arm cancel (hold-to-talk).
+                guard !memoIgnoreRelease else { return }
+                let dx = value.translation.width
+                memoDragX = min(0, dx)
+                let armed = dx < -Self.memoCancelDistance
+                if armed != memoCancelArmed {
+                    memoCancelArmed = armed
+                    if armed { Haptics.pick() }
                 }
             },
-            onMicRelease: {
+            onMicEnd: { value in
                 let held = Date().timeIntervalSince(memoPressStartedAt ?? Date())
+                let cancel = memoCancelArmed || value.translation.width < -Self.memoCancelDistance
                 memoHoldActive = false
                 memoPressStartedAt = nil
+                memoDragX = 0
+                memoCancelArmed = false
                 if memoIgnoreRelease {
                     memoIgnoreRelease = false
+                    return
+                }
+                // Slide-left discard: drop the memo instead of sending.
+                if cancel {
+                    memoFinishWhenPermission = false
+                    if recorder.recording { recorder.cancel() }
                     return
                 }
                 // Hold-to-talk: release after the threshold sends.
@@ -1964,11 +2041,13 @@ struct ChatView: View {
                     memoIgnoreRelease = false
                     memoFinishWhenPermission = false
                     memoPressStartedAt = nil
+                    memoCancelArmed = false
+                    memoDragX = 0
                     finishMemoHold()
                 } else if canSend {
                     send()
                 } else if !isChannel {
-                    startCall(.voice)
+                    requestCall(.voice)
                 }
             }
         )
@@ -1988,6 +2067,17 @@ struct ChatView: View {
         if let memo = recorder.stop() {
             sendMemo(.init(name: memo.name, mime: "audio/m4a", data: memo.data))
         }
+    }
+
+    /// Discard the in-progress voice memo (✕ or slide-to-cancel).
+    private func cancelMemoRecording() {
+        memoHoldActive = false
+        memoIgnoreRelease = false
+        memoFinishWhenPermission = false
+        memoPressStartedAt = nil
+        memoCancelArmed = false
+        memoDragX = 0
+        recorder.cancel()
     }
 
     private var canSend: Bool {
@@ -2015,7 +2105,7 @@ struct ChatView: View {
                         ForEach(items) { m in
                             Button { completeMention(m) } label: {
                                 HStack(spacing: 6) {
-                                    if m.isAgent, let p = m.project { AgentAvatar(project: p, theme: theme, size: 20, still: true) } else { PersonAvatar(url: m.avatarUrl, handle: m.handle, size: 20, name: m.name, id: m.id, colorIndex: m.avatarColorIndex) }
+                                    if m.isAgent { AgentAvatar(project: model.agent(member: m, chatId: chatId), theme: theme, size: 20, still: true) } else { PersonAvatar(url: m.avatarUrl, handle: m.handle, size: 20, name: m.name, id: m.id, colorIndex: m.avatarColorIndex) }
                                     Text("@\(m.isAgent ? mentionSlug(m.project?.name ?? m.handle) : m.handle)")
                                         .font(theme.font(Theme.small, weight: .medium)).foregroundStyle(theme.text)
                                     if !label(m).isEmpty {
@@ -2279,24 +2369,91 @@ struct WorkingStatusText: View {
     }
 }
 
+/// Clear `UIControl` that runs `action` on touch-down. SwiftUI `Button` /
+/// `TapGesture` often fail while a `ScrollView` is still decelerating; UIKit
+/// controls in an overlay above the scroll view keep receiving the touch.
+private struct ScrollInterruptTap: UIViewRepresentable {
+    var action: () -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(action: action) }
+
+    func makeUIView(context: Context) -> UIControl {
+        let control = UIControl()
+        control.backgroundColor = .clear
+        control.isExclusiveTouch = true
+        // Touch-down: stop deceleration and jump immediately so the action is not
+        // lost if SwiftUI tears the control down when the scroll view settles.
+        control.addTarget(context.coordinator, action: #selector(Coordinator.touchDown(_:)), for: .touchDown)
+        return control
+    }
+
+    func updateUIView(_ uiView: UIControl, context: Context) {
+        context.coordinator.action = action
+    }
+
+    final class Coordinator: NSObject {
+        var action: () -> Void
+        init(action: @escaping () -> Void) { self.action = action }
+
+        @objc func touchDown(_ sender: UIControl) {
+            if let root = sender.window {
+                Self.stopDeceleratingScrollViews(in: root)
+            }
+            action()
+        }
+
+        private static func stopDeceleratingScrollViews(in view: UIView) {
+            if let scroll = view as? UIScrollView, scroll.isDecelerating || scroll.isDragging {
+                scroll.setContentOffset(scroll.contentOffset, animated: false)
+            }
+            for child in view.subviews {
+                stopDeceleratingScrollViews(in: child)
+            }
+        }
+    }
+}
+
 /// `.navigationBarBackButtonHidden(true)` turns off the system edge-swipe
 /// back gesture; this turns it back on for the enclosing UINavigationController.
 /// Shared with `SettingsPage` (and any other custom-back screen).
+/// Pass `enabled: false` while the composer is focused so an edge swipe
+/// (or text-selection drag near the left edge) cannot leave the chat.
 struct InteractivePopGestureEnabler: UIViewControllerRepresentable {
+    var enabled: Bool = true
+
     func makeUIViewController(context: Context) -> Controller { Controller() }
-    func updateUIViewController(_ uiViewController: Controller, context: Context) {}
+
+    func updateUIViewController(_ uiViewController: Controller, context: Context) {
+        uiViewController.isPopEnabled = enabled
+        uiViewController.applyPopEnabled()
+    }
 
     final class Controller: UIViewController, UIGestureRecognizerDelegate {
+        var isPopEnabled = true
+
         override func viewDidAppear(_ animated: Bool) {
             super.viewDidAppear(animated)
+            applyPopEnabled()
+        }
+
+        override func viewWillDisappear(_ animated: Bool) {
+            super.viewWillDisappear(animated)
+            // Leave the nav controller able to pop after this screen is gone.
+            if let pop = enclosingNavigationController()?.interactivePopGestureRecognizer {
+                pop.isEnabled = true
+            }
+        }
+
+        func applyPopEnabled() {
             guard let nav = enclosingNavigationController(),
                   let pop = nav.interactivePopGestureRecognizer else { return }
-            pop.isEnabled = true
+            pop.isEnabled = isPopEnabled
             pop.delegate = self
         }
 
         func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
-            (enclosingNavigationController()?.viewControllers.count ?? 0) > 1
+            guard isPopEnabled else { return false }
+            return (enclosingNavigationController()?.viewControllers.count ?? 0) > 1
         }
 
         /// Background representables sometimes have a nil `navigationController`;
@@ -2624,10 +2781,15 @@ private struct ComposerField: View {
     let isChannel: Bool
     let needsAnswer: Bool
     let hasPending: Bool
+    /// Hold-to-talk state owned by the chat screen (slide-to-cancel).
+    let memoHoldActive: Bool
+    let memoCancelArmed: Bool
+    let memoDragX: CGFloat
+    let cancelDistance: CGFloat
     let prompt: (String) -> String
     let onCancelRecording: () -> Void
-    let onMicPress: () -> Void
-    let onMicRelease: () -> Void
+    let onMicDrag: (DragGesture.Value) -> Void
+    let onMicEnd: (DragGesture.Value) -> Void
     let onPrimary: () -> Void
 
     private var canSend: Bool {
@@ -2651,30 +2813,51 @@ private struct ComposerField: View {
     var body: some View {
         HStack(spacing: 8) {
             if recorder.recording {
+                // Visible discard control (tap) — also used after a short tap that
+                // left recording on; hold-to-talk can slide left instead.
                 Button(action: onCancelRecording) {
-                    Image(systemName: "xmark").font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.icon)
+                    Image(systemName: "xmark")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(theme.danger)
+                        .frame(width: 44, height: Theme.fieldHeight)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .padding(.leading, 14)
-                Circle().fill(theme.danger).frame(width: 8, height: 8)
-                // Level bars drawn into whatever width is left (newest on the right),
-                // so the recorder row never pushes the composer past the screen edge.
-                Canvas { ctx, size in
-                    let pitch: CGFloat = 5, w: CGFloat = 3
-                    let levels = recorder.levels
-                    let n = min(levels.count, max(0, Int(size.width / pitch)))
-                    for i in 0..<n {
-                        let l = CGFloat(levels[levels.count - n + i])
-                        let h = min(size.height, 4 + l * 20)
-                        let x = size.width - CGFloat(n - i) * pitch
-                        let rect = CGRect(x: x, y: (size.height - h) / 2, width: w, height: h)
-                        ctx.fill(Path(roundedRect: rect, cornerRadius: w / 2), with: .color(theme.text))
+                .accessibilityLabel("Cancel")
+                if memoCancelArmed {
+                    Text("Release to cancel")
+                        .font(theme.font(Theme.small))
+                        .foregroundStyle(theme.danger)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                } else if memoHoldActive && memoDragX < -12 {
+                    Text("Slide to cancel")
+                        .font(theme.font(Theme.small))
+                        .foregroundStyle(theme.muted)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .opacity(min(1, -memoDragX / cancelDistance))
+                } else {
+                    HStack(spacing: 8) {
+                        Circle().fill(theme.danger).frame(width: 8, height: 8)
+                        // Level bars drawn into whatever width is left (newest on the right),
+                        // so the recorder row never pushes the composer past the screen edge.
+                        Canvas { ctx, size in
+                            let pitch: CGFloat = 5, w: CGFloat = 3
+                            let levels = recorder.levels
+                            let n = min(levels.count, max(0, Int(size.width / pitch)))
+                            for i in 0..<n {
+                                let l = CGFloat(levels[levels.count - n + i])
+                                let h = min(size.height, 4 + l * 20)
+                                let x = size.width - CGFloat(n - i) * pitch
+                                let rect = CGRect(x: x, y: (size.height - h) / 2, width: w, height: h)
+                                ctx.fill(Path(roundedRect: rect, cornerRadius: w / 2), with: .color(theme.text))
+                            }
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: 24)
+                        Text(recorder.timeLabel)
+                            .font(theme.font(Theme.small, design: .monospaced))
+                            .foregroundStyle(theme.text)
                     }
                 }
-                .frame(maxWidth: .infinity, maxHeight: 24)
-                Text(recorder.timeLabel)
-                    .font(theme.font(Theme.small, design: .monospaced))
-                    .foregroundStyle(theme.text)
             } else {
                 TextField("", text: $draft.text, prompt: Text(prompt(draft.text)).foregroundStyle(theme.placeholder), axis: .vertical)
                     .lineLimit(1...8)
@@ -2689,10 +2872,11 @@ private struct ComposerField: View {
             }
             if draft.text.isEmpty || recorder.recording {
                 // Press/release like Mac: tap toggles recording on; hold ≥0.25s then
-                // release sends. highPriorityGesture so a focused TextField cannot
-                // steal the touch. The mic stays mounted while recording so release
-                // can finish without a second tap.
-                Image(systemName: "mic")
+                // release sends. Slide left while holding to discard (WhatsApp-style).
+                // highPriorityGesture so a focused TextField cannot steal the touch.
+                // The mic stays mounted while recording so release can finish without
+                // a second tap.
+                Image(systemName: memoCancelArmed ? "trash" : "mic")
                     .font(theme.font(17))
                     .foregroundStyle(recorder.recording ? theme.danger : theme.icon)
                     .frame(width: 44, height: Theme.fieldHeight)
@@ -2701,8 +2885,8 @@ private struct ComposerField: View {
                     .id("memo-mic")
                     .highPriorityGesture(
                         DragGesture(minimumDistance: 0)
-                            .onChanged { _ in onMicPress() }
-                            .onEnded { _ in onMicRelease() }
+                            .onChanged { onMicDrag($0) }
+                            .onEnded { onMicEnd($0) }
                     )
             }
             // While recording: tap send also finishes (same as release). Otherwise
