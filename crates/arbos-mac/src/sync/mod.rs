@@ -28,9 +28,9 @@ use crate::model::{
     Voice,
 };
 use crate::model::{
-    Attachment, BoxState, ChannelsView, Chat, ConnectorsView, Effort, Id, Link, LinkState,
-    LocalView, Machine, Message, NewSecret, Project, ProjectDocView, ProjectSecrets, Routine,
-    RoutineRun, RoutineTrigger, SecretsView, Skill,
+    Attachment, BoxState, ChannelsView, Chat, ConnectorsView, DeviceView, Effort, Id, Link,
+    LinkState, LocalView, Machine, Message, NewSecret, Project, ProjectDocView, ProjectSecrets,
+    Routine, RoutineRun, RoutineTrigger, SecretsView, Skill,
 };
 
 /// Something the source learned; the UI applies it to its mirror.
@@ -55,9 +55,12 @@ pub enum SyncEvent {
     },
     /// Someone in a people chat started/stopped typing (room presence).
     /// Someone's device sent a presence frame in a room we share (API §7c
-    /// frames carry `handle`): they are online right now.
+    /// frames carry `handle`): they are online right now. Optional `seen` is
+    /// the message id they last looked at (read receipts).
     Presence {
         handle: String,
+        chat_id: Option<Id>,
+        seen: Option<Id>,
     },
     Typing {
         chat_id: Id,
@@ -132,6 +135,12 @@ pub enum SyncEvent {
     /// push) — `None` = unarchived.
     ChatArchived {
         chat_id: Id,
+        archived_at: Option<u64>,
+    },
+    /// `space_archived` push: another device archived / unarchived a sidebar
+    /// space (an agent or a server) for me.
+    SpaceArchived {
+        space_id: Id,
         archived_at: Option<u64>,
     },
     /// `feedback_capture` push: the user's agent is filing feedback and wants a picture of the
@@ -263,6 +272,8 @@ pub enum SyncEvent {
     },
     /// Settings → Secrets: secrets, accesses, requests, activity (never values; D83).
     Secrets(SecretsView),
+    /// Settings → Devices: this account's signed-in devices, or why they could not be read.
+    Devices(Result<Vec<DeviceView>, String>),
     /// One agent's secrets page (`GET /projects/{id}/secrets`).
     ProjectSecrets {
         project_id: Id,
@@ -674,6 +685,22 @@ pub enum ClientCommand {
         space_id: Id,
         muted: bool,
     },
+    /// Sidebar archive (2026-10-23): `PUT /projects/{id}/archive` or
+    /// `PUT /servers/{id}/archive` `{archived}` — hides the row for me on every
+    /// device; nothing is deleted. People chats use `ArchiveChat`.
+    ArchiveSpace {
+        space_id: Id,
+        server: bool,
+        archived: bool,
+    },
+    /// Settings → Notifications: send and show Presence `{seen}` read receipts
+    /// in people chats (default on). Local preference; presence frames omit
+    /// `seen` when off. When `persist` is true (the Settings toggle), also
+    /// `PUT /chats/{id}/settings {read_receipts}` for every people chat.
+    SetReadReceipts {
+        enabled: bool,
+        persist: bool,
+    },
     /// Leaf picker (D92): `PATCH /projects/{id} {avatar_leaf: 0–8|null, avatar_leaf_color: 0–9|null}`;
     /// `None` = automatic (derived from the project id).
     SetAvatarLeaf {
@@ -715,6 +742,15 @@ pub enum ClientCommand {
         attachment: Attachment,
         text: String,
     },
+    /// Bubble menu → Forward: write `text` as a new user row in `chat_id`
+    /// carrying `forwardedFrom: <name>` (the bubble's "Forwarded from" header).
+    /// `message_id` is the optimistic row's id.
+    ForwardText {
+        chat_id: Id,
+        message_id: Id,
+        text: String,
+        forwarded_from: String,
+    },
     /// Settings → Connectors opened or asked for a refresh.
     RefreshConnectors,
     /// Connect a provider: OAuth when `token` is `None`, else store the pasted token.
@@ -727,6 +763,12 @@ pub enum ClientCommand {
     },
     /// Settings → Secrets opened or asked for a refresh.
     SecretsRefresh,
+    /// Settings → Devices opened or asked for a refresh (`GET /auth/devices`).
+    DevicesRefresh,
+    /// Settings → Devices: sign another device out (`DELETE /auth/devices/{id}`).
+    DeviceRevoke {
+        id: Id,
+    },
     /// An agent's Secrets page opened.
     ProjectSecretsRefresh {
         project_id: Id,

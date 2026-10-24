@@ -24,6 +24,7 @@ use crate::ui::channels::{ChannelsEvent, ChannelsPanel};
 use crate::ui::composer::{self, Composer, ComposerEvent, ComposerInput};
 use crate::ui::connectors::{ConnectorsEvent, ConnectorsPanel};
 use crate::ui::create_entity::{self, Kind as CreateKind};
+use crate::ui::delete_confirm;
 use crate::ui::dropzone;
 use crate::ui::feedback::{FeedbackSheet, SendFeedback};
 use crate::ui::frost::{frosted, MENU_BLUR, PANEL_BLUR};
@@ -38,7 +39,7 @@ use crate::ui::motion::{ease_out_cubic, PulseClock, COMPOSER_DROP_MS, SHAKE_MS};
 use crate::ui::onboarding;
 use crate::ui::people;
 use crate::ui::profiles;
-use crate::ui::react_menu;
+use crate::ui::reactions;
 use crate::ui::routines::{RoutinesEvent, RoutinesPanel};
 use crate::ui::secrets::{SecretsEvent, SecretsPanel};
 use crate::ui::servers;
@@ -55,7 +56,16 @@ use crate::ui::voicepicker;
 
 actions!(
     shell,
-    [CloseTab, NewTab, PrevTab, NextTab, ToggleRail, Escape, Quit]
+    [
+        CloseTab,
+        NewTab,
+        PrevTab,
+        NextTab,
+        ToggleRail,
+        FocusSearch,
+        Escape,
+        Quit
+    ]
 );
 
 /// Left inset for the conversation header while the sidebar is hidden: the window's traffic lights.
@@ -110,6 +120,8 @@ pub(crate) enum SettingsPage {
     Skills,
     ThisMac,
     Secrets,
+    /// Signed-in devices of my account: list + sign out another (Oct 23).
+    Devices,
 }
 
 impl SettingsPage {
@@ -128,6 +140,7 @@ impl SettingsPage {
             SettingsPage::Skills => "Skills",
             SettingsPage::ThisMac => "This Mac",
             SettingsPage::Secrets => "Secrets",
+            SettingsPage::Devices => "Devices",
         }
     }
 
@@ -141,6 +154,7 @@ impl SettingsPage {
                 | SettingsPage::Notifications
                 | SettingsPage::Updates
                 | SettingsPage::About
+                | SettingsPage::Devices
         )
     }
 
@@ -157,7 +171,8 @@ impl SettingsPage {
             | SettingsPage::Connectors
             | SettingsPage::Channels
             | SettingsPage::ThisMac
-            | SettingsPage::Secrets => SETTINGS_WIDTH,
+            | SettingsPage::Secrets
+            | SettingsPage::Devices => SETTINGS_WIDTH,
             SettingsPage::Routines => crate::ui::routines::PANEL_WIDTH + 32.0,
             SettingsPage::Skills => skills::CARD_WIDTH + 32.0,
         }
@@ -190,6 +205,13 @@ pub struct Shell {
     pub(crate) viewer_search: Entity<ComposerInput>,
     /// Keyboard focus while the media viewer is up (← → page, Esc closes).
     viewer_focus: FocusHandle,
+    /// The bubble whose "Forward to" picker last took the search field's focus
+    /// (`AppState::forward_message`), so it is cleared and focused once per opening.
+    forward_message_focused_for: Option<crate::model::Id>,
+    /// Keyboard owner of the "Delete message?" confirm (Return / Esc).
+    delete_confirm_focus: FocusHandle,
+    /// The message whose confirm last took that focus, so it is focused once per opening.
+    delete_confirm_focused_for: Option<crate::model::Id>,
     /// `AppState::media_viewer_generation` the viewer was last focused for.
     viewer_focused_generation: u64,
     pub(crate) connectors: Entity<ConnectorsPanel>,
@@ -205,15 +227,27 @@ pub struct Shell {
         crate::model::Id,
         gpui::Point<gpui::Pixels>,
     )>,
-    /// The quick-react emoji bar (`react_menu`): (chat, message, the click).
-    pub(crate) react_menu: Option<(
+    /// `ARBOS_RIG_MESSAGE_MENU=x,y` (screenshot rig): opens the menu once the
+    /// open chat has a message; cleared when it has.
+    rig_message_menu: Option<gpui::Point<gpui::Pixels>>,
+    /// `ARBOS_RIG_FORWARD_MESSAGE=1` (screenshot rig): opens the "Forward to"
+    /// picker for the newest message of the open chat; cleared once it has.
+    rig_forward_message: bool,
+    /// `ARBOS_RIG_DELETE_CONFIRM=1` (screenshot rig): opens the "Delete
+    /// message?" confirm for the newest message of the open chat; cleared once it has.
+    rig_delete_confirm: bool,
+    /// The reaction capsule over a bubble (`reactions`): (chat, message, the smiley's click).
+    pub(crate) reaction_capsule: Option<(
         crate::model::Id,
         crate::model::Id,
         gpui::Point<gpui::Pixels>,
     )>,
-    /// `ARBOS_RIG_MESSAGE_MENU=x,y` (screenshot rig): opens the menu once the
-    /// open chat has a message; cleared when it has.
-    rig_message_menu: Option<gpui::Point<gpui::Pixels>>,
+    /// The capsule's "pick any emoji" field is showing (system picker open).
+    pub(crate) reaction_pick_open: bool,
+    pub(crate) reaction_pick: Entity<ComposerInput>,
+    /// `ARBOS_RIG_REACTION_CAPSULE=x,y` (screenshot rig): opens the capsule for
+    /// the newest message of the open chat at that window position.
+    rig_reaction_capsule: Option<gpui::Point<gpui::Pixels>>,
     pub(crate) settings_scroll: ScrollHandle,
     pub(crate) routines: Entity<RoutinesPanel>,
     pub(crate) routines_open: bool,
@@ -233,6 +267,15 @@ pub struct Shell {
     /// app-01M5ATBWSY9E1HHBKH2QQVDEZX). Nothing renders it; escapes and
     /// click-outside still clear it so leftover true never sticks.
     pub(crate) menu_open: bool,
+    /// The chat list's top strip: whether the round search button has
+    /// expanded into its field (click or ⌘F), and which segment of the
+    /// All · Agents · People · Servers filter is selected
+    /// ([feedback sidebar-strip-filter-2026-10-24]).
+    pub(crate) search_strip: sidebar::SearchStrip,
+    pub(crate) list_filter: sidebar::ListFilter,
+    /// Sidebar: the "Hidden chats" list is showing instead of the chat list
+    /// (Jacob 2026-10-23; the footer opens it, ‹ back returns).
+    pub(crate) hidden_open: bool,
     /// D88: the name/invite/channel field of the server sheets and the inline channel rename
     /// on the server page; `channel_rename` is the channel being renamed there.
     pub(crate) server_input: Entity<ComposerInput>,
@@ -268,6 +311,8 @@ pub struct Shell {
     /// Group pane › Members: the row whose ✕ was clicked (`user:<id>` or
     /// `agent:<project>`); it shows "Remove … ?" with Cancel / Remove.
     pub(crate) member_remove_armed: Option<String>,
+    /// Settings → Devices: the device whose Sign out is asking (Oct 23).
+    pub(crate) device_revoke_armed: Option<String>,
     /// A member row's menu on the group pane (Shift-click / right-click): View
     /// profile, Remove from group → arms `member_remove_armed`.
     pub(crate) member_menu: Option<member_menu::MemberMenu>,
@@ -336,10 +381,12 @@ impl Shell {
                 || v == "about"
                 || v == "appearance"
                 || v == "credits"
+                || v == "devices"
                 || v.starts_with("secrets")
         });
         let settings_scroll = ScrollHandle::new();
         let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+        let reaction_pick = reactions::new_pick_input(cx);
         cx.subscribe(
             &transcript,
             |this, _, event: &TranscriptEvent, cx| match event {
@@ -352,14 +399,12 @@ impl Shell {
                     this.message_menu = Some((chat_id.clone(), message_id.clone(), *position));
                     cx.notify();
                 }
-                TranscriptEvent::ReactMenu {
+                TranscriptEvent::ReactionCapsule {
                     chat_id,
                     message_id,
                     position,
                 } => {
-                    this.close_popovers(cx);
-                    this.react_menu = Some((chat_id.clone(), message_id.clone(), *position));
-                    cx.notify();
+                    this.open_reaction_capsule(chat_id.clone(), message_id.clone(), *position, cx);
                 }
                 TranscriptEvent::Reply {
                     chat_id,
@@ -761,6 +806,9 @@ impl Shell {
             viewer_search,
             viewer_focus: cx.focus_handle(),
             viewer_focused_generation: 0,
+            forward_message_focused_for: None,
+            delete_confirm_focus: cx.focus_handle(),
+            delete_confirm_focused_for: None,
             connectors,
             skills,
             local,
@@ -778,6 +826,7 @@ impl Shell {
                 Some("about") => SettingsPage::About,
                 Some("appearance") => SettingsPage::Appearance,
                 Some("credits") => SettingsPage::Credits,
+                Some("devices") => SettingsPage::Devices,
                 Some(v) if v.starts_with("secrets") => SettingsPage::Secrets,
                 _ => SettingsPage::Root,
             },
@@ -788,12 +837,18 @@ impl Shell {
             row_delete_armed: false,
             agent_delete_armed: false,
             member_remove_armed: None,
+            device_revoke_armed: None,
             member_menu: None,
             chat_menu: None,
             chat_delete_armed: false,
             message_menu: None,
-            react_menu: None,
             rig_message_menu: message_menu::rig_anchor(),
+            rig_forward_message: std::env::var_os("ARBOS_RIG_FORWARD_MESSAGE").is_some(),
+            rig_delete_confirm: std::env::var_os("ARBOS_RIG_DELETE_CONFIRM").is_some(),
+            reaction_capsule: None,
+            reaction_pick_open: false,
+            reaction_pick,
+            rig_reaction_capsule: reactions::rig_anchor(),
             renaming_tab: None,
             tab_rename_input,
             tab_menu_open: false,
@@ -810,6 +865,17 @@ impl Shell {
             fixture_drag_over: std::env::var("ARBOS_FIXTURE_DRAG_OVER").is_ok_and(|v| v == "1"),
             signing_in: false,
             menu_open: false,
+            // A rig query (`ARBOS_SEARCH`) shows the field open, as a typed one would.
+            search_strip: sidebar::SearchStrip {
+                open: search_query.is_some()
+                    || std::env::var("ARBOS_SEARCH_OPEN").is_ok_and(|v| v == "1"),
+            },
+            // Rig: `ARBOS_SIDEBAR_FILTER=all|agents|people|servers` selects a segment at launch.
+            list_filter: std::env::var("ARBOS_SIDEBAR_FILTER")
+                .ok()
+                .and_then(|v| sidebar::ListFilter::parse(&v))
+                .unwrap_or_default(),
+            hidden_open: false,
             server_input,
             channel_rename: None,
             invite_expires: false,
@@ -842,6 +908,9 @@ impl Shell {
                 s.open_profile(ProfilePage::Me, cx);
                 s.set_profile_tab(1, cx);
             });
+            if shell.settings_page == SettingsPage::Devices {
+                shell.state.update(cx, |s, cx| s.devices_refresh(cx));
+            }
         }
         shell
     }
@@ -959,6 +1028,7 @@ impl Shell {
             | SettingsPage::Notifications
             | SettingsPage::Updates
             | SettingsPage::About => {}
+            SettingsPage::Devices => self.state.update(cx, |s, cx| s.devices_refresh(cx)),
             SettingsPage::Connectors => self.connectors.update(cx, |p, cx| {
                 p.show(cx);
                 p.embedded = true;
@@ -1006,7 +1076,8 @@ impl Shell {
             | SettingsPage::Appearance
             | SettingsPage::Notifications
             | SettingsPage::Updates
-            | SettingsPage::About => {}
+            | SettingsPage::About
+            | SettingsPage::Devices => {}
             SettingsPage::Connectors => self.connectors.update(cx, |p, cx| p.hide(cx)),
             SettingsPage::Routines => {
                 self.routines_open = false;
@@ -1058,7 +1129,8 @@ impl Shell {
             | SettingsPage::Appearance
             | SettingsPage::Notifications
             | SettingsPage::Updates
-            | SettingsPage::About => true,
+            | SettingsPage::About
+            | SettingsPage::Devices => true,
             SettingsPage::Connectors => self.connectors.read(cx).is_open(),
             SettingsPage::Routines => self.routines_open,
             SettingsPage::Channels => self.channels.read(cx).is_open(),
@@ -1867,9 +1939,42 @@ impl Shell {
         });
     }
 
+    /// ⌘F: the round search button in the chat list's strip expands into its
+    /// field and takes focus ([feedback sidebar-strip-filter-2026-10-24]).
+    fn focus_search(&mut self, _: &FocusSearch, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_search(window, cx);
+    }
+
+    pub(crate) fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.menu_open = false;
+        self.search_strip.focus();
+        let handle = self.search_input.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
+    /// The search field folds back into its round button; a typed query is
+    /// dropped and the composer takes focus again.
+    pub(crate) fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search_strip.fold();
+        self.search_input.update(cx, |i, cx| i.clear(cx));
+        Composer::focus(&self.composer, window, cx);
+        cx.notify();
+    }
+
     /// Escape stops a recording memo (keeping its transcript), then closes
     /// whatever floats: menus, then sheets.
     fn escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
+        if self.state.read(cx).forward_message.is_some() {
+            self.state.update(cx, |s, cx| s.close_forward_message(cx));
+            Composer::focus(&self.composer, window, cx);
+            return;
+        }
+        if self.state.read(cx).delete_confirm.is_some() {
+            self.state.update(cx, |s, cx| s.close_delete_confirm(cx));
+            Composer::focus(&self.composer, window, cx);
+            return;
+        }
         if let Some(viewer) = self.state.read(cx).media_viewer.as_ref() {
             // Esc closes the Forward picker first, then the viewer.
             if viewer.forward_open {
@@ -1916,10 +2021,9 @@ impl Shell {
             .focus_handle(cx)
             .is_focused(window)
         {
-            // Escape in the Search field clears it and returns to the composer.
-            self.search_input.update(cx, |i, cx| i.clear(cx));
-            Composer::focus(&self.composer, window, cx);
-            cx.notify();
+            // Escape in the Search field clears it, folds it back into its
+            // round button and returns to the composer.
+            self.close_search(window, cx);
             return;
         }
         let editing_agent = {
@@ -1955,7 +2059,7 @@ impl Shell {
             || self.row_menu.is_some()
             || self.chat_menu.is_some()
             || self.message_menu.is_some()
-            || self.react_menu.is_some();
+            || self.reaction_capsule.is_some();
         self.close_popovers(cx);
         if floating {
             return;
@@ -2111,7 +2215,7 @@ impl Shell {
         self.channel_menu = None;
         self.chat_menu = None;
         self.message_menu = None;
-        self.react_menu = None;
+        self.close_reaction_capsule(cx);
         self.member_remove_armed = None;
         self.member_menu = Some(member_menu::MemberMenu { space_id, key, at });
         cx.notify();
@@ -2128,8 +2232,8 @@ impl Shell {
             || self.channel_menu.is_some()
             || self.chat_menu.is_some()
             || self.message_menu.is_some()
-            || self.react_menu.is_some()
             || self.member_menu.is_some()
+            || self.reaction_capsule.is_some()
         {
             self.menu_open = false;
             self.member_menu = None;
@@ -2145,7 +2249,7 @@ impl Shell {
             self.chat_menu = None;
             self.chat_delete_armed = false;
             self.message_menu = None;
-            self.react_menu = None;
+            self.close_reaction_capsule(cx);
             cx.notify();
         }
     }
@@ -3513,6 +3617,8 @@ impl Render for Shell {
         let viewer_open = state.media_viewer.is_some();
         let viewer_forward_open = state.media_viewer.as_ref().is_some_and(|v| v.forward_open);
         let viewer_generation = state.media_viewer_generation;
+        let forward_message_open = state.forward_message.as_ref().map(|f| f.message_id.clone());
+        let delete_confirm_open = state.delete_confirm.as_ref().map(|d| d.message_id.clone());
         let pairing = state.pairing.clone();
         let new_chat_open = state.new_chat_open;
         let people_space = state.selected().filter(|p| p.is_people()).cloned();
@@ -3528,6 +3634,7 @@ impl Render for Shell {
             .on_action(cx.listener(Self::prev_tab))
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::toggle_rail))
+            .on_action(cx.listener(Self::focus_search))
             .on_action(cx.listener(Self::escape))
             .on_action(cx.listener(Self::send_feedback))
             .on_action(cx.listener(Self::paste_into_chat))
@@ -3637,6 +3744,13 @@ impl Render for Shell {
                 if page == ProfilePage::Me && self.settings_open_at_bottom {
                     self.profile_scroll.scroll_to_bottom();
                 }
+            } else if page == ProfilePage::Me
+                && self.settings_open_at_bottom
+                && std::env::var("ARBOS_OPEN_SETTINGS_BOTTOM").is_ok_and(|v| v == "1")
+            {
+                // Rig only: a Settings subpage whose rows arrive after the pane opened (the
+                // Secret page waits for the secrets list) keeps its end in view.
+                self.profile_scroll.scroll_to_bottom();
             }
             if page == ProfilePage::Me && !self.settings_page_alive(cx) {
                 self.settings_page = SettingsPage::Root;
@@ -3673,8 +3787,74 @@ impl Render for Shell {
         if let Some(menu) = message_menu::render(self, window, cx) {
             root = root.child(menu);
         }
-        if let Some(menu) = react_menu::render(self, window, cx) {
-            root = root.child(menu);
+        if self.rig_forward_message {
+            let target = self.state.read(cx).active_chat_id().and_then(|chat| {
+                let state = self.state.read(cx);
+                let last = state.messages.get(&chat)?.last()?.id.clone();
+                Some((chat, last))
+            });
+            if let Some((chat, message)) = target {
+                self.rig_forward_message = false;
+                self.state
+                    .update(cx, |s, cx| s.open_forward_message(chat, message, cx));
+            }
+        }
+        if let Some(picker) = media_viewer::message_forward_overlay(self, cx) {
+            // The picker's search field takes the keyboard while it is up (same
+            // field as the viewer's picker; cleared on each opening).
+            if self.forward_message_focused_for != forward_message_open {
+                self.forward_message_focused_for = forward_message_open;
+                self.viewer_search.update(cx, |input, cx| input.clear(cx));
+            }
+            let search = self.viewer_search.read(cx).focus_handle(cx);
+            if !search.is_focused(window) {
+                window.focus(&search, cx);
+            }
+            root = root.child(picker);
+        } else if self.forward_message_focused_for.is_some() {
+            self.forward_message_focused_for = None;
+            if !viewer_open {
+                Composer::focus(&self.composer, window, cx);
+            }
+        }
+        if let Some(at) = self.rig_reaction_capsule {
+            let target = self.state.read(cx).active_chat_id().and_then(|chat| {
+                let state = self.state.read(cx);
+                let last = state.messages.get(&chat)?.last()?.id.clone();
+                Some((chat, last))
+            });
+            if let Some((chat, message)) = target {
+                self.rig_reaction_capsule = None;
+                self.reaction_capsule = Some((chat, message, at));
+            }
+        }
+        if let Some(capsule) = reactions::render(self, window, cx) {
+            root = root.child(capsule);
+        }
+        if self.rig_delete_confirm {
+            let target = self.state.read(cx).active_chat_id().and_then(|chat| {
+                let state = self.state.read(cx);
+                let last = state.messages.get(&chat)?.last()?.id.clone();
+                Some((chat, last))
+            });
+            if let Some((chat, message)) = target {
+                self.rig_delete_confirm = false;
+                self.state
+                    .update(cx, |s, cx| s.open_delete_confirm(chat, message, cx));
+            }
+        }
+        if let Some(confirm) = delete_confirm::overlay(self, &self.delete_confirm_focus, cx) {
+            // Return / Esc go to the card while it is up; focus moves there once per opening.
+            if self.delete_confirm_focused_for != delete_confirm_open {
+                self.delete_confirm_focused_for = delete_confirm_open.clone();
+                window.focus(&self.delete_confirm_focus, cx);
+            }
+            root = root.child(confirm);
+        } else if self.delete_confirm_focused_for.is_some() {
+            self.delete_confirm_focused_for = None;
+            if self.delete_confirm_focus.is_focused(window) {
+                Composer::focus(&self.composer, window, cx);
+            }
         }
         // Rig: the hook asked for the first other member's row menu on the group pane.
         if let Some(armed) = self.state.update(cx, |s, _| s.rig_member_menu.take()) {

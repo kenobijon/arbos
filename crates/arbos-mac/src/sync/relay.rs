@@ -152,6 +152,7 @@ struct QueuedSend {
     command: &'static str,
     answer: Option<(String, serde_json::Value)>,
     reply_to: Option<String>,
+    forwarded_from: Option<String>,
 }
 
 struct Shared {
@@ -190,6 +191,9 @@ struct Shared {
     /// The chat on screen in a focused window; presence frames carry it as
     /// `focused_chat` so the relay does not push this device for it (§7c).
     focused_chat: Mutex<Option<Id>>,
+    /// Settings → Notifications "Read receipts": when true, people-chat presence
+    /// frames carry `seen: <newest message id>` (API chat settings / §7c).
+    read_receipts: AtomicBool,
     /// Calls v1: `in_call` on every presence frame while this device is in one (§8).
     in_call: Mutex<Option<String>>,
     /// On-device store (#929); `None` without credentials or with `ARBOS_NO_STORE=1`.
@@ -214,8 +218,10 @@ fn project_doc_key(project_id: &str) -> String {
 }
 
 impl Shared {
-    /// `{device, at, focused_chat?}` — every presence frame (15 s tick, typing,
-    /// focus change) says which chat this device is looking at, if any.
+    /// `{device, at, focused_chat?, seen?}` — every presence frame (15 s tick,
+    /// typing, focus change) says which chat this device is looking at, if any.
+    /// When read receipts are on and the focused chat is a people chat, `seen`
+    /// is the newest message id in that chat (read-receipt Presence).
     fn presence_header(&self) -> Value {
         let mut header = json!({
             "device": self.device_id(),
@@ -223,13 +229,26 @@ impl Shared {
             "user": self.me_id(),
             "handle": self.me_handle(),
         });
-        if let Some(chat) = self.focused_chat.lock().unwrap().as_deref() {
+        let focused = self.focused_chat.lock().unwrap().clone();
+        if let Some(chat) = focused.as_deref() {
             header["focused_chat"] = json!(chat);
+            if self.read_receipts.load(Ordering::Relaxed) && self.is_people(chat) {
+                if let Some(seen) = self.newest_message_id(chat) {
+                    header["seen"] = json!(seen);
+                }
+            }
         }
         if let Some(call) = self.in_call.lock().unwrap().as_deref() {
             header["in_call"] = json!(call);
         }
         header
+    }
+
+    /// Newest message id in a chat doc, if the doc is open and non-empty.
+    fn newest_message_id(&self, chat_id: &str) -> Option<String> {
+        let docs = self.docs.lock().unwrap();
+        let doc = docs.get(chat_id)?;
+        doc.read_all().last().map(|m| m.id.clone())
     }
 
     fn token(&self) -> String {
@@ -682,6 +701,7 @@ impl SyncSource for RelaySource {
                 docs: Mutex::new(HashMap::new()),
                 rooms: Mutex::new(HashMap::new()),
                 focused_chat: Mutex::new(None),
+                read_receipts: AtomicBool::new(true),
                 in_call: Mutex::new(None),
                 projects: Mutex::new(Vec::new()),
                 chats: Mutex::new(Vec::new()),
@@ -1244,6 +1264,19 @@ async fn poll_me_pushes(shared: &Arc<Shared>) {
                 if !call.call_id.is_empty() {
                     let _ = shared.events.send(SyncEvent::CallStarted { call, sender });
                 }
+            }
+            PushEventDto::SpaceArchived(payload) => {
+                let at = payload.archived_at.filter(|t| *t > 0).map(|t| t as u64);
+                if payload.kind != "server" {
+                    let mut projects = shared.projects.lock().unwrap();
+                    if let Some(p) = projects.iter_mut().find(|p| p.id == payload.space_id) {
+                        p.archived_at = at;
+                    }
+                }
+                let _ = shared.events.send(SyncEvent::SpaceArchived {
+                    space_id: payload.space_id.clone(),
+                    archived_at: at,
+                });
             }
             PushEventDto::ChatArchived(payload) => {
                 let chat_id = payload.chat_id.clone();
@@ -2029,17 +2062,18 @@ fn people_error(err: &anyhow::Error) -> String {
 }
 
 /// `GET /projects` then `GET /projects/{id}` for chats, models and spend.
-/// `GET /me/unread` → chat id → has unread, for every chat the relay counts unread in. The
-/// list is the user's one read cursor (shared by all their devices; own messages never
-/// count), so a chat it does not name has nothing unread. `None` when the relay did not
-/// answer it (older relay, transport error): the per-chat flag decides then.
-async fn fetch_unread_map(shared: &Arc<Shared>) -> Option<HashMap<Id, bool>> {
+/// `GET /me/unread` → chat id → unread message count, for every chat the relay counts
+/// unread in. The list is the user's one read cursor (shared by all their devices; own
+/// messages never count), so a chat it does not name has nothing unread. `None` when the
+/// relay did not answer it (older relay, transport error): the per-chat flag decides then.
+async fn fetch_unread_map(shared: &Arc<Shared>) -> Option<HashMap<Id, u32>> {
     match shared.get_json("/me/unread").await {
         Ok(v) => match serde_json::from_value::<UnreadDto>(v) {
             Ok(dto) => Some(
                 dto.chats
                     .into_iter()
-                    .map(|c| (c.chat_id, c.unread > 0))
+                    .filter(|c| c.unread > 0)
+                    .map(|c| (c.chat_id, c.unread as u32))
                     .collect(),
             ),
             Err(err) => {
@@ -2299,9 +2333,12 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
             &pending_ids,
         );
         for c in &mut merged {
-            let relay_unread = relay_unread_for(unread_by_chat.as_ref(), &c.id, c.unread);
+            let relay_count =
+                relay_unread_for(unread_by_chat.as_ref(), &c.id, c.unread, c.unread_count);
             let local_read = local_reads.get(&c.id).copied();
-            c.unread = merged_unread(relay_unread, local_read, c.last_message_at as i64);
+            let count = merged_unread(relay_count, local_read, c.last_message_at as i64);
+            c.unread_count = count;
+            c.unread = count > 0;
         }
         *local = merged;
     }
@@ -3275,7 +3312,7 @@ async fn perform_room_actions(
                     typing,
                     in_call,
                     mine,
-                    header: _,
+                    header,
                 } => {
                     if let Some(call_id) = in_call {
                         if !mine
@@ -3288,8 +3325,15 @@ async fn perform_room_actions(
                         }
                     }
                     if let (false, Some(handle)) = (mine, handle) {
+                        let seen = header
+                            .get("seen")
+                            .and_then(Value::as_str)
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_string);
                         let _ = shared.events.send(SyncEvent::Presence {
                             handle: handle.clone(),
+                            chat_id: is_people.then(|| room_chat.to_string()),
+                            seen,
                         });
                         if is_people {
                             if let Some(active) = typing {
@@ -3626,6 +3670,7 @@ async fn send_message(
     command: &'static str,
     answer: Option<(String, serde_json::Value)>,
     reply_to: Option<String>,
+    forwarded_from: Option<String>,
 ) {
     // No room doc yet: queue while NewChat is in flight, otherwise fail visibly.
     if !shared.docs.lock().unwrap().contains_key(&chat_id) {
@@ -3640,6 +3685,7 @@ async fn send_message(
                     command,
                     answer,
                     reply_to,
+                    forwarded_from,
                 });
                 return;
             }
@@ -3814,6 +3860,9 @@ async fn send_message(
         let device = shared.device_id();
         doc.core.transact(|d| {
             let _ = d.append_user_message(&message_id, &text, &device, &opts);
+            if let Some(by) = forwarded_from.as_deref() {
+                d.set_message_fields(&message_id, &[("forwardedFrom", json!(by))]);
+            }
             d.push_command(command, payload, &device);
             if let Some(ref title) = title {
                 d.push_command("retitle", json!({ "title": title }), &device);
@@ -4064,6 +4113,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 "send",
                 None,
                 None,
+                None,
             ));
         }
         ClientCommand::Transcribe {
@@ -4211,6 +4261,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 let mut chats = shared.chats.lock().unwrap();
                 if let Some(c) = chats.iter_mut().find(|c| c.id == chat_id) {
                     c.unread = false;
+                    c.unread_count = 0;
                 }
             }
             shared
@@ -4829,6 +4880,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 "send",
                 None,
                 reply_to,
+                None,
             ));
         }
         ClientCommand::Forward {
@@ -4851,6 +4903,26 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 "send",
                 None,
                 None,
+                None,
+            ));
+        }
+        ClientCommand::ForwardText {
+            chat_id,
+            message_id,
+            text,
+            forwarded_from,
+        } => {
+            tokio::spawn(send_message(
+                shared.clone(),
+                chat_id,
+                message_id,
+                text,
+                Vec::new(),
+                None,
+                "send",
+                None,
+                None,
+                Some(forwarded_from),
             ));
         }
         ClientCommand::Steer {
@@ -4869,6 +4941,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 "steer",
                 None,
                 reply_to,
+                None,
             ));
         }
         ClientCommand::Answer {
@@ -4888,6 +4961,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 None,
                 "answer",
                 answer,
+                None,
                 None,
             ));
         }
@@ -4932,12 +5006,34 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             chat_id,
             message_id,
         } => {
-            let docs = shared.docs.lock().unwrap();
-            if let Some(doc) = docs.get(&chat_id) {
-                if let Err(e) = doc.core.transact(|d| d.delete_message(&message_id)) {
-                    eprintln!("relay: delete message: {e:#}");
+            // The relay decides and edits the doc (`DELETE /room/{project}/{chat}/
+            // messages/{id}`); the deletion comes back as a relay-signed row. A
+            // refusal (403 `not_yours`) is told once; the message stays.
+            let project_id = shared
+                .chats
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|c| c.id == chat_id)
+                .map(|c| c.project_id.clone())
+                .unwrap_or_else(|| chat_id.clone());
+            let is_people = shared.is_people(&chat_id);
+            let room = room::room_path(&project_id, &chat_id, is_people);
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Err(err) = shared
+                    .delete(&format!("/room/{room}/messages/{message_id}"))
+                    .await
+                {
+                    let why = match err.downcast_ref::<RelayError>() {
+                        Some(e) if e.status == 403 => {
+                            "You can only delete your own messages.".to_owned()
+                        }
+                        _ => format!("Could not delete the message: {}", people_error(&err)),
+                    };
+                    shared.notice(why);
                 }
-            }
+            });
         }
         ClientCommand::Approve {
             chat_id,
@@ -5157,6 +5253,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         kind: crate::model::ChatKind::Chat,
                         participants: Vec::new(),
                         unread: false,
+                        unread_count: 0,
                         last_message_at: now_ms(),
                         archived_at: None,
                     });
@@ -5223,6 +5320,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                                 q.command,
                                 q.answer,
                                 q.reply_to,
+                                q.forwarded_from,
                             ));
                         }
                     }
@@ -5628,6 +5726,37 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 }
             });
         }
+        ClientCommand::ArchiveSpace {
+            space_id,
+            server,
+            archived,
+        } => {
+            // Optimistic in the project cache the next refresh is built from
+            // (servers come straight from `GET /servers`, which carries the flag).
+            if !server {
+                let mut projects = shared.projects.lock().unwrap();
+                if let Some(p) = projects.iter_mut().find(|p| p.id == space_id) {
+                    p.archived_at = archived.then(now_ms);
+                }
+            }
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let path = if server {
+                    format!("/servers/{space_id}/archive")
+                } else {
+                    format!("/projects/{space_id}/archive")
+                };
+                if let Err(err) = shared
+                    .put_json(&path, json!({ "archived": archived }))
+                    .await
+                {
+                    // Older relay: the Mac keeps its local state until the next refresh.
+                    if !err.to_string().contains("HTTP 404") {
+                        shared.notice(format!("Archive: {}", people_error(&err)));
+                    }
+                }
+            });
+        }
         ClientCommand::SetMuted { space_id, muted } => {
             if !shared.is_people(&space_id) {
                 return;
@@ -5653,6 +5782,28 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     shared.notice(format!("Mute: {err:#}"));
                 }
             });
+        }
+        ClientCommand::SetReadReceipts { enabled, persist } => {
+            shared.read_receipts.store(enabled, Ordering::Relaxed);
+            // Refresh presence so peers drop or pick up our `seen` at once.
+            for room in shared.rooms.lock().unwrap().values() {
+                let _ = room.cmds.send(RoomCmd::Presence);
+            }
+            if persist {
+                // Mirror onto every people chat we know (`PUT …/settings`).
+                let people: Vec<Id> = shared.people.lock().unwrap().iter().cloned().collect();
+                let shared = shared.clone();
+                tokio::spawn(async move {
+                    for chat_id in people {
+                        let _ = shared
+                            .put_json(
+                                &format!("/chats/{chat_id}/settings"),
+                                json!({ "read_receipts": enabled }),
+                            )
+                            .await;
+                    }
+                });
+            }
         }
         ClientCommand::FetchVoices => {
             let shared = shared.clone();
@@ -6149,6 +6300,21 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             let shared = shared.clone();
             tokio::spawn(async move {
                 refresh_secrets(&shared).await;
+            });
+        }
+        ClientCommand::DevicesRefresh => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                refresh_devices(&shared).await;
+            });
+        }
+        ClientCommand::DeviceRevoke { id } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Err(err) = shared.delete(&format!("/auth/devices/{id}")).await {
+                    shared.notice(format!("Sign out device: {}", relay_message(&err)));
+                }
+                refresh_devices(&shared).await;
             });
         }
         ClientCommand::ProjectSecretsRefresh { project_id } => {
@@ -6906,6 +7072,16 @@ async fn refresh_secrets(shared: &Arc<Shared>) {
     let _ = shared.events.send(SyncEvent::Secrets(secrets_view_from_dto(
         &overview, &requests,
     )));
+}
+
+/// Settings → Devices (`GET /auth/devices`): the list, or why it could not be read.
+async fn refresh_devices(shared: &Arc<Shared>) {
+    let result = match shared.get_json("/auth/devices").await {
+        Ok(value) => serde_json::from_value::<Vec<crate::model::DeviceView>>(value)
+            .map_err(|e| format!("unexpected reply: {e}")),
+        Err(err) => Err(relay_message(&err)),
+    };
+    let _ = shared.events.send(SyncEvent::Devices(result));
 }
 
 /// One agent's Secrets page (`GET /projects/{id}/secrets`).

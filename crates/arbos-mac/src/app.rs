@@ -20,10 +20,10 @@ use crate::model::{
 };
 use crate::model::{
     new_id, now_ms, Attachment, AttachmentKind, BoxState, ChannelSel, ChannelsView, Chat, ChatKind,
-    ConnectorsView, Effort, Id, Link, LinkState, LocalView, Machine, Message, MessageStatus,
-    NewSecret, Part, Project, ProjectDocView, ProjectSecrets, QuestionState, Role, Routine,
-    RoutineRun, RoutineTrigger, SecretDirector, SecretScope, SecretsView, ServerInfo, Skill,
-    StatusKind,
+    ConnectorsView, DevicesView, Effort, Id, Link, LinkState, LocalView, Machine, Message,
+    MessageStatus, NewSecret, Part, Project, ProjectDocView, ProjectSecrets, QuestionState, Role,
+    Routine, RoutineRun, RoutineTrigger, SecretDirector, SecretScope, SecretsView, ServerInfo,
+    Skill, StatusKind,
 };
 use crate::search;
 use crate::sign_in;
@@ -134,6 +134,10 @@ fn muted_path() -> PathBuf {
     crate::sync::credentials::config_dir().join("muted.json")
 }
 
+fn read_receipts_path() -> PathBuf {
+    crate::sync::credentials::config_dir().join("read_receipts.json")
+}
+
 /// Multi-chat (several chats per agent: tabs, "+", ⌘T, archive) is on by
 /// default. `ARBOS_MULTI_CHAT=0` or `{"multi_chat": false}` in
 /// `<config>/settings.json` turns it off (one chat per agent).
@@ -161,6 +165,20 @@ fn save_muted(muted: &HashSet<Id>) {
     if let Ok(json) = serde_json::to_string(&muted.iter().collect::<Vec<_>>()) {
         let _ = std::fs::write(muted_path(), json);
     }
+}
+
+/// Settings → Notifications "Read receipts" (default on, matching the relay).
+fn load_read_receipts() -> bool {
+    std::fs::read_to_string(read_receipts_path())
+        .ok()
+        .and_then(|s| serde_json::from_str::<bool>(&s).ok())
+        .unwrap_or(true)
+}
+
+fn save_read_receipts(enabled: bool) {
+    let dir = crate::sync::credentials::config_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(read_receipts_path(), if enabled { "true" } else { "false" });
 }
 
 /// "3 min ago", "2 h ago", "yesterday", "5 days ago".
@@ -286,6 +304,24 @@ pub struct ForwardTarget {
     /// "@sam", "Group · 4 members", "Agent".
     pub subtitle: String,
     pub last_activity: u64,
+}
+
+/// Bubble menu → Forward (feedback app-01M5MXRZ7609S70P9S9P2RZDDF): the text
+/// message the open picker will send on, and who wrote it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ForwardMessage {
+    pub chat_id: Id,
+    pub message_id: Id,
+    /// The original sender's display name ("Forwarded from <by>").
+    pub by: String,
+}
+
+/// Bubble menu → Delete (feedback app-01M5MXQ90MEEWF6C8W090VCZHF): the message
+/// the "Delete message?" confirm is open for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeleteConfirm {
+    pub chat_id: Id,
+    pub message_id: Id,
 }
 
 /// The text line a forwarded attachment travels with (every client renders
@@ -464,6 +500,10 @@ pub struct AppState {
     pub media_viewer: Option<MediaViewer>,
     /// Bumped on every open so the shell focuses the viewer once per opening.
     pub media_viewer_generation: u64,
+    /// Bubble menu → Forward: the message the "Forward to" picker is open for.
+    pub forward_message: Option<ForwardMessage>,
+    /// Bubble menu → Delete: the "Delete message?" confirm, when open.
+    pub delete_confirm: Option<DeleteConfirm>,
     pub new_project_open: bool,
     /// Debug: per-message "Show details" disclosures in the transcript.
     pub show_details: bool,
@@ -473,6 +513,8 @@ pub struct AppState {
     pub connectors: ConnectorsView,
     /// Settings → Secrets (D83).
     pub secrets: SecretsView,
+    /// Settings → Devices (`GET /auth/devices`).
+    pub devices: DevicesView,
     /// Agent profile → Secrets, per project.
     pub project_secrets: std::collections::HashMap<Id, ProjectSecrets>,
     /// Settings → Routines, per project (F3).
@@ -516,6 +558,11 @@ pub struct AppState {
     pub renaming_project: Option<Id>,
     /// Spaces whose notifications are muted (`<config>/muted.json`).
     pub muted: HashSet<Id>,
+    /// Settings → Notifications: send and show Presence `{seen}` read receipts
+    /// (`<config>/read_receipts.json`, default on).
+    pub read_receipts: bool,
+    /// People-chat read receipts: chat id → (peer handle → last seen message id).
+    pub message_receipts: HashMap<Id, HashMap<String, Id>>,
     /// Last presence frame seen per handle (ms): "online" while fresh.
     pub presence_seen: HashMap<String, u64>,
     /// Answered this session: never re-arm it on a later sync, even when the
@@ -817,11 +864,14 @@ impl AppState {
             details_open: None,
             media_viewer: None,
             media_viewer_generation: 0,
+            forward_message: None,
+            delete_confirm: None,
             new_project_open: false,
             show_details: false,
             machine: Machine::default(),
             connectors: ConnectorsView::default(),
             secrets: SecretsView::default(),
+            devices: DevicesView::default(),
             project_secrets: std::collections::HashMap::new(),
             routines: HashMap::new(),
             routine_runs: HashMap::new(),
@@ -839,6 +889,8 @@ impl AppState {
             profile_editing_name: false,
             renaming_project: None,
             muted: load_muted(),
+            read_receipts: load_read_receipts(),
+            message_receipts: HashMap::new(),
             presence_seen: HashMap::new(),
             notify_prompt_answered: false,
             focus_sent: None,
@@ -1225,6 +1277,13 @@ impl AppState {
                 if self.account.is_some() {
                     self.maybe_prompt_notifications();
                     self.prefetch_directory();
+                    // Align the sync source with the saved Settings → Notifications
+                    // preference (Shared defaults to on); no PUT on every launch.
+                    let enabled = self.read_receipts;
+                    self.command(ClientCommand::SetReadReceipts {
+                        enabled,
+                        persist: false,
+                    });
                 }
                 if let Some(url) = self.account.as_ref().map(|a| a.avatar_url.clone()) {
                     self.want_avatar(url);
@@ -1316,9 +1375,19 @@ impl AppState {
                     self.group_created(chat_id, cx);
                 }
             }
-            SyncEvent::Presence { handle } => {
-                self.presence_seen.insert(handle, now_ms());
-                if self.profile.is_some() {
+            SyncEvent::Presence {
+                handle,
+                chat_id,
+                seen,
+            } => {
+                self.presence_seen.insert(handle.clone(), now_ms());
+                if let (Some(chat_id), Some(seen)) = (chat_id, seen) {
+                    self.message_receipts
+                        .entry(chat_id)
+                        .or_default()
+                        .insert(handle, seen);
+                    cx.notify();
+                } else if self.profile.is_some() {
                     cx.notify();
                 }
             }
@@ -1488,8 +1557,8 @@ impl AppState {
                 // Signed in and synced (also the path without a sign-in event).
                 if !projects.is_empty() {
                     self.maybe_prompt_notifications();
-                    // The "Voice · <name>" label needs the list once (only with voice mode on).
-                    if !self.voices_requested && self.voice_mode_feature {
+                    // The agent pane's "Voice · <name>" row needs the list once.
+                    if !self.voices_requested {
                         self.voices_requested = true;
                         self.fetch_voices();
                     }
@@ -1919,6 +1988,18 @@ impl AppState {
                 }
                 cx.notify();
             }
+            SyncEvent::SpaceArchived {
+                space_id,
+                archived_at,
+            } => {
+                // Another device archived / unarchived a sidebar space for me.
+                if let Some(p) = self.projects.iter_mut().find(|p| p.id == space_id) {
+                    p.archived_at = archived_at;
+                } else if let Some(s) = self.servers.iter_mut().find(|s| s.id == space_id) {
+                    s.archived_at = archived_at;
+                }
+                cx.notify();
+            }
             SyncEvent::ChatArchived {
                 chat_id,
                 archived_at,
@@ -1980,6 +2061,9 @@ impl AppState {
                     .map(|m| arrival_read(chat_visible, self.is_mine(m), m.role == Role::System))
                     .collect();
                 self.apply_arrival_read(&chat_id, &effects);
+                if effects.contains(&ArrivalRead::MarkUnread) {
+                    self.unarchive_on_activity(&chat_id, cx);
+                }
                 self.request_thumbnails(&chat_id);
                 if self.onboarding.is_some() {
                     self.onboarding_tick(cx);
@@ -2039,6 +2123,9 @@ impl AppState {
                         message.role == Role::System,
                     );
                     self.apply_arrival_read(&chat_id, &[effect]);
+                    if effect == ArrivalRead::MarkUnread {
+                        self.unarchive_on_activity(&chat_id, cx);
+                    }
                 }
                 if text_only && appended > 0 {
                     cx.emit(AppEvent::TranscriptText { chat_id });
@@ -2088,6 +2175,17 @@ impl AppState {
             }
             SyncEvent::Secrets(view) => {
                 self.secrets = view;
+                cx.notify();
+            }
+            SyncEvent::Devices(result) => {
+                match result {
+                    Ok(items) => {
+                        self.devices.items = items;
+                        self.devices.error = None;
+                    }
+                    Err(why) => self.devices.error = Some(why),
+                }
+                self.devices.loaded = true;
                 cx.notify();
             }
             SyncEvent::Routines {
@@ -2672,6 +2770,7 @@ impl AppState {
             .find(|c| c.id == chat_id)
         {
             chat.unread = false;
+            chat.unread_count = 0;
         }
         self.command(ClientCommand::OpenChat {
             chat_id: chat_id.clone(),
@@ -2786,6 +2885,7 @@ impl AppState {
             .find(|c| c.id == chat_id)
         {
             chat.unread = false;
+            chat.unread_count = 0;
         }
         self.sync_badge();
         self.command(ClientCommand::MarkRead {
@@ -2796,8 +2896,23 @@ impl AppState {
         cx.notify();
     }
 
+    /// Can the open space take a new tab (⌘T, the pill's "+", the dropdown's
+    /// New tab)? Only an agent's own chats: people DMs and groups and server
+    /// channels have no project chats, so there the shortcut is a no-op and
+    /// the controls are absent (Jacob 2026-10-23: "New chat failed: HTTP 404
+    /// no such project" from ⌘T in a group).
+    pub fn can_new_tab(&self) -> bool {
+        new_tab_allowed(
+            self.multi_chat,
+            self.selected_project
+                .as_deref()
+                .and_then(|id| self.project(id)),
+            self.selected_channel.is_some(),
+        )
+    }
+
     pub fn new_tab(&mut self, cx: &mut Context<Self>) {
-        if !self.multi_chat {
+        if !self.can_new_tab() {
             return;
         }
         let Some(project_id) = self.selected_project.clone() else {
@@ -2828,6 +2943,7 @@ impl AppState {
                 kind: ChatKind::Chat,
                 participants: Vec::new(),
                 unread: false,
+                unread_count: 0,
                 last_message_at: now_ms(),
                 archived_at: None,
             });
@@ -3064,6 +3180,7 @@ impl AppState {
                 sender_avatar_color: None,
                 mentions: Vec::new(),
                 reply_to: reply_to.clone(),
+                forwarded_from: None,
                 asked_by_handle: None,
                 owner_handle: None,
                 usage: None,
@@ -3788,6 +3905,7 @@ impl AppState {
                 sender_avatar_color: None,
                 mentions: Vec::new(),
                 reply_to: None,
+                forwarded_from: None,
                 asked_by_handle: None,
                 owner_handle: None,
                 usage: None,
@@ -4187,6 +4305,7 @@ impl AppState {
                 sender_avatar_color: None,
                 mentions: Vec::new(),
                 reply_to: None,
+                forwarded_from: None,
                 asked_by_handle: None,
                 owner_handle: None,
                 created_at: now_ms(),
@@ -4280,6 +4399,34 @@ impl AppState {
             message_id,
         });
         cx.notify();
+    }
+
+    /// Bubble menu → Delete: ask first (feedback app-01M5MXQ90MEEWF6C8W090VCZHF).
+    /// The menu only offers Delete where `may_delete_message` holds, so the
+    /// confirm's one action is always "delete for everyone".
+    pub fn open_delete_confirm(&mut self, chat_id: Id, message_id: Id, cx: &mut Context<Self>) {
+        if message_id.is_empty() {
+            return;
+        }
+        self.delete_confirm = Some(DeleteConfirm {
+            chat_id,
+            message_id,
+        });
+        cx.notify();
+    }
+
+    pub fn close_delete_confirm(&mut self, cx: &mut Context<Self>) {
+        if self.delete_confirm.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// The confirm's Delete (click or Return): delete and close.
+    pub fn confirm_delete(&mut self, cx: &mut Context<Self>) {
+        let Some(confirm) = self.delete_confirm.take() else {
+            return;
+        };
+        self.delete_message(confirm.chat_id, confirm.message_id, cx);
     }
 
     pub fn retry(&mut self, chat_id: Id, message_id: Id, cx: &mut Context<Self>) {
@@ -4428,12 +4575,9 @@ impl AppState {
         cx.notify();
     }
 
-    /// Ask the relay for the voice list (the picker opening).
+    /// Ask the relay for the voice list (the agent pane's Voice row and the
+    /// call-voice picker need it; the list is independent of voice mode).
     pub fn fetch_voices(&mut self) {
-        // No voice picker while the feature is off: nothing needs the list.
-        if !self.voice_mode_feature {
-            return;
-        }
         self.command(ClientCommand::FetchVoices);
     }
 
@@ -4874,6 +5018,88 @@ impl AppState {
         self.project(space_id).is_some_and(|p| p.muted) || self.muted.contains(space_id)
     }
 
+    /// Sidebar archive (Jacob 2026-10-23): is this space (agent, people chat
+    /// or server) hidden from my list?
+    pub fn is_space_archived(&self, space_id: &str) -> bool {
+        self.project(space_id)
+            .map(|p| p.archived_at.is_some())
+            .or_else(|| {
+                self.servers
+                    .iter()
+                    .find(|s| s.id == space_id)
+                    .map(|s| s.archived_at.is_some())
+            })
+            .unwrap_or(false)
+    }
+
+    /// Hidden spaces, newest first; what the "Hidden chats · N" footer counts.
+    pub fn archived_space_count(&self) -> usize {
+        self.projects
+            .iter()
+            .filter(|p| p.archived_at.is_some())
+            .count()
+            + self
+                .servers
+                .iter()
+                .filter(|s| s.archived_at.is_some())
+                .count()
+    }
+
+    /// Archive (hide) or unarchive a sidebar space for me, on every device.
+    /// Nothing is deleted; an archived agent keeps running its routines. A
+    /// people chat goes through the chat archive the relay already has.
+    pub fn set_space_archived(&mut self, space_id: Id, archived: bool, cx: &mut Context<Self>) {
+        let at = archived.then(now_ms);
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == space_id) {
+            p.archived_at = at;
+            let people = p.is_people();
+            if archived && self.selected_project.as_deref() == Some(space_id.as_str()) {
+                self.selected_project = None;
+                self.select_next_if_none(cx);
+            }
+            if people {
+                self.command(ClientCommand::ArchiveChat {
+                    chat_id: space_id,
+                    archived,
+                });
+            } else {
+                self.command(ClientCommand::ArchiveSpace {
+                    space_id,
+                    server: false,
+                    archived,
+                });
+            }
+            cx.notify();
+            return;
+        }
+        if let Some(s) = self.servers.iter_mut().find(|s| s.id == space_id) {
+            s.archived_at = at;
+            if archived && self.open_server.as_deref() == Some(space_id.as_str()) {
+                self.open_server = None;
+                self.selected_channel = None;
+                self.select_next_if_none(cx);
+            }
+            self.command(ClientCommand::ArchiveSpace {
+                space_id,
+                server: true,
+                archived,
+            });
+            cx.notify();
+        }
+    }
+
+    /// A hidden space comes back when something new arrives in it (Telegram).
+    fn unarchive_on_activity(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        let Some(space_id) = self
+            .project_of_chat(chat_id)
+            .filter(|p| p.archived_at.is_some())
+            .map(|p| p.id.clone())
+        else {
+            return;
+        };
+        self.set_space_archived(space_id, false, cx);
+    }
+
     pub fn toggle_mute(&mut self, space_id: Id, cx: &mut Context<Self>) {
         let now_muted = !self.is_muted(&space_id);
         let people = self.project(&space_id).is_some_and(|p| p.is_people());
@@ -5002,7 +5228,7 @@ impl AppState {
     }
 
     /// Who shared it, for the viewer's caption: name, else `@handle`, else "You" / the agent.
-    fn viewer_sender_name(&self, m: &Message) -> String {
+    pub fn viewer_sender_name(&self, m: &Message) -> String {
         if let Some(n) = m.sender_name.as_deref().filter(|n| !n.is_empty()) {
             return n.to_string();
         }
@@ -5316,6 +5542,7 @@ impl AppState {
                 sender_avatar_color: None,
                 mentions: Vec::new(),
                 reply_to: None,
+                forwarded_from: None,
                 asked_by_handle: None,
                 owner_handle: None,
                 usage: None,
@@ -5339,6 +5566,135 @@ impl AppState {
             from_slot,
             attachment,
             text,
+        });
+        self.push_notice(format!("Forwarded to {}", target.name));
+        cx.emit(AppEvent::TranscriptChanged {
+            chat_id: target.chat_id,
+        });
+        cx.notify();
+    }
+
+    // ----- bubble menu → Forward (feedback app-01M5MXRZ7609S70P9S9P2RZDDF) -----
+
+    /// Who a message is from, for "Forwarded from <name>": the row's sender
+    /// name, else the person's display name, my own name for my bubbles, else
+    /// the agent's name.
+    pub fn forward_sender_name(&self, m: &Message) -> String {
+        if self.is_mine(m) {
+            if let Some(a) = self.account.as_ref() {
+                let name = if a.name.trim().is_empty() {
+                    a.login.clone()
+                } else {
+                    a.name.clone()
+                };
+                if !name.is_empty() {
+                    return name;
+                }
+            }
+        }
+        self.viewer_sender_name(m)
+    }
+
+    /// Open the "Forward to" picker for a bubble (the media viewer's picker,
+    /// over the chat).
+    pub fn open_forward_message(&mut self, chat_id: Id, message_id: Id, cx: &mut Context<Self>) {
+        let Some(message) = self
+            .messages
+            .get(&chat_id)
+            .and_then(|ms| ms.iter().find(|m| m.id == message_id))
+        else {
+            return;
+        };
+        if message.plain_text().trim().is_empty() {
+            self.push_notice("Nothing to forward");
+            cx.notify();
+            return;
+        }
+        let by = self.forward_sender_name(message);
+        self.forward_message = Some(ForwardMessage {
+            chat_id,
+            message_id,
+            by,
+        });
+        cx.notify();
+    }
+
+    pub fn close_forward_message(&mut self, cx: &mut Context<Self>) {
+        if self.forward_message.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Forward the picked message's text to `target` as a new message of mine
+    /// there (no reply quote), carrying `forwardedFrom: <name>` so every client
+    /// draws the "Forwarded from <name>" header on the bubble.
+    pub fn forward_message_to(&mut self, target: ForwardTarget, cx: &mut Context<Self>) {
+        let Some(source) = self.forward_message.take() else {
+            return;
+        };
+        let Some(text) = self
+            .messages
+            .get(&source.chat_id)
+            .and_then(|ms| ms.iter().find(|m| m.id == source.message_id))
+            .map(|m| m.plain_text().trim().to_owned())
+            .filter(|t| !t.is_empty())
+        else {
+            cx.notify();
+            return;
+        };
+        let message_id = new_id();
+        let parts = vec![Part::Text {
+            id: new_id(),
+            text: text.clone(),
+        }];
+        self.messages
+            .entry(target.chat_id.clone())
+            .or_default()
+            .push(Message {
+                id: message_id.clone(),
+                chat_id: target.chat_id.clone(),
+                role: Role::User,
+                sender: "user".into(),
+                status: MessageStatus::Queued,
+                turn: None,
+                decision: None,
+                subagent_id: None,
+                subagent_name: None,
+                handoff_messages: None,
+                agent_reply_to: None,
+                reactions: Default::default(),
+                in_reply_to: None,
+                routine_name: None,
+                sender_name: None,
+                sender_icon: None,
+                sender_handle: None,
+                sender_avatar: None,
+                sender_avatar_color: None,
+                mentions: Vec::new(),
+                reply_to: None,
+                forwarded_from: Some(source.by.clone()),
+                asked_by_handle: None,
+                owner_handle: None,
+                usage: None,
+                return_contract: None,
+                waiting_user: false,
+                waiting_approval: false,
+                model: None,
+                effort: None,
+                created_at: now_ms(),
+                completed_at: None,
+                call_id: None,
+                activity: None,
+                pending: true,
+                parts,
+                hidden_parts: Vec::new(),
+                greeting: false,
+            });
+        self.command(ClientCommand::ForwardText {
+            chat_id: target.chat_id.clone(),
+            message_id,
+            text,
+            forwarded_from: source.by,
         });
         self.push_notice(format!("Forwarded to {}", target.name));
         cx.emit(AppEvent::TranscriptChanged {
@@ -5383,6 +5739,7 @@ impl AppState {
     }
 
     /// Light the unread dot (and Dock badge) until the next refresh confirms.
+    /// Until `GET /me/unread` returns, count at least one missed message (same as iOS).
     fn mark_chat_unread(&mut self, chat_id: &str) {
         if let Some(chat) = self
             .chats
@@ -5391,6 +5748,7 @@ impl AppState {
             .find(|c| c.id == chat_id)
         {
             chat.unread = true;
+            chat.unread_count = chat.unread_count.max(1);
         }
         self.sync_badge();
     }
@@ -5719,14 +6077,14 @@ impl AppState {
         cx.activate(true);
     }
 
-    /// Dock badge = chats with something unread (cleared as they are read).
+    /// Dock badge = unread messages across chats (from `GET /me/unread`; cleared as they are read).
     pub fn sync_badge(&self) {
         let total = self
             .chats
             .values()
             .flat_map(|v| v.iter())
-            .filter(|c| c.unread)
-            .count();
+            .map(Chat::missed_count)
+            .sum();
         notify::set_badge(total);
     }
 
@@ -5791,6 +6149,23 @@ impl AppState {
 
     pub fn set_notifications_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
         self.notifier.enabled = enabled;
+        cx.notify();
+    }
+
+    /// Settings → Notifications "Read receipts": Presence `{seen}` on/off.
+    pub fn set_read_receipts(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.read_receipts == enabled {
+            return;
+        }
+        self.read_receipts = enabled;
+        save_read_receipts(enabled);
+        if !enabled {
+            self.message_receipts.clear();
+        }
+        self.command(ClientCommand::SetReadReceipts {
+            enabled,
+            persist: true,
+        });
         cx.notify();
     }
 
@@ -7051,6 +7426,26 @@ impl AppState {
 
     pub fn secrets_refresh(&mut self, cx: &mut Context<Self>) {
         self.command(ClientCommand::SecretsRefresh);
+        cx.notify();
+    }
+
+    // ----- devices (Settings → Devices, Oct 23) ---------------------------
+
+    /// Settings → Devices opened: ask the relay for the list (the page shows
+    /// "Loading…" until the answer, the last list meanwhile).
+    pub fn devices_refresh(&mut self, cx: &mut Context<Self>) {
+        self.devices.error = None;
+        self.command(ClientCommand::DevicesRefresh);
+        cx.notify();
+    }
+
+    /// Sign another device out. The current device never goes through here
+    /// (its row offers Sign out instead), so the user is never stranded.
+    pub fn revoke_device(&mut self, id: Id, cx: &mut Context<Self>) {
+        if !crate::ui::devices::remove_other(&mut self.devices.items, &id) {
+            return;
+        }
+        self.command(ClientCommand::DeviceRevoke { id });
         cx.notify();
     }
 
@@ -8380,6 +8775,21 @@ fn device_name() -> String {
     }
 }
 
+/// The one rule behind ⌘T, the header pill's "+" and the tab dropdown's New
+/// tab: only an agent's own space takes a new tab. People DMs and groups
+/// (`SpaceKind::Dm` / `Group`) have no project chats, a server channel has no
+/// space at all, and the whole thing sits behind the multi-chat flag.
+pub(crate) fn new_tab_allowed(
+    multi_chat: bool,
+    space: Option<&Project>,
+    channel_open: bool,
+) -> bool {
+    if !multi_chat || channel_open {
+        return false;
+    }
+    space.is_some_and(|p| !p.is_people())
+}
+
 /// The local row of a session fork (#1257): the same project, a plain chat
 /// titled `<title> (fork)`, nothing pinned or shared. `None` when `source`
 /// cannot be forked (groups, system tabs, chats of shared or people spaces).
@@ -8402,6 +8812,7 @@ pub(crate) fn forked_chat(source: &Chat, project: &Project, id: Id) -> Option<Ch
         kind: ChatKind::Chat,
         participants: Vec::new(),
         unread: false,
+        unread_count: 0,
         last_message_at: now_ms(),
         archived_at: None,
     })
@@ -8613,6 +9024,7 @@ mod fork_tests {
             kind: ChatKind::Chat,
             participants: Vec::new(),
             unread: false,
+            unread_count: 0,
             last_message_at: 0,
             archived_at: None,
         }
@@ -8704,6 +9116,58 @@ mod trim_tests {
             }
         });
         assert!(trim_rect(&img).is_none());
+    }
+}
+
+#[cfg(test)]
+mod new_tab_scope_tests {
+    //! Jacob (2026-10-23, Arbonites group): ⌘T in a group chat tried to create
+    //! a project chat and the relay answered "no such project". New tab is an
+    //! agent-space affordance only — the same gate decides the shortcut, the
+    //! pill's "+" and the dropdown row, so none of them exist for people rooms
+    //! or channels.
+    use super::*;
+    use crate::model::SpaceKind;
+
+    fn space(kind: SpaceKind) -> Project {
+        Project {
+            id: "s-1".into(),
+            name: "Space".into(),
+            kind,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn agent_space_keeps_new_tab() {
+        assert!(new_tab_allowed(
+            true,
+            Some(&space(SpaceKind::Project)),
+            false
+        ));
+    }
+
+    #[test]
+    fn people_rooms_and_channels_have_no_new_tab() {
+        assert!(!new_tab_allowed(
+            true,
+            Some(&space(SpaceKind::Group)),
+            false
+        ));
+        assert!(!new_tab_allowed(true, Some(&space(SpaceKind::Dm)), false));
+        // A channel in the centre: no space selected, channel open.
+        assert!(!new_tab_allowed(true, None, true));
+        // Nothing open at all.
+        assert!(!new_tab_allowed(true, None, false));
+    }
+
+    #[test]
+    fn multi_chat_off_hides_it_everywhere() {
+        assert!(!new_tab_allowed(
+            false,
+            Some(&space(SpaceKind::Project)),
+            false
+        ));
     }
 }
 

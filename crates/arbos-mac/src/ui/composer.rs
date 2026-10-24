@@ -14,12 +14,12 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    actions, div, fill, img, point, prelude::*, px, relative, size, App, Bounds, ClipboardItem,
-    Context, CursorStyle, Div, Element, ElementId, ElementInputHandler, Entity, EntityInputHandler,
-    EventEmitter, FocusHandle, Focusable, FontWeight, GlobalElementId, InspectorElementId,
-    IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
-    PaintQuad, Pixels, Point, Render, RenderImage, SharedString, Style, TextAlign, TextRun,
-    UTF16Selection, UnderlineStyle, Window, WrappedLine,
+    actions, div, fill, img, point, prelude::*, px, relative, size, App, Bounds, ClipboardEntry,
+    ClipboardItem, Context, CursorStyle, Div, Element, ElementId, ElementInputHandler, Entity,
+    EntityInputHandler, EventEmitter, FocusHandle, Focusable, FontWeight, GlobalElementId,
+    InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ObjectFit, PaintQuad, Pixels, Point, Render, RenderImage, SharedString, Style,
+    TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -67,11 +67,23 @@ actions!(
         Paste,
         Copy,
         Cut,
+        Undo,
+        Redo,
         Escape,
         AcceptMention,
         PrevMention,
     ]
 );
+
+/// One restore point for ⌘Z / ⌘⇧Z in the composer field.
+#[derive(Clone, PartialEq, Eq)]
+struct EditSnapshot {
+    content: String,
+    selected_range: Range<usize>,
+    selection_reversed: bool,
+}
+
+const UNDO_LIMIT: usize = 100;
 
 pub const MAX_LINES: usize = 10;
 pub const COMPOSER_RADIUS: f32 = COMPOSER_HEIGHT / 2.0;
@@ -79,6 +91,81 @@ pub const COMPOSER_RADIUS: f32 = COMPOSER_HEIGHT / 2.0;
 pub type SubmitHandler = Rc<dyn Fn(&mut Window, &mut App)>;
 /// Returns true when the @-mention menu handled the key (skip caret / send).
 pub type MentionKeyHandler = Rc<dyn Fn(&mut App) -> bool>;
+/// Files and images from a ⌘V, for the owner to stage.
+pub type PasteMediaHandler = Rc<dyn Fn(Vec<PathBuf>, Vec<gpui::Image>, &mut App)>;
+
+/// A clipboard sorted by what ⌘V should do with it.
+///
+/// - A Finder copy carries the paths plus a text twin (the paths joined by
+///   newlines); only the paths count, the twin is never typed.
+/// - Rich text (HTML, RTF) arrives as its plain-text form — GPUI reads only
+///   `public.utf8-plain-text`.
+/// - A copied screenshot / image carries no text.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Pasted {
+    pub text: Option<String>,
+    pub files: Vec<PathBuf>,
+    pub images: Vec<gpui::Image>,
+}
+
+impl Pasted {
+    pub(crate) fn from_clipboard(item: &ClipboardItem) -> Self {
+        let mut out = Self::default();
+        for entry in item.entries() {
+            match entry {
+                ClipboardEntry::ExternalPaths(paths) => {
+                    out.files.extend(paths.paths().iter().cloned());
+                }
+                ClipboardEntry::Image(image) => out.images.push(image.clone()),
+                ClipboardEntry::String(s) => {
+                    out.text.get_or_insert_with(String::new).push_str(s.text());
+                }
+            }
+        }
+        if !out.files.is_empty() {
+            out.text = None;
+        }
+        out
+    }
+}
+
+/// File extension for a pasted image, so the staged tile and the upload see
+/// a normal image file.
+pub(crate) fn image_extension(format: gpui::ImageFormat) -> &'static str {
+    use gpui::ImageFormat::*;
+    match format {
+        Png => "png",
+        Jpeg => "jpg",
+        Webp => "webp",
+        Gif => "gif",
+        Svg => "svg",
+        Bmp => "bmp",
+        Tiff => "tiff",
+        Ico => "ico",
+        Pnm => "pnm",
+    }
+}
+
+/// A clipboard image becomes a real file the composer can stage and the send
+/// path can upload: `<tmp>/arbos-pasted/Pasted image <date>.<ext>` (the
+/// system clears its temp dir on its own).
+pub(crate) fn stash_pasted_image(image: &gpui::Image, dir: &Path) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    let stamp = chrono::Local::now().format("%Y-%m-%d at %H.%M.%S");
+    let ext = image_extension(image.format);
+    let mut path = dir.join(format!("Pasted image {stamp}.{ext}"));
+    let mut n = 2;
+    while path.exists() {
+        path = dir.join(format!("Pasted image {stamp} ({n}).{ext}"));
+        n += 1;
+    }
+    std::fs::write(&path, &image.bytes)?;
+    Ok(path)
+}
+
+pub(crate) fn pasted_images_dir() -> PathBuf {
+    std::env::temp_dir().join("arbos-pasted")
+}
 const INPUT_LINE_HEIGHT: f32 = LINE_HEIGHT;
 const INPUT_FONT_SIZE: f32 = TEXT_BODY;
 
@@ -113,6 +200,10 @@ pub struct ComposerInput {
     is_selecting: bool,
     /// Vertical scroll inside the box once it reaches `MAX_LINES`.
     scroll_y: f32,
+    /// Prior text states for ⌘Z (paste, word-delete, typing, cut).
+    undo_stack: Vec<EditSnapshot>,
+    /// States undone by ⌘Z, waiting for ⌘⇧Z.
+    redo_stack: Vec<EditSnapshot>,
     /// Runs deferred, after this entity's update ends, so the owner may read
     /// and update the input freely.
     pub on_submit: Option<SubmitHandler>,
@@ -122,6 +213,8 @@ pub struct ComposerInput {
     pub on_mention_prev: Option<MentionKeyHandler>,
     /// Enter while the `@` mention menu is open: accept the highlighted row.
     pub on_mention_accept: Option<MentionKeyHandler>,
+    /// ⌘V with files or an image on the clipboard: the owner stages them.
+    pub on_paste_media: Option<PasteMediaHandler>,
     /// Multi-line editors (skill bodies): Enter inserts a newline instead of
     /// submitting.
     pub enter_inserts_newline: bool,
@@ -148,10 +241,13 @@ impl ComposerInput {
             layout: None,
             is_selecting: false,
             scroll_y: 0.0,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
             on_submit: None,
             on_mention_next: None,
             on_mention_prev: None,
             on_mention_accept: None,
+            on_paste_media: None,
             enter_inserts_newline: false,
             masked: false,
             text_center: false,
@@ -192,6 +288,8 @@ impl ComposerInput {
         self.selection_reversed = false;
         self.marked_range = None;
         self.scroll_y = 0.0;
+        self.undo_stack.clear();
+        self.redo_stack.clear();
         cx.notify();
     }
 
@@ -214,6 +312,8 @@ impl ComposerInput {
         self.selection_reversed = false;
         self.marked_range = None;
         self.scroll_y = 0.0;
+        self.undo_stack.clear();
+        self.redo_stack.clear();
         cx.notify();
     }
 
@@ -341,12 +441,62 @@ impl ComposerInput {
         if self.content[at + 1..].contains(char::is_whitespace) {
             return;
         }
+        self.record_undo();
         self.content.truncate(at);
         self.content.push('@');
         self.content.push_str(handle);
         self.content.push(' ');
         let len = self.content.len();
         self.selected_range = len..len;
+        cx.notify();
+    }
+
+    fn snapshot(&self) -> EditSnapshot {
+        EditSnapshot {
+            content: self.content.clone(),
+            selected_range: self.selected_range.clone(),
+            selection_reversed: self.selection_reversed,
+        }
+    }
+
+    fn apply_snapshot(&mut self, snap: EditSnapshot) {
+        self.content = snap.content;
+        self.selected_range = snap.selected_range;
+        self.selection_reversed = snap.selection_reversed;
+        self.marked_range = None;
+    }
+
+    /// Push the current text before a user edit so ⌘Z can restore it.
+    fn record_undo(&mut self) {
+        let snap = self.snapshot();
+        if self.undo_stack.last() == Some(&snap) {
+            return;
+        }
+        self.undo_stack.push(snap);
+        if self.undo_stack.len() > UNDO_LIMIT {
+            self.undo_stack.remove(0);
+        }
+        self.redo_stack.clear();
+    }
+
+    fn undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(prev) = self.undo_stack.pop() else {
+            return;
+        };
+        self.redo_stack.push(self.snapshot());
+        self.apply_snapshot(prev);
+        cx.notify();
+    }
+
+    fn redo(&mut self, _: &Redo, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(next) = self.redo_stack.pop() else {
+            return;
+        };
+        self.undo_stack.push(self.snapshot());
+        if self.undo_stack.len() > UNDO_LIMIT {
+            self.undo_stack.remove(0);
+        }
+        self.apply_snapshot(next);
         cx.notify();
     }
 
@@ -503,10 +653,25 @@ impl ComposerInput {
         self.paste_clipboard(window, cx);
     }
 
-    /// Insert the clipboard's text at the caret (⌘V / Edit → Paste).
+    /// ⌘V / Edit → Paste: text lands at the caret; copied files and clipboard
+    /// images go to the owner (`on_paste_media`), which stages them like a
+    /// drop ([feedback desktop-paste-2026-10-23]). Fields without an owner
+    /// hook (search, names, secrets) keep text only.
     pub(crate) fn paste_clipboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            self.replace_text_in_range(None, &text, window, cx);
+        let Some(item) = cx.read_from_clipboard() else {
+            return;
+        };
+        let pasted = Pasted::from_clipboard(&item);
+        if let Some(text) = pasted.text.as_deref().filter(|t| !t.is_empty()) {
+            self.replace_text_in_range(None, text, window, cx);
+        }
+        if pasted.files.is_empty() && pasted.images.is_empty() {
+            return;
+        }
+        // The owner reads and updates this very entity; it must run after this
+        // update ends (same re-entrancy rule as `send`, #1208).
+        if let Some(cb) = self.on_paste_media.clone() {
+            window.defer(cx, move |_, cx| cb(pasted.files, pasted.images, cx));
         }
     }
 
@@ -929,6 +1094,12 @@ impl EntityInputHandler for ComposerInput {
             .map(|range_utf16| self.range_from_utf16(range_utf16))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
+        // IME commits keep `marked_range`; the checkpoint was taken when
+        // composition started. Every other edit (paste, word-delete, typing)
+        // records here so ⌘Z restores the prior text.
+        if self.marked_range.is_none() {
+            self.record_undo();
+        }
         self.content =
             self.content[0..range.start].to_owned() + new_text + &self.content[range.end..];
         self.selected_range = range.start + new_text.len()..range.start + new_text.len();
@@ -949,6 +1120,10 @@ impl EntityInputHandler for ComposerInput {
             .map(|range_utf16| self.range_from_utf16(range_utf16))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
+        // One undo step for the whole IME composition: checkpoint only at start.
+        if self.marked_range.is_none() {
+            self.record_undo();
+        }
         self.content =
             self.content[0..range.start].to_owned() + new_text + &self.content[range.end..];
         if !new_text.is_empty() {
@@ -1393,6 +1568,8 @@ impl Render for ComposerInput {
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::copy))
+            .on_action(cx.listener(Self::undo))
+            .on_action(cx.listener(Self::redo))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -1479,9 +1656,15 @@ impl Composer {
         let weak_next = weak.clone();
         let weak_prev = weak.clone();
         let weak_accept = weak.clone();
+        let weak_paste = weak.clone();
         input.update(cx, |input, _| {
             input.on_submit = Some(Rc::new(move |window, cx| {
                 let _ = weak.update(cx, |composer, cx| composer.submit(window, cx));
+            }));
+            input.on_paste_media = Some(Rc::new(move |files, images, cx| {
+                let _ = weak_paste.update(cx, |composer, cx| {
+                    composer.paste_media(files, images, cx);
+                });
             }));
             input.on_mention_next = Some(Rc::new(move |cx| {
                 weak_next
@@ -1746,7 +1929,26 @@ impl Composer {
         row
     }
 
-    /// Paths from the "+" picker or a drop onto the chat (pane or composer).
+    /// ⌘V with files (Finder copy) or an image (screenshot, copied picture):
+    /// staged exactly like a drop — files as attachment chips, images as
+    /// tiles. Directories are skipped like everywhere else.
+    pub(crate) fn paste_media(
+        &mut self,
+        files: Vec<PathBuf>,
+        images: Vec<gpui::Image>,
+        cx: &mut Context<Self>,
+    ) {
+        let dir = pasted_images_dir();
+        let stashed = images.iter().filter_map(|image| {
+            stash_pasted_image(image, &dir)
+                .map_err(|e| log::warn!("pasted image not saved: {e}"))
+                .ok()
+        });
+        self.add_paths(files.into_iter().chain(stashed), cx);
+    }
+
+    /// Paths from the "+" picker, a drop onto the chat (pane or composer), or
+    /// a ⌘V.
     pub(crate) fn add_paths(
         &mut self,
         paths: impl IntoIterator<Item = PathBuf>,
@@ -2766,6 +2968,67 @@ mod reply_preview_tests {
 mod tests {
     use super::*;
 
+    fn image(format: gpui::ImageFormat, bytes: &[u8]) -> gpui::Image {
+        let bytes = bytes.to_vec();
+        gpui::Image {
+            format,
+            id: gpui::hash(&bytes),
+            bytes,
+        }
+    }
+
+    #[test]
+    fn pasted_text_is_text() {
+        let p = Pasted::from_clipboard(&ClipboardItem::new_string("hello".into()));
+        assert_eq!(p.text.as_deref(), Some("hello"));
+        assert!(p.files.is_empty() && p.images.is_empty());
+    }
+
+    #[test]
+    fn pasted_image_is_an_image_with_no_text() {
+        let img = image(gpui::ImageFormat::Png, b"png");
+        let p = Pasted::from_clipboard(&ClipboardItem {
+            entries: vec![ClipboardEntry::Image(img.clone())],
+        });
+        assert_eq!(p.text, None);
+        assert_eq!(p.images, vec![img]);
+    }
+
+    #[test]
+    fn pasted_finder_copy_keeps_the_paths_and_drops_the_text_twin() {
+        let p = Pasted::from_clipboard(&ClipboardItem {
+            entries: vec![
+                ClipboardEntry::ExternalPaths(gpui::ExternalPaths(
+                    [PathBuf::from("/a.pdf"), PathBuf::from("/b c.png")]
+                        .into_iter()
+                        .collect(),
+                )),
+                ClipboardEntry::String(gpui::ClipboardString::new("/a.pdf\n/b c.png".into())),
+            ],
+        });
+        assert_eq!(p.text, None);
+        assert_eq!(
+            p.files,
+            vec![PathBuf::from("/a.pdf"), PathBuf::from("/b c.png")]
+        );
+    }
+
+    #[test]
+    fn stashed_image_gets_a_dated_name_and_its_extension() {
+        let dir = std::env::temp_dir().join(format!("arbos-paste-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let img = image(gpui::ImageFormat::Jpeg, b"jpeg bytes");
+        let a = stash_pasted_image(&img, &dir).unwrap();
+        let b = stash_pasted_image(&img, &dir).unwrap();
+        let name = a.file_name().unwrap().to_str().unwrap();
+        assert!(name.starts_with("Pasted image "), "{name}");
+        assert!(name.ends_with(".jpg"), "{name}");
+        assert_ne!(a, b, "a second paste in the same second gets its own file");
+        assert_eq!(std::fs::read(&a).unwrap(), b"jpeg bytes");
+        assert!(is_image_path(&a));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn recording_shows_a_stop_button_whatever_else_is_going_on() {
         for has_text in [false, true] {
@@ -2973,6 +3236,126 @@ mod enter_tests {
             text.starts_with("hi @sam"),
             "the mention was completed: {text:?}"
         );
+    }
+
+    /// Paste with an owner hook, as the chat composer has: text at the caret,
+    /// files and images to the hook ([feedback desktop-paste-2026-10-23]).
+    type PastedMedia = Rc<std::cell::RefCell<Vec<(Vec<PathBuf>, Vec<gpui::Image>)>>>;
+
+    fn input_with_paste_hook(
+        cx: &mut TestAppContext,
+    ) -> (Entity<ComposerInput>, &mut VisualTestContext, PastedMedia) {
+        let (input, vcx, _) = input_with_owner_callbacks(cx);
+        let media = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = media.clone();
+        vcx.update(|_, cx| {
+            input.update(cx, |input, _| {
+                input.on_paste_media = Some(Rc::new(move |files, images, _| {
+                    sink.borrow_mut().push((files, images));
+                }));
+            });
+        });
+        (input, vcx, media)
+    }
+
+    fn png_1x1() -> gpui::Image {
+        let bytes = vec![
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9C, 0x62, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01, 0xE5, 0x27, 0xDE, 0xFC, 0x00, 0x00,
+            0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+        gpui::Image {
+            format: gpui::ImageFormat::Png,
+            id: gpui::hash(&bytes),
+            bytes,
+        }
+    }
+
+    #[gpui::test]
+    fn paste_text_lands_at_the_caret(cx: &mut TestAppContext) {
+        let (input, cx, media) = input_with_paste_hook(cx);
+        cx.simulate_input("see ");
+        cx.update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string("this".into())));
+        cx.dispatch_action(Paste);
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(|_, cx| input.read(cx).text().to_string()),
+            "see this"
+        );
+        assert!(media.borrow().is_empty(), "plain text stages nothing");
+    }
+
+    #[gpui::test]
+    fn paste_image_stages_it_and_types_nothing(cx: &mut TestAppContext) {
+        let (input, cx, media) = input_with_paste_hook(cx);
+        cx.simulate_input("look");
+        let image = png_1x1();
+        cx.update(|_, cx| {
+            cx.write_to_clipboard(ClipboardItem {
+                entries: vec![ClipboardEntry::Image(image.clone())],
+            })
+        });
+        cx.dispatch_action(Paste);
+        cx.run_until_parked();
+        assert_eq!(cx.update(|_, cx| input.read(cx).text().to_string()), "look");
+        let media = media.borrow();
+        assert_eq!(media.len(), 1, "the hook ran once");
+        assert!(media[0].0.is_empty());
+        assert_eq!(media[0].1, vec![image]);
+    }
+
+    #[gpui::test]
+    fn paste_finder_copy_stages_the_files_not_their_paths(cx: &mut TestAppContext) {
+        let (input, cx, media) = input_with_paste_hook(cx);
+        let paths = vec![
+            PathBuf::from("/tmp/report.pdf"),
+            PathBuf::from("/tmp/shot.png"),
+        ];
+        // What AppKit hands over for a Finder copy: the paths plus a text
+        // twin with the same paths joined by newlines.
+        cx.update(|_, cx| {
+            cx.write_to_clipboard(ClipboardItem {
+                entries: vec![
+                    ClipboardEntry::ExternalPaths(gpui::ExternalPaths(
+                        paths.iter().cloned().collect(),
+                    )),
+                    ClipboardEntry::String(gpui::ClipboardString::new(
+                        "/tmp/report.pdf\n/tmp/shot.png".into(),
+                    )),
+                ],
+            })
+        });
+        cx.dispatch_action(Paste);
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(|_, cx| input.read(cx).text().to_string()),
+            "",
+            "the path list is never typed into the message"
+        );
+        let media = media.borrow();
+        assert_eq!(media.len(), 1);
+        assert_eq!(media[0].0, paths);
+        assert!(media[0].1.is_empty());
+    }
+
+    #[gpui::test]
+    fn paste_without_an_owner_hook_keeps_text_only(cx: &mut TestAppContext) {
+        // Search / name / secret fields: files and images are ignored, text works.
+        let (input, cx, _) = input_with_owner_callbacks(cx);
+        cx.update(|_, cx| {
+            cx.write_to_clipboard(ClipboardItem {
+                entries: vec![ClipboardEntry::Image(png_1x1())],
+            })
+        });
+        cx.dispatch_action(Paste);
+        cx.run_until_parked();
+        assert_eq!(cx.update(|_, cx| input.read(cx).text().to_string()), "");
+        cx.update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string("abc".into())));
+        cx.dispatch_action(Paste);
+        cx.run_until_parked();
+        assert_eq!(cx.update(|_, cx| input.read(cx).text().to_string()), "abc");
     }
 
     #[gpui::test]

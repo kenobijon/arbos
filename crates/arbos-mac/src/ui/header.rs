@@ -61,8 +61,9 @@ pub fn render(
         | None => false,
     };
     // Agents with multi-chat keep a trailing "+" inside the pill, so the right
-    // pad is tighter than the people/group pill's.
-    let show_new_chat = !is_people && state.multi_chat;
+    // pad is tighter than the people/group pill's. One gate with ⌘T and the
+    // dropdown's New tab (`AppState::can_new_tab`): people rooms get none.
+    let show_new_chat = state.can_new_tab();
     let mut pill = div()
         .id("header-title")
         .flex()
@@ -326,23 +327,23 @@ fn link_pill(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
     )
 }
 
-/// The expand control while the sidebar is hidden: the same 28 pt tile as the
-/// sidebar strip's collapse control, beside the traffic lights (72 + 12 pt)
-/// ([feedback mac-collapsed-toggle-inline]).
+/// The expand control while the sidebar is hidden: the same round disc as the
+/// sidebar strip's collapse toggle, beside the traffic lights (72 + 12 pt)
+/// ([feedback mac-collapsed-toggle-inline], [feedback sidebar-strip-filter-2026-10-24]).
 fn sidebar_toggle(shell: &Shell, theme: &Theme, cx: &mut Context<Shell>) -> Stateful<Div> {
     let _ = shell.state.read(cx).sidebar_overlay;
     div()
         .id("header-sidebar")
-        .size(px(28.0))
+        .size(px(crate::ui::sidebar::STRIP_BUTTON))
         .flex_shrink_0()
-        .rounded(px(7.0))
+        .rounded_full()
         .flex()
         .items_center()
         .justify_center()
         .cursor_pointer()
         .bg(theme.surface_2)
-        .hover(|s| s.bg(theme.surface_2))
-        .child(icon("sidebar-left", 17.0, theme.text))
+        .hover(|s| s.bg(Theme::with_alpha(theme.text, 0.14)))
+        .child(icon("sidebar-left", 16.0, theme.text))
         // The bar is a window-drag region; a control is not part of it.
         .on_mouse_down(
             gpui::MouseButton::Left,
@@ -661,6 +662,7 @@ fn tab_dropdown(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> impl
     let mut anchored_menu = anchored_chat_menu(shell, cx);
     let state = shell.state.read(cx);
     let multi_chat = state.multi_chat;
+    let new_tab = state.can_new_tab();
     let active = state.active_tab.get(&space.id).cloned();
     let tabs: Vec<Chat> = state.visible_tabs(&space.id).into_iter().cloned().collect();
     let mut previous: Vec<Chat> = state
@@ -922,7 +924,7 @@ fn tab_dropdown(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> impl
         body = body.child(list);
     }
 
-    if multi_chat {
+    if new_tab {
         body = body.child(glass::menu_divider(&theme)).child(
             glass::menu_row("tab-menu-new", "plus", "New tab", false, &theme)
                 .child(
@@ -1025,7 +1027,7 @@ mod header_tests {
             let left = self.folded.then(|| {
                 div()
                     .id("toggle")
-                    .size(px(28.0))
+                    .size(px(crate::ui::sidebar::STRIP_BUTTON))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .into_any_element()
             });

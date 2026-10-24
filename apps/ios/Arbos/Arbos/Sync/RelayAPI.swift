@@ -199,8 +199,11 @@ final class RelayAPI {
                 continue
             }
             let id: String
+            // The per-user archive flag rides on the list only; the detail is shared.
+            var listArchivedAt: Int64? = nil
             if let dto = try? decoder.decode(ProjectDto.self, from: itemData) {
                 id = dto.id
+                listArchivedAt = dto.archived_at.flatMap { $0 }
             } else if let bare = try? decoder.decode(ProjectListId.self, from: itemData) {
                 id = bare.id
             } else {
@@ -230,6 +233,7 @@ final class RelayAPI {
                 continue
             }
             var project = Arbos.Project(dto: detail.project)
+            project.archivedAt = listArchivedAt
             if let key = project.imageKey {
                 project.imageURL = "\(endpoint.httpUrl)/blob/\(id)/\(key)?token=\(token())"
             }
@@ -303,6 +307,16 @@ final class RelayAPI {
     /// Soft-delete an owned agent (`DELETE /projects/{id}`).
     func deleteProject(_ projectId: Id) async throws {
         _ = try await request("DELETE", "/projects/\(projectId)")
+    }
+
+    /// `PUT /projects/{id}/archive {archived}` — this user's sidebar archive, synced across devices.
+    func setProjectArchived(_ projectId: Id, archived: Bool) async throws {
+        _ = try await request("PUT", "/projects/\(projectId)/archive", body: ["archived": archived])
+    }
+
+    /// `PUT /servers/{id}/archive {archived}` — same flag for a server row.
+    func setServerArchived(_ serverId: String, archived: Bool) async throws {
+        _ = try await request("PUT", "/servers/\(serverId)/archive", body: ["archived": archived])
     }
 
     func setModel(projectId: Id, model: String, effort: Effort) async throws {
@@ -999,15 +1013,79 @@ final class RelayAPI {
         return try await peopleChat(chatId)
     }
 
-    func removeMember(chatId: String, userId: String) async throws {
-        _ = try await request("DELETE", "/chats/\(chatId)/members/\(userId)")
+    /// `DELETE /chats/{id}/members/{userId}[?ban=1]` — owner/admin remove or ban.
+    func removeMember(chatId: String, userId: String, ban: Bool = false) async throws {
+        _ = try await request("DELETE", "/chats/\(chatId)/members/\(userId)\(ban ? "?ban=1" : "")")
     }
 
-    /// `PUT /chats/{id}/settings {read_receipts?, muted?}` per member.
-    func chatSettings(chatId: String, muted: Bool? = nil, readReceipts: Bool? = nil) async throws {
+    /// `PUT /chats/{id}/members/{userId}` — mute/unmute from posting (optional duration).
+    func setMemberSilenced(
+        chatId: String,
+        userId: String,
+        silenced: Bool,
+        silencedUntilMs: Int64? = nil
+    ) async throws -> PeopleChat {
+        var body: [String: Any] = ["silenced": silenced]
+        if silenced, let until = silencedUntilMs {
+            body["silenced_until"] = until
+        }
+        let v = try await json("PUT", "/chats/\(chatId)/members/\(userId)", body: body)
+        if let chat = PeopleChat.parse(v) { return chat }
+        return try await peopleChat(chatId)
+    }
+
+    /// Owner: set a member's role to `admin` or `member`.
+    func setMemberRole(chatId: String, userId: String, role: String) async throws -> PeopleChat {
+        let v = try await json("PUT", "/chats/\(chatId)/members/\(userId)", body: ["role": role])
+        if let chat = PeopleChat.parse(v) { return chat }
+        return try await peopleChat(chatId)
+    }
+
+    /// Owner: whether this admin may mute and ban members.
+    func setMemberCanMuteBan(chatId: String, userId: String, canMuteBan: Bool) async throws -> PeopleChat {
+        let v = try await json("PUT", "/chats/\(chatId)/members/\(userId)", body: ["can_mute_ban": canMuteBan])
+        if let chat = PeopleChat.parse(v) { return chat }
+        return try await peopleChat(chatId)
+    }
+
+    /// `GET /chats/{id}/invites` — group invite links (same shape as server invites).
+    func groupInvites(_ chatId: String) async throws -> [ServerInviteLink] {
+        let v = try await json("GET", "/chats/\(chatId)/invites")
+        let list = ((v as? [String: Any])?["invites"] as? [Any]) ?? []
+        return list.compactMap(ServerInviteLink.parse)
+    }
+
+    /// `POST /chats/{id}/invites {expires, max_uses}` → the new group invite link.
+    func createGroupInvite(_ chatId: String, expires: Bool, maxUses: Int?) async throws -> ServerInviteLink? {
+        var body: [String: Any] = ["expires": expires]
+        if let maxUses { body["max_uses"] = maxUses }
+        return ServerInviteLink.parse(try await json("POST", "/chats/\(chatId)/invites", body: body))
+    }
+
+    /// `DELETE /chats/{id}/invites/{iid}` — the link stops working at once.
+    func revokeGroupInvite(_ chatId: String, inviteId: String) async throws {
+        _ = try await request("DELETE", "/chats/\(chatId)/invites/\(inviteId)")
+    }
+
+    /// `POST /chats/join {code}` (the code or the whole link) → the people group chat.
+    func joinGroup(code: String) async throws -> PeopleChat {
+        let v = try await json("POST", "/chats/join", body: ["code": code.trimmingCharacters(in: .whitespacesAndNewlines)])
+        guard let chat = PeopleChat.parse(v) else { throw RelayError(status: 0, message: "The relay returned no chat") }
+        return chat
+    }
+
+    /// Delete a message for everyone: the relay checks who may (403 `not_yours`) and writes
+    /// the deletion into the doc itself. `room` is `people/<chat>` or `<project>/<chat>`.
+    func deleteMessage(room: String, messageId: String) async throws {
+        _ = try await request("DELETE", "/room/\(room)/messages/\(messageId)")
+    }
+
+    /// `PUT /chats/{id}/settings {read_receipts?, muted?, archived?}` per member.
+    func chatSettings(chatId: String, muted: Bool? = nil, readReceipts: Bool? = nil, archived: Bool? = nil) async throws {
         var body: [String: Any] = [:]
         if let muted { body["muted"] = muted }
         if let readReceipts { body["read_receipts"] = readReceipts }
+        if let archived { body["archived"] = archived }
         _ = try await request("PUT", "/chats/\(chatId)/settings", body: body)
     }
 
