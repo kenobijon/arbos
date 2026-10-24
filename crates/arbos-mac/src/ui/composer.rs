@@ -95,6 +95,9 @@ pub const COMPOSER_RADIUS: f32 = COMPOSER_HEIGHT / 2.0;
 pub type SubmitHandler = Rc<dyn Fn(&mut Window, &mut App)>;
 /// Returns true when the @-mention menu handled the key (skip caret / send).
 pub type MentionKeyHandler = Rc<dyn Fn(&mut App) -> bool>;
+/// ↑ (−1) / ↓ (+1) in a single-line picker field: the owner moves its list
+/// highlight; the caret stays put.
+pub type ArrowHandler = Rc<dyn Fn(i32, &mut App)>;
 /// Files and images from a ⌘V, for the owner to stage.
 pub type PasteMediaHandler = Rc<dyn Fn(Vec<PathBuf>, Vec<gpui::Image>, &mut App)>;
 
@@ -230,6 +233,9 @@ pub struct ComposerInput {
     pub on_mention_accept: Option<MentionKeyHandler>,
     /// Esc while the `@` mention menu is open: close it for this token.
     pub on_mention_escape: Option<MentionKeyHandler>,
+    /// Pickers (the command palette): ↑ / ↓ walk the result list instead of
+    /// moving the caret in this one-line field.
+    pub on_arrow: Option<ArrowHandler>,
     /// ⌘V with files or an image on the clipboard: the owner stages them.
     pub on_paste_media: Option<PasteMediaHandler>,
     /// Multi-line editors (skill bodies): Enter inserts a newline instead of
@@ -278,6 +284,7 @@ impl ComposerInput {
             on_mention_prev: None,
             on_mention_accept: None,
             on_mention_escape: None,
+            on_arrow: None,
             on_paste_media: None,
             enter_inserts_newline: false,
             masked: false,
@@ -692,6 +699,16 @@ impl ComposerInput {
         true
     }
 
+    /// A picker's ↑/↓: hand the step to the owner after this update ends
+    /// (same re-entrancy rule as the mention keys); `false` with no handler.
+    fn defer_arrow(&self, delta: i32, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(cb) = self.on_arrow.clone() else {
+            return false;
+        };
+        window.defer(cx, move |_, cx| cb(delta, cx));
+        true
+    }
+
     /// Complete the open `@token` with `handle`: a chip when the table knows
     /// the handle, else the plain `@handle ` text. What `Composer` does through
     /// `insert_mention` with a picker row; kept for the Enter tests.
@@ -797,6 +814,9 @@ impl ComposerInput {
         if self.defer_mention_key(self.on_mention_prev.clone(), window, cx) {
             return;
         }
+        if self.defer_arrow(-1, window, cx) {
+            return;
+        }
         if self.selected_range.is_empty() {
             self.move_to(self.offset_for_vertical_move(true), cx);
         } else {
@@ -806,6 +826,9 @@ impl ComposerInput {
 
     fn down(&mut self, _: &Down, window: &mut Window, cx: &mut Context<Self>) {
         if self.defer_mention_key(self.on_mention_next.clone(), window, cx) {
+            return;
+        }
+        if self.defer_arrow(1, window, cx) {
             return;
         }
         if self.selected_range.is_empty() {
