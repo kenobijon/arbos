@@ -1871,6 +1871,10 @@ fn send_user(
     let project_id = project_of(shared, &chat_id);
     if let Some(space) = people_space_of(shared, &chat_id) {
         let mentions = mentions_in(&space, &text, &tokens);
+        // Rig (#1596): `ARBOS_FIXTURE_TRACE_SENDS=1` prints what the row carries.
+        if std::env::var_os("ARBOS_FIXTURE_TRACE_SENDS").is_some() {
+            eprintln!("fixture send: text={text:?} chips={tokens:?} mentions={mentions:?}");
+        }
         let me = me();
         let opts = UserMessageOpts {
             attachments: user_attachments(&attachments),

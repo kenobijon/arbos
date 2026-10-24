@@ -2458,6 +2458,10 @@ final class AppModel: ObservableObject {
                               author: CoreChatDoc.Author, mentions: [String], reply: String?,
                               attachments: [Attachment], alreadyUnacked: Bool = false) {
         if !alreadyUnacked { markUnacked(chatId: chatId, messageId: messageId) }
+        // Rig (#1596): `ARBOS_TRACE_SENDS=1` prints what the row carries.
+        if DebugHooks.traceSends {
+            print("[arbos send] text=\(text.debugDescription) mentions=\(mentions)")
+        }
         do {
             try doc.insertUserMessage(id: messageId, text: text, deviceId: deviceId, attachments: attachments,
                                       author: author, mentions: mentions, replyTo: reply)
