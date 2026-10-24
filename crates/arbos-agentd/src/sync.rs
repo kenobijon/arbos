@@ -521,13 +521,13 @@ impl SyncHub {
             let mut refused = false;
             let mut handshook = false;
             let result = {
-                // Jitter + the box-wide gate: see `REDIAL_CONCURRENCY`.
+                // Jitter before the dial; the box-wide gate (`REDIAL_CONCURRENCY`) is taken
+                // inside `room_session` around the handshake only — holding it for the whole
+                // session capped a box at 16 live rooms (images 0.1.101–0.1.103: the canary's
+                // chat never connected, its turn never started).
                 let jitter = Duration::from_millis(rand::random::<u64>() % 750);
                 tokio::time::sleep(jitter).await;
-                let permit = redial_gate().acquire().await;
-                let r = self.room_session(&host, &mut handshook).await;
-                drop(permit);
-                r
+                self.room_session(&host, &mut handshook).await
             };
             match result {
                 Ok(()) => tracing::info!(room = %room_name, "room session closed"),
@@ -576,6 +576,8 @@ impl SyncHub {
             room,
             self.cfg.box_token
         );
+        // The gate covers the dial + Hello only, then the permit goes back for the next room.
+        let permit = redial_gate().acquire().await;
         let (ws, _) = tokio::time::timeout(
             Duration::from_secs(15),
             tokio_tungstenite::connect_async(&ws_url),
@@ -594,6 +596,7 @@ impl SyncHub {
             Bytes::new(),
         );
         sink.send(Message::Binary(hello.encode())).await?;
+        drop(permit);
         *handshook = true;
         let chat_id = {
             let mut h = host.lock().await;
@@ -1189,11 +1192,105 @@ mod tests {
         // The stale row was not gated, but it is still in the doc and in the context the gate
         // and the turn read for the follow-up.
         assert!(host.doc.message("stale-fact").is_some());
-        let ctx = crate::people::recent_people_context(&host.doc.messages(), "follow-up", 12);
+        let info = crate::people::PeopleChatInfo {
+            members: vec![serde_json::json!({ "member": "user:sam", "handle": "sam" })],
+            slug: "testagent".into(),
+            kind: "group".into(),
+            ..Default::default()
+        };
+        let ctx =
+            crate::people::recent_people_context(&host.doc.messages(), "follow-up", 12, &info);
         assert!(
             ctx.iter()
                 .any(|m| m["text"].as_str() == Some("fyi the launch date moved to the 12th")),
             "{ctx:?}"
         );
+    }
+
+    /// Images 0.1.101–0.1.103 failed the canary: the redial gate's permit was held for the
+    /// whole session, so a box could keep at most `REDIAL_CONCURRENCY` rooms connected and the
+    /// canary's chat never came up. Forty rooms against a fake relay must all be open at once.
+    #[tokio::test]
+    async fn more_rooms_than_the_redial_gate_stay_connected_at_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc as StdArc;
+
+        let open = StdArc::new(AtomicUsize::new(0));
+        let peak = StdArc::new(AtomicUsize::new(0));
+        let (open2, peak2) = (open.clone(), peak.clone());
+        async fn room_ws(
+            ws: axum::extract::ws::WebSocketUpgrade,
+            axum::extract::State((open, peak)): axum::extract::State<(
+                StdArc<AtomicUsize>,
+                StdArc<AtomicUsize>,
+            )>,
+        ) -> axum::response::Response {
+            ws.on_upgrade(move |mut socket| async move {
+                let n = open.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(n, Ordering::SeqCst);
+                // Hold the socket open; the client sends Hello and waits for STATE.
+                while let Some(Ok(_)) = futures::StreamExt::next(&mut socket).await {}
+                open.fetch_sub(1, Ordering::SeqCst);
+            })
+        }
+        let app = axum::Router::new()
+            .route("/room/{project}/{chat}", axum::routing::get(room_ws))
+            .with_state((open2, peak2));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let root = std::env::temp_dir().join(format!("arbos-rooms-{}", ulid()));
+        std::fs::create_dir_all(&root).unwrap();
+        let bx = crate::config::BoxConfig {
+            user_id: Some("u-test".into()),
+            relay_url: format!("http://127.0.0.1:{port}"),
+            box_token: "test-token".into(),
+            mcp_token: "test-mcp".into(),
+            work_root: root.clone(),
+            bind: "127.0.0.1".into(),
+            port: 0,
+            local_box: true,
+            pi_bin: "/nonexistent/pi".into(),
+            prime_bin: "/nonexistent/prime-agent".into(),
+            claude_bin: "/nonexistent/claude".into(),
+            pi_ext_override: None,
+            device_id: "box:test".into(),
+            default_talking_model: "mock-talking".into(),
+            default_subagent_model: "mock-sub".into(),
+            legacy_project_id: None,
+        };
+        let cfg = Arc::new(bx.workspace(
+            &json!({ "id": "01TESTPROJECTROOMS0000000", "name": "Rooms" }),
+            0,
+        ));
+        std::fs::create_dir_all(cfg.state_dir.join("agentd")).unwrap();
+        let store = Store::open(&cfg.state_dir.join("agentd").join("agentd.db")).unwrap();
+        let (tx, _rx) = mpsc::channel(64);
+        let hub = SyncHub::new(cfg, store, tx);
+        const ROOMS: usize = 40;
+        for i in 0..ROOMS {
+            hub.open_room_named(
+                &format!("chat{i}"),
+                &format!("people/chat{i}"),
+                PROJECT_DOC_CHAT_ID,
+            )
+            .await
+            .unwrap();
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while peak.load(Ordering::SeqCst) < ROOMS && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(
+            peak.load(Ordering::SeqCst),
+            ROOMS,
+            "every room connected at once; {} > {REDIAL_CONCURRENCY} gate permits",
+            ROOMS
+        );
+        hub.close_all().await;
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
