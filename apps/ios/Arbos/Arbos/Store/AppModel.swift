@@ -310,7 +310,8 @@ final class AppModel: ObservableObject {
 
     /// Who the call screen shows before anyone joins: the DM peer, or (for a
     /// people group) every other human plus the agents in that chat; for a
-    /// project chat the project's agent (Calls Phase 2).
+    /// project chat the project's agent (Calls Phase 2). A selective group
+    /// start (`CallManager.ringIds`) narrows the group list to the people we named.
     func expectedCallPeople(_ c: Call) -> [CallPerson] {
         guard let chat = peopleChat(c.chatId) else {
             if !c.agents.isEmpty { return c.agents }
@@ -320,7 +321,11 @@ final class AppModel: ObservableObject {
         }
         let me = user?.id
         if chat.isGroup {
-            return chat.members.filter { $0.id != me }.map(CallPerson.from(member:))
+            let others = chat.members.filter { $0.id != me }
+            if let ring = CallManager.shared.ringIds, c.callId == CallManager.shared.call?.callId {
+                return others.filter { ring.contains($0.id) }.map(CallPerson.from(member:))
+            }
+            return others.map(CallPerson.from(member:))
         }
         guard let other = chat.counterpart(me: me) else { return [] }
         return [CallPerson.from(member: other)]

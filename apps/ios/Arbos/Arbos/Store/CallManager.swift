@@ -134,6 +134,10 @@ final class CallManager: NSObject, ObservableObject {
     static let missedAfter: TimeInterval = 30
     /// Active calls per chat (for the "On a call · Join" bar), from pushes, presence and GET /chats/{id}/call.
     @Published private(set) var activeByChat: [String: Call] = [:]
+    /// Member ids we asked the relay to ring on the call we started (`ring` body). Nil =
+    /// whole group / DM (default). Cleared when the call tears down. The call screen uses
+    /// this so a selective group start only shows the people we named as "Ringing…".
+    @Published private(set) var ringIds: Set<String>?
 
     let room = LiveKit.Room()
     var localVideoTrack: VideoTrack? { room.localParticipant.firstCameraVideoTrack }
@@ -211,7 +215,8 @@ final class CallManager: NSObject, ObservableObject {
     // MARK: Start / join / accept / leave
 
     /// From the chat header: start (201) or join (200) the chat's call.
-    func start(chatId: String, projectId: String?, kind: CallKind, title: String) async {
+    /// `ring` — optional member ids to notify (selective group call). Nil / empty = everyone.
+    func start(chatId: String, projectId: String?, kind: CallKind, title: String, ring: [String]? = nil) async {
         guard !isActive else { isPresented = true; return }
         guard await CallManager.micGranted() else { error = "Microphone access is off in Settings."; return }
         if kind == .video { _ = await CallManager.cameraGranted() }
@@ -222,8 +227,10 @@ final class CallManager: NSObject, ObservableObject {
         prepareCallAudioSession(video: kind == .video)
         ringbackWanted = true
         syncRingback()
+        let ringList = ring.flatMap { $0.isEmpty ? nil : $0 }
+        ringIds = ringList.map { Set($0) }
         do {
-            let (started, isNew) = try await api.startCall(chatId: chatId, projectId: projectId, kind: kind)
+            let (started, isNew) = try await api.startCall(chatId: chatId, projectId: projectId, kind: kind, ring: ringList)
             call = started
             if isNew, let who = me() {
                 writeSystemLine?(chatId, started.projectId, "\(who.displayName) started a \(kind == .video ? "video" : "voice") call", started.callId)
@@ -685,6 +692,7 @@ final class CallManager: NSObject, ObservableObject {
         // Drop the call UI before the network leave so Hang up always dismisses, even
         // when POST /leave is slow or fails.
         call = nil
+        ringIds = nil
         tiles = []
         connectedAt = nil
         cameraOn = false

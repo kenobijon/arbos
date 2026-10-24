@@ -95,6 +95,8 @@ struct ChatView: View {
     @State private var showProfile = false
     @State private var showSearch = false
     @State private var searchText = ""
+    /// Group chats: pick members to call, or call everyone.
+    @State private var showGroupCallPicker = false
     @FocusState private var searchFocused: Bool
     @ObservedObject private var calls = CallManager.shared
     /// iMessage-style: drag the transcript left to peek message times (0…`RowView.timeRevealWidth`).
@@ -191,9 +193,22 @@ struct ChatView: View {
     private var headerExtra: CGFloat { (hasCallBar ? 52 : 0) + (hasInCallBar ? 56 : 0) + (showSearch ? 46 : 0) }
     /// Member chips under the header: groups only. A 1:1 DM already names the peer in the pill.
     private var showsMemberChips: Bool { people?.isGroup == true }
+    /// Header phone for groups: opens the pick-members / call-everyone sheet.
+    private var showsGroupCallButton: Bool {
+        people?.isGroup == true && !isChannel && !hasCallBar && !hasInCallBar && !calls.isActive
+    }
 
-    private func startCall(_ kind: CallKind) {
-        Task { await calls.start(chatId: chatId, projectId: isPeople ? nil : projectId, kind: kind, title: callTitle) }
+    private func startCall(_ kind: CallKind, ring: [String]? = nil) {
+        Task { await calls.start(chatId: chatId, projectId: isPeople ? nil : projectId, kind: kind, title: callTitle, ring: ring) }
+    }
+
+    /// Groups open the picker; DMs and agent chats start at once.
+    private func requestCall(_ kind: CallKind) {
+        if people?.isGroup == true {
+            showGroupCallPicker = true
+        } else {
+            startCall(kind)
+        }
     }
     @State private var replyTo: Message?
     /// Long-press → Edit: the own message whose text is in the composer.
@@ -544,6 +559,14 @@ struct ChatView: View {
         .sheet(isPresented: $showSettings) {
             SettingsView().environmentObject(model).environment(\.theme, theme)
         }
+        .sheet(isPresented: $showGroupCallPicker) {
+            if let people {
+                GroupCallPickerSheet(people: people, meId: model.user?.id) { ring in
+                    startCall(.voice, ring: ring)
+                }
+                .environment(\.theme, theme)
+            }
+        }
         .sheet(isPresented: $showProfile) {
             AgentEditSheet(projectId: projectId).environmentObject(model).environment(\.theme, theme)
         }
@@ -862,6 +885,10 @@ struct ChatView: View {
                 }
             }
             .buttonStyle(.plain)
+            // Groups put call + search on the right; this twin keeps the title centred.
+            if showsGroupCallButton {
+                Color.clear.frame(width: Theme.control + 8).allowsHitTesting(false)
+            }
             Spacer()
             GlassPill {
                 HStack(spacing: 6) {
@@ -946,26 +973,39 @@ struct ChatView: View {
                 .contentShape(Capsule())
             }
             Spacer()
-            // Same-size circle as the back button keeps the title pill centred.
-            Button {
-                if showSearch {
-                    showSearch = false
-                    searchText = ""
-                    searchFocused = false
-                } else {
-                    withAnimation(.easeOut(duration: 0.18)) { showSearch = true }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { searchFocused = true }
+            HStack(spacing: 8) {
+                if showsGroupCallButton {
+                    Button { showGroupCallPicker = true } label: {
+                        GlassCircle {
+                            Image(systemName: "phone.fill")
+                                .font(theme.font(16, weight: .semibold))
+                                .foregroundStyle(theme.text)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Start a call")
+                    .accessibilityIdentifier("chat-call-button")
                 }
-            } label: {
-                GlassCircle {
-                    Image(systemName: "magnifyingglass")
-                        .font(theme.font(17, weight: .medium))
-                        .foregroundStyle(theme.text)
+                Button {
+                    if showSearch {
+                        showSearch = false
+                        searchText = ""
+                        searchFocused = false
+                    } else {
+                        withAnimation(.easeOut(duration: 0.18)) { showSearch = true }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { searchFocused = true }
+                    }
+                } label: {
+                    GlassCircle {
+                        Image(systemName: "magnifyingglass")
+                            .font(theme.font(17, weight: .medium))
+                            .foregroundStyle(theme.text)
+                    }
                 }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Search in chat")
+                .accessibilityIdentifier("chat-search-button")
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Search in chat")
-            .accessibilityIdentifier("chat-search-button")
         }
         .padding(.horizontal, 16)
         .padding(.top, 6)
@@ -1928,7 +1968,7 @@ struct ChatView: View {
                 } else if canSend {
                     send()
                 } else if !isChannel {
-                    startCall(.voice)
+                    requestCall(.voice)
                 }
             }) {
                 Circle()
