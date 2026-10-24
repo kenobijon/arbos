@@ -2880,20 +2880,81 @@ final class AppModel: ObservableObject {
         return true
     }
 
-    /// Owner/admin removes a person from a people chat (`DELETE /chats/{id}/members/{userId}`);
-    /// the relay writes the "<me> removed @handle" line (#1349).
-    func removeMember(chatId: String, userId: String) {
+    /// Owner/admin removes (or bans) a person from a people chat
+    /// (`DELETE /chats/{id}/members/{userId}[?ban=1]`); the relay writes the
+    /// "<me> removed @handle" line (#1349). Ban keeps them from rejoining.
+    func removeMember(chatId: String, userId: String, ban: Bool = false) {
         Task {
             do {
-                try await api.removeMember(chatId: chatId, userId: userId)
+                try await api.removeMember(chatId: chatId, userId: userId, ban: ban)
                 if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
                     peopleChats[i].members.removeAll { !$0.isAgent && $0.id == userId }
                 }
                 // The relay writes "<me> removed @handle" into the chat (#1349).
             } catch {
                 let e = error as? RelayError
-                notice = Notice(text: e?.type == "owner_only" ? "Only an owner can remove people."
-                                 : "Remove failed: \(error.localizedDescription)")
+                notice = Notice(text: e?.type == "owner_only" ? "Only an owner or admin can manage members."
+                                 : (ban ? "Ban failed: \(error.localizedDescription)"
+                                    : "Remove failed: \(error.localizedDescription)"))
+            }
+        }
+    }
+
+    /// Owner/admin mutes (or unmutes) a member from posting in a people group.
+    /// Pass `duration` when muting to choose how long the mute lasts.
+    func setMemberSilenced(
+        chatId: String,
+        userId: String,
+        silenced: Bool,
+        duration: MemberMuteDuration? = nil
+    ) {
+        Task {
+            do {
+                let until = silenced ? duration?.silencedUntilMs : nil
+                let chat = try await api.setMemberSilenced(
+                    chatId: chatId, userId: userId, silenced: silenced, silencedUntilMs: until
+                )
+                if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
+                    peopleChats[i] = chat
+                }
+            } catch {
+                let e = error as? RelayError
+                notice = Notice(text: e?.type == "owner_only" ? "Only an owner or an admin with mute rights can mute members."
+                                 : "Mute failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Owner promotes or demotes a group member (`admin` / `member`).
+    func setMemberRole(chatId: String, userId: String, role: String) {
+        Task {
+            do {
+                let chat = try await api.setMemberRole(chatId: chatId, userId: userId, role: role)
+                if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
+                    peopleChats[i] = chat
+                }
+            } catch {
+                let e = error as? RelayError
+                notice = Notice(text: e?.type == "owner_only" ? "Only the owner can change admin roles."
+                                 : "Role change failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Owner sets whether an admin may mute and ban members.
+    func setMemberCanMuteBan(chatId: String, userId: String, canMuteBan: Bool) {
+        Task {
+            do {
+                let chat = try await api.setMemberCanMuteBan(
+                    chatId: chatId, userId: userId, canMuteBan: canMuteBan
+                )
+                if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
+                    peopleChats[i] = chat
+                }
+            } catch {
+                let e = error as? RelayError
+                notice = Notice(text: e?.type == "owner_only" ? "Only the owner can set mute and ban rights."
+                                 : "Could not update mute and ban rights: \(error.localizedDescription)")
             }
         }
     }

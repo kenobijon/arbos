@@ -452,6 +452,14 @@ struct ChatView: View {
                             .frame(maxWidth: .infinity)
                             .frame(height: Theme.fieldHeight)
                             .accessibilityIdentifier("channel-read-only")
+                    } else if isPeople, people?.isSilencedNow == true {
+                        // Group admin muted me from posting — one quiet line, no composer.
+                        Text("You've been muted in this group")
+                            .font(theme.font(Theme.small))
+                            .foregroundStyle(theme.muted)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: Theme.fieldHeight)
+                            .accessibilityIdentifier("group-silenced")
                     } else {
                         composer
                     }

@@ -255,6 +255,9 @@ pub(crate) fn member_dto(state: &AppState, m: &Membership) -> ChatMemberDto {
         last_seen_at: None,
         online: None,
         read_receipts: None,
+        silenced: None,
+        silenced_until: None,
+        can_mute_ban: None,
         avatar: None,
         avatar_color: None,
         avatar_color_index: None,
@@ -288,6 +291,14 @@ pub(crate) fn member_dto(state: &AppState, m: &Membership) -> ChatMemberDto {
                 .and_then(Value::as_bool)
                 .unwrap_or(true),
         );
+        let silenced = membership_is_silenced(m);
+        dto.silenced = Some(silenced);
+        if silenced {
+            dto.silenced_until = m.silenced_until;
+        }
+        if m.role == "admin" {
+            dto.can_mute_ban = Some(member_can_mute_ban(m));
+        }
     }
     if let Some(pid) = m.project_id() {
         if let Ok(Some(p)) = state.db.project(pid) {
@@ -534,6 +545,10 @@ pub fn people_chat_dto(
         me: ChatMeDto {
             role: Some(mine.map(|m| m.role.clone())),
             muted: Some(mine.is_some_and(|m| m.muted)),
+            silenced: Some(mine.is_some_and(membership_is_silenced)),
+            silenced_until: mine
+                .filter(|m| membership_is_silenced(m))
+                .and_then(|m| m.silenced_until),
             archived_at,
             read_receipts: Some(
                 mine.map(|m| {
@@ -1243,7 +1258,7 @@ pub async fn chat_leave(
         Ok(v) => v,
         Err(r) => return *r,
     };
-    if let Err(e) = state.db.remove_member(&id, &format!("user:{me}")) {
+    if let Err(e) = state.db.remove_member(&id, &format!("user:{me}"), false) {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
     }
     state.matrix.touch_chat(&state, &id, None);
@@ -1256,6 +1271,7 @@ pub async fn chat_leave(
             user_id: me.clone(),
             handle: handle_of(&state, &me),
             by_handle: handle_of(&state, &me),
+            banned: None,
         }),
     );
     // Only a group keeps a chat for the others to read; a DM just ends.
@@ -1624,7 +1640,7 @@ pub fn detach_agent_from_people_chats(state: &AppState, project_id: &str, by_use
     let chats = state.db.chats_of_member(&member).unwrap_or_default();
     let by_handle = handle_of(state, by_user);
     for cm in chats {
-        match state.db.remove_member(&cm.chat.id, &member) {
+        match state.db.remove_member(&cm.chat.id, &member, false) {
             Ok(true) => {}
             Ok(false) => continue,
             Err(e) => {
@@ -1669,7 +1685,10 @@ pub async fn agent_remove(
     if let Err(r) = own_project(&state, &me, &project_id) {
         return *r;
     }
-    match state.db.remove_member(&id, &format!("agent:{project_id}")) {
+    match state
+        .db
+        .remove_member(&id, &format!("agent:{project_id}"), false)
+    {
         Ok(true) => {}
         Ok(false) => {
             return api_error(
@@ -1824,11 +1843,29 @@ pub async fn member_add(
     let mut names: Vec<String> = Vec::new();
     for other in &people {
         let other_id = other.id.clone();
+        if state
+            .db
+            .member_is_banned(&id, &format!("user:{other_id}"))
+            .unwrap_or(false)
+        {
+            return api_error(
+                StatusCode::FORBIDDEN,
+                "banned",
+                "they were banned from this group",
+            );
+        }
         if let Err(e) =
             state
                 .db
                 .add_member(&id, &format!("user:{other_id}"), "member", &me, &json!({}))
         {
+            if e.to_string().contains("banned") {
+                return api_error(
+                    StatusCode::FORBIDDEN,
+                    "banned",
+                    "they were banned from this group",
+                );
+            }
             return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
         }
         let event = PushEventDto::PeopleMemberAdded(PeopleMemberAddedPayloadDto {
@@ -1870,35 +1907,130 @@ pub async fn member_add(
     }
 }
 
-/// `DELETE /chats/{id}/members/{user_id}` — a chat owner removes a person; access ends at once.
+/// Owner or admin of a people group (not a plain member).
+fn can_manage_members(cm: &ChatWithMembers, me: &str) -> bool {
+    cm.members
+        .iter()
+        .any(|m| m.user_id() == Some(me) && (m.role == "owner" || m.role == "admin"))
+}
+
+/// My role in the chat, if I am a live human member.
+fn my_role<'a>(cm: &'a ChatWithMembers, me: &str) -> Option<&'a str> {
+    cm.members
+        .iter()
+        .find(|m| m.user_id() == Some(me))
+        .map(|m| m.role.as_str())
+}
+
+/// True while an admin mute still blocks posting (honours timed `silenced_until`).
+fn membership_is_silenced(m: &Membership) -> bool {
+    if !m.silenced {
+        return false;
+    }
+    !matches!(m.silenced_until, Some(until) if until <= now_ms())
+}
+
+/// Owner always; an admin only when the owner left `can_mute_ban` on (default true).
+fn member_can_mute_ban(m: &Membership) -> bool {
+    if m.role == "owner" {
+        return true;
+    }
+    if m.role != "admin" {
+        return false;
+    }
+    m.settings
+        .get("can_mute_ban")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+}
+
+/// May I remove this human target? Owners manage everyone else; admins manage
+/// members only (not the owner or other admins).
+/// Returns `Some(error response)` when refused.
+fn can_moderate_member(cm: &ChatWithMembers, me: &str, target_id: &str) -> Option<Response> {
+    if !can_manage_members(cm, me) {
+        return Some(api_error(
+            StatusCode::FORBIDDEN,
+            "owner_only",
+            "only an owner or admin can manage members",
+        ));
+    }
+    if target_id == me {
+        return Some(api_error(
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "use leave to remove yourself",
+        ));
+    }
+    let target = cm.members.iter().find(|m| m.user_id() == Some(target_id));
+    let Some(target) = target else {
+        return Some(api_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "not a member",
+        ));
+    };
+    if target.role == "owner" {
+        return Some(api_error(
+            StatusCode::FORBIDDEN,
+            "owner_stays",
+            "the owner cannot be removed",
+        ));
+    }
+    if my_role(cm, me) == Some("admin") && target.role == "admin" {
+        return Some(api_error(
+            StatusCode::FORBIDDEN,
+            "owner_only",
+            "only the owner manages an admin",
+        ));
+    }
+    None
+}
+
+/// May I mute or ban this human? Same hierarchy as remove, plus the owner can
+/// turn off mute/ban for individual admins (`can_mute_ban`).
+fn can_mute_ban_member(cm: &ChatWithMembers, me: &str, target_id: &str) -> Option<Response> {
+    if let Some(r) = can_moderate_member(cm, me, target_id) {
+        return Some(r);
+    }
+    let Some(actor) = cm.members.iter().find(|m| m.user_id() == Some(me)) else {
+        return Some(api_error(
+            StatusCode::FORBIDDEN,
+            "owner_only",
+            "only an owner or admin can mute or ban",
+        ));
+    };
+    if !member_can_mute_ban(actor) {
+        return Some(api_error(
+            StatusCode::FORBIDDEN,
+            "owner_only",
+            "the owner has not given you mute and ban rights",
+        ));
+    }
+    None
+}
+
+/// `DELETE /chats/{id}/members/{user_id}[?ban=1]` — owner/admin removes (or bans) a person.
 pub async fn member_remove(
     State(state): State<AppState>,
     principal: Principal,
     Path((id, user_id)): Path<(String, String)>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> Response {
     let (me, cm) = match member_chat(&state, &principal, &id) {
         Ok(v) => v,
         Err(r) => return *r,
     };
-    if !cm
-        .members
-        .iter()
-        .any(|m| m.user_id() == Some(me.as_str()) && m.role == "owner")
-    {
-        return api_error(
-            StatusCode::FORBIDDEN,
-            "owner_only",
-            "only an owner can remove people",
-        );
+    let ban = q.get("ban").is_some_and(|b| b == "1");
+    // Ban needs mute/ban rights; plain remove is any owner/admin.
+    if ban {
+        if let Some(r) = can_mute_ban_member(&cm, &me, &user_id) {
+            return r;
+        }
+    } else if let Some(r) = can_moderate_member(&cm, &me, &user_id) {
+        return r;
     }
-    if user_id == me {
-        return api_error(
-            StatusCode::BAD_REQUEST,
-            "bad_request",
-            "use leave to remove yourself",
-        );
-    }
-    match state.db.remove_member(&id, &format!("user:{user_id}")) {
+    match state.db.remove_member(&id, &format!("user:{user_id}"), ban) {
         Ok(true) => {}
         Ok(false) => return api_error(StatusCode::NOT_FOUND, "not_found", "not a member"),
         Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
@@ -1909,6 +2041,7 @@ pub async fn member_remove(
         user_id: user_id.clone(),
         handle: handle_of(&state, &user_id),
         by_handle: handle_of(&state, &me),
+        banned: Some(ban),
     });
     let _ = state.db.push_user_event(&user_id, &event, None);
     notify_members(&state, &cm, &me, &event);
@@ -1922,6 +2055,179 @@ pub async fn member_remove(
         }
     }
     StatusCode::NO_CONTENT.into_response()
+}
+
+#[derive(Deserialize)]
+pub struct MemberPatchBody {
+    /// Mute (true) or unmute (false) from posting in this group.
+    pub silenced: Option<bool>,
+    /// When a mute ends (ms). Omit or null with `silenced: true` = until unmuted.
+    #[serde(default)]
+    pub silenced_until: Option<i64>,
+    /// Owner only: set this person's role to `admin` or `member`.
+    pub role: Option<String>,
+    /// Owner only: whether this admin may mute and ban members (default true).
+    pub can_mute_ban: Option<bool>,
+}
+
+/// `PUT /chats/{id}/members/{user_id}` — mute/unmute (with optional duration), or
+/// owner sets role / mute-ban rights for an admin.
+pub async fn member_patch(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path((id, user_id)): Path<(String, String)>,
+    Json(b): Json<MemberPatchBody>,
+) -> Response {
+    let (me, cm) = match member_chat(&state, &principal, &id) {
+        Ok(v) => v,
+        Err(r) => return *r,
+    };
+    let has_silence = b.silenced.is_some();
+    let has_role = b.role.is_some();
+    let has_rights = b.can_mute_ban.is_some();
+    if !has_silence && !has_role && !has_rights {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "set silenced, role, or can_mute_ban",
+        );
+    }
+
+    // Role / mute-ban rights: owner only, and only for someone else who is not the owner.
+    if has_role || has_rights {
+        if my_role(&cm, &me) != Some("owner") {
+            return api_error(
+                StatusCode::FORBIDDEN,
+                "owner_only",
+                "only the owner sets admin roles and mute-ban rights",
+            );
+        }
+        if user_id == me {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+                "cannot change your own role or mute-ban rights",
+            );
+        }
+        let target = cm
+            .members
+            .iter()
+            .find(|m| m.user_id() == Some(user_id.as_str()));
+        let Some(target) = target else {
+            return api_error(StatusCode::NOT_FOUND, "not_found", "not a member");
+        };
+        if target.role == "owner" {
+            return api_error(
+                StatusCode::FORBIDDEN,
+                "owner_stays",
+                "the owner cannot be demoted",
+            );
+        }
+        if let Some(role) = b.role.as_deref() {
+            if role != "admin" && role != "member" {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "bad_request",
+                    "role is admin or member",
+                );
+            }
+            match state
+                .db
+                .set_member_role(&id, &format!("user:{user_id}"), role)
+            {
+                Ok(true) => {}
+                Ok(false) => return api_error(StatusCode::NOT_FOUND, "not_found", "not a member"),
+                Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+            }
+            // Fresh admins get mute/ban on unless the same request sets it.
+            if role == "admin" && b.can_mute_ban.is_none() {
+                let mut settings = if target.settings.is_object() {
+                    target.settings.clone()
+                } else {
+                    json!({})
+                };
+                settings["can_mute_ban"] = json!(true);
+                let _ = state
+                    .db
+                    .set_member_settings(&id, &format!("user:{user_id}"), &settings);
+            }
+            if role == "member" {
+                let mut settings = if target.settings.is_object() {
+                    target.settings.clone()
+                } else {
+                    json!({})
+                };
+                if settings.get("can_mute_ban").is_some() {
+                    if let Some(obj) = settings.as_object_mut() {
+                        obj.remove("can_mute_ban");
+                    }
+                    let _ =
+                        state
+                            .db
+                            .set_member_settings(&id, &format!("user:{user_id}"), &settings);
+                }
+            }
+        }
+        if let Some(can) = b.can_mute_ban {
+            // Reload role after a possible promotion in this request.
+            let role_now = b.role.as_deref().unwrap_or(target.role.as_str());
+            if role_now != "admin" {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "bad_request",
+                    "mute-ban rights apply to admins only",
+                );
+            }
+            let fresh = state
+                .db
+                .membership(&id, &format!("user:{user_id}"))
+                .ok()
+                .flatten();
+            let mut settings = fresh
+                .as_ref()
+                .map(|m| {
+                    if m.settings.is_object() {
+                        m.settings.clone()
+                    } else {
+                        json!({})
+                    }
+                })
+                .unwrap_or_else(|| json!({}));
+            settings["can_mute_ban"] = json!(can);
+            if let Err(e) = state
+                .db
+                .set_member_settings(&id, &format!("user:{user_id}"), &settings)
+            {
+                return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
+            }
+        }
+    }
+
+    if let Some(silenced) = b.silenced {
+        if let Some(r) = can_mute_ban_member(&cm, &me, &user_id) {
+            return r;
+        }
+        let until = if silenced { b.silenced_until } else { None };
+        match state
+            .db
+            .set_member_silenced(&id, &format!("user:{user_id}"), silenced, until)
+        {
+            Ok(true) => {}
+            Ok(false) => return api_error(StatusCode::NOT_FOUND, "not_found", "not a member"),
+            Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+        }
+    }
+
+    state.matrix.touch_chat(&state, &id, None);
+    let event = PushEventDto::PeopleChatUpdated(PeopleChatUpdatedPayloadDto {
+        chat_id: id.clone(),
+    });
+    let _ = state.db.push_user_event(&user_id, &event, None);
+    notify_members(&state, &cm, &me, &event);
+    match load_chat(&state, &id) {
+        Ok(cm) => Json(chat_json(&state, &cm, &me, &device_of(&principal))).into_response(),
+        Err(r) => *r,
+    }
 }
 
 /// `GET /box/people/{chat_id}` — the chat as the owner's box sees it (members and settings).
@@ -2957,6 +3263,14 @@ pub fn on_room_push(
     if state.db.blocked_by_any(user_id, &humans).unwrap_or(false) {
         return Err(PushRefused::NotAvailable);
     }
+    // Admin mute from posting: silenced members cannot send into the room.
+    if cm
+        .members
+        .iter()
+        .any(|m| m.user_id() == Some(user_id.as_str()) && membership_is_silenced(m))
+    {
+        return Err(PushRefused::NotAvailable);
+    }
     let limit = if young_account(state, user_id) {
         MSGS_PER_MIN / 2
     } else {
@@ -3209,7 +3523,7 @@ mod tests {
         // Leaving drops access at once.
         state
             .db
-            .remove_member(&chat, &format!("user:{bob}"))
+            .remove_member(&chat, &format!("user:{bob}"), false)
             .expect("leave");
         assert!(!state.allows(&bob_dev, &key));
     }
@@ -3489,10 +3803,12 @@ mod agent_tests {
             .add_member(&chat, &format!("user:{bob}"), "member", &alice, &json!({}))
             .unwrap();
 
+        let no_ban = Query(std::collections::HashMap::new());
         let r = member_remove(
             State(state.clone()),
             bob_dev.clone(),
             Path((chat.clone(), carol.clone())),
+            no_ban.clone(),
         )
         .await;
         assert_eq!(r.status(), StatusCode::FORBIDDEN);
@@ -3507,6 +3823,7 @@ mod agent_tests {
             State(state.clone()),
             bob_dev,
             Path((chat.clone(), bob.clone())),
+            no_ban.clone(),
         )
         .await;
         assert_eq!(r.status(), StatusCode::FORBIDDEN);
@@ -3521,6 +3838,7 @@ mod agent_tests {
             State(state.clone()),
             alice_dev,
             Path((chat.clone(), carol.clone())),
+            no_ban,
         )
         .await;
         assert_eq!(r.status(), StatusCode::NO_CONTENT);
@@ -3537,6 +3855,74 @@ mod agent_tests {
             },
             &format!("{PEOPLE_ACL_PREFIX}{chat}")
         ));
+    }
+
+    #[tokio::test]
+    async fn owner_can_mute_and_ban_a_group_member() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 41);
+        let (bob, bob_dev) = person(&state, 42);
+        let chat = dm(&state, &alice, &bob);
+        // Promote to a group so moderation applies the same as production groups.
+        let _ = state.db.set_people_chat_kind(&chat, "group");
+        state
+            .db
+            .add_member(&chat, &format!("user:{bob}"), "member", &alice, &json!({}))
+            .unwrap();
+
+        // Mute Bob from posting.
+        let r = member_patch(
+            State(state.clone()),
+            alice_dev.clone(),
+            Path((chat.clone(), bob.clone())),
+            Json(MemberPatchBody {
+                silenced: Some(true),
+                silenced_until: None,
+                role: None,
+                can_mute_ban: None,
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let m = state
+            .db
+            .membership(&chat, &format!("user:{bob}"))
+            .unwrap()
+            .unwrap();
+        assert!(m.silenced);
+        assert!(
+            on_room_push(&state, &bob_dev, &chat).is_err(),
+            "a muted member cannot post"
+        );
+        assert!(
+            on_room_push(&state, &alice_dev, &chat).is_ok(),
+            "owner still posts"
+        );
+
+        // Ban Bob — removed and cannot rejoin.
+        let mut ban_q = std::collections::HashMap::new();
+        ban_q.insert("ban".into(), "1".into());
+        let r = member_remove(
+            State(state.clone()),
+            alice_dev.clone(),
+            Path((chat.clone(), bob.clone())),
+            Query(ban_q),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::NO_CONTENT);
+        assert!(state
+            .db
+            .membership(&chat, &format!("user:{bob}"))
+            .unwrap()
+            .is_none());
+        assert!(state
+            .db
+            .member_is_banned(&chat, &format!("user:{bob}"))
+            .unwrap());
+        assert!(state
+            .db
+            .add_member(&chat, &format!("user:{bob}"), "member", &alice, &json!({}))
+            .is_err());
     }
 
     #[tokio::test]
@@ -3717,6 +4103,7 @@ mod membership_notice_tests {
             State(state.clone()),
             alice_dev.clone(),
             Path((chat.clone(), carol_id)),
+            Query(std::collections::HashMap::new()),
         )
         .await;
         assert_eq!(r.status(), StatusCode::NO_CONTENT);

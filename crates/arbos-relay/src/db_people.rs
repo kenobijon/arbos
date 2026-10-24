@@ -20,7 +20,8 @@ CREATE TABLE IF NOT EXISTS people_chats (
 CREATE TABLE IF NOT EXISTS people_members (
   chat_id TEXT NOT NULL, member TEXT NOT NULL, role TEXT NOT NULL, added_by TEXT NOT NULL,
   joined_at INTEGER NOT NULL, left_at INTEGER, settings TEXT NOT NULL DEFAULT '{}',
-  muted INTEGER NOT NULL DEFAULT 0,
+  muted INTEGER NOT NULL DEFAULT 0, silenced INTEGER NOT NULL DEFAULT 0,
+  silenced_until INTEGER, banned_at INTEGER,
   PRIMARY KEY (chat_id, member)
 );
 CREATE INDEX IF NOT EXISTS people_members_member ON people_members(member);
@@ -74,6 +75,19 @@ pub fn migrate_people(c: &Connection) {
     );
     let _ = c.execute(
         "ALTER TABLE people_chats ADD COLUMN avatar_leaf_color INTEGER",
+        [],
+    );
+    // Group admin mute (can't post) and ban (can't rejoin).
+    let _ = c.execute(
+        "ALTER TABLE people_members ADD COLUMN silenced INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = c.execute(
+        "ALTER TABLE people_members ADD COLUMN silenced_until INTEGER",
+        [],
+    );
+    let _ = c.execute(
+        "ALTER TABLE people_members ADD COLUMN banned_at INTEGER",
         [],
     );
 }
@@ -146,6 +160,11 @@ pub struct Membership {
     pub joined_at: i64,
     pub settings: Value,
     pub muted: bool,
+    /// Admin muted this member from posting (not notification mute).
+    pub silenced: bool,
+    /// When the admin mute ends (ms). `None` while muted means until unmuted.
+    #[serde(default)]
+    pub silenced_until: Option<i64>,
 }
 
 impl Membership {
@@ -175,10 +194,13 @@ fn membership_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Membership> {
         joined_at: r.get(4)?,
         settings: serde_json::from_str(&r.get::<_, String>(5)?).unwrap_or(Value::Null),
         muted: r.get::<_, i64>(6)? != 0,
+        silenced: r.get::<_, i64>(7).unwrap_or(0) != 0,
+        silenced_until: r.get::<_, Option<i64>>(8).unwrap_or(None),
     })
 }
 
-const MEMBER_COLS: &str = "chat_id, member, role, added_by, joined_at, settings, muted";
+const MEMBER_COLS: &str =
+    "chat_id, member, role, added_by, joined_at, settings, muted, silenced, silenced_until";
 
 fn people_chat_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<PeopleChat> {
     Ok(PeopleChat {
@@ -256,23 +278,77 @@ impl Db {
         added_by: &str,
         settings: &Value,
     ) -> Result<()> {
+        if self.member_is_banned(chat_id, member)? {
+            anyhow::bail!("banned");
+        }
         self.with(|c| {
             c.execute(
                 "INSERT INTO people_members(chat_id, member, role, added_by, joined_at, settings)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)
                  ON CONFLICT(chat_id, member) DO UPDATE SET role = excluded.role, added_by = excluded.added_by,
-                    joined_at = excluded.joined_at, left_at = NULL, settings = excluded.settings",
+                    joined_at = excluded.joined_at, left_at = NULL, silenced = 0, silenced_until = NULL,
+                    settings = excluded.settings",
                 params![chat_id, member, role, added_by, now_ms(), settings.to_string()],
             )
             .map(|_| ())
         })
     }
 
-    pub fn remove_member(&self, chat_id: &str, member: &str) -> Result<bool> {
+    /// True when this person was banned from the chat (they cannot rejoin).
+    pub fn member_is_banned(&self, chat_id: &str, member: &str) -> Result<bool> {
+        self.with(|c| {
+            let banned: Option<i64> = c
+                .query_row(
+                    "SELECT banned_at FROM people_members WHERE chat_id = ?1 AND member = ?2",
+                    params![chat_id, member],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .flatten();
+            Ok(banned.is_some())
+        })
+    }
+
+    /// Soft-leave a member. When `ban` is true they cannot be re-added.
+    pub fn remove_member(&self, chat_id: &str, member: &str, ban: bool) -> Result<bool> {
+        self.with(|c| {
+            let now = now_ms();
+            Ok(c.execute(
+                "UPDATE people_members SET left_at = ?3,
+                    banned_at = CASE WHEN ?4 THEN ?3 ELSE banned_at END,
+                    silenced = 0, silenced_until = NULL
+                 WHERE chat_id = ?1 AND member = ?2 AND left_at IS NULL",
+                params![chat_id, member, now, ban as i64],
+            )? > 0)
+        })
+    }
+
+    /// Mute (`silenced`) from posting. `until` is ms when the mute ends; `None` = until unmuted.
+    pub fn set_member_silenced(
+        &self,
+        chat_id: &str,
+        member: &str,
+        silenced: bool,
+        until: Option<i64>,
+    ) -> Result<bool> {
+        self.with(|c| {
+            let until = if silenced { until } else { None };
+            c.execute(
+                "UPDATE people_members SET silenced = ?3, silenced_until = ?4
+                 WHERE chat_id = ?1 AND member = ?2 AND left_at IS NULL",
+                params![chat_id, member, silenced as i64, until],
+            )
+            .map(|n| n > 0)
+        })
+    }
+
+    /// Owner sets a human member's role to `admin` or `member`.
+    pub fn set_member_role(&self, chat_id: &str, member: &str, role: &str) -> Result<bool> {
         self.with(|c| {
             c.execute(
-                "UPDATE people_members SET left_at = ?3 WHERE chat_id = ?1 AND member = ?2 AND left_at IS NULL",
-                params![chat_id, member, now_ms()],
+                "UPDATE people_members SET role = ?3
+                 WHERE chat_id = ?1 AND member = ?2 AND left_at IS NULL AND role != 'owner'",
+                params![chat_id, member, role],
             )
             .map(|n| n > 0)
         })

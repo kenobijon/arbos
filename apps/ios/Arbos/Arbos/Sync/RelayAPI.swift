@@ -1013,8 +1013,39 @@ final class RelayAPI {
         return try await peopleChat(chatId)
     }
 
-    func removeMember(chatId: String, userId: String) async throws {
-        _ = try await request("DELETE", "/chats/\(chatId)/members/\(userId)")
+    /// `DELETE /chats/{id}/members/{userId}[?ban=1]` — owner/admin remove or ban.
+    func removeMember(chatId: String, userId: String, ban: Bool = false) async throws {
+        _ = try await request("DELETE", "/chats/\(chatId)/members/\(userId)\(ban ? "?ban=1" : "")")
+    }
+
+    /// `PUT /chats/{id}/members/{userId}` — mute/unmute from posting (optional duration).
+    func setMemberSilenced(
+        chatId: String,
+        userId: String,
+        silenced: Bool,
+        silencedUntilMs: Int64? = nil
+    ) async throws -> PeopleChat {
+        var body: [String: Any] = ["silenced": silenced]
+        if silenced, let until = silencedUntilMs {
+            body["silenced_until"] = until
+        }
+        let v = try await json("PUT", "/chats/\(chatId)/members/\(userId)", body: body)
+        if let chat = PeopleChat.parse(v) { return chat }
+        return try await peopleChat(chatId)
+    }
+
+    /// Owner: set a member's role to `admin` or `member`.
+    func setMemberRole(chatId: String, userId: String, role: String) async throws -> PeopleChat {
+        let v = try await json("PUT", "/chats/\(chatId)/members/\(userId)", body: ["role": role])
+        if let chat = PeopleChat.parse(v) { return chat }
+        return try await peopleChat(chatId)
+    }
+
+    /// Owner: whether this admin may mute and ban members.
+    func setMemberCanMuteBan(chatId: String, userId: String, canMuteBan: Bool) async throws -> PeopleChat {
+        let v = try await json("PUT", "/chats/\(chatId)/members/\(userId)", body: ["can_mute_ban": canMuteBan])
+        if let chat = PeopleChat.parse(v) { return chat }
+        return try await peopleChat(chatId)
     }
 
     /// `GET /chats/{id}/invites` — group invite links (same shape as server invites).
