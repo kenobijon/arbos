@@ -107,3 +107,95 @@ struct MessageMenuContent: View {
         }
     }
 }
+
+/// Long-press → View thread: the held message and every reply in its chain.
+struct MessageThreadSheet: View {
+    @Environment(\.theme) private var theme
+    @Environment(\.dismiss) private var dismiss
+    let root: Message
+    let replies: [Message]
+
+    private var title: String {
+        replies.count == 1 ? "1 reply" : "\(replies.count) replies"
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    threadRow(root, showCount: true)
+                    ForEach(replies) { message in
+                        threadRow(message, showCount: false)
+                    }
+                }
+                .padding(16)
+            }
+            .background(theme.bg)
+            .navigationTitle(title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }
+                        .foregroundStyle(theme.text)
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+        .presentationBackground(theme.bg)
+        .preferredColorScheme(theme.isDark ? .dark : .light)
+    }
+
+    private func threadRow(_ message: Message, showCount: Bool) -> some View {
+        let mine = message.role == .user
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(senderLabel(message))
+                    .font(theme.font(Theme.tiny, weight: .semibold))
+                    .foregroundStyle(mine ? theme.userText.opacity(0.7) : theme.muted)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                if showCount, !replies.isEmpty {
+                    Text("\(replies.count)")
+                        .font(theme.font(11, weight: .semibold))
+                        .foregroundStyle(mine ? theme.userText.opacity(0.7) : theme.muted)
+                        .accessibilityLabel("\(replies.count) \(replies.count == 1 ? "reply" : "replies")")
+                }
+            }
+            Text(bodyText(message))
+                .font(theme.font(Theme.body))
+                .foregroundStyle(mine ? theme.userText : theme.text)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .textSelection(.enabled)
+        }
+        .padding(.horizontal, Theme.bubbleHPad)
+        .padding(.vertical, Theme.bubbleVPad)
+        .background(
+            RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous)
+                .fill(mine ? theme.bubbleUser : theme.bubbleAssistant)
+        )
+    }
+
+    private func senderLabel(_ message: Message) -> String {
+        if let handle = message.senderHandle?.trimmingCharacters(in: .whitespaces), !handle.isEmpty {
+            return "@\(handle)"
+        }
+        if let name = message.senderName?.trimmingCharacters(in: .whitespaces), !name.isEmpty {
+            return name
+        }
+        switch message.role {
+        case .user: return "You"
+        case .assistant, .project: return "Agent"
+        case .system: return "System"
+        }
+    }
+
+    private func bodyText(_ message: Message) -> String {
+        let text = message.plainText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !text.isEmpty { return text }
+        for part in message.parts {
+            if case .attachment(_, let a) = part { return a.name }
+        }
+        return "Message"
+    }
+}
