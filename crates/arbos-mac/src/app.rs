@@ -729,6 +729,37 @@ impl ActiveCall {
     }
 }
 
+/// Store `new` in `slot` and return the previous frame so the caller can
+/// `App::drop_image` it (video frames upload into the window sprite atlas).
+fn swap_frame(
+    slot: &mut Option<Arc<RenderImage>>,
+    new: Option<Arc<RenderImage>>,
+) -> Option<Arc<RenderImage>> {
+    std::mem::replace(slot, new)
+}
+
+/// Remove the participant with `identity` and return their last video frame.
+fn remove_call_participant(active: &mut ActiveCall, identity: &str) -> Option<Arc<RenderImage>> {
+    let idx = active
+        .participants
+        .iter()
+        .position(|p| p.identity == identity)?;
+    active.participants.remove(idx).video
+}
+
+fn drop_video_frame(cx: &mut App, frame: Option<Arc<RenderImage>>) {
+    if let Some(image) = frame {
+        cx.drop_image(image, None);
+    }
+}
+
+fn drop_active_call_images(active: ActiveCall, cx: &mut App) {
+    drop_video_frame(cx, active.local_video);
+    for p in active.participants {
+        drop_video_frame(cx, p.video);
+    }
+}
+
 /// What the Details drawer (stub) describes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DetailsTarget {
@@ -1365,7 +1396,9 @@ impl AppState {
                     self.my_call.as_ref().map(|c| &c.status),
                     Some(CallStatus::Connecting)
                 ) {
-                    self.my_call = None;
+                    if let Some(active) = self.my_call.take() {
+                        drop_active_call_images(active, cx);
+                    }
                 }
                 self.push_notice(message);
                 cx.notify();
@@ -8416,9 +8449,10 @@ impl AppState {
         let _ = self.call_commands.send(CallCmd::Leave);
         if !active.call.call_id.is_empty() {
             self.command(ClientCommand::LeaveCall {
-                call_id: active.call.call_id,
+                call_id: active.call.call_id.clone(),
             });
         }
+        drop_active_call_images(active, cx);
         self.sync_tones();
         cx.notify();
     }
@@ -8439,7 +8473,7 @@ impl AppState {
         if let Some(c) = self.my_call.as_mut() {
             c.camera = !c.camera;
             if !c.camera {
-                c.local_video = None;
+                drop_video_frame(cx, swap_frame(&mut c.local_video, None));
                 c.agent_seeing = false;
             }
             c.notice = None;
@@ -8500,7 +8534,9 @@ impl AppState {
             .unwrap_or(call.kind == CallKind::Video);
         let Some(token) = call.token.clone() else {
             self.push_notice("The relay sent no join token.");
-            self.my_call = None;
+            if let Some(active) = self.my_call.take() {
+                drop_active_call_images(active, cx);
+            }
             cx.notify();
             return;
         };
@@ -8604,7 +8640,9 @@ impl AppState {
             .map(|c| c.call.call_id == ended.call_id)
             .unwrap_or(false)
         {
-            self.my_call = None;
+            if let Some(active) = self.my_call.take() {
+                drop_active_call_images(active, cx);
+            }
             let _ = self.call_commands.send(CallCmd::Leave);
         }
         // Exactly one device writes the end line (contract §1) — and once: the
@@ -8795,23 +8833,29 @@ impl AppState {
                             video: None,
                         }),
                     }
-                } else {
-                    active.participants.retain(|p| p.identity != identity);
+                } else if let Some(frame) = remove_call_participant(active, &identity) {
+                    cx.drop_image(frame, None);
                 }
             }
             CallEvent::Video { identity, frame } => {
-                if identity == "local" {
-                    active.local_video = Some(frame);
+                let prev = if identity == "local" {
+                    swap_frame(&mut active.local_video, Some(frame))
                 } else if let Some(p) = active.participant_mut(&identity) {
-                    p.video = Some(frame);
-                }
+                    swap_frame(&mut p.video, Some(frame))
+                } else {
+                    None
+                };
+                drop_video_frame(cx, prev);
             }
             CallEvent::VideoOff { identity } => {
-                if identity == "local" {
-                    active.local_video = None;
+                let prev = if identity == "local" {
+                    swap_frame(&mut active.local_video, None)
                 } else if let Some(p) = active.participant_mut(&identity) {
-                    p.video = None;
-                }
+                    swap_frame(&mut p.video, None)
+                } else {
+                    None
+                };
+                drop_video_frame(cx, prev);
             }
             CallEvent::Speaking(ids) => {
                 for p in active.participants.iter_mut() {
@@ -8840,7 +8884,7 @@ impl AppState {
             }
             CallEvent::CameraUnavailable(why) => {
                 active.camera = false;
-                active.local_video = None;
+                drop_video_frame(cx, swap_frame(&mut active.local_video, None));
                 active.notice = Some(format!("Camera unavailable: {why}"));
             }
             CallEvent::MicUnavailable(why) => {
@@ -8857,7 +8901,9 @@ impl AppState {
                 if active.status == CallStatus::Connected {
                     // The engine dropped the room on its own: leave the relay side too.
                     let call_id = active.call.call_id.clone();
-                    self.my_call = None;
+                    if let Some(ended) = self.my_call.take() {
+                        drop_active_call_images(ended, cx);
+                    }
                     if !call_id.is_empty() {
                         self.command(ClientCommand::LeaveCall { call_id });
                     }
@@ -9568,6 +9614,83 @@ mod chat_image_scale_tests {
         // Aspect ≈ 3024/1964.
         let ratio = w as f32 / h as f32;
         assert!((ratio - 3024.0 / 1964.0).abs() < 0.02);
+    }
+}
+
+#[cfg(test)]
+mod call_video_frame_tests {
+    //! feedback app-01M5R1Z6356QE63XK9EP4HDGEG: each decoded video frame was a
+    //! new RenderImage left in the sprite atlas. swap_frame / remove_call_participant
+    //! hand the previous frame back so App::drop_image can free it.
+    use super::{remove_call_participant, swap_frame, ActiveCall, CallParticipant, CallStatus};
+    use crate::model::{Call, Sender};
+    use gpui::RenderImage;
+    use std::sync::Arc;
+
+    fn frame() -> Arc<RenderImage> {
+        Arc::new(RenderImage::new(Vec::new()))
+    }
+
+    fn active_with(participant: CallParticipant) -> ActiveCall {
+        ActiveCall {
+            call: Call::default(),
+            status: CallStatus::Connected,
+            muted: false,
+            camera: true,
+            participants: vec![participant],
+            local_video: None,
+            joined_at: 0,
+            expanded: true,
+            notice: None,
+            outgoing: false,
+            reachable: None,
+            agent_seeing: false,
+        }
+    }
+
+    #[test]
+    fn swap_frame_returns_none_the_first_time() {
+        let mut slot = None;
+        let first = frame();
+        assert!(swap_frame(&mut slot, Some(first.clone())).is_none());
+        assert!(Arc::ptr_eq(slot.as_ref().unwrap(), &first));
+    }
+
+    #[test]
+    fn swap_frame_returns_the_previous_frame_and_keeps_the_new_one() {
+        let mut slot = None;
+        let first = frame();
+        let second = frame();
+        assert!(swap_frame(&mut slot, Some(first.clone())).is_none());
+        let prev = swap_frame(&mut slot, Some(second.clone()));
+        assert!(Arc::ptr_eq(prev.as_ref().unwrap(), &first));
+        assert!(Arc::ptr_eq(slot.as_ref().unwrap(), &second));
+        assert!(swap_frame(&mut slot, None).is_some_and(|p| Arc::ptr_eq(&p, &second)));
+        assert!(slot.is_none());
+    }
+
+    #[test]
+    fn remove_call_participant_hands_back_that_participants_frame() {
+        let video = frame();
+        let mut active = active_with(CallParticipant {
+            identity: "u_ken".into(),
+            sender: Sender::default(),
+            speaking: false,
+            muted: false,
+            video: Some(video.clone()),
+        });
+        active.participants.push(CallParticipant {
+            identity: "u_other".into(),
+            sender: Sender::default(),
+            speaking: false,
+            muted: false,
+            video: Some(frame()),
+        });
+        let taken = remove_call_participant(&mut active, "u_ken");
+        assert!(taken.is_some_and(|p| Arc::ptr_eq(&p, &video)));
+        assert_eq!(active.participants.len(), 1);
+        assert_eq!(active.participants[0].identity, "u_other");
+        assert!(remove_call_participant(&mut active, "u_missing").is_none());
     }
 }
 
