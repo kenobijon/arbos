@@ -177,6 +177,8 @@ private struct ChatSession: View {
     /// Follow the end as rows stream / grow. Cleared when the user scrolls up;
     /// restored when they return near the end or tap the chevron / pill (Mac stick pin).
     @State private var pinnedToBottom = true
+    /// When this chat screen appeared (the history window does not grow in its first second).
+    @State private var appearedAt = Date()
     /// Rows that arrived while the reader was away from the end — drives the
     /// "New messages" pill. Cleared when they re-pin or jump to the latest.
     @State private var newBelowCount = 0
@@ -904,6 +906,7 @@ private struct ChatSession: View {
             }
         }
         .onAppear {
+            appearedAt = Date()
             LaunchClock.mark("chat-appear", detail: "messages=\(messages.count)")
             // Force: re-PUT even if the cursor is unchanged so the relay clears
             // unread events recorded after the last PUT (other apps / badge).
@@ -1529,6 +1532,10 @@ private struct ChatSession: View {
             // Nearing the top: the next older slice of rows joins the view tree; a channel
             // also asks the server for one older page.
             .modifier(NearTopReporter(enabled: true) {
+                // The first layout reports offset 0 before the bottom anchor applies; a
+                // grow step there (30 more bubbles) landed inside the open and cost a
+                // 200–300 ms frame on a long group. History waits a beat after appear.
+                guard Date().timeIntervalSince(appearedAt) > 1.0 else { return }
                 if windowCount + windowSkipEnd < visibleRows.count {
                     growWindow()
                 } else if isChannel {
