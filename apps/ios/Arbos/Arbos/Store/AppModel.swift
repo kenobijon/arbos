@@ -1827,7 +1827,9 @@ final class AppModel: ObservableObject {
             let started = Date()
             for (ix, bytes) in rowBytes.enumerated() {
                 for (_, doc) in docs {
+                    let t0 = Date()
                     _ = try? doc.importUpdateReportingPending(bytes)
+                    PerfCounters.time("import", ms: Date().timeIntervalSince(t0) * 1000)
                 }
                 if gapMs > 0 { try? await Task.sleep(for: .milliseconds(gapMs)) } else { await Task.yield() }
                 if ix == rowBytes.count - 1 {
@@ -2061,7 +2063,13 @@ final class AppModel: ObservableObject {
             return
         }
         Task.detached(priority: .userInitiated) { [weak self] in
+            #if DEBUG
+            let t0 = Date()
+            #endif
             let list = doc.readAll()
+            #if DEBUG
+            PerfCounters.time("readAll.bg", ms: Date().timeIntervalSince(t0) * 1000)
+            #endif
             await MainActor.run {
                 guard let self, self.snapshotGeneration[chatId] == gen else { return }
                 self.applySnapshot(chatId, list: list)
@@ -2070,6 +2078,10 @@ final class AppModel: ObservableObject {
     }
 
     private func applySnapshot(_ chatId: Id, list: [Message]) {
+        #if DEBUG
+        let t0 = Date()
+        defer { PerfCounters.time("applySnapshot", ms: Date().timeIntervalSince(t0) * 1000) }
+        #endif
         var list = list
         let pendingIds = unacked[chatId] ?? []
         for i in list.indices where list[i].role == .user {
