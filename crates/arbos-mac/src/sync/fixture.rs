@@ -876,6 +876,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 kind: ChatKind::Chat,
                 participants: Vec::new(),
                 unread: false,
+                unread_count: 0,
                 last_message_at: now_ms(),
                 archived_at: None,
             });
@@ -914,6 +915,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 kind: ChatKind::Chat,
                 participants: Vec::new(),
                 unread: false,
+                unread_count: 0,
                 last_message_at: now_ms(),
                 archived_at: None,
             });
@@ -1175,6 +1177,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 kind: ChatKind::Chat,
                 participants: Vec::new(),
                 unread: false,
+                unread_count: 0,
                 last_message_at: now_ms(),
                 archived_at: None,
             });
@@ -2596,6 +2599,7 @@ fn mark_read(shared: &Shared, chat_id: &str) {
         match chats.iter_mut().find(|c| c.id == chat_id && c.unread) {
             Some(c) => {
                 c.unread = false;
+                c.unread_count = 0;
                 true
             }
             None => false,
@@ -3581,6 +3585,7 @@ fn mark_unread_if_hidden(shared: &Arc<Shared>, chat_id: &str) {
         let mut chats = shared.chats.lock().unwrap();
         if let Some(c) = chats.iter_mut().find(|c| c.id == chat_id) {
             c.unread = true;
+            c.unread_count = c.unread_count.max(1);
             c.last_message_at = now_ms();
         }
     }
@@ -4185,6 +4190,7 @@ fn seed_chats() -> Vec<Chat> {
         kind: ChatKind::Chat,
         participants: Vec::new(),
         unread: false,
+        unread_count: 0,
         last_message_at: t.saturating_sub(ago_min * 60_000),
         archived_at: None,
     };
@@ -5225,6 +5231,7 @@ fn seed_people_chats() -> Vec<Chat> {
             kind: ChatKind::Chat,
             participants: Vec::new(),
             unread: true,
+            unread_count: 0,
             last_message_at: now_ms().saturating_sub(12 * 60_000),
             archived_at: None,
         },
@@ -5237,6 +5244,7 @@ fn seed_people_chats() -> Vec<Chat> {
             kind: ChatKind::Chat,
             participants: Vec::new(),
             unread: false,
+            unread_count: 0,
             last_message_at: now_ms().saturating_sub(25 * 60_000),
             archived_at: None,
         },
@@ -5249,6 +5257,7 @@ fn seed_people_chats() -> Vec<Chat> {
             kind: ChatKind::Chat,
             participants: Vec::new(),
             unread: false,
+            unread_count: 0,
             last_message_at: now_ms().saturating_sub(50 * 60_000),
             archived_at: None,
         },
@@ -5763,6 +5772,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                 kind: ChatKind::Chat,
                 participants: Vec::new(),
                 unread: false,
+                unread_count: 0,
                 last_message_at: now_ms(),
                 archived_at: None,
             });
@@ -5880,6 +5890,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                 kind: ChatKind::Chat,
                 participants: Vec::new(),
                 unread: false,
+                unread_count: 0,
                 last_message_at: now_ms(),
                 archived_at: None,
             });
