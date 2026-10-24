@@ -105,6 +105,8 @@ final class CallManager: NSObject, ObservableObject {
     @Published private(set) var error: String?
     @Published private(set) var muted = false
     @Published private(set) var cameraOn = false
+    /// Publishing a screen-share track (system picker chooses what to share on iOS 27+).
+    @Published private(set) var screenShareOn = false
     @Published private(set) var speakerOn = false
     @Published private(set) var frontCamera = true
     /// Full-screen call UI wanted (the root view presents it). While a call is
@@ -141,6 +143,9 @@ final class CallManager: NSObject, ObservableObject {
 
     let room = LiveKit.Room()
     var localVideoTrack: VideoTrack? { room.localParticipant.firstCameraVideoTrack }
+    var localScreenShareTrack: VideoTrack? {
+        room.localParticipant.firstScreenSharePublication?.track as? VideoTrack
+    }
 
     // Wiring from AppModel.
     var api: RelayAPI?
@@ -696,6 +701,7 @@ final class CallManager: NSObject, ObservableObject {
         tiles = []
         connectedAt = nil
         cameraOn = false
+        screenShareOn = false
         agentSeeing = false
         seeingAgentName = nil
         muted = false
@@ -796,7 +802,7 @@ final class CallManager: NSObject, ObservableObject {
         if !turningOn {
             // Off means off at once: the indicator drops now, and the camera track is
             // unpublished (not just muted) so the agent's vision sampler gets nothing.
-            agentSeeing = false
+            if !screenShareOn { agentSeeing = false }
             cameraOn = false
             objectWillChange.send()
         }
@@ -812,6 +818,42 @@ final class CallManager: NSObject, ObservableObject {
             self.error = CallManager.describe(error)
         }
         objectWillChange.send()
+    }
+
+    /// Start or stop screen share. Starting presents the system content picker on iOS 27+
+    /// (LiveKit ScreenCaptureKit) so the user chooses the app or screen to share; dismissing
+    /// the picker cancels with no track. Stopping unpublishes the share track.
+    func toggleScreenShare() async {
+        let turningOn = !screenShareOn
+        if !turningOn {
+            if !cameraOn { agentSeeing = false }
+            screenShareOn = false
+            objectWillChange.send()
+        }
+        do {
+            try await room.localParticipant.setScreenShare(enabled: turningOn)
+            if !turningOn {
+                for pub in room.localParticipant.videoTracks where pub.source == .screenShareVideo {
+                    if let local = pub as? LocalTrackPublication { try? await room.localParticipant.unpublish(publication: local) }
+                }
+            }
+            screenShareOn = room.localParticipant.isScreenShareEnabled()
+        } catch {
+            screenShareOn = room.localParticipant.isScreenShareEnabled()
+            // User dismissed the content picker — not an error to show on the call screen.
+            if let lk = error as? LiveKitError, lk.type == .cancelled { /* no-op */ }
+            else { self.error = CallManager.describe(error) }
+        }
+        objectWillChange.send()
+    }
+
+    fileprivate func syncScreenShareFromRoom() {
+        let on = room.localParticipant.isScreenShareEnabled()
+        if screenShareOn != on {
+            screenShareOn = on
+            if !on, !cameraOn { agentSeeing = false }
+            objectWillChange.send()
+        }
     }
 
     // MARK: Agent camera vision (§11)
@@ -843,7 +885,7 @@ final class CallManager: NSObject, ObservableObject {
         } else {
             return
         }
-        agentSeeing = seeingMe && cameraOn
+        agentSeeing = seeingMe && (cameraOn || screenShareOn)
         if seeingMe {
             let identity = (d["agent"] as? String) ?? participant?.identity?.stringValue ?? ""
             seeingAgentName = (d["agent_name"] as? String)
@@ -886,10 +928,16 @@ final class CallManager: NSObject, ObservableObject {
             .map { p in
                 let identity = p.identity?.stringValue ?? UUID().uuidString
                 let person = CallPerson.parse(metadata: p.metadata) ?? CallPerson.placeholder(identity: identity, name: p.name)
-                let video = p.videoTracks.first { $0.source == .camera }?.track as? VideoTrack
+                // Prefer a screen share when they are sharing; otherwise their camera.
+                let screen = p.videoTracks.first { $0.source == .screenShareVideo }?.track as? VideoTrack
+                let camera = p.videoTracks.first { $0.source == .camera }?.track as? VideoTrack
+                let sharing = p.isScreenShareEnabled()
+                let video = screen ?? camera
+                let hasVideo = sharing || p.isCameraEnabled()
                 return CallTile(id: identity, person: person, isSpeaking: p.isSpeaking,
-                                micOn: CallManager.remoteMicOn(p), cameraOn: p.isCameraEnabled(), videoTrack: video)
+                                micOn: CallManager.remoteMicOn(p), cameraOn: hasVideo, videoTrack: video)
             }
+        syncScreenShareFromRoom()
         syncRingback()
     }
 
@@ -1266,6 +1314,14 @@ extension CallManager: RoomDelegate {
 
     nonisolated func room(_ room: LiveKit.Room, participant: RemoteParticipant, didUnsubscribeTrack publication: RemoteTrackPublication) {
         Task { @MainActor in self.refreshTiles() }
+    }
+
+    nonisolated func room(_ room: LiveKit.Room, participant: LocalParticipant, didPublishTrack publication: LocalTrackPublication) {
+        Task { @MainActor in self.syncScreenShareFromRoom() }
+    }
+
+    nonisolated func room(_ room: LiveKit.Room, participant: LocalParticipant, didUnpublishTrack publication: LocalTrackPublication) {
+        Task { @MainActor in self.syncScreenShareFromRoom() }
     }
 
     nonisolated func room(_ room: LiveKit.Room, participant: Participant, didUpdateIsSpeaking isSpeaking: Bool) {
