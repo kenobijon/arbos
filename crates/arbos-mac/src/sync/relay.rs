@@ -152,6 +152,7 @@ struct QueuedSend {
     command: &'static str,
     answer: Option<(String, serde_json::Value)>,
     reply_to: Option<String>,
+    forwarded_from: Option<String>,
 }
 
 struct Shared {
@@ -3669,6 +3670,7 @@ async fn send_message(
     command: &'static str,
     answer: Option<(String, serde_json::Value)>,
     reply_to: Option<String>,
+    forwarded_from: Option<String>,
 ) {
     // No room doc yet: queue while NewChat is in flight, otherwise fail visibly.
     if !shared.docs.lock().unwrap().contains_key(&chat_id) {
@@ -3683,6 +3685,7 @@ async fn send_message(
                     command,
                     answer,
                     reply_to,
+                    forwarded_from,
                 });
                 return;
             }
@@ -3857,6 +3860,9 @@ async fn send_message(
         let device = shared.device_id();
         doc.core.transact(|d| {
             let _ = d.append_user_message(&message_id, &text, &device, &opts);
+            if let Some(by) = forwarded_from.as_deref() {
+                d.set_message_fields(&message_id, &[("forwardedFrom", json!(by))]);
+            }
             d.push_command(command, payload, &device);
             if let Some(ref title) = title {
                 d.push_command("retitle", json!({ "title": title }), &device);
@@ -4105,6 +4111,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 Vec::new(),
                 Some(wav),
                 "send",
+                None,
                 None,
                 None,
             ));
@@ -4873,6 +4880,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 "send",
                 None,
                 reply_to,
+                None,
             ));
         }
         ClientCommand::Forward {
@@ -4895,6 +4903,26 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 "send",
                 None,
                 None,
+                None,
+            ));
+        }
+        ClientCommand::ForwardText {
+            chat_id,
+            message_id,
+            text,
+            forwarded_from,
+        } => {
+            tokio::spawn(send_message(
+                shared.clone(),
+                chat_id,
+                message_id,
+                text,
+                Vec::new(),
+                None,
+                "send",
+                None,
+                None,
+                Some(forwarded_from),
             ));
         }
         ClientCommand::Steer {
@@ -4913,6 +4941,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 "steer",
                 None,
                 reply_to,
+                None,
             ));
         }
         ClientCommand::Answer {
@@ -4932,6 +4961,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 None,
                 "answer",
                 answer,
+                None,
                 None,
             ));
         }
@@ -4976,12 +5006,34 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             chat_id,
             message_id,
         } => {
-            let docs = shared.docs.lock().unwrap();
-            if let Some(doc) = docs.get(&chat_id) {
-                if let Err(e) = doc.core.transact(|d| d.delete_message(&message_id)) {
-                    eprintln!("relay: delete message: {e:#}");
+            // The relay decides and edits the doc (`DELETE /room/{project}/{chat}/
+            // messages/{id}`); the deletion comes back as a relay-signed row. A
+            // refusal (403 `not_yours`) is told once; the message stays.
+            let project_id = shared
+                .chats
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|c| c.id == chat_id)
+                .map(|c| c.project_id.clone())
+                .unwrap_or_else(|| chat_id.clone());
+            let is_people = shared.is_people(&chat_id);
+            let room = room::room_path(&project_id, &chat_id, is_people);
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Err(err) = shared
+                    .delete(&format!("/room/{room}/messages/{message_id}"))
+                    .await
+                {
+                    let why = match err.downcast_ref::<RelayError>() {
+                        Some(e) if e.status == 403 => {
+                            "You can only delete your own messages.".to_owned()
+                        }
+                        _ => format!("Could not delete the message: {}", people_error(&err)),
+                    };
+                    shared.notice(why);
                 }
-            }
+            });
         }
         ClientCommand::Approve {
             chat_id,
@@ -5268,6 +5320,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                                 q.command,
                                 q.answer,
                                 q.reply_to,
+                                q.forwarded_from,
                             ));
                         }
                     }

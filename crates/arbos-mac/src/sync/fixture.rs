@@ -35,8 +35,8 @@ use crate::model::{
     ConnectorsView, DeviceView, Effort, FieldKind, FormField, Id, Link, LocalDevice, LocalView,
     Message, MessageStatus, Part, Project, QuestionState, Role, Routine, RoutineRun,
     RoutineRunStatus, RoutineTrigger, Secret, SecretActivity, SecretAgent, SecretDirector,
-    SecretRequest, SecretScope, SecretsView, Skill, StatusKind, ToolCall, ToolStatus, TurnKind,
-    Widget,
+    SecretRequest, SecretScope, SecretsView, ServerChannel, ServerInfo, Skill, StatusKind,
+    ToolCall, ToolStatus, TurnKind, Widget,
 };
 
 pub const STREAM_FRAME_MS: u64 = arbos_core::STREAM_COMMIT_MS;
@@ -214,6 +214,7 @@ impl SyncSource for FixtureSource {
             emit_local(&shared);
             emit_secrets(&shared);
             emit_open_request(&shared);
+            emit_servers_hook(&shared);
             let _ = events.send(SyncEvent::Link(Link::Live));
             emit_link_hook(&shared);
             emit_typing_hook(&shared);
@@ -234,6 +235,96 @@ impl SyncSource for FixtureSource {
             Ok(())
         })
     }
+}
+
+/// `ARBOS_FIXTURE_SERVERS=1` lists three servers (D88 servers otherwise live
+/// on the relay only) so a rig can shoot the chat list's Servers segment and
+/// the server rows ([feedback sidebar-strip-filter-2026-10-24]).
+fn emit_servers_hook(shared: &Arc<Shared>) {
+    if !std::env::var("ARBOS_FIXTURE_SERVERS").is_ok_and(|v| v == "1") {
+        return;
+    }
+    let now = now_ms() as i64;
+    let servers = [
+        (
+            "fx-server-hq",
+            "Arbos HQ",
+            "general",
+            "Ken",
+            "gate is green, shipping the next build",
+            1,
+        ),
+        (
+            "fx-server-affine",
+            "Affine",
+            "validators",
+            "Sami",
+            "epoch 412 settled",
+            2,
+        ),
+        (
+            "fx-server-hyper",
+            "Hyper",
+            "trading",
+            "You",
+            "pausing the dry-run trader",
+            3,
+        ),
+    ];
+    let mut list = Vec::new();
+    let mut snapshot = arbos_matrix::Snapshot::default();
+    for (i, (id, name, channel, who, text, idx)) in servers.iter().enumerate() {
+        let last_ts = now - (i as i64) * 2_700_000 - 600_000;
+        let room_id = format!("!{id}-space:arbos.life");
+        let channel_room = format!("!{id}-{channel}:arbos.life");
+        list.push(ServerInfo {
+            id: id.to_string(),
+            name: name.to_string(),
+            owner_user_id: "fx-me".into(),
+            space_room_id: Some(room_id.clone()),
+            created_at: last_ts - 86_400_000,
+            my_role: if i == 0 { "owner" } else { "member" }.into(),
+            member_count: 4 + i as u64,
+            channels: vec![ServerChannel {
+                id: format!("{id}-{channel}"),
+                server_id: id.to_string(),
+                name: channel.to_string(),
+                room_id: Some(channel_room.clone()),
+                created_at: last_ts - 86_400_000,
+                ..ServerChannel::default()
+            }],
+            general_channel_id: Some(format!("{id}-{channel}")),
+            avatar_color_index_effective: Some(*idx),
+            ..ServerInfo::default()
+        });
+        snapshot.spaces.push(arbos_matrix::SpaceRow {
+            room_id,
+            server_id: id.to_string(),
+            name: name.to_string(),
+            member_count: 4 + i as u64,
+            unread: u64::from(i == 0),
+            last_text: text.to_string(),
+            last_sender_name: who.to_string(),
+            last_ts,
+            channel_ids: vec![format!("{id}-{channel}")],
+        });
+        snapshot.channels.push(arbos_matrix::ChannelRow {
+            room_id: channel_room,
+            channel_id: format!("{id}-{channel}"),
+            server_id: id.to_string(),
+            name: format!("#{channel}"),
+            restricted: false,
+            can_post: true,
+            unread: u64::from(i == 0),
+            last_text: text.to_string(),
+            last_sender_name: who.to_string(),
+            last_ts,
+            order: format!("{i}"),
+        });
+    }
+    let _ = shared.events.send(SyncEvent::ServersAvailable(true));
+    let _ = shared.events.send(SyncEvent::Servers(list));
+    let _ = shared.events.send(SyncEvent::MatrixRooms(snapshot));
 }
 
 /// `ARBOS_LINK=offline|relay-down|reconnecting|syncing|restart-soon` puts every fixture room
@@ -632,7 +723,15 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     title: None,
                 })
                 .collect();
-            send_user(shared, chat_id, message_id, text, attachments, reply_to);
+            send_user(
+                shared,
+                chat_id,
+                message_id,
+                text,
+                attachments,
+                reply_to,
+                None,
+            );
         }
         ClientCommand::Forward {
             chat_id,
@@ -643,7 +742,15 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         } => {
             // No blob store to copy between: the row lands in the destination
             // chat with the same key, so its picture is already cached.
-            send_user(shared, chat_id, message_id, text, vec![attachment], None);
+            send_user(
+                shared,
+                chat_id,
+                message_id,
+                text,
+                vec![attachment],
+                None,
+                None,
+            );
         }
         ClientCommand::OpenAttachment {
             key,
@@ -669,6 +776,22 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             }
             let _ = shared.events.send(SyncEvent::AttachmentOpened { key });
         }
+        ClientCommand::ForwardText {
+            chat_id,
+            message_id,
+            text,
+            forwarded_from,
+        } => {
+            send_user(
+                shared,
+                chat_id,
+                message_id,
+                text,
+                Vec::new(),
+                None,
+                Some(forwarded_from),
+            );
+        }
         ClientCommand::Steer {
             chat_id,
             message_id,
@@ -676,7 +799,15 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             reply_to,
         } => {
             // Fixture has no live pi turn; land the bubble like a normal send.
-            send_user(shared, chat_id, message_id, text, Vec::new(), reply_to);
+            send_user(
+                shared,
+                chat_id,
+                message_id,
+                text,
+                Vec::new(),
+                reply_to,
+                None,
+            );
         }
         ClientCommand::SendVoice {
             chat_id,
@@ -695,7 +826,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 kind: Some(AttachmentKind::Audio),
                 title: None,
             }];
-            send_user(shared, chat_id, message_id, text, attachments, None);
+            send_user(shared, chat_id, message_id, text, attachments, None, None);
         }
         ClientCommand::Transcribe {
             request_id, wav, ..
@@ -1849,6 +1980,7 @@ fn send_user(
     text: String,
     attachments: Vec<Attachment>,
     reply_to: Option<String>,
+    forwarded_from: Option<String>,
 ) {
     let project_id = project_of(shared, &chat_id);
     if let Some(space) = people_space_of(shared, &chat_id) {
@@ -1867,6 +1999,9 @@ fn send_user(
         with_doc(shared, &chat_id, |doc| {
             doc.core.transact(|d| {
                 let _ = d.append_user_message(&message_id, &text, DEVICE, &opts);
+                if let Some(by) = forwarded_from.as_deref() {
+                    d.set_message_fields(&message_id, &[("forwardedFrom", json!(by))]);
+                }
                 d.push_command("send", json!({ "messageId": message_id }), DEVICE);
             });
         });
@@ -1882,6 +2017,9 @@ fn send_user(
     with_doc(shared, &chat_id, |doc| {
         doc.core.transact(|d| {
             let _ = d.append_user_message(&message_id, &text, DEVICE, &opts);
+            if let Some(by) = forwarded_from.as_deref() {
+                d.set_message_fields(&message_id, &[("forwardedFrom", json!(by))]);
+            }
             if asleep {
                 set_status(d, &message_id, MessageStatus::Queued);
             }
@@ -5322,6 +5460,7 @@ fn human_message(chat_id: &str, who: &Person, text: &str, at: u64) -> Message {
         sender_avatar_color: None,
         mentions: Vec::new(),
         reply_to: None,
+        forwarded_from: None,
         asked_by_handle: None,
         owner_handle: None,
         usage: None,
