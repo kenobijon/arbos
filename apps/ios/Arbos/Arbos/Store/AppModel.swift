@@ -3359,12 +3359,20 @@ final class AppModel: ObservableObject {
     }
 
     /// Delete a message for everyone via the shared chat doc. No push notification.
+    /// In a people group, also writes a hidden admin audit line (Activity screen).
     func deleteMessage(chatId: Id, messageId: Id) {
         guard !messageId.isEmpty else { return }
+        let audit = groupDeletionAuditLine(chatId: chatId)
         #if DEBUG
         if isFixture {
             guard var list = messages[chatId] else { return }
             list.removeAll { $0.id == messageId }
+            if let audit {
+                let m = Message(id: newId(), chatId: chatId, role: .system, sender: "system", status: .done, turn: nil, decision: nil,
+                                subagentId: nil, subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: nowMs(),
+                                completedAt: nowMs(), pending: false, parts: [.text(id: newId(), text: audit)], hiddenCount: 0)
+                list.append(m)
+            }
             messages[chatId] = list
             clearUnacked(chatId: chatId, messageId: messageId)
             Haptics.pick()
@@ -3373,6 +3381,9 @@ final class AppModel: ObservableObject {
         #endif
         guard let doc = docs[chatId] else { return }
         do {
+            if let audit {
+                try doc.insertSystemLine(id: newId(), text: audit, deviceId: deviceId)
+            }
             try doc.deleteMessage(messageId: messageId)
             doc.commit()
             clearUnacked(chatId: chatId, messageId: messageId)
@@ -3380,6 +3391,19 @@ final class AppModel: ObservableObject {
         } catch {
             notice = Notice(text: "Could not delete the message: \(error.localizedDescription)")
         }
+    }
+
+    /// Text for a people-group deletion audit, or nil when this chat is not a group.
+    private func groupDeletionAuditLine(chatId: Id) -> String? {
+        guard let people = peopleChat(chatId), people.isGroup else { return nil }
+        let who: String = {
+            if let name = user?.name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
+                return name
+            }
+            if let login = user?.login, !login.isEmpty { return "@\(login)" }
+            return "Someone"
+        }()
+        return GroupActivity.deletionNotice(who: who)
     }
 
     /// Paint any room doc that already has rows but no published transcript yet
