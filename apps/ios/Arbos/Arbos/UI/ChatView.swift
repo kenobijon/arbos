@@ -774,7 +774,7 @@ private struct ChatSession: View {
                         },
                         onDismiss: { closeActions() },
                         bubble: {
-                            RowView(model: model, row: row, chatId: chatId, width: geo.size.width, timeReveal: 0,
+                            RowView(model: model, theme: theme, composerInset: composerSideInset, row: row, chatId: chatId, width: geo.size.width, timeReveal: 0,
                                     mentions: MentionTable.Cache.shared.table(model: model, theme: theme))
                                 .padding(.horizontal, 16)
                         }
@@ -1469,6 +1469,8 @@ private struct ChatSession: View {
                     // skip the ForEach when the transcript inputs are unchanged.
                     TranscriptRows(
                         model: model,
+                        theme: theme,
+                        composerInset: composerSideInset,
                         mentions: mentions,
                         shown: shown,
                         shownStamp: Self.shownStamp(rowsVersion, windowCount, windowSkipEnd, searchText, showSearch),
@@ -2841,6 +2843,8 @@ struct ModelPickerView: View {
 /// does not rebuild every bubble when the row list is unchanged.
 private struct TranscriptRows: View, Equatable {
     let model: AppModel
+    let theme: Theme
+    let composerInset: CGFloat
     let mentions: MentionTable
     let shown: [Row]
     /// Identity of `shown` (rows version + window bounds + search): compared instead of the array.
@@ -2863,6 +2867,8 @@ private struct TranscriptRows: View, Equatable {
     static func == (lhs: TranscriptRows, rhs: TranscriptRows) -> Bool {
         let same = lhs.shownStamp == rhs.shownStamp
             && lhs.actionsRowId == rhs.actionsRowId
+            && lhs.composerInset == rhs.composerInset
+            && lhs.theme == rhs.theme
             && lhs.chatId == rhs.chatId
             && lhs.width == rhs.width
             && lhs.timeReveal == rhs.timeReveal
@@ -2887,7 +2893,7 @@ private struct TranscriptRows: View, Equatable {
         let firstId = shown.first?.id
         ForEach(shown) { row in
             let reply = canReply(row)
-            RowView(model: model, row: row, chatId: chatId, width: width, timeReveal: timeReveal,
+            RowView(model: model, theme: theme, composerInset: composerInset, row: row, chatId: chatId, width: width, timeReveal: timeReveal,
                     onQuoteTap: onQuoteTap,
                     highlighted: highlightedMessage == row.messageId,
                     onReply: reply ? { onReply(row) } : nil,
