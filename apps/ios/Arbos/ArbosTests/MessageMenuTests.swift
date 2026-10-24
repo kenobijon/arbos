@@ -13,12 +13,16 @@ final class MessageMenuTests: XCTestCase {
 
     func testOwnMessageAddsEditBeforeDelete() {
         XCTAssertEqual(
-            MessageMenu.items(forMessage: true, canEdit: true),
+            MessageMenu.items(forMessage: true, canEdit: true, canDelete: true),
             [.copy, .reply, .forward, .replyInDM, .edit, .delete]
         )
         XCTAssertEqual(
-            MessageMenu.items(forMessage: true, canEdit: true).map(\.label),
+            MessageMenu.items(forMessage: true, canEdit: true, canDelete: true).map(\.label),
             ["Copy", "Reply", "Forward", "Reply in DM", "Edit", "Delete"]
+        )
+        XCTAssertEqual(
+            MessageMenu.items(forMessage: true, canEdit: true, canDelete: false),
+            [.copy, .reply, .forward, .replyInDM, .edit]
         )
     }
 
@@ -37,6 +41,15 @@ final class MessageMenuTests: XCTestCase {
     func testNonMessageRowsCopyOnly() {
         XCTAssertEqual(MessageMenu.items(forMessage: false), [.copy])
         XCTAssertEqual(MessageMenu.items(forMessage: false, canEdit: true), [.copy])
+    }
+
+    /// feedback app-01M5MXQ90MEEWF6C8W090VCZHF: Delete asks first. My own message gets the
+    /// plain title; a moderator sees whose message it is; the one action is for everyone.
+    func testDeleteConfirmCopy() {
+        XCTAssertEqual(MessageDeleteCopy.title(mine: true, sender: "Jacob"), "Delete message?")
+        XCTAssertEqual(MessageDeleteCopy.title(mine: false, sender: "Sam Rivera"), "Delete Sam Rivera’s message?")
+        XCTAssertEqual(MessageDeleteCopy.title(mine: false, sender: "  "), "Delete message?")
+        XCTAssertTrue(MessageDeleteCopy.body.contains("for everyone"))
     }
 
     /// #1389: a long-press on any block of a bubble reaches the one menu, and
