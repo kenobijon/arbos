@@ -1,8 +1,9 @@
 //! Inline mention chips (Jacob, 2026-10-23, after Grok Bot): when a bubble
-//! says `@comms`, `@sam`, `@launch-week` or `@launch-crew` and we know who
-//! that is, the mention draws as a chip — the entity's picture, its name in
-//! the accent colour, on a soft pill — and a click opens that entity in the
-//! right pane (the shared D93 profile pane). Unknown handles stay plain text.
+//! says `@comms`, `@sam`, `@launch-week`, `@launch-crew`, `@here` or `@agents`
+//! and we know who that is, the mention draws as a chip — the entity's picture,
+//! its name in the accent colour, on a soft pill — and a click opens that
+//! entity in the right pane (the shared D93 profile pane). Collective `@here`
+//! / `@agents` chips have no page. Unknown handles stay plain text.
 //!
 //! How it fits the selectable prose (#1389): the text itself is not broken
 //! into elements. [`Mentions::display`] rewrites `@comms` to `@Comms` (the
@@ -31,13 +32,16 @@ use crate::ui::theme::Theme;
 pub const PILL_PAD_X: f32 = 4.0;
 pub const PILL_PAD_Y: f32 = 1.0;
 pub const PILL_RADIUS: f32 = 6.0;
-/// The picture disc; the `@` plus the hair space after it is its cell, so
-/// the disc never crowds the name (Grok: a clear gap between icon and name).
+/// The picture disc, at most; it shrinks to its cell so it never touches
+/// the name (Grok: a clear gap between icon and name).
 pub const PICTURE: f32 = 15.0;
-/// What the rewrite puts after `@`: a hair space, so the picture cell is one
-/// wide glyph box and the name starts a step later. Copies carry it
-/// invisibly; `find` expects it.
-pub const CELL: &str = "@\u{200A}";
+/// The gap the disc keeps to the name, inside the cell.
+pub const PICTURE_GAP: f32 = 3.0;
+/// What the rewrite puts after `@`: a three-per-em space, so the picture
+/// cell is `@` + ⅓ em wide — room for a 15 pt disc and the gap at body size,
+/// a smaller disc at smaller sizes. Copies carry it as a thin space; `find`
+/// expects it.
+pub const CELL: &str = "@\u{2004}";
 
 /// What the chip paints in the `@` cell.
 #[derive(Clone)]
@@ -54,8 +58,8 @@ pub enum Picture {
 }
 
 pub struct Mention {
-    /// Where a click goes.
-    pub page: ProfilePage,
+    /// Where a click goes; `None` for collective `@here` / `@agents` (no profile).
+    pub page: Option<ProfilePage>,
     /// The display name the chip shows (and the text carries after `@`).
     pub name: String,
     pub picture: Picture,
@@ -111,6 +115,23 @@ impl Mentions {
                 .entry(handle.to_lowercase())
                 .or_insert_with(|| Rc::new(m));
         };
+        // Collective pings first so a rare handle collision cannot steal them.
+        add(
+            "here".into(),
+            Mention {
+                page: None,
+                name: "here".into(),
+                picture: initials("here", "here", None, theme),
+            },
+        );
+        add(
+            "agents".into(),
+            Mention {
+                page: None,
+                name: "agents".into(),
+                picture: initials("agents", "agents", None, theme),
+            },
+        );
         for p in &s.projects {
             if p.is_people() && !p.is_people_group() {
                 // A DM: its person is mentionable by handle.
@@ -118,10 +139,10 @@ impl Mentions {
                     add(
                         person.handle.clone(),
                         Mention {
-                            page: ProfilePage::User {
+                            page: Some(ProfilePage::User {
                                 handle: person.handle.clone(),
                                 space_id: Some(p.id.clone()),
-                            },
+                            }),
                             name: person.display_name(),
                             picture: person_picture(s, person, theme),
                         },
@@ -145,7 +166,7 @@ impl Mentions {
             add(
                 slug,
                 Mention {
-                    page,
+                    page: Some(page),
                     name: p.name.trim().to_string(),
                     picture: project_picture(s, p, theme),
                 },
@@ -161,10 +182,10 @@ impl Mentions {
             add(
                 person.handle.clone(),
                 Mention {
-                    page: ProfilePage::User {
+                    page: Some(ProfilePage::User {
                         handle: person.handle.clone(),
                         space_id: None,
-                    },
+                    }),
                     name: person.display_name(),
                     picture: person_picture(s, person, theme),
                 },
@@ -191,9 +212,9 @@ impl Mentions {
             add(
                 slug,
                 Mention {
-                    page: ProfilePage::Server {
+                    page: Some(ProfilePage::Server {
                         server_id: server.id.clone(),
-                    },
+                    }),
                     name: server.name.trim().to_string(),
                     picture,
                 },
@@ -286,11 +307,40 @@ impl Mentions {
         out
     }
 
-    /// Open the mention's page in the right pane.
-    pub fn open(&self, m: &Mention, cx: &mut App) {
-        if let Some(open) = &self.opener {
-            open(&m.page, cx);
+    /// `@handle` runs in raw typed text (composer): no display rewrite, the
+    /// `@` stays visible. Byte ranges cover `@` + the handle.
+    pub fn find_raw(&self, text: &str) -> Vec<Range<usize>> {
+        let mut out = Vec::new();
+        if self.by_handle.is_empty() || !text.contains('@') {
+            return out;
         }
+        let mut i = 0;
+        while let Some(off) = text[i..].find('@') {
+            let at = i + off;
+            let starts_token = text[..at]
+                .chars()
+                .last()
+                .is_none_or(|c| !c.is_alphanumeric() && c != '@');
+            let handle_len = handle_len(&text[at + 1..]);
+            if starts_token && handle_len > 0 {
+                let handle = &text[at + 1..at + 1 + handle_len];
+                if self.by_handle.contains_key(&handle.to_lowercase()) {
+                    out.push(at..at + 1 + handle_len);
+                    i = at + 1 + handle_len;
+                    continue;
+                }
+            }
+            i = at + 1;
+        }
+        out
+    }
+
+    /// Open the mention's page in the right pane (no-op for `@here` / `@agents`).
+    pub fn open(&self, m: &Mention, cx: &mut App) {
+        let (Some(open), Some(page)) = (&self.opener, &m.page) else {
+            return;
+        };
+        open(page, cx);
     }
 }
 
@@ -370,7 +420,7 @@ pub(crate) mod tests {
 
     pub(crate) fn stub(name: &str, page: ProfilePage) -> Mention {
         Mention {
-            page,
+            page: Some(page),
             name: name.to_string(),
             picture: Picture::Initials {
                 text: "X".into(),
@@ -433,7 +483,7 @@ pub(crate) mod tests {
             format!("ask {CELL}Comms, {CELL}Sam Rivera, {CELL}Launch week and {CELL}Launch Crew.")
         );
         let chips = m.find(&text);
-        let pages: Vec<&ProfilePage> = chips.iter().map(|(_, m)| &m.page).collect();
+        let pages: Vec<&ProfilePage> = chips.iter().filter_map(|(_, m)| m.page.as_ref()).collect();
         assert_eq!(chips.len(), 4);
         assert!(matches!(pages[0], ProfilePage::Agent { project_id } if project_id == "p-comms"));
         assert!(matches!(pages[1], ProfilePage::User { handle, .. } if handle == "sam"));
@@ -443,6 +493,51 @@ pub(crate) mod tests {
         for (range, mention) in &chips {
             assert_eq!(&text[range.clone()], format!("{CELL}{}", mention.name));
         }
+    }
+
+    #[test]
+    fn here_and_agents_become_chips_without_a_page() {
+        let m = Mentions::with_table(
+            vec![
+                (
+                    "here",
+                    Mention {
+                        page: None,
+                        name: "here".into(),
+                        picture: Picture::Initials {
+                            text: "H".into(),
+                            top: Hsla::default(),
+                            bottom: Hsla::default(),
+                        },
+                    },
+                ),
+                (
+                    "agents",
+                    Mention {
+                        page: None,
+                        name: "agents".into(),
+                        picture: Picture::Initials {
+                            text: "A".into(),
+                            top: Hsla::default(),
+                            bottom: Hsla::default(),
+                        },
+                    },
+                ),
+            ],
+            |_, _| {},
+        );
+        let text = m.display("ping @here and @agents please");
+        assert_eq!(text, format!("ping {CELL}here and {CELL}agents please"));
+        let chips = m.find(&text);
+        assert_eq!(chips.len(), 2);
+        assert!(chips[0].1.page.is_none());
+        assert!(chips[1].1.page.is_none());
+        assert_eq!(
+            m.find_raw("ping @here and @agents please"),
+            vec![5..10, 15..22]
+        );
+        // Partial tokens stay plain.
+        assert!(m.find_raw("@he @agent").is_empty());
     }
 
     #[test]

@@ -61,8 +61,9 @@ pub fn render(
         | None => false,
     };
     // Agents with multi-chat keep a trailing "+" inside the pill, so the right
-    // pad is tighter than the people/group pill's.
-    let show_new_chat = !is_people && state.multi_chat;
+    // pad is tighter than the people/group pill's. One gate with ⌘T and the
+    // dropdown's New tab (`AppState::can_new_tab`): people rooms get none.
+    let show_new_chat = state.can_new_tab();
     let mut pill = div()
         .id("header-title")
         .flex()
@@ -666,6 +667,7 @@ fn tab_dropdown(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> impl
     let mut anchored_menu = anchored_chat_menu(shell, cx);
     let state = shell.state.read(cx);
     let multi_chat = state.multi_chat;
+    let new_tab = state.can_new_tab();
     let active = state.active_tab.get(&space.id).cloned();
     let tabs: Vec<Chat> = state.visible_tabs(&space.id).into_iter().cloned().collect();
     let mut previous: Vec<Chat> = state
@@ -927,7 +929,7 @@ fn tab_dropdown(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> impl
         body = body.child(list);
     }
 
-    if multi_chat {
+    if new_tab {
         body = body.child(glass::menu_divider(&theme)).child(
             glass::menu_row("tab-menu-new", "plus", "New tab", false, &theme)
                 .child(

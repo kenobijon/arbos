@@ -15,10 +15,12 @@
 //!   main session exactly as before and gets its full answer when the lock frees.
 //!
 //! Guardrails: one call of at most `QUICK_MAX_TOKENS`, `QUICK_CALLS_PER_MINUTE` model calls per
-//! chat (then a canned line, no call), `ARBOS_QUICK_REPLY_TIMEOUT_MS` on the call (then the
-//! canned line), tagged `x-arbos-purpose: quick-reply` for spend accounting. A status note is
-//! written only after `BUSY_GRACE` of real waiting (so a turn that answers in normal time never
-//! gets one) and at most once per busy turn per chat (#1448). Nothing here touches the main
+//! chat (then silent queue, no call), `ARBOS_QUICK_REPLY_TIMEOUT_MS` on the call (then silent
+//! queue), tagged `x-arbos-purpose: quick-reply` for spend accounting. A status note is written
+//! only after `BUSY_GRACE` of real waiting (so a turn that answers in normal time never gets
+//! one) and at most once per busy turn per chat (#1448). Task acknowledgements — including the
+//! old "Still on it: … N s in" canned line — never post a chat bubble (#1479): the apps already
+//! show one quiet working indicator while the agent works. Nothing here touches the main
 //! session's system prompt (D87) or the #1037 limit announcements.
 
 use std::sync::Arc;
@@ -40,7 +42,8 @@ pub enum QuickOutcome {
     Answered,
     /// An acknowledgement was written and the words went into the running turn.
     Steered,
-    /// An acknowledgement was written; the message still queues for the main session.
+    /// The message queues for the main session. Task mid-turn arrivals get no acknowledgement
+    /// bubble (#1479); Status/Guide write their own rows when they apply.
     Queued,
 }
 
@@ -65,16 +68,17 @@ impl SideKind {
 /// Output cap of the quick call: a few sentences (reasoning is off for the call, so the whole
 /// budget is visible text).
 pub const QUICK_MAX_TOKENS: u32 = 320;
-/// Model calls per chat per minute before quick replies fall back to the canned line.
+/// Model calls per chat per minute before quick replies fall back to a silent queue.
 pub const QUICK_CALLS_PER_MINUTE: usize = 6;
 /// Characters of the user's message the quick call sees.
 const USER_TEXT_MAX: usize = 1200;
 /// How long the agent may stay busy before a new message earns a status note. Short turns that
-/// free the lock inside this window never get a "Still on it" row (#1448). Kept under the
-/// busy-reply gate (~5 s) so a real long turn still answers within seconds.
+/// free the lock inside this window never get a status row (#1448). Kept under the busy-reply
+/// gate (~5 s) so a real status question still answers within seconds. Task acks never become
+/// bubbles at all (#1479).
 const BUSY_GRACE: Duration = Duration::from_secs(3);
 
-/// `ARBOS_QUICK_REPLY_TIMEOUT_MS` (default 8000): the call's budget before the canned line.
+/// `ARBOS_QUICK_REPLY_TIMEOUT_MS` (default 8000): the call's budget before a silent queue.
 pub fn quick_reply_timeout() -> Duration {
     let ms = std::env::var("ARBOS_QUICK_REPLY_TIMEOUT_MS")
         .ok()
@@ -109,7 +113,7 @@ pub fn parse_tagged_reply(text: &str) -> (SideKind, String) {
 /// A quick reply must never land as a fragment. `truncated` = the provider hit the token cap.
 /// Returns the text when it ends a sentence; when it does not (cap hit, or the text simply
 /// stops mid-sentence), the text cut back to its last full sentence if that keeps at least
-/// half of it; else `None` (the caller writes the canned line).
+/// half of it; else `None` (the caller queues silently — no canned bubble, #1479).
 pub fn finish_cleanly(text: &str, truncated: bool) -> Option<String> {
     let t = text.trim();
     if t.is_empty() {
@@ -167,7 +171,9 @@ pub struct BusySnapshot {
 }
 
 impl BusySnapshot {
-    /// The canned line when no model call is made (rate limit, timeout, error).
+    /// Legacy canned acknowledgement (kept for tests). Not posted to the chat (#1479): Task
+    /// mid-turn arrivals queue silently and the UI's working indicator covers the wait.
+    #[cfg(test)]
     pub fn canned_line(&self) -> String {
         let what = match &self.activity {
             Some(a) if !a.trim().is_empty() => a.trim().trim_end_matches('…').to_owned(),
@@ -525,19 +531,6 @@ impl Agent {
             return QuickOutcome::Queued;
         }
         let t0 = Instant::now();
-        // The row first: the user sees something after the grace, not in the first milliseconds.
-        let row_id = ulid();
-        {
-            let h = host.lock().await;
-            h.doc
-                .start_assistant_message(&row_id, &user_msg_id, &self.cfg.device_id);
-            h.doc.add_status_part(&row_id, "working", "Working…");
-            h.doc.set_message_fields(&row_id, &[("quick", json!(true))]);
-            if let Some(attr) = self.people_reply_fields(chat_id) {
-                h.doc.set_message_fields(&row_id, &attr.fields);
-            }
-            h.doc.set_activity(&row_id, Some("Checking on it…"));
-        }
         let address = self.owner_address_note(chat_id, host, &user_msg_id).await;
         let (talking_model, _) = self.live_models().await;
         let model = std::env::var("ARBOS_QUICK_REPLY_MODEL")
@@ -580,24 +573,24 @@ impl Agent {
                                 chat_id,
                                 truncated,
                                 chars = text.chars().count(),
-                                "quick reply did not end a sentence; canned line"
+                                "quick reply did not end a sentence; silent queue"
                             );
-                            (SideKind::Task, snap.canned_line())
+                            (SideKind::Task, String::new())
                         }
                     }
                 }
                 Ok(Err(e)) => {
-                    tracing::warn!(chat_id, error = %e, "quick reply call failed; canned line");
-                    (SideKind::Task, snap.canned_line())
+                    tracing::warn!(chat_id, error = %e, "quick reply call failed; silent queue");
+                    (SideKind::Task, String::new())
                 }
                 Err(_) => {
-                    tracing::warn!(chat_id, "quick reply call timed out; canned line");
-                    (SideKind::Task, snap.canned_line())
+                    tracing::warn!(chat_id, "quick reply call timed out; silent queue");
+                    (SideKind::Task, String::new())
                 }
             }
         } else {
-            tracing::info!(chat_id, "quick reply rate limit; canned line");
-            (SideKind::Task, snap.canned_line())
+            tracing::info!(chat_id, "quick reply rate limit; silent queue");
+            (SideKind::Task, String::new())
         };
         // Guidance needs a user turn of this chat to steer; otherwise it queues like a task.
         let kind = if kind == SideKind::Guide && !snap.steerable {
@@ -605,7 +598,41 @@ impl Agent {
         } else {
             kind
         };
+        // #1479: Task mid-turn arrivals (and every canned "Still on it" fallback) never post a
+        // chat bubble — the apps already show one quiet working indicator. Queue for the main
+        // session; do not mark this wait as noted so a later status question can still answer.
+        if kind == SideKind::Task {
+            let _ = self.store.t3_append(
+                chat_id,
+                None,
+                Some(chat_id),
+                "quick_reply",
+                Some("system"),
+                &format!(
+                    "quick reply task (silent): {}model call, {} ms after the grace",
+                    if used_model { "" } else { "no " },
+                    t0.elapsed().as_millis()
+                ),
+                Some(&json!({
+                    "message_id": user_msg_id, "side": "task", "model_call": used_model,
+                    "model": model, "waited_ms": t_wait.elapsed().as_millis() as u64,
+                    "steerable": snap.steerable, "silent": true,
+                })),
+            );
+            tracing::info!(
+                chat_id,
+                ms = t0.elapsed().as_millis() as i64,
+                model_call = used_model,
+                "quick reply silent queue; no ack bubble"
+            );
+            return QuickOutcome::Queued;
+        }
         let text = crate::store::redact(text.trim());
+        if text.is_empty() {
+            return QuickOutcome::Queued;
+        }
+        // Status / guide only: open the row after we know we have a real sentence to post.
+        let row_id = ulid();
         // The decision row for debugging readers (`inspect`, kind `quick_reply`): which side the
         // model read the message as, whether a model call was made, how long the user waited.
         let _ = self.store.t3_append(
@@ -627,10 +654,15 @@ impl Agent {
         );
         {
             let h = host.lock().await;
+            h.doc
+                .start_assistant_message(&row_id, &user_msg_id, &self.cfg.device_id);
+            h.doc.set_message_fields(&row_id, &[("quick", json!(true))]);
+            if let Some(attr) = self.people_reply_fields(chat_id) {
+                h.doc.set_message_fields(&row_id, &attr.fields);
+            }
             if let Some(p) = h.doc.add_text_part(&row_id, "text") {
                 h.doc.append_text(&row_id, &p, &text);
             }
-            h.doc.set_activity(&row_id, None);
             h.doc.set_message_fields(
                 &row_id,
                 &[
@@ -698,7 +730,10 @@ impl Agent {
                     }
                 }
             }
-            SideKind::Task => QuickOutcome::Queued,
+            SideKind::Task => {
+                // Handled above (silent queue); kept for exhaustiveness.
+                QuickOutcome::Queued
+            }
         }
     }
 }
@@ -750,7 +785,7 @@ pub(crate) mod tests {
             finish_cleanly(two, true).as_deref(),
             Some("Both are running. The UTC logger started at 04:15:49Z and the per-minute routine has already appended a tick.")
         );
-        // Too little left after the cut: better the canned line than one stub sentence.
+        // Too little left after the cut: better a silent queue than one stub sentence.
         assert_eq!(finish_cleanly("Yes. The logger started at 04:15:49Z and has been writing a line every fifteen seconds since, with", true), None);
         assert_eq!(
             finish_cleanly("Yes, I'm here.", false).as_deref(),
@@ -1054,8 +1089,10 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// #1479: a new task while busy must not post a "Still on it" / "Noted" ack bubble — the
+    /// quiet working indicator covers the wait; the message still queues for the main session.
     #[tokio::test]
-    async fn busy_agent_acknowledges_a_new_task_and_still_queues_it() {
+    async fn busy_agent_queues_a_new_task_without_an_ack_bubble() {
         let (agent, root) = test_agent().await;
         let chat = "01TESTCHATQUICKREPLY000001";
         let host = agent.sync.open_room(chat).await.unwrap();
@@ -1065,21 +1102,23 @@ pub(crate) mod tests {
         let a2 = agent.clone();
         let chat2 = chat.to_owned();
         let waiting = tokio::spawn(async move { a2.handle_command(&chat2, cmd).await });
-        // The acknowledgement lands while the lock is still held …
-        let ack = loop {
-            let rows = reply_rows(&host, &msg_id);
-            if let Some(r) = rows.iter().find(|r| !r.text().trim().is_empty()) {
-                break r.text();
+        // Wait past the busy grace + mock think so the quick path has decided.
+        while t0.elapsed() < Duration::from_secs(FIRST_REPLY_GATE_SECS) {
+            if agent.sends_waiting() >= 1 {
+                break;
             }
-            assert!(
-                t0.elapsed() < Duration::from_secs(FIRST_REPLY_GATE_SECS),
-                "no acknowledgement within the gate"
-            );
             tokio::time::sleep(Duration::from_millis(20)).await;
-        };
-        assert!(ack.contains("Noted"), "{ack}");
-        // … and the message itself is still queued for the main session (one waiter).
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(
+            t0.elapsed() < Duration::from_secs(FIRST_REPLY_GATE_SECS),
+            "task did not queue within the gate"
+        );
+        assert!(
+            reply_rows(&host, &msg_id)
+                .iter()
+                .all(|r| r.text().trim().is_empty()),
+            "no ack bubble for a mid-turn task"
+        );
         assert_eq!(agent.sends_waiting(), 1);
         assert!(!waiting.is_finished());
         assert!(
@@ -1213,29 +1252,42 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// #1411 end to end: the model's answer comes back cut by the cap; the bubble gets the
-    /// canned line, marked done, never the fragment.
+    /// #1411 / #1479: a truncated model answer must not land as a fragment, and must not fall
+    /// back to a "Still on it" bubble — silent queue instead.
     #[tokio::test]
-    async fn capped_quick_reply_lands_as_the_canned_line() {
+    async fn capped_quick_reply_queues_silently_without_a_fragment() {
         let (agent, root) = test_agent().await;
         let chat = "01TESTCHATQUICKREPLY000005";
         let host = agent.sync.open_room(chat).await.unwrap();
-        let _busy = agent.test_hold_turn(chat).await;
+        let busy = agent.test_hold_turn(chat).await;
         let (msg_id, cmd) = send_cmd(&host, "did the logger finish? what did it print?");
+        let t0 = Instant::now();
         let a2 = agent.clone();
         let chat2 = chat.to_owned();
         let waiting = tokio::spawn(async move { a2.handle_command(&chat2, cmd).await });
-        let text = loop {
-            let rows = reply_rows(&host, &msg_id);
-            if let Some(r) = rows.iter().find(|r| !r.text().trim().is_empty()) {
-                break r.text();
+        while t0.elapsed() < Duration::from_secs(FIRST_REPLY_GATE_SECS) {
+            if agent.sends_waiting() >= 1 {
+                break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
-        };
-        assert!(text.starts_with("Still on it:"), "{text}");
-        assert!(!text.contains("3 lines written,"));
-        assert!(text.trim_end().ends_with('.'));
+        }
+        let rows = reply_rows(&host, &msg_id);
+        assert!(
+            rows.iter().all(|r| {
+                let t = r.text();
+                t.trim().is_empty()
+                    || (!t.contains("3 lines written,") && !t.starts_with("Still on it:"))
+            }),
+            "truncated quick reply must not post a fragment or Still-on-it bubble: {:?}",
+            rows.iter().map(|r| r.text()).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            agent.sends_waiting(),
+            1,
+            "message still queues for the main session"
+        );
         waiting.abort();
+        drop(busy);
         let _ = std::fs::remove_dir_all(&root);
     }
 

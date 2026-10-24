@@ -1,11 +1,13 @@
 //! The media viewer (feedback media-viewer-2026-10-23, #1381): one lightbox
 //! for every chat kind, opened from an attachment card or a Library tile.
 //! Black backdrop over the window; the album (the chat's pictures and videos
-//! in order) pages with ← → or the chevrons; × / Esc / the backdrop close it.
-//! Caption top-left (who, when, file), counter top-centre, Download and
-//! Forward pills at the bottom. Video shows its poster with Play (QuickTime
-//! Player); a file shows its tile with Quick Look. Forward opens a picker of
-//! DMs, agents and groups; one click sends the item there as a new message.
+//! in order) pages with ← → or the chevrons; × / Close / Esc / backdrop /
+//! swipe-down (scroll) close it and return to the chat
+//! ([feedback app-01M5N9BJNZX8T1EQCX3RAB7GXD]). Caption top-left (who, when,
+//! file), counter top-centre, Close · Download · Forward pills at the bottom.
+//! Video shows its poster with Play (QuickTime Player); a file shows its tile
+//! with Quick Look. Forward opens a picker of DMs, agents and groups; one
+//! click sends the item there as a new message.
 
 use gpui::{
     actions, div, img, prelude::*, px, AnyElement, Context, Div, ElementId, FocusHandle,
@@ -35,6 +37,9 @@ const CAPTION_LEFT: f32 = crate::ui::shell::TRAFFIC_LIGHTS_INSET + 12.0;
 /// The picture's room: top bar and bottom pills stay clear of it.
 const PICTURE_TOP: f32 = 70.0;
 const PICTURE_BOTTOM: f32 = 90.0;
+/// Trackpad / wheel swipe-down past this many pixels closes the viewer
+/// (same idea as the iPhone's swipe-down dismiss).
+const DISMISS_SCROLL_PX: f32 = 48.0;
 /// Forward picker card.
 const PICKER_WIDTH: f32 = 360.0;
 const PICKER_HEIGHT: f32 = 420.0;
@@ -136,6 +141,8 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
 
     let close = shell.state.clone();
     let close_x = shell.state.clone();
+    let close_pill = shell.state.clone();
+    let close_scroll = shell.state.clone();
     let prev = shell.state.clone();
     let next = shell.state.clone();
     let act_prev = shell.state.clone();
@@ -287,7 +294,15 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
         .absolute()
         .inset_0()
         .occlude()
-        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+        // Swipe / scroll down closes — the iPhone's dismiss gesture on a Mac
+        // trackpad ([feedback app-01M5N9BJNZX8T1EQCX3RAB7GXD]).
+        .on_scroll_wheel(move |event, _, cx| {
+            cx.stop_propagation();
+            let dy = f32::from(event.delta.pixel_delta(px(20.0)).y);
+            if dy > DISMISS_SCROLL_PX {
+                close_scroll.update(cx, |s, cx| s.close_media_viewer(cx));
+            }
+        })
         .bg(Theme::with_alpha(gpui::black(), BACKDROP))
         .on_mouse_down(MouseButton::Left, move |_, _, cx| {
             close.update(cx, |s, cx| s.close_media_viewer(cx));
@@ -315,8 +330,7 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
                 ),
         )
         .child(caption)
-        .child(counter)
-        .child(close_btn);
+        .child(counter);
 
     if count > 1 {
         let at_start = viewer.index == 0;
@@ -358,7 +372,11 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
             );
     }
 
-    // ----- Download · Forward ---------------------------------------------
+    // × after the chevrons so the full-height next strip cannot steal its hits
+    // when the album has more than one item.
+    root = root.child(close_btn);
+
+    // ----- Close · Download · Forward -------------------------------------
     root = root.child(
         div()
             .absolute()
@@ -368,6 +386,12 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
             .flex()
             .justify_center()
             .gap(px(10.0))
+            .child(
+                pill("media-viewer-close-pill", "xmark", "Close").on_click(move |_, _, cx| {
+                    cx.stop_propagation();
+                    close_pill.update(cx, |s, cx| s.close_media_viewer(cx));
+                }),
+            )
             .child(
                 pill("media-viewer-download", "arrow-down", "Download").on_click(
                     move |_, _, cx| {

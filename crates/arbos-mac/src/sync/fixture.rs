@@ -32,10 +32,11 @@ use crate::model::{
     new_id, now_ms, ApprovalRisk, ApprovalState, Attachment, AttachmentKind, BoxState,
     ChannelBinding, ChannelPairing, ChannelPlatform, ChannelPlatformState, ChannelsView, Chat,
     ChatKind, ChoiceOption, Connector, ConnectorAction, ConnectorProvider, ConnectorStatus,
-    ConnectorsView, Effort, FieldKind, FormField, Id, Link, LocalDevice, LocalView, Message,
-    MessageStatus, Part, Project, QuestionState, Role, Routine, RoutineRun, RoutineRunStatus,
-    RoutineTrigger, Secret, SecretActivity, SecretAgent, SecretDirector, SecretRequest,
-    SecretScope, SecretsView, Skill, StatusKind, ToolCall, ToolStatus, TurnKind, Widget,
+    ConnectorsView, DeviceView, Effort, FieldKind, FormField, Id, Link, LocalDevice, LocalView,
+    Message, MessageStatus, Part, Project, QuestionState, Role, Routine, RoutineRun,
+    RoutineRunStatus, RoutineTrigger, Secret, SecretActivity, SecretAgent, SecretDirector,
+    SecretRequest, SecretScope, SecretsView, Skill, StatusKind, ToolCall, ToolStatus, TurnKind,
+    Widget,
 };
 
 pub const STREAM_FRAME_MS: u64 = arbos_core::STREAM_COMMIT_MS;
@@ -84,12 +85,16 @@ struct Shared {
     connectors: Mutex<ConnectorsView>,
     channels: Mutex<ChannelsView>,
     secrets: Mutex<SecretsView>,
+    /// Settings → Devices: this account's signed-in devices (this Mac first).
+    devices: Mutex<Vec<DeviceView>>,
     routines: Mutex<Vec<Routine>>,
     routine_runs: Mutex<HashMap<Id, Vec<RoutineRun>>>,
     local: Mutex<LocalView>,
     /// Voice memos sent in this session, by blob key (F11; no blob store offline).
     voice_blobs: Mutex<HashMap<String, Arc<Vec<u8>>>>,
     machine: Mutex<Machine>,
+    /// People blocked in this session (the relay's `GET /blocks` stand-in, #1545).
+    blocked: Mutex<Vec<Person>>,
 }
 
 /// What the offline STT "hears" (the bundled test clip says this).
@@ -129,10 +134,12 @@ impl SyncSource for FixtureSource {
                 connectors: Mutex::new(seed_connectors()),
                 channels: Mutex::new(seed_channels()),
                 secrets: Mutex::new(seed_secrets()),
+                devices: Mutex::new(seed_devices()),
                 routines: Mutex::new(seed_routines()),
                 routine_runs: Mutex::new(seed_routine_runs()),
                 local: Mutex::new(seed_local()),
                 voice_blobs: Mutex::new(HashMap::new()),
+                blocked: Mutex::new(Vec::new()),
                 machine: Mutex::new(Machine {
                     // `ARBOS_FIXTURE_MACHINE=error|waking` seeds a banner state (screenshot rig).
                     state: match std::env::var("ARBOS_FIXTURE_MACHINE").as_deref() {
@@ -482,8 +489,11 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         | ClientCommand::RemoveMember { .. }
         | ClientCommand::LeaveChat { .. }
         | ClientCommand::BlockUser { .. }
+        | ClientCommand::UnblockUser { .. }
         | ClientCommand::InviteToProject { .. }
         | ClientCommand::RemoveProjectMember { .. }
+        | ClientCommand::SetMessageGrant { .. }
+        | ClientCommand::RemoveMessageGrant { .. }
         | ClientCommand::FetchAvatar { .. }
         | ClientCommand::DeleteProject { .. }
         | ClientCommand::DeletePeopleChat { .. }
@@ -1072,6 +1082,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             }
             emit_projects(shared);
         }
+        ClientCommand::SetReadReceipts { .. } => {}
         ClientCommand::MachineRestart => {
             set_machine(shared, MachineState::Stopped, Some("Restarting…"), None);
             let shared = shared.clone();
@@ -1138,6 +1149,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 avatar_leaf: leaf.map(|l| l.leaf),
                 avatar_leaf_color: leaf.map(|l| l.color),
                 image_url: None,
+                message_grants: Vec::new(),
             });
             let chat_id = new_id();
             shared.chats.lock().unwrap().push(Chat {
@@ -1274,6 +1286,13 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             emit_connectors(shared);
         }
         ClientCommand::SecretsRefresh => emit_secrets(shared),
+        ClientCommand::DevicesRefresh => emit_devices(shared),
+        ClientCommand::DeviceRevoke { id } => {
+            // The relay refuses to revoke the caller's own device through this
+            // path (Sign out does that); the fixture mirrors it.
+            crate::ui::devices::remove_other(&mut shared.devices.lock().unwrap(), &id);
+            emit_devices(shared);
+        }
         ClientCommand::ProjectSecretsRefresh { project_id } => {
             let view = shared.secrets.lock().unwrap().clone();
             let items = view
@@ -1868,6 +1887,43 @@ fn emit_connectors(shared: &Shared) {
 fn emit_secrets(shared: &Shared) {
     let view = shared.secrets.lock().unwrap().clone();
     let _ = shared.events.send(SyncEvent::Secrets(view));
+}
+
+fn emit_devices(shared: &Shared) {
+    let list = shared.devices.lock().unwrap().clone();
+    let _ = shared.events.send(SyncEvent::Devices(Ok(list)));
+}
+
+/// Three devices: this Mac (current), an iPhone seen an hour ago, and a
+/// read-only Grok Bot reader (`kind: "reader"`) from last week.
+pub fn seed_devices() -> Vec<DeviceView> {
+    let now = now_ms() as i64;
+    vec![
+        DeviceView {
+            id: "dev-fx-mac".into(),
+            name: "Jacob's MacBook Pro".into(),
+            kind: "github".into(),
+            created_at: now - 12 * 24 * 3_600_000,
+            last_seen_at: Some(now - 20_000),
+            current: true,
+        },
+        DeviceView {
+            id: "dev-fx-iphone".into(),
+            name: "iPhone".into(),
+            kind: "github".into(),
+            created_at: now - 9 * 24 * 3_600_000,
+            last_seen_at: Some(now - 2 * 3_600_000),
+            current: false,
+        },
+        DeviceView {
+            id: "dev-fx-grokbot".into(),
+            name: "GrokBot-Arbos".into(),
+            kind: "reader".into(),
+            created_at: now - 6 * 24 * 3_600_000,
+            last_seen_at: Some(now - 3 * 24 * 3_600_000),
+            current: false,
+        },
+    ]
 }
 
 fn fixture_agent(project_id: &str, name: &str, enabled: bool, note: &str) -> SecretAgent {
@@ -2469,6 +2525,11 @@ async fn wake_machine(shared: &Arc<Shared>) {
 fn emit_projects(shared: &Shared) {
     let projects = shared.projects.lock().unwrap().clone();
     let _ = shared.events.send(SyncEvent::Projects(projects));
+}
+
+fn emit_blocked(shared: &Shared) {
+    let blocked = shared.blocked.lock().unwrap().clone();
+    let _ = shared.events.send(SyncEvent::Blocked(blocked));
 }
 
 fn emit_project_docs(shared: &Shared) {
@@ -3910,6 +3971,7 @@ fn seed_projects() -> Vec<Project> {
             avatar_leaf: None,
             avatar_leaf_color: None,
             image_url: None,
+            message_grants: Vec::new(),
         },
         Project {
             id: PROJECT_COMMS.into(),
@@ -3943,6 +4005,7 @@ fn seed_projects() -> Vec<Project> {
             avatar_leaf: None,
             avatar_leaf_color: None,
             image_url: None,
+            message_grants: Vec::new(),
         },
         Project {
             id: PROJECT_ARBOS.into(),
@@ -3976,6 +4039,7 @@ fn seed_projects() -> Vec<Project> {
             avatar_leaf: None,
             avatar_leaf_color: None,
             image_url: None,
+            message_grants: Vec::new(),
         },
     ]
 }
@@ -4340,6 +4404,75 @@ impl Seeder<'_> {
             .core
             .transact(|d| write_project_line(d, project, text, self.t));
     }
+
+    /// Agent-to-agent messaging, sender side: the hand-off row agentd writes after
+    /// `send_message` (what the box writes, byte for byte in shape).
+    fn agent_message_sent(&mut self, to_name: &str, text: &str) -> Id {
+        self.t += 6_000;
+        let id = new_id();
+        self.doc.core.transact(|d| {
+            let _ = d.begin_message(
+                &id,
+                "assistant",
+                "agent",
+                DEVICE,
+                core_status(MessageStatus::Done),
+                &[
+                    ("turn", json!({ "kind": "spawn" })),
+                    ("subagentName", json!(to_name)),
+                    ("handoffMessages", json!(2)),
+                    ("agentMessage", json!({ "id": new_id(), "toName": to_name })),
+                    ("createdAt", json!(self.t)),
+                    ("completedAt", json!(self.t)),
+                ],
+            );
+            let _ = d.add_hidden_part(
+                &id,
+                "agent_message_sent",
+                text,
+                &json!({ "toName": to_name }),
+            );
+        });
+        id
+    }
+
+    /// Agent-to-agent messaging, receiving side: another agent's words in this chat.
+    fn agent_message_received(&mut self, from_id: &str, from_name: &str, text: &str) {
+        self.t += 30_000;
+        self.doc.core.transact(|d| {
+            d.append_project_message(
+                &new_id(),
+                text,
+                DEVICE,
+                &format!("project:{from_id}"),
+                &[
+                    ("senderName", json!(from_name)),
+                    ("senderHandle", json!(Project::mention_slug(from_name))),
+                    (
+                        "agentMessage",
+                        json!({ "id": new_id(), "fromProjectId": from_id }),
+                    ),
+                    ("createdAt", json!(self.t)),
+                    ("completedAt", json!(self.t)),
+                ],
+                false,
+            );
+        });
+    }
+
+    /// The reply that went back to that agent ("Replied to ◉ X").
+    fn assistant_replying_to_agent(&mut self, to_name: &str, text: &str) -> Id {
+        let id = self.assistant(TurnKind::Reply, MessageStatus::Done, vec![text_part(text)]);
+        self.doc.core.transact(|d| {
+            d.set_message_fields(&id, &[("agentReplyTo", json!(to_name))]);
+        });
+        id
+    }
+}
+
+/// `ARBOS_FIXTURE_AGENT_MESSAGE=1`: seed the agent-to-agent messaging scenario.
+fn agent_message_fixture() -> bool {
+    std::env::var("ARBOS_FIXTURE_AGENT_MESSAGE").is_ok_and(|v| v == "1")
 }
 
 fn text(s: &str) -> Part {
@@ -4473,6 +4606,27 @@ fn seed_chat_docs() -> Vec<ChatDoc> {
                 );
             }
             _ => {}
+        }
+        // `ARBOS_FIXTURE_AGENT_MESSAGE=1` (screenshot rig): the sender side of an
+        // agent-to-agent message — "send Comms a hello" → the hand-off row
+        // ("Messaged ◉ Comms" → "2 messages with ◉ Comms") → "Sent to Comms." → the
+        // relayed reply. The Comms chat gets the receiving side (below).
+        if agent_message_fixture() {
+            s.user("send Comms a hello");
+            s.agent_message_sent(
+                "Comms",
+                "Hello, Comms — Jacob asked me to pass along a hello.",
+            );
+            s.assistant(
+                TurnKind::Reply,
+                MessageStatus::Done,
+                vec![text("Sent to Comms.")],
+            );
+            s.assistant(
+                TurnKind::SubagentResult,
+                MessageStatus::Done,
+                vec![text("Comms says hello back — and it's ready whenever you want the weekly update sent.")],
+            );
         }
     }
     out.push(main);
@@ -4831,6 +4985,20 @@ fn seed_chat_docs() -> Vec<ChatDoc> {
                 },
             ],
         );
+        // `ARBOS_FIXTURE_AGENT_MESSAGE=1`: the receiving side — Arbos's row (member
+        // bubble labelled "Arbos"), Comms's reply, "Replied to ◉ Arbos".
+        if agent_message_fixture() {
+            s.t = base.saturating_sub(10 * 60_000);
+            s.agent_message_received(
+                PROJECT_ARBOS,
+                "Arbos",
+                "Hello, Comms — Jacob asked me to pass along a hello.",
+            );
+            s.assistant_replying_to_agent(
+                "Arbos",
+                "Hello back, Jacob — and hi Arbos! Ready whenever you want the weekly update sent.",
+            );
+        }
     }
     out.push(comms);
     out
@@ -4921,6 +5089,7 @@ fn people_space(id: &str, other: Person, agents: Vec<AgentMember>) -> Project {
         avatar_leaf: None,
         avatar_leaf_color: None,
         image_url: None,
+        message_grants: Vec::new(),
     }
 }
 
@@ -5021,6 +5190,7 @@ fn seed_people_projects() -> Vec<Project> {
             avatar_leaf: None,
             avatar_leaf_color: None,
             image_url: None,
+            message_grants: Vec::new(),
         },
     ]
 }
@@ -5078,6 +5248,7 @@ fn human_message(chat_id: &str, who: &Person, text: &str, at: u64) -> Message {
         subagent_id: None,
         subagent_name: None,
         handoff_messages: None,
+        agent_reply_to: None,
         reactions: Default::default(),
         in_reply_to: None,
         routine_name: None,
@@ -5256,6 +5427,18 @@ fn seed_people_chat_docs() -> Vec<ChatDoc> {
         text_part("Deck, dashboard and the press kit for the run-through."),
     ];
     insert_message_via_core(&group, &shared_files);
+    // Two shared links, as in the iPhone fixture: the group Library's Links
+    // section ([feedback group-library-links-2026-10-23]) and the link-open
+    // confirm have something to show.
+    insert_message_via_core(
+        &group,
+        &human_message(
+            GROUP_LAUNCH,
+            &samir,
+            "Launch checklist is here: https://notion.so/arbos/launch-week — and the signup form: https://arbos.life/i/launch",
+            base + 390_000,
+        ),
+    );
     insert_message_via_core(
         &group,
         &human_message(
@@ -5852,9 +6035,83 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             true
         }
         ClientCommand::BlockUser { handle } => {
+            let handle = handle.trim().trim_start_matches('@').to_lowercase();
+            let who = directory()
+                .into_iter()
+                .find(|p| p.handle == handle)
+                .unwrap_or_else(|| person("", &handle, None, "member"));
+            {
+                let mut blocked = shared.blocked.lock().unwrap();
+                if !blocked.iter().any(|p| p.handle == who.handle) {
+                    blocked.push(who);
+                }
+            }
             let _ = shared
                 .events
                 .send(SyncEvent::Notice(format!("@{handle} blocked.")));
+            emit_blocked(shared);
+            true
+        }
+        ClientCommand::UnblockUser { user_id, handle } => {
+            shared
+                .blocked
+                .lock()
+                .unwrap()
+                .retain(|p| p.id != *user_id && p.handle != *handle);
+            let _ = shared
+                .events
+                .send(SyncEvent::Notice(format!("@{handle} unblocked.")));
+            emit_blocked(shared);
+            true
+        }
+        // "Who may message X" (agent-to-agent messaging): the grant list lives on the project.
+        ClientCommand::SetMessageGrant {
+            project_id,
+            grantee,
+            enabled,
+        } => {
+            let mut projects = shared.projects.lock().unwrap();
+            if let Some(p) = projects.iter_mut().find(|p| p.id == *project_id) {
+                if let Some(g) = p.message_grants.iter_mut().find(|g| g.grantee == *grantee) {
+                    g.enabled = *enabled;
+                } else {
+                    let handle = grantee.trim_start_matches('@').to_lowercase();
+                    let Some(other) = directory().into_iter().find(|p| p.handle == handle) else {
+                        drop(projects);
+                        let _ = shared.events.send(SyncEvent::PeopleError(format!(
+                            "No GitHub user named @{handle}."
+                        )));
+                        return true;
+                    };
+                    p.message_grants.push(crate::model::MessageGrant {
+                        grantee: format!("user:{}", other.id),
+                        kind: "person".into(),
+                        id: other.id.clone(),
+                        name: other.name.clone(),
+                        handle: Some(other.handle.clone()),
+                        avatar_url: other.avatar_url.clone(),
+                        enabled: *enabled,
+                        note: String::new(),
+                        created_at: now_ms() as i64,
+                        last_at: None,
+                    });
+                }
+            }
+            drop(projects);
+            emit_projects(shared);
+            true
+        }
+        ClientCommand::RemoveMessageGrant {
+            project_id,
+            grantee,
+        } => {
+            {
+                let mut projects = shared.projects.lock().unwrap();
+                if let Some(p) = projects.iter_mut().find(|p| p.id == *project_id) {
+                    p.message_grants.retain(|g| g.grantee != *grantee);
+                }
+            }
+            emit_projects(shared);
             true
         }
         ClientCommand::InviteToProject { project_id, handle } => {
@@ -6234,6 +6491,9 @@ fn fixture_call(shared: &Arc<Shared>, chat_id: &str, kind: CallKind) -> Call {
         reason: None,
         participants: vec![sender_of(&me)],
         agents: Vec::new(),
+        speak_mode: None,
+        invited_speakers: Vec::new(),
+        can_speak: Some(true),
     }
 }
 
@@ -6403,6 +6663,7 @@ mod seed_parity_tests {
             "User Done user:gh_456 name=Some(\"Sam Rivera\") h=Some(\"sam\") asked=None turn=None wa=false [text] hidden=[] text=71 r=0 dt=30000 ct=Some(0)",
             "Assistant Done agent:01J9ARBOS00000000000000000 name=Some(\"Arbos\") h=Some(\"arbos\") asked=Some(\"sam\") turn=None wa=false [text] hidden=[] text=96 r=0 dt=60000 ct=Some(0)",
             "User Done user:gh_457 name=Some(\"Samir Haddad\") h=Some(\"samir\") asked=None turn=None wa=false [attachment:Slide 4 · signups:Some(212000):Image,attachment:Launch dashboard:Some(348000):Image,attachment:Launch day, the team:Some(1204000):Image,attachment:Signup funnel:Some(156000):Image,attachment:Press kit v3:Some(1840000):Pdf,attachment:Launch teaser:Some(6420000):Video,text] hidden=[] text=54 r=0 dt=80000 ct=Some(0)",
+            "User Done user:gh_457 name=Some(\"Samir Haddad\") h=Some(\"samir\") asked=None turn=None wa=false [text] hidden=[] text=112 r=0 dt=90000 ct=Some(0)",
             "User Done user:gh_458 name=Some(\"Sara Lind\") h=Some(\"sara\") asked=None turn=None wa=false [text] hidden=[] text=64 r=0 dt=100000 ct=Some(0)",
             "User Done user:gh_458 name=Some(\"Sara Lind\") h=Some(\"sara\") asked=None turn=None wa=false [text] hidden=[] text=55 r=0 dt=120000 ct=Some(0)",
             "Assistant Error agent:01J9ARBOS00000000000000000 name=Some(\"Arbos\") h=Some(\"arbos\") asked=Some(\"sara\") turn=None wa=false [text,error] hidden=[] text=0 r=0 dt=125000 ct=Some(0)",
