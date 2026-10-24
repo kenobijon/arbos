@@ -268,10 +268,6 @@ struct ChatView: View {
     private var headerExtra: CGFloat { (hasCallBar ? 52 : 0) + (hasInCallBar ? 56 : 0) + (showSearch ? 46 : 0) }
     /// Member chips under the header: groups only. A 1:1 DM already names the peer in the pill.
     private var showsMemberChips: Bool { people?.isGroup == true }
-    /// Header phone for groups: opens the pick-members / call-everyone sheet.
-    private var showsGroupCallButton: Bool {
-        people?.isGroup == true && !isChannel && !hasCallBar && !hasInCallBar && !calls.isActive
-    }
 
     private func startCall(_ kind: CallKind, ring: [String]? = nil) {
         Task { await calls.start(chatId: chatId, projectId: isPeople ? nil : projectId, kind: kind, title: callTitle, ring: ring) }
@@ -1028,10 +1024,6 @@ struct ChatView: View {
                 }
             }
             .buttonStyle(.plain)
-            // Groups put call + search on the right; this twin keeps the title centred.
-            if showsGroupCallButton {
-                Color.clear.frame(width: Theme.control + 8).allowsHitTesting(false)
-            }
             Spacer()
             GlassPill {
                 HStack(spacing: 6) {
@@ -1116,39 +1108,28 @@ struct ChatView: View {
                 .contentShape(Capsule())
             }
             Spacer()
-            HStack(spacing: 8) {
-                if showsGroupCallButton {
-                    Button { showGroupCallPicker = true } label: {
-                        GlassCircle {
-                            Image(systemName: "phone.fill")
-                                .font(theme.font(16, weight: .semibold))
-                                .foregroundStyle(theme.text)
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Start a call")
-                    .accessibilityIdentifier("chat-call-button")
+            // Same-size circle as the back button keeps the title pill centred.
+            // Call lives on the composer (phone when idle); a header phone here
+            // duplicated it in groups (#1625).
+            Button {
+                if showSearch {
+                    showSearch = false
+                    searchText = ""
+                    searchFocused = false
+                } else {
+                    withAnimation(.easeOut(duration: 0.18)) { showSearch = true }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { searchFocused = true }
                 }
-                Button {
-                    if showSearch {
-                        showSearch = false
-                        searchText = ""
-                        searchFocused = false
-                    } else {
-                        withAnimation(.easeOut(duration: 0.18)) { showSearch = true }
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { searchFocused = true }
-                    }
-                } label: {
-                    GlassCircle {
-                        Image(systemName: "magnifyingglass")
-                            .font(theme.font(17, weight: .medium))
-                            .foregroundStyle(theme.text)
-                    }
+            } label: {
+                GlassCircle {
+                    Image(systemName: "magnifyingglass")
+                        .font(theme.font(17, weight: .medium))
+                        .foregroundStyle(theme.text)
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Search in chat")
-                .accessibilityIdentifier("chat-search-button")
             }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Search in chat")
+            .accessibilityIdentifier("chat-search-button")
         }
         .padding(.horizontal, 16)
         .padding(.top, 6)
