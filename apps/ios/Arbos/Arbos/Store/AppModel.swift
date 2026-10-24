@@ -492,12 +492,19 @@ final class AppModel: ObservableObject {
     static let maxHomePins = 5
 
     /// Home-list keys (`p:<projectId>` / `c:<peopleChatId>`) kept at the top.
-    @Published private(set) var pinnedHomeIds: Set<String> = {
-        Set(UserDefaults.standard.stringArray(forKey: "pinnedHome") ?? [])
+    /// Order is the pin strip: index 0 is the topmost row.
+    @Published private(set) var pinnedHomeIds: [String] = {
+        var seen = Set<String>()
+        return (UserDefaults.standard.stringArray(forKey: "pinnedHome") ?? [])
+            .filter { seen.insert($0).inserted }
     }()
 
     func isHomePinned(projectId: Id) -> Bool { pinnedHomeIds.contains("p:" + projectId) }
     func isHomePinned(peopleChatId: Id) -> Bool { pinnedHomeIds.contains("c:" + peopleChatId) }
+
+    /// Position in the pin strip (0 = top), or `nil` when not pinned.
+    func homePinIndex(projectId: Id) -> Int? { pinnedHomeIds.firstIndex(of: "p:" + projectId) }
+    func homePinIndex(peopleChatId: Id) -> Int? { pinnedHomeIds.firstIndex(of: "c:" + peopleChatId) }
 
     func pinHome(projectId: Id) {
         unarchive(projectId)
@@ -512,6 +519,18 @@ final class AppModel: ObservableObject {
     }
     func unpinHome(peopleChatId: Id) { setHomePinned("c:" + peopleChatId, false) }
 
+    /// Put a pinned home row first in the pin strip (long-press → Move to top).
+    func moveHomePinToTop(projectId: Id) { moveHomePinToTop(key: "p:" + projectId) }
+    func moveHomePinToTop(peopleChatId: Id) { moveHomePinToTop(key: "c:" + peopleChatId) }
+
+    /// Move a pinned home row one step toward the top of the strip.
+    func moveHomePinUp(projectId: Id) { moveHomePin(key: "p:" + projectId, delta: -1) }
+    func moveHomePinUp(peopleChatId: Id) { moveHomePin(key: "c:" + peopleChatId, delta: -1) }
+
+    /// Move a pinned home row one step toward the bottom of the strip.
+    func moveHomePinDown(projectId: Id) { moveHomePin(key: "p:" + projectId, delta: 1) }
+    func moveHomePinDown(peopleChatId: Id) { moveHomePin(key: "c:" + peopleChatId, delta: 1) }
+
     private func setHomePinned(_ key: String, _ pinned: Bool) {
         if pinned {
             guard !pinnedHomeIds.contains(key) else { return }
@@ -520,12 +539,28 @@ final class AppModel: ObservableObject {
                 notice = Notice(text: "You can pin up to five chats.")
                 return
             }
-            pinnedHomeIds.insert(key)
+            // New pins land at the top; later Move to top / up / down adjusts order.
+            pinnedHomeIds.insert(key, at: 0)
         } else {
-            guard pinnedHomeIds.contains(key) else { return }
-            pinnedHomeIds.remove(key)
+            guard let i = pinnedHomeIds.firstIndex(of: key) else { return }
+            pinnedHomeIds.remove(at: i)
         }
-        UserDefaults.standard.set(Array(pinnedHomeIds), forKey: "pinnedHome")
+        UserDefaults.standard.set(pinnedHomeIds, forKey: "pinnedHome")
+    }
+
+    private func moveHomePinToTop(key: String) {
+        guard let i = pinnedHomeIds.firstIndex(of: key), i > 0 else { return }
+        pinnedHomeIds.remove(at: i)
+        pinnedHomeIds.insert(key, at: 0)
+        UserDefaults.standard.set(pinnedHomeIds, forKey: "pinnedHome")
+    }
+
+    private func moveHomePin(key: String, delta: Int) {
+        guard let i = pinnedHomeIds.firstIndex(of: key) else { return }
+        let j = i + delta
+        guard pinnedHomeIds.indices.contains(j) else { return }
+        pinnedHomeIds.swapAt(i, j)
+        UserDefaults.standard.set(pinnedHomeIds, forKey: "pinnedHome")
     }
 
     @Published private(set) var machineError: String?
@@ -2377,10 +2412,30 @@ final class AppModel: ObservableObject {
 
     /// `GET /voices` once per launch (the relay caches it for an hour anyway). Nothing is
     /// fetched while voice mode is switched off on the relay (no picker to feed).
+    /// The call-voice catalog for the agent's Voice row and `VoicePickerView`. It is
+    /// independent of the voice-mode kill switch (spoken replies): the row picks the
+    /// voice used in calls, so the list must load while voice mode is off.
     func loadVoices() async {
-        guard voiceCatalog == nil, !isFixture, VoiceModeFlag.shared.on else { return }
+        guard voiceCatalog == nil else { return }
+        if isFixture {
+            voiceCatalog = AppModel.fixtureVoiceCatalog
+            return
+        }
         voiceCatalog = try? await api.voices()
     }
+
+    /// The Mac fixture's five voices (`fixture_voices` in arbos-mac), so the rig's picker
+    /// shows rows instead of the relay error.
+    static let fixtureVoiceCatalog = VoiceCatalog(
+        defaultId: "ara",
+        voices: [
+            Voice(id: "ara", name: "Ara", description: "Warm and clear, a touch of gravel. The current default."),
+            Voice(id: "rex", name: "Rex", description: "Low, steady, unhurried."),
+            Voice(id: "sol", name: "Sol", description: "Bright and quick; good for short answers."),
+            Voice(id: "ivy", name: "Ivy", description: "Soft, close to the mic."),
+            Voice(id: "ode", name: "Ode", description: "Even and neutral, reads long text well."),
+        ]
+    )
 
     /// Save on tap: show it at once, PATCH, then read back what the relay kept.
     func setVoice(_ projectId: Id, _ voice: String?) {
@@ -2771,6 +2826,53 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Group profile › Invite links › New link (any member).
+    func createGroupInvite(_ chatId: Id, expires: Bool, singleUse: Bool) async -> ServerInviteLink? {
+        do {
+            return try await api.createGroupInvite(chatId, expires: expires, maxUses: singleUse ? 1 : nil)
+        } catch {
+            notice = Notice(text: "Could not make an invite link: \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    /// Group profile › Invite links › list.
+    func groupInvites(_ chatId: Id) async -> [ServerInviteLink] {
+        (try? await api.groupInvites(chatId)) ?? []
+    }
+
+    /// Group profile › Invite links › revoke.
+    func revokeGroupInvite(_ chatId: Id, inviteId: String) async -> Bool {
+        do {
+            try await api.revokeGroupInvite(chatId, inviteId: inviteId)
+            return true
+        } catch {
+            notice = Notice(text: "Could not revoke the link: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    /// `arbos://join-group/<code>` (the site's group invite page): join and open the chat.
+    func joinGroupFromLink(code: String) async {
+        let code = code.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
+        guard !code.isEmpty else { return }
+        do {
+            let chat = try await api.joinGroup(code: code)
+            if let i = peopleChats.firstIndex(where: { $0.id == chat.id }) {
+                peopleChats[i] = chat
+            } else {
+                peopleChats.insert(chat, at: 0)
+            }
+            ensureRoom(projectId: peopleSlot, key: chat.id, roomChat: chat.id)
+            open(peopleChat: chat)
+        } catch {
+            let type = (error as? RelayError)?.type
+            notice = Notice(text: type == "not_available" ? "You can't join this group."
+                            : type == "not_found" || (error as? RelayError)?.status == 404 ? "That invite link is not valid."
+                            : "Could not join the group: \(error.localizedDescription)")
+        }
+    }
+
     /// The group pane's Add members: every pick goes to THIS chat — people by
     /// `POST /chats/{id}/members`, agents by `POST /chats/{id}/agents`. All are
     /// tried; the first failure is reported once and the call returns false.
@@ -2813,20 +2915,81 @@ final class AppModel: ObservableObject {
         return true
     }
 
-    /// Owner/admin removes a person from a people chat (`DELETE /chats/{id}/members/{userId}`);
-    /// the relay writes the "<me> removed @handle" line (#1349).
-    func removeMember(chatId: String, userId: String) {
+    /// Owner/admin removes (or bans) a person from a people chat
+    /// (`DELETE /chats/{id}/members/{userId}[?ban=1]`); the relay writes the
+    /// "<me> removed @handle" line (#1349). Ban keeps them from rejoining.
+    func removeMember(chatId: String, userId: String, ban: Bool = false) {
         Task {
             do {
-                try await api.removeMember(chatId: chatId, userId: userId)
+                try await api.removeMember(chatId: chatId, userId: userId, ban: ban)
                 if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
                     peopleChats[i].members.removeAll { !$0.isAgent && $0.id == userId }
                 }
                 // The relay writes "<me> removed @handle" into the chat (#1349).
             } catch {
                 let e = error as? RelayError
-                notice = Notice(text: e?.type == "owner_only" ? "Only an owner can remove people."
-                                 : "Remove failed: \(error.localizedDescription)")
+                notice = Notice(text: e?.type == "owner_only" ? "Only an owner or admin can manage members."
+                                 : (ban ? "Ban failed: \(error.localizedDescription)"
+                                    : "Remove failed: \(error.localizedDescription)"))
+            }
+        }
+    }
+
+    /// Owner/admin mutes (or unmutes) a member from posting in a people group.
+    /// Pass `duration` when muting to choose how long the mute lasts.
+    func setMemberSilenced(
+        chatId: String,
+        userId: String,
+        silenced: Bool,
+        duration: MemberMuteDuration? = nil
+    ) {
+        Task {
+            do {
+                let until = silenced ? duration?.silencedUntilMs : nil
+                let chat = try await api.setMemberSilenced(
+                    chatId: chatId, userId: userId, silenced: silenced, silencedUntilMs: until
+                )
+                if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
+                    peopleChats[i] = chat
+                }
+            } catch {
+                let e = error as? RelayError
+                notice = Notice(text: e?.type == "owner_only" ? "Only an owner or an admin with mute rights can mute members."
+                                 : "Mute failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Owner promotes or demotes a group member (`admin` / `member`).
+    func setMemberRole(chatId: String, userId: String, role: String) {
+        Task {
+            do {
+                let chat = try await api.setMemberRole(chatId: chatId, userId: userId, role: role)
+                if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
+                    peopleChats[i] = chat
+                }
+            } catch {
+                let e = error as? RelayError
+                notice = Notice(text: e?.type == "owner_only" ? "Only the owner can change admin roles."
+                                 : "Role change failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Owner sets whether an admin may mute and ban members.
+    func setMemberCanMuteBan(chatId: String, userId: String, canMuteBan: Bool) {
+        Task {
+            do {
+                let chat = try await api.setMemberCanMuteBan(
+                    chatId: chatId, userId: userId, canMuteBan: canMuteBan
+                )
+                if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
+                    peopleChats[i] = chat
+                }
+            } catch {
+                let e = error as? RelayError
+                notice = Notice(text: e?.type == "owner_only" ? "Only the owner can set mute and ban rights."
+                                 : "Could not update mute and ban rights: \(error.localizedDescription)")
             }
         }
     }
@@ -3470,8 +3633,10 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Delete a message for everyone via the shared chat doc. No push notification.
-    func deleteMessage(chatId: Id, messageId: Id) {
+    /// Delete a message for everyone. The relay decides (`DELETE /room/…/messages/{id}`,
+    /// 403 `not_yours` otherwise) and writes the deletion into the doc; it comes back as a
+    /// relay-signed row. No push notification.
+    func deleteMessage(chatId: Id, messageId: Id, projectId: Id? = nil) {
         guard !messageId.isEmpty else { return }
         #if DEBUG
         if isFixture {
@@ -3483,14 +3648,60 @@ final class AppModel: ObservableObject {
             return
         }
         #endif
+        let room: String
+        if peopleChat(chatId) != nil {
+            room = "people/\(chatId)"
+        } else if let projectId, projectId != peopleSlot {
+            room = "\(projectId)/\(chatId)"
+        } else {
+            room = "people/\(chatId)"
+        }
+        Task {
+            do {
+                try await api.deleteMessage(room: room, messageId: messageId)
+                clearUnacked(chatId: chatId, messageId: messageId)
+                Haptics.pick()
+            } catch {
+                let e = error as? RelayError
+                notice = Notice(text: e?.status == 403 ? "You can only delete your own messages."
+                                 : "Could not delete the message: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Edit a message's text in the shared chat doc (own messages). No new send
+    /// command — peers see the updated body via room sync only.
+    func editMessage(chatId: Id, messageId: Id, text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !messageId.isEmpty, !trimmed.isEmpty else { return }
+        #if DEBUG
+        if isFixture {
+            guard var list = messages[chatId],
+                  let idx = list.firstIndex(where: { $0.id == messageId })
+            else { return }
+            var parts = list[idx].parts
+            if let t = parts.lastIndex(where: {
+                if case .text = $0 { return true } else { return false }
+            }) {
+                if case .text(let id, _) = parts[t] {
+                    parts[t] = .text(id: id, text: trimmed)
+                }
+            } else {
+                parts.append(.text(id: "\(messageId)-t", text: trimmed))
+            }
+            list[idx].parts = parts
+            messages[chatId] = list
+            Haptics.pick()
+            return
+        }
+        #endif
         guard let doc = docs[chatId] else { return }
         do {
-            try doc.deleteMessage(messageId: messageId)
+            try doc.editMessage(messageId: messageId, text: trimmed)
             doc.commit()
-            clearUnacked(chatId: chatId, messageId: messageId)
             Haptics.pick()
         } catch {
-            notice = Notice(text: "Could not delete the message: \(error.localizedDescription)")
+            notice = Notice(text: "Could not edit the message: \(error.localizedDescription)")
         }
     }
 
