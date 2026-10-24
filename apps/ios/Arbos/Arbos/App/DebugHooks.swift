@@ -93,7 +93,7 @@ enum DebugHooks {
     static var fixtureLongRows: Int? { value("ARBOS_FIXTURE_LONG_ROWS").flatMap { Int($0) } }
     /// Log frame pacing (dropped frames, worst frame, time over budget) and memory every
     /// 2 s to `com.unarbos.arbos.ios` / `perf` for the duration of the launch.
-    static var perfLog: Bool { value("ARBOS_PERF_LOG") == "1" }
+    static let perfLog: Bool = value("ARBOS_PERF_LOG") == "1"
     /// Seed the fixture group from a Loro snapshot file (a relay export of a real chat).
     static var fixtureDoc: String? { value("ARBOS_FIXTURE_DOC") }
     /// Perf rig drivers, run a few seconds after the chat opens: `scroll` pages the
