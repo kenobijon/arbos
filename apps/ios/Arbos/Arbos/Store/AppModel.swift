@@ -2377,10 +2377,30 @@ final class AppModel: ObservableObject {
 
     /// `GET /voices` once per launch (the relay caches it for an hour anyway). Nothing is
     /// fetched while voice mode is switched off on the relay (no picker to feed).
+    /// The call-voice catalog for the agent's Voice row and `VoicePickerView`. It is
+    /// independent of the voice-mode kill switch (spoken replies): the row picks the
+    /// voice used in calls, so the list must load while voice mode is off.
     func loadVoices() async {
-        guard voiceCatalog == nil, !isFixture, VoiceModeFlag.shared.on else { return }
+        guard voiceCatalog == nil else { return }
+        if isFixture {
+            voiceCatalog = AppModel.fixtureVoiceCatalog
+            return
+        }
         voiceCatalog = try? await api.voices()
     }
+
+    /// The Mac fixture's five voices (`fixture_voices` in arbos-mac), so the rig's picker
+    /// shows rows instead of the relay error.
+    static let fixtureVoiceCatalog = VoiceCatalog(
+        defaultId: "ara",
+        voices: [
+            Voice(id: "ara", name: "Ara", description: "Warm and clear, a touch of gravel. The current default."),
+            Voice(id: "rex", name: "Rex", description: "Low, steady, unhurried."),
+            Voice(id: "sol", name: "Sol", description: "Bright and quick; good for short answers."),
+            Voice(id: "ivy", name: "Ivy", description: "Soft, close to the mic."),
+            Voice(id: "ode", name: "Ode", description: "Even and neutral, reads long text well."),
+        ]
+    )
 
     /// Save on tap: show it at once, PATCH, then read back what the relay kept.
     func setVoice(_ projectId: Id, _ voice: String?) {
