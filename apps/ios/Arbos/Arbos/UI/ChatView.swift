@@ -482,9 +482,12 @@ struct ChatView: View {
         #if DEBUG
         let _ = PerfCounters.bump("chatBody")
         #endif
-        GeometryReader { geo in
-            ZStack(alignment: .top) {
-                theme.bg.ignoresSafeArea()
+        // Header stays outside GeometryReader (same pattern as ServerChannelsView /
+        // HiddenChatsView). Nesting it inside the reader let iOS 26/27 vertically
+        // centre the glass bar over the transcript (feedback app-01M5P98RB40WKA70R70DMDN97E).
+        ZStack(alignment: .top) {
+            theme.bg.ignoresSafeArea()
+            GeometryReader { geo in
                 transcript(width: geo.size.width, height: geo.size.height)
                     // A tap on a mention chip (`arbos://mention/<kind>/<id>`, MentionChips.swift)
                     // opens that entity's page; every other link goes to the system.
@@ -493,47 +496,48 @@ struct ChatView: View {
                         model.showProfile(target)
                         return .handled
                     })
-                headerBlur
-                // Hug content height: a horizontal ScrollView (member chips) inside this
-                // stack is flexible on the vertical axis, so without fixedSize the VStack
-                // fills the GeometryReader and iOS 27 lays the back button / title mid-screen
-                // with the chips over the composer ([feedback APuu1qHpbKmmpqZeUusEi0Q]).
-                VStack(spacing: 8) {
-                    header
-                    linkPill.padding(.top, -5)
-                    if let people, showsMemberChips { memberChips(people).padding(.horizontal, 16) }
-                    if showSearch {
-                        HStack(spacing: 8) {
-                            Image(systemName: "magnifyingglass").font(.system(size: 15, weight: .medium)).foregroundStyle(theme.muted)
-                            TextField("", text: $searchText, prompt: Text("Search in chat").foregroundStyle(theme.placeholder))
-                                .font(theme.font(Theme.body)).foregroundStyle(theme.text)
-                                .focused($searchFocused)
-                                .autocorrectionDisabled()
-                            Button { showSearch = false; searchText = "" } label: {
-                                Image(systemName: "xmark.circle.fill").foregroundStyle(theme.muted)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                        .padding(.horizontal, 12).frame(height: 38)
-                        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.field))
-                        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
-                        .padding(.horizontal, 16)
-                    }
-                    if hasInCallBar, let c = calls.call {
-                        InCallOverlay(expected: model.expectedCallPeople(c), inline: true)
-                            .frame(height: 48)
-                    }
-                    if hasCallBar, let active = calls.activeByChat[chatId] {
-                        CallBar(call: active) {
-                            Task { await calls.join(active, title: callTitle) }
-                        }
-                        .padding(.horizontal, 16)
-                    }
-                }
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .top)
             }
+            headerBlur
+            // Hug content height: a horizontal ScrollView (member chips) inside this
+            // stack is flexible on the vertical axis, so without fixedSize the VStack
+            // fills the proposed height and iOS 27 lays the back button / title mid-screen
+            // with the chips over the composer ([feedback APuu1qHpbKmmpqZeUusEi0Q]).
+            VStack(spacing: 8) {
+                header
+                linkPill.padding(.top, -5)
+                if let people, showsMemberChips { memberChips(people).padding(.horizontal, 16) }
+                if showSearch {
+                    HStack(spacing: 8) {
+                        Image(systemName: "magnifyingglass").font(.system(size: 15, weight: .medium)).foregroundStyle(theme.muted)
+                        TextField("", text: $searchText, prompt: Text("Search in chat").foregroundStyle(theme.placeholder))
+                            .font(theme.font(Theme.body)).foregroundStyle(theme.text)
+                            .focused($searchFocused)
+                            .autocorrectionDisabled()
+                        Button { showSearch = false; searchText = "" } label: {
+                            Image(systemName: "xmark.circle.fill").foregroundStyle(theme.muted)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.horizontal, 12).frame(height: 38)
+                    .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.field))
+                    .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+                    .padding(.horizontal, 16)
+                }
+                if hasInCallBar, let c = calls.call {
+                    InCallOverlay(expected: model.expectedCallPeople(c), inline: true)
+                        .frame(height: 48)
+                }
+                if hasCallBar, let active = calls.activeByChat[chatId] {
+                    CallBar(call: active) {
+                        Task { await calls.join(active, title: callTitle) }
+                    }
+                    .padding(.horizontal, 16)
+                }
+            }
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .top)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .overlay(alignment: .bottom) {
             if newBelowCount > 0 {
                 newMessagesPill
