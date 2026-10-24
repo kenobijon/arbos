@@ -838,12 +838,16 @@ struct RowView: View, Equatable {
     /// (composer keystrokes, presence ticks). Closures / the swipe binding are
     /// not compared — they stay valid for the open chat.
     static func == (lhs: RowView, rhs: RowView) -> Bool {
-        lhs.row == rhs.row
+        let same = lhs.row == rhs.row
             && lhs.chatId == rhs.chatId
             && lhs.width == rhs.width
             && lhs.timeReveal == rhs.timeReveal
             && lhs.highlighted == rhs.highlighted
             && lhs.mentions.stamp == rhs.mentions.stamp
+        #if DEBUG
+        PerfCounters.bump(same ? "rowEqTrue" : "rowEqFalse")
+        #endif
+        return same
     }
 
     private var maxBubble: CGFloat { max(200, width - Theme.bubbleInset) }

@@ -2284,7 +2284,7 @@ private struct TranscriptRows: View, Equatable {
     let onMenu: (MessageMenuItem, Row) -> Void
 
     static func == (lhs: TranscriptRows, rhs: TranscriptRows) -> Bool {
-        lhs.shown == rhs.shown
+        let same = lhs.shown == rhs.shown
             && lhs.chatId == rhs.chatId
             && lhs.width == rhs.width
             && lhs.timeReveal == rhs.timeReveal
@@ -2292,6 +2292,13 @@ private struct TranscriptRows: View, Equatable {
             && lhs.mentions.stamp == rhs.mentions.stamp
             && lhs.rowsCount == rhs.rowsCount
             && lhs.messagesCount == rhs.messagesCount
+        #if DEBUG
+        PerfCounters.bump(same ? "rowsEqTrue" : "rowsEqFalse")
+        if !same {
+            PerfCounters.bump("rowsEq.\(lhs.shown == rhs.shown ? "" : "shown,")\(lhs.width == rhs.width ? "" : "width,")\(lhs.timeReveal == rhs.timeReveal ? "" : "reveal,")\(lhs.mentions.stamp == rhs.mentions.stamp ? "" : "stamp,")\(lhs.highlightedMessage == rhs.highlightedMessage ? "" : "hl,")")
+        }
+        #endif
+        return same
     }
 
     var body: some View {
