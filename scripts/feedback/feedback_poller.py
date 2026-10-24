@@ -1259,7 +1259,8 @@ class Loop:
 
     def freeze_allows(self, fid: str, st: dict, fz: dict) -> bool:
         allow = {a.lower().lstrip("@") for a in fz.get("allow", []) if a}
-        if (st.get("tester") or "") == "Jacob (owner)":
+        # `freeze_exempt` is set by hand for an item the owner adopted during a freeze (#1510, 2026-10-24 00:29).
+        if st.get("freeze_exempt") or (st.get("tester") or "") == "Jacob (owner)":
             return True
         keys = {(st.get("tester_key") or "").lower().lstrip("@")}
         info: dict = {}
