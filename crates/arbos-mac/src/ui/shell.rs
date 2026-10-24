@@ -2588,10 +2588,16 @@ impl Shell {
         // 876, which put the bubble 21–28 pt right of the pill's edge
         // ([feedback agent-bubble-inset-2026-10-22]). The pill itself has
         // not moved.
+        // Wheel over the input (sibling of the list) still scrolls the chat —
+        // same as dragging over a bubble ([feedback app-01M5PDB3QYAPBPA4FJXZE1FFD0]).
         let composer_block = column_row(
             div()
                 .w_full()
                 .debug_selector(|| "chat-composer-block".into())
+                .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _, cx| {
+                    this.transcript
+                        .update(cx, |t, cx| t.scroll_from_wheel(event, cx));
+                }))
                 .child(self.composer.clone())
                 .into_any_element(),
         );
