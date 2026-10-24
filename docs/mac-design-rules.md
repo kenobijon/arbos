@@ -217,6 +217,28 @@ Code: `transcript.rs` `hover_time()` (returns nothing at opacity 0) and
 `layout_tests::the_time_is_hidden_at_rest_and_beside_the_bubble_on_hover`;
 iPhone `Transcript.swift` `RowView` + `SenderNameRowTests`.
 
+## Bubble hover rail (Jacob 2026-10-24, [feedback bubble-hover-rail-2026-10-24])
+
+**The ☺ ↩ ⋯ rail is vertically centred beside the bubble and shows while the
+pointer is anywhere on the bubble.** Measured on Jacob's Grok Bot shot
+(`grok-chat-2-research.png`, 2 px/pt): the three glyphs sit at the mid-height
+of a 440 pt table bubble, the first glyph's centre 18 pt past its right edge,
+glyph centres 26 pt apart — the rail's own geometry (`RAIL_BUTTON` 24 + `RAIL_GAP`
+2, 6 pt off the bubble) already matched; only the placement did not. Before
+this rule the rail hung off the *last markdown block* of a reply — at the
+bottom of a long bubble — and appeared only while that last block was hovered.
+
+An agent reply is one transcript row per markdown block, so "the bubble" means
+all of those rows: hover is tracked per message (`HoverFade` keyed by
+`{message_id}#bubble`), and the last block places the rail at the middle of
+every block row (`Transcript::bubble_rail_centre` → `rail_centre()` from the
+list's item bounds), clamped so a bubble taller than the pane keeps its rail on
+screen under the header fade band. One-row bubbles (mine, other people's,
+media) centre the rail on their own row as before.
+
+Code: `transcript.rs` `HoverFade::set(key, row, …)`, `rail_centre()`,
+`hover_rail_frame()`; pinned by `rail_tests`.
+
 ## iPhone bubble gestures (Jacob 2026-10-24, [feedback iphone-open-scroll-block-2026-10-24] #1645 + #1629)
 
 **A pan that starts on a bubble always scrolls the chat.** Bubble gestures are
