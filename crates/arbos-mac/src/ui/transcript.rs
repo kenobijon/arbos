@@ -1712,11 +1712,8 @@ impl Transcript {
         let can_reply = Self::can_reply_row(&row.kind) && !row.message_id.is_empty();
         let swipe_row_id = row.id.clone();
         let swipe_message_id = row.message_id.clone();
-        let selectable = Selectable::new(&self.selection, theme.accent_soft, cx).with_mentions(
-            self.mentions.clone(),
-            theme.accent,
-            Theme::with_alpha(theme.accent, 0.14),
-        );
+        let selectable = Selectable::new(&self.selection, theme.accent_soft, cx)
+            .with_mentions(self.mentions.clone(), theme.accent);
         let inner: AnyElement = match row.kind {
             RowKind::User {
                 text,
