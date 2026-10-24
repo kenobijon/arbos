@@ -3069,9 +3069,6 @@ impl Agent {
                 TurnKind::User => {
                     h.doc
                         .add_status_part(&assistant_msg_id, "working", "Working…");
-                    if let Some(attr) = self.people_reply_fields(chat_id) {
-                        h.doc.set_message_fields(&assistant_msg_id, &attr.fields);
-                    }
                     // The platform reply (quote header) on the row this answers: always
                     // where attribution matters (groups, channels, people chats, a row
                     // another agent sent), in a 1:1 only when the answer is to an earlier
@@ -3103,6 +3100,10 @@ impl Agent {
                     name,
                     status: _,
                 } => {
+                    // Same people-chat attribution as a normal reply: without
+                    // `agent:<id>` + askedByHandle the Mac / iPhone draw a flush-left
+                    // bubble with no disc (#1604), while every other participant sits
+                    // on the avatar column.
                     h.doc
                         .add_status_part(&assistant_msg_id, "working", "Working…");
                     h.doc.set_message_fields(
@@ -3112,10 +3113,6 @@ impl Agent {
                             ("subagentName", json!(name)),
                         ],
                     );
-                    // A job's answer in a people chat is attributed like any reply of this agent.
-                    if let Some(attr) = self.people_reply_fields(chat_id) {
-                        h.doc.set_message_fields(&assistant_msg_id, &attr.fields);
-                    }
                 }
                 TurnKind::ApprovalOutcome { approval_id, title } => {
                     h.doc.add_status_part(
@@ -3128,6 +3125,12 @@ impl Agent {
                         &[("approvalId", json!(approval_id))],
                     );
                 }
+            }
+            // Every assistant row in a people chat — user reply, subagent result,
+            // approval follow-up — carries the agent's sender / avatar / asker so
+            // clients put it on the same lane as the other participants (#1604).
+            if let Some(attr) = self.people_reply_fields(chat_id) {
+                h.doc.set_message_fields(&assistant_msg_id, &attr.fields);
             }
             pid
         };

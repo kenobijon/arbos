@@ -2759,6 +2759,15 @@ pub fn build_rows(
                 let mut lane: Option<String> = None;
                 let in_people =
                     message.sender.starts_with("agent:") && message.asked_by_handle.is_some();
+                // Multi-party chats (group / channel / shared): every agent bubble sits
+                // on the avatar column like the other participants. People-chat replies
+                // also carry asked_by_handle; a subagent-result row used to ship as bare
+                // `sender: agent` with no asker (#1604) — once attributed as `agent:<id>`
+                // it still needs the lane even if asked_by_handle is missing.
+                let agent_speaker = in_people
+                    || message.role == Role::Project
+                    || message.sender.starts_with("project:")
+                    || (names_senders && message.sender.starts_with("agent:"));
                 // Quote the message this answers: `replyTo` is the platform reply the
                 // box sets by the #1521 rule (always in groups / channels / people chats
                 // and for a row another agent sent; in a 1:1 only when answering an
@@ -2776,7 +2785,7 @@ pub fn build_rows(
                             .flatten()
                     })
                     .map(|id| Quote::for_reply(id, messages));
-                if message.role == Role::Project || in_people {
+                if agent_speaker {
                     // A people-chat agent (or another Project, F6) speaks in its own lane;
                     // the disc on the last block names it. No meta line — "answering
                     // @x · owned by @y" moved to the profile pane (Jacob, 2026-10-22).
@@ -2790,9 +2799,7 @@ pub fn build_rows(
                 // says who is working).
                 let sender_named = names_senders
                     && lane.is_some()
-                    && (in_people
-                        || message.role == Role::Project
-                        || prev_sender.as_deref() != Some(message.sender.as_str()));
+                    && (agent_speaker || prev_sender.as_deref() != Some(message.sender.as_str()));
                 let last_text_part = message
                     .parts
                     .iter()
@@ -5370,6 +5377,77 @@ mod system_line_tests {
             rows.iter().all(|r| !r.id.ends_with("#sender")),
             "no sender header row above a bubble any more"
         );
+    }
+
+    /// #1604: in a multi-party chat an agent row with `agent:<id>` (and no
+    /// `askedByHandle` — the shape a subagent-result turn used to ship) still
+    /// sits on the avatar column and names its sender, like every other
+    /// participant. A 1:1 agent chat (names_senders off) stays flush-left.
+    #[test]
+    fn multi_party_agent_bubble_keeps_lane_without_asked_by() {
+        let t = 1_700_000_000_000u64;
+        let mut agent = message("assistant", "agent:doug", "subagent result prose", t);
+        agent.sender_name = Some("Doug".into());
+        agent.sender_handle = Some("doug".into());
+        // No asked_by_handle — the pre-#1604 SubagentResult shape.
+        let (spoken, failed) = (HashSet::new(), HashMap::new());
+        let group = build_rows(
+            &[agent.clone()],
+            false,
+            speech(&spoken, &failed),
+            "gh_me",
+            &HashSet::new(),
+            &Mentions::empty(),
+            true,
+            None,
+        );
+        let solo = build_rows(
+            &[agent],
+            false,
+            speech(&spoken, &failed),
+            "gh_me",
+            &HashSet::new(),
+            &Mentions::empty(),
+            false,
+            None,
+        );
+        let group_lane: Vec<Option<&str>> = group
+            .iter()
+            .filter_map(|r| match &r.kind {
+                RowKind::Markdown {
+                    first: true,
+                    lane,
+                    named,
+                    ..
+                } => Some((lane.as_deref(), *named)),
+                _ => None,
+            })
+            .map(|(lane, named)| {
+                assert!(named, "group names the agent");
+                lane
+            })
+            .collect();
+        assert_eq!(
+            group_lane,
+            [Some("agent:doug")],
+            "group: avatar lane + disc seed"
+        );
+        let solo_lane: Vec<Option<&str>> = solo
+            .iter()
+            .filter_map(|r| match &r.kind {
+                RowKind::Markdown {
+                    first: true,
+                    lane,
+                    named,
+                    ..
+                } => {
+                    assert!(!named, "1:1 never labels the agent");
+                    Some(lane.as_deref())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(solo_lane, [None], "1:1: flush-left, no disc");
     }
 
     /// The chat-kind rule behind `names_senders`.
