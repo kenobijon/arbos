@@ -907,8 +907,12 @@ struct RowView: View, Equatable {
     /// bubble. ChatView still observes the model and rebuilds rows when the
     /// transcript changes; actions call through this reference.
     let model: AppModel
-    @Environment(\.theme) private var theme
-    @Environment(\.composerInset) private var composerInset
+    /// Plain inputs, not `@Environment`: an environment read made every bubble's body
+    /// re-run on each AppModel publish even when the value was equal (SwiftUI marks the
+    /// environment dependency changed per write) — the open-time freeze on long groups
+    /// (iphone-open-scroll-block, 2026-10-24). The row list reads them once.
+    let theme: Theme
+    let composerInset: CGFloat
     let row: Row
     let chatId: Id
     let width: CGFloat
@@ -944,6 +948,8 @@ struct RowView: View, Equatable {
             && lhs.timeReveal == rhs.timeReveal
             && lhs.highlighted == rhs.highlighted
             && lhs.mentions.stamp == rhs.mentions.stamp
+            && lhs.composerInset == rhs.composerInset
+            && lhs.theme == rhs.theme
         #if DEBUG
         PerfCounters.bump(same ? "rowEqTrue" : "rowEqFalse")
         #endif
@@ -975,6 +981,7 @@ struct RowView: View, Equatable {
     var body: some View {
         #if DEBUG
         let _ = PerfCounters.bump("rowBody")
+        let _ = DebugHooks.perfChanges ? Self._printChanges() : ()
         #endif
         VStack(spacing: 4) {
             bubble
@@ -1068,11 +1075,13 @@ struct RowView: View, Equatable {
                     if let quote {
                         quoteHeader(quote, color: theme.userText)
                     }
+                    // No `.textSelection(.enabled)`: it steals pans from the chat
+                    // ScrollView so a drag on / onto a bubble sticks
+                    // ([feedback app-01M5Q1N6C1HAKHC6P2XPEWMRSS]). Copy is on long-press.
                     Markdown.inlineText(text, color: theme.userText, link: theme.accent, codeChip: theme.userCodeChip, mentions: mentions)
                         .font(theme.font(Theme.body))
                         .lineSpacing(Theme.bodyLineSpacing)
                         .tint(theme.accent)
-                        .textSelection(.enabled)
                 }
                 .padding(.horizontal, Theme.bubbleHPad)
                 .padding(.vertical, Theme.bubbleVPad)
@@ -1110,7 +1119,6 @@ struct RowView: View, Equatable {
                         .font(theme.font(Theme.body))
                         .lineSpacing(Theme.bodyLineSpacing)
                         .tint(theme.accent)
-                        .textSelection(.enabled)
                 }
                 .padding(.horizontal, Theme.bubbleHPad)
                 .padding(.vertical, Theme.bubbleVPad)
@@ -1479,7 +1487,6 @@ struct BlockView: View {
                     .font(theme.font(Theme.body))
                     .lineSpacing(Theme.bodyLineSpacing)
                     .tint(theme.accent)
-                    .textSelection(.enabled)
             }
         case .heading(_, let text):
             Text(Markdown.inline(text, color: theme.text, link: theme.accent, codeChip: theme.codeChip))
@@ -1525,7 +1532,6 @@ struct BlockView: View {
                 Text(code)
                     .font(theme.font(14, design: .monospaced))
                     .foregroundStyle(theme.text)
-                    .textSelection(.enabled)
                     .padding(10)
             }
             .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.bg.opacity(0.6)))

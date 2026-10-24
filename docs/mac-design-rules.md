@@ -143,6 +143,43 @@ Code: `transcript.rs` `hover_time()` (returns nothing at opacity 0) and
 `layout_tests::the_time_is_hidden_at_rest_and_beside_the_bubble_on_hover`;
 iPhone `Transcript.swift` `RowView` + `SenderNameRowTests`.
 
+## iPhone bubble gestures (Jacob 2026-10-24, [feedback iphone-open-scroll-block-2026-10-24] #1645 + #1629)
+
+**A pan that starts on a bubble always scrolls the chat.** Bubble gestures are
+`simultaneousGesture`s, never exclusive: the long-press (reactions + menu) must
+not delay or swallow a vertical drag. **Bubble text is not selectable on the
+iPhone** — `.textSelection(.enabled)` stays off in every bubble (user, other
+person, agent, code); Copy is on the long-press menu. Approved by Jacob as the
+trade-off in #1629 (@allan), which supersedes #1389's drag-to-select on the
+iPhone. The Mac keeps selection (`select.rs`, mention chips included).
+
+The other half of the same P0 is performance: while a room catches up or a
+burst of live rows lands, the transcript is re-read at most once per window
+(600 ms catching up, 150 ms live), off the main actor, and a bubble never reads
+`theme` or `composerInset` from the environment (plain inputs), so a publish
+does not re-create the window of bubbles (#1645; first-scrollable after open
++7.8 s → +0.74 s with a 72-row catch-up on Arbonites).
+
+Code: `MessageActions.swift` `messageRowGestures`, `Transcript.swift` `RowView`,
+`AppModel.swift` `requestSnapshot` / `applySnapshot`.
+
+## Full screen (Jacob 2026-10-24, [feedback fullscreen-traffic-lights-2026-10-24])
+
+Native full screen looks like Chrome's: the window just grows to the screen.
+
+| Item | Rule |
+|---|---|
+| Traffic lights | Stay visible, top left, on the strip's line (centre 21 pt from the top, close at x 14 — the windowed position) |
+| Strip and filter | Exactly where they are in windowed mode: no band above, no layout jump |
+| Hover at the top edge | macOS still slides its own title bar in with the menu bar; that is the system's, we add nothing |
+
+macOS hides a full-screen window's real buttons and shows them only in that
+slide-in bar, so in full screen the shell paints its own three lights
+(`ui/traffic_lights.rs`, `LightsGeometry`) in the 72 pt the strip already
+keeps clear for them (`TRAFFIC_LIGHTS_INSET`), wired to close / leave full
+screen (minimise is disabled in full screen, as AppKit disables it). Pinned by
+`traffic_lights::tests` (`full_screen_adds_no_band_above_the_strip`).
+
 ## Delete is immediate — no confirm (Jacob 2026-10-24, [feedback remove-delete-confirms-2026-10-24])
 
 **Delete in the message menu and Delete in the chat-list row menu act at

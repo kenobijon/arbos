@@ -1297,7 +1297,10 @@ class Loop:
 
     def hold_for_approval(self, fid: str, st: dict) -> None:
         main_head = self.gh.branch_head("main") or ""
-        first = st.get("status") != "awaiting_jacob"
+        # The hold attaches to the ITEM, not to one green head: a re-gate after main moved returns here with
+        # `awaiting` already set — same listing, same ready_since, no second "held" comment (#1551 was
+        # announced three times on 2026-10-24 while nothing about it had changed for Jacob).
+        first = not st.get("awaiting")
         aw = st.get("awaiting") or {}
         aw.update(ready=True, ready_head=st.get("branch_head"), main_head=main_head, ready_since=aw.get("ready_since") or iso(), conflict=False)
         aw.setdefault("since", iso())
@@ -2342,6 +2345,28 @@ class Loop:
         if mac:
             self.rust_gate_mac_start(cur)
 
+    def note_main_tests_broken(self, active: dict, body: str) -> None:
+        """The iOS half compiles the unit-test target too (#1621); when it fails the same way on main the half is
+        green ('reported, not blamed') — but a report nobody reads is no report (16:4x Oct 24: MentionDraftTests
+        broke main at 15:15 and was found by a worker by hand). Surface it: loop log, `status` (cursor field) and
+        one note per main head in the journal; the operator routes the fix to the test's owner."""
+        m = re.search(r"== tests: the same failure exists on main \(([0-9a-f]+)\)", body)
+        cur = self.store.cursor()
+        if not m:
+            if cur.get("main_ios_tests_broken") and "== tests: compile" in body:
+                cur.pop("main_ios_tests_broken", None)
+                self.store.save_cursor(cur)
+                log(f"Gate {active['id']}: main's iOS unit-test target compiles again")
+            return
+        errors = [l.strip() for l in body.splitlines() if "error:" in l][:12]
+        rec = cur.get("main_ios_tests_broken") or {}
+        if rec.get("main") != m.group(1):
+            rec = {"main": m.group(1), "since": iso(), "run": active["id"], "errors": errors}
+            cur["main_ios_tests_broken"] = rec
+            self.store.save_cursor(cur)
+            log(f"ALERT main's iOS unit-test target does not compile at {m.group(1)} (seen by gate {active['id']}); branches are not blamed — "
+                f"route the fix to the test's owner: " + " | ".join(errors[:3]))
+
     def rust_gate_mac_start(self, cur: dict) -> None:
         active = cur["rust_gate"]
         if self.rust_gate_mac("start-batch", active["id"], active["tree"], "1") is not None:
@@ -2439,6 +2464,7 @@ class Loop:
                         active["ios_tail"] = body[-5000:]
                         self.store.save_cursor(cur)
                         log(f"Gate {active['id']}: iOS half {active['ios']}")
+                        self.note_main_tests_broken(active, body)
         if active["linux"] == "pending" or active["mac"] == "pending" or active.get("ios", "skipped") == "pending":
             if active["linux"] == "fail" or active["mac"] == "fail" or active.get("ios") == "fail":
                 # One half is already red: settle now; a Mac build still running is for a dead tree.
@@ -3933,9 +3959,13 @@ class Loop:
         print(f"launches today={self.store.launches_today()}/{self.cfg.max_per_day} last={self.store.last_launch()}")
         print(f"kill file: {'PRESENT' if self.cfg.kill_file.exists() else 'absent'} ({self.cfg.kill_file})")
         gate = self.approval_state()
-        n = sum(1 for f in self.store.items() if self.store.state(f).get("status") == "awaiting_jacob")
+        held = [self.store.state(f) for f in self.store.items()]
+        held = [h for h in held if h.get("status") == "awaiting_jacob" or (h.get("awaiting") and h.get("status") == "gating" and not h.get("approved_by_jacob"))]
+        n = len(held)
+        regating = sum(1 for h in held if h.get("status") == "gating")
         if gate:
-            print(f"RELEASE-APPROVAL GATE on (standing rule; allow: {', '.join(gate.get('allow', []))}); awaiting Jacob: {n} — "
+            print(f"RELEASE-APPROVAL GATE on (standing rule; allow: {', '.join(gate.get('allow', []))}); awaiting Jacob: {n}"
+                  + (f" ({regating} re-gating after main moved — still awaiting, approve/decline any time)" if regating else "") + " — "
                   f"list: {self.cfg.state_dir / self.AWAITING_DOC}; `arbos-feedback approve <item>` / `decline <item> \"<note>\"`")
         else:
             print(f"RELEASE-APPROVAL GATE *** LIFTED WHOLESALE *** {(self.cfg.state_dir / self.APPROVAL_LIFTED_FILE).read_text().strip()} — "
@@ -3951,6 +3981,10 @@ class Loop:
                   + ", ".join(f"{k} {v}" for k, v in sorted(by.items())) + " — `arbos-feedback unfreeze` lifts it")
         self.print_gate_queue(cur)
         self.print_deploy_lane()
+        broken = cur.get("main_ios_tests_broken")
+        if broken:
+            print(f"MAIN iOS UNIT TESTS BROKEN at {broken.get('main')} since {broken.get('since')} (gate {broken.get('run')}); branches are not blamed — route the fix: "
+                  + " | ".join((broken.get("errors") or [])[:2]))
         for fid in self.store.items():
             st = self.store.state(fid)
             bits = [st.get("status", "?"), st.get("target", ""), st.get("tier", ""), st.get("tester", "")]
