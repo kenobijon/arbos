@@ -140,6 +140,11 @@ final class CoreChatDoc {
         try doc.deleteMessage(messageId: messageId)
     }
 
+    /// Replace a message's text (edit). Does not commit. Sets `editedAt`.
+    func editMessage(messageId: Id, text: String) throws {
+        try doc.editMessage(messageId: messageId, text: text)
+    }
+
     /// Append a `commands` row (`send`, `stop`, `answer`, `retry`, `retitle`). Does not commit.
     func pushCommand(_ kind: String, payload: [String: Any], device: String) throws {
         let data = try JSONSerialization.data(withJSONObject: payload)

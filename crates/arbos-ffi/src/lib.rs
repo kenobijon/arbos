@@ -755,6 +755,14 @@ impl ChatDoc {
             .map_err(write_err)
     }
 
+    /// Replace the text of an existing message (edit). Does not commit. Sets
+    /// `editedAt`. No-op when the message or its text part is missing.
+    pub fn edit_message(&self, message_id: String, text: String) -> Result<(), FfiError> {
+        self.lock_doc()
+            .edit_message_text(&message_id, &text)
+            .map_err(write_err)
+    }
+
     /// Append a `commands` row. Does not commit. Returns the new command id.
     /// `payload_json` must be a JSON object.
     pub fn add_command(
@@ -1031,6 +1039,24 @@ mod tests {
         doc.delete_message("gone".into()).unwrap();
         doc.commit();
         assert_eq!(doc.message_count(), 1);
+    }
+
+    #[test]
+    fn edit_message_replaces_text() {
+        let doc = ChatDoc::open();
+        doc.insert_user_message(
+            "m1".into(),
+            "hello".into(),
+            "dev".into(),
+            UserMessageOptsRecord::default(),
+        )
+        .unwrap();
+        doc.edit_message("m1".into(), "hello edited".into())
+            .unwrap();
+        doc.commit();
+        let row: Value = serde_json::from_str(&doc.read_message_json(0).unwrap()).unwrap();
+        assert_eq!(row["parts"][0]["text"], "hello edited");
+        assert!(row["editedAt"].as_i64().unwrap_or(0) > 0);
     }
 
     #[test]
