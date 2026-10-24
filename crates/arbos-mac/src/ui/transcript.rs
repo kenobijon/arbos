@@ -287,6 +287,29 @@ pub fn message_line(message: &Message, max_chars: usize) -> String {
     first_words(&line, max_chars)
 }
 
+/// The forwarded bubble's header (Telegram / iMessage): forward glyph, then
+/// "Forwarded from <name>", one line, in the quote header's muted colour.
+fn forwarded_header(by: String, text_color: gpui::Hsla) -> Stateful<Div> {
+    let muted = Theme::with_alpha(text_color, 0.72);
+    div()
+        .id(SharedString::from(format!("forwarded-from-{by}")))
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .min_w_0()
+        .child(icon("forward", 12.0, muted))
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .text_size(px(TEXT_SMALL))
+                .font_weight(FontWeight::MEDIUM)
+                .line_height(px(LINE_HEIGHT - 4.0))
+                .text_color(muted)
+                .child(format!("{}{by}", crate::app::FORWARDED_FROM_PREFIX)),
+        )
+}
+
 /// First words of a message for its quote header: the whole message on one
 /// line (newlines and markdown flattened), cut on a word boundary; attachments
 /// name their file.
@@ -316,6 +339,9 @@ pub enum RowKind {
         /// Set when this message replies to another: Grok's quote header
         /// sits inside the bubble above the text.
         quote: Option<Quote>,
+        /// Bubble menu → Forward: "Forwarded from <name>" header above the
+        /// text (feedback app-01M5MXRZ7609S70P9S9P2RZDDF).
+        forwarded_from: Option<String>,
     },
     Markdown {
         block: Block,
@@ -1626,6 +1652,7 @@ impl Transcript {
                 time,
                 receipt,
                 quote,
+                forwarded_from,
             } => {
                 // My bubble is dark in both appearances: white text, a
                 // stronger highlight than the soft one on the grey bubbles.
@@ -1642,7 +1669,12 @@ impl Transcript {
                 } else {
                     Theme::with_alpha(theme.bubble_text(), 0.55)
                 };
-                let quote_header = quote.map(|q| self.quote_header(&row.id, q, text_color));
+                // A forward carries its "Forwarded from" header where a reply
+                // would carry its quote (a forward never quotes).
+                let quote_header = match forwarded_from {
+                    Some(by) => Some(forwarded_header(by, text_color)),
+                    None => quote.map(|q| self.quote_header(&row.id, q, text_color)),
+                };
                 // Triple-backtick fences render as code cards (same as agent
                 // replies); other text stays plain so "# heading" is still literal.
                 // Bare `http(s)://…` URLs are still accented and clickable.
@@ -2707,6 +2739,12 @@ pub fn build_rows(
                         .map(|id| Quote::for_reply(id, messages));
                     let receipt =
                         receipt_status(message, messages, mix, is_mine, receipts, read_receipts);
+                    let forwarded_from = message
+                        .forwarded_from
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|n| !n.is_empty())
+                        .map(str::to_owned);
                     rows.push(Row {
                         version: hash_version(
                             &(
@@ -2716,6 +2754,7 @@ pub fn build_rows(
                                 from.as_ref().map(|p| &p.handle),
                                 &quote,
                                 receipt,
+                                &forwarded_from,
                             ),
                             false,
                         ),
@@ -2730,6 +2769,7 @@ pub fn build_rows(
                             time: clock_label(message.created_at),
                             receipt,
                             quote,
+                            forwarded_from,
                         },
                     });
                 }
@@ -5317,6 +5357,45 @@ mod system_line_tests {
                 ("agent", true),
                 ("agent", true),
             ]
+        );
+    }
+
+    /// Bubble menu → Forward (feedback app-01M5MXRZ7609S70P9S9P2RZDDF): a row with
+    /// `forwardedFrom` draws the "Forwarded from <name>" header instead of a reply
+    /// quote; a plain message carries neither.
+    #[test]
+    fn forwarded_bubble_carries_its_sender_header() {
+        let t = 1_700_000_000_000u64;
+        let mut forwarded = message("user", "user:gh_me", "see this", t + 1_000);
+        forwarded.forwarded_from = Some(" Sam Rivera ".into());
+        let messages = [message("user", "user:gh_bob", "hi", t), forwarded];
+        let (spoken, failed) = (HashSet::new(), HashMap::new());
+        let rows = build_rows(
+            &messages,
+            false,
+            speech(&spoken, &failed),
+            "gh_me",
+            &HashSet::new(),
+            &Mentions::empty(),
+            false,
+            None,
+            true,
+        );
+        let headers: Vec<(Option<String>, bool)> = rows
+            .iter()
+            .filter_map(|r| match &r.kind {
+                RowKind::User {
+                    forwarded_from,
+                    quote,
+                    ..
+                } => Some((forwarded_from.clone(), quote.is_some())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            headers,
+            [(None, false), (Some("Sam Rivera".into()), false)],
+            "the forward header is trimmed and a forward never quotes"
         );
     }
 
