@@ -145,6 +145,15 @@ struct ReplySwipe {
     locked: bool,
 }
 
+/// Click-drag vertical pan that scrolls the list (iPhone ScrollView parity).
+/// Armed on press; locks once the pan is clearly vertical so text selection
+/// and reply-swipe stay free for horizontal / select gestures.
+struct DragScroll {
+    start: Point<Pixels>,
+    last: Point<Pixels>,
+    locked: bool,
+}
+
 impl HoverFade {
     /// Record a hover change for `row_id`; `true` when something changed.
     fn set(&mut self, row_id: &str, hovered: bool, now: Instant) -> bool {
@@ -587,6 +596,8 @@ pub struct Transcript {
     rig_select: Option<(String, Instant)>,
     /// Swipe-right-to-reply in progress (Telegram / iPhone parity).
     reply_swipe: Option<ReplySwipe>,
+    /// Vertical click-drag scroll over bubbles / empty rows.
+    drag_scroll: Option<DragScroll>,
 }
 
 impl Transcript {
@@ -643,6 +654,7 @@ impl Transcript {
                 (spec, Instant::now() + Duration::from_millis(after))
             }),
             reply_swipe: None,
+            drag_scroll: None,
         }
     }
 
@@ -846,6 +858,101 @@ impl Transcript {
         cx.notify();
     }
 
+    /// Wheel over the composer (sibling of this list): move the transcript
+    /// the same way a wheel over the bubbles would ([feedback
+    /// app-01M5PDB3QYAPBPA4FJXZE1FFD0]).
+    pub fn scroll_from_wheel(&mut self, event: &gpui::ScrollWheelEvent, cx: &mut Context<Self>) {
+        let dy = f32::from(event.delta.pixel_delta(px(20.0)).y);
+        // List::scroll uses `scroll_top - delta.y`; scroll_by adds to offset.
+        if dy != 0.0 {
+            self.list.scroll_by(px(-dy));
+        }
+        self.on_wheel(event, cx);
+    }
+
+    /// Arm a possible vertical drag-scroll (bubbles / empty rows).
+    fn begin_drag_scroll(&mut self, start: Point<Pixels>) {
+        self.drag_scroll = Some(DragScroll {
+            start,
+            last: start,
+            locked: false,
+        });
+    }
+
+    /// Trackpad / mouse move while a vertical drag-scroll may be in progress.
+    fn on_drag_scroll_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if self.drag_scroll.is_none() {
+            return;
+        }
+        if event.pressed_button != Some(MouseButton::Left) {
+            self.drag_scroll = None;
+            return;
+        }
+        // Text selection has committed: leave the pointer alone.
+        if self.selection.read(cx).is_selecting() {
+            self.drag_scroll = None;
+            return;
+        }
+        // Reply swipe has locked horizontal: leave it alone.
+        if self.reply_swipe.as_ref().is_some_and(|s| s.locked) {
+            self.drag_scroll = None;
+            return;
+        }
+
+        let (dx, dy_from_start, locked) = {
+            let drag = self.drag_scroll.as_ref().expect("checked above");
+            let dx: f32 = (event.position.x - drag.start.x).into();
+            let dy: f32 = (event.position.y - drag.start.y).into();
+            (dx, dy, drag.locked)
+        };
+        if !locked {
+            if dx.abs() + dy_from_start.abs() < REPLY_SWIPE_SLOP {
+                return;
+            }
+            // Horizontal-dominant: text selection / reply swipe own the gesture.
+            if dx.abs() > dy_from_start.abs() * 1.15 {
+                self.drag_scroll = None;
+                return;
+            }
+            // Vertical: take the gesture.
+            self.reply_swipe = None;
+            self.selection.update(cx, |s, cx| {
+                s.clear();
+                cx.notify();
+            });
+            if let Some(drag) = self.drag_scroll.as_mut() {
+                drag.locked = true;
+            }
+        }
+
+        let last = self
+            .drag_scroll
+            .as_ref()
+            .map(|d| d.last)
+            .expect("drag_scroll still armed");
+        let step: f32 = (event.position.y - last.y).into();
+        if let Some(drag) = self.drag_scroll.as_mut() {
+            drag.last = event.position;
+        }
+        if step.abs() < 0.5 {
+            return;
+        }
+        // Finger down → content follows → older messages (lower scroll offset).
+        self.list.scroll_by(px(-step));
+        if step > 0.0 {
+            self.pinned_to_bottom = false;
+            self.spring.velocity = 0.0;
+            self.repin_check_pending = false;
+        } else {
+            self.repin_check_pending = true;
+        }
+        cx.notify();
+    }
+
+    fn end_drag_scroll(&mut self) {
+        self.drag_scroll = None;
+    }
+
     /// One spring step per frame while pinned and not yet at the end.
     fn step_spring(&mut self, window: &mut Window, _cx: &mut Context<Self>) {
         if self.repin_check_pending {
@@ -890,6 +997,7 @@ impl Transcript {
         self.pane_open = pane_open;
         if chat_changed {
             self.reply_swipe = None;
+            self.drag_scroll = None;
         }
         let messages: Vec<Message> = chat_id
             .as_deref()
@@ -2316,18 +2424,34 @@ impl Render for Transcript {
             .track_focus(&focus)
             .on_action(cx.listener(Self::copy_selection))
             .on_scroll_wheel(cx.listener(|this, event, _, cx| this.on_wheel(event, cx)))
-            // Swipe-right-to-reply: move/up live on the transcript so a drag
-            // that leaves the row still finishes (same as the iPhone gesture).
+            // Drag-scroll + swipe-right-to-reply: move/up live on the transcript
+            // so a drag that leaves the row still finishes (iPhone parity).
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, _, _cx| {
+                    if event.modifiers.control || event.modifiers.shift {
+                        return;
+                    }
+                    this.begin_drag_scroll(event.position);
+                }),
+            )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
                 this.on_reply_swipe_move(event, cx);
+                this.on_drag_scroll_move(event, cx);
             }))
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, _: &MouseUpEvent, _, cx| this.on_reply_swipe_up(cx)),
+                cx.listener(|this, _: &MouseUpEvent, _, cx| {
+                    this.on_reply_swipe_up(cx);
+                    this.end_drag_scroll();
+                }),
             )
             .on_mouse_up_out(
                 MouseButton::Left,
-                cx.listener(|this, _: &MouseUpEvent, _, cx| this.on_reply_swipe_up(cx)),
+                cx.listener(|this, _: &MouseUpEvent, _, cx| {
+                    this.on_reply_swipe_up(cx);
+                    this.end_drag_scroll();
+                }),
             )
             // Grok's header band (Jacob, Oct 22 12:49 CR, superseding the opaque
             // band): the list runs up under the floating pill and fades out
