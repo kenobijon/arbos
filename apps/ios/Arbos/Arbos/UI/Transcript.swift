@@ -401,8 +401,27 @@ enum Transcript {
     /// "8:05 AM" for the time after a group / channel bubble's text.
     static func clockLabel(_ ms: Int64) -> String? {
         guard ms > 0 else { return nil }
-        return Date(timeIntervalSince1970: Double(ms) / 1000).formatted(date: .omitted, time: .shortened)
+        // One label per minute, through a reused formatter: `Date.formatted` per row made
+        // every rebuild of a long group cost ~50 µs × rows (5 000 rows: 14 s in Debug).
+        let minute = ms / 60_000
+        if let hit = clockLabels.object(forKey: NSNumber(value: minute)) { return hit as String }
+        let label = clockFormatter.string(from: Date(timeIntervalSince1970: Double(minute * 60)))
+        clockLabels.setObject(label as NSString, forKey: NSNumber(value: minute))
+        return label
     }
+
+    private static let clockFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .none
+        f.timeStyle = .short
+        return f
+    }()
+
+    private static let clockLabels: NSCache<NSNumber, NSString> = {
+        let cache = NSCache<NSNumber, NSString>()
+        cache.countLimit = 20_000
+        return cache
+    }()
 
     static func proseBlocks(_ text: String, people: Bool) -> [Block] {
         let key = (people ? "p\u{1}" : "a\u{1}") + text
