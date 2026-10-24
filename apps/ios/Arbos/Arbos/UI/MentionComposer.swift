@@ -211,6 +211,10 @@ struct MentionTextView: UIViewRepresentable {
     @Binding var isFocused: Bool
     let placeholder: String
     let theme: Theme
+    /// The `Project` an agent chip draws its picture from — the app's single
+    /// source for agent identity (`AppModel.agent(member:chatId:)`), so the chip
+    /// matches the bubbles.
+    var agentProject: (ChatMember) -> Project? = { $0.project }
     var maxLines: Int = 8
 
     static let insets = UIEdgeInsets(top: 10, left: 16, bottom: 10, right: 0)
@@ -431,7 +435,7 @@ struct MentionTextView: UIViewRepresentable {
             if let hit = chipCache[key] { return hit }
             let theme = parent.theme
             let picture: AnyView
-            if m.member.isAgent, let p = m.member.project {
+            if m.member.isAgent, let p = parent.agentProject(m.member) {
                 picture = AnyView(AgentAvatar(project: p, theme: theme, size: MentionTable.picture, still: true))
             } else {
                 picture = AnyView(PersonAvatar(url: m.member.avatarUrl, handle: m.member.handle, size: MentionTable.picture, name: m.member.name, id: m.member.id, colorIndex: m.member.avatarColorIndex))
