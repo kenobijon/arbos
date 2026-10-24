@@ -4985,7 +4985,6 @@ impl Agent {
         s
     }
 
-    #[allow(clippy::too_many_arguments)]
     /// A `send` that arrived while a user turn holds the lock: run it as its own job beside
     /// that turn — a subagent session in this workspace whose brief is the user's message with
     /// the chat's recent turns, answered back into this chat as one bubble by the result turn.
@@ -5150,6 +5149,7 @@ impl Agent {
         Ok(true)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn run_subagent(
         self: &Arc<Self>,
         chat_id: &str,
