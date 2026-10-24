@@ -688,6 +688,18 @@ struct ChatView: View {
                             model.fixtureAgentMessage(chatId: chatId, received: show == "agent-message-received")
                         }
                         #endif
+                    case "forward":
+                        // Rig: the Forward sheet for the newest message bubble.
+                        if let row = rows.last(where: { isMessageRow($0) }) { beginForward(row) }
+                    case "forwarded":
+                        // Rig: a sent bubble forwarded from Sam Rivera (fixture only).
+                        #if DEBUG
+                        if model.isFixture {
+                            model.fixtureAppend(chatId: chatId,
+                                                text: "Sending in a sec. Also: can we add your Arbos agent here so it can pull the numbers while we talk?",
+                                                attachments: [], forwardedFrom: "Sam Rivera")
+                        }
+                        #endif
                     case "replied":
                         // Rig: a sent bubble quoting the newest agent message (fixture only).
                         #if DEBUG

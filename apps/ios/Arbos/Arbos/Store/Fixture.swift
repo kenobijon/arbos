@@ -322,7 +322,8 @@ extension AppModel {
 
     /// Sends in fixture mode append locally so the composer can be exercised,
     /// then a scripted reply lands as complete bubbles (ack → working → result).
-    func fixtureAppend(chatId: Id, text: String, attachments: [Attachment], replyTo: Id? = nil) {
+    func fixtureAppend(chatId: Id, text: String, attachments: [Attachment], replyTo: Id? = nil,
+                       forwardedFrom: String? = nil) {
         var list = messages[chatId] ?? []
         // Finish the fixture's stuck "working" turn so the demo reads cleanly.
         if let i = list.lastIndex(where: { $0.isStreaming }) {
@@ -331,6 +332,7 @@ extension AppModel {
         }
         var m = user(newId(), chatId, text, at: nowMs())
         m.replyTo = replyTo
+        m.forwardedFrom = forwardedFrom
         m.parts = attachments.map { .attachment(id: newId(), attachment: $0) } + (text.isEmpty ? [] : m.parts)
         list.append(m)
         messages[chatId] = list
