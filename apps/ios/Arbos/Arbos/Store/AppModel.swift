@@ -697,7 +697,7 @@ final class AppModel: ObservableObject {
     /// touch — folds into one re-read per this window, and the home list's activity bump
     /// happens with that re-read, not per row. 72 rows replayed per row cost 11 s of
     /// blocked main thread on a 1 500-message group (iphone-open-scroll-block, 2026-10-24).
-    static let catchUpCoalesceMs = 250
+    static let catchUpCoalesceMs = 600
     /// Lists at or above this size are decoded off the main actor (`emitSnapshot`).
     static let asyncSnapshotMinRows = 300
     /// Per-chat generation of the last requested snapshot; a slower background decode
@@ -1829,8 +1829,8 @@ final class AppModel: ObservableObject {
                 if gapMs > 0 { try? await Task.sleep(for: .milliseconds(gapMs)) } else { await Task.yield() }
                 if ix == rowBytes.count - 1 {
                     for (key, _) in docs {
-                        emitSnapshot(key)
                         caughtUp.insert(key)
+                        emitSnapshot(key)
                     }
                 }
             }
@@ -1873,7 +1873,7 @@ final class AppModel: ObservableObject {
                     // window for all of them (list or message touches alike), and the
                     // home-list bump rides along instead of re-sorting per row.
                     self.activityPending.insert(key)
-                    self.requestSnapshot(key, windowMs: Self.catchUpCoalesceMs)
+                    self.requestSnapshot(key, windowMs: Self.catchUpCoalesceMs, deferAlways: true)
                 } else if touched.listChanged {
                     self.emitSnapshot(key)
                     self.markActivity(chatId: key)
@@ -1925,8 +1925,9 @@ final class AppModel: ObservableObject {
             if isProjectDoc {
                 self.applyProjectDoc(projectId)
             } else {
-                self.emitSnapshot(key)
+                // Live before the final read, so that read also bumps the home list.
                 self.caughtUp.insert(key)
+                self.emitSnapshot(key)
                 self.firstLoginChatSynced(key)
             }
         }
@@ -2023,16 +2024,19 @@ final class AppModel: ObservableObject {
     /// A list change from the doc: re-read now when the room was quiet, else once
     /// at the end of the coalesce window. Direct `emitSnapshot` callers (catch-up,
     /// checkpoint paint, ACK) still read at once and clear a pending request.
-    private func requestSnapshot(_ chatId: Id, windowMs: Int = AppModel.snapshotCoalesceMs) {
+    /// `deferAlways`: never read at once (a catch-up's first row must not cost a
+    /// full re-read when the next 70 arrive within the window); the paint the
+    /// reader sees meanwhile is the store / checkpoint one.
+    private func requestSnapshot(_ chatId: Id, windowMs: Int = AppModel.snapshotCoalesceMs, deferAlways: Bool = false) {
         guard !snapshotPending.contains(chatId) else { return }
         let window = Double(windowMs) / 1000
         let since = Date().timeIntervalSince1970 - (snapshotLastAt[chatId] ?? 0)
-        guard since < window else {
+        guard since < window || deferAlways else {
             emitSnapshot(chatId)
             return
         }
         snapshotPending.insert(chatId)
-        let delayMs = max(1, Int((window - since) * 1000))
+        let delayMs = deferAlways ? windowMs : max(1, Int((window - since) * 1000))
         Task { @MainActor [weak self] in
             try? await Task.sleep(for: .milliseconds(delayMs))
             guard let self, self.snapshotPending.contains(chatId) else { return }
@@ -2074,7 +2078,8 @@ final class AppModel: ObservableObject {
         var next = messages
         next[chatId] = list
         messages = next
-        if activityPending.remove(chatId) != nil {
+        // The home list re-sorts once the room is live, not per catch-up snapshot.
+        if caughtUp.contains(chatId), activityPending.remove(chatId) != nil {
             markActivity(chatId: chatId)
         }
     }
