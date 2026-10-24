@@ -2,8 +2,8 @@
 //! agent's picture — a tab pill **Bot | Generate | Upload** with **Reset** at the right, a body
 //! per tab, and a footer **Cancel | Set avatar**. Nothing changes until "Set avatar".
 //!
-//! - **Bot**: the nine D92 leaves in Grok's grid (5 / 4), every leaf on a muted disc and the
-//!   selected one tinted with the chosen colour; the ten autumn swatches in two rows of five.
+//! - **Bot**: the sixteen D92 (v2) leaves as their 4 × 4 sheet, every leaf neutral and the
+//!   selected one in its hue (pastel disc, darker leaf); the ten hues in two rows of five.
 //!   The per-id automatic default stays: Reset goes back to it.
 //! - **Generate**: a short prompt → `POST /projects/{id}/avatar/generate` (the relay's OpenAI
 //!   key, one low-quality square, metered and capped) → the picture previews here; Set makes it
@@ -38,14 +38,16 @@ const RADIUS: f32 = 16.0;
 const BAR_H: f32 = 44.0;
 const BAR_INSET: f32 = 12.0;
 const TAB_H: f32 = 28.0;
-const LEAF_ROWS: [f32; 2] = [92.0, 148.0];
-const LEAF_PITCH: f32 = 56.0;
-const LEAF_DISC: f32 = 33.0;
-const LEAF_RING: f32 = 40.0;
-const SWATCH_ROWS: [f32; 2] = [206.0, 246.0];
-const SWATCH_PITCH: f32 = 40.0;
-const SWATCH: f32 = 23.0;
-const SWATCH_RING: f32 = 31.0;
+/// The 4 × 4 leaf sheet (v2) on a 48 pt pitch, then the ten hues on a 36 pt pitch; the
+/// footer hairline stays at 340.5.
+const LEAF_ROWS: [f32; 4] = [84.0, 132.0, 180.0, 228.0];
+const LEAF_PITCH: f32 = 48.0;
+const LEAF_DISC: f32 = 30.0;
+const LEAF_RING: f32 = 36.0;
+const SWATCH_ROWS: [f32; 2] = [282.0, 318.0];
+const SWATCH_PITCH: f32 = 36.0;
+const SWATCH: f32 = 21.0;
+const SWATCH_RING: f32 = 29.0;
 const FOOTER_H: f32 = 56.5;
 const FOOTER_TOP: f32 = HEIGHT - FOOTER_H;
 const PILL_H: f32 = 28.0;
@@ -144,10 +146,18 @@ impl Picker {
     }
 }
 
+/// Unselected leaves in the grid: a neutral disc and a neutral leaf (Grok tints only the pick).
 fn muted_disc(theme: &Theme) -> Hsla {
     match theme.appearance {
         Appearance::Dark => hex(0x3A3A3A),
         Appearance::Light => theme.field,
+    }
+}
+
+fn muted_ink(theme: &Theme) -> Hsla {
+    match theme.appearance {
+        Appearance::Dark => hex(0x8A8A8A),
+        Appearance::Light => theme.text_muted,
     }
 }
 
@@ -168,8 +178,8 @@ fn ring(size: f32, selected: bool, colour: Hsla) -> Div {
         .cursor_pointer()
 }
 
-/// A leaf on a disc of any colour (the Bot grid tints only the selected one).
-fn leaf_on(pick: LeafPick, size: f32, disc: Hsla) -> Div {
+/// A leaf on a disc, both in any colour (the Bot grid tints only the selected one).
+fn leaf_on(leaf_index: u8, size: f32, disc: Hsla, ink: Hsla) -> Div {
     div()
         .size(px(size))
         .flex_shrink_0()
@@ -178,7 +188,7 @@ fn leaf_on(pick: LeafPick, size: f32, disc: Hsla) -> Div {
         .justify_center()
         .rounded_full()
         .bg(disc)
-        .child(avatars::leaf_glyph(pick, size, 0.0))
+        .child(avatars::leaf_glyph_inked(leaf_index, size, 0.0, ink))
 }
 
 /// The round picture the Generate / Upload tabs preview: the pending choice, else the entity's
@@ -326,11 +336,7 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
         Tab::Bot => {
             let pick = picker.pick(&project);
             for (r, top) in LEAF_ROWS.iter().enumerate() {
-                let leaves: Vec<u8> = if r == 0 {
-                    (0..5).collect()
-                } else {
-                    (5..9).collect()
-                };
+                let leaves: Vec<u8> = (r as u8 * 4..r as u8 * 4 + 4).collect();
                 let mut row = div()
                     .absolute()
                     .left_0()
@@ -340,14 +346,13 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
                     .justify_center();
                 for index in leaves {
                     let selected = pick.leaf == index;
-                    let cell = LeafPick {
-                        leaf: index,
-                        color: pick.color,
-                    };
-                    let disc = if selected {
-                        avatars::leaf_disc(pick.color)
+                    let (disc, ink) = if selected {
+                        (
+                            avatars::leaf_disc(pick.color),
+                            avatars::leaf_ink(pick.color),
+                        )
                     } else {
-                        muted_disc(&theme)
+                        (muted_disc(&theme), muted_ink(&theme))
                     };
                     row = row.child(
                         ring(LEAF_RING, selected, p.ring)
@@ -355,7 +360,7 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
                                 "avatar-leaf-{index}"
                             ))))
                             .mx(px((LEAF_PITCH - LEAF_RING) / 2.0))
-                            .child(leaf_on(cell, LEAF_DISC, disc))
+                            .child(leaf_on(index, LEAF_DISC, disc, ink))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if let Some(pk) = this.avatar_picker.as_mut() {
                                     pk.leaf = Some(index);

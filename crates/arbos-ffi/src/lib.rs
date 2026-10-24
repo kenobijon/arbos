@@ -378,6 +378,12 @@ impl RoomSession {
     }
 
     /// Host failed to import row bytes; reconnect from the last good cursor.
+    /// The import of the last `ApplyBytes` was parked by Loro (dependencies missing): the
+    /// persisted cursor stays below that row; a corrective `Cursor` action follows.
+    pub fn apply_pending(&self) {
+        self.lock().apply_pending();
+    }
+
     pub fn apply_failed(&self) {
         self.lock().apply_failed();
     }
@@ -591,6 +597,19 @@ impl ChatDoc {
     }
 
     /// Import update or snapshot bytes.
+    /// Import an update; `true` when Loro parked it as pending (its dependencies are not in
+    /// the doc yet), `false` when it applied. Hosts report `true` with `RoomSession.apply_pending`.
+    pub fn apply_update(&self, bytes: Vec<u8>) -> Result<bool, FfiError> {
+        let result = {
+            self.lock_doc()
+                .import(&bytes)
+                .map(|status| status.pending.is_some())
+                .map_err(|e| FfiError::Import(e.to_string()))
+        };
+        self.flush_pending();
+        result
+    }
+
     pub fn apply(&self, bytes: Vec<u8>) -> Result<(), FfiError> {
         let result = {
             self.lock_doc()

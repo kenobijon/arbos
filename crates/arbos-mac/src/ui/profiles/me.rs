@@ -7,12 +7,13 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui::{
-    canvas, div, prelude::*, px, Bounds, Context, Div, DragMoveEvent, IntoElement, MouseButton,
-    MouseDownEvent, Pixels, Render, Stateful, Window,
+    canvas, div, prelude::*, px, Bounds, Context, Div, DragMoveEvent, ElementId, IntoElement,
+    MouseButton, MouseDownEvent, Pixels, Render, SharedString, Stateful, Window,
 };
 
 use crate::app::ProfilePage;
 use crate::model::{now_ms, MachineState};
+use crate::ui::devices;
 use crate::ui::glass;
 use crate::ui::icons::icon;
 use crate::ui::motion::PulseClock;
@@ -64,10 +65,17 @@ impl Shell {
         let profile_tab = state.profile_tab;
         let custom_avatar = state.has_custom_avatar();
         let notify_on = state.notifier.enabled;
+        let read_receipts = state.read_receipts;
         let secrets_value = if state.secrets.loaded {
             state.secrets.row_value()
         } else {
             String::new()
+        };
+        let devices_view = state.devices.clone();
+        let devices_summary = match state.devices.items.len() {
+            0 => String::new(),
+            1 => "1 device".to_string(),
+            n => format!("{n} devices"),
         };
         let store_usage = state.store_usage;
         let update = state.update.clone();
@@ -523,29 +531,53 @@ impl Shell {
 
         // ----- Notifications page body -------------------------------------------
         let notifications_body = {
-            let group = settings_group(&theme).child(seg_row(
-                "Notifications",
-                div()
-                    .flex()
-                    .gap(px(2.0))
-                    .child(
-                        glass::segment("notify-on", "On", notify_on, &theme).on_click(cx.listener(
-                            |this, _, _, cx| {
-                                this.state
-                                    .update(cx, |s, cx| s.set_notifications_enabled(true, cx));
-                            },
-                        )),
-                    )
-                    .child(
-                        glass::segment("notify-off", "Off", !notify_on, &theme).on_click(
-                            cx.listener(|this, _, _, cx| {
-                                this.state
-                                    .update(cx, |s, cx| s.set_notifications_enabled(false, cx));
-                            }),
+            let group = settings_group(&theme)
+                .child(seg_row(
+                    "Notifications",
+                    div()
+                        .flex()
+                        .gap(px(2.0))
+                        .child(
+                            glass::segment("notify-on", "On", notify_on, &theme).on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.state
+                                        .update(cx, |s, cx| s.set_notifications_enabled(true, cx));
+                                }),
+                            ),
+                        )
+                        .child(
+                            glass::segment("notify-off", "Off", !notify_on, &theme).on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.state.update(cx, |s, cx| {
+                                        s.set_notifications_enabled(false, cx);
+                                    });
+                                }),
+                            ),
                         ),
-                    ),
-                &theme,
-            ));
+                    &theme,
+                ))
+                .child(seg_row(
+                    "Read receipts",
+                    div()
+                        .flex()
+                        .gap(px(2.0))
+                        .child(
+                            glass::segment("receipts-on", "On", read_receipts, &theme).on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.state.update(cx, |s, cx| s.set_read_receipts(true, cx));
+                                }),
+                            ),
+                        )
+                        .child(
+                            glass::segment("receipts-off", "Off", !read_receipts, &theme).on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.state
+                                        .update(cx, |s, cx| s.set_read_receipts(false, cx));
+                                }),
+                            ),
+                        ),
+                    &theme,
+                ));
             div()
                 .flex()
                 .flex_col()
@@ -553,7 +585,9 @@ impl Shell {
                 .child(group)
                 .child(footnote(
                 "A banner with the sender's picture when an agent finishes or a person writes, \
-                     only while you are not looking."
+                     only while you are not looking. Read receipts show a Seen line under your \
+                     last message in a people chat when someone has opened it — turn them off to \
+                     stop sending and seeing that mark."
                     .into(),
                 &theme,
             ))
@@ -605,28 +639,34 @@ impl Shell {
                         ),
                     &theme,
                 ))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(10.0))
-                        .min_h(px(44.0))
-                        .px(px(16.0))
-                        .py(px(10.0))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .text_size(px(TEXT_BODY))
-                                .text_color(if update_failed {
-                                    theme.danger
-                                } else {
-                                    theme.text
-                                })
-                                .child(update.status_line()),
-                        )
-                        .child(actions),
-                );
+                .child({
+                    // A failure row carries a sentence and two actions; side by side in a 280 pt
+                    // pane the sentence got ~40 pt and wrapped one word per line. Stack it.
+                    let status = div()
+                        .min_w_0()
+                        .text_size(px(TEXT_BODY))
+                        .text_color(if update_failed {
+                            theme.danger
+                        } else {
+                            theme.text
+                        })
+                        .child(update.status_line());
+                    let row = div().min_h(px(44.0)).px(px(16.0)).py(px(10.0));
+                    if update_failed {
+                        row.flex()
+                            .flex_col()
+                            .items_start()
+                            .gap(px(8.0))
+                            .child(status.w_full())
+                            .child(actions)
+                    } else {
+                        row.flex()
+                            .items_center()
+                            .gap(px(10.0))
+                            .child(status.flex_1())
+                            .child(actions)
+                    }
+                });
             div()
                 .flex()
                 .flex_col()
@@ -700,6 +740,128 @@ impl Shell {
                 ))
         };
 
+        // ----- Devices page body (Oct 23) -----------------------------------------
+        // One card, a row per signed-in device; this Mac first and marked; every
+        // other row has Sign out, which asks first and then revokes on the relay.
+        let devices_body = {
+            let view = devices_view;
+            let armed = self.device_revoke_armed.clone();
+            let mut body = div().flex().flex_col().gap(px(22.0));
+            if let Some(why) = view.error.clone().filter(|_| view.items.is_empty()) {
+                body = body
+                    .child(settings_group(&theme).child(
+                        glass::row("Devices", &theme).child(value("Could not load".into(), &theme)),
+                    ))
+                    .child(footnote(
+                        format!("{why}. Pull to try again: reopen Devices."),
+                        &theme,
+                    ));
+            } else if !view.loaded && view.items.is_empty() {
+                body = body.child(kit::empty("Loading…", &theme));
+            } else if view.items.is_empty() {
+                body = body.child(kit::empty("No devices yet", &theme));
+            } else {
+                let mut rows: Vec<gpui::AnyElement> = Vec::new();
+                for r in devices::rows(&view.items, now_ms() as i64) {
+                    if armed.as_deref() == Some(r.id.as_str()) {
+                        let id = r.id.clone();
+                        rows.push(
+                            kit::confirm_row(
+                                &devices::confirm_question(&r.name),
+                                "Sign out",
+                                kit::confirm_button(
+                                    "device-revoke-cancel",
+                                    "Cancel",
+                                    false,
+                                    &theme,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.device_revoke_armed = None;
+                                        cx.notify();
+                                    },
+                                )),
+                                kit::confirm_button("device-revoke-go", "Sign out", true, &theme)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.device_revoke_armed = None;
+                                        let id = id.clone();
+                                        this.state.update(cx, |s, cx| s.revoke_device(id, cx));
+                                    })),
+                                &theme,
+                            )
+                            .into_any_element(),
+                        );
+                        continue;
+                    }
+                    let title: SharedString = r.name.clone().into();
+                    // The kind tag ("read-only") and the control share the trailing
+                    // slot, in flow — never over the name (seen on the gate build).
+                    let mut trailing = div().flex().flex_shrink_0().items_center().gap(px(8.0));
+                    if let Some(tag) = r.tag {
+                        trailing = trailing.child(
+                            div()
+                                .px(px(6.0))
+                                .py(px(1.0))
+                                .rounded_full()
+                                .bg(theme.surface_2)
+                                .text_size(px(TEXT_TINY))
+                                .text_color(theme.text_muted)
+                                .whitespace_nowrap()
+                                .child(tag),
+                        );
+                    }
+                    trailing = if !r.revokable() {
+                        trailing.child(
+                            div()
+                                .text_size(px(TEXT_SMALL))
+                                .text_color(theme.text_muted)
+                                .whitespace_nowrap()
+                                .child("This Mac"),
+                        )
+                    } else {
+                        let id = r.id.clone();
+                        trailing.child(
+                            link_button("device-revoke", "Sign out", true, &theme)
+                                .id(ElementId::Name(SharedString::from(format!(
+                                    "device-revoke-{}",
+                                    r.id
+                                ))))
+                                .whitespace_nowrap()
+                                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                    cx.stop_propagation()
+                                })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.device_revoke_armed = Some(id.clone());
+                                    cx.notify();
+                                })),
+                        )
+                    };
+                    let row = kit::row(
+                        ElementId::Name(SharedString::from(format!("device-{}", r.id))),
+                        kit::Leading::Tile(r.glyph),
+                        title,
+                        Some(r.subtitle.clone().into()),
+                        None,
+                        Some(trailing.into_any_element()),
+                        false,
+                        &theme,
+                    );
+                    rows.push(row.into_any_element());
+                }
+                body = body.child(
+                    kit::section(rows, kit::INSET + 30.0 + kit::GAP, &theme)
+                        .mx(px(0.0))
+                        .mb(px(0.0)),
+                );
+                body = body.child(footnote(
+                    "Every GitHub sign-in is a device. Signing one out ends its session at once; it can sign in again. This Mac signs out from the Settings tab."
+                        .into(),
+                    &theme,
+                ));
+            }
+            body
+        };
+
         let page = self.settings_page;
         let tab = profile_tab;
         let pane_width = profiles::SHEET_WIDTH.max(page.sheet_width());
@@ -717,6 +879,7 @@ impl Shell {
                     SettingsPage::Notifications => notifications_body,
                     SettingsPage::Updates => updates_body,
                     SettingsPage::About => about_body,
+                    SettingsPage::Devices => devices_body,
                     SettingsPage::Root
                     | SettingsPage::Connectors
                     | SettingsPage::Routines
@@ -740,7 +903,8 @@ impl Shell {
                     | SettingsPage::Appearance
                     | SettingsPage::Notifications
                     | SettingsPage::Updates
-                    | SettingsPage::About => unreachable!("handled above"),
+                    | SettingsPage::About
+                    | SettingsPage::Devices => unreachable!("handled above"),
                     SettingsPage::Connectors => self.connectors.clone().into_any_element(),
                     SettingsPage::Routines => self.routines.clone().into_any_element(),
                     SettingsPage::Channels => self.channels.clone().into_any_element(),
@@ -936,16 +1100,27 @@ impl Shell {
                 )
                 .into_any_element(),
             ]));
-            // Secrets (Credits · Connected apps hidden until implemented).
-            body.push(Section::Card(vec![page_row(
-                "settings-secrets",
-                "key",
-                SettingsPage::Secrets,
-                Some(secrets_value),
-                &theme,
-                cx,
-            )
-            .into_any_element()]));
+            // Secrets · Devices (Credits · Connected apps hidden until implemented).
+            body.push(Section::Card(vec![
+                page_row(
+                    "settings-secrets",
+                    "key",
+                    SettingsPage::Secrets,
+                    Some(secrets_value),
+                    &theme,
+                    cx,
+                )
+                .into_any_element(),
+                page_row(
+                    "settings-devices",
+                    "laptop",
+                    SettingsPage::Devices,
+                    Some(devices_summary),
+                    &theme,
+                    cx,
+                )
+                .into_any_element(),
+            ]));
             // On this Mac (Routines · Channels · Skills hidden until implemented).
             body.push(Section::Card(vec![kit::nav_row(
                 "settings-local",

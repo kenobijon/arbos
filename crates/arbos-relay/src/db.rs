@@ -569,6 +569,7 @@ impl Db {
         crate::db_voice::migrate_voice(&c);
         Self::migrate_vault_items_per_user(&c)?;
         c.execute_batch(crate::db_secrets::SECRETS_SCHEMA)?;
+        c.execute_batch(crate::agent_messages::SCHEMA)?;
         crate::db_secrets::migrate_secrets(&c);
         c.execute_batch(crate::matrix::db::MATRIX_SCHEMA)?;
         crate::matrix::db::migrate_matrix(&c);
@@ -1514,6 +1515,19 @@ impl Db {
                 row_count,
                 row_bytes,
             })
+        })
+    }
+
+    /// Seq of a stored batch id, if any — used to ACK a resent push as `dup` before the people
+    /// gates (so a reconnect storm does not burn the message rate limit).
+    pub fn row_seq_for_batch(&self, room: &str, batch_id: &str) -> Result<Option<i64>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT seq FROM rows WHERE room = ?1 AND batch_id = ?2",
+                params![room, batch_id],
+                |r| r.get(0),
+            )
+            .optional()
         })
     }
 

@@ -528,6 +528,7 @@ pub async fn page(w: &Workspace, q: &Query) -> Value {
         "count": events.len(),
         "identity": identity_json(&w.agent).await,
         "turn": turn_json(&w.agent).await,
+        "links": w.sync.link_summary().await,
         "events": events.iter().map(Event::to_json).collect::<Vec<_>>(),
     })
 }
@@ -576,6 +577,7 @@ pub async fn box_state(sup: &Supervisor) -> Value {
             "started_at": w.started_at,
             "run_as": w.cfg.run_as.as_ref().map(|r| r.user.clone()),
             "turn": turn_json(&w.agent).await,
+            "links": w.sync.link_summary().await,
         }));
     }
     let now = now_ms();

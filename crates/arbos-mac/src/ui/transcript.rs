@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     actions, div, list, prelude::*, px, Animation, AnimationExt, AnyElement, App, Context, Div,
-    Entity, FontWeight, ListAlignment, ListScrollEvent, ListState, Render, SharedString, Stateful,
-    TextRun, Window,
+    Entity, FontWeight, ListAlignment, ListScrollEvent, ListState, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, SharedString, Stateful, TextRun, Window,
 };
 
 use crate::app::{AppEvent, AppState, DetailsTarget};
@@ -98,6 +98,13 @@ const HOVER_FADE_MS: f32 = 150.0;
 pub const HEADER_FADE_BAND: f32 = crate::ui::header::metrics::FADE_BAND;
 /// How long the hover copy glyph stays a checkmark after a successful copy.
 const COPY_FEEDBACK_MS: u64 = 2_000;
+/// How far a right swipe pulls the bubble before reply arms (iPhone
+/// `replySwipeWidth` / Telegram-style).
+const REPLY_SWIPE_WIDTH: f32 = 56.0;
+/// Release past this fraction of [`REPLY_SWIPE_WIDTH`] starts a reply.
+const REPLY_SWIPE_ARM: f32 = REPLY_SWIPE_WIDTH * 0.7;
+/// Ignore pointer noise until the drag travels this far (iPhone minimumDistance).
+const REPLY_SWIPE_SLOP: f32 = 12.0;
 
 /// Which bubble row the pointer is over, and the one it just left, with the
 /// moment each happened: the fade is computed from those at render time.
@@ -105,6 +112,20 @@ const COPY_FEEDBACK_MS: u64 = 2_000;
 struct HoverFade {
     over: Option<(String, Instant)>,
     left: Option<(String, Instant)>,
+}
+
+/// In-progress swipe-right-to-reply on a message row (iPhone `replySwipeGesture`).
+struct ReplySwipe {
+    /// The transcript row the press started on (visual offset + reply glyph).
+    row_id: String,
+    /// The message to reply to when the swipe arms.
+    message_id: Id,
+    /// Press origin in window coordinates.
+    start: Point<Pixels>,
+    /// How far the row has been pulled right (px).
+    drag: f32,
+    /// True once the pan is clearly horizontal-right (scroll / select stay free until then).
+    locked: bool,
 }
 
 impl HoverFade {
@@ -326,10 +347,19 @@ pub enum RowKind {
         /// Under another person's bubble (chips clear the avatar column).
         indent: bool,
     },
+    /// Optional read receipt under my last outbound bubble ("Seen").
+    Seen {
+        label: String,
+    },
     /// Grok's hand-off line: "Messaged ◉ A" / "N messages with ◉ A, ◉ B and ◉ C".
     Handoff {
         names: Vec<String>,
         total: u32,
+    },
+    /// Agent-to-agent messaging: this reply went back to the agent that wrote in —
+    /// "Replied to ◉ hjkb", the same line style as a hand-off.
+    RepliedTo {
+        name: String,
     },
     /// An image or file in the chat (agent or user). `mine` right-aligns my sends.
     Attachment {
@@ -350,11 +380,15 @@ pub enum RowKind {
     /// S18: draft-and-approve card.
     Approval {
         view: ApprovalView,
+        /// People chat: the card sits after the sender's avatar lane, like its bubble.
+        lane: bool,
     },
     /// Error: one line, red glyph, Retry.
     /// A typed question widget (design §10): rendered by a [`QuestionCard`] view.
     Question {
         question_id: String,
+        /// People chat: the card sits after the sender's avatar lane, like its bubble.
+        lane: bool,
     },
     Error {
         code: String,
@@ -443,8 +477,13 @@ pub const STICK_THRESHOLD_PX: f32 = 70.0;
 /// How far above the end the user must be before the ↓ button shows.
 const JUMP_BUTTON_AFTER_PX: f32 = 160.0;
 
-/// Right-click on a bubble: the shell opens the message menu there.
-/// Hover face-smile: the shell opens the quick-react emoji bar there.
+/// The hover rail's buttons: Grok Mac's 24 pt hit target, 16 pt glyph, 2 pt apart.
+pub const RAIL_BUTTON: f32 = 24.0;
+pub const RAIL_GLYPH: f32 = 16.0;
+pub const RAIL_GAP: f32 = 2.0;
+
+/// Right-click or the rail's ⋯: the shell opens the message menu there.
+/// The rail's smiley: the shell opens the reaction capsule there.
 /// Hover reply: the shell sets the composer's reply target.
 pub enum TranscriptEvent {
     MessageMenu {
@@ -452,8 +491,7 @@ pub enum TranscriptEvent {
         message_id: Id,
         position: gpui::Point<gpui::Pixels>,
     },
-    /// Hover react glyph → the six-emoji bar (`react_menu`).
-    ReactMenu {
+    ReactionCapsule {
         chat_id: Id,
         message_id: Id,
         position: gpui::Point<gpui::Pixels>,
@@ -505,6 +543,8 @@ pub struct Transcript {
     /// `ARBOS_RIG_SELECT_AFTER_MS` (so a reply typed over VNC can land
     /// first). Cleared when applied.
     rig_select: Option<(String, Instant)>,
+    /// Swipe-right-to-reply in progress (Telegram / iPhone parity).
+    reply_swipe: Option<ReplySwipe>,
 }
 
 impl Transcript {
@@ -560,7 +600,103 @@ impl Transcript {
                 .detach();
                 (spec, Instant::now() + Duration::from_millis(after))
             }),
+            reply_swipe: None,
         }
+    }
+
+    /// Rows that can be replied to (same set as the message menu's Reply item
+    /// on the iPhone: text, media, and empty agent bubbles — not stamps,
+    /// cards, errors, or chrome).
+    fn can_reply_row(kind: &RowKind) -> bool {
+        matches!(
+            kind,
+            RowKind::User { .. }
+                | RowKind::Markdown { .. }
+                | RowKind::NoAnswer { .. }
+                | RowKind::Attachment { .. }
+        )
+    }
+
+    /// Mouse down on a replyable row: arm a possible swipe-right-to-reply.
+    /// Vertical scroll and text selection stay free until the pan locks.
+    fn begin_reply_swipe(&mut self, row_id: String, message_id: Id, start: Point<Pixels>) {
+        self.reply_swipe = Some(ReplySwipe {
+            row_id,
+            message_id,
+            start,
+            drag: 0.0,
+            locked: false,
+        });
+    }
+
+    /// Trackpad / mouse move while a reply swipe may be in progress.
+    fn on_reply_swipe_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if self.reply_swipe.is_none() {
+            return;
+        }
+        if event.pressed_button != Some(MouseButton::Left) {
+            self.reply_swipe = None;
+            cx.notify();
+            return;
+        }
+        let (dx, dy, was_locked, prev_drag) = {
+            let swipe = self.reply_swipe.as_ref().expect("checked above");
+            let dx: f32 = (event.position.x - swipe.start.x).into();
+            let dy: f32 = (event.position.y - swipe.start.y).into();
+            (dx, dy, swipe.locked, swipe.drag)
+        };
+        if !was_locked {
+            if dx.abs() + dy.abs() < REPLY_SWIPE_SLOP {
+                return;
+            }
+            // Vertical scroll or leftward peek: do not steal the gesture.
+            if dx <= 0.0 || dx.abs() <= dy.abs() * 1.15 {
+                self.reply_swipe = None;
+                return;
+            }
+        }
+        let raw = dx.max(0.0);
+        let w = REPLY_SWIPE_WIDTH;
+        let reveal = if raw <= w {
+            raw
+        } else {
+            w + ((raw - w) * 0.2).min(24.0)
+        };
+        let just_locked = !was_locked;
+        let moved = (prev_drag - reveal).abs() > 0.5;
+        if let Some(swipe) = self.reply_swipe.as_mut() {
+            swipe.locked = true;
+            if moved {
+                swipe.drag = reveal;
+            }
+        }
+        if just_locked {
+            self.selection.update(cx, |s, cx| {
+                s.clear();
+                cx.notify();
+            });
+        }
+        if just_locked || moved {
+            cx.notify();
+        }
+    }
+
+    /// Mouse up: if the swipe armed far enough, start a reply (same path as
+    /// the hover reply glyph and the message-menu Reply item).
+    fn on_reply_swipe_up(&mut self, cx: &mut Context<Self>) {
+        let Some(swipe) = self.reply_swipe.take() else {
+            return;
+        };
+        let triggered = swipe.locked && swipe.drag >= REPLY_SWIPE_ARM;
+        if triggered {
+            if let Some(chat_id) = self.chat_id.clone() {
+                cx.emit(TranscriptEvent::Reply {
+                    chat_id,
+                    message_id: swipe.message_id,
+                });
+            }
+        }
+        cx.notify();
     }
 
     /// Apply `ARBOS_RIG_SELECT` to the newest settled agent bubble, once.
@@ -639,9 +775,15 @@ impl Transcript {
     /// and let the next frame (`step_spring`) read pixel offsets.
     fn handle_scroll(&mut self, event: &ListScrollEvent) {
         // `is_scrolled == false` means the bottom-aligned list snapped to its
-        // end: the user is back at the tail. Direction is handled by the
-        // wheel listener; this callback never re-pins on its own otherwise.
-        if !event.is_scrolled {
+        // end: the user is back at the tail. `is_scrolled == true` means they
+        // left that natural end (wheel, trackpad, or scrollbar). Unpin so a
+        // new incoming row cannot spring them back while they read history —
+        // the parent wheel listener alone was not enough (scrollbar / list
+        // scroll paths never cleared the pin).
+        if event.is_scrolled {
+            self.pinned_to_bottom = false;
+            self.spring.velocity = 0.0;
+        } else {
             self.pinned_to_bottom = true;
             self.spring.velocity = 0.0;
         }
@@ -704,12 +846,13 @@ impl Transcript {
         let pane_open = state.profile.is_some();
         let pane_changed = pane_open != self.pane_open;
         self.pane_open = pane_open;
+        if chat_changed {
+            self.reply_swipe = None;
+        }
         let messages: Vec<Message> = chat_id
             .as_deref()
             .map(|id| state.messages_of(id).to_vec())
             .unwrap_or_default();
-        self.chat_id = chat_id;
-
         let show_details = state.show_details;
         let speech = SpeechRows {
             enabled: state.voice_mode_available(),
@@ -724,6 +867,15 @@ impl Transcript {
             state.active_chat(),
             state.selected_channel.is_some(),
         );
+        // Optional Seen under my last outbound bubble (Settings → Notifications).
+        let seen_label = if state.read_receipts {
+            chat_id
+                .as_deref()
+                .and_then(|id| seen_label_for(state, id, &messages, &me_id))
+        } else {
+            None
+        };
+        self.chat_id = chat_id;
         let new_rows = build_rows(
             &messages,
             show_details,
@@ -732,6 +884,7 @@ impl Transcript {
             &thumb_keys,
             &self.mentions,
             multi_party,
+            seen_label,
         );
         self.multi_party = multi_party;
         // A sender change opens the turn gap. So does every new assistant /
@@ -764,9 +917,9 @@ impl Transcript {
         self.veils
             .retain(|id, _| new_rows.iter().any(|r| r.id == *id));
         self.cards.retain(|qid, _| {
-            new_rows
-                .iter()
-                .any(|r| matches!(&r.kind, RowKind::Question { question_id } if question_id == qid))
+            new_rows.iter().any(
+                |r| matches!(&r.kind, RowKind::Question { question_id, .. } if question_id == qid),
+            )
         });
 
         if chat_changed {
@@ -812,6 +965,14 @@ impl Transcript {
         let old_len = self.rows.len();
         self.rows = new_rows;
         self.list.splice(prefix..old_len, self.rows.len() - prefix);
+        // Reading history: a stale pin (scrollbar / list scroll that never
+        // cleared it) must not spring to the new end when rows land below.
+        let max = f32::from(self.list.max_offset_for_scrollbar().y);
+        let cur = -f32::from(self.list.scroll_px_offset_for_scrollbar().y);
+        if max - cur > STICK_THRESHOLD_PX {
+            self.pinned_to_bottom = false;
+            self.spring.velocity = 0.0;
+        }
         self.reveal_hit(cx);
         // While pinned the spring glides to the new end on the next frames.
         cx.notify();
@@ -951,10 +1112,11 @@ impl Transcript {
             })
     }
 
-    /// Hover-only reply · copy · react glyphs beside a bubble (fade with the
-    /// row). After a successful copy the glyph becomes a checkmark for a
-    /// moment. The face-smile opens the six-emoji bar (`react_menu`).
-    fn hover_reply_copy(
+    /// The hover rail beside a bubble (fades with the row), in Grok's order:
+    /// smiley (the reaction capsule) · reply · ⋯ (the message menu: Copy,
+    /// Reply, Delete). After a copy from the menu the ⋯ shows a checkmark
+    /// for a moment.
+    fn hover_rail(
         &self,
         row_id: &str,
         message_id: &Id,
@@ -963,17 +1125,16 @@ impl Transcript {
         cx: &mut Context<Self>,
     ) -> Div {
         let chat_id = self.chat_id.clone();
+        let (react_chat, react_msg) = (chat_id.clone(), message_id.clone());
+        let (more_chat, more_msg) = (chat_id.clone(), message_id.clone());
         let reply_msg = message_id.clone();
-        let copy_msg = message_id.clone();
-        let react_chat = self.chat_id.clone();
-        let react_msg = message_id.clone();
         let just_copied = self.copied_feedback.as_ref().is_some_and(|(id, at)| {
             id == message_id && at.elapsed() < Duration::from_millis(COPY_FEEDBACK_MS)
         });
         // Keep the checkmark readable even if the pointer leaves mid-feedback.
-        let copy_opacity = if just_copied { 1.0 } else { opacity };
-        let copy_glyph = if just_copied { "check" } else { "copy" };
-        let copy_color = if just_copied {
+        let more_opacity = if just_copied { 1.0 } else { opacity };
+        let more_glyph = if just_copied { "check" } else { "ellipsis" };
+        let more_color = if just_copied {
             theme.online
         } else {
             theme.text_muted
@@ -981,7 +1142,7 @@ impl Transcript {
         let btn = |id: SharedString, glyph: &'static str, opacity: f32, color: gpui::Hsla| {
             div()
                 .id(id)
-                .size(px(24.0))
+                .size(px(RAIL_BUTTON))
                 .flex_shrink_0()
                 .flex()
                 .items_center()
@@ -990,12 +1151,31 @@ impl Transcript {
                 .cursor_pointer()
                 .opacity(opacity)
                 .hover(|s| s.bg(theme.surface_2))
-                .child(icon(glyph, 16.0, color))
+                .child(icon(glyph, RAIL_GLYPH, color))
         };
         div()
             .flex()
             .items_center()
-            .gap(px(2.0))
+            .gap(px(RAIL_GAP))
+            .child(
+                btn(
+                    SharedString::from(format!("{row_id}#react")),
+                    "face-smile",
+                    opacity,
+                    theme.text_muted,
+                )
+                .on_click(cx.listener(
+                    move |_, event: &gpui::ClickEvent, _, cx| {
+                        if let Some(chat_id) = react_chat.clone() {
+                            cx.emit(TranscriptEvent::ReactionCapsule {
+                                chat_id,
+                                message_id: react_msg.clone(),
+                                position: event.position(),
+                            });
+                        }
+                    },
+                )),
+            )
             .child(
                 btn(
                     SharedString::from(format!("{row_id}#reply")),
@@ -1014,26 +1194,17 @@ impl Transcript {
             )
             .child(
                 btn(
-                    SharedString::from(format!("{row_id}#copy")),
-                    copy_glyph,
-                    copy_opacity,
-                    copy_color,
-                )
-                .on_click(cx.listener(move |this, _, _, cx| this.copy_message(&copy_msg, cx))),
-            )
-            .child(
-                btn(
-                    SharedString::from(format!("{row_id}#react")),
-                    "face-smile",
-                    opacity,
-                    theme.text_muted,
+                    SharedString::from(format!("{row_id}#more")),
+                    more_glyph,
+                    more_opacity,
+                    more_color,
                 )
                 .on_click(cx.listener(
                     move |_, event: &gpui::ClickEvent, _, cx| {
-                        if let Some(chat_id) = react_chat.clone() {
-                            cx.emit(TranscriptEvent::ReactMenu {
+                        if let Some(chat_id) = more_chat.clone() {
+                            cx.emit(TranscriptEvent::MessageMenu {
                                 chat_id,
-                                message_id: react_msg.clone(),
+                                message_id: more_msg.clone(),
                                 position: event.position(),
                             });
                         }
@@ -1108,6 +1279,71 @@ impl Transcript {
             image,
             project_id: agent_pid,
         }
+    }
+
+    /// Grok's centred agent line: `lead` then "◉ A, ◉ B and ◉ C" with 16 pt discs. A name that
+    /// is one of my agents is a link to that agent's chat (the "open Doug" affordance).
+    fn agent_line(
+        &self,
+        lead: &str,
+        names: &[String],
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let state = self.state.read(cx);
+        let mut line = div()
+            .flex()
+            .items_center()
+            .gap(px(5.0))
+            .text_size(px(TEXT_SMALL))
+            .text_color(theme.text_muted)
+            .child(lead.to_owned());
+        let n = names.len();
+        for (i, name) in names.iter().enumerate() {
+            let mine = state
+                .projects
+                .iter()
+                .find(|p| p.name.eq_ignore_ascii_case(name) && p.kind == SpaceKind::Project);
+            let glyph: AnyElement = match mine {
+                Some(space) => crate::ui::avatars::project(space, 16.0, theme).into_any_element(),
+                // Not one of my projects (a subagent): initials on the name's gradient.
+                None => {
+                    crate::ui::avatars::element(name, name, None, 16.0, theme).into_any_element()
+                }
+            };
+            let mut who = div()
+                .id(SharedString::from(format!("agent-line-{lead}-{i}-{name}")))
+                .flex()
+                .items_center()
+                .gap(px(5.0))
+                .child(glyph)
+                .child(div().child(name.clone()));
+            if let Some(space) = mine {
+                let pid = space.id.clone();
+                let state_entity = self.state.clone();
+                who = who
+                    .cursor_pointer()
+                    .hover(|el| el.text_color(theme.text))
+                    .on_click(move |_, _, cx| {
+                        let pid = pid.clone();
+                        state_entity.update(cx, |s, cx| s.select_project(pid, cx));
+                    });
+            }
+            line = line.child(who);
+            if n >= 2 && i + 2 == n {
+                line = line.child(div().child("and"));
+            } else if i + 2 < n {
+                line = line.child(div().ml(px(-5.0)).child(","));
+            }
+        }
+        div()
+            .w_full()
+            .flex()
+            .justify_center()
+            .pt(px(10.0))
+            .pb(px(6.0))
+            .child(line)
+            .into_any_element()
     }
 
     /// The 24 pt disc for an agent's message in a people chat.
@@ -1295,11 +1531,9 @@ impl Transcript {
                 time_el,
             ));
         let (row_el, reveal) = self.hover_row(row_id, now, window, cx);
-        // Hover: reply · copy · react (face-smile opens the emoji bar).
-        let hover_actions = (last && !live).then(|| {
-            let actions = self.hover_reply_copy(row_id, message_id, reveal, theme, cx);
-            div().flex().items_center().gap(px(2.0)).child(actions)
-        });
+        // Hover: the rail (smiley · reply · ⋯) on the last block of a finished reply.
+        let hover_actions =
+            (last && !live).then(|| self.hover_rail(row_id, message_id, reveal, theme, cx));
         // Messages for Mac: the bubble's time shows beside the glyph on hover
         // (1:1 chats; a group / channel bubble already carries it after the text).
         let hover_time = (last && !live && !inline_time)
@@ -1366,6 +1600,10 @@ impl Transcript {
         };
         let theme = Theme::of(cx).clone();
         let now = Instant::now();
+        // Before the match moves `row.kind`: which rows accept swipe-right-to-reply.
+        let can_reply = Self::can_reply_row(&row.kind) && !row.message_id.is_empty();
+        let swipe_row_id = row.id.clone();
+        let swipe_message_id = row.message_id.clone();
         let selectable = Selectable::new(&self.selection, theme.accent_soft, cx).with_mentions(
             self.mentions.clone(),
             theme.accent,
@@ -1483,7 +1721,7 @@ impl Transcript {
                         .child({
                             let (row_el, reveal) = self.hover_row(&row.id, now, window, cx);
                             let actions =
-                                self.hover_reply_copy(&row.id, &row.message_id, reveal, &theme, cx);
+                                self.hover_rail(&row.id, &row.message_id, reveal, &theme, cx);
                             row_el
                                 .justify_start()
                                 .items_end()
@@ -1545,7 +1783,7 @@ impl Transcript {
                             // My bubble sits right, so its outer edge (and time) is on the left.
                             let (row_el, reveal) = self.hover_row(&row.id, now, window, cx);
                             let actions =
-                                self.hover_reply_copy(&row.id, &row.message_id, reveal, &theme, cx);
+                                self.hover_rail(&row.id, &row.message_id, reveal, &theme, cx);
                             row_el
                                 .justify_end()
                                 .children(hover_time(time, reveal, &theme).map(|t| t.mr(px(8.0))))
@@ -1711,52 +1949,28 @@ impl Transcript {
                     .child(chips)
                     .into_any_element()
             }
+            RowKind::Seen { label } => div()
+                .w_full()
+                .flex()
+                .justify_end()
+                .mt(px(-2.0))
+                .pb(px(ROW_GAP_HALF))
+                .pr(px(6.0))
+                .text_size(px(TEXT_TINY))
+                .text_color(theme.text_muted)
+                .child(label)
+                .into_any_element(),
             RowKind::Handoff { names, total } => {
                 // "Messaged ◉ A" while only the brief went out; "N messages with
                 // ◉ A, ◉ B and ◉ C" once replies came back (Grok refs 13/58).
-                let state = self.state.read(cx);
                 let lead = if total <= names.len() as u32 {
                     "Messaged".to_string()
                 } else {
                     format!("{total} messages with")
                 };
-                let mut line = div()
-                    .flex()
-                    .items_center()
-                    .gap(px(5.0))
-                    .text_size(px(TEXT_SMALL))
-                    .text_color(theme.text_muted)
-                    .child(lead);
-                let n = names.len();
-                for (i, name) in names.iter().enumerate() {
-                    let glyph: AnyElement = match state
-                        .projects
-                        .iter()
-                        .find(|p| p.name.eq_ignore_ascii_case(name))
-                    {
-                        Some(space) => {
-                            crate::ui::avatars::project(space, 16.0, &theme).into_any_element()
-                        }
-                        // Not one of my projects (a subagent): initials on the name's gradient.
-                        None => crate::ui::avatars::element(name, name, None, 16.0, &theme)
-                            .into_any_element(),
-                    };
-                    line = line.child(glyph).child(div().child(name.clone()));
-                    if n >= 2 && i + 2 == n {
-                        line = line.child(div().child("and"));
-                    } else if i + 2 < n {
-                        line = line.child(div().ml(px(-5.0)).child(","));
-                    }
-                }
-                div()
-                    .w_full()
-                    .flex()
-                    .justify_center()
-                    .pt(px(10.0))
-                    .pb(px(6.0))
-                    .child(line)
-                    .into_any_element()
+                self.agent_line(&lead, &names, &theme, cx)
             }
+            RowKind::RepliedTo { name } => self.agent_line("Replied to", &[name], &theme, cx),
             RowKind::Attachment {
                 attachment,
                 part_id,
@@ -1787,12 +2001,15 @@ impl Transcript {
                         });
                     }) as attachments::OpenFn
                 });
-                div()
-                    .w_full()
-                    .py(px(4.0))
-                    .flex()
-                    .when(mine, |el| el.justify_end())
-                    .when(lane, |el| el.pl(px(SENDER_LANE)))
+                // Same reply · copy rail and right-click menu as text bubbles
+                // (feedback app-01M5N8ZQVWC63V54HM70D9SJ4H): an image / file
+                // row was a bare card with no way to reply.
+                let card = self
+                    .menu_target(
+                        div().id(SharedString::from(format!("{}#media", row.id))),
+                        &row.message_id,
+                        cx,
+                    )
                     .child(attachments::card(
                         &row.id,
                         &attachment,
@@ -1801,13 +2018,47 @@ impl Transcript {
                         open,
                         self.state.clone(),
                         &theme,
-                    ))
-                    .into_any_element()
+                    ));
+                let (row_el, reveal) = self.hover_row(&row.id, now, window, cx);
+                let actions = self.hover_rail(&row.id, &row.message_id, reveal, &theme, cx);
+                if mine {
+                    // My media sits right; the rail is on its outer (left) edge.
+                    div()
+                        .w_full()
+                        .py(px(4.0))
+                        .flex()
+                        .flex_col()
+                        .items_end()
+                        .child(
+                            row_el
+                                .justify_end()
+                                .items_center()
+                                .child(actions.mr(px(6.0)))
+                                .child(card),
+                        )
+                        .into_any_element()
+                } else {
+                    div()
+                        .w_full()
+                        .py(px(4.0))
+                        .flex()
+                        .flex_col()
+                        .items_start()
+                        .child(
+                            row_el
+                                .justify_start()
+                                .items_center()
+                                .when(lane, |el| el.pl(px(SENDER_LANE)))
+                                .child(card)
+                                .child(actions.ml(px(6.0))),
+                        )
+                        .into_any_element()
+                }
             }
             RowKind::AskUser { text } => {
                 cards::status_row(StatusKind::AskUser, &text, false, &theme, cx).into_any_element()
             }
-            RowKind::Question { question_id } => {
+            RowKind::Question { question_id, lane } => {
                 let Some(chat_id) = self.chat_id.clone() else {
                     return div().into_any_element();
                 };
@@ -1837,14 +2088,9 @@ impl Transcript {
                         cx.new(|cx| QuestionCard::new(state, chat_id, question_id, &widget, cx))
                     })
                     .clone();
-                // Grok: the card is as wide as the assistant block.
-                div()
-                    .w_full()
-                    .flex()
-                    .child(assistant_slot(card))
-                    .into_any_element()
+                card_row(card, lane).into_any_element()
             }
-            RowKind::Approval { view } => {
+            RowKind::Approval { view, lane } => {
                 let chat_id = self.chat_id.clone().unwrap_or_default();
                 let approval_id = view.approval_id.clone();
                 let (state_a, chat_a, id_a) =
@@ -1869,11 +2115,7 @@ impl Transcript {
                         });
                     },
                 );
-                div()
-                    .w_full()
-                    .flex()
-                    .child(assistant_slot(card))
-                    .into_any_element()
+                card_row(card, lane).into_any_element()
             }
             RowKind::Error { code, message } => {
                 let state = self.state.clone();
@@ -1959,11 +2201,53 @@ impl Transcript {
                     && !matches!(prev.kind, RowKind::Stamp { .. } | RowKind::BottomInset)
                     && self.turn_starts.contains(&row.message_id)
             });
-        column_row(inner)
-            .when(turn_start, |el| el.pt(px(TURN_GAP_EXTRA)))
-            .when(highlighted, |el| {
-                el.bg(Theme::with_alpha(theme.accent, 0.14))
+        let swipe_drag = self
+            .reply_swipe
+            .as_ref()
+            .filter(|s| s.row_id == swipe_row_id)
+            .map(|s| s.drag)
+            .unwrap_or(0.0);
+        let accent = theme.accent;
+        div()
+            .id(SharedString::from(format!("{swipe_row_id}#swipe")))
+            .relative()
+            .w_full()
+            .when(can_reply, |el| {
+                let (row_id, message_id) = (swipe_row_id.clone(), swipe_message_id.clone());
+                el.on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, event: &MouseDownEvent, _, _cx| {
+                        if event.modifiers.control || event.modifiers.shift {
+                            return;
+                        }
+                        this.begin_reply_swipe(row_id.clone(), message_id.clone(), event.position);
+                    }),
+                )
             })
+            .when(swipe_drag > 0.5, |el| {
+                el.child(
+                    div()
+                        .absolute()
+                        .left(px(COLUMN_MARGIN + swipe_drag - REPLY_SWIPE_WIDTH))
+                        .top_0()
+                        .bottom_0()
+                        .w(px(REPLY_SWIPE_WIDTH))
+                        .flex()
+                        .items_center()
+                        .justify_start()
+                        .pl(px(4.0))
+                        .opacity((swipe_drag / (REPLY_SWIPE_WIDTH * 0.55)).min(1.0))
+                        .child(icon("reply", 16.0, accent)),
+                )
+            })
+            .child(
+                column_row(inner)
+                    .when(swipe_drag > 0.0, |el| el.ml(px(swipe_drag)))
+                    .when(turn_start, |el| el.pt(px(TURN_GAP_EXTRA)))
+                    .when(highlighted, |el| {
+                        el.bg(Theme::with_alpha(theme.accent, 0.14))
+                    }),
+            )
             .into_any_element()
     }
 }
@@ -2001,6 +2285,19 @@ fn assistant_slot(bubble: impl IntoElement) -> Div {
         .child(bubble)
 }
 
+/// A question / approval card is a transcript row like a bubble (#1374, #1440 follow-up): the
+/// same left edge as an incoming bubble — after the sender's avatar lane in a people chat — and
+/// the same cap width (`assistant_slot`). The lane is left empty: the card belongs to the
+/// agent's run and the disc already sits on its bubble.
+pub fn card_row(card: impl IntoElement, lane: bool) -> Div {
+    div()
+        .w_full()
+        .flex()
+        .when(lane, |el| el.pl(px(SENDER_LANE)))
+        .debug_selector(|| "chat-card-row".into())
+        .child(assistant_slot(card))
+}
+
 fn relative_width(fraction: f32) -> gpui::DefiniteLength {
     gpui::relative(fraction)
 }
@@ -2033,6 +2330,19 @@ impl Render for Transcript {
             .track_focus(&focus)
             .on_action(cx.listener(Self::copy_selection))
             .on_scroll_wheel(cx.listener(|this, event, _, cx| this.on_wheel(event, cx)))
+            // Swipe-right-to-reply: move/up live on the transcript so a drag
+            // that leaves the row still finishes (same as the iPhone gesture).
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                this.on_reply_swipe_move(event, cx);
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseUpEvent, _, cx| this.on_reply_swipe_up(cx)),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseUpEvent, _, cx| this.on_reply_swipe_up(cx)),
+            )
             // Grok's header band (Jacob, Oct 22 12:49 CR, superseding the opaque
             // band): the list runs up under the floating pill and fades out
             // over `HEADER_FADE_BAND` — Grok's text is gone at the window edge
@@ -2200,6 +2510,9 @@ fn is_json_block(block: &Block) -> bool {
 ///
 /// `thumb_keys` are blob refs that already have a decoded preview; they are
 /// mixed into row versions so a late thumbnail reloads the picture row.
+/// `names_senders` and `seen_label` landed from parallel feedbacks; keep them
+/// as plain args rather than a one-off options struct.
+#[allow(clippy::too_many_arguments)]
 pub fn build_rows(
     messages: &[Message],
     show_details: bool,
@@ -2208,6 +2521,7 @@ pub fn build_rows(
     thumb_keys: &HashSet<&str>,
     mentions: &Mentions,
     names_senders: bool,
+    seen_label: Option<String>,
 ) -> Vec<Row> {
     let mine = |m: &Message| {
         m.sender == "user" || m.sender.is_empty() || m.sender == format!("user:{me_id}")
@@ -2221,6 +2535,11 @@ pub fn build_rows(
     let last_reply = messages
         .iter()
         .rposition(|m| m.role == Role::Assistant && !m.is_streaming());
+    // Last outbound message from me: optional Seen sits under it (and its reactions).
+    let last_mine_id = messages
+        .iter()
+        .rfind(|m| m.role == Role::User && mine(m))
+        .map(|m| m.id.clone());
     let mut last_stamp_at: u64 = 0;
     // Who spoke last in a people chat: a bubble carries its sender's name only when
     // the sender changed or a date stamp broke the run (Grok Bot's group style), and
@@ -2359,6 +2678,16 @@ pub fn build_rows(
                     queued = true;
                 }
                 push_reactions(&mut rows, message, mine(message));
+                if last_mine_id.as_deref() == Some(message.id.as_str()) {
+                    if let Some(label) = seen_label.clone() {
+                        rows.push(Row {
+                            version: hash_version(&label, false),
+                            id: format!("{}#seen", message.id),
+                            message_id: message.id.clone(),
+                            kind: RowKind::Seen { label },
+                        });
+                    }
+                }
             }
             Role::System => {
                 // Call lines and membership notices ("Jacob added Home, hjkb and
@@ -2423,14 +2752,22 @@ pub fn build_rows(
                 let mut lane: Option<String> = None;
                 let in_people =
                     message.sender.starts_with("agent:") && message.asked_by_handle.is_some();
-                // Quote the user message this answers: prefer `replyTo` (platform
-                // reply feature); fall back to `inReplyTo` (turn link / older rows)
-                // so consecutive replies do not look like one run (#1447).
+                // Quote the message this answers: `replyTo` is the platform reply the
+                // box sets by the #1521 rule (always in groups / channels / people chats
+                // and for a row another agent sent; in a 1:1 only when answering an
+                // earlier message than the latest). Rows from older boxes in attributed
+                // chats fall back to `inReplyTo` (#1447); a plain 1:1 answer to the
+                // latest message carries no quote.
+                let attributed = message.role == Role::Project || in_people;
                 let reply_quote = message
                     .reply_to
                     .as_deref()
                     .filter(|id| !id.is_empty())
-                    .or_else(|| message.in_reply_to.as_deref().filter(|id| !id.is_empty()))
+                    .or_else(|| {
+                        attributed
+                            .then(|| message.in_reply_to.as_deref().filter(|id| !id.is_empty()))
+                            .flatten()
+                    })
                     .map(|id| Quote::for_reply(id, messages));
                 if message.role == Role::Project || in_people {
                     // A people-chat agent (or another Project, F6) speaks in its own lane;
@@ -2597,6 +2934,7 @@ pub fn build_rows(
                                 message_id: message.id.clone(),
                                 kind: RowKind::Question {
                                     question_id: question_id.clone(),
+                                    lane: lane.is_some(),
                                 },
                             }),
                             None => rows.push(Row {
@@ -2638,7 +2976,10 @@ pub fn build_rows(
                                 ),
                                 id: format!("{}#{}", message.id, id),
                                 message_id: message.id.clone(),
-                                kind: RowKind::Approval { view },
+                                kind: RowKind::Approval {
+                                    view,
+                                    lane: lane.is_some(),
+                                },
                             });
                         }
                         Part::Status {
@@ -2683,7 +3024,15 @@ pub fn build_rows(
                     )
                 });
                 let failed = !errors.is_empty() || matches!(message.status, MessageStatus::Error);
-                if shows_nothing && finished && !streaming && (failed || only_empty) {
+                // A hand-off row (a subagent brief, an agent-to-agent send) is its own line
+                // ("Messaged ◉ X"); it never gets the stock line, even with no parts (#1466).
+                let handoff_row = message.subagent_name.is_some()
+                    && matches!(
+                        message.turn,
+                        Some(TurnKind::New | TurnKind::Spawn | TurnKind::Wake)
+                    );
+                if shows_nothing && finished && !streaming && !handoff_row && (failed || only_empty)
+                {
                     let line = errors
                         .first()
                         .map(|(_, _, text)| text.trim())
@@ -2783,6 +3132,21 @@ pub fn build_rows(
                         kind: RowKind::Details,
                     });
                 }
+                // Agent-to-agent messaging: the reply went back to the agent that wrote in.
+                if let Some(name) = message
+                    .agent_reply_to
+                    .as_deref()
+                    .filter(|n| !streaming && !n.trim().is_empty())
+                {
+                    rows.push(Row {
+                        version: hash_version(&name, false),
+                        id: format!("{}#replied", message.id),
+                        message_id: message.id.clone(),
+                        kind: RowKind::RepliedTo {
+                            name: name.to_owned(),
+                        },
+                    });
+                }
             }
         }
         if rows.len() > rows_before_message {
@@ -2803,6 +3167,36 @@ pub fn build_rows(
         });
     }
     rows
+}
+
+/// "Seen" when at least one peer's Presence `seen` covers my last outbound
+/// message in this chat (Settings → Notifications read receipts on).
+fn seen_label_for(
+    state: &AppState,
+    chat_id: &str,
+    messages: &[Message],
+    me_id: &str,
+) -> Option<String> {
+    let mine = |m: &Message| {
+        m.sender == "user" || m.sender.is_empty() || m.sender == format!("user:{me_id}")
+    };
+    let last_mine = messages.iter().rfind(|m| m.role == Role::User && mine(m))?;
+    if last_mine.pending {
+        return None;
+    }
+    let receipts = state.message_receipts.get(chat_id)?;
+    if receipts.is_empty() {
+        return None;
+    }
+    let my_ix = messages.iter().position(|m| m.id == last_mine.id)?;
+    let any = receipts.values().any(|seen_id| {
+        messages
+            .iter()
+            .position(|m| &m.id == seen_id)
+            .is_some_and(|ix| ix >= my_ix)
+            || seen_id == &last_mine.id
+    });
+    any.then(|| "Seen".to_owned())
 }
 
 /// One chips row under a message that carries reactions.
@@ -3442,21 +3836,27 @@ const QUOTE_TO_TEXT_GAP: f32 = 6.0;
 /// The inside of a bubble, in this order: sender name (group / channel,
 /// someone else) → reply quote header → the text, with the time after it.
 /// A short text keeps the time on its line; a wrapped one pushes it to the
-/// right of the next line. No `min_w_0` on the column or its items: taffy
-/// sizes a flex column from its items, and an item with `min-width: 0`
-/// contributes nothing, so the bubble would take the name's or the quote's
-/// width and wrap the body one word per line (bubble-quote-width-2026-10-23).
+/// right of the next line.
 ///
-/// The text + time line is a flex *row*, and there the rule is the opposite:
-/// the text item must be `min_w_0`. GPUI measures a text's min-content width
-/// as its unwrapped width (`AvailableSpace::MinContent` → no wrap width), so
-/// without it the item's automatic minimum is the whole line, it cannot
-/// shrink to the bubble, and the text runs out of the bubble's right edge
-/// while the time drops to a line of its own (Jacob, 2026-10-23, v0.6.184:
-/// bubble-overflow-hotfix-2026-10-23). With `min_w_0` the row still reports
-/// the unwrapped width as its max-content size (a flex item's basis is its
-/// content; the minimum only matters when shrinking), so a short bubble is
-/// still content-sized, and a long one wraps at the bubble's width.
+/// Width rules:
+/// - The column and the text+time row are `w_full` so they take the bubble's
+///   content box when the bubble is capped — the body can wrap at that edge.
+/// - No `min_w_0` on the column or the text+time row: taffy sizes a flex
+///   column from its items, and an item with `min-width: 0` contributes
+///   nothing, so the bubble would take the name's or the quote's width and
+///   wrap the body one word per line (bubble-quote-width-2026-10-23).
+/// - The text wrapper alone keeps `min_w_0`. The text+time line is a flex
+///   *row*, and there the rule is the opposite of the column: GPUI measures
+///   a text's min-content width as its unwrapped width
+///   (`AvailableSpace::MinContent` → no wrap width), so without `min_w_0`
+///   the item's automatic minimum is the whole line, it cannot shrink to
+///   the bubble, and the text runs out of the bubble's right edge while the
+///   time drops to a line of its own (Jacob, 2026-10-23, v0.6.184 / 0.6.185:
+///   bubble-overflow-hotfix-2026-10-23, app-01M5N8R9VYF64GWW8TVXW8HFX9).
+///   With `min_w_0` the row still reports the unwrapped width as its
+///   max-content size (a flex item's basis is its content; the minimum only
+///   matters when shrinking), so a short bubble is still content-sized, and
+///   a long one wraps at the bubble's width.
 fn sender_bubble_column(
     name: Option<AnyElement>,
     quote: Option<AnyElement>,
@@ -3466,6 +3866,7 @@ fn sender_bubble_column(
     div()
         .flex()
         .flex_col()
+        .w_full()
         .children(name.map(|n| {
             div()
                 .pb(px(NAME_TO_TEXT_GAP))
@@ -3483,6 +3884,7 @@ fn sender_bubble_column(
                 .flex()
                 .flex_wrap()
                 .items_end()
+                .w_full()
                 .child(
                     div()
                         .min_w_0()
@@ -3855,6 +4257,17 @@ mod layout_tests {
                 queued: false,
             };
             let row_over_pill = presence::row(presence, &theme, cx).into_any_element();
+            // A question / approval card, framed by the real `card_row`: in an agent chat (no
+            // lane) and in a people chat (lane) — a card that wants more than any pane has.
+            let card = |sel: &'static str| {
+                div()
+                    .debug_selector(move || sel.into())
+                    .max_w_full()
+                    .min_w_0()
+                    .child(div().w(px(4000.0)).h(px(CHAT_LINE_HEIGHT)))
+            };
+            let card_plain = card_row(card("test-card"), false).into_any_element();
+            let card_people = card_row(card("test-people-card"), true).into_any_element();
             div()
                 .w(px(self.pane))
                 .h(px(400.0))
@@ -3862,6 +4275,8 @@ mod layout_tests {
                 .flex_col()
                 .child(column_row(row))
                 .child(column_row(people_row))
+                .child(column_row(card_plain))
+                .child(column_row(card_people))
                 .child(column_row(row_over_pill))
                 .child(column_row(pill))
         }
@@ -3885,6 +4300,8 @@ mod layout_tests {
         disc: gpui::Bounds<Pixels>,
         people_bubble_left: f32,
         composer_text_left: f32,
+        card: gpui::Bounds<gpui::Pixels>,
+        people_card: gpui::Bounds<gpui::Pixels>,
     }
 
     fn measure(cx: &mut TestAppContext, pane: f32) -> Edges {
@@ -3929,6 +4346,10 @@ mod layout_tests {
         let composer_text = vcx
             .debug_bounds("test-composer-text")
             .expect("composer text drawn");
+        let card = vcx.debug_bounds("test-card").expect("card drawn");
+        let people_card = vcx
+            .debug_bounds("test-people-card")
+            .expect("people card drawn");
         Edges {
             bubble_left: bubble.origin.x.into(),
             bubble_width: bubble.size.width.into(),
@@ -3947,6 +4368,43 @@ mod layout_tests {
             disc,
             people_bubble_left: people_bubble.origin.x.into(),
             composer_text_left: composer_text.origin.x.into(),
+            card,
+            people_card,
+        }
+    }
+
+    /// #1440 follow-up (Jacob, 2026-10-23 17:59): a question / approval card lines up with the
+    /// bubbles — card left == bubble left, card width ≤ the bubble cap — in an agent chat and,
+    /// after the avatar lane, in a people chat.
+    #[gpui::test]
+    fn cards_share_the_bubbles_left_edge_and_cap(cx: &mut TestAppContext) {
+        for pane in [REFERENCE_PANE, GROK_REF_57_PANE, 1400.0] {
+            let e = measure(cx, pane);
+            let (cx0, cw): (f32, f32) = (e.card.origin.x.into(), e.card.size.width.into());
+            assert!(
+                (cx0 - e.bubble_left).abs() <= 0.5,
+                "pane {pane}: card left {cx0} vs bubble left {}",
+                e.bubble_left
+            );
+            assert!(
+                cw <= e.bubble_width + 0.5,
+                "pane {pane}: card width {cw} over the bubble cap {}",
+                e.bubble_width
+            );
+            let (pcx, pcw): (f32, f32) = (
+                e.people_card.origin.x.into(),
+                e.people_card.size.width.into(),
+            );
+            assert!(
+                (pcx - e.people_bubble_left).abs() <= 0.5,
+                "pane {pane}: people card left {pcx} vs people bubble left {}",
+                e.people_bubble_left
+            );
+            let people_cap = e.bubble_width - SENDER_LANE;
+            assert!(
+                pcw <= people_cap + 0.5,
+                "pane {pane}: people card width {pcw} over the lane cap {people_cap}"
+            );
         }
     }
 
@@ -4215,9 +4673,8 @@ mod layout_tests {
         );
     }
 
-    /// A quoted agent bubble as `markdown_bubble` builds it: the bubble is a
-    /// flex column (quote header over the text) in the slot, with and without
-    /// the avatar lane.
+    /// A quoted agent bubble as `markdown_bubble` builds it: `sender_bubble_column`
+    /// (name → quote → body) in the slot, with and without the avatar lane.
     struct QuotedBubble {
         lane: bool,
         selection: Entity<TextSelection>,
@@ -4253,20 +4710,21 @@ mod layout_tests {
                 .max_w_full()
                 .min_w_0()
                 .relative()
-                .flex()
-                .flex_col()
-                .gap(px(6.0))
                 .px(px(BUBBLE_PAD_X))
                 .py(px(BUBBLE_PAD_Y))
-                .child(quote)
-                .child(render_block(
-                    "q",
-                    &Block::Paragraph(LONG_BODY.to_string()),
-                    0,
+                .child(sender_bubble_column(
                     None,
-                    Instant::now(),
-                    &theme,
-                    &bubble_sel,
+                    Some(quote.into_any_element()),
+                    render_block(
+                        "q",
+                        &Block::Paragraph(LONG_BODY.to_string()),
+                        0,
+                        None,
+                        Instant::now(),
+                        &theme,
+                        &bubble_sel,
+                    ),
+                    None,
                 ));
             let row = div()
                 .w_full()
@@ -4292,6 +4750,10 @@ mod layout_tests {
     /// incoming bubble with a one-word reply quote collapsed to the quote's
     /// width and wrapped its body one word per line. The bubble's width is the
     /// body's (capped by the column), never the quote header's.
+    ///
+    /// 2026-10-23 20:55 (v0.6.185): after sender_bubble_column dropped
+    /// `min_w_0` on the text wrapper, a long quoted body ran past the bubble's
+    /// right edge instead of wrapping — assert the text stays inside.
     #[gpui::test]
     fn a_quoted_bubble_is_as_wide_as_its_body_not_its_quote(cx: &mut TestAppContext) {
         for lane in [false, true] {
@@ -4302,9 +4764,13 @@ mod layout_tests {
             vcx.run_until_parked();
             let bubble = vcx.debug_bounds("test-bubble").expect("bubble drawn");
             let quote = vcx.debug_bounds("test-quote").expect("quote drawn");
+            let text = vcx.debug_bounds("bubble-text").expect("body drawn");
             let slot = vcx.debug_bounds("chat-bubble-slot").expect("slot drawn");
             let bw: f32 = bubble.size.width.into();
             let qw: f32 = quote.size.width.into();
+            let tw: f32 = text.size.width.into();
+            let tx: f32 = text.origin.x.into();
+            let bx: f32 = bubble.origin.x.into();
             let cap: f32 = f32::from(slot.size.width) - ASSISTANT_RIGHT_GAP;
             assert!(
                 qw < 120.0 && bw > qw + 200.0,
@@ -4318,6 +4784,16 @@ mod layout_tests {
             assert!(
                 bh < 6.0 * CHAT_LINE_HEIGHT,
                 "lane={lane}: the body wraps to a few lines, not one word per line ({bh} pt tall)"
+            );
+            let text_right = tx + tw;
+            let bubble_inner_right = bx + bw - BUBBLE_PAD_X;
+            assert!(
+                text_right <= bubble_inner_right + 1.0,
+                "lane={lane}: body runs past the bubble (text right {text_right}, inner {bubble_inner_right})"
+            );
+            assert!(
+                bh > 2.0 * CHAT_LINE_HEIGHT,
+                "lane={lane}: a long body must wrap to more than one line ({bh} pt tall)"
             );
         }
     }
@@ -4663,6 +5139,7 @@ mod system_line_tests {
             &HashSet::new(),
             &Mentions::empty(),
             true,
+            None,
         );
         let kinds: Vec<&RowKind> = rows.iter().map(|r| &r.kind).collect();
         // Date stamp, Bob (named), the notice, Bob again (named again).
@@ -4721,6 +5198,7 @@ mod system_line_tests {
             &HashSet::new(),
             &Mentions::empty(),
             true,
+            None,
         );
         // The name sits inside each reply's first bubble (sender-name-in-bubble-2026-10-23).
         let named_bubbles: Vec<bool> = rows
@@ -4804,6 +5282,7 @@ mod system_line_tests {
             &HashSet::new(),
             &Mentions::empty(),
             true,
+            None,
         );
         assert_eq!(
             names(&rows),
@@ -4836,6 +5315,7 @@ mod system_line_tests {
             &HashSet::new(),
             &Mentions::empty(),
             false,
+            None,
         );
         assert_eq!(
             names(&rows),
@@ -4877,6 +5357,7 @@ mod system_line_tests {
             kind: crate::model::ChatKind::Group,
             participants: Vec::new(),
             unread: false,
+            unread_count: 0,
             last_message_at: 0,
             archived_at: None,
         };
@@ -4944,6 +5425,7 @@ mod presence_rows_tests {
             &HashSet::new(),
             &Mentions::empty(),
             true,
+            None,
         )
     }
 

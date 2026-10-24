@@ -9,7 +9,6 @@ import SwiftUI
 struct HomeView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
-    @State private var showSettings = false
     @State private var showNewChat = false
     @State private var searching = false
     @State private var query = ""
@@ -40,7 +39,11 @@ struct HomeView: View {
             .sorted { peopleActivity($0) > peopleActivity($1) }
     }
 
-    private var hiddenCount: Int { hiddenProjects.count + hiddenPeople.count }
+    private var hiddenServers: [Server] {
+        model.servers.filter { model.isArchived(serverId: $0.id) }
+    }
+
+    private var hiddenCount: Int { hiddenProjects.count + hiddenPeople.count + hiddenServers.count }
     @FocusState private var searchFocused: Bool
 
     /// Selection above the home list (All | Agents | People).
@@ -51,22 +54,8 @@ struct HomeView: View {
         var id: String { rawValue }
     }
 
-    private var projects: [Project] {
-        let q = searchQuery
-        let sorted = model.projects.sorted { lastActivity($0) > lastActivity($1) }
-        if q.isEmpty {
-            // Archived agents stay out of the home list until search (or open).
-            return sorted.filter { !model.isArchived($0.id) }
-        }
-        return sorted.filter { matchesProject($0, q: q) }
-    }
-
-    /// Trimmed, lowercased query; leading `@` stripped so "@robert" finds the row.
-    private var searchQuery: String {
-        query.trimmingCharacters(in: .whitespaces)
-            .trimmingCharacters(in: CharacterSet(charactersIn: "@"))
-            .lowercased()
-    }
+    /// Folded query (case + diacritics, leading `@` stripped) so "@robert" and "Zoe" find their rows.
+    private var searchQuery: String { HomeSearch.normalizeQuery(query) }
 
     var body: some View {
         NavigationStack(path: $model.path) {
@@ -119,23 +108,24 @@ struct HomeView: View {
                                 goalsSection
                             }
                         }
-                        ForEach(homeRows) { row in
-                            switch row {
+                        ForEach(homeRows) { entry in
+                            switch entry.row {
                             case .project(let project):
                                 let pinned = model.isHomePinned(projectId: project.id)
                                 // borderless (not .plain): .plain steals the list swipe /
                                 // long-press on recent iOS, so archive and the menu fail.
-                                Button { openSearchHit(project) } label: {
-                                    AgentRow(project: project, preview: preview(project), previewIcon: previewIcon(project), time: timeLabel(project),
+                                Button { openSearchHit(project, hit: entry.hit) } label: {
+                                    AgentRow(project: project, preview: entry.hit.reason ?? preview(project),
+                                             previewIcon: entry.hit.reason == nil ? previewIcon(project) : nil, time: timeLabel(project),
                                              streaming: model.isStreaming(project: project.id),
                                              unread: model.chats(of: project.id).contains { model.chatHasUnread($0) },
                                              pinned: pinned)
                                 }
                                 .buttonStyle(.borderless)
                                 .contextMenu {
-                                    // Long-press: Pin (also on leading swipe), then Fork /
-                                    // Delete for owned agents. Archive stays on the trailing
-                                    // swipe; Profile is the chat header.
+                                    // Long-press: Pin (also on leading swipe), Fork (owned),
+                                    // Archive (also on the trailing swipe), then Delete for
+                                    // owned agents. Profile is the chat header.
                                     Button {
                                         withAnimation {
                                             if pinned { model.unpinHome(projectId: project.id) }
@@ -148,6 +138,13 @@ struct HomeView: View {
                                         Button { model.duplicateProject(project) } label: {
                                             Label("Fork", systemImage: "arrow.triangle.branch")
                                         }
+                                    }
+                                    Button {
+                                        withAnimation { model.archive(project.id) }
+                                    } label: {
+                                        Label("Archive", systemImage: "archivebox")
+                                    }
+                                    if !project.shared {
                                         Divider()
                                         Button(role: .destructive) { deleteProject = project } label: {
                                             Label("Delete", systemImage: "trash")
@@ -181,7 +178,7 @@ struct HomeView: View {
                             case .people(let chat):
                                 let pinned = model.isHomePinned(peopleChatId: chat.id)
                                 Button { model.open(peopleChat: chat) } label: {
-                                    PeopleRow(chat: chat, preview: peoplePreview(chat), time: timeLabel(ms: peopleActivity(chat)),
+                                    PeopleRow(chat: chat, preview: entry.hit.reason ?? peoplePreview(chat), time: timeLabel(ms: peopleActivity(chat)),
                                               unread: model.peopleUnread.contains(chat.id) || model.unreadCount(for: chat) > 0,
                                               count: model.unreadCount(for: chat), me: model.user?.id,
                                               pinned: pinned)
@@ -240,7 +237,7 @@ struct HomeView: View {
                                 // time, unread dot; no counts, badges or disclosure. Tap → its
                                 // channel list; the user then opens a channel.
                                 Button { model.open(server: server) } label: {
-                                    ServerRow(server: server, preview: model.serverPreview(server),
+                                    ServerRow(server: server, preview: entry.hit.reason ?? model.serverPreview(server),
                                               time: timeLabel(ms: model.serverActivity(server)),
                                               unread: model.serverUnread(server))
                                 }
@@ -248,6 +245,11 @@ struct HomeView: View {
                                 .contextMenu {
                                     Button { model.showProfile(.server(serverId: server.id)) } label: {
                                         Label("Server info", systemImage: "person.2")
+                                    }
+                                    Button {
+                                        withAnimation { model.archive(serverId: server.id) }
+                                    } label: {
+                                        Label("Archive", systemImage: "archivebox")
                                     }
                                 }
                                 .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
@@ -273,12 +275,15 @@ struct HomeView: View {
                 .listStyle(.plain)
                 .scrollContentBackground(.hidden)
                 .background(theme.bg)
-                .mask {
-                    VStack(spacing: 0) {
-                        LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom).frame(height: 100)
-                        Color.black
-                    }
-                    .ignoresSafeArea()
+                // Fade under the top bar as an overlay — a List `.mask` clips the
+                // system scroll indicator on the right edge (feedback
+                // app-01M5MY2Y9HTFR019WAEPPDCNYS). Same treatment as ChatView's
+                // headerBlur: keep the soft edge, leave the scroller free.
+                .scrollIndicators(.visible)
+                .overlay(alignment: .top) {
+                    LinearGradient(colors: [theme.bg, theme.bg.opacity(0)], startPoint: .top, endPoint: .bottom)
+                        .frame(height: 100)
+                        .allowsHitTesting(false)
                 }
                 .refreshable { await model.refreshRegistry() }
                 topBar
@@ -322,9 +327,6 @@ struct HomeView: View {
                 GoalDetailPage(goalId: openGoalId ?? "")
                     .environmentObject(model)
                     .environment(\.theme, theme)
-            }
-            .sheet(isPresented: $showSettings) {
-                SettingsView().environmentObject(model).environment(\.theme, theme)
             }
             .sheet(isPresented: $showNewChat) {
                 NewChatSheet().environmentObject(model).environment(\.theme, theme)
@@ -388,6 +390,12 @@ struct HomeView: View {
             }
             if DebugHooks.show == "hidden", DebugHooks.openProject == nil {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { showHidden = true }
+            }
+            // Rig: `ARBOS_SEARCH=<text>` opens the home search with that query.
+            if let q = DebugHooks.search, DebugHooks.openProject == nil {
+                model.paintTranscriptsForSearch()
+                searching = true
+                query = q
             }
             #if DEBUG
             if DebugHooks.show == "notify", DebugHooks.openProject == nil {
@@ -522,7 +530,7 @@ struct HomeView: View {
 
     private var topBar: some View {
         HStack(spacing: 10) {
-            Button { showSettings = true } label: {
+            Button { model.mainTab = .settings } label: {
                 ZStack(alignment: .bottomTrailing) {
                     PersonAvatar(url: model.user?.avatarUrl, handle: model.user?.login ?? "?", size: Theme.control, name: model.user?.name, id: model.user?.id, colorIndex: model.user?.avatarColorIndexEffective)
                     Circle()
@@ -671,40 +679,88 @@ struct HomeView: View {
         var activity: Int64 { 0 }
     }
 
-    /// Projects, DMs and servers in one list: pinned first, then newest activity.
+    /// One home row with how it matched the search (every row is a `title`
+    /// hit without a query, so the list is pinned-first by activity as before).
+    struct HomeEntry: Identifiable {
+        var row: HomeRow
+        var hit: HomeSearch.Hit
+        var id: String { row.id }
+    }
+
+    /// Projects, DMs and servers in one list. Without a query: pinned first, then
+    /// newest activity. With one: people (display name / @handle) first, then rows
+    /// matched by title, then by a member, then by a message — newest first inside
+    /// each group; a hit beyond the row's own name is explained on its second line.
     /// `listFilter` can hide people (Agents) or agents/servers (People).
-    private var homeRows: [HomeRow] {
+    private var homeRows: [HomeEntry] {
         let q = searchQuery
-        var rows: [(Bool, Int64, HomeRow)] = []
-        switch listFilter {
-        case .all:
-            for p in projects {
-                rows.append((model.isHomePinned(projectId: p.id), lastActivity(p), .project(p)))
+        var rows: [(HomeSearch.Kind, Bool, Int64, HomeEntry)] = []
+        if listFilter != .people {
+            for p in model.projects {
+                // Agents: my agents only (`!shared`) — no shared-in agents.
+                if listFilter == .agents && p.shared { continue }
+                // Archived agents stay out of the home list until search (or open).
+                if q.isEmpty && model.isArchived(p.id) { continue }
+                guard let hit = projectHit(p, q: q) else { continue }
+                rows.append((hit.kind, model.isHomePinned(projectId: p.id), lastActivity(p), HomeEntry(row: .project(p), hit: hit)))
             }
-            for c in model.peopleChats where matchesPeople(c, q: q) {
+        }
+        if listFilter != .agents {
+            for c in model.peopleChats {
                 // Archived people stay out of the home list until search (or open).
                 if q.isEmpty && model.isArchived(peopleChatId: c.id) { continue }
-                rows.append((model.isHomePinned(peopleChatId: c.id), peopleActivity(c), .people(c)))
+                guard let hit = peopleHit(c, q: q) else { continue }
+                rows.append((hit.kind, model.isHomePinned(peopleChatId: c.id), peopleActivity(c), HomeEntry(row: .people(c), hit: hit)))
             }
+        }
+        if listFilter == .all {
             // D88: servers sort among the chats by last activity (rule 1).
-            for s in model.servers where matchesServer(s, q: q) {
-                rows.append((false, model.serverActivity(s), .server(s)))
-            }
-        case .agents:
-            // My agents only (`!shared`) — no people chats, servers, or shared-in agents.
-            for p in projects where !p.shared {
-                rows.append((model.isHomePinned(projectId: p.id), lastActivity(p), .project(p)))
-            }
-        case .people:
-            for c in model.peopleChats where matchesPeople(c, q: q) {
-                if q.isEmpty && model.isArchived(peopleChatId: c.id) { continue }
-                rows.append((model.isHomePinned(peopleChatId: c.id), peopleActivity(c), .people(c)))
+            for s in model.servers {
+                // Archived servers stay out of the home list until search (or Unarchive).
+                if q.isEmpty && model.isArchived(serverId: s.id) { continue }
+                guard let hit = HomeSearch.serverHit(name: s.name, channels: s.channels.map(\.name), q: q) else { continue }
+                rows.append((hit.kind, false, model.serverActivity(s), HomeEntry(row: .server(s), hit: hit)))
             }
         }
         return rows.sorted {
-            if $0.0 != $1.0 { return $0.0 && !$1.0 }
-            return $0.1 > $1.1
-        }.map(\.2)
+            if $0.0 != $1.0 { return $0.0 < $1.0 }
+            if $0.1 != $1.1 { return $0.1 && !$1.1 }
+            return $0.2 > $1.2
+        }.map(\.3)
+    }
+
+    /// Agent name; a shared project's owner; a chat title under the agent; a loaded message.
+    private func projectHit(_ p: Project, q: String) -> HomeSearch.Hit? {
+        let chats = model.chats(of: p.id)
+        var members: [HomeSearch.Member] = []
+        if p.shared, let owner = p.ownerHandle, owner != model.user?.login {
+            members.append(HomeSearch.Member(handle: owner, name: p.ownerName))
+        }
+        return HomeSearch.titledHit(title: p.name, members: members,
+                                    chats: chats.filter { !$0.isSystem }.map { HomeSearch.ChatTitle(id: $0.id, title: $0.title) },
+                                    messages: { searchableMessages(chats.map(\.id)) }, q: q)
+    }
+
+    /// DM: the other person's display name / @handle. Group: title, a member (not me), an agent.
+    private func peopleHit(_ c: PeopleChat, q: String) -> HomeSearch.Hit? {
+        let me = model.user?.id
+        if !c.isGroup, let other = c.counterpart(me: me) {
+            return HomeSearch.dmHit(name: other.displayName, handle: other.handle,
+                                    messages: { searchableMessages([c.id]) }, q: q)
+        }
+        let members = c.members.filter { $0.id != me }.map {
+            HomeSearch.Member(handle: $0.handle, name: $0.isAgent ? $0.displayName : $0.name, isAgent: $0.isAgent)
+        }
+        return HomeSearch.titledHit(title: c.title, members: members,
+                                    messages: { searchableMessages([c.id]) }, q: q)
+    }
+
+    private func searchableMessages(_ chatIds: [Id]) -> [HomeSearch.MessageText] {
+        chatIds.flatMap { chatId in
+            model.searchableMessages(of: chatId).map {
+                HomeSearch.MessageText(chatId: chatId, messageId: $0.id, createdAt: $0.createdAt, text: $0.plainText)
+            }
+        }
     }
 
     /// All | Agents | People — same capsule pill as profile panes (`PaneTabs`).
@@ -736,49 +792,11 @@ struct HomeView: View {
         }
     }
 
-    /// Match the names shown on the row (agent name, person name/@handle, group title),
-    /// a chat title under the agent, or any loaded message text in that conversation.
-    private func matchesProject(_ p: Project, q: String) -> Bool {
-        if p.name.lowercased().contains(q) { return true }
-        return model.chats(of: p.id).contains {
-            $0.title.lowercased().contains(q) || messagesMatch($0.id, q: q)
-        }
-    }
-
-    private func matchesPeople(_ c: PeopleChat, q: String) -> Bool {
-        if q.isEmpty { return true }
-        if c.title.lowercased().contains(q) { return true }
-        if c.humans.contains(where: {
-            $0.handle.lowercased().contains(q) || $0.displayName.lowercased().contains(q)
-        }) { return true }
-        // Shared chats also list agents on the row badge — find those by name too.
-        if c.agents.contains(where: {
-            ($0.project?.name ?? $0.handle).lowercased().contains(q)
-        }) { return true }
-        return messagesMatch(c.id, q: q)
-    }
-
-    /// Server name or any of its channel names (`#general`).
-    private func matchesServer(_ s: Server, q: String) -> Bool {
-        if q.isEmpty { return true }
-        if s.name.lowercased().contains(q) { return true }
-        return s.channels.contains { $0.name.lowercased().contains(q) }
-    }
-
-    private func messagesMatch(_ chatId: Id, q: String) -> Bool {
-        model.searchableMessageText(of: chatId).contains(q)
-    }
-
-    /// Open the chat that matched the query (title or message), else the agent's landing chat.
-    private func openSearchHit(_ project: Project) {
-        let q = searchQuery
-        if !q.isEmpty {
-            let chats = model.chats(of: project.id)
-            if let hit = chats.first(where: { $0.title.lowercased().contains(q) })
-                ?? chats.first(where: { messagesMatch($0.id, q: q) }) {
-                model.open(chat: hit)
-                return
-            }
+    /// Open the chat the hit points at (a chat title or a message), else the agent's landing chat.
+    private func openSearchHit(_ project: Project, hit: HomeSearch.Hit) {
+        if let chatId = hit.chatId, let chat = model.chat(chatId) {
+            model.open(chat: chat)
+            return
         }
         model.open(project: project)
     }
@@ -935,8 +953,8 @@ struct WaitlistCard: View {
     }
 }
 
-/// Archived ("hidden") chats, Grok's "Hidden chats" page: agents and people,
-/// tap opens, swipe/long-press Unhide, Delete removes for good.
+/// Archived ("hidden") chats, Grok's "Hidden chats" page: agents, people and servers;
+/// tap opens, swipe/long-press Unarchive, Delete removes for good.
 struct HiddenChatsView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
@@ -947,10 +965,12 @@ struct HiddenChatsView: View {
     private enum HiddenRow: Identifiable {
         case project(Project)
         case people(PeopleChat)
+        case server(Server)
         var id: String {
             switch self {
             case .project(let p): return "p:" + p.id
             case .people(let c): return "c:" + c.id
+            case .server(let s): return "s:" + s.id
             }
         }
     }
@@ -962,7 +982,10 @@ struct HiddenChatsView: View {
         let people = model.peopleChats.filter { model.isArchived(peopleChatId: $0.id) }
             .sorted { peopleTitle($0) < peopleTitle($1) }
             .map { HiddenRow.people($0) }
-        return projects + people
+        let servers = model.servers.filter { model.isArchived(serverId: $0.id) }
+            .sorted { $0.name < $1.name }
+            .map { HiddenRow.server($0) }
+        return projects + people + servers
     }
 
     var body: some View {
@@ -994,7 +1017,7 @@ struct HiddenChatsView: View {
                         .buttonStyle(.borderless)
                         .contextMenu {
                             Button { withAnimation { model.unarchive(project.id) } } label: {
-                                Label("Unhide", systemImage: "eye")
+                                Label("Unarchive", systemImage: "tray.and.arrow.up")
                             }
                             if !project.shared {
                                 Button(role: .destructive) { deleteProject = project } label: {
@@ -1005,10 +1028,10 @@ struct HiddenChatsView: View {
                         .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
                         .listRowSeparator(.hidden)
                         .listRowBackground(theme.bg)
-                        // Unhide first = full-swipe restores; Delete needs a tap.
+                        // Unarchive first = full-swipe restores; Delete needs a tap.
                         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                             Button { withAnimation { model.unarchive(project.id) } } label: {
-                                Label("Unhide", systemImage: "eye")
+                                Label("Unarchive", systemImage: "tray.and.arrow.up")
                             }
                             .tint(theme.unread)
                             if !project.shared {
@@ -1025,7 +1048,7 @@ struct HiddenChatsView: View {
                         .buttonStyle(.borderless)
                         .contextMenu {
                             Button { withAnimation { model.unarchive(peopleChatId: chat.id) } } label: {
-                                Label("Unhide", systemImage: "eye")
+                                Label("Unarchive", systemImage: "tray.and.arrow.up")
                             }
                             Button(role: .destructive) { deletePeople = chat } label: {
                                 Label("Delete", systemImage: "trash")
@@ -1034,15 +1057,34 @@ struct HiddenChatsView: View {
                         .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
                         .listRowSeparator(.hidden)
                         .listRowBackground(theme.bg)
-                        // Unhide first = full-swipe restores; Delete needs a tap.
+                        // Unarchive first = full-swipe restores; Delete needs a tap.
                         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                             Button { withAnimation { model.unarchive(peopleChatId: chat.id) } } label: {
-                                Label("Unhide", systemImage: "eye")
+                                Label("Unarchive", systemImage: "tray.and.arrow.up")
                             }
                             .tint(theme.unread)
                             Button(role: .destructive) { deletePeople = chat } label: {
                                 Label("Delete", systemImage: "trash")
                             }
+                        }
+                    case .server(let server):
+                        Button { model.open(server: server) } label: {
+                            ServerRow(server: server, preview: model.serverPreview(server), time: "", unread: false)
+                        }
+                        .buttonStyle(.borderless)
+                        .contextMenu {
+                            Button { withAnimation { model.unarchive(serverId: server.id) } } label: {
+                                Label("Unarchive", systemImage: "tray.and.arrow.up")
+                            }
+                        }
+                        .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(theme.bg)
+                        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                            Button { withAnimation { model.unarchive(serverId: server.id) } } label: {
+                                Label("Unarchive", systemImage: "tray.and.arrow.up")
+                            }
+                            .tint(theme.unread)
                         }
                     }
                 }
@@ -1050,6 +1092,7 @@ struct HiddenChatsView: View {
             .listStyle(.plain)
             .scrollContentBackground(.hidden)
             .background(theme.bg)
+            .scrollIndicators(.visible)
             // Grok page header: back circle left, title centred in a pill.
             HStack {
                 Button { dismiss() } label: {
@@ -1075,6 +1118,7 @@ struct HiddenChatsView: View {
             .padding(.top, 6)
         }
         .toolbar(.hidden, for: .navigationBar)
+        .toolbar(.hidden, for: .tabBar)
         .confirmationDialog(
             "Delete \(deleteProject?.name ?? "this agent")?",
             isPresented: Binding(

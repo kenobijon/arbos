@@ -139,16 +139,16 @@ pub fn leaf_color_names() -> Vec<String> {
     leaf::COLORS.iter().map(|c| c.name.to_owned()).collect()
 }
 
-/// Disc colour `index` as `#RRGGBB`.
+/// Disc colour `index` (the pastel) as `#RRGGBB`.
 #[uniffi::export]
 pub fn leaf_color_hex(index: u8) -> String {
     leaf::COLORS[(index % leaf::COLOR_COUNT) as usize].rgb.hex()
 }
 
-/// The leaf ink (cream) as `#RRGGBB`.
+/// The leaf ink on disc colour `index` (the darker same hue) as `#RRGGBB`.
 #[uniffi::export]
-pub fn leaf_ink_hex() -> String {
-    leaf::LEAF_INK.hex()
+pub fn leaf_ink_hex(index: u8) -> String {
+    leaf::COLORS[(index % leaf::COLOR_COUNT) as usize].ink.hex()
 }
 
 /// The leaf's span as a share of the disc diameter.

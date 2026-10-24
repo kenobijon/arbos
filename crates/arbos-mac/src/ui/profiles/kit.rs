@@ -12,7 +12,9 @@
 //!   under the title; chevron 13 pt faint when the row pushes a page;
 //! * danger row: centred red label, same height.
 
-use gpui::{div, prelude::*, px, AnyElement, Div, ElementId, FontWeight, SharedString, Stateful};
+use gpui::{
+    div, prelude::*, px, AnyElement, Div, ElementId, FontWeight, Hsla, SharedString, Stateful,
+};
 
 use crate::ui::glass;
 use crate::ui::icons::icon;
@@ -249,6 +251,17 @@ pub fn value_row(
 /// The destructive action at the end of a pane (Block user, Sign out,
 /// Remove picture): a centred red label in its own card.
 pub fn danger_row(id: impl Into<ElementId>, label: &str, theme: &Theme) -> Stateful<Div> {
+    action_row(id, label, theme.danger, theme)
+}
+
+/// A centred one-label action in its own card, in the given colour — the
+/// non-destructive twin of `danger_row` (Unblock in the accent colour).
+pub fn action_row(
+    id: impl Into<ElementId>,
+    label: &str,
+    color: Hsla,
+    theme: &Theme,
+) -> Stateful<Div> {
     div()
         .id(id)
         .flex()
@@ -257,7 +270,7 @@ pub fn danger_row(id: impl Into<ElementId>, label: &str, theme: &Theme) -> State
         .min_h(px(ROW_MIN_H))
         .px(px(INSET))
         .text_size(px(TEXT_BODY))
-        .text_color(theme.danger)
+        .text_color(color)
         .cursor_pointer()
         .hover(|s| s.bg(theme.surface_2))
         .child(label.to_string())

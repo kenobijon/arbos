@@ -1,14 +1,15 @@
 //! An agent's page on the shared profile pane (D93): one [`ProfilePane`]
 //! spec — hero (leaf / photo with the owner's crayon, editable name,
 //! "working" or "Agent · run by @owner"), the tabs **Profile** (name, handle,
-//! description) | **Settings** (model, reasoning) | **Library** (images,
-//! files, links from the agent's chats), and a Delete agent footer for the
-//! owner. The same three tabs as the iPhone's agent page. Voice, Share
+//! description) | **Settings** (model, reasoning, call voice) | **Library**
+//! (images, files, links from the agent's chats), and a Delete agent footer
+//! for the owner. The same three tabs as the iPhone's agent page. Share
 //! project and Add to this chat left the pane on 2026-10-22 (Jacob: simple,
-//! consistent, powerful); the avatar picker opens from the hero while the
-//! pane is up.
+//! consistent, powerful); the Voice row came back on 2026-10-23 (the call
+//! voice — spoken replies stay behind the voice-mode switch); the avatar
+//! picker opens from the hero while the pane is up.
 
-use gpui::{div, prelude::*, px, Context, Div, SharedString, Stateful};
+use gpui::{div, prelude::*, px, Context, Div, ElementId, Focusable, SharedString, Stateful};
 
 use crate::app::{AgentPick, ProfilePage};
 use crate::model::{Id, MachineState, Project};
@@ -103,6 +104,7 @@ pub(super) fn page(
     } else {
         project.model.clone()
     };
+    let voice_text = crate::ui::voicepicker::current_label(&project, &state.voices);
     let pick = state.agent_pick;
     let renaming = state.profile_editing_name && mine;
     let tab = state.profile_tab;
@@ -338,12 +340,15 @@ pub(super) fn page(
             }
         }
         _ => {
-            // ----- Settings: how the agent runs — Model · Reasoning ---------------------
-            // (Voice, Share project and Add to this chat left the pane on
-            // 2026-10-22 — Jacob: simple, consistent, powerful.)
+            // ----- Settings: how the agent runs — Model · Reasoning · Voice -------------
+            // Voice is the agent's call voice (the same picker as the voice
+            // sheet); spoken replies in chat stay behind the voice-mode kill
+            // switch. Share project and Add to this chat left the pane on
+            // 2026-10-22 — Jacob: simple, consistent, powerful.
             if mine {
                 let model_open = pick == Some(AgentPick::Model);
                 let reasoning_open = pick == Some(AgentPick::Reasoning);
+                let voice_open = pick == Some(AgentPick::Voice);
                 let rows = vec![
                     hoverpick::row(
                         "Model",
@@ -365,18 +370,44 @@ pub(super) fn page(
                         cx,
                     )
                     .into_any_element(),
+                    hoverpick::row(
+                        "Voice",
+                        voice_text,
+                        AgentPick::Voice,
+                        voice_open,
+                        voice_open.then(|| hoverpick::voice_panel(shell, &project, cx)),
+                        &theme,
+                        cx,
+                    )
+                    .into_any_element(),
                 ];
                 // When a row has just opened, the pane scrolls so its list is
-                // in view (Section::Reveal).
-                let open = pick.and_then(|open| match open {
-                    AgentPick::Model => Some(0),
-                    AgentPick::Reasoning => Some(1),
-                    AgentPick::Voice => None,
+                // in view (Section::Reveal). Rows are children 0 / 1 / 2.
+                let open = pick.map(|open| match open {
+                    AgentPick::Model => 0,
+                    AgentPick::Reasoning => 1,
+                    AgentPick::Voice => 2,
                 });
                 body.push(match open {
                     Some(open) => Section::Reveal { rows, open },
                     None => Section::Card(rows),
                 });
+                // Agent-to-agent messaging: who else's agents may write into this agent's
+                // chat. My own agents always may; this card lists other people (D83's
+                // People-card shape: avatar · name/@handle · last message · switch).
+                body.push(Section::Title(
+                    format!("Who may message {}", project.name).into(),
+                ));
+                body.push(Section::Card(message_grant_rows(
+                    shell, &project, &theme, cx,
+                )));
+                body.push(Section::Footnote(
+                    format!(
+                        "Your own agents can always message {}. People listed here may have their agents message it too; their messages land in this chat and {} answers them.",
+                        project.name, project.name
+                    )
+                    .into(),
+                ));
             } else {
                 body.push(Section::Card(vec![kit::value_row(
                     "agent-model-row",
@@ -449,4 +480,110 @@ pub(super) fn page(
         shell,
         cx,
     ))
+}
+
+/// The rows of "Who may message X": one per grant (person or agent of another owner) with a
+/// switch, then "Give a person access…" → the people picker.
+fn message_grant_rows(
+    shell: &Shell,
+    project: &Project,
+    theme: &Theme,
+    cx: &mut Context<Shell>,
+) -> Vec<gpui::AnyElement> {
+    let state = shell.state.read(cx);
+    let mut rows: Vec<gpui::AnyElement> = Vec::new();
+    for g in &project.message_grants {
+        let person = crate::model::Person {
+            id: g.id.clone(),
+            handle: g.handle.clone().unwrap_or_else(|| g.id.clone()),
+            name: g.name.clone(),
+            avatar_url: g.avatar_url.clone(),
+            ..Default::default()
+        };
+        let title = g
+            .name
+            .clone()
+            .or_else(|| g.handle.clone().map(|h| format!("@{h}")))
+            .unwrap_or_else(|| g.id.clone());
+        let mut subtitle = match (&g.handle, g.kind.as_str()) {
+            (Some(h), "person") => format!("@{h}"),
+            (Some(h), _) => format!("@{h} · agent"),
+            (None, k) => k.to_owned(),
+        };
+        if let Some(at) = g.last_at {
+            subtitle = format!("{subtitle} · messaged {}", crate::model::ago(at));
+        } else if !g.note.is_empty() {
+            subtitle = format!("{subtitle} · {}", g.note);
+        }
+        let (pid, grantee, on) = (project.id.clone(), g.grantee.clone(), g.enabled);
+        let avatar = if g.kind == "agent" {
+            avatars::element(&g.id, &title, None, kit::AVATAR, theme).into_any_element()
+        } else {
+            crate::ui::people::avatar(state.avatar(&g.avatar_url), &person, kit::AVATAR, theme)
+                .into_any_element()
+        };
+        let switch = div()
+            .id(ElementId::Name(SharedString::from(format!(
+                "message-grant-switch-{}",
+                g.grantee
+            ))))
+            .cursor_pointer()
+            .child(glass::switch(on, theme))
+            .on_click(cx.listener({
+                let (pid, grantee) = (pid.clone(), grantee.clone());
+                move |this, _, _, cx| {
+                    let (pid, grantee) = (pid.clone(), grantee.clone());
+                    this.state
+                        .update(cx, |s, cx| s.set_message_grant(pid, grantee, !on, cx));
+                }
+            }))
+            .into_any_element();
+        rows.push(
+            kit::row(
+                ElementId::Name(SharedString::from(format!("message-grant-{}", g.grantee))),
+                Leading::Avatar(avatar),
+                title,
+                Some(subtitle.into()),
+                None,
+                Some(switch),
+                false,
+                theme,
+            )
+            // Right-click removes the row (the switch only pauses it).
+            .on_mouse_down(gpui::MouseButton::Right, {
+                cx.listener(move |this, _: &gpui::MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    let (pid, grantee) = (pid.clone(), grantee.clone());
+                    this.state
+                        .update(cx, |s, cx| s.remove_message_grant(pid, grantee, cx));
+                })
+            })
+            .into_any_element(),
+        );
+    }
+    let pid = project.id.clone();
+    rows.push(
+        kit::row(
+            "message-grant-add",
+            Leading::Glyph("person-plus"),
+            "Give a person access…",
+            None,
+            None,
+            None,
+            false,
+            theme,
+        )
+        .text_color(theme.accent)
+        .cursor_pointer()
+        .hover(|s| s.bg(theme.surface_2))
+        .on_click(cx.listener(move |this, _, window, cx| {
+            let id = pid.clone();
+            this.state
+                .update(cx, |s, cx| s.open_message_grant_picker(id, cx));
+            let handle = this.people_input.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+        }))
+        .into_any_element(),
+    );
+    rows
 }

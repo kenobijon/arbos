@@ -21,7 +21,7 @@ use crate::ui::avatar_picker;
 use crate::ui::avatars::{self, leaf, LeafPick};
 use crate::ui::callview;
 use crate::ui::channels::{ChannelsEvent, ChannelsPanel};
-use crate::ui::composer::{Composer, ComposerEvent, ComposerInput};
+use crate::ui::composer::{self, Composer, ComposerEvent, ComposerInput};
 use crate::ui::connectors::{ConnectorsEvent, ConnectorsPanel};
 use crate::ui::create_entity::{self, Kind as CreateKind};
 use crate::ui::dropzone;
@@ -38,7 +38,7 @@ use crate::ui::motion::{ease_out_cubic, PulseClock, COMPOSER_DROP_MS, SHAKE_MS};
 use crate::ui::onboarding;
 use crate::ui::people;
 use crate::ui::profiles;
-use crate::ui::react_menu;
+use crate::ui::reactions;
 use crate::ui::routines::{RoutinesEvent, RoutinesPanel};
 use crate::ui::secrets::{SecretsEvent, SecretsPanel};
 use crate::ui::servers;
@@ -110,6 +110,8 @@ pub(crate) enum SettingsPage {
     Skills,
     ThisMac,
     Secrets,
+    /// Signed-in devices of my account: list + sign out another (Oct 23).
+    Devices,
 }
 
 impl SettingsPage {
@@ -128,6 +130,7 @@ impl SettingsPage {
             SettingsPage::Skills => "Skills",
             SettingsPage::ThisMac => "This Mac",
             SettingsPage::Secrets => "Secrets",
+            SettingsPage::Devices => "Devices",
         }
     }
 
@@ -141,6 +144,7 @@ impl SettingsPage {
                 | SettingsPage::Notifications
                 | SettingsPage::Updates
                 | SettingsPage::About
+                | SettingsPage::Devices
         )
     }
 
@@ -157,7 +161,8 @@ impl SettingsPage {
             | SettingsPage::Connectors
             | SettingsPage::Channels
             | SettingsPage::ThisMac
-            | SettingsPage::Secrets => SETTINGS_WIDTH,
+            | SettingsPage::Secrets
+            | SettingsPage::Devices => SETTINGS_WIDTH,
             SettingsPage::Routines => crate::ui::routines::PANEL_WIDTH + 32.0,
             SettingsPage::Skills => skills::CARD_WIDTH + 32.0,
         }
@@ -205,15 +210,21 @@ pub struct Shell {
         crate::model::Id,
         gpui::Point<gpui::Pixels>,
     )>,
-    /// The quick-react emoji bar (`react_menu`): (chat, message, the click).
-    pub(crate) react_menu: Option<(
+    /// `ARBOS_RIG_MESSAGE_MENU=x,y` (screenshot rig): opens the menu once the
+    /// open chat has a message; cleared when it has.
+    rig_message_menu: Option<gpui::Point<gpui::Pixels>>,
+    /// The reaction capsule over a bubble (`reactions`): (chat, message, the smiley's click).
+    pub(crate) reaction_capsule: Option<(
         crate::model::Id,
         crate::model::Id,
         gpui::Point<gpui::Pixels>,
     )>,
-    /// `ARBOS_RIG_MESSAGE_MENU=x,y` (screenshot rig): opens the menu once the
-    /// open chat has a message; cleared when it has.
-    rig_message_menu: Option<gpui::Point<gpui::Pixels>>,
+    /// The capsule's "pick any emoji" field is showing (system picker open).
+    pub(crate) reaction_pick_open: bool,
+    pub(crate) reaction_pick: Entity<ComposerInput>,
+    /// `ARBOS_RIG_REACTION_CAPSULE=x,y` (screenshot rig): opens the capsule for
+    /// the newest message of the open chat at that window position.
+    rig_reaction_capsule: Option<gpui::Point<gpui::Pixels>>,
     pub(crate) settings_scroll: ScrollHandle,
     pub(crate) routines: Entity<RoutinesPanel>,
     pub(crate) routines_open: bool,
@@ -233,6 +244,9 @@ pub struct Shell {
     /// app-01M5ATBWSY9E1HHBKH2QQVDEZX). Nothing renders it; escapes and
     /// click-outside still clear it so leftover true never sticks.
     pub(crate) menu_open: bool,
+    /// Sidebar: the "Hidden chats" list is showing instead of the chat list
+    /// (Jacob 2026-10-23; the footer opens it, ‹ back returns).
+    pub(crate) hidden_open: bool,
     /// D88: the name/invite/channel field of the server sheets and the inline channel rename
     /// on the server page; `channel_rename` is the channel being renamed there.
     pub(crate) server_input: Entity<ComposerInput>,
@@ -268,6 +282,8 @@ pub struct Shell {
     /// Group pane › Members: the row whose ✕ was clicked (`user:<id>` or
     /// `agent:<project>`); it shows "Remove … ?" with Cancel / Remove.
     pub(crate) member_remove_armed: Option<String>,
+    /// Settings → Devices: the device whose Sign out is asking (Oct 23).
+    pub(crate) device_revoke_armed: Option<String>,
     /// A member row's menu on the group pane (Shift-click / right-click): View
     /// profile, Remove from group → arms `member_remove_armed`.
     pub(crate) member_menu: Option<member_menu::MemberMenu>,
@@ -336,10 +352,12 @@ impl Shell {
                 || v == "about"
                 || v == "appearance"
                 || v == "credits"
+                || v == "devices"
                 || v.starts_with("secrets")
         });
         let settings_scroll = ScrollHandle::new();
         let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+        let reaction_pick = reactions::new_pick_input(cx);
         cx.subscribe(
             &transcript,
             |this, _, event: &TranscriptEvent, cx| match event {
@@ -352,14 +370,12 @@ impl Shell {
                     this.message_menu = Some((chat_id.clone(), message_id.clone(), *position));
                     cx.notify();
                 }
-                TranscriptEvent::ReactMenu {
+                TranscriptEvent::ReactionCapsule {
                     chat_id,
                     message_id,
                     position,
                 } => {
-                    this.close_popovers(cx);
-                    this.react_menu = Some((chat_id.clone(), message_id.clone(), *position));
-                    cx.notify();
+                    this.open_reaction_capsule(chat_id.clone(), message_id.clone(), *position, cx);
                 }
                 TranscriptEvent::Reply {
                     chat_id,
@@ -625,6 +641,14 @@ impl Shell {
         if std::env::var("ARBOS_OPEN_NEW_CHAT").is_ok_and(|v| v == "1") {
             state.update(cx, |s, cx| s.open_new_chat(cx));
         }
+        // Rig: `ARBOS_SEARCH=<text>` opens the sidebar search with that query
+        // (synthetic key events do not reach the GPUI field on the shared display).
+        let search_query = std::env::var("ARBOS_SEARCH")
+            .ok()
+            .filter(|q| !q.trim().is_empty());
+        if let Some(q) = &search_query {
+            search_input.update(cx, |input, cx| input.set_text(q.clone(), cx));
+        }
         if std::env::var("ARBOS_OPEN_NEW_AGENT").is_ok_and(|v| v == "1") {
             state.update(cx, |s, cx| {
                 s.open_new_chat(cx);
@@ -770,6 +794,7 @@ impl Shell {
                 Some("about") => SettingsPage::About,
                 Some("appearance") => SettingsPage::Appearance,
                 Some("credits") => SettingsPage::Credits,
+                Some("devices") => SettingsPage::Devices,
                 Some(v) if v.starts_with("secrets") => SettingsPage::Secrets,
                 _ => SettingsPage::Root,
             },
@@ -780,12 +805,16 @@ impl Shell {
             row_delete_armed: false,
             agent_delete_armed: false,
             member_remove_armed: None,
+            device_revoke_armed: None,
             member_menu: None,
             chat_menu: None,
             chat_delete_armed: false,
             message_menu: None,
-            react_menu: None,
             rig_message_menu: message_menu::rig_anchor(),
+            reaction_capsule: None,
+            reaction_pick_open: false,
+            reaction_pick,
+            rig_reaction_capsule: reactions::rig_anchor(),
             renaming_tab: None,
             tab_rename_input,
             tab_menu_open: false,
@@ -802,6 +831,7 @@ impl Shell {
             fixture_drag_over: std::env::var("ARBOS_FIXTURE_DRAG_OVER").is_ok_and(|v| v == "1"),
             signing_in: false,
             menu_open: false,
+            hidden_open: false,
             server_input,
             channel_rename: None,
             invite_expires: false,
@@ -834,6 +864,9 @@ impl Shell {
                 s.open_profile(ProfilePage::Me, cx);
                 s.set_profile_tab(1, cx);
             });
+            if shell.settings_page == SettingsPage::Devices {
+                shell.state.update(cx, |s, cx| s.devices_refresh(cx));
+            }
         }
         shell
     }
@@ -884,6 +917,49 @@ impl Shell {
         self.feedback.update(cx, |sheet, cx| sheet.open(window, cx));
     }
 
+    /// Edit → Paste / ⌘V when focus is not already on a text field (e.g. after
+    /// selecting a bubble): land the clipboard in the chat composer.
+    fn paste_into_chat(
+        &mut self,
+        _: &composer::Paste,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // A focused ComposerInput (chat, search, secrets, …) already handles
+        // Paste; running again here would insert the text twice.
+        if self.text_field_focused(window, cx) {
+            return;
+        }
+        Composer::focus(&self.composer, window, cx);
+        let input = self.composer.read(cx).input.clone();
+        input.update(cx, |input, cx| input.paste_clipboard(window, cx));
+    }
+
+    /// True when a one-line or chat text field owns the keyboard.
+    fn text_field_focused(&self, window: &Window, cx: &App) -> bool {
+        let focused =
+            |input: &Entity<ComposerInput>| input.read(cx).focus_handle(cx).is_focused(window);
+        focused(&self.composer.read(cx).input)
+            || focused(&self.pairing_input)
+            || focused(&self.project_input)
+            || focused(&self.search_input)
+            || focused(&self.viewer_search)
+            || focused(&self.people_input)
+            || focused(&self.server_input)
+            || focused(&self.name_input)
+            || focused(&self.handle_input)
+            || focused(&self.agent_name_input)
+            || focused(&self.description_input)
+            || focused(&self.avatar_prompt_input)
+            || focused(&self.model_search_input)
+            || focused(&self.tab_rename_input)
+            || focused(&self.feedback.read(cx).note)
+            || self.connectors.read(cx).input_focused(window, cx)
+            || self.secrets.read(cx).input_focused(window, cx)
+            || self.skills.read(cx).has_focus(window, cx)
+            || (self.routines_open && self.routines.read(cx).has_focus(window, cx))
+    }
+
     pub(crate) fn open_feedback(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.menu_open = false;
         self.close_settings(cx);
@@ -908,6 +984,7 @@ impl Shell {
             | SettingsPage::Notifications
             | SettingsPage::Updates
             | SettingsPage::About => {}
+            SettingsPage::Devices => self.state.update(cx, |s, cx| s.devices_refresh(cx)),
             SettingsPage::Connectors => self.connectors.update(cx, |p, cx| {
                 p.show(cx);
                 p.embedded = true;
@@ -955,7 +1032,8 @@ impl Shell {
             | SettingsPage::Appearance
             | SettingsPage::Notifications
             | SettingsPage::Updates
-            | SettingsPage::About => {}
+            | SettingsPage::About
+            | SettingsPage::Devices => {}
             SettingsPage::Connectors => self.connectors.update(cx, |p, cx| p.hide(cx)),
             SettingsPage::Routines => {
                 self.routines_open = false;
@@ -1007,7 +1085,8 @@ impl Shell {
             | SettingsPage::Appearance
             | SettingsPage::Notifications
             | SettingsPage::Updates
-            | SettingsPage::About => true,
+            | SettingsPage::About
+            | SettingsPage::Devices => true,
             SettingsPage::Connectors => self.connectors.read(cx).is_open(),
             SettingsPage::Routines => self.routines_open,
             SettingsPage::Channels => self.channels.read(cx).is_open(),
@@ -1904,7 +1983,7 @@ impl Shell {
             || self.row_menu.is_some()
             || self.chat_menu.is_some()
             || self.message_menu.is_some()
-            || self.react_menu.is_some();
+            || self.reaction_capsule.is_some();
         self.close_popovers(cx);
         if floating {
             return;
@@ -2060,7 +2139,7 @@ impl Shell {
         self.channel_menu = None;
         self.chat_menu = None;
         self.message_menu = None;
-        self.react_menu = None;
+        self.close_reaction_capsule(cx);
         self.member_remove_armed = None;
         self.member_menu = Some(member_menu::MemberMenu { space_id, key, at });
         cx.notify();
@@ -2077,8 +2156,8 @@ impl Shell {
             || self.channel_menu.is_some()
             || self.chat_menu.is_some()
             || self.message_menu.is_some()
-            || self.react_menu.is_some()
             || self.member_menu.is_some()
+            || self.reaction_capsule.is_some()
         {
             self.menu_open = false;
             self.member_menu = None;
@@ -2094,7 +2173,7 @@ impl Shell {
             self.chat_menu = None;
             self.chat_delete_armed = false;
             self.message_menu = None;
-            self.react_menu = None;
+            self.close_reaction_capsule(cx);
             cx.notify();
         }
     }
@@ -3479,6 +3558,7 @@ impl Render for Shell {
             .on_action(cx.listener(Self::toggle_rail))
             .on_action(cx.listener(Self::escape))
             .on_action(cx.listener(Self::send_feedback))
+            .on_action(cx.listener(Self::paste_into_chat))
             // Clicks on chrome must not strand keyboard focus: unless another
             // text field took it, the composer keeps it. Floating menus close.
             .on_mouse_down(
@@ -3585,6 +3665,13 @@ impl Render for Shell {
                 if page == ProfilePage::Me && self.settings_open_at_bottom {
                     self.profile_scroll.scroll_to_bottom();
                 }
+            } else if page == ProfilePage::Me
+                && self.settings_open_at_bottom
+                && std::env::var("ARBOS_OPEN_SETTINGS_BOTTOM").is_ok_and(|v| v == "1")
+            {
+                // Rig only: a Settings subpage whose rows arrive after the pane opened (the
+                // Secret page waits for the secrets list) keeps its end in view.
+                self.profile_scroll.scroll_to_bottom();
             }
             if page == ProfilePage::Me && !self.settings_page_alive(cx) {
                 self.settings_page = SettingsPage::Root;
@@ -3621,8 +3708,19 @@ impl Render for Shell {
         if let Some(menu) = message_menu::render(self, window, cx) {
             root = root.child(menu);
         }
-        if let Some(menu) = react_menu::render(self, window, cx) {
-            root = root.child(menu);
+        if let Some(at) = self.rig_reaction_capsule {
+            let target = self.state.read(cx).active_chat_id().and_then(|chat| {
+                let state = self.state.read(cx);
+                let last = state.messages.get(&chat)?.last()?.id.clone();
+                Some((chat, last))
+            });
+            if let Some((chat, message)) = target {
+                self.rig_reaction_capsule = None;
+                self.reaction_capsule = Some((chat, message, at));
+            }
+        }
+        if let Some(capsule) = reactions::render(self, window, cx) {
+            root = root.child(capsule);
         }
         // Rig: the hook asked for the first other member's row menu on the group pane.
         if let Some(armed) = self.state.update(cx, |s, _| s.rig_member_menu.take()) {

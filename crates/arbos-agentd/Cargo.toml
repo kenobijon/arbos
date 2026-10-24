@@ -32,5 +32,6 @@ hex.workspace = true
 async-trait.workspace = true
 nix.workspace = true
 regex-lite.workspace = true
+rand.workspace = true
 base64.workspace = true
 ulid.workspace = true

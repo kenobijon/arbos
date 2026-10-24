@@ -184,6 +184,8 @@ struct ChatView: View {
     @State private var pulsePhase = false
     /// The original a quote tap scrolled to; tinted until the fade timer clears it.
     @State private var highlightedMessage: Id?
+    /// The bubble whose long-press actions (reaction capsule + menu) are open.
+    @State private var actionsRow: Row?
     @State private var mentionQuery: String?
     /// Chip-picked addressees in a people chat: `agent:…` and/or `user:…` member ids.
     /// Empty means no chip: agent-only DMs may still infer the last agent; human-peer DMs stay
@@ -426,9 +428,12 @@ struct ChatView: View {
         }
         .animation(.easeOut(duration: 0.2), value: awayFromBottom)
         .animation(.easeOut(duration: 0.2), value: newBelowCount > 0)
+        .environment(\.composerInset, composerSideInset)
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 0) {
                 presenceRow
+                    .environment(\.composerInset, composerSideInset)
+                    .animation(.easeOut(duration: 0.25), value: composerFocused)
                 Group {
                     if isChannel, !model.channelCanPost(chatId) {
                         // Rule 9: a restricted channel I cannot post in — one quiet line, no composer.
@@ -455,7 +460,40 @@ struct ChatView: View {
             }
             .background(theme.bg)
         }
+        .overlayPreferenceValue(RowFrameKey.self) { anchors in
+            GeometryReader { geo in
+                if let row = actionsRow, let anchor = anchors[row.id] {
+                    let frame = geo[anchor]
+                    MessageActionsOverlay(
+                        row: row,
+                        frame: frame,
+                        width: geo.size.width,
+                        height: geo.size.height,
+                        safeTop: geo.safeAreaInsets.top,
+                        safeBottom: geo.safeAreaInsets.bottom,
+                        held: heldReactions(row),
+                        items: MessageMenu.items,
+                        onReact: { emoji in
+                            closeActions()
+                            model.toggleReaction(chatId: chatId, messageId: row.messageId, emoji: emoji)
+                        },
+                        onMenu: { item in
+                            closeActions()
+                            runMessageMenu(item, row: row)
+                        },
+                        onDismiss: { closeActions() },
+                        bubble: {
+                            RowView(model: model, row: row, chatId: chatId, width: geo.size.width, timeReveal: 0,
+                                    mentions: MentionTable.Cache.shared.table(model: model, theme: theme))
+                                .padding(.horizontal, 16)
+                        }
+                    )
+                }
+            }
+            .ignoresSafeArea()
+        }
         .toolbar(.hidden, for: .navigationBar)
+        .toolbar(.hidden, for: .tabBar)
         .navigationBarBackButtonHidden(true)
         // Hiding the system back button also disables the edge-swipe pop; re-enable it.
         .background(InteractivePopGestureEnabler())
@@ -640,6 +678,14 @@ struct ChatView: View {
                             model.fixtureAppendAssistant(chatId: chatId, text: AppModel.longReview)
                             replyTo = model.messages[chatId]?.last { $0.role == .assistant }
                             composerFocused = true
+                        }
+                        #endif
+                    case "agent-message", "agent-message-received":
+                        // Rig: agent-to-agent messaging rows (fixture only) — the sender's
+                        // hand-off + confirm + relayed reply, or the receiver's labelled row.
+                        #if DEBUG
+                        if model.isFixture {
+                            model.fixtureAgentMessage(chatId: chatId, received: show == "agent-message-received")
                         }
                         #endif
                     case "replied":
@@ -1023,32 +1069,34 @@ struct ChatView: View {
                         emptyHint
                     }
                     let shown = windowedRows
-                    ForEach(Array(shown.enumerated()), id: \.element.id) { i, row in
-                        let canReply = isMessageRow(row)
-                        RowView(row: row, chatId: chatId, width: width, timeReveal: timeReveal,
-                                onQuoteTap: { revealQuoted($0) },
-                                highlighted: highlightedMessage == row.messageId,
-                                onReply: canReply ? { beginReply(to: row) } : nil,
-                                replySwipeActive: $replySwipeActive)
-                            .padding(.top, gap(before: i, in: shown))
-                            .id(row.id)
-                            .onAppear {
-                                // Once per open — not on every row (group chats fire this dozens of times).
-                                if i == 0 {
-                                    LaunchClock.mark("chat-first-row", detail: "shown=\(shown.count) rows=\(rows.count) messages=\(messages.count)")
-                                }
-                            }
-                            .contextMenu {
-                                if canReact(to: row) {
-                                    MessageReactionBar { emoji in
-                                        model.toggleReaction(chatId: chatId, messageId: row.messageId, emoji: emoji)
-                                    }
-                                }
-                                MessageMenuContent(items: MessageMenu.items(forMessage: canReply)) { item in
-                                    runMessageMenu(item, row: row)
-                                }
-                            }
-                    }
+                    // One MentionTable for every bubble (Mac builds Mentions once per
+                    // sync). Per-row rebuilds were the main group-chat lag on iPhone.
+                    let mentions = MentionTable.Cache.shared.table(model: model, theme: theme)
+                    // Equatable host: composer keystrokes re-evaluate ChatView but
+                    // skip the ForEach when the transcript inputs are unchanged.
+                    TranscriptRows(
+                        model: model,
+                        mentions: mentions,
+                        shown: shown,
+                        chatId: chatId,
+                        width: width,
+                        timeReveal: timeReveal,
+                        highlightedMessage: highlightedMessage,
+                        rowsCount: rows.count,
+                        messagesCount: messages.count,
+                        replySwipeActive: $replySwipeActive,
+                        canReply: { isMessageRow($0) },
+                        onQuoteTap: { revealQuoted($0) },
+                        onReply: { beginReply(to: $0) },
+                        onMenu: { runMessageMenu($0, row: $1) },
+                        actionsRowId: actionsRow?.id,
+                        onLongPress: { row in
+                            Haptics.pick()
+                            withAnimation(.easeOut(duration: 0.18)) { actionsRow = row }
+                        },
+                        gapBefore: { gap(before: $0, in: $1) }
+                    )
+                    .equatable()
                     // Who is working is the presence row over the composer
                     // (`PresenceRow`), not a transcript row.
                     // Clears the 24 pt fade above the composer, so the last row
@@ -1056,6 +1104,8 @@ struct ChatView: View {
                     Color.clear.frame(height: 28).id("bottom")
                 }
                 .padding(.horizontal, 16)
+                // The avatar column follows the `+` as the composer inset animates with the keyboard.
+                .animation(.easeOut(duration: 0.25), value: composerFocused)
                 // Short threads: fill the viewport and pin rows to the bottom so
                 // two bubbles cannot float mid-screen (scroll-anchor alone was
                 // centering them on iOS 26). Empty-state copy keeps its own
@@ -1160,8 +1210,9 @@ struct ChatView: View {
     }
 
     /// "@sam" / "Bob" (the agent of this chat) / "you" for the composer's reply preview.
+    /// My own rows carry `sender: user:<my id>` in shared projects — still "you".
     private func replyLabel(for m: Message) -> String {
-        if let h = m.senderHandle, m.sender != "user" { return "@\(h)" }
+        if let h = m.senderHandle, m.sender != "user", m.sender != model.myUserId { return "@\(h)" }
         if m.role == .assistant || m.role == .project { return project?.name ?? "the agent" }
         return "you"
     }
@@ -1185,8 +1236,8 @@ struct ChatView: View {
     }
 
     /// A real message in the shared chat doc (the full menu: Copy, Reply,
-    /// Forward, Delete) — not a date / join / system line. Channels carry no
-    /// replies or deletes yet (C1 scope): Copy only.
+    /// Forward, Reply in DM, Delete) — not a date / join / system line.
+    /// Channels carry no replies or deletes yet (C1 scope): Copy only.
     private func isMessageRow(_ row: Row) -> Bool {
         if isChannel { return false }
         switch row.kind {
@@ -1197,16 +1248,20 @@ struct ChatView: View {
         }
     }
 
-    /// Emoji reactions on long-press: someone else's bubble only (not yours),
-    /// and not date / join / system / channel rows.
-    private func canReact(to row: Row) -> Bool {
-        guard isMessageRow(row) else { return false }
-        return row.role != .user
+    private func closeActions() {
+        withAnimation(.easeOut(duration: 0.15)) { actionsRow = nil }
+    }
+
+    /// Emoji I already put on this message (tinted in the capsule).
+    private func heldReactions(_ row: Row) -> Set<String> {
+        guard let me = model.myUserId, let m = messageById[row.messageId] else { return [] }
+        return Set(m.reactions.filter { $0.senders.contains(me) }.map(\.emoji))
     }
 
     /// The long-press menu's actions (`MessageMenu`): Copy the text, Reply
     /// (in a people chat the agent that wrote it becomes the recipient),
-    /// Forward to another chat, Delete for everyone.
+    /// Forward to another chat, Reply in DM (open a private chat with the human
+    /// who wrote it), Delete for everyone.
     private func runMessageMenu(_ item: MessageMenuItem, row: Row) {
         switch item {
         case .copy:
@@ -1215,6 +1270,16 @@ struct ChatView: View {
             beginReply(to: row)
         case .forward:
             beginForward(row)
+        case .replyInDM:
+            // Same path as the group member "Send private message" (#1455): open
+            // (or create) the DM with that person's handle. Agents and your own
+            // messages have no peer to DM.
+            guard let m = messageById[row.messageId],
+                  let handle = m.senderHandle, !handle.isEmpty,
+                  m.sender.hasPrefix("user:"),
+                  m.sender != model.myUserId
+            else { return }
+            Task { _ = await model.openDM(handle: handle) }
         case .delete:
             model.deleteMessage(chatId: chatId, messageId: row.messageId)
         }
@@ -1749,6 +1814,13 @@ struct ChatView: View {
         let agents = people.agents.filter { $0.project != nil && (query.isEmpty || mentionSlug($0.project?.name ?? $0.handle).hasPrefix(query)) }
         let humans = people.humans.filter { $0.id != model.user?.id && (query.isEmpty || $0.handle.lowercased().hasPrefix(query)) }
         let items = agents + humans
+        // A slug both an agent and a person carry (#1538) gets a kind label on each chip.
+        let slugs = items.map { $0.isAgent ? mentionSlug($0.project?.name ?? $0.handle) : $0.handle.lowercased() }
+        func label(_ m: ChatMember) -> String {
+            let slug = m.isAgent ? mentionSlug(m.project?.name ?? m.handle) : m.handle.lowercased()
+            let shared = slugs.filter { $0 == slug }.count > 1 || slug == model.user?.login.lowercased()
+            return shared ? (m.isAgent ? "agent" : "person") : ""
+        }
         return Group {
             if !items.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
@@ -1759,6 +1831,9 @@ struct ChatView: View {
                                     if m.isAgent, let p = m.project { AgentAvatar(project: p, theme: theme, size: 20, still: true) } else { PersonAvatar(url: m.avatarUrl, handle: m.handle, size: 20, name: m.name, id: m.id, colorIndex: m.avatarColorIndex) }
                                     Text("@\(m.isAgent ? mentionSlug(m.project?.name ?? m.handle) : m.handle)")
                                         .font(theme.font(Theme.small, weight: .medium)).foregroundStyle(theme.text)
+                                    if !label(m).isEmpty {
+                                        Text(label(m)).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
+                                    }
                                 }
                                 .padding(.leading, 6).padding(.trailing, 12).padding(.vertical, 7)
                                 .background(Capsule().fill(theme.bubbleAssistant))
@@ -2176,6 +2251,70 @@ struct ModelPickerView: View {
             .onAppear { effort = current.effort }
         }
         .presentationDetents([.medium, .large])
+    }
+}
+
+/// The visible transcript rows. Equatable so a composer keystroke (ChatView's
+/// `draft` `@State`) or an AppModel presence tick that re-evaluates ChatView
+/// does not rebuild every bubble when the row list is unchanged.
+private struct TranscriptRows: View, Equatable {
+    let model: AppModel
+    let mentions: MentionTable
+    let shown: [Row]
+    let chatId: Id
+    let width: CGFloat
+    let timeReveal: CGFloat
+    let highlightedMessage: Id?
+    let rowsCount: Int
+    let messagesCount: Int
+    var replySwipeActive: Binding<Bool>
+    let canReply: (Row) -> Bool
+    let onQuoteTap: (Id) -> Void
+    let onReply: (Row) -> Void
+    let onMenu: (MessageMenuItem, Row) -> Void
+    /// The bubble whose long-press actions are open (it alone reports its frame).
+    let actionsRowId: String?
+    let onLongPress: (Row) -> Void
+    let gapBefore: (Int, [Row]) -> CGFloat
+
+    static func == (lhs: TranscriptRows, rhs: TranscriptRows) -> Bool {
+        lhs.shown == rhs.shown
+            && lhs.actionsRowId == rhs.actionsRowId
+            && lhs.chatId == rhs.chatId
+            && lhs.width == rhs.width
+            && lhs.timeReveal == rhs.timeReveal
+            && lhs.highlightedMessage == rhs.highlightedMessage
+            && lhs.mentions === rhs.mentions
+            && lhs.rowsCount == rhs.rowsCount
+            && lhs.messagesCount == rhs.messagesCount
+    }
+
+    var body: some View {
+        ForEach(Array(shown.enumerated()), id: \.element.id) { i, row in
+            let reply = canReply(row)
+            RowView(model: model, row: row, chatId: chatId, width: width, timeReveal: timeReveal,
+                    onQuoteTap: onQuoteTap,
+                    highlighted: highlightedMessage == row.messageId,
+                    onReply: reply ? { onReply(row) } : nil,
+                    replySwipeActive: replySwipeActive,
+                    mentions: mentions)
+                .equatable()
+                .padding(.top, gapBefore(i, shown))
+                .id(row.id)
+                .onAppear {
+                    // Once per open — not on every row (group chats fire this dozens of times).
+                    if i == 0 {
+                        LaunchClock.mark("chat-first-row", detail: "shown=\(shown.count) rows=\(rowsCount) messages=\(messagesCount)")
+                    }
+                }
+                // A message bubble: long-press → the reaction capsule + menu overlay
+                // (`MessageActionsOverlay`). Other rows keep the plain Copy menu.
+                .anchorPreference(key: RowFrameKey.self, value: .bounds) { anchor in
+                    actionsRowId == row.id ? [row.id: anchor] : [:]
+                }
+                .messageRowGestures(isMessage: reply, onLongPress: { onLongPress(row) },
+                                    onCopyMenu: { onMenu($0, row) })
+        }
     }
 }
 

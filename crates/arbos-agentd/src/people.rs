@@ -11,7 +11,10 @@
 //! addresses this agent, the decision model reads recent chat context and chooses whether this
 //! agent should reply (or stay quiet) so the right agent continues the thread — or none do. Each
 //! human message is labelled with the author's display name (falling back to bare handle) and role
-//! (`owner` | `guest`) in the prompt. Guests may direct ordinary work; they may not use the
+//! (`owner` | `guest`) in the prompt. The author is the row's `sender: user:<id>`, else the
+//! person whose device wrote it (the relay's box roster lists each member's device ids), else
+//! the only human in the chat; a row nobody can be matched to is "a member" with guest powers
+//! — the owner is never assumed (#1580). Guests may direct ordinary work; they may not use the
 //! owner's secrets unless the owner put them on that secret's People list. Agents
 //! address people by display name, never `@handle`. The owner's credits pay; audit lines carry
 //! `asked_by`.
@@ -77,6 +80,16 @@ impl PeopleChatInfo {
         self.handle_of(&self.owner_user)
     }
 
+    /// "Jacob's" — whose budget this agent spends, for the budget notice (`budget.rs`).
+    pub fn owner_spoken_possessive(&self) -> String {
+        let name = self.spoken_name_of(&self.owner_user);
+        if name.ends_with('s') {
+            format!("{name}'")
+        } else {
+            format!("{name}'s")
+        }
+    }
+
     /// How to speak to / about this person: display name, else bare handle (no `@`).
     fn spoken_name_of(&self, user_id: &str) -> String {
         self.members
@@ -94,6 +107,105 @@ impl PeopleChatInfo {
             .map(person_spoken_name)
             .collect()
     }
+
+    /// Human member ids (`user:` stripped).
+    fn human_ids(&self) -> Vec<String> {
+        self.members
+            .iter()
+            .filter_map(|m| m["member"].as_str()?.strip_prefix("user:"))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// The person whose device wrote a row, from the box-facing roster's `devices` lists.
+    /// Row ids may carry the `dev:` prefix (Mac, arbosctl); the roster has bare ids.
+    fn user_of_device(&self, device_id: &str) -> Option<String> {
+        let bare = device_id.strip_prefix("dev:").unwrap_or(device_id);
+        if bare.is_empty() {
+            return None;
+        }
+        self.members.iter().find_map(|m| {
+            let uid = m["member"].as_str()?.strip_prefix("user:")?;
+            let devices = m["devices"].as_array()?;
+            devices
+                .iter()
+                .any(|d| d.as_str().is_some_and(|d| d == bare || d == device_id))
+                .then(|| uid.to_owned())
+        })
+    }
+
+    /// Who wrote a human row. `sender: user:<id>` wins; else the row's `deviceId` through the
+    /// roster; else the one human in the chat (a DM with only the owner and agents). `None` means
+    /// the author is unknown — never assume the owner (#1580: a guest's note was read back as
+    /// the owner's).
+    fn author_of(&self, msg: &MessageView) -> Option<String> {
+        let sender = msg.rest.get("sender").and_then(Value::as_str).unwrap_or("");
+        if let Some(uid) = sender.strip_prefix("user:") {
+            if !uid.is_empty() {
+                return Some(uid.to_owned());
+            }
+        }
+        if let Some(device) = msg.rest.get("deviceId").and_then(Value::as_str) {
+            if let Some(uid) = self.user_of_device(device) {
+                return Some(uid);
+            }
+        }
+        if let Some(handle) = msg
+            .rest
+            .get("senderHandle")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|h| !h.is_empty())
+        {
+            let hit = self.members.iter().find_map(|m| {
+                let uid = m["member"].as_str()?.strip_prefix("user:")?;
+                m["handle"]
+                    .as_str()
+                    .is_some_and(|h| h.eq_ignore_ascii_case(handle))
+                    .then(|| uid.to_owned())
+            });
+            if hit.is_some() {
+                return hit;
+            }
+        }
+        let humans = self.human_ids();
+        match humans.as_slice() {
+            [only] => Some(only.clone()),
+            _ => None,
+        }
+    }
+}
+
+/// `user_id` of an asker the agent could not identify (see `arbos_core::UNKNOWN_ASKER`).
+pub const UNKNOWN_ASKER: &str = arbos_core::UNKNOWN_ASKER;
+
+/// Label for an author the row does not identify.
+const UNKNOWN_SPOKEN: &str = "a member";
+
+/// Handle for a human row's author: the row's `senderHandle`, else the roster's for `user_id`,
+/// else `a member`.
+fn author_handle(msg: &MessageView, info: &PeopleChatInfo, user_id: Option<&str>) -> String {
+    msg.rest
+        .get("senderHandle")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+        .map(str::to_owned)
+        .or_else(|| user_id.map(|u| info.handle_of(u)))
+        .unwrap_or_else(|| UNKNOWN_SPOKEN.to_owned())
+}
+
+/// Spoken name for a human row's author: `senderName`, else the roster's display name / handle
+/// for `user_id`, else the row's handle, else `a member`.
+fn author_spoken(msg: &MessageView, info: &PeopleChatInfo, user_id: Option<&str>) -> String {
+    let from_roster = user_id.and_then(|u| {
+        info.members
+            .iter()
+            .find(|m| m["member"].as_str() == Some(&format!("user:{u}")))
+            .map(person_spoken_name)
+    });
+    let fallback = from_roster.unwrap_or_else(|| author_handle(msg, info, user_id));
+    message_spoken_name(msg, &fallback)
 }
 
 /// Prefer display `name`; else bare `handle`. Never `@handle`.
@@ -128,6 +240,11 @@ fn addressed_only_to_people(msg: &MessageView) -> bool {
     let Some(mentions) = msg.rest.get("mentions").and_then(Value::as_array) else {
         return false;
     };
+    // Typed mentions (#1538): a `user:` chip for the SENDER is not a people ping — nobody
+    // @-mentions themselves. It happens when an agent's slug equals the sender's own handle
+    // (Jacob @unarbos named an agent "unarbos"): the composer resolved `@unarbos` to the
+    // person, and the agent of that slug is who was meant. Other people's chips still are.
+    let sender = msg.rest.get("sender").and_then(Value::as_str).unwrap_or("");
     let mut saw_person = false;
     for m in mentions {
         let Some(s) = m.as_str() else {
@@ -136,7 +253,7 @@ fn addressed_only_to_people(msg: &MessageView) -> bool {
         if s.starts_with("agent:") {
             return false;
         }
-        if s.starts_with("user:") {
+        if s.starts_with("user:") && s != sender {
             saw_person = true;
         }
     }
@@ -215,23 +332,34 @@ fn text_names_people(msg: &MessageView, info: &PeopleChatInfo) -> bool {
     let Some(token) = leading_address_token(&msg.text()) else {
         return false;
     };
-    text_token_names_people(&token, info, true)
+    let sender = msg.rest.get("sender").and_then(Value::as_str).unwrap_or("");
+    text_token_names_people_except(&token, info, true, sender)
 }
 
 /// True when the leading token is a human's `@handle` (not merely their display name).
+/// The sender's own handle does not count (#1538).
 fn text_names_people_by_handle(msg: &MessageView, info: &PeopleChatInfo) -> bool {
     let Some(token) = leading_address_token(&msg.text()) else {
         return false;
     };
-    text_token_names_people(&token, info, false)
+    let sender = msg.rest.get("sender").and_then(Value::as_str).unwrap_or("");
+    text_token_names_people_except(&token, info, false, sender)
 }
 
-fn text_token_names_people(token: &str, info: &PeopleChatInfo, allow_display_name: bool) -> bool {
+/// Does `token` name a human in the chat (by `@handle`, or by display / first name when
+/// allowed), ignoring the member `except` (the sender: "@unarbos" written by @unarbos is not a
+/// ping to themselves — #1538, an agent may carry that slug).
+fn text_token_names_people_except(
+    token: &str,
+    info: &PeopleChatInfo,
+    allow_display_name: bool,
+    except: &str,
+) -> bool {
     for m in &info.members {
         let Some(member) = m["member"].as_str() else {
             continue;
         };
-        if !member.starts_with("user:") {
+        if !member.starts_with("user:") || member == except {
             continue;
         }
         let handle = m["handle"].as_str().unwrap_or("").to_lowercase();
@@ -662,8 +790,14 @@ pub fn addressed(
 }
 
 /// Recent human and agent lines before `up_to` as `[{from, text}]`, oldest first, for the
-/// responder decision.
-fn recent_people_context(messages: &[MessageView], up_to: &str, max: usize) -> Vec<Value> {
+/// responder decision and the group prelude. A human line is labelled with its author's display
+/// name (roster or row), else their handle, else `a member` — never the owner by default.
+fn recent_people_context(
+    messages: &[MessageView],
+    up_to: &str,
+    max: usize,
+    info: &PeopleChatInfo,
+) -> Vec<Value> {
     let mut out = Vec::new();
     for m in messages {
         if m.id == up_to {
@@ -676,20 +810,16 @@ fn recent_people_context(messages: &[MessageView], up_to: &str, max: usize) -> V
         if text.trim().is_empty() {
             continue;
         }
-        let handle = m
-            .rest
-            .get("senderHandle")
-            .and_then(Value::as_str)
-            .unwrap_or(if m.role == "assistant" {
-                "agent"
-            } else {
-                "user"
-            });
         let from = if m.role == "assistant" {
+            let handle = m
+                .rest
+                .get("senderHandle")
+                .and_then(Value::as_str)
+                .unwrap_or("agent");
             format!("@{handle} (agent)")
         } else {
-            // Humans: display name when the client sent it; else bare handle (no @).
-            message_spoken_name(m, handle)
+            let author = info.author_of(m);
+            author_spoken(m, info, author.as_deref())
         };
         out.push(json!({ "from": from, "text": text }));
     }
@@ -970,7 +1100,8 @@ impl Agent {
                             && m.rest.get("deviceId").and_then(Value::as_str)
                                 == Some(self.cfg.device_id.as_str()))
                 });
-            let recent = recent_people_context(&h.doc.messages(), user_msg_id, RESPOND_RECENT_MAX);
+            let recent =
+                recent_people_context(&h.doc.messages(), user_msg_id, RESPOND_RECENT_MAX, info);
             (msg, replied_to_mine, recent)
         };
         let every = info.settings["reply_policy"].as_str() == Some("every_message");
@@ -1060,12 +1191,7 @@ impl Agent {
         if text.trim().is_empty() {
             return false;
         }
-        let asker_handle = msg
-            .rest
-            .get("senderHandle")
-            .and_then(Value::as_str)
-            .unwrap_or("someone");
-        let asker = message_spoken_name(msg, asker_handle);
+        let asker = author_spoken(msg, info, info.author_of(msg).as_deref());
         let me = self.cfg.project_id.as_str();
         let candidates: Vec<Candidate> = info
             .members
@@ -1107,6 +1233,14 @@ impl Agent {
             }
             Err(errors) => {
                 self.log_responder_decision(&room, &msg.id, Err(&errors), Some(("SKIP", &[])));
+                // A budget refusal is not an outage: say so once in the chat and stop asking
+                // the model for every message until the block lapses (`budget.rs`).
+                if let Some(e) = errors
+                    .iter()
+                    .find(|e| crate::budget::Refusal::classify(e).is_some())
+                {
+                    self.note_budget_refusal(chat_id, e, false).await;
+                }
                 false
             }
         }
@@ -1127,36 +1261,24 @@ impl Agent {
             let h = host.lock().await;
             let msg = h.doc.message(user_msg_id)?;
             let recent = if info.is_group() {
-                recent_people_context(&h.doc.messages(), user_msg_id, RESPOND_RECENT_MAX)
+                recent_people_context(&h.doc.messages(), user_msg_id, RESPOND_RECENT_MAX, &info)
             } else {
                 Vec::new()
             };
             (msg, recent)
         };
-        let sender = msg
-            .rest
-            .get("sender")
-            .and_then(Value::as_str)
-            .unwrap_or("user")
-            .to_owned();
-        let user_id = sender
-            .strip_prefix("user:")
-            .unwrap_or(&info.owner_user)
-            .to_owned();
-        let handle = msg
-            .rest
-            .get("senderHandle")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .unwrap_or_else(|| info.handle_of(&user_id));
-        let spoken = message_spoken_name(&msg, &info.spoken_name_of(&user_id));
-        let role = if user_id == info.owner_user {
-            "owner"
-        } else {
-            "guest"
+        // Who is asking: the row's `sender`, its device, its handle, or the only human in the
+        // chat. An author the row does not identify is "a member" with guest powers — the owner
+        // is never assumed (#1580).
+        let author = info.author_of(&msg);
+        let handle = author_handle(&msg, &info, author.as_deref());
+        let spoken = author_spoken(&msg, &info, author.as_deref());
+        let role = match author.as_deref() {
+            Some(uid) if uid == info.owner_user => "owner",
+            Some(_) | None => "guest",
         };
         let asker = Asker {
-            user_id,
+            user_id: author.clone().unwrap_or_else(|| UNKNOWN_ASKER.to_owned()),
             handle: handle.clone(),
             name: spoken.clone(),
             role,
@@ -1234,8 +1356,21 @@ impl Agent {
                 live
             }
         };
+        // An unidentified author is named as such: the model must not fill the gap with the
+        // owner (nor with anyone else in the roster).
+        let from_clause = match (&author, spoken.as_str()) {
+            (Some(_), _) => format!(
+                "This message is from {spoken} ({role}); treat it as a request from another person in the conversation and address them by their display name ({spoken}), never as an @handle"
+            ),
+            (None, UNKNOWN_SPOKEN) => format!(
+                "This message is from a person in this chat whose account the row does not name — treat them as a guest, not as {owner_spoken}, and if asked who wrote it say the message does not say; address them plainly, never as an @handle"
+            ),
+            (None, _) => format!(
+                "This message is from {spoken} (not matched to a member of this chat; treat them as a guest, not as {owner_spoken}); address them as {spoken}, never as an @handle"
+            ),
+        };
         let mut prelude = format!(
-            "[People chat with {}. You are @{my_slug} (the agent of {owner_spoken}'s Project \"{}\"){}.{} This message is from {spoken} ({role}); treat it as a request from another person in the conversation and address them by their display name ({spoken}), never as an @handle. Your reply is read by everyone in the chat.{secrets_rule}]\n",
+            "[People chat with {}. You are @{my_slug} (the agent of {owner_spoken}'s Project \"{}\"){}.{} {from_clause}. Your reply is read by everyone in the chat.{secrets_rule}]\n",
             people.join(", "),
             self.cfg.project_id,
             others_clause,
@@ -1446,21 +1581,27 @@ impl Agent {
                 live
             }
         };
-        let fields = vec![
+        let mut fields = vec![
             ("sender", json!(format!("agent:{}", self.cfg.project_id))),
             ("senderHandle", json!(handle)),
             ("senderName", json!(name)),
             ("senderAvatar", json!(avatar)),
             ("senderAvatarColor", json!(avatar_color)),
             ("ownerHandle", json!(info.owner_handle())),
-            ("askedBy", json!(format!("user:{}", asker.user_id))),
+        ];
+        // An asker the row did not identify gets no `askedBy` (there is no account to point
+        // at); the handle label still says who the row claimed to be, if anything.
+        if asker.user_id != UNKNOWN_ASKER {
+            fields.push(("askedBy", json!(format!("user:{}", asker.user_id))));
+        }
+        fields.extend([
             ("askedByHandle", json!(asker.handle)),
             ("inReplyTo", json!(asker.message_id)),
             // Platform reply feature: thread this bubble to the asker's message
             // so everyone sees which line is being answered (feedback
             // app-01M5MPKJ9K6HGHFH6BZWR9CME0).
             ("replyTo", json!(asker.message_id)),
-        ];
+        ]);
         Some(ReplyAttribution { fields })
     }
 
@@ -1888,6 +2029,152 @@ mod tests {
         ));
     }
 
+    /// #1580: a guest's row with no `sender: user:<id>` / `senderHandle` (older app, arbosctl)
+    /// was read back as the owner's. The author comes from the row, its device, its handle, or
+    /// the only human in the chat — and is otherwise unknown, never the owner.
+    #[test]
+    fn unlabelled_rows_never_resolve_to_the_owner() {
+        let group = PeopleChatInfo {
+            members: vec![
+                json!({ "member": "user:gh_1", "handle": "jacob", "name": "Jacob", "devices": ["DEVJ1", "DEVJ2"] }),
+                json!({ "member": "user:gh_2", "handle": "sam", "name": "Sam Okafor", "devices": ["DEVSAM"] }),
+                json!({ "member": "agent:01HPROJ", "handle": "bob" }),
+            ],
+            owner_user: "gh_1".into(),
+            slug: "bob".into(),
+            kind: "group".into(),
+            ..Default::default()
+        };
+        let bare = |extra: Value| {
+            let mut m = msg("we agreed the launch date is 12 November", json!({}));
+            m.rest = json!({ "sender": "user" });
+            if let (Some(r), Some(e)) = (m.rest.as_object_mut(), extra.as_object()) {
+                for (k, v) in e {
+                    r.insert(k.clone(), v.clone());
+                }
+            }
+            m
+        };
+
+        // Explicit sender wins.
+        let labelled = msg("hi", json!({}));
+        assert_eq!(group.author_of(&labelled).as_deref(), Some("gh_2"));
+        assert_eq!(author_handle(&labelled, &group, Some("gh_2")), "sam");
+        assert_eq!(author_spoken(&labelled, &group, Some("gh_2")), "Sam Okafor");
+
+        // The guest's device (with or without the `dev:` prefix) names the guest.
+        let by_device = bare(json!({ "deviceId": "dev:DEVSAM" }));
+        assert_eq!(group.author_of(&by_device).as_deref(), Some("gh_2"));
+        assert_eq!(
+            group
+                .author_of(&bare(json!({ "deviceId": "DEVJ2" })))
+                .as_deref(),
+            Some("gh_1")
+        );
+        // A handle alone still finds the member.
+        let by_handle = bare(json!({ "deviceId": "dev:anon", "senderHandle": "Sam" }));
+        assert_eq!(group.author_of(&by_handle).as_deref(), Some("gh_2"));
+
+        // Unknown device, no handle, two humans: nobody — and not the owner.
+        let unknown = bare(json!({ "deviceId": "dev:anon" }));
+        assert_eq!(group.author_of(&unknown), None);
+        assert_eq!(author_handle(&unknown, &group, None), UNKNOWN_SPOKEN);
+        assert_eq!(author_spoken(&unknown, &group, None), UNKNOWN_SPOKEN);
+        // A handle the roster lacks is still kept as the label (never swapped for the owner).
+        let stranger = bare(json!({ "deviceId": "dev:anon", "senderHandle": "priya" }));
+        assert_eq!(group.author_of(&stranger), None);
+        assert_eq!(author_handle(&stranger, &group, None), "priya");
+        assert_eq!(author_spoken(&stranger, &group, None), "priya");
+        let named = bare(json!({ "senderName": "Priya N." }));
+        assert_eq!(author_spoken(&named, &group, None), "Priya N.");
+
+        // The recent-context lines use the same resolution.
+        let mut lines = vec![by_device.clone(), unknown.clone(), labelled.clone()];
+        for (i, m) in lines.iter_mut().enumerate() {
+            m.id = format!("m{i}");
+        }
+        let ctx = recent_people_context(&lines, "none", 10, &group);
+        assert_eq!(ctx[0]["from"], "Sam Okafor");
+        assert_eq!(ctx[1]["from"], UNKNOWN_SPOKEN);
+        assert_eq!(ctx[2]["from"], "Sam Okafor");
+
+        // A DM whose only human is the owner: an unlabelled row is theirs.
+        let dm = PeopleChatInfo {
+            members: vec![
+                json!({ "member": "user:gh_1", "handle": "jacob", "name": "Jacob" }),
+                json!({ "member": "agent:01HPROJ", "handle": "bob" }),
+            ],
+            owner_user: "gh_1".into(),
+            slug: "bob".into(),
+            kind: "dm".into(),
+            ..Default::default()
+        };
+        assert_eq!(dm.author_of(&unknown).as_deref(), Some("gh_1"));
+        // Two humans and no roster devices: still unknown.
+        let no_devices = PeopleChatInfo {
+            members: vec![
+                json!({ "member": "user:gh_1", "handle": "jacob" }),
+                json!({ "member": "user:gh_2", "handle": "sam" }),
+            ],
+            owner_user: "gh_1".into(),
+            ..Default::default()
+        };
+        assert_eq!(no_devices.author_of(&unknown), None);
+    }
+
+    /// #1538: Jacob (@unarbos) named an agent "unarbos". The composer resolved `@unarbos` to
+    /// the person (`mentions=[user:…]`), which silenced every agent; typed resolution: a
+    /// `user:` chip for the sender is not a people ping, and the sender's own handle in the
+    /// prose does not count as naming a person — so the agent with that slug is addressed.
+    /// An `agent:` chip wakes the agent regardless; another person's chip still wins.
+    #[test]
+    fn sender_own_handle_resolves_to_the_agent_of_that_slug() {
+        let arbonites = PeopleChatInfo {
+            members: vec![
+                json!({ "member": "agent:01HPROJ", "handle": "unarbos", "project": { "name": "unarbos" } }),
+                json!({ "member": "user:gh_2", "handle": "unarbos", "name": "Arbos" }),
+                json!({ "member": "user:gh_9", "handle": "scout", "name": "Scout" }),
+            ],
+            slug: "unarbos".into(),
+            kind: "group".into(),
+            ..Default::default()
+        };
+        // The Mac resolved the slug to the sender themself.
+        let m = msg(
+            "@unarbos are you there?",
+            json!({ "mentions": ["user:gh_2"] }),
+        );
+        assert!(
+            !addressed_only_to_people(&m),
+            "a chip for the sender is not a people ping"
+        );
+        assert!(!text_names_people_by_handle(&m, &arbonites));
+        assert!(!people_ping_not_for_agents(&m, &arbonites));
+        assert!(
+            addressed(&m, P, "unarbos", false, false, false),
+            "the agent of that slug is addressed"
+        );
+        // A typed agent chip wakes the agent, whoever shares the slug.
+        assert!(addressed(
+            &msg("hey", json!({ "mentions": ["agent:01HPROJ"] })),
+            P,
+            "unarbos",
+            false,
+            false,
+            false
+        ));
+        // Someone else pinging the person by chip: still the person's, not ours.
+        let other = msg(
+            "@unarbos can you look?",
+            json!({ "sender": "user:gh_9", "mentions": ["user:gh_2"] }),
+        );
+        assert!(addressed_only_to_people(&other));
+        assert!(
+            people_ping_not_for_agents(&other, &arbonites)
+                || text_mentions_agent(&other, &arbonites)
+        );
+    }
+
     #[test]
     fn recent_context_stops_at_current_and_caps() {
         let mut lines = Vec::new();
@@ -1900,17 +2187,152 @@ mod tests {
             }
             lines.push(m);
         }
+        let info = PeopleChatInfo::default();
         // Context for "m12": lines m0…m11, capped to the last 5.
-        let ctx = recent_people_context(&lines, "m12", 5);
+        let ctx = recent_people_context(&lines, "m12", 5, &info);
         assert_eq!(ctx.len(), 5);
         assert_eq!(ctx[0]["text"], "line 7");
         assert_eq!(ctx[4]["text"], "line 11");
         assert_eq!(ctx[4]["from"], "@bob (agent)");
         assert_eq!(ctx[3]["from"], "sam");
         // Unknown id → everything, still capped.
-        let all = recent_people_context(&lines, "missing", 3);
+        let all = recent_people_context(&lines, "missing", 3, &info);
         assert_eq!(all.len(), 3);
         assert_eq!(all[2]["text"], "line 14");
+    }
+}
+
+#[cfg(test)]
+mod attribution_tests {
+    //! #1580 end to end on the agent: the prelude, the asker and the reply fields for a guest's
+    //! row that carries no author fields.
+
+    use arbos_core::ids::ulid;
+
+    use super::*;
+    use crate::status::tests::test_agent;
+
+    fn group_info(agent: &Agent, with_devices: bool) -> PeopleChatInfo {
+        let devices = |ids: &[&str]| {
+            if with_devices {
+                json!(ids)
+            } else {
+                Value::Null
+            }
+        };
+        PeopleChatInfo {
+            members: vec![
+                json!({ "member": "user:gh_owner", "handle": "jacob", "name": "Jacob", "devices": devices(&["DEVJACOB"]) }),
+                json!({ "member": "user:gh_peer", "handle": "lt-peer", "name": "Priya", "devices": devices(&["01M5ND06ZW"]) }),
+                json!({ "member": format!("agent:{}", agent.cfg.project_id), "handle": "lane-a" }),
+            ],
+            settings: json!({ "reply_policy": "mention" }),
+            owner_user: "gh_owner".into(),
+            slug: "lane-a".into(),
+            kind: "group".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn guest_row_without_author_fields_is_not_the_owner() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATATTRIBUTION00001";
+        agent.people.test_insert(chat, group_info(&agent, false));
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let note = ulid();
+        let ask = ulid();
+        {
+            let h = host.lock().await;
+            // The peer's note, as an older client / arbosctl wrote it: `sender: user`, nothing else.
+            h.doc
+                .append_user_message(
+                    &note,
+                    "Note from me: the launch date is 12 November",
+                    "dev:anon",
+                    &arbos_core::doc::UserMessageOpts::default(),
+                )
+                .unwrap();
+            // The owner's question, fully labelled.
+            let opts = arbos_core::doc::UserMessageOpts {
+                sender: Some("user:gh_owner".into()),
+                sender_handle: Some("jacob".into()),
+                sender_name: Some("Jacob".into()),
+                mentions: vec![format!("agent:{}", agent.cfg.project_id)],
+                ..Default::default()
+            };
+            h.doc
+                .append_user_message(
+                    &ask,
+                    "@lane-a who posted the launch date?",
+                    "dev:mac",
+                    &opts,
+                )
+                .unwrap();
+        }
+
+        // The unlabelled row itself: unknown author, guest powers, no owner anywhere.
+        let prelude = agent.people_turn_context(chat, &host, &note).await.unwrap();
+        assert!(
+            prelude.contains("whose account the row does not name"),
+            "{prelude}"
+        );
+        assert!(prelude.contains("treat them as a guest, not as Jacob"));
+        assert!(!prelude.contains("from Jacob (owner)"), "{prelude}");
+        let asker = agent.people.asker(chat).unwrap();
+        assert_eq!(asker.user_id, UNKNOWN_ASKER);
+        assert_eq!(asker.role, "guest");
+        assert_eq!(asker.spoken(), "a member");
+        let fields = agent.people_reply_fields(chat).unwrap().fields;
+        assert!(
+            !fields.iter().any(|(k, _)| *k == "askedBy"),
+            "no account to point at: {fields:?}"
+        );
+        assert!(fields
+            .iter()
+            .any(|(k, v)| *k == "askedByHandle" && v == "a member"));
+
+        // The owner's question: the group transcript labels the note as a member's, not Jacob's.
+        let prelude = agent.people_turn_context(chat, &host, &ask).await.unwrap();
+        assert!(
+            prelude.contains("This message is from Jacob (owner)"),
+            "{prelude}"
+        );
+        assert!(
+            prelude.contains("- a member: Note from me: the launch date is 12 November"),
+            "{prelude}"
+        );
+        assert!(!prelude.contains("- Jacob: Note from me"), "{prelude}");
+
+        // With the relay's device roster the same row resolves to the peer.
+        agent.people.test_insert(chat, group_info(&agent, true));
+        let peer_note = ulid();
+        {
+            let h = host.lock().await;
+            h.doc
+                .append_user_message(
+                    &peer_note,
+                    "Priya owns the checklist",
+                    "dev:01M5ND06ZW",
+                    &arbos_core::doc::UserMessageOpts::default(),
+                )
+                .unwrap();
+        }
+        let prelude = agent
+            .people_turn_context(chat, &host, &peer_note)
+            .await
+            .unwrap();
+        assert!(
+            prelude.contains("This message is from Priya (guest)"),
+            "{prelude}"
+        );
+        let asker = agent.people.asker(chat).unwrap();
+        assert_eq!(asker.user_id, "gh_peer");
+        assert_eq!(asker.handle, "lt-peer");
+        let fields = agent.people_reply_fields(chat).unwrap().fields;
+        assert!(fields
+            .iter()
+            .any(|(k, v)| *k == "askedBy" && v == "user:gh_peer"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 

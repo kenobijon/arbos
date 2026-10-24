@@ -82,6 +82,10 @@ pub struct Project {
     /// People chats: my `me.muted` on the relay (synced across devices).
     #[serde(default)]
     pub muted: bool,
+    /// Sidebar archive (2026-10-23): hidden from the list for me, on every
+    /// device (the relay's per-user flag); the agent keeps running.
+    #[serde(default)]
+    pub archived_at: Option<u64>,
     /// The agent's one chat, §9b `primary_chat_id` (stored on the relay, never
     /// flips); older relays and the fixture send none and the client picks:
     /// most messages, ties → earliest created.
@@ -110,6 +114,37 @@ pub struct Project {
     /// the avatar loader can fetch; `None` = the initials disc.
     #[serde(default)]
     pub image_url: Option<String>,
+    /// "Who may message X" (agent-to-agent messaging): other owners' people / agents the
+    /// owner allowed to message this agent. Empty unless I own it.
+    #[serde(default)]
+    pub message_grants: Vec<MessageGrant>,
+}
+
+/// One row of an agent's "Who may message X" card (`message_grants` on the project).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct MessageGrant {
+    /// `user:<id>` / `project:<id>`: the key for PUT / DELETE.
+    #[serde(default)]
+    pub grantee: String,
+    /// `person` or `agent`.
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub handle: Option<String>,
+    #[serde(default, deserialize_with = "null_to_empty")]
+    pub avatar_url: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub note: String,
+    #[serde(default)]
+    pub created_at: i64,
+    #[serde(default)]
+    pub last_at: Option<i64>,
 }
 
 /// One entry of `GET /voices`: a voice the agent can speak with on calls.
@@ -609,6 +644,15 @@ pub struct Call {
     /// Project agents that belong to this chat (Phase 2).
     #[serde(default)]
     pub agents: Vec<Sender>,
+    /// `"open"` or `"hosted"` (bigger group calls: host + invited speakers only).
+    #[serde(default)]
+    pub speak_mode: Option<String>,
+    /// Invited speakers (host is `started_by`).
+    #[serde(default)]
+    pub invited_speakers: Vec<Sender>,
+    /// Whether this device may publish audio (from the join token reply).
+    #[serde(default)]
+    pub can_speak: Option<bool>,
 }
 
 impl Call {
@@ -959,6 +1003,11 @@ pub struct Chat {
     /// S15 system tab "Projects ⇄".
     pub is_system: bool,
     pub unread: bool,
+    /// Unread message count from `GET /me/unread` (Dock badge). `0` when read or unknown.
+    /// Live arrivals may set [`Self::unread`] with this still `0` until the next refresh;
+    /// the badge treats that as one missed message.
+    #[serde(default)]
+    pub unread_count: u32,
     pub last_message_at: u64,
     /// §9c: archived for me (per user, synced by the relay); `None` = not archived.
     #[serde(default)]
@@ -973,6 +1022,17 @@ pub struct Chat {
 impl Chat {
     pub fn is_group(&self) -> bool {
         self.kind == ChatKind::Group
+    }
+
+    /// Missed messages for the Dock badge: the relay count, or 1 when only the unread flag is lit.
+    pub fn missed_count(&self) -> usize {
+        if self.unread_count > 0 {
+            self.unread_count as usize
+        } else if self.unread {
+            1
+        } else {
+            0
+        }
     }
 }
 
@@ -1456,6 +1516,10 @@ pub struct Message {
     /// Messages exchanged with the subagent on a hand-off row (1 = brief sent, 2 = result back).
     #[serde(default)]
     pub handoff_messages: Option<u32>,
+    /// Agent-to-agent messaging: this reply answered a message another agent sent into the
+    /// chat; the name drawn in the "Replied to ◉ X" line under the bubble.
+    #[serde(default)]
+    pub agent_reply_to: Option<String>,
     /// Emoji reactions, the iPhone's shape: `{ emoji: { "user:<id>": true } }`.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub reactions: std::collections::BTreeMap<String, std::collections::BTreeMap<String, bool>>,
@@ -1526,8 +1590,9 @@ pub struct Message {
     pub greeting: bool,
 }
 
-/// The quick-react set, in display order (the iPhone's `MessageReaction.palette`).
-pub const REACTION_PALETTE: [&str; 6] = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
+/// The reaction capsule's set, in Grok Bot's order (the iPhone's
+/// `MessageReaction.palette`); any other emoji comes from the system picker.
+pub const REACTION_PALETTE: [&str; 5] = ["😂", "👍", "👎", "❤️", "🎉"];
 
 impl Message {
     /// Reactions as `(emoji, senders)`, palette order first, then the rest
@@ -2228,6 +2293,31 @@ pub struct NewSecret {
     pub inject_env: bool,
 }
 
+/// One signed-in device of my account (`GET /auth/devices`, Oct 23).
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+pub struct DeviceView {
+    pub id: String,
+    pub name: String,
+    /// `github` (a GitHub sign-in), `paircode`, `reader` (read-only, Grok Bot) …
+    #[serde(default)]
+    pub kind: String,
+    pub created_at: i64,
+    #[serde(default)]
+    pub last_seen_at: Option<i64>,
+    /// The device that made the request — this Mac.
+    #[serde(default)]
+    pub current: bool,
+}
+
+/// Settings → Devices state.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DevicesView {
+    pub items: Vec<DeviceView>,
+    pub loaded: bool,
+    /// Why the list could not be read, when it could not.
+    pub error: Option<String>,
+}
+
 /// Settings → Secrets state (`GET /secrets` + `GET /secrets/requests`).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SecretsView {
@@ -2841,6 +2931,9 @@ pub struct ServerInfo {
     pub member_count: u64,
     #[serde(default)]
     pub channels: Vec<ServerChannel>,
+    /// Sidebar archive (2026-10-23): hidden from the list for me, on every device.
+    #[serde(default)]
+    pub archived_at: Option<u64>,
     #[serde(default)]
     pub general_channel_id: Option<String>,
     #[serde(default)]

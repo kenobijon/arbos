@@ -364,6 +364,70 @@ pub fn agent_slug(name: &str) -> String {
         .join("-")
 }
 
+/// An agent's `@slug` must not be a person's `@handle`: when Jacob (@unarbos) named an agent
+/// "unarbos", `@unarbos` in the group resolved to him and the agent's mention gate never fired
+/// (#1538). The name that keeps the slug clear of every signed-in user's login: `name` itself,
+/// else `<name> agent`, `<name> 2`, `<name> 3`, … Returns `(name, changed)`.
+pub fn agent_name_clear_of_people(state: &AppState, name: &str) -> (String, bool) {
+    let taken = |candidate: &str| {
+        let slug = agent_slug(candidate);
+        !slug.is_empty() && state.db.user_by_handle(&slug).ok().flatten().is_some()
+    };
+    let name = name.trim();
+    if !taken(name) {
+        return (name.to_owned(), false);
+    }
+    let first = format!("{name} agent");
+    if !taken(&first) {
+        return (first, true);
+    }
+    for n in 2..100 {
+        let c = format!("{name} {n}");
+        if !taken(&c) {
+            return (c, true);
+        }
+    }
+    (format!("{name} agent {}", now_ms() % 1000), true)
+}
+
+/// One-shot at boot (#1538): every live agent whose slug is a person's handle gets the same
+/// suffix a new one would, and its box hears `project_renamed`. Idempotent; logs each rename.
+pub fn rename_agents_that_shadow_people(state: &AppState) {
+    let Ok(projects) = state.db.list_projects() else {
+        return;
+    };
+    for p in projects {
+        let (clear, changed) = agent_name_clear_of_people(state, &p.name);
+        if !changed {
+            continue;
+        }
+        if let Err(e) = state.db.update_project(
+            &p.id,
+            Some(&clear),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ) {
+            tracing::warn!(project = %p.id, error = %e, "handle-collision rename failed");
+            continue;
+        }
+        let _ = state.db.enqueue_push(
+            &p.id,
+            "project_renamed",
+            &json!({ "from": p.name, "to": clear, "at": now_ms(), "reason": "handle_collision" }),
+        );
+        tracing::info!(project = %p.id, from = %p.name, to = %clear, "agent renamed: its @slug was a person's handle");
+    }
+}
+
 /// Soft-deleted agents leave every list at once; do not linger as @mention ghosts that
 /// never wake (workspace already moved to `/work/.archive/`). Humans always pass.
 fn member_alive(state: &AppState, m: &Membership) -> bool {
@@ -1877,7 +1941,7 @@ pub async fn box_people_chat(
         );
     }
     match load_chat(&state, &id) {
-        Ok(cm) => Json(chat_json(&state, &cm, user_id, &device_of(&principal))).into_response(),
+        Ok(cm) => Json(box_chat_json(&state, &cm, user_id, &device_of(&principal))).into_response(),
         Err(r) => *r,
     }
 }
@@ -1889,8 +1953,34 @@ pub fn people_chats_of_project(state: &AppState, project_id: &str, owner: &str) 
         .chats_of_member(&format!("agent:{project_id}"))
         .unwrap_or_default()
         .iter()
-        .map(|cm| chat_json(state, cm, owner, "box"))
+        .map(|cm| box_chat_json(state, cm, owner, "box"))
         .collect()
+}
+
+/// How many device ids a box-facing roster lists per person.
+const MEMBER_DEVICES_MAX: usize = 64;
+
+/// The chat as a box sees it: the apps' roster plus, on every human member, `devices` — the
+/// ids that person's devices write into `deviceId`. A row that carries no `sender: user:<id>`
+/// (an older app, `arbosctl`) is attributed by the box through this list instead of being
+/// guessed as the owner's (#1580). Apps never get it; they have the row's author fields.
+pub fn box_chat_json(state: &AppState, cm: &ChatWithMembers, me: &str, device_id: &str) -> Value {
+    let mut chat = chat_json(state, cm, me, device_id);
+    if let Some(members) = chat.get_mut("members").and_then(Value::as_array_mut) {
+        for m in members {
+            let Some(uid) = m.get("user_id").and_then(Value::as_str).map(str::to_owned) else {
+                continue;
+            };
+            let ids = state
+                .db
+                .device_ids_of_user(&uid, MEMBER_DEVICES_MAX)
+                .unwrap_or_default();
+            if let Some(o) = m.as_object_mut() {
+                o.insert("devices".into(), json!(ids));
+            }
+        }
+    }
+    chat
 }
 
 // ---- projects together (step 3) ----------------------------------------------------------------
@@ -2501,22 +2591,33 @@ fn html_escape(s: &str) -> String {
 
 /// Why a row push into a people room was refused (sent back as an `error` frame).
 pub enum PushRefused {
-    RateLimited,
+    /// Over the message rate limit. `retry_s` is seconds until the oldest counted event leaves
+    /// the 60 s window (carried as `retryS` on the error frame).
+    RateLimited {
+        retry_s: i64,
+    },
     NotAvailable,
 }
 
 impl PushRefused {
     pub fn code(&self) -> &'static str {
         match self {
-            PushRefused::RateLimited => "rate_limited",
+            PushRefused::RateLimited { .. } => "rate_limited",
             PushRefused::NotAvailable => "not_available",
         }
     }
 
     pub fn message(&self) -> &'static str {
         match self {
-            PushRefused::RateLimited => "slow down",
+            PushRefused::RateLimited { .. } => "slow down",
             PushRefused::NotAvailable => "this chat is not available",
+        }
+    }
+
+    pub fn retry_s(&self) -> Option<i64> {
+        match self {
+            PushRefused::RateLimited { retry_s } => Some(*retry_s),
+            PushRefused::NotAvailable => None,
         }
     }
 }
@@ -2532,24 +2633,29 @@ pub fn on_room_push(
     let Principal::Device { user_id, .. } = principal else {
         return Ok(Vec::new()); // boxes (agents) are metered by their owner's credits, not here
     };
-    let limit = if young_account(state, user_id) {
-        MSGS_PER_MIN / 2
-    } else {
-        MSGS_PER_MIN
-    };
-    if state
-        .db
-        .rate_event(user_id, "msg", 60_000)
-        .is_ok_and(|n| n > limit)
-    {
-        return Err(PushRefused::RateLimited);
-    }
     let Ok(cm) = load_chat(state, chat_id) else {
         return Err(PushRefused::NotAvailable);
     };
     let humans = human_user_ids(&cm);
     if state.db.blocked_by_any(user_id, &humans).unwrap_or(false) {
         return Err(PushRefused::NotAvailable);
+    }
+    let limit = if young_account(state, user_id) {
+        MSGS_PER_MIN / 2
+    } else {
+        MSGS_PER_MIN
+    };
+    // Count first; insert only when this push is allowed. A refused reconnect storm must not
+    // keep the user over the limit forever.
+    match state.db.rate_check_and_note(user_id, "msg", 60_000, limit) {
+        Ok(true) => {}
+        Ok(false) => {
+            let retry_s = state.db.rate_retry_s(user_id, "msg", 60_000).unwrap_or(1);
+            return Err(PushRefused::RateLimited { retry_s });
+        }
+        Err(_) => {
+            return Err(PushRefused::RateLimited { retry_s: 1 });
+        }
     }
     let (head, _) = state.db.room_activity(&room_of(chat_id)).unwrap_or((0, 0));
     let event = PushEventDto::PeopleMessage(PeopleMessagePayloadDto {
@@ -2618,6 +2724,81 @@ pub fn notify_agent_renamed(state: &AppState, project_id: &str) {
 }
 
 #[cfg(test)]
+mod push_rate_tests {
+    //! Only accepted people pushes insert a rate event (#1570).
+
+    use super::tests_support::{dm, person};
+    use super::*;
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    #[test]
+    fn refused_push_adds_no_rate_event_and_push_after_window_is_accepted() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 1);
+        let (bob, _) = person(&state, 2);
+        let chat = dm(&state, &alice, &bob);
+        let limit = 3;
+        for _ in 0..limit {
+            assert!(state
+                .db
+                .rate_check_and_note(&alice, "msg", 60_000, limit)
+                .unwrap());
+        }
+        assert_eq!(state.db.rate_count(&alice, "msg", 60_000).unwrap(), limit);
+
+        // Directly at the gate: over the limit → RateLimited, count unchanged.
+        // on_room_push uses MSGS_PER_MIN (or half); fill that window instead.
+        let real_limit = MSGS_PER_MIN / 2; // young account
+        while state.db.rate_count(&alice, "msg", 60_000).unwrap() < real_limit {
+            assert!(state
+                .db
+                .rate_check_and_note(&alice, "msg", 60_000, real_limit)
+                .unwrap());
+        }
+        let before = state.db.rate_count(&alice, "msg", 60_000).unwrap();
+        let err = on_room_push(&state, &alice_dev, &chat).unwrap_err();
+        assert!(matches!(err, PushRefused::RateLimited { retry_s } if retry_s >= 1));
+        assert_eq!(
+            state.db.rate_count(&alice, "msg", 60_000).unwrap(),
+            before,
+            "refused push must not insert"
+        );
+
+        // Age every event out of the window, then a push is accepted and counted once.
+        state
+            .db
+            .with(|c| {
+                c.execute("UPDATE rate_events SET at = at - 120000", [])?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(state.db.rate_count(&alice, "msg", 60_000).unwrap(), 0);
+        assert!(on_room_push(&state, &alice_dev, &chat).is_ok());
+        assert_eq!(state.db.rate_count(&alice, "msg", 60_000).unwrap(), 1);
+    }
+
+    #[test]
+    fn rate_check_and_note_counts_first() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        assert!(state
+            .db
+            .rate_check_and_note(&alice, "msg", 60_000, 2)
+            .unwrap());
+        assert!(state
+            .db
+            .rate_check_and_note(&alice, "msg", 60_000, 2)
+            .unwrap());
+        assert!(!state
+            .db
+            .rate_check_and_note(&alice, "msg", 60_000, 2)
+            .unwrap());
+        assert_eq!(state.db.rate_count(&alice, "msg", 60_000).unwrap(), 2);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     //! ACL invariant: only a member's devices (and the box of a project whose agent is in the
     //! chat) may touch a people room.
@@ -2628,6 +2809,39 @@ mod tests {
     use super::*;
     use crate::state::test_support::test_state;
     use crate::state::AuthMode;
+
+    /// #1538: an agent named after a person ("unarbos" by @unarbos) gets a suffix so `@unarbos`
+    /// keeps meaning the person; the boot sweep fixes existing ones; a free name is untouched.
+    #[test]
+    fn agent_names_stay_clear_of_people_handles() {
+        let state = test_state(AuthMode::Paircode);
+        let (jacob, _) = person(&state, 268993031); // login user268993031
+        assert_eq!(
+            agent_name_clear_of_people(&state, "User268993031"),
+            ("User268993031 agent".to_owned(), true)
+        );
+        assert_eq!(
+            agent_name_clear_of_people(&state, "Research"),
+            ("Research".to_owned(), false)
+        );
+        // An existing collision is renamed at boot and the box is told.
+        let pid = project_of(&state, &jacob, "user268993031");
+        rename_agents_that_shadow_people(&state);
+        let p = state.db.project(&pid).unwrap().unwrap();
+        assert_eq!(p.name, "user268993031 agent");
+        assert_ne!(agent_slug(&p.name), "user268993031");
+        let pushes = state.db.take_pushes(&pid).unwrap_or_default();
+        assert!(
+            pushes.iter().any(|(_, kind, _)| kind == "project_renamed"),
+            "{pushes:?}"
+        );
+        // Idempotent.
+        rename_agents_that_shadow_people(&state);
+        assert_eq!(
+            state.db.project(&pid).unwrap().unwrap().name,
+            "user268993031 agent"
+        );
+    }
 
     #[test]
     fn non_member_cannot_read_a_people_room() {
@@ -2681,6 +2895,63 @@ mod tests {
             .remove_member(&chat, &format!("user:{bob}"))
             .expect("leave");
         assert!(!state.allows(&bob_dev, &key));
+    }
+
+    /// #1580: the box roster lists each person's device ids (revoked ones too) so a row with
+    /// only a `deviceId` is attributed to its author; the apps' roster does not carry them.
+    #[test]
+    fn box_roster_carries_member_devices_and_the_app_roster_does_not() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 11);
+        let (bob, bob_dev) = person(&state, 12);
+        let chat = dm(&state, &alice, &bob);
+        let old = ulid();
+        state
+            .db
+            .insert_device(&old, "old phone", &ulid(), &bob, "github")
+            .expect("device");
+        state.db.revoke_device(&old).expect("revoke");
+        let cm = load_chat(&state, &chat).expect("chat");
+
+        let boxed = box_chat_json(&state, &cm, &alice, "box");
+        let devices_of = |v: &Value, user: &str| -> Vec<String> {
+            v["members"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|m| m["member"] == format!("user:{user}"))
+                .and_then(|m| m["devices"].as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|d| d.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let Principal::Device { id: bob_id, .. } = &bob_dev else {
+            panic!("device")
+        };
+        let Principal::Device { id: alice_id, .. } = &alice_dev else {
+            panic!("device")
+        };
+        let bobs = devices_of(&boxed, &bob);
+        assert!(bobs.contains(bob_id), "{bobs:?}");
+        assert!(bobs.contains(&old), "revoked devices still name their rows");
+        assert_eq!(devices_of(&boxed, &alice), vec![alice_id.clone()]);
+        let agent_rows: Vec<&Value> = boxed["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["devices"].is_array())
+            .collect();
+        assert_eq!(agent_rows.len(), 2, "humans only");
+
+        let app = chat_json(&state, &cm, &alice, alice_id);
+        assert!(app["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|m| m.get("devices").is_none()));
     }
 }
 

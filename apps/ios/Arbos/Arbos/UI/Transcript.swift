@@ -103,7 +103,7 @@ enum RowKind: Equatable {
     /// senders at all (group / channel, `rows(multiParty:)`); the name sits inside the bubble
     /// and `time` follows the text (Jacob, 2026-10-23).
     case other(text: String, handle: String, avatar: String?, named: Bool, quote: Quote?, time: String?)
-    case assistant(blocks: [Block], live: Bool, caption: String?)
+    case assistant(blocks: [Block], live: Bool, caption: String?, quote: Quote? = nil)
     /// Shared agent in a people chat: same shape as `.other` (avatar + bubble, name on each
     /// reply — consecutive answers from the same agent must not merge, #1447). No
     /// "answering @x · owned by @y" meta — ownership lives in the profile pane
@@ -114,7 +114,9 @@ enum RowKind: Equatable {
     case system(icon: String?, text: String, avatarProject: Id?)
     /// Grok Bot question card: bold question, × top-right, lettered answer rows.
     /// `questionId` is nil for a legacy `waiting_user` status line (no `question` part).
-    case question(questionId: String?, text: String, options: [ChoiceOption], multi: Bool, picked: [String], open: Bool)
+    /// `lane`: in a people chat the card sits after the sender's avatar lane, like the bubble it
+    /// belongs to (#1440 follow-up: the card must share the bubble's left edge and cap width).
+    case question(questionId: String?, text: String, options: [ChoiceOption], multi: Bool, picked: [String], open: Bool, lane: Bool)
     /// A file card; tap opens the media viewer on it (Open → Quick Look).
     case file(item: MediaItem, subtitle: String)
     case voiceMemo(name: String, projectId: Id, ref: String?, fromUser: Bool)
@@ -237,8 +239,13 @@ enum Transcript {
                 let lastTextPart = message.parts.lastIndex { $0.textValue != nil }
                 let firstTextPart = message.parts.firstIndex { $0.textValue != nil }
                 let agentId: String? = message.sender.hasPrefix("agent:") ? String(message.sender.dropFirst(6)) : nil
-                // Quote the user message this answers (`inReplyTo`); same chip as a human reply.
-                let replyQuote = message.inReplyTo.flatMap { $0.isEmpty ? nil : Quote.forReply($0, in: byId) }
+                // Quote the message this answers: `replyTo` is the platform reply the box sets by
+                // the #1521 rule (always in groups / channels / people chats and for a row another
+                // agent sent; in a 1:1 only when answering an earlier message than the latest).
+                // Member bubbles from older boxes fall back to `inReplyTo`; a plain 1:1 answer to
+                // the latest message carries no quote.
+                let platformQuote = message.replyTo.flatMap { $0.isEmpty ? nil : Quote.forReply($0, in: byId) }
+                let replyQuote = platformQuote ?? message.inReplyTo.flatMap { $0.isEmpty ? nil : Quote.forReply($0, in: byId) }
                 // Error parts wait until the prose is known: under a real answer they stay the
                 // chip with Retry; on an answer with no words they become the words.
                 var errors: [(id: Id, code: String, text: String)] = []
@@ -258,20 +265,30 @@ enum Transcript {
                                                            agentId: agentId,
                                                            quote: pix == firstTextPart ? replyQuote : nil,
                                                            time: pix == lastTextPart ? inlineTime : nil)))
+                        } else if message.role == .project, let from = Self.projectSender(message) {
+                            // Another agent wrote into this chat (agent-to-agent messaging):
+                            // the group member bubble — its avatar, its colour, its name above.
+                            chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
+                                             kind: .member(blocks: blocks, live: live, handle: from.handle,
+                                                           avatar: nil, named: pix == firstTextPart, agentId: from.projectId,
+                                                           quote: nil, time: pix == lastTextPart ? inlineTime : nil)))
                         } else {
                             chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
-                                             kind: .assistant(blocks: blocks, live: live, caption: nil)))
+                                             kind: .assistant(blocks: blocks, live: live, caption: nil,
+                                                              quote: pix == firstTextPart ? platformQuote : nil)))
                         }
                     case .status(let id, .askUser, let text):
                         // agentd writes a `question` part and this status line; the part wins.
                         if message.questions.isEmpty {
                             chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
-                                             kind: .question(questionId: nil, text: text, options: [], multi: false, picked: [], open: true)))
+                                             kind: .question(questionId: nil, text: text, options: [], multi: false, picked: [], open: true,
+                                                             lane: people && message.senderHandle != nil)))
                         }
                     case .question(let id, let q):
                         chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
                                          kind: .question(questionId: q.questionId, text: q.question, options: q.options,
-                                                         multi: q.multi, picked: q.answer, open: q.open)))
+                                                         multi: q.multi, picked: q.answer, open: q.open,
+                                                         lane: people && message.senderHandle != nil)))
                     case .status(let id, .handoff, let text):
                         // Legacy status line; the turn-based row above already covers it.
                         if handoffName == nil {
@@ -305,7 +322,10 @@ enum Transcript {
                     }
                 }
                 let failed = !errors.isEmpty || message.status == .error
-                if showsNothing, finished, !streaming, failed || onlyEmpty {
+                // A hand-off row (a subagent brief, an agent-to-agent send) is its own line
+                // ("Messaged ◉ X"); it never gets the stock line, even with no parts (#1466).
+                let handoffRow = handoffName != nil
+                if showsNothing, finished, !streaming, !handoffRow, failed || onlyEmpty {
                     let line: String = {
                         if let first = errors.first?.text.trimmingCharacters(in: .whitespacesAndNewlines), !first.isEmpty {
                             return first
@@ -331,6 +351,12 @@ enum Transcript {
                         chunk.append(Row(id: "\(message.id)#\(e.id)", messageId: message.id, role: .assistant, kind: .error(code: e.code, message: e.text)))
                     }
                 }
+            }
+            // Agent-to-agent messaging: the reply went back to the agent that wrote in.
+            if !streaming, let to = message.agentReplyTo?.trimmingCharacters(in: .whitespaces), !to.isEmpty,
+               message.role == .assistant {
+                chunk.append(Row(id: "\(message.id)#replied", messageId: message.id, role: .system,
+                                 kind: .system(icon: nil, text: "Replied to \u{FFFC}\(to)", avatarProject: nil)))
             }
             guard !chunk.isEmpty else { continue }
             for i in chunk.indices { chunk[i].createdAt = message.createdAt }
@@ -414,6 +440,15 @@ enum Transcript {
         }
         flush()
         return out
+    }
+
+    /// `sender: project:<id>` plus the row's `senderHandle` (or a slug of `senderName`): the
+    /// handle the member bubble is drawn with and the agent id its tap opens.
+    static func projectSender(_ message: Message) -> (handle: String, projectId: String)? {
+        guard message.sender.hasPrefix("project:") else { return nil }
+        let pid = String(message.sender.dropFirst("project:".count))
+        let handle = message.senderHandle ?? message.senderName.map { mentionSlug($0) } ?? pid
+        return (handle, pid)
     }
 
     /// Grok's wording: "Messaged ◉ A" (brief only), "Messaged ◉ A and ◉ B", or
@@ -732,9 +767,14 @@ enum Markdown {
 
 // MARK: - Row views
 
-struct RowView: View {
-    @EnvironmentObject private var model: AppModel
+struct RowView: View, Equatable {
+    /// Held without `@EnvironmentObject` / `@ObservedObject` so presence, typing
+    /// and the other ~60 `@Published` AppModel fields do not invalidate every
+    /// bubble. ChatView still observes the model and rebuilds rows when the
+    /// transcript changes; actions call through this reference.
+    let model: AppModel
     @Environment(\.theme) private var theme
+    @Environment(\.composerInset) private var composerInset
     let row: Row
     let chatId: Id
     let width: CGFloat
@@ -749,8 +789,8 @@ struct RowView: View {
     var onReply: (() -> Void)? = nil
     /// ChatView sets this while a reply swipe is locked so swipe-right-to-back does not fire.
     var replySwipeActive: Binding<Bool> = .constant(false)
-    /// Mention chips (Oct 23): who `@handle` resolves to.
-    private var mentions: MentionTable { MentionTable(model: model, theme: theme) }
+    /// Shared mention table from ChatView (built once per directory sync).
+    let mentions: MentionTable
 
     /// Trailing column width for swipe-revealed times (fits "12:59 PM").
     static let timeRevealWidth: CGFloat = 56
@@ -759,6 +799,18 @@ struct RowView: View {
 
     @State private var replyDrag: CGFloat = 0
     @State private var replyLocked = false
+
+    /// Skip re-drawing when the parent re-evaluates for an unrelated reason
+    /// (composer keystrokes, presence ticks). Closures / the swipe binding are
+    /// not compared — they stay valid for the open chat.
+    static func == (lhs: RowView, rhs: RowView) -> Bool {
+        lhs.row == rhs.row
+            && lhs.chatId == rhs.chatId
+            && lhs.width == rhs.width
+            && lhs.timeReveal == rhs.timeReveal
+            && lhs.highlighted == rhs.highlighted
+            && lhs.mentions === rhs.mentions
+    }
 
     private var maxBubble: CGFloat { max(200, width - Theme.bubbleInset) }
 
@@ -894,7 +946,7 @@ struct RowView: View {
                     PersonAvatar(url: avatar, handle: handle, size: Theme.memberAvatar, name: model.personName(handle: handle), id: model.personId(handle: handle))
                 }
                 .buttonStyle(.plain)
-                .padding(.leading, Theme.avatarColumnInset)
+                .padding(.leading, Theme.avatarColumnInset(composerInset: composerInset))
                 .accessibilityLabel("@\(handle), profile")
                 // Group / channel: the name inside the bubble, in the sender's colour,
                 // then the reply quote, then the text with the time after it.
@@ -922,7 +974,7 @@ struct RowView: View {
                 .padding(.vertical, Theme.bubbleVPad)
                 .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
                 .modifier(LiveSenderBar(url: avatar, seed: model.personId(handle: handle) ?? handle))
-                .frame(maxWidth: maxBubble - Theme.memberLane, alignment: .leading)
+                .frame(maxWidth: maxBubble - Theme.memberLane(composerInset: composerInset), alignment: .leading)
                 Spacer(minLength: 0)
             }
             .task(id: avatar) { SenderAccents.shared.load(url: avatar) }
@@ -939,7 +991,7 @@ struct RowView: View {
             }()
             HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
                 Button(action: openMember) { peopleAvatar(handle: handle, avatar: avatar) }
-                    .padding(.leading, Theme.avatarColumnInset)
+                    .padding(.leading, Theme.avatarColumnInset(composerInset: composerInset))
                     .buttonStyle(.plain)
                     .accessibilityLabel("@\(handle), profile")
                 memberBubble(
@@ -967,7 +1019,7 @@ struct RowView: View {
                                         .tint(theme.accent)
                                         .textSelection(.enabled)
                                 } else {
-                                    BlockView(block: block, live: live && i == blocks.count - 1)
+                                    BlockView(block: block, live: live && i == blocks.count - 1, mentions: mentions)
                                 }
                             }
                             if let time, lastParagraph == nil {
@@ -976,13 +1028,13 @@ struct RowView: View {
                         }
                     }
                 )
-                .frame(maxWidth: maxBubble - Theme.memberLane, alignment: .leading)
+                .frame(maxWidth: maxBubble - Theme.memberLane(composerInset: composerInset), alignment: .leading)
                 Spacer(minLength: 0)
             }
             .task(id: avatar) {
                 if memberProject(handle: handle) == nil { SenderAccents.shared.load(url: avatar) }
             }
-        case .assistant(let blocks, let live, let caption):
+        case .assistant(let blocks, let live, let caption, let quote):
             HStack {
                 VStack(alignment: .leading, spacing: 8) {
                     if let caption {
@@ -990,8 +1042,11 @@ struct RowView: View {
                             .font(theme.font(Theme.tiny, weight: .medium))
                             .foregroundStyle(theme.muted)
                     }
+                    if let quote {
+                        quoteHeader(quote, color: theme.text)
+                    }
                     ForEach(Array(blocks.enumerated()), id: \.offset) { i, block in
-                        BlockView(block: block, live: live && i == blocks.count - 1)
+                        BlockView(block: block, live: live && i == blocks.count - 1, mentions: mentions)
                     }
                 }
                 .padding(.horizontal, Theme.bubbleHPad)
@@ -1022,11 +1077,14 @@ struct RowView: View {
             .foregroundStyle(theme.muted)
             .frame(maxWidth: .infinity)
             .multilineTextAlignment(.center)
-        case .question(let questionId, let text, let options, let multi, let picked, let open):
-            HStack {
+        case .question(let questionId, let text, let options, let multi, let picked, let open, let lane):
+            // The card is a transcript row like a bubble: the same left edge (after the avatar
+            // lane in a people chat) and the same cap width as an incoming bubble.
+            HStack(spacing: 0) {
+                if lane { Color.clear.frame(width: Theme.memberLane(composerInset: composerInset), height: 1) }
                 QuestionCard(rowId: row.id, chatId: chatId, questionId: questionId, title: text, options: options,
                              multi: multi, picked: picked, open: open)
-                    .frame(maxWidth: maxBubble, alignment: .leading)
+                    .frame(maxWidth: lane ? maxBubble - Theme.memberLane(composerInset: composerInset) : maxBubble, alignment: .leading)
                 Spacer(minLength: 0)
             }
         case .file(let item, let subtitle):
@@ -1111,7 +1169,8 @@ struct RowView: View {
     /// Match the avatar offset used by people-chat bubbles (26 pt + 8 pt gap).
     private var reactionLeading: CGFloat {
         switch row.kind {
-        case .other, .member: return Theme.memberLane
+        case .other, .member: return Theme.memberLane(composerInset: composerInset)
+        case .question(_, _, _, _, _, _, let lane): return lane ? Theme.memberLane(composerInset: composerInset) : 0
         default: return 0
         }
     }
@@ -1267,12 +1326,11 @@ struct RowView: View {
 }
 
 struct BlockView: View {
-    @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
     let block: Block
     let live: Bool
-    /// Mention chips (Oct 23): who `@handle` resolves to.
-    private var mentions: MentionTable { MentionTable(model: model, theme: theme) }
+    /// Shared mention table from the row (built once per directory sync).
+    let mentions: MentionTable
 
     var body: some View {
         switch block {

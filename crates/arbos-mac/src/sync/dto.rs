@@ -23,10 +23,10 @@ use crate::model::{
     AccountView, AgentMember, BoxState, Call, CallKind, ChannelBinding, ChannelPairing,
     ChannelPlatform, ChannelPlatformState, ChannelsView, Chat, ChatKind, ConnectedVault, Connector,
     ConnectorAction, ConnectorProvider, ConnectorStatus, ConnectorsView, Effort, Id, LocalDevice,
-    LocalView, Machine, MachineState, Person, Project, ProjectMachine, ProjectSecretAccess,
-    ProjectSecrets, Reachable, ReachableDevice, ReplyPolicy, Routine, RoutineRun, RoutineRunStatus,
-    RoutineTrigger, Secret, SecretActivity, SecretAgent, SecretDirector, SecretRequest,
-    SecretScope, SecretsView, Sender, Skill, SpaceKind, Voice,
+    LocalView, Machine, MachineState, MessageGrant, Person, Project, ProjectMachine,
+    ProjectSecretAccess, ProjectSecrets, Reachable, ReachableDevice, ReplyPolicy, Routine,
+    RoutineRun, RoutineRunStatus, RoutineTrigger, Secret, SecretActivity, SecretAgent,
+    SecretDirector, SecretRequest, SecretScope, SecretsView, Sender, Skill, SpaceKind, Voice,
 };
 use crate::sync::credentials::{AccountUser, DeviceCredentials};
 
@@ -255,6 +255,9 @@ impl From<&CallDto> for Call {
             reason: c.reason.clone(),
             participants: c.participants.iter().map(Sender::from).collect(),
             agents: c.agents.iter().map(Sender::from).collect(),
+            speak_mode: c.speak_mode.clone(),
+            invited_speakers: c.invited_speakers.iter().map(Sender::from).collect(),
+            can_speak: c.can_speak,
         }
     }
 }
@@ -676,6 +679,7 @@ pub(crate) fn project_from_dto(
         people,
         shared: p.shared.unwrap_or(false),
         owner_handle: p.owner_handle.clone().flatten().filter(|h| !h.is_empty()),
+        archived_at: p.archived_at.flatten().filter(|t| *t > 0).map(|t| t as u64),
         avatar: non_empty(&p.avatar),
         avatar_color: non_empty(&p.avatar_color),
         description: non_empty(&p.description),
@@ -690,34 +694,58 @@ pub(crate) fn project_from_dto(
         avatar_leaf: p.avatar_leaf.and_then(leaf_index),
         avatar_leaf_color: p.avatar_leaf_color.and_then(leaf_index),
         image_url: None,
+        message_grants: p.message_grants.iter().map(message_grant_from).collect(),
+    }
+}
+
+fn message_grant_from(g: &arbos_core::api::MessageGrantDto) -> MessageGrant {
+    MessageGrant {
+        grantee: g.grantee.clone(),
+        kind: g.kind.clone(),
+        id: g.id.clone(),
+        name: g.name.clone().filter(|n| !n.is_empty()),
+        handle: g.handle.clone().filter(|h| !h.is_empty()),
+        avatar_url: g.avatar_url.clone().unwrap_or_default(),
+        enabled: g.enabled,
+        note: g.note.clone(),
+        created_at: g.created_at,
+        last_at: g.last_at,
     }
 }
 
 /// The relay's verdict for one chat: `GET /me/unread` is the user's read cursor and names
-/// every chat with something unread, so when it answered, a chat it leaves out is read.
-/// Only when it did not answer (`None`: older relay) does the chat's own `unread` flag count.
+/// every chat with something unread (with a message count), so when it answered, a chat it
+/// leaves out is read. Only when it did not answer (`None`: older relay) does the chat's own
+/// `unread` flag count — then `known_count` (at least 1) stands in for the missing total.
 pub(crate) fn relay_unread_for(
-    unread_by_chat: Option<&HashMap<Id, bool>>,
+    unread_by_chat: Option<&HashMap<Id, u32>>,
     chat_id: &str,
     chat_flag: bool,
-) -> bool {
+    known_count: u32,
+) -> u32 {
     match unread_by_chat {
-        Some(map) => map.get(chat_id).copied().unwrap_or(false),
-        None => chat_flag,
+        Some(map) => map.get(chat_id).copied().unwrap_or(0),
+        None => {
+            if chat_flag {
+                known_count.max(1)
+            } else {
+                0
+            }
+        }
     }
 }
 
-/// Merge the relay's unread flag with a local read mark.
+/// Merge the relay's unread message count with a local read mark.
 ///
 /// The relay wins, except when this device marked the chat read at or after
 /// the relay's last activity (our `PUT /read` has not landed yet).
 pub(crate) fn merged_unread(
-    relay_unread: bool,
+    relay_unread: u32,
     local_read_at: Option<i64>,
     last_activity_at: i64,
-) -> bool {
+) -> u32 {
     if local_read_at.is_some_and(|at| at >= last_activity_at) {
-        return false;
+        return 0;
     }
     relay_unread
 }
@@ -794,6 +822,7 @@ pub(crate) fn chat_from_dto(dto: &ChatDto) -> Chat {
         kind: chat_kind(&dto.kind),
         participants: dto.participants.clone(),
         unread: false,
+        unread_count: 0,
         last_message_at: dto.created_at.max(0) as u64,
         archived_at: dto
             .archived_at
@@ -963,6 +992,7 @@ pub(crate) fn people_space_from(
         owner_person: None,
         machine_info: None,
         muted: dto.me.muted.unwrap_or(false),
+        archived_at: None,
         primary_chat: None,
         voice: None,
         vision_enabled: true,
@@ -976,6 +1006,7 @@ pub(crate) fn people_space_from(
             .as_deref()
             .and_then(non_empty)
             .map(|k| format!("{http_url}/blob/people:{id}/{k}?token={token}")),
+        message_grants: Vec::new(),
     };
     let chat = Chat {
         id: id.clone(),
@@ -986,6 +1017,7 @@ pub(crate) fn people_space_from(
         kind: ChatKind::Chat,
         participants: Vec::new(),
         unread: dto.unread,
+        unread_count: u32::from(dto.unread),
         last_message_at: dto.last_activity_at.max(0) as u64,
         archived_at: dto.archived_at.filter(|t| *t > 0).map(|t| t as u64),
     };
@@ -1197,24 +1229,21 @@ mod tests {
 
     #[test]
     fn merged_unread_relay_and_local_read() {
-        assert!(merged_unread(true, None, 1_700_000_000_000));
-        assert!(!merged_unread(
-            true,
-            Some(1_700_000_000_100),
-            1_700_000_000_000
-        ));
-        assert!(!merged_unread(false, None, 1_700_000_000_000));
-        assert!(!merged_unread(
-            false,
-            Some(1_700_000_000_100),
-            1_700_000_000_000
-        ));
+        assert_eq!(merged_unread(2, None, 1_700_000_000_000), 2);
+        assert_eq!(
+            merged_unread(2, Some(1_700_000_000_100), 1_700_000_000_000),
+            0
+        );
+        assert_eq!(merged_unread(0, None, 1_700_000_000_000), 0);
+        assert_eq!(
+            merged_unread(0, Some(1_700_000_000_100), 1_700_000_000_000),
+            0
+        );
         // Local read before the latest activity: relay still wins.
-        assert!(merged_unread(
-            true,
-            Some(1_699_999_999_000),
-            1_700_000_000_000
-        ));
+        assert_eq!(
+            merged_unread(2, Some(1_699_999_999_000), 1_700_000_000_000),
+            2
+        );
     }
 
     /// #1438: `GET /me/unread` is the user's cursor. A chat it does not list is read even when
@@ -1222,11 +1251,12 @@ mod tests {
     /// counts when the endpoint did not answer.
     #[test]
     fn me_unread_is_authoritative_when_served() {
-        let served: HashMap<Id, bool> = HashMap::from([("dm".to_string(), true)]);
-        assert!(relay_unread_for(Some(&served), "dm", false));
-        assert!(!relay_unread_for(Some(&served), "group", true));
-        assert!(relay_unread_for(None, "group", true));
-        assert!(!relay_unread_for(None, "group", false));
+        let served: HashMap<Id, u32> = HashMap::from([("dm".to_string(), 2)]);
+        assert_eq!(relay_unread_for(Some(&served), "dm", false, 0), 2);
+        assert_eq!(relay_unread_for(Some(&served), "group", true, 1), 0);
+        assert_eq!(relay_unread_for(None, "group", true, 0), 1);
+        assert_eq!(relay_unread_for(None, "group", true, 4), 4);
+        assert_eq!(relay_unread_for(None, "group", false, 0), 0);
     }
 
     fn sample_chat(id: &str, project_id: &str, title: &str, archived_at: Option<u64>) -> Chat {
@@ -1239,6 +1269,7 @@ mod tests {
             kind: ChatKind::Chat,
             participants: Vec::new(),
             unread: false,
+            unread_count: 0,
             last_message_at: 1_000,
             archived_at,
         }
@@ -1310,26 +1341,61 @@ mod tests {
             project_id: "proj_fixture".into(),
             unread: 3,
         });
-        let by_id: HashMap<&str, bool> = unread
+        let by_id: HashMap<&str, u32> = unread
             .chats
             .iter()
-            .map(|c| (c.chat_id.as_str(), c.unread > 0))
+            .map(|c| (c.chat_id.as_str(), c.unread.max(0) as u32))
             .collect();
-        assert_eq!(by_id.get("people_dm"), Some(&true));
-        assert_eq!(by_id.get("chat_fixture"), Some(&true));
+        assert_eq!(by_id.get("people_dm"), Some(&2));
+        assert_eq!(by_id.get("chat_fixture"), Some(&3));
+        assert_eq!(
+            by_id.values().copied().sum::<u32>(),
+            unread.total.max(0) as u32 + 3
+        );
 
         let dto: ChatDto = load_json("chat_json_for.json");
         let mut chat = chat_from_dto(&dto);
         assert!(!chat.unread);
-        let relay = by_id.get(chat.id.as_str()).copied().unwrap_or(false);
-        chat.unread = merged_unread(relay, None, chat.last_message_at as i64);
+        assert_eq!(chat.unread_count, 0);
+        let relay = by_id.get(chat.id.as_str()).copied().unwrap_or(0);
+        let count = merged_unread(relay, None, chat.last_message_at as i64);
+        chat.unread_count = count;
+        chat.unread = count > 0;
         assert!(chat.unread);
-        chat.unread = merged_unread(
+        assert_eq!(chat.unread_count, 3);
+        assert_eq!(chat.missed_count(), 3);
+        let count = merged_unread(
             relay,
             Some(chat.last_message_at as i64 + 1),
             chat.last_message_at as i64,
         );
+        chat.unread_count = count;
+        chat.unread = count > 0;
         assert!(!chat.unread);
+        assert_eq!(chat.unread_count, 0);
+    }
+
+    #[test]
+    fn missed_count_sums_messages_not_chats() {
+        let a = Chat {
+            unread: true,
+            unread_count: 5,
+            ..sample_chat("a", "p", "A", None)
+        };
+        let b = Chat {
+            unread: true,
+            unread_count: 2,
+            ..sample_chat("b", "p", "B", None)
+        };
+        let live = Chat {
+            unread: true,
+            unread_count: 0,
+            ..sample_chat("c", "p", "C", None)
+        };
+        assert_eq!(
+            [a, b, live].iter().map(Chat::missed_count).sum::<usize>(),
+            8
+        );
     }
 
     #[test]

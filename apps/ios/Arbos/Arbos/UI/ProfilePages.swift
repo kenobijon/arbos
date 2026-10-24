@@ -276,11 +276,22 @@ struct PaneDangerRow: View {
     let title: String
     let action: () -> Void
 
+    var body: some View { PaneActionRow(title: title, color: theme.danger, action: action) }
+}
+
+/// A centred one-label action in its own card, in the given colour — the
+/// non-destructive twin of `PaneDangerRow` (Unblock in the accent colour).
+struct PaneActionRow: View {
+    @Environment(\.theme) private var theme
+    let title: String
+    let color: Color
+    let action: () -> Void
+
     var body: some View {
         Button(action: action) {
             Text(title)
                 .font(theme.font(Theme.body))
-                .foregroundStyle(theme.danger)
+                .foregroundStyle(color)
                 .frame(maxWidth: .infinity)
                 .frame(minHeight: PaneKit.rowHeight)
                 .contentShape(Rectangle())
@@ -587,6 +598,23 @@ struct ChatItemsList: View {
 
 // MARK: - User page
 
+/// The person pane's footer row (#1545): Block user / Unblock derives from the relay's
+/// block list (`AppModel.blocked`, `GET /blocks`), never from a local flag, so it is right
+/// on pane re-open and app relaunch. The Mac twin is `app.rs` `blocked_entry` /
+/// `user.rs` `block_row_label`.
+enum BlockRow {
+    /// The block-list entry for a person: same non-empty id, else the same handle
+    /// (GitHub logins are case-insensitive).
+    static func entry(in blocked: [Person], id: String, handle: String) -> Person? {
+        blocked.first { b in
+            (!b.id.isEmpty && b.id == id)
+                || (!b.handle.isEmpty && b.handle.caseInsensitiveCompare(handle) == .orderedSame)
+        }
+    }
+
+    static func title(blocked: Bool) -> String { blocked ? "Unblock" : "Block user" }
+}
+
 struct UserProfileView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
@@ -609,6 +637,7 @@ struct UserProfileView: View {
     }
     @State private var fresh: Person?
     private var isMe: Bool { peerId == model.user?.id || person.id == model.user?.id }
+    private var blockedEntry: Person? { BlockRow.entry(in: model.blocked, id: peerId, handle: peerHandle) }
     private var items: [ChatItem] {
         guard let dm else { return [] }
         return ChatMedia.items(messages: model.messages(of: dm.id), slot: "\(peopleSlot):\(dm.id)", model: model)
@@ -639,20 +668,22 @@ struct UserProfileView: View {
                         body: tab == "Links"
                             ? [.custom(AnyView(ChatItemsList(items: items, kind: .link, empty: dm == nil ? "No chat with \(person.displayName) yet." : "No links shared yet.")))]
                             : groupsSections,
-                        footer: isMe ? [] : [.card([AnyView(ProfileLinkRow(title: "Block user", destructive: true) { confirmBlock = true })])]
+                        footer: isMe ? [] : [.card([AnyView(blockRow)])]
                     )
                     Color.clear.frame(height: 40)
                 }
             }
+            .scrollIndicators(.visible)
             ProfileTopBar { EmptyView() }
         }
         .confirmationDialog("Block @\(person.handle)?", isPresented: $confirmBlock, titleVisibility: .visible) {
             Button("Block", role: .destructive) {
+                // The pane stays open: the row flips to Unblock once the relay lists them.
                 if let m = dm?.humans.first(where: isPeer) { model.block(m) } else { model.block(handle: peerHandle) }
-                dismiss()
             }
         } message: { Text("They cannot message you or add you to chats.") }
         .task {
+            await model.refreshBlocks()
             await model.refreshPeople()
             let id = model.personId(handle: person.handle) ?? person.id
             fresh = await model.fetchUser(id)
@@ -666,6 +697,15 @@ struct UserProfileView: View {
                 avatarColorIndex: fresh?.avatarColorIndex ?? person.avatarColorIndex
             )
             sharedProjects = await model.sharedProjects(with: who)
+        }
+    }
+
+    /// Block user (red) or Unblock (accent), from the relay's block list.
+    @ViewBuilder private var blockRow: some View {
+        if let entry = blockedEntry {
+            PaneActionRow(title: BlockRow.title(blocked: true), color: theme.accent) { model.unblock(entry) }
+        } else {
+            PaneDangerRow(title: BlockRow.title(blocked: false)) { confirmBlock = true }
         }
     }
 
@@ -717,6 +757,9 @@ struct GroupProfileView: View {
     @State private var pendingRemoveName: String?
     /// Human member (not you) whose row was tapped: offer View profile / Send private message.
     @State private var memberActions: ProfilePerson?
+    /// Footer confirm: leave (member) or delete (owner) this people group.
+    @State private var confirmLeave = false
+    @State private var confirmDelete = false
 
     private var people: PeopleChat? { model.peopleChat(chatId) }
     private var project: Project? { projectId.flatMap { model.project($0) } }
@@ -776,6 +819,20 @@ struct GroupProfileView: View {
         return others.isEmpty ? people.humans : others
     }
 
+    /// Footer on every tab for a people group: Leave group chat for members,
+    /// Delete group chat for the owner (same rule as the chat list).
+    private var leaveFooter: [PaneSection] {
+        guard let people, people.isGroup else { return [] }
+        if model.ownsGroup(people) {
+            return [.card([AnyView(ProfileLinkRow(title: "Delete group chat", destructive: true) {
+                confirmDelete = true
+            })])]
+        }
+        return [.card([AnyView(ProfileLinkRow(title: "Leave group chat", destructive: true) {
+            confirmLeave = true
+        })])]
+    }
+
     var body: some View {
         ZStack(alignment: .top) {
             theme.bg.ignoresSafeArea()
@@ -784,8 +841,8 @@ struct GroupProfileView: View {
                     Color.clear.frame(height: 80)
                     // The shared pane (D93): picture (crayon when a people group — it
                     // opens the edit sheet), name, member count, Members | Library.
-                    // No Mute / Leave footer (Jacob, 2026-10-20, same as the Mac):
-                    // leaving or deleting a group is the chat list's Delete.
+                    // Leave / Delete group chat in the footer (same rule as the chat
+                    // list: members leave, owners delete).
                     ProfilePane(
                         hero: PaneHero(
                             picture: .image(AnyView(heroPicture)),
@@ -794,7 +851,8 @@ struct GroupProfileView: View {
                         ),
                         tabs: PaneKinds.group,
                         selected: $tab,
-                        body: tab == "Members" ? membersSections : librarySections
+                        body: tab == "Members" ? membersSections : librarySections,
+                        footer: leaveFooter
                     )
                     Color.clear.frame(height: 40)
                 }
@@ -824,6 +882,32 @@ struct GroupProfileView: View {
                 pendingRemoveId = nil
                 pendingRemoveName = nil
             }
+        }
+        .confirmationDialog(
+            "Leave \(title)?",
+            isPresented: $confirmLeave,
+            titleVisibility: .visible
+        ) {
+            Button("Leave group chat", role: .destructive) {
+                model.leavePeopleChat(chatId)
+                dismiss()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("You leave the group. It stays for everyone else.")
+        }
+        .confirmationDialog(
+            "Delete \(title)?",
+            isPresented: $confirmDelete,
+            titleVisibility: .visible
+        ) {
+            Button("Delete group chat", role: .destructive) {
+                model.deletePeopleChat(chatId)
+                dismiss()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Deletes the group for everyone in it.")
         }
         .confirmationDialog(
             memberActions.map { $0.displayName } ?? "Member",
@@ -967,7 +1051,7 @@ struct GroupProfileView: View {
         // Send private message (other people), and for whoever may remove this member a
         // divider and Remove from group — which asks first (the confirm above) and then
         // lets the relay write "<me> removed X". Your own row never offers Remove;
-        // leaving is the chat list's Delete.
+        // leaving is the pane footer's Leave group chat (or Delete for the owner).
         .contextMenu {
             if r.agent == nil && !isMe {
                 Button {
@@ -995,13 +1079,17 @@ struct GroupProfileView: View {
         let media = items.filter { $0.kind == .media }
         let files = items.filter { $0.kind == .file }
         let voice = items.filter { $0.kind == .voice }
-        if media.isEmpty && files.isEmpty && voice.isEmpty {
+        // Links shared in the group, as in the agent pane's Library (DaWizzaa's ask,
+        // [feedback group-library-links-2026-10-23]).
+        let links = items.filter { $0.kind == .link }
+        if media.isEmpty && files.isEmpty && voice.isEmpty && links.isEmpty {
             return [.empty("Nothing shared here yet.")]
         }
         var out: [PaneSection] = []
         if !media.isEmpty { out += [.title("Images · \(media.count)"), .grid(media)] }
         if !files.isEmpty { out += [.title("Files · \(files.count)"), .files(files)] }
         if !voice.isEmpty { out += [.title("Voice · \(voice.count)"), .voice(voice)] }
+        if !links.isEmpty { out += [.title("Links · \(links.count)"), .links(links)] }
         return out
     }
 
