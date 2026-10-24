@@ -94,6 +94,12 @@ enum DebugHooks {
     /// Log frame pacing (dropped frames, worst frame, time over budget) and memory every
     /// 2 s to `com.unarbos.arbos.ios` / `perf` for the duration of the launch.
     static var perfLog: Bool { value("ARBOS_PERF_LOG") == "1" }
+    /// Seed the fixture group from a Loro snapshot file (a relay export of a real chat).
+    static var fixtureDoc: String? { value("ARBOS_FIXTURE_DOC") }
+    /// Perf rig drivers, run a few seconds after the chat opens: `scroll` pages the
+    /// transcript to its top and back, `type` appends 40 keystrokes to the composer,
+    /// `typing` fakes a member's typing presence every second. Comma-separated.
+    static var perfDrive: Set<String> { Set((value("ARBOS_PERF_DRIVE") ?? "").split(separator: ",").map(String.init)) }
     /// Scripted tour for the screen recording (fixture only).
     static var demo: Bool { value("ARBOS_DEMO") == "1" }
     /// Scripted tour against the live relay: sends ARBOS_AUTO_SEND, waits for the reply, tours the sheets.

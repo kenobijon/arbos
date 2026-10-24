@@ -342,6 +342,10 @@ struct ChatView: View {
             if let name = m.project?.name ?? m.name, !name.isEmpty { agentNames[id] = name }
         }
         let list = messages
+        #if DEBUG
+        let refreshStarted = Date()
+        defer { PerfCounters.time("rows()", ms: Date().timeIntervalSince(refreshStarted) * 1000) }
+        #endif
         let byId = Transcript.index(list)
         // Sender names inside the bubbles: groups and channels only — never a 1:1 chat.
         let multiParty = isChannel || (people?.isGroup ?? false)
@@ -363,6 +367,9 @@ struct ChatView: View {
     }
 
     var body: some View {
+        #if DEBUG
+        let _ = PerfCounters.bump("chatBody")
+        #endif
         GeometryReader { geo in
             ZStack(alignment: .top) {
                 theme.bg.ignoresSafeArea()
@@ -570,6 +577,10 @@ struct ChatView: View {
                     DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(ms)) { model.setRoomLink(chatId, .live) }
                 }
             }
+            #if DEBUG
+            let drive = DebugHooks.perfDrive
+            if !drive.isEmpty { Task { @MainActor in await runPerfDrive(drive) } }
+            #endif
             if let show = DebugHooks.show {
                 DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(DebugHooks.showDelayMs)) {
                     switch show {
@@ -1148,6 +1159,64 @@ struct ChatView: View {
             }
         }
     }
+
+    #if DEBUG
+    /// `ARBOS_PERF_DRIVE` (perf rig): scripted scroll / typing / typing-row load so the
+    /// frame log can be read per phase (`phase … begin/end` lines in the `perf` log).
+    private func runPerfDrive(_ drive: Set<String>) async {
+        try? await Task.sleep(for: .seconds(4))
+        if drive.contains("scroll") {
+            PerfLog.mark("phase scroll begin", ms: 0)
+            // Page up ~12 rows at a time to the oldest shown row (growing the window on
+            // the way), then page back down. Each hop is an animated scrollTo, so the
+            // rows between are laid out and drawn like a flick.
+            var hops = 0
+            while hops < 60 {
+                let shown = windowedRows
+                guard let proxy = scroller, let topId = shown.first?.id else { break }
+                let anchorIx = max(0, shown.count - 1 - (hops + 1) * 12)
+                let target = shown[anchorIx].id
+                withAnimation(.easeInOut(duration: 0.35)) { proxy.scrollTo(target, anchor: .top) }
+                try? await Task.sleep(for: .milliseconds(500))
+                hops += 1
+                if target == topId, windowCount >= visibleRows.count { break }
+            }
+            PerfLog.mark("phase scroll top", ms: 0)
+            try? await Task.sleep(for: .seconds(1))
+            withAnimation(.easeInOut(duration: 0.6)) { scroller?.scrollTo("bottom", anchor: .bottom) }
+            try? await Task.sleep(for: .seconds(2))
+            PerfLog.mark("phase scroll end", ms: 0)
+        }
+        if drive.contains("type") {
+            PerfLog.mark("phase type begin", ms: 0)
+            composerFocused = true
+            try? await Task.sleep(for: .milliseconds(800))
+            for ch in "hey everyone, is the launch call still at ten?" {
+                let t = Date()
+                draft.append(ch)
+                await Task.yield()
+                PerfCounters.time("keystroke", ms: Date().timeIntervalSince(t) * 1000)
+                try? await Task.sleep(for: .milliseconds(90))
+            }
+            try? await Task.sleep(for: .seconds(1))
+            PerfLog.mark("phase type end", ms: 0)
+            draft = ""
+            composerFocused = false
+        }
+        if drive.contains("typing") {
+            PerfLog.mark("phase typing begin", ms: 0)
+            let handles = (people?.humans ?? []).map(\.handle).filter { $0 != model.user?.login }.prefix(3)
+            for i in 0..<8 {
+                for h in handles {
+                    model.noteTyping(["handle": h, "typing": i % 2 == 0], chatId: chatId)
+                }
+                try? await Task.sleep(for: .seconds(1))
+            }
+            PerfLog.mark("phase typing end", ms: 0)
+        }
+        PerfLog.mark("phase done", ms: 0)
+    }
+    #endif
 
     /// Pin the transcript to its end once the rows have a height: the first
     /// `scrollTo` runs before layout knows the content size, so repeat after
@@ -2231,6 +2300,9 @@ private struct TranscriptRows: View, Equatable {
     }
 
     var body: some View {
+        #if DEBUG
+        let _ = PerfCounters.bump("transcriptRowsBody")
+        #endif
         ForEach(Array(shown.enumerated()), id: \.element.id) { i, row in
             let reply = canReply(row)
             RowView(model: model, row: row, chatId: chatId, width: width, timeReveal: timeReveal,

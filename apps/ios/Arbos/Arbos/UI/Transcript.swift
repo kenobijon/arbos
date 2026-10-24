@@ -825,6 +825,9 @@ struct RowView: View, Equatable {
     }
 
     var body: some View {
+        #if DEBUG
+        let _ = PerfCounters.bump("rowBody")
+        #endif
         VStack(spacing: 4) {
             bubble
             if !row.reactions.isEmpty {
@@ -1320,6 +1323,9 @@ struct BlockView: View {
     let mentions: MentionTable
 
     var body: some View {
+        #if DEBUG
+        let _ = PerfCounters.bump("blockBody")
+        #endif
         switch block {
         case .paragraph(let text):
             if live {
