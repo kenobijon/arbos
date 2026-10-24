@@ -2513,6 +2513,10 @@ impl Shell {
                 .h(px(header::metrics::DRAG_OVERHANG))
                 .window_drag(),
         );
+        // Cap height and clip: a stretched overlay over a long transcript would
+        // otherwise centre the pill mid-pane ([feedback
+        // local-relay-unarbos-20261024065516774-20261024065609]; iPhone twin
+        // APuu1qHpbKmmpqZeUusEi0Q).
         column.child(body).children(bottom).child(
             div()
                 .absolute()
@@ -2520,6 +2524,8 @@ impl Shell {
                 .left_0()
                 .right_0()
                 .h(px(header::metrics::HEIGHT))
+                .max_h(px(header::metrics::HEIGHT))
+                .overflow_hidden()
                 .child(header_bar),
         )
     }
