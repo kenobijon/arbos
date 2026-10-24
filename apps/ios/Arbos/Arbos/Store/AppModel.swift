@@ -3775,7 +3775,7 @@ final class AppModel: ObservableObject {
         markUnacked(chatId: chatId, messageId: messageId)
         do {
             try doc.insertUserMessage(id: messageId, text: text, deviceId: deviceId, attachments: attachments,
-                                      replyTo: replyTo)
+                                      author: projectAuthor(projectId: chat.projectId), replyTo: replyTo)
             try doc.pushCommand(command, payload: extra.merging(["messageId": messageId]) { _, new in new }, device: deviceId)
             if !chat.isPinned && chat.title == "New chat" {
                 let title = AppModel.title(from: text)
@@ -3793,6 +3793,16 @@ final class AppModel: ObservableObject {
         if let p = project(chat.projectId), p.state.isAsleep || p.state == .error {
             wake(projectId: p.id, reason: "send")
         }
+    }
+
+    /// Author fields for a row in a project chat (API §3/§7, same as the Mac): always the
+    /// handle and display name, so the agent addresses the writer by name; `sender: user:<id>`
+    /// in a project someone shared with me, so a guest's words are never read as the owner's
+    /// (#1580). A solo project keeps the plain `user` the box expects.
+    private func projectAuthor(projectId: Id) -> CoreChatDoc.Author? {
+        guard let me = user else { return nil }
+        let shared = project(projectId)?.shared == true
+        return CoreChatDoc.Author(sender: shared ? "user:\(me.id)" : "user", handle: me.login, name: me.name, avatar: nil)
     }
 
     /// A send typed before the optimistic new-chat's relay id landed.
