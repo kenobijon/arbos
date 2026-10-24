@@ -729,6 +729,87 @@ pub(crate) fn recent_people_context(
     out
 }
 
+/// An active exchange: this agent answered this person moments ago, and nobody else took the
+/// thread since. Their next un-mentioned line ("Who is in this chat?", "How many messages are
+/// there?") is for the agent — the decision model must not get a vote on it (2026-10-23 23:53,
+/// Arbonites: jev scored the follow-ups 0.29 and 0.47 against a 0.50 bar; #1573).
+pub const FOLLOW_UP_WINDOW_MS: i64 = 3 * 60 * 1000;
+/// How many rows back the agent's last reply may sit for the thread to still be "active".
+pub const FOLLOW_UP_MESSAGES: usize = 8;
+
+/// Is `user_msg_id` a direct follow-up in an active exchange between its sender and `me`
+/// (`agent:<project_id>`)? True when, within the last [`FOLLOW_UP_MESSAGES`] rows and
+/// [`FOLLOW_UP_WINDOW_MS`], the newest agent reply is this agent's and it answered the same
+/// person; false as soon as another agent replied or was @mentioned in between.
+pub(crate) fn follow_up_in_active_exchange(
+    messages: &[MessageView],
+    user_msg_id: &str,
+    me: &str,
+) -> bool {
+    let Some(i) = messages.iter().position(|m| m.id == user_msg_id) else {
+        return false;
+    };
+    let msg = &messages[i];
+    if msg.role != "user" {
+        return false;
+    }
+    let sender = msg.rest.get("sender").and_then(Value::as_str).unwrap_or("");
+    if sender.is_empty() || sender.starts_with("agent:") || sender.starts_with("project:") {
+        return false;
+    }
+    let at = msg
+        .rest
+        .get("createdAt")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let sender_of = |id: &str| -> Option<String> {
+        messages
+            .iter()
+            .find(|m| m.id == id)
+            .and_then(|m| m.rest.get("sender").and_then(Value::as_str))
+            .map(str::to_owned)
+    };
+    let start = i.saturating_sub(FOLLOW_UP_MESSAGES);
+    for m in messages[start..i].iter().rev() {
+        if m.role == "assistant" {
+            let from = m.rest.get("sender").and_then(Value::as_str).unwrap_or("");
+            if from != me {
+                // Another agent has the thread.
+                return false;
+            }
+            let reply_at = m.rest.get("createdAt").and_then(Value::as_i64).unwrap_or(0);
+            if at - reply_at > FOLLOW_UP_WINDOW_MS {
+                return false;
+            }
+            // My reply must have been to this same person (or to nobody in particular).
+            return match m
+                .rest
+                .get("inReplyTo")
+                .and_then(Value::as_str)
+                .and_then(sender_of)
+            {
+                Some(asked_by) => asked_by == sender,
+                None => true,
+            };
+        }
+        if m.role == "user"
+            && m.rest
+                .get("mentions")
+                .and_then(Value::as_array)
+                .is_some_and(|a| {
+                    a.iter().any(|v| {
+                        v.as_str()
+                            .is_some_and(|s| s.starts_with("agent:") && s != me)
+                    })
+                })
+        {
+            // Someone called another agent in between: the thread is theirs now.
+            return false;
+        }
+    }
+    false
+}
+
 impl Agent {
     /// After a rename (#1481): patch every cached people-chat row so `@newslug` still wakes this
     /// agent and the prelude / reply attribution speak the live name — without waiting for the
@@ -983,7 +1064,7 @@ impl Agent {
         user_msg_id: &str,
         info: &PeopleChatInfo,
     ) -> (bool, &'static str) {
-        let (msg, replied_to_mine, recent) = {
+        let (msg, replied_to_mine, recent, follow_up) = {
             let h = host.lock().await;
             let Some(msg) = h.doc.message(user_msg_id) else {
                 return (false, "message not in the doc");
@@ -1000,8 +1081,10 @@ impl Agent {
                             && m.rest.get("deviceId").and_then(Value::as_str)
                                 == Some(self.cfg.device_id.as_str()))
                 });
-            let recent = recent_people_context(&h.doc.messages(), user_msg_id, RESPOND_RECENT_MAX);
-            (msg, replied_to_mine, recent)
+            let all = h.doc.messages();
+            let recent = recent_people_context(&all, user_msg_id, RESPOND_RECENT_MAX);
+            let follow_up = follow_up_in_active_exchange(&all, user_msg_id, &me);
+            (msg, replied_to_mine, recent, follow_up)
         };
         let every = info.settings["reply_policy"].as_str() == Some("every_message");
         // Bare person name / people-only address in the prose ("Allan?", "Ken") wins over a
@@ -1056,6 +1139,11 @@ impl Agent {
         // for Ken). Mid-line @person references alone still reach the decision model.
         if addressed_only_to_people(&msg) {
             return (false, "addressed to people only");
+        }
+        // @mentions set the order, never a filter: a direct follow-up from the person this
+        // agent just answered is answered, in context, without asking the decision model.
+        if follow_up {
+            return (true, "follow-up in an active exchange with me");
         }
         if !info.is_group() {
             return (false, "unaddressed in a DM");
@@ -2079,5 +2167,87 @@ mod gate_record_tests {
         let after = agent.store.t3_after(reply.at, Some(chat), 50).unwrap();
         assert!(after.iter().all(|(r, _)| r.at > reply.at));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Jacob (2026-10-23 23:54, Arbonites): "@testagent who is in this chat" was answered, the
+    /// un-mentioned "How many messages are there?" ten seconds later was not (jev 0.47 < 0.50).
+    /// @mentions set the order, never a filter: a follow-up from the person the agent just
+    /// answered is for the agent, decision model or not.
+    #[test]
+    fn follow_up_in_an_active_exchange_is_for_me() {
+        const ME: &str = "agent:01HPROJ";
+        let t0 = 1_792_799_600_000_i64;
+        let row = |id: &str, role: &str, sender: &str, at: i64, extra: Value| {
+            let mut rest = json!({ "sender": sender, "createdAt": at });
+            if let (Some(r), Some(e)) = (rest.as_object_mut(), extra.as_object()) {
+                for (k, v) in e {
+                    r.insert(k.clone(), v.clone());
+                }
+            }
+            MessageView {
+                id: id.into(),
+                role: role.into(),
+                status: "done".into(),
+                parts: vec![json!({ "kind": "text", "text": "…" })],
+                rest,
+            }
+        };
+        let thread = vec![
+            row("q1", "user", "user:const", t0, json!({ "mentions": [ME] })),
+            row(
+                "a1",
+                "assistant",
+                ME,
+                t0 + 4_000,
+                json!({ "inReplyTo": "q1" }),
+            ),
+            row("q2", "user", "user:const", t0 + 14_000, json!({})),
+        ];
+        assert!(follow_up_in_active_exchange(&thread, "q2", ME));
+        // Someone else's question is not my follow-up.
+        let other = vec![
+            thread[0].clone(),
+            thread[1].clone(),
+            row("q2", "user", "user:sam", t0 + 14_000, json!({})),
+        ];
+        assert!(!follow_up_in_active_exchange(&other, "q2", ME));
+        // Another agent answered in between: the thread is theirs.
+        let taken = vec![
+            thread[0].clone(),
+            thread[1].clone(),
+            row("a2", "assistant", "agent:OTHER", t0 + 8_000, json!({})),
+            row("q2", "user", "user:const", t0 + 14_000, json!({})),
+        ];
+        assert!(!follow_up_in_active_exchange(&taken, "q2", ME));
+        // Another agent was called in between.
+        let called = vec![
+            thread[0].clone(),
+            thread[1].clone(),
+            row(
+                "q1b",
+                "user",
+                "user:const",
+                t0 + 8_000,
+                json!({ "mentions": ["agent:OTHER"] }),
+            ),
+            row("q2", "user", "user:const", t0 + 14_000, json!({})),
+        ];
+        assert!(!follow_up_in_active_exchange(&called, "q2", ME));
+        // Too late: the exchange is over.
+        let late = vec![
+            thread[0].clone(),
+            thread[1].clone(),
+            row(
+                "q2",
+                "user",
+                "user:const",
+                t0 + 4_000 + FOLLOW_UP_WINDOW_MS + 1,
+                json!({}),
+            ),
+        ];
+        assert!(!follow_up_in_active_exchange(&late, "q2", ME));
+        // Never answered anyone: nothing to follow up on.
+        let cold = vec![row("q2", "user", "user:const", t0, json!({}))];
+        assert!(!follow_up_in_active_exchange(&cold, "q2", ME));
     }
 }
