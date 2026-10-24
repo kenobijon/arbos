@@ -2852,8 +2852,23 @@ impl AppState {
         cx.notify();
     }
 
+    /// Can the open space take a new tab (⌘T, the pill's "+", the dropdown's
+    /// New tab)? Only an agent's own chats: people DMs and groups and server
+    /// channels have no project chats, so there the shortcut is a no-op and
+    /// the controls are absent (Jacob 2026-10-23: "New chat failed: HTTP 404
+    /// no such project" from ⌘T in a group).
+    pub fn can_new_tab(&self) -> bool {
+        new_tab_allowed(
+            self.multi_chat,
+            self.selected_project
+                .as_deref()
+                .and_then(|id| self.project(id)),
+            self.selected_channel.is_some(),
+        )
+    }
+
     pub fn new_tab(&mut self, cx: &mut Context<Self>) {
-        if !self.multi_chat {
+        if !self.can_new_tab() {
             return;
         }
         let Some(project_id) = self.selected_project.clone() else {
@@ -8473,6 +8488,21 @@ fn device_name() -> String {
     }
 }
 
+/// The one rule behind ⌘T, the header pill's "+" and the tab dropdown's New
+/// tab: only an agent's own space takes a new tab. People DMs and groups
+/// (`SpaceKind::Dm` / `Group`) have no project chats, a server channel has no
+/// space at all, and the whole thing sits behind the multi-chat flag.
+pub(crate) fn new_tab_allowed(
+    multi_chat: bool,
+    space: Option<&Project>,
+    channel_open: bool,
+) -> bool {
+    if !multi_chat || channel_open {
+        return false;
+    }
+    space.is_some_and(|p| !p.is_people())
+}
+
 /// The local row of a session fork (#1257): the same project, a plain chat
 /// titled `<title> (fork)`, nothing pinned or shared. `None` when `source`
 /// cannot be forked (groups, system tabs, chats of shared or people spaces).
@@ -8797,6 +8827,58 @@ mod trim_tests {
             }
         });
         assert!(trim_rect(&img).is_none());
+    }
+}
+
+#[cfg(test)]
+mod new_tab_scope_tests {
+    //! Jacob (2026-10-23, Arbonites group): ⌘T in a group chat tried to create
+    //! a project chat and the relay answered "no such project". New tab is an
+    //! agent-space affordance only — the same gate decides the shortcut, the
+    //! pill's "+" and the dropdown row, so none of them exist for people rooms
+    //! or channels.
+    use super::*;
+    use crate::model::SpaceKind;
+
+    fn space(kind: SpaceKind) -> Project {
+        Project {
+            id: "s-1".into(),
+            name: "Space".into(),
+            kind,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn agent_space_keeps_new_tab() {
+        assert!(new_tab_allowed(
+            true,
+            Some(&space(SpaceKind::Project)),
+            false
+        ));
+    }
+
+    #[test]
+    fn people_rooms_and_channels_have_no_new_tab() {
+        assert!(!new_tab_allowed(
+            true,
+            Some(&space(SpaceKind::Group)),
+            false
+        ));
+        assert!(!new_tab_allowed(true, Some(&space(SpaceKind::Dm)), false));
+        // A channel in the centre: no space selected, channel open.
+        assert!(!new_tab_allowed(true, None, true));
+        // Nothing open at all.
+        assert!(!new_tab_allowed(true, None, false));
+    }
+
+    #[test]
+    fn multi_chat_off_hides_it_everywhere() {
+        assert!(!new_tab_allowed(
+            false,
+            Some(&space(SpaceKind::Project)),
+            false
+        ));
     }
 }
 
