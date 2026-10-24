@@ -256,6 +256,29 @@ fn channel_last_line(row: &arbos_matrix::ChannelRow) -> String {
 /// Without a query every row is a `Title` hit, so the list is by activity.
 type RowKey = (search::HitKind, std::cmp::Reverse<u64>);
 
+/// The chats list's top and bottom fade (Jacob likes it, Oct 23). The band
+/// sits under the strip's bottom edge: the scroll box is pulled up by the band
+/// and the list pads by the same amount, so at rest the first row starts where
+/// the fade ends and only rows that scroll under the strip cross it (the pane
+/// rule from #1365 / #1424). The bottom band stays over the list's end.
+pub const LIST_FADE_BAND: f32 = 14.0;
+
+/// The wrapper is a flex column: the list inside keeps `flex_1 / min_h_0`, so
+/// it stays bounded and scrolls. (#1497's first try used a block div here —
+/// the list took its content height and painted through the account row,
+/// #1528; `row_bounds_tests` pins this.)
+pub(crate) fn faded_list(list: impl IntoElement) -> gpui::AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h_0()
+        .mt(px(-LIST_FADE_BAND))
+        .debug_selector(|| "sidebar-list-frame".into())
+        .child(edge_faded(LIST_FADE_BAND, true, true, list))
+        .into_any_element()
+}
+
 pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
     let theme = Theme::of(cx).clone();
     let state = shell.state.read(cx);
@@ -269,11 +292,19 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
     let open_server_admin = open_server.as_ref().is_some_and(ServerInfo::can_admin);
     let waitlist_position = state.machine.waitlist_position;
 
+    // Sidebar archive (Jacob 2026-10-23): archived spaces leave the list and
+    // sit behind the "Hidden chats · N" footer; a search still finds them.
+    let hidden_mode = shell.hidden_open && query.is_empty();
+    let hidden_count = state.archived_space_count();
+    let shows = |archived: bool| hidden_mode == archived || !query.is_empty();
     let mut rows: Vec<(RowKey, ListEntry)> = Vec::new();
     for s in state.servers.iter() {
         let Some(hit) = search::server_hit(s, &query) else {
             continue;
         };
+        if !shows(s.archived_at.is_some()) {
+            continue;
+        }
         let selected = state.open_server.as_deref() == Some(s.id.as_str())
             || state
                 .selected_channel
@@ -298,6 +329,9 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         let Some(hit) = state.space_search_hit(p, &query) else {
             continue;
         };
+        if !shows(p.archived_at.is_some()) {
+            continue;
+        }
         let streaming = state.project_is_streaming(&p.id);
         // Shared projects badge the disc with the other side; a group is one
         // plain disc (redesign 2026-10-20).
@@ -474,7 +508,7 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         .flex_1()
         .min_h_0()
         .px(px(8.0))
-        .pt(px(6.0))
+        .pt(px(LIST_FADE_BAND + 6.0))
         .pb(px(12.0))
         .overflow_y_scroll();
     // D89: the host that runs everyone's computer is full; this account is in line. Chats and
@@ -565,11 +599,76 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
                 .child(format!("Nothing matches “{typed}”.")),
         );
     }
+    if hidden_mode {
+        // "Hidden chats ‹ back": the hidden rows stand in for the list.
+        list = list.child(
+            div()
+                .id("sidebar-hidden-head")
+                .flex()
+                .items_center()
+                .justify_between()
+                .h(px(28.0))
+                .px(px(12.0))
+                .mb(px(4.0))
+                .text_size(px(TEXT_TINY))
+                .text_color(theme.text_muted)
+                .child("Hidden chats")
+                .child(
+                    div()
+                        .id("sidebar-hidden-back")
+                        .cursor_pointer()
+                        .hover(|s| s.text_color(theme.text))
+                        .child("‹ back")
+                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.hidden_open = false;
+                            cx.notify();
+                        })),
+                ),
+        );
+        if rows.is_empty() {
+            list = list.child(
+                div()
+                    .pt(px(40.0))
+                    .text_center()
+                    .text_size(px(TEXT_SMALL))
+                    .text_color(theme.text_muted)
+                    .child("Nothing hidden."),
+            );
+        }
+    }
     for (_, entry) in rows {
         list = match entry {
             ListEntry::Chat(row) => list.child(render_row(*row, shell, &theme, cx)),
             ListEntry::Server(row) => list.child(render_server_row(*row, &theme, cx)),
         };
+    }
+    if !hidden_mode && query.is_empty() && hidden_count > 0 {
+        // Grok Bot's footer: muted "Hidden chats · N ›" under the list.
+        list = list.child(
+            div()
+                .id("sidebar-hidden-footer")
+                .flex()
+                .items_center()
+                .justify_between()
+                .mt(px(8.0))
+                .h(px(32.0))
+                .px(px(12.0))
+                .rounded(px(PANEL_RADIUS - 4.0))
+                .text_size(px(TEXT_SMALL))
+                .text_color(theme.text_muted)
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.surface_2))
+                .child(format!("Hidden chats · {hidden_count}"))
+                .child(icon("chevron-right", 12.0, theme.text_faint))
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.hidden_open = true;
+                    this.menu_open = false;
+                    this.row_menu = None;
+                    cx.notify();
+                })),
+        );
     }
 
     // ----- bottom: Update pill (only when a newer build exists) and the account row --
@@ -723,10 +822,8 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         .child(strip)
         .child(match open_server.as_ref() {
             // Inside a server the left pane shows its channels (mockup h).
-            Some(server) => {
-                edge_faded(14.0, true, true, server_channels(server, shell, &theme, cx))
-            }
-            None => edge_faded(14.0, true, true, list),
+            Some(server) => faded_list(server_channels(server, shell, &theme, cx)),
+            None => faded_list(list),
         });
     if let Some(update) = shell.render_update_button(cx) {
         column = column.child(div().px(px(12.0)).pb(px(8.0)).child(update));
@@ -772,6 +869,8 @@ fn render_server_row(
         time,
     } = row;
     let id: Id = server.id.clone();
+    let menu_id: Id = server.id.clone();
+    let ctrl_menu_id: Id = server.id.clone();
     div()
         .id(ElementId::Name(SharedString::from(format!(
             "row-server-{}",
@@ -796,14 +895,46 @@ fn render_server_row(
             })
         })
         .cursor_pointer()
-        .on_click(cx.listener(move |this, _, window, cx| {
-            this.menu_open = false;
-            this.row_menu = None;
-            this.chat_menu = None;
-            this.state
-                .update(cx, |s, cx| s.enter_server(id.clone(), cx));
-            Composer::focus(&this.composer, window, cx);
-        }))
+        .on_click(
+            cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                if is_control_click(event) {
+                    return;
+                }
+                this.menu_open = false;
+                this.row_menu = None;
+                this.chat_menu = None;
+                this.state
+                    .update(cx, |s, cx| s.enter_server(id.clone(), cx));
+                Composer::focus(&this.composer, window, cx);
+            }),
+        )
+        // Right-click / control-click: Archive (2026-10-23) — the server's own
+        // page holds Leave and Delete.
+        .on_mouse_down(
+            gpui::MouseButton::Right,
+            cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                this.menu_open = false;
+                this.chat_menu = None;
+                this.row_menu = Some((menu_id.clone(), event.position));
+                this.row_delete_armed = false;
+                cx.notify();
+            }),
+        )
+        .on_mouse_down(
+            gpui::MouseButton::Left,
+            cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                if !event.modifiers.control {
+                    return;
+                }
+                cx.stop_propagation();
+                this.menu_open = false;
+                this.chat_menu = None;
+                this.row_menu = Some((ctrl_menu_id.clone(), event.position));
+                this.row_delete_armed = false;
+                cx.notify();
+            }),
+        )
         .child(
             div()
                 .relative()
@@ -940,7 +1071,7 @@ fn server_channels(
         .flex_1()
         .min_h_0()
         .px(px(8.0))
-        .pt(px(6.0))
+        .pt(px(LIST_FADE_BAND + 6.0))
         .pb(px(12.0))
         .overflow_y_scroll()
         .child(back);
@@ -1508,6 +1639,39 @@ pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
     let (space_id, at) = shell.row_menu.clone()?;
     let theme = Theme::of(cx).clone();
     let state = shell.state.read(cx);
+    let archived = state.is_space_archived(&space_id);
+    let archive_row = |theme: &Theme, cx: &mut Context<Shell>| {
+        let id = space_id.clone();
+        glass::menu_row(
+            "row-menu-archive",
+            if archived { "tray-up" } else { "archive" },
+            if archived { "Unarchive" } else { "Archive" },
+            false,
+            theme,
+        )
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.row_menu = None;
+            let id = id.clone();
+            this.state
+                .update(cx, |s, cx| s.set_space_archived(id, !archived, cx));
+        }))
+    };
+    // A server row (D88): Archive / Unarchive only — Leave and Delete live on its page.
+    if state.servers.iter().any(|s| s.id == space_id) {
+        let body = div()
+            .flex()
+            .flex_col()
+            .gap(px(1.0))
+            .child(archive_row(&theme, cx));
+        return Some(
+            div()
+                .absolute()
+                .left(at.x)
+                .top(at.y)
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(glass::frosted_menu(200.0, &theme, body)),
+        );
+    }
     let space = state.projects.iter().find(|p| p.id == space_id)?.clone();
     let muted = state.is_muted(&space.id);
     let is_people = space.is_people();
@@ -1630,7 +1794,10 @@ pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
 
     let mut body = div().flex().flex_col().gap(px(1.0));
     if is_group {
-        // Mockup f: the group row's menu is "Delete group" and nothing else.
+        // Mockup f: the group row's menu is "Delete group" — plus Archive (2026-10-23).
+        body = body
+            .child(archive_row(&theme, cx))
+            .child(glass::menu_divider(&theme));
         body = body.child(
             glass::menu_row("row-menu-delete", "trash", "Delete group", true, &theme).on_click(
                 cx.listener(|this, _, _, cx| {
@@ -1691,6 +1858,7 @@ pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
             ),
         );
     }
+    body = body.child(archive_row(&theme, cx));
     if can_delete {
         body = body.child(glass::menu_divider(&theme));
         body = body.child(
@@ -1893,8 +2061,7 @@ pub fn chat_menu(
 mod row_bounds_tests {
     use gpui::{div, prelude::*, px, ScrollHandle, TestAppContext};
 
-    use super::top_strip;
-    use crate::ui::frost::edge_faded;
+    use super::{faded_list, top_strip, LIST_FADE_BAND};
 
     const ROWS: usize = 12;
     const ROW_H: f32 = 58.0;
@@ -1912,7 +2079,10 @@ mod row_bounds_tests {
             _: &mut gpui::Window,
             _: &mut gpui::Context<Self>,
         ) -> impl IntoElement {
-            let strip = div().h(px(top_strip())).flex_shrink_0();
+            let strip = div()
+                .h(px(top_strip()))
+                .flex_shrink_0()
+                .debug_selector(|| "sidebar-strip".into());
             let mut list = div()
                 .id("chat-list")
                 .flex()
@@ -1920,7 +2090,7 @@ mod row_bounds_tests {
                 .flex_1()
                 .min_h_0()
                 .px(px(8.0))
-                .pt(px(6.0))
+                .pt(px(LIST_FADE_BAND + 6.0))
                 .pb(px(12.0))
                 .overflow_y_scroll()
                 .track_scroll(&self.scroll)
@@ -1945,7 +2115,7 @@ mod row_bounds_tests {
                 .flex()
                 .flex_col()
                 .child(strip)
-                .child(edge_faded(14.0, true, true, list))
+                .child(faded_list(list))
                 .child(account)
         }
     }
@@ -1974,6 +2144,25 @@ mod row_bounds_tests {
                 list_bottom <= account_top + 0.5,
                 "{pass}: list bottom {list_bottom} runs into the account row at {account_top}"
             );
+            if pass == "top" {
+                // #1497: the fade band ends at the strip's bottom edge and the
+                // first row starts its 6 pt under it, clear of the fade.
+                let frame = vcx.debug_bounds("sidebar-list-frame").expect("frame");
+                let strip = vcx.debug_bounds("sidebar-strip").expect("strip");
+                let first = vcx.debug_bounds("row-0").expect("first row");
+                let fade_bottom: f32 = f32::from(frame.origin.y) + LIST_FADE_BAND;
+                let strip_bottom: f32 = strip.bottom().into();
+                let row_top: f32 = first.origin.y.into();
+                assert!(
+                    (fade_bottom - strip_bottom).abs() <= 0.5,
+                    "fade band ends at {fade_bottom}, strip at {strip_bottom}"
+                );
+                assert!(
+                    (row_top - (strip_bottom + 6.0)).abs() <= 0.5,
+                    "first row at {row_top}, strip + 6 = {}",
+                    strip_bottom + 6.0
+                );
+            }
             let mut spans: Vec<(f32, f32)> = Vec::new();
             for i in 0..ROWS {
                 let sel: &'static str = Box::leak(format!("row-{i}").into_boxed_str());
