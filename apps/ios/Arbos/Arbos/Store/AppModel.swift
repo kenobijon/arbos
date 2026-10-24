@@ -220,7 +220,36 @@ final class AppModel: ObservableObject {
         }
     }
     @Published var chats: [Id: [Chat]] = [:]
-    @Published var messages: [Id: [Message]] = [:]
+    @Published var messages: [Id: [Message]] = [:] {
+        didSet { bumpVersions(from: oldValue, to: messages) }
+    }
+    /// Bumped whenever a chat's list (`messages` or `channelRows`) is replaced; views
+    /// watch this instead of comparing the whole message array on every body.
+    @Published private(set) var messagesVersion: [Id: Int] = [:]
+    /// One pass over a chat's list, kept until that list changes.
+    private var activityCache: [Id: ChatActivity] = [:]
+
+    /// A chat's scan results (streaming / open hand-off / awaiting) and the view's
+    /// change detection must not cost a pass over the list per screen body: both key
+    /// off the version. Arrays are COW, so unchanged chats share storage with the old
+    /// dictionary and keep their version (arbonites-chat-lag, 2026-10-24).
+    private func bumpVersions(from old: [Id: [Message]], to new: [Id: [Message]]) {
+        for (id, list) in new where !Self.sameStorage(list, old[id]) {
+            messagesVersion[id, default: 0] &+= 1
+            activityCache[id] = nil
+        }
+        for id in old.keys where new[id] == nil {
+            messagesVersion[id, default: 0] &+= 1
+            activityCache[id] = nil
+        }
+    }
+
+    /// Same array buffer (an unchanged value carried over by copy-on-write).
+    private static func sameStorage(_ a: [Message], _ b: [Message]?) -> Bool {
+        guard let b, a.count == b.count else { return false }
+        if a.isEmpty { return true }
+        return a.withUnsafeBufferPointer { pa in b.withUnsafeBufferPointer { pb in pa.baseAddress == pb.baseAddress } }
+    }
     @Published var caughtUp: Set<Id> = []
     @Published var link: Link = .connecting
     /// Per-room link, for the chat header's connection pill. The pill must not
@@ -300,7 +329,9 @@ final class AppModel: ObservableObject {
     @Published var matrixConnected = true
     var matrixDisconnectedSince: Date?
     /// Decoded channel timelines by relay channel id — the rows ChatView renders for a channel.
-    @Published var channelRows: [Id: [Message]] = [:]
+    @Published var channelRows: [Id: [Message]] = [:] {
+        didSet { bumpVersions(from: oldValue, to: channelRows) }
+    }
     /// Channels whose room reached the beginning of its history (`loadOlder` → nil).
     var channelAtStart: Set<Id> = []
     /// Channels with an `openRoom` / `loadOlder` in flight.
@@ -3439,14 +3470,41 @@ final class AppModel: ObservableObject {
     /// by a box that died (or a leftover stream under a later user message)
     /// must not pin the indicator forever — every streaming row uses the
     /// same 15-minute freshness window (including the last assistant message).
-    func isStreaming(_ chatId: Id) -> Bool {
+    /// What the working-state checks need from a chat's list, gathered in one pass
+    /// and cached until the list changes. The time windows are applied at read time.
+    struct ChatActivity {
+        /// `createdAt` of the newest assistant row still streaming with no user line after it.
+        var liveStreamAt: Int64?
+        /// Open hand-off rows: (streaming, createdAt, completedAt ?? createdAt).
+        var openHandoffs: [(streaming: Bool, createdAt: Int64, finishedAt: Int64)] = []
+        /// `createdAt` of the last row when it is the user's.
+        var lastUserAt: Int64?
+    }
+
+    private func activity(_ chatId: Id) -> ChatActivity {
+        if let hit = activityCache[chatId] { return hit }
         let list = messages(of: chatId)
-        let recent = nowMs() - 15 * 60 * 1000
-        guard let idx = list.lastIndex(where: {
-            $0.role == .assistant && $0.isStreaming && $0.createdAt >= recent
-        }) else { return false }
-        // A later user line means this stream is leftover from a prior turn.
-        return !list.suffix(from: idx + 1).contains { $0.role == .user }
+        var out = ChatActivity()
+        var userAfter = false
+        for m in list.reversed() {
+            if out.liveStreamAt == nil {
+                if m.role == .user { userAfter = true }
+                if m.role == .assistant, m.isStreaming, !userAfter { out.liveStreamAt = m.createdAt }
+            }
+            if m.role == .assistant, m.subagentId != nil || m.subagentName != nil,
+               m.turn == .new || m.turn == .spawn || m.turn == .wake,
+               (m.handoffMessages ?? 1) < 2 {
+                out.openHandoffs.append((m.isStreaming, m.createdAt, m.completedAt ?? m.createdAt))
+            }
+        }
+        if let last = list.last, last.role == .user { out.lastUserAt = last.createdAt }
+        activityCache[chatId] = out
+        return out
+    }
+
+    func isStreaming(_ chatId: Id) -> Bool {
+        guard let at = activity(chatId).liveStreamAt else { return false }
+        return at >= nowMs() - 15 * 60 * 1000
     }
 
     func isStreaming(project projectId: Id) -> Bool {
@@ -3458,18 +3516,14 @@ final class AppModel: ObservableObject {
     /// `done` while the child still runs, so `isStreaming` alone misses it —
     /// show the faded working line until the hand-off closes.
     func hasOpenSubagent(_ chatId: Id) -> Bool {
-        let recent = nowMs() - 15 * 60 * 1000
-        return messages(of: chatId).contains { m in
-            guard m.role == .assistant else { return false }
-            guard m.subagentId != nil || m.subagentName != nil else { return false }
-            guard m.turn == .new || m.turn == .spawn || m.turn == .wake else { return false }
-            guard (m.handoffMessages ?? 1) < 2 else { return false }
+        let now = nowMs()
+        let recent = now - 15 * 60 * 1000
+        return activity(chatId).openHandoffs.contains { h in
             // Streaming hand-off rows (the normal case while the child runs).
             // Same freshness window as `isStreaming` so a dead box cannot pin forever.
-            if m.isStreaming { return m.createdAt >= recent }
+            if h.streaming { return h.createdAt >= recent }
             // Brief race after `finish_message` before `handoffMessages` flips to 2.
-            let t = m.completedAt ?? m.createdAt
-            return nowMs() - t < 60_000
+            return now - h.finishedAt < 60_000
         }
     }
 
@@ -3482,11 +3536,10 @@ final class AppModel: ObservableObject {
         if peopleChat(chatId) != nil { return false }
         // Nobody "works" in a server channel; a sent line is just a line.
         if channel(chatId) != nil { return false }
-        let list = messages(of: chatId)
-        guard let last = list.last, last.role == .user else { return false }
+        guard let at = activity(chatId).lastUserAt else { return false }
         // Short bridge until the agent opens a streaming row (cold wake).
         // ChatView ticks this once a second so it can expire cleanly.
-        return nowMs() - last.createdAt < 15_000
+        return nowMs() - at < 15_000
     }
 
     // MARK: Commands (crdt-sync §6.2: the client writes rows and commands)

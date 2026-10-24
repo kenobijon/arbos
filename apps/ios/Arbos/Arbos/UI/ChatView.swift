@@ -26,6 +26,8 @@ struct ChatView: View {
 
     @State private var draft = ""
     @State private var rows: [Row] = []
+    /// The message list the current `rows` were built from (last id / count checks).
+    @State private var rowsSource: [Message] = []
     /// id → message for the rows on screen (menus, search, replies); rebuilt with `rows`.
     @State private var messageById: [Id: Message] = [:]
     /// How many of the newest rows are in the view tree. The transcript is a plain
@@ -687,12 +689,19 @@ struct ChatView: View {
         // Profile "search" sets pendingSearchChat while this chat is already on screen
         // (sheet over us), so onAppear alone never sees it — watch the published flag.
         .onChange(of: model.pendingSearchChat) { _, _ in openPendingSearchIfNeeded() }
-        .onChange(of: messages, initial: true) { old, new in
+        // The per-chat version, not the array: comparing 1 000+ messages on every
+        // body (each keystroke, presence tick, publish) was a measurable share of
+        // the Arbonites lag (arbonites-chat-lag, 2026-10-24).
+        .onChange(of: model.messagesVersion[chatId] ?? 0, initial: true) { _, _ in
+            let old = rowsSource
+            let new = messages
+            let initial = old.isEmpty && rows.isEmpty
+            rowsSource = new
             refreshRows()
             // Streaming tokens reassign `messages` with the same last id — do not
             // mark-read on every delta. Initial call (`old == new`) and a new last
             // row still mark; AppModel also skips/throttles the PUT.
-            if old.last?.id != new.last?.id || old == new {
+            if old.last?.id != new.last?.id || initial {
                 model.markRead(chatId: chatId)
                 if isPeople { model.markPeopleRead(chatId) }
             }
@@ -1062,8 +1071,7 @@ struct ChatView: View {
                         canReply: { isMessageRow($0) },
                         onQuoteTap: { revealQuoted($0) },
                         onReply: { beginReply(to: $0) },
-                        onMenu: { runMessageMenu($0, row: $1) },
-                        gapBefore: { gap(before: $0, in: $1) }
+                        onMenu: { runMessageMenu($0, row: $1) }
                     )
                     .equatable()
                     // Who is working is the presence row over the composer
@@ -1322,18 +1330,6 @@ struct ChatView: View {
     /// Spacing: 8 pt between blocks of one message, 24 pt around sender changes,
     /// system lines, and each new agent reply (quick ack vs main answer must not
     /// look merged — #1447). Measured on the references.
-    private func gap(before i: Int, in shown: [Row]) -> CGFloat {
-        guard i > 0, i < shown.count else { return 0 }
-        let prev = shown[i - 1], cur = shown[i]
-        if case .system = prev.kind { return 20 }
-        if case .system = cur.kind { return 20 }
-        if prev.role != cur.role { return 24 }
-        // Same role: still open the turn gap when an agent starts a new message.
-        if prev.messageId != cur.messageId && (cur.role == .assistant || cur.role == .project) {
-            return 24
-        }
-        return 8
-    }
 
     /// The machine's notice (waking / can't reach). The link has no line here:
     /// the header's connection pill is its one place ([feedback connection-pill]).
@@ -2286,7 +2282,6 @@ private struct TranscriptRows: View, Equatable {
     let onQuoteTap: (Id) -> Void
     let onReply: (Row) -> Void
     let onMenu: (MessageMenuItem, Row) -> Void
-    let gapBefore: (Int, [Row]) -> CGFloat
 
     static func == (lhs: TranscriptRows, rhs: TranscriptRows) -> Bool {
         lhs.shown == rhs.shown
@@ -2294,7 +2289,7 @@ private struct TranscriptRows: View, Equatable {
             && lhs.width == rhs.width
             && lhs.timeReveal == rhs.timeReveal
             && lhs.highlightedMessage == rhs.highlightedMessage
-            && lhs.mentions === rhs.mentions
+            && lhs.mentions.stamp == rhs.mentions.stamp
             && lhs.rowsCount == rhs.rowsCount
             && lhs.messagesCount == rhs.messagesCount
     }
@@ -2303,7 +2298,10 @@ private struct TranscriptRows: View, Equatable {
         #if DEBUG
         let _ = PerfCounters.bump("transcriptRowsBody")
         #endif
-        ForEach(Array(shown.enumerated()), id: \.element.id) { i, row in
+        // Rows keyed by id, never by position: a grow step prepends older rows and
+        // must not touch the ones already laid out (arbonites-chat-lag).
+        let firstId = shown.first?.id
+        ForEach(shown) { row in
             let reply = canReply(row)
             RowView(model: model, row: row, chatId: chatId, width: width, timeReveal: timeReveal,
                     onQuoteTap: onQuoteTap,
@@ -2312,11 +2310,11 @@ private struct TranscriptRows: View, Equatable {
                     replySwipeActive: replySwipeActive,
                     mentions: mentions)
                 .equatable()
-                .padding(.top, gapBefore(i, shown))
+                .padding(.top, row.id == firstId ? 0 : row.gapBefore)
                 .id(row.id)
                 .onAppear {
                     // Once per open — not on every row (group chats fire this dozens of times).
-                    if i == 0 {
+                    if row.id == firstId {
                         LaunchClock.mark("chat-first-row", detail: "shown=\(shown.count) rows=\(rowsCount) messages=\(messagesCount)")
                     }
                 }

@@ -136,6 +136,10 @@ struct Row: Identifiable, Equatable {
     var reactions: [MessageReaction] = []
     /// The message's `createdAt` (ms), so the swipe-revealed time needs no lookup.
     var createdAt: Int64 = 0
+    /// Space above this row (8 pt within a run, 24 pt at a sender / turn change,
+    /// 20 pt around system lines), fixed at build time so a row's layout does not
+    /// depend on its position in the visible window.
+    var gapBefore: CGFloat = 0
 }
 
 enum Transcript {
@@ -370,7 +374,25 @@ enum Transcript {
             rows.append(contentsOf: chunk)
             prevSender = message.sender
         }
-        return Self.mergeHandoffs(rows, handoffs)
+        return Self.withGaps(Self.mergeHandoffs(rows, handoffs))
+    }
+
+    /// Spacing between neighbours (measured on the Grok Bot references).
+    static func gap(from prev: Row, to cur: Row) -> CGFloat {
+        if case .system = prev.kind { return 20 }
+        if case .system = cur.kind { return 20 }
+        if prev.role != cur.role { return 24 }
+        // Same role: still open the turn gap when an agent starts a new message.
+        if prev.messageId != cur.messageId && (cur.role == .assistant || cur.role == .project) {
+            return 24
+        }
+        return 8
+    }
+
+    private static func withGaps(_ rows: [Row]) -> [Row] {
+        var out = rows
+        for i in out.indices.dropFirst() { out[i].gapBefore = gap(from: out[i - 1], to: out[i]) }
+        return out
     }
 
     /// Blocks for one text part — polished, split, JSON dropped. Cached by text: a rebuild
@@ -717,6 +739,28 @@ enum Markdown {
     /// accent + underline on links; monospaced (a point under body) on a soft
     /// wash for ``code``. Bare `http(s)://` URLs are linked too.
     static func inline(_ text: String, color: Color, link: Color, codeChip: Color) -> AttributedString {
+        // Parsed once per text and palette: the markdown parse and the link detector
+        // ran on every bubble body, and a long group re-evaluates many bodies at once
+        // (arbonites-chat-lag). NSCache: bounded, dropped under memory pressure.
+        let key = "\(text)\u{1}\(color)\u{1}\(link)\u{1}\(codeChip)" as NSString
+        if let hit = inlineCache.object(forKey: key) { return hit.value }
+        let attr = inlineUncached(text, color: color, link: link, codeChip: codeChip)
+        inlineCache.setObject(AttributedBox(attr), forKey: key)
+        return attr
+    }
+
+    private final class AttributedBox {
+        let value: AttributedString
+        init(_ value: AttributedString) { self.value = value }
+    }
+
+    private static let inlineCache: NSCache<NSString, AttributedBox> = {
+        let cache = NSCache<NSString, AttributedBox>()
+        cache.countLimit = 4_000
+        return cache
+    }()
+
+    private static func inlineUncached(_ text: String, color: Color, link: Color, codeChip: Color) -> AttributedString {
         var attr = (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
             ?? AttributedString(text)
         linkBareURLs(&attr)
@@ -799,7 +843,7 @@ struct RowView: View, Equatable {
             && lhs.width == rhs.width
             && lhs.timeReveal == rhs.timeReveal
             && lhs.highlighted == rhs.highlighted
-            && lhs.mentions === rhs.mentions
+            && lhs.mentions.stamp == rhs.mentions.stamp
     }
 
     private var maxBubble: CGFloat { max(200, width - Theme.bubbleInset) }
