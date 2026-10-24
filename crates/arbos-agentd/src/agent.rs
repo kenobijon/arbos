@@ -5693,6 +5693,15 @@ impl Agent {
                     let _ = self
                         .store
                         .set_subagent_last_status(&subagent_id, &format!("step: {label}"));
+                    // The status line follows the worker's real activity (Grok parity, traits
+                    // 14: "Searching for surf schools" instead of "<agent> is working").
+                    if let Some(a) = crate::activity::label(&name, &input) {
+                        {
+                            let h = host.lock().await;
+                            h.doc.set_activity(&msg_id, Some(&a));
+                        }
+                        self.post_activity(chat_id, Some(a));
+                    }
                     let _ = self.store.t3_append(
                         &subagent_id,
                         Some(&subagent_id),
@@ -5789,6 +5798,11 @@ impl Agent {
         }
         keepalive.abort();
         self.subagent_turns.fetch_sub(1, Ordering::SeqCst);
+        {
+            let h = host.lock().await;
+            h.doc.set_activity(&msg_id, None);
+        }
+        self.post_activity(chat_id, None);
         let total_ms = t0.elapsed().as_millis() as i64;
         let contract = extract_return_contract(&text);
         let status = contract
