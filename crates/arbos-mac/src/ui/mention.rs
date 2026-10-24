@@ -250,27 +250,47 @@ pub struct Mention {
     pub name: String,
     pub picture: Picture,
     /// The member id a sent row carries for this entity (`user:<id>` /
-    /// `agent:<project-id>`); `None` for groups, servers and the collective
-    /// `@here` / `@agents` (those expand at send time).
+    /// `agent:<project-id>`), or the collective marker (`here` / `agents`)
+    /// the sources expand into the chat's members; `None` for groups and
+    /// servers.
     pub id: Option<String>,
+}
+
+/// What a composer chip stands for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TokenKind {
+    /// One person or agent (`user:<id>` / `agent:<project-id>`).
+    Member,
+    /// `@here` (everyone in this chat) or `@agents` (all agents here).
+    Collective,
 }
 
 /// A committed mention in the composer (#1596): the chip stands for one
 /// entity, picked from the menu or resolved from an exact `@handle`. Its text
 /// in the field is [`CELL`] + `name` at `range`; the sent row carries
-/// `@handle` in the text and `id` in `mentions`.
+/// `@handle` in the text and `id` in `mentions` (a collective's marker is
+/// expanded into member ids by the source).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MentionToken {
     pub range: Range<usize>,
     pub handle: String,
     pub name: String,
     pub id: Option<String>,
+    pub kind: TokenKind,
 }
 
 impl MentionToken {
     /// What the token reads as in the sent text.
     pub fn plain(&self) -> String {
         format!("@{}", self.handle)
+    }
+
+    pub fn kind_of(handle: &str) -> TokenKind {
+        if crate::sync::is_collective(handle) {
+            TokenKind::Collective
+        } else {
+            TokenKind::Member
+        }
     }
 }
 
@@ -325,13 +345,14 @@ impl Mentions {
         let mut table = Table::default();
         let mut add = |handle: String, m: Mention| table.add(handle, m);
         // Collective pings first so a rare handle collision cannot steal them.
+        // Their id is the marker the sources expand (`sync::expand_collectives`).
         add(
             "here".into(),
             Mention {
                 page: None,
                 name: "here".into(),
                 picture: initials("here", "here", None, theme),
-                id: None,
+                id: Some(crate::sync::COLLECTIVE_HERE.into()),
             },
         );
         add(
@@ -340,7 +361,7 @@ impl Mentions {
                 page: None,
                 name: "agents".into(),
                 picture: initials("agents", "agents", None, theme),
-                id: None,
+                id: Some(crate::sync::COLLECTIVE_AGENTS.into()),
             },
         );
         for p in &s.projects {
@@ -976,6 +997,7 @@ pub(crate) mod tests {
             handle: "arbos".into(),
             name: "Jacob".into(),
             id: Some("user:gh_arbos".into()),
+            kind: TokenKind::Member,
         };
         assert_eq!(m.mention_for(&token).unwrap().name, "Jacob");
         assert_eq!(token.plain(), "@arbos");
