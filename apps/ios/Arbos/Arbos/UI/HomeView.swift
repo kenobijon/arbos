@@ -100,8 +100,8 @@ struct HomeView: View {
                                     .listRowSeparator(.hidden)
                                     .listRowBackground(theme.bg)
                             }
-                            if !model.openGoals.isEmpty {
-                                goalsSection
+                            if !plannedTasks.isEmpty {
+                                plannedTasksSection
                             }
                         }
                         ForEach(homeRows) { entry in
@@ -427,22 +427,56 @@ struct HomeView: View {
         return "Removes this chat from your list."
     }
 
-    /// Goals section: status, next step, last moved — tap opens the goal.
-    private var goalsSection: some View {
+    /// One planned task on Home: an agent's unfinished plan step (or next step / goal title).
+    private struct PlannedTask: Identifiable {
+        let id: String
+        let goalId: String
+        let projectId: String
+        let agentName: String
+        let text: String
+    }
+
+    /// Open goals → one planned task each (doing step, else first todo, else next_step, else title).
+    private var plannedTasks: [PlannedTask] {
+        model.openGoals.prefix(6).map { goal in
+            let agent = goal.projectName
+                ?? model.project(goal.projectId)?.name
+                ?? "Agent"
+            let doing = goal.plan.first { $0.status == "doing" }
+            let todo = goal.plan.first { $0.status == "todo" }
+            let text = doing?.title
+                ?? todo?.title
+                ?? (goal.nextStep.isEmpty ? goal.title : goal.nextStep)
+            return PlannedTask(
+                id: goal.id,
+                goalId: goal.id,
+                projectId: goal.projectId,
+                agentName: agent,
+                text: text
+            )
+        }
+    }
+
+    /// Planned tasks by agent: agent name, task text — tap opens the goal.
+    private var plannedTasksSection: some View {
         Section {
-            ForEach(model.openGoals.prefix(6)) { goal in
-                Button { openGoalId = goal.id } label: {
+            ForEach(plannedTasks) { task in
+                Button { openGoalId = task.goalId } label: {
                     HStack(spacing: 12) {
-                        Image(systemName: "flag.fill")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(theme.accent)
-                            .frame(width: 28, height: 28)
+                        if let project = model.project(task.projectId) {
+                            AgentAvatar(project: project, theme: theme, size: 28, still: true)
+                        } else {
+                            Image(systemName: "checklist")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundStyle(theme.accent)
+                                .frame(width: 28, height: 28)
+                        }
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(goal.title)
+                            Text(task.agentName)
                                 .font(theme.font(Theme.body, weight: .medium))
                                 .foregroundStyle(theme.text)
                                 .lineLimit(1)
-                            Text(goalHomeSubtitle(goal))
+                            Text(task.text)
                                 .font(theme.font(Theme.tiny))
                                 .foregroundStyle(theme.muted)
                                 .lineLimit(1)
@@ -455,6 +489,7 @@ struct HomeView: View {
                 .listRowInsets(EdgeInsets(top: 6, leading: 20, bottom: 6, trailing: 22))
                 .listRowSeparator(.hidden)
                 .listRowBackground(theme.bg)
+                .accessibilityLabel("\(task.agentName), \(task.text)")
             }
             Button { showGoals = true } label: {
                 HStack(spacing: 8) {
@@ -474,18 +509,11 @@ struct HomeView: View {
             .listRowBackground(theme.bg)
             .accessibilityLabel("All goals")
         } header: {
-            Text("Goals")
+            Text("Planned tasks")
                 .font(theme.font(Theme.tiny, weight: .medium))
                 .foregroundStyle(theme.muted)
                 .textCase(nil)
         }
-    }
-
-    private func goalHomeSubtitle(_ goal: GoalItem) -> String {
-        var parts: [String] = [goal.statusLabel]
-        if !goal.nextStep.isEmpty { parts.append(goal.nextStep) }
-        if let moved = goal.lastMovedAt { parts.append(SecretsText.ago(moved)) }
-        return parts.joined(separator: " · ")
     }
 
     /// Grok's "Hidden chats  N  ›" line under the list (measured: 15 pt muted,
