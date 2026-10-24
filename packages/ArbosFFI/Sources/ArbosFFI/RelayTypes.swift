@@ -1575,6 +1575,8 @@ public struct PeopleChatDto: Codable {
 	/// D92 amendment: the group's leaf picture, when one was picked (`image_key` wins).
 	public let avatar_leaf: Int64?
 	public let avatar_leaf_color: Int64?
+	/// Optional about text for a people group (≤200 chars). Absent or empty = none.
+	public let description: String?
 	public let pending: Bool
 	public let members: [ChatMemberDto]
 	public let room: String
@@ -1585,7 +1587,7 @@ public struct PeopleChatDto: Codable {
 	public let lock_state: String
 	public let me: ChatMeDto
 
-	public init(id: String, archived_at: Int64?, kind: String, created_by: String, created_at: Int64, title: String, image_key: String?, avatar_leaf: Int64?, avatar_leaf_color: Int64?, pending: Bool, members: [ChatMemberDto], room: String, head_seq: Int64, last_activity_at: Int64, read_seq: Int64, unread: Bool, lock_state: String, me: ChatMeDto) {
+	public init(id: String, archived_at: Int64?, kind: String, created_by: String, created_at: Int64, title: String, image_key: String?, avatar_leaf: Int64?, avatar_leaf_color: Int64?, description: String?, pending: Bool, members: [ChatMemberDto], room: String, head_seq: Int64, last_activity_at: Int64, read_seq: Int64, unread: Bool, lock_state: String, me: ChatMeDto) {
 		self.id = id
 		self.archived_at = archived_at
 		self.kind = kind
@@ -1595,6 +1597,7 @@ public struct PeopleChatDto: Codable {
 		self.image_key = image_key
 		self.avatar_leaf = avatar_leaf
 		self.avatar_leaf_color = avatar_leaf_color
+		self.description = description
 		self.pending = pending
 		self.members = members
 		self.room = room
