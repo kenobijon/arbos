@@ -51,17 +51,22 @@ final class PresenceRowTests: XCTestCase {
 
     func testPictureIsTheBubblePictureOnThePlusColumn() {
         // Same rule as Mac (`SENDER_DISC = PLUS_BUTTON`): the row's picture and the
-        // bubble's picture are the `+` size at the `+` centre (keyboard up:
-        // 19 + 42 / 2 = 40); the row's gap is the bubble row's gap, so the text
-        // starts where the body does.
+        // bubble's picture are the `+` size at the `+` centre; the row's gap is the
+        // bubble row's gap, so the text starts where the body does.
         XCTAssertEqual(Theme.memberAvatar, Theme.plusButton, "avatar disc = + disc")
         XCTAssertEqual(PresenceRow.avatar, Theme.memberAvatar)
-        XCTAssertEqual(PresenceRow.inset, Theme.avatarColumnInset)
         XCTAssertEqual(PresenceRow.gap, Theme.memberAvatarGap)
-        let center = 16 + Theme.avatarColumnInset + Theme.memberAvatar / 2
-        let plusCenter = Theme.composerInsetKeyboard + Theme.plusButton / 2
-        XCTAssertEqual(center, plusCenter, accuracy: 1)
-        XCTAssertEqual(16 + Theme.memberLane, 74, "text and bubble body after the larger disc")
+        // The column follows the `+` through both composer insets (keyboard down / up).
+        for composerInset in [Theme.composerInset, Theme.composerInsetKeyboard] {
+            let center = 16 + Theme.avatarColumnInset(composerInset: composerInset) + Theme.memberAvatar / 2
+            let plusCenter = composerInset + Theme.plusButton / 2
+            XCTAssertEqual(center, plusCenter, accuracy: 1, "inset \(composerInset)")
+            XCTAssertEqual(16 + Theme.memberLane(composerInset: composerInset),
+                           16 + Theme.avatarColumnInset(composerInset: composerInset) + Theme.memberAvatar + Theme.memberAvatarGap)
+        }
+        // Keyboard up: avatar spans the `+` (19–61), body after the gap at 74.
+        XCTAssertEqual(16 + Theme.avatarColumnInset(composerInset: Theme.composerInsetKeyboard), 19)
+        XCTAssertEqual(16 + Theme.memberLane(composerInset: Theme.composerInsetKeyboard), 74)
         XCTAssertEqual(PresenceRow.maxPictures, 3)
     }
 }
