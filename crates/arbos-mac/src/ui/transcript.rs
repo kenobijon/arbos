@@ -347,6 +347,10 @@ pub enum RowKind {
         /// Under another person's bubble (chips clear the avatar column).
         indent: bool,
     },
+    /// Optional read receipt under my last outbound bubble ("Seen").
+    Seen {
+        label: String,
+    },
     /// Grok's hand-off line: "Messaged ◉ A" / "N messages with ◉ A, ◉ B and ◉ C".
     Handoff {
         names: Vec<String>,
@@ -473,8 +477,13 @@ pub const STICK_THRESHOLD_PX: f32 = 70.0;
 /// How far above the end the user must be before the ↓ button shows.
 const JUMP_BUTTON_AFTER_PX: f32 = 160.0;
 
-/// Right-click on a bubble: the shell opens the message menu there.
-/// Hover face-smile: the shell opens the quick-react emoji bar there.
+/// The hover rail's buttons: Grok Mac's 24 pt hit target, 16 pt glyph, 2 pt apart.
+pub const RAIL_BUTTON: f32 = 24.0;
+pub const RAIL_GLYPH: f32 = 16.0;
+pub const RAIL_GAP: f32 = 2.0;
+
+/// Right-click or the rail's ⋯: the shell opens the message menu there.
+/// The rail's smiley: the shell opens the reaction capsule there.
 /// Hover reply: the shell sets the composer's reply target.
 pub enum TranscriptEvent {
     MessageMenu {
@@ -482,8 +491,7 @@ pub enum TranscriptEvent {
         message_id: Id,
         position: gpui::Point<gpui::Pixels>,
     },
-    /// Hover react glyph → the six-emoji bar (`react_menu`).
-    ReactMenu {
+    ReactionCapsule {
         chat_id: Id,
         message_id: Id,
         position: gpui::Point<gpui::Pixels>,
@@ -845,8 +853,6 @@ impl Transcript {
             .as_deref()
             .map(|id| state.messages_of(id).to_vec())
             .unwrap_or_default();
-        self.chat_id = chat_id;
-
         let show_details = state.show_details;
         let speech = SpeechRows {
             enabled: state.voice_mode_available(),
@@ -861,6 +867,15 @@ impl Transcript {
             state.active_chat(),
             state.selected_channel.is_some(),
         );
+        // Optional Seen under my last outbound bubble (Settings → Notifications).
+        let seen_label = if state.read_receipts {
+            chat_id
+                .as_deref()
+                .and_then(|id| seen_label_for(state, id, &messages, &me_id))
+        } else {
+            None
+        };
+        self.chat_id = chat_id;
         let new_rows = build_rows(
             &messages,
             show_details,
@@ -869,6 +884,7 @@ impl Transcript {
             &thumb_keys,
             &self.mentions,
             multi_party,
+            seen_label,
         );
         self.multi_party = multi_party;
         // A sender change opens the turn gap. So does every new assistant /
@@ -1096,10 +1112,11 @@ impl Transcript {
             })
     }
 
-    /// Hover-only reply · copy · react glyphs beside a bubble (fade with the
-    /// row). After a successful copy the glyph becomes a checkmark for a
-    /// moment. The face-smile opens the six-emoji bar (`react_menu`).
-    fn hover_reply_copy(
+    /// The hover rail beside a bubble (fades with the row), in Grok's order:
+    /// smiley (the reaction capsule) · reply · ⋯ (the message menu: Copy,
+    /// Reply, Delete). After a copy from the menu the ⋯ shows a checkmark
+    /// for a moment.
+    fn hover_rail(
         &self,
         row_id: &str,
         message_id: &Id,
@@ -1108,17 +1125,16 @@ impl Transcript {
         cx: &mut Context<Self>,
     ) -> Div {
         let chat_id = self.chat_id.clone();
+        let (react_chat, react_msg) = (chat_id.clone(), message_id.clone());
+        let (more_chat, more_msg) = (chat_id.clone(), message_id.clone());
         let reply_msg = message_id.clone();
-        let copy_msg = message_id.clone();
-        let react_chat = self.chat_id.clone();
-        let react_msg = message_id.clone();
         let just_copied = self.copied_feedback.as_ref().is_some_and(|(id, at)| {
             id == message_id && at.elapsed() < Duration::from_millis(COPY_FEEDBACK_MS)
         });
         // Keep the checkmark readable even if the pointer leaves mid-feedback.
-        let copy_opacity = if just_copied { 1.0 } else { opacity };
-        let copy_glyph = if just_copied { "check" } else { "copy" };
-        let copy_color = if just_copied {
+        let more_opacity = if just_copied { 1.0 } else { opacity };
+        let more_glyph = if just_copied { "check" } else { "ellipsis" };
+        let more_color = if just_copied {
             theme.online
         } else {
             theme.text_muted
@@ -1126,7 +1142,7 @@ impl Transcript {
         let btn = |id: SharedString, glyph: &'static str, opacity: f32, color: gpui::Hsla| {
             div()
                 .id(id)
-                .size(px(24.0))
+                .size(px(RAIL_BUTTON))
                 .flex_shrink_0()
                 .flex()
                 .items_center()
@@ -1135,12 +1151,31 @@ impl Transcript {
                 .cursor_pointer()
                 .opacity(opacity)
                 .hover(|s| s.bg(theme.surface_2))
-                .child(icon(glyph, 16.0, color))
+                .child(icon(glyph, RAIL_GLYPH, color))
         };
         div()
             .flex()
             .items_center()
-            .gap(px(2.0))
+            .gap(px(RAIL_GAP))
+            .child(
+                btn(
+                    SharedString::from(format!("{row_id}#react")),
+                    "face-smile",
+                    opacity,
+                    theme.text_muted,
+                )
+                .on_click(cx.listener(
+                    move |_, event: &gpui::ClickEvent, _, cx| {
+                        if let Some(chat_id) = react_chat.clone() {
+                            cx.emit(TranscriptEvent::ReactionCapsule {
+                                chat_id,
+                                message_id: react_msg.clone(),
+                                position: event.position(),
+                            });
+                        }
+                    },
+                )),
+            )
             .child(
                 btn(
                     SharedString::from(format!("{row_id}#reply")),
@@ -1159,26 +1194,17 @@ impl Transcript {
             )
             .child(
                 btn(
-                    SharedString::from(format!("{row_id}#copy")),
-                    copy_glyph,
-                    copy_opacity,
-                    copy_color,
-                )
-                .on_click(cx.listener(move |this, _, _, cx| this.copy_message(&copy_msg, cx))),
-            )
-            .child(
-                btn(
-                    SharedString::from(format!("{row_id}#react")),
-                    "face-smile",
-                    opacity,
-                    theme.text_muted,
+                    SharedString::from(format!("{row_id}#more")),
+                    more_glyph,
+                    more_opacity,
+                    more_color,
                 )
                 .on_click(cx.listener(
                     move |_, event: &gpui::ClickEvent, _, cx| {
-                        if let Some(chat_id) = react_chat.clone() {
-                            cx.emit(TranscriptEvent::ReactMenu {
+                        if let Some(chat_id) = more_chat.clone() {
+                            cx.emit(TranscriptEvent::MessageMenu {
                                 chat_id,
-                                message_id: react_msg.clone(),
+                                message_id: more_msg.clone(),
                                 position: event.position(),
                             });
                         }
@@ -1505,11 +1531,9 @@ impl Transcript {
                 time_el,
             ));
         let (row_el, reveal) = self.hover_row(row_id, now, window, cx);
-        // Hover: reply · copy · react (face-smile opens the emoji bar).
-        let hover_actions = (last && !live).then(|| {
-            let actions = self.hover_reply_copy(row_id, message_id, reveal, theme, cx);
-            div().flex().items_center().gap(px(2.0)).child(actions)
-        });
+        // Hover: the rail (smiley · reply · ⋯) on the last block of a finished reply.
+        let hover_actions =
+            (last && !live).then(|| self.hover_rail(row_id, message_id, reveal, theme, cx));
         // Messages for Mac: the bubble's time shows beside the glyph on hover
         // (1:1 chats; a group / channel bubble already carries it after the text).
         let hover_time = (last && !live && !inline_time)
@@ -1697,7 +1721,7 @@ impl Transcript {
                         .child({
                             let (row_el, reveal) = self.hover_row(&row.id, now, window, cx);
                             let actions =
-                                self.hover_reply_copy(&row.id, &row.message_id, reveal, &theme, cx);
+                                self.hover_rail(&row.id, &row.message_id, reveal, &theme, cx);
                             row_el
                                 .justify_start()
                                 .items_end()
@@ -1759,7 +1783,7 @@ impl Transcript {
                             // My bubble sits right, so its outer edge (and time) is on the left.
                             let (row_el, reveal) = self.hover_row(&row.id, now, window, cx);
                             let actions =
-                                self.hover_reply_copy(&row.id, &row.message_id, reveal, &theme, cx);
+                                self.hover_rail(&row.id, &row.message_id, reveal, &theme, cx);
                             row_el
                                 .justify_end()
                                 .children(hover_time(time, reveal, &theme).map(|t| t.mr(px(8.0))))
@@ -1925,6 +1949,17 @@ impl Transcript {
                     .child(chips)
                     .into_any_element()
             }
+            RowKind::Seen { label } => div()
+                .w_full()
+                .flex()
+                .justify_end()
+                .mt(px(-2.0))
+                .pb(px(ROW_GAP_HALF))
+                .pr(px(6.0))
+                .text_size(px(TEXT_TINY))
+                .text_color(theme.text_muted)
+                .child(label)
+                .into_any_element(),
             RowKind::Handoff { names, total } => {
                 // "Messaged ◉ A" while only the brief went out; "N messages with
                 // ◉ A, ◉ B and ◉ C" once replies came back (Grok refs 13/58).
@@ -1985,7 +2020,7 @@ impl Transcript {
                         &theme,
                     ));
                 let (row_el, reveal) = self.hover_row(&row.id, now, window, cx);
-                let actions = self.hover_reply_copy(&row.id, &row.message_id, reveal, &theme, cx);
+                let actions = self.hover_rail(&row.id, &row.message_id, reveal, &theme, cx);
                 if mine {
                     // My media sits right; the rail is on its outer (left) edge.
                     div()
@@ -2475,6 +2510,9 @@ fn is_json_block(block: &Block) -> bool {
 ///
 /// `thumb_keys` are blob refs that already have a decoded preview; they are
 /// mixed into row versions so a late thumbnail reloads the picture row.
+/// `names_senders` and `seen_label` landed from parallel feedbacks; keep them
+/// as plain args rather than a one-off options struct.
+#[allow(clippy::too_many_arguments)]
 pub fn build_rows(
     messages: &[Message],
     show_details: bool,
@@ -2483,6 +2521,7 @@ pub fn build_rows(
     thumb_keys: &HashSet<&str>,
     mentions: &Mentions,
     names_senders: bool,
+    seen_label: Option<String>,
 ) -> Vec<Row> {
     let mine = |m: &Message| {
         m.sender == "user" || m.sender.is_empty() || m.sender == format!("user:{me_id}")
@@ -2496,6 +2535,11 @@ pub fn build_rows(
     let last_reply = messages
         .iter()
         .rposition(|m| m.role == Role::Assistant && !m.is_streaming());
+    // Last outbound message from me: optional Seen sits under it (and its reactions).
+    let last_mine_id = messages
+        .iter()
+        .rfind(|m| m.role == Role::User && mine(m))
+        .map(|m| m.id.clone());
     let mut last_stamp_at: u64 = 0;
     // Who spoke last in a people chat: a bubble carries its sender's name only when
     // the sender changed or a date stamp broke the run (Grok Bot's group style), and
@@ -2634,6 +2678,16 @@ pub fn build_rows(
                     queued = true;
                 }
                 push_reactions(&mut rows, message, mine(message));
+                if last_mine_id.as_deref() == Some(message.id.as_str()) {
+                    if let Some(label) = seen_label.clone() {
+                        rows.push(Row {
+                            version: hash_version(&label, false),
+                            id: format!("{}#seen", message.id),
+                            message_id: message.id.clone(),
+                            kind: RowKind::Seen { label },
+                        });
+                    }
+                }
             }
             Role::System => {
                 // Call lines and membership notices ("Jacob added Home, hjkb and
@@ -2698,14 +2752,22 @@ pub fn build_rows(
                 let mut lane: Option<String> = None;
                 let in_people =
                     message.sender.starts_with("agent:") && message.asked_by_handle.is_some();
-                // Quote the user message this answers: prefer `replyTo` (platform
-                // reply feature); fall back to `inReplyTo` (turn link / older rows)
-                // so consecutive replies do not look like one run (#1447).
+                // Quote the message this answers: `replyTo` is the platform reply the
+                // box sets by the #1521 rule (always in groups / channels / people chats
+                // and for a row another agent sent; in a 1:1 only when answering an
+                // earlier message than the latest). Rows from older boxes in attributed
+                // chats fall back to `inReplyTo` (#1447); a plain 1:1 answer to the
+                // latest message carries no quote.
+                let attributed = message.role == Role::Project || in_people;
                 let reply_quote = message
                     .reply_to
                     .as_deref()
                     .filter(|id| !id.is_empty())
-                    .or_else(|| message.in_reply_to.as_deref().filter(|id| !id.is_empty()))
+                    .or_else(|| {
+                        attributed
+                            .then(|| message.in_reply_to.as_deref().filter(|id| !id.is_empty()))
+                            .flatten()
+                    })
                     .map(|id| Quote::for_reply(id, messages));
                 if message.role == Role::Project || in_people {
                     // A people-chat agent (or another Project, F6) speaks in its own lane;
@@ -2962,7 +3024,15 @@ pub fn build_rows(
                     )
                 });
                 let failed = !errors.is_empty() || matches!(message.status, MessageStatus::Error);
-                if shows_nothing && finished && !streaming && (failed || only_empty) {
+                // A hand-off row (a subagent brief, an agent-to-agent send) is its own line
+                // ("Messaged ◉ X"); it never gets the stock line, even with no parts (#1466).
+                let handoff_row = message.subagent_name.is_some()
+                    && matches!(
+                        message.turn,
+                        Some(TurnKind::New | TurnKind::Spawn | TurnKind::Wake)
+                    );
+                if shows_nothing && finished && !streaming && !handoff_row && (failed || only_empty)
+                {
                     let line = errors
                         .first()
                         .map(|(_, _, text)| text.trim())
@@ -3097,6 +3167,36 @@ pub fn build_rows(
         });
     }
     rows
+}
+
+/// "Seen" when at least one peer's Presence `seen` covers my last outbound
+/// message in this chat (Settings → Notifications read receipts on).
+fn seen_label_for(
+    state: &AppState,
+    chat_id: &str,
+    messages: &[Message],
+    me_id: &str,
+) -> Option<String> {
+    let mine = |m: &Message| {
+        m.sender == "user" || m.sender.is_empty() || m.sender == format!("user:{me_id}")
+    };
+    let last_mine = messages.iter().rfind(|m| m.role == Role::User && mine(m))?;
+    if last_mine.pending {
+        return None;
+    }
+    let receipts = state.message_receipts.get(chat_id)?;
+    if receipts.is_empty() {
+        return None;
+    }
+    let my_ix = messages.iter().position(|m| m.id == last_mine.id)?;
+    let any = receipts.values().any(|seen_id| {
+        messages
+            .iter()
+            .position(|m| &m.id == seen_id)
+            .is_some_and(|ix| ix >= my_ix)
+            || seen_id == &last_mine.id
+    });
+    any.then(|| "Seen".to_owned())
 }
 
 /// One chips row under a message that carries reactions.
@@ -5039,6 +5139,7 @@ mod system_line_tests {
             &HashSet::new(),
             &Mentions::empty(),
             true,
+            None,
         );
         let kinds: Vec<&RowKind> = rows.iter().map(|r| &r.kind).collect();
         // Date stamp, Bob (named), the notice, Bob again (named again).
@@ -5097,6 +5198,7 @@ mod system_line_tests {
             &HashSet::new(),
             &Mentions::empty(),
             true,
+            None,
         );
         // The name sits inside each reply's first bubble (sender-name-in-bubble-2026-10-23).
         let named_bubbles: Vec<bool> = rows
@@ -5180,6 +5282,7 @@ mod system_line_tests {
             &HashSet::new(),
             &Mentions::empty(),
             true,
+            None,
         );
         assert_eq!(
             names(&rows),
@@ -5212,6 +5315,7 @@ mod system_line_tests {
             &HashSet::new(),
             &Mentions::empty(),
             false,
+            None,
         );
         assert_eq!(
             names(&rows),
@@ -5253,6 +5357,7 @@ mod system_line_tests {
             kind: crate::model::ChatKind::Group,
             participants: Vec::new(),
             unread: false,
+            unread_count: 0,
             last_message_at: 0,
             archived_at: None,
         };
@@ -5320,6 +5425,7 @@ mod presence_rows_tests {
             &HashSet::new(),
             &Mentions::empty(),
             true,
+            None,
         )
     }
 
