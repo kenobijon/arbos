@@ -2391,7 +2391,15 @@ mod gate_record_tests {
         let gates: Vec<&(crate::store::T3Row, Option<Value>)> =
             rows.iter().filter(|(r, _)| r.kind == "gate").collect();
         assert_eq!(gates.len(), 2, "{rows:?}");
-        let (skip, skip_data) = gates[0];
+        // Two rows in one millisecond sort by ulid, not by write order: pick by message id.
+        let by_msg = |id: &str| {
+            gates
+                .iter()
+                .find(|(_, d)| d.as_ref().and_then(|d| d["message_id"].as_str()) == Some(id))
+                .copied()
+                .expect("gate row for the message")
+        };
+        let (skip, skip_data) = by_msg(&for_other);
         assert!(skip
             .text
             .starts_with("gate skip: addressed to another agent only"));
@@ -2399,7 +2407,7 @@ mod gate_record_tests {
         assert_eq!(skip_data["reply"], false);
         assert_eq!(skip_data["message_id"], for_other);
         assert_eq!(skip_data["handle"], "doug");
-        let (reply, _) = gates[1];
+        let (reply, _) = by_msg(&for_me);
         assert!(reply.text.starts_with("gate reply: addressed to me"));
         // The window honours the chat filter and the time cursor.
         assert!(agent
