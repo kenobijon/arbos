@@ -1001,6 +1001,7 @@ struct RowView: View, Equatable {
     var body: some View {
         #if DEBUG
         let _ = PerfCounters.bump("rowBody")
+        let _ = DebugHooks.perfChanges ? Self._printChanges() : ()
         #endif
         VStack(spacing: 4) {
             bubble

@@ -1816,7 +1816,7 @@ final class AppModel: ObservableObject {
             ensureRoom(projectId: peopleSlot, key: key, roomChat: key, restored: (doc, 0, [], doc.readAll()))
             // No relay in the rig: the socket would redial forever and flap the link
             // (each flap publishes `caughtUp`). The doc's change handler stays.
-            rooms[key]?.stop()
+            self.rooms[key]?.stop()
             caughtUp.remove(key)
             docs.append((key, doc))
         }

@@ -631,6 +631,7 @@ private struct ChatSession: View {
     var body: some View {
         #if DEBUG
         let _ = PerfCounters.bump("chatBody")
+        let _ = DebugHooks.perfChanges ? Self._printChanges() : ()
         #endif
         // Header stays outside GeometryReader (same pattern as ServerChannelsView /
         // HiddenChatsView). Nesting it inside the reader let iOS 26/27 vertically
@@ -2879,6 +2880,7 @@ private struct TranscriptRows: View, Equatable {
     var body: some View {
         #if DEBUG
         let _ = PerfCounters.bump("transcriptRowsBody")
+        let _ = DebugHooks.perfChanges ? Self._printChanges() : ()
         #endif
         // Rows keyed by id, never by position: a grow step prepends older rows and
         // must not touch the ones already laid out (arbonites-chat-lag).

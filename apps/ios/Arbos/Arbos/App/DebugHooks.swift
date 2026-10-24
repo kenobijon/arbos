@@ -123,6 +123,9 @@ enum DebugHooks {
     static var perfReplayGapMs: Int { Int(value("ARBOS_PERF_REPLAY_GAP_MS") ?? "") ?? 5 }
     /// Delay before the replay starts, after the chat screen appears (ms).
     static var perfReplayAfterMs: Int { Int(value("ARBOS_PERF_REPLAY_AFTER_MS") ?? "") ?? 1500 }
+    /// Print SwiftUI's change reasons (`_printChanges`) for the chat screen, the row
+    /// list and each bubble (stdout; launch with `--stdout`).
+    static let perfChanges: Bool = value("ARBOS_PERF_CHANGES") == "1"
     /// Perf rig drivers, run a few seconds after the chat opens: `scroll` pages the
     /// transcript to its top and back, `type` appends 40 keystrokes to the composer,
     /// `typing` fakes a member's typing presence every second. Comma-separated.
