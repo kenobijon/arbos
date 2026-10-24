@@ -24,6 +24,7 @@ use crate::ui::channels::{ChannelsEvent, ChannelsPanel};
 use crate::ui::composer::{self, Composer, ComposerEvent, ComposerInput};
 use crate::ui::connectors::{ConnectorsEvent, ConnectorsPanel};
 use crate::ui::create_entity::{self, Kind as CreateKind};
+use crate::ui::delete_confirm;
 use crate::ui::dropzone;
 use crate::ui::feedback::{FeedbackSheet, SendFeedback};
 use crate::ui::frost::{frosted, MENU_BLUR, PANEL_BLUR};
@@ -195,6 +196,10 @@ pub struct Shell {
     pub(crate) viewer_search: Entity<ComposerInput>,
     /// Keyboard focus while the media viewer is up (← → page, Esc closes).
     viewer_focus: FocusHandle,
+    /// Keyboard owner of the "Delete message?" confirm (Return / Esc).
+    delete_confirm_focus: FocusHandle,
+    /// The message whose confirm last took that focus, so it is focused once per opening.
+    delete_confirm_focused_for: Option<crate::model::Id>,
     /// `AppState::media_viewer_generation` the viewer was last focused for.
     viewer_focused_generation: u64,
     pub(crate) connectors: Entity<ConnectorsPanel>,
@@ -213,6 +218,9 @@ pub struct Shell {
     /// `ARBOS_RIG_MESSAGE_MENU=x,y` (screenshot rig): opens the menu once the
     /// open chat has a message; cleared when it has.
     rig_message_menu: Option<gpui::Point<gpui::Pixels>>,
+    /// `ARBOS_RIG_DELETE_CONFIRM=1` (screenshot rig): opens the "Delete
+    /// message?" confirm for the newest message of the open chat; cleared once it has.
+    rig_delete_confirm: bool,
     /// The reaction capsule over a bubble (`reactions`): (chat, message, the smiley's click).
     pub(crate) reaction_capsule: Option<(
         crate::model::Id,
@@ -777,6 +785,8 @@ impl Shell {
             viewer_search,
             viewer_focus: cx.focus_handle(),
             viewer_focused_generation: 0,
+            delete_confirm_focus: cx.focus_handle(),
+            delete_confirm_focused_for: None,
             connectors,
             skills,
             local,
@@ -811,6 +821,7 @@ impl Shell {
             chat_delete_armed: false,
             message_menu: None,
             rig_message_menu: message_menu::rig_anchor(),
+            rig_delete_confirm: std::env::var_os("ARBOS_RIG_DELETE_CONFIRM").is_some(),
             reaction_capsule: None,
             reaction_pick_open: false,
             reaction_pick,
@@ -1898,6 +1909,11 @@ impl Shell {
     /// Escape stops a recording memo (keeping its transcript), then closes
     /// whatever floats: menus, then sheets.
     fn escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
+        if self.state.read(cx).delete_confirm.is_some() {
+            self.state.update(cx, |s, cx| s.close_delete_confirm(cx));
+            Composer::focus(&self.composer, window, cx);
+            return;
+        }
         if let Some(viewer) = self.state.read(cx).media_viewer.as_ref() {
             // Esc closes the Forward picker first, then the viewer.
             if viewer.forward_open {
@@ -3541,6 +3557,7 @@ impl Render for Shell {
         let viewer_open = state.media_viewer.is_some();
         let viewer_forward_open = state.media_viewer.as_ref().is_some_and(|v| v.forward_open);
         let viewer_generation = state.media_viewer_generation;
+        let delete_confirm_open = state.delete_confirm.as_ref().map(|d| d.message_id.clone());
         let pairing = state.pairing.clone();
         let new_chat_open = state.new_chat_open;
         let people_space = state.selected().filter(|p| p.is_people()).cloned();
@@ -3721,6 +3738,31 @@ impl Render for Shell {
         }
         if let Some(capsule) = reactions::render(self, window, cx) {
             root = root.child(capsule);
+        }
+        if self.rig_delete_confirm {
+            let target = self.state.read(cx).active_chat_id().and_then(|chat| {
+                let state = self.state.read(cx);
+                let last = state.messages.get(&chat)?.last()?.id.clone();
+                Some((chat, last))
+            });
+            if let Some((chat, message)) = target {
+                self.rig_delete_confirm = false;
+                self.state
+                    .update(cx, |s, cx| s.open_delete_confirm(chat, message, cx));
+            }
+        }
+        if let Some(confirm) = delete_confirm::overlay(self, &self.delete_confirm_focus, cx) {
+            // Return / Esc go to the card while it is up; focus moves there once per opening.
+            if self.delete_confirm_focused_for != delete_confirm_open {
+                self.delete_confirm_focused_for = delete_confirm_open.clone();
+                window.focus(&self.delete_confirm_focus, cx);
+            }
+            root = root.child(confirm);
+        } else if self.delete_confirm_focused_for.is_some() {
+            self.delete_confirm_focused_for = None;
+            if self.delete_confirm_focus.is_focused(window) {
+                Composer::focus(&self.composer, window, cx);
+            }
         }
         // Rig: the hook asked for the first other member's row menu on the group pane.
         if let Some(armed) = self.state.update(cx, |s, _| s.rig_member_menu.take()) {
