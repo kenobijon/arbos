@@ -5426,6 +5426,7 @@ mod system_line_tests {
             &Mentions::empty(),
             true,
             None,
+            true,
         );
         let solo = build_rows(
             &[agent],
@@ -5436,6 +5437,7 @@ mod system_line_tests {
             &Mentions::empty(),
             false,
             None,
+            true,
         );
         let group_lane: Vec<Option<&str>> = group
             .iter()
