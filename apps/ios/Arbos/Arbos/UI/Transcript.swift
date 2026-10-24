@@ -103,7 +103,7 @@ enum RowKind: Equatable {
     /// senders at all (group / channel, `rows(multiParty:)`); the name sits inside the bubble
     /// and `time` follows the text (Jacob, 2026-10-23).
     case other(text: String, handle: String, avatar: String?, named: Bool, quote: Quote?, time: String?)
-    case assistant(blocks: [Block], live: Bool, caption: String?)
+    case assistant(blocks: [Block], live: Bool, caption: String?, quote: Quote? = nil)
     /// Shared agent in a people chat: same shape as `.other` (avatar + bubble, name on each
     /// reply — consecutive answers from the same agent must not merge, #1447). No
     /// "answering @x · owned by @y" meta — ownership lives in the profile pane
@@ -239,8 +239,13 @@ enum Transcript {
                 let lastTextPart = message.parts.lastIndex { $0.textValue != nil }
                 let firstTextPart = message.parts.firstIndex { $0.textValue != nil }
                 let agentId: String? = message.sender.hasPrefix("agent:") ? String(message.sender.dropFirst(6)) : nil
-                // Quote the user message this answers (`inReplyTo`); same chip as a human reply.
-                let replyQuote = message.inReplyTo.flatMap { $0.isEmpty ? nil : Quote.forReply($0, in: byId) }
+                // Quote the message this answers: `replyTo` is the platform reply the box sets by
+                // the #1521 rule (always in groups / channels / people chats and for a row another
+                // agent sent; in a 1:1 only when answering an earlier message than the latest).
+                // Member bubbles from older boxes fall back to `inReplyTo`; a plain 1:1 answer to
+                // the latest message carries no quote.
+                let platformQuote = message.replyTo.flatMap { $0.isEmpty ? nil : Quote.forReply($0, in: byId) }
+                let replyQuote = platformQuote ?? message.inReplyTo.flatMap { $0.isEmpty ? nil : Quote.forReply($0, in: byId) }
                 // Error parts wait until the prose is known: under a real answer they stay the
                 // chip with Retry; on an answer with no words they become the words.
                 var errors: [(id: Id, code: String, text: String)] = []
@@ -269,7 +274,8 @@ enum Transcript {
                                                            quote: nil, time: pix == lastTextPart ? inlineTime : nil)))
                         } else {
                             chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
-                                             kind: .assistant(blocks: blocks, live: live, caption: nil)))
+                                             kind: .assistant(blocks: blocks, live: live, caption: nil,
+                                                              quote: pix == firstTextPart ? platformQuote : nil)))
                         }
                     case .status(let id, .askUser, let text):
                         // agentd writes a `question` part and this status line; the part wins.
@@ -316,7 +322,10 @@ enum Transcript {
                     }
                 }
                 let failed = !errors.isEmpty || message.status == .error
-                if showsNothing, finished, !streaming, failed || onlyEmpty {
+                // A hand-off row (a subagent brief, an agent-to-agent send) is its own line
+                // ("Messaged ◉ X"); it never gets the stock line, even with no parts (#1466).
+                let handoffRow = handoffName != nil
+                if showsNothing, finished, !streaming, !handoffRow, failed || onlyEmpty {
                     let line: String = {
                         if let first = errors.first?.text.trimmingCharacters(in: .whitespacesAndNewlines), !first.isEmpty {
                             return first
@@ -1025,13 +1034,16 @@ struct RowView: View, Equatable {
             .task(id: avatar) {
                 if memberProject(handle: handle) == nil { SenderAccents.shared.load(url: avatar) }
             }
-        case .assistant(let blocks, let live, let caption):
+        case .assistant(let blocks, let live, let caption, let quote):
             HStack {
                 VStack(alignment: .leading, spacing: 8) {
                     if let caption {
                         Text(caption)
                             .font(theme.font(Theme.tiny, weight: .medium))
                             .foregroundStyle(theme.muted)
+                    }
+                    if let quote {
+                        quoteHeader(quote, color: theme.text)
                     }
                     ForEach(Array(blocks.enumerated()), id: \.offset) { i, block in
                         BlockView(block: block, live: live && i == blocks.count - 1, mentions: mentions)
