@@ -1340,6 +1340,8 @@ class Loop:
         rows = []
         for fid in self.store.items():
             st = self.store.state(fid)
+            if not gate:
+                break  # gate off: nothing is held; the list is empty by definition
             if st.get("status") not in ("awaiting_jacob",) and not (st.get("awaiting") and st.get("status") == "gating" and not st.get("approved_by_jacob")):
                 continue
             aw = st.get("awaiting") or {}
