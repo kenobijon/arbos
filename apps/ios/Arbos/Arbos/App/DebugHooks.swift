@@ -121,6 +121,8 @@ enum DebugHooks {
     static var perfReplayRooms: Int { Int(value("ARBOS_PERF_REPLAY_ROOMS") ?? "") ?? 1 }
     /// Milliseconds between replayed rows (0 = as fast as the run loop allows).
     static var perfReplayGapMs: Int { Int(value("ARBOS_PERF_REPLAY_GAP_MS") ?? "") ?? 5 }
+    /// Replay as live rows (room caught up) rather than as a catch-up.
+    static var perfReplayLive: Bool { value("ARBOS_PERF_REPLAY_LIVE") == "1" }
     /// Delay before the replay starts, after the chat screen appears (ms).
     static var perfReplayAfterMs: Int { Int(value("ARBOS_PERF_REPLAY_AFTER_MS") ?? "") ?? 1500 }
     /// Print SwiftUI's change reasons (`_printChanges`) for the chat screen, the row

@@ -698,6 +698,8 @@ final class AppModel: ObservableObject {
     /// happens with that re-read, not per row. 72 rows replayed per row cost 11 s of
     /// blocked main thread on a 1 500-message group (iphone-open-scroll-block, 2026-10-24).
     static let catchUpCoalesceMs = 600
+    /// Live rows: the first lands at once, the rest of a burst fold into one read per window.
+    static let liveCoalesceMs = 150
     /// Lists at or above this size are decoded off the main actor (`emitSnapshot`).
     static let asyncSnapshotMinRows = 300
     /// Per-chat generation of the last requested snapshot; a slower background decode
@@ -1823,6 +1825,9 @@ final class AppModel: ObservableObject {
         LaunchClock.mark("replay-restored", detail: "rooms=\(docs.count) rows=\(rowBytes.count) ckpt=\(ckpt.count)B")
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(afterMs))
+            // `ARBOS_PERF_REPLAY_LIVE=1`: the rooms count as live (rows arriving while the
+            // reader scrolls) instead of catching up.
+            for (key, _) in docs { if DebugHooks.perfReplayLive { caughtUp.insert(key) } else { caughtUp.remove(key) } }
             PerfLog.mark("phase replay begin", ms: 0)
             let started = Date()
             for (ix, bytes) in rowBytes.enumerated() {
@@ -1883,14 +1888,11 @@ final class AppModel: ObservableObject {
                     self.activityPending.insert(key)
                     self.requestSnapshot(key, windowMs: Self.catchUpCoalesceMs, deferAlways: true)
                 } else if touched.listChanged {
-                    #if DEBUG
-                    PerfCounters.bump("emit.L1883")
-                    #endif
-                    self.emitSnapshot(key)
-                    self.markActivity(chatId: key)
-                    // Loro is live; /me/pushes and /me/unread can lag — light the
-                    // blue circle and drain the push queue as soon as a new row lands.
-                    self.noteLiveUnread(chatId: key)
+                    // Live: a burst of rows (agents answering each other) folds into one
+                    // re-read per short window too; the home-list bump and the unread
+                    // light ride with that read (`applySnapshot`) instead of per row.
+                    self.activityPending.insert(key)
+                    self.requestSnapshot(key, windowMs: Self.liveCoalesceMs)
                 } else if !touched.messages.isEmpty {
                     self.emitMessages(key, indexes: touched.messages)
                     // Same kick project chats get via `chats` in markActivity — people
@@ -2123,6 +2125,9 @@ final class AppModel: ObservableObject {
         // The home list re-sorts once the room is live, not per catch-up snapshot.
         if caughtUp.contains(chatId), activityPending.remove(chatId) != nil {
             markActivity(chatId: chatId)
+            // Loro is live; /me/pushes and /me/unread can lag — light the
+            // blue circle and drain the push queue as soon as a new row lands.
+            noteLiveUnread(chatId: chatId)
         }
     }
 
