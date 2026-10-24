@@ -1259,9 +1259,18 @@ class Loop:
 
     def freeze_allows(self, fid: str, st: dict, fz: dict) -> bool:
         allow = {a.lower().lstrip("@") for a in fz.get("allow", []) if a}
-        # `freeze_exempt` is set by hand for an item the owner adopted during a freeze (#1510, 2026-10-24 00:29).
+        # Structural exemptions (owner scope, 2026-10-24 00:35): the freeze is for tester-filed reports whose
+        # reporter is not on the allow list. Anything owned by a coordinator worker (`handed_off_to` bc-…; loop
+        # agents are `agent_id`, not owners), anything tracked/registered by the coordinator (`track_commit`,
+        # inbox / track submissions) and anything labelled "Jacob (owner)" is Jacob's and keeps moving.
+        # `freeze_exempt` is the by-hand switch for an item the owner adopted during a freeze (#1510).
         if st.get("freeze_exempt") or (st.get("tester") or "") == "Jacob (owner)":
             return True
+        if str(st.get("handed_off_to") or "").startswith("bc-") or st.get("track_commit"):
+            return True
+        with contextlib.suppress(Exception):
+            if self.store.submission(fid).get("source") in ("inbox", "track"):
+                return True
         keys = {(st.get("tester_key") or "").lower().lstrip("@")}
         info: dict = {}
         with contextlib.suppress(Exception):
@@ -1295,9 +1304,20 @@ class Loop:
         n = 0
         for fid in self.store.items():
             st = self.store.state(fid)
-            if st.get("status") in ("queued", "gating") and not self.freeze_allows(fid, st, fz):
+            allowed = self.freeze_allows(fid, st, fz)
+            if st.get("status") in ("queued", "gating") and not allowed:
                 self.freeze_park(fid, st, fz)
                 n += 1
+            elif st.get("status") == "parked" and allowed:
+                # The scope changed (allow list edited, item adopted, owner rule): back to where it was.
+                st["status"] = st.pop("parked_from", "queued")
+                st.pop("parked_at", None)
+                self.store.save_state(fid, st)
+                self.store.event(fid, "unparked", to=st["status"], why="now within the freeze's allow scope")
+                log(f"[{fid}] unparked: within the freeze's allow scope now ({st['status']})")
+                if st.get("issue"):
+                    with contextlib.suppress(HttpError):
+                        self.gh.set_labels(st["issue"], [], ["frozen"])
         return n
 
     def lift_freeze(self) -> int:
