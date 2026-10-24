@@ -348,47 +348,142 @@ final class AppModel: ObservableObject {
         }
     }
 
-    // MARK: Home archive (device-local)
+    // MARK: Home archive (per user on the relay; UserDefaults keeps the offline copy)
 
-    /// Agents hidden from the home list until found in search (or opened).
+    /// Agents hidden from the home list (Hidden chats) until unarchived or new activity.
     @Published private(set) var archivedProjectIds: Set<Id> = {
         Set(UserDefaults.standard.stringArray(forKey: "archivedProjects") ?? [])
     }()
 
-    /// People DMs/groups hidden from home until found in search (or opened).
+    /// People DMs/groups hidden from home until unarchived or new activity.
     @Published private(set) var archivedPeopleChatIds: Set<Id> = {
         Set(UserDefaults.standard.stringArray(forKey: "archivedPeopleChats") ?? [])
     }()
+
+    /// Servers hidden from home until unarchived.
+    @Published private(set) var archivedServerIds: Set<Id> = {
+        Set(UserDefaults.standard.stringArray(forKey: "archivedServers") ?? [])
+    }()
+
+    /// Rows this device just (un)archived: the relay list may still say the old state for
+    /// a poll or two, so the reconcile skips them until the deadline.
+    private var archiveLocalUntil: [String: Date] = [:]
+    private static let archiveLocalGraceSeconds: TimeInterval = 20
 
     func isArchived(_ projectId: Id) -> Bool { archivedProjectIds.contains(projectId) }
 
     func isArchived(peopleChatId: Id) -> Bool { archivedPeopleChatIds.contains(peopleChatId) }
 
-    func archive(_ projectId: Id) {
-        guard !archivedProjectIds.contains(projectId) else { return }
-        archivedProjectIds.insert(projectId)
+    func isArchived(serverId: Id) -> Bool { archivedServerIds.contains(serverId) }
+
+    func archive(_ projectId: Id) { setArchived(projectId: projectId, true) }
+    func unarchive(_ projectId: Id) { setArchived(projectId: projectId, false) }
+    func archive(peopleChatId: Id) { setArchived(peopleChatId: peopleChatId, true) }
+    func unarchive(peopleChatId: Id) { setArchived(peopleChatId: peopleChatId, false) }
+    func archive(serverId: Id) { setArchived(serverId: serverId, true) }
+    func unarchive(serverId: Id) { setArchived(serverId: serverId, false) }
+
+    private func setArchived(projectId: Id, _ archived: Bool) {
+        guard archivedProjectIds.contains(projectId) != archived else { return }
+        if archived { archivedProjectIds.insert(projectId) } else { archivedProjectIds.remove(projectId) }
         UserDefaults.standard.set(Array(archivedProjectIds), forKey: "archivedProjects")
-        // Archive clears a home pin — the row is hidden until search/open.
-        unpinHome(projectId: projectId)
+        // Archive clears a home pin — the row is hidden until unarchived.
+        if archived { unpinHome(projectId: projectId) }
+        archiveLocalUntil["p:" + projectId] = Date().addingTimeInterval(Self.archiveLocalGraceSeconds)
+        guard credentials != nil, !isFixture else { return }
+        Task {
+            do { try await api.setProjectArchived(projectId, archived: archived) } catch let e as RelayError where e.status == 404 {
+                // Older relay: the archive stays on this device.
+            } catch { notice = Notice(text: "\(archived ? "Archive" : "Unarchive") failed: \(error.localizedDescription)") }
+        }
     }
 
-    func archive(peopleChatId: Id) {
-        guard !archivedPeopleChatIds.contains(peopleChatId) else { return }
-        archivedPeopleChatIds.insert(peopleChatId)
+    private func setArchived(peopleChatId: Id, _ archived: Bool) {
+        guard archivedPeopleChatIds.contains(peopleChatId) != archived else { return }
+        if archived { archivedPeopleChatIds.insert(peopleChatId) } else { archivedPeopleChatIds.remove(peopleChatId) }
         UserDefaults.standard.set(Array(archivedPeopleChatIds), forKey: "archivedPeopleChats")
-        unpinHome(peopleChatId: peopleChatId)
+        if archived { unpinHome(peopleChatId: peopleChatId) }
+        if let i = peopleChats.firstIndex(where: { $0.id == peopleChatId }) {
+            peopleChats[i].archivedAt = archived ? nowMs() : nil
+        }
+        archiveLocalUntil["c:" + peopleChatId] = Date().addingTimeInterval(Self.archiveLocalGraceSeconds)
+        guard credentials != nil, !isFixture else { return }
+        Task {
+            do { try await api.chatSettings(chatId: peopleChatId, archived: archived) } catch let e as RelayError where e.status == 404 {
+                // Older relay: the archive stays on this device.
+            } catch { notice = Notice(text: "\(archived ? "Archive" : "Unarchive") failed: \(error.localizedDescription)") }
+        }
     }
 
-    func unarchive(_ projectId: Id) {
-        guard archivedProjectIds.contains(projectId) else { return }
-        archivedProjectIds.remove(projectId)
-        UserDefaults.standard.set(Array(archivedProjectIds), forKey: "archivedProjects")
+    private func setArchived(serverId: Id, _ archived: Bool) {
+        guard archivedServerIds.contains(serverId) != archived else { return }
+        if archived { archivedServerIds.insert(serverId) } else { archivedServerIds.remove(serverId) }
+        UserDefaults.standard.set(Array(archivedServerIds), forKey: "archivedServers")
+        archiveLocalUntil["s:" + serverId] = Date().addingTimeInterval(Self.archiveLocalGraceSeconds)
+        guard credentials != nil, !isFixture else { return }
+        Task {
+            do { try await api.setServerArchived(serverId, archived: archived) } catch let e as RelayError where e.status == 404 {
+                // Older relay: the archive stays on this device.
+            } catch { notice = Notice(text: "\(archived ? "Archive" : "Unarchive") failed: \(error.localizedDescription)") }
+        }
     }
 
-    func unarchive(peopleChatId: Id) {
-        guard archivedPeopleChatIds.contains(peopleChatId) else { return }
-        archivedPeopleChatIds.remove(peopleChatId)
-        UserDefaults.standard.set(Array(archivedPeopleChatIds), forKey: "archivedPeopleChats")
+    /// The relay's per-user flags win over the offline copy, except for rows this device
+    /// changed in the last few seconds (`archiveLocalUntil`).
+    private func reconcileArchive(key prefix: String, relay: [(Id, Bool)], into set: inout Set<Id>, defaultsKey: String) {
+        let now = Date()
+        var next = set
+        for (id, archived) in relay {
+            if let until = archiveLocalUntil[prefix + id], until > now { continue }
+            if archived { next.insert(id) } else { next.remove(id) }
+        }
+        guard next != set else { return }
+        set = next
+        UserDefaults.standard.set(Array(set), forKey: defaultsKey)
+    }
+
+    func reconcileArchivedProjects(_ list: [Project]) {
+        guard !isFixture else { return }
+        reconcileArchive(key: "p:", relay: list.map { ($0.id, $0.archivedAt != nil) }, into: &archivedProjectIds, defaultsKey: "archivedProjects")
+    }
+
+    func reconcileArchivedPeople(_ list: [PeopleChat]) {
+        guard !isFixture else { return }
+        reconcileArchive(key: "c:", relay: list.map { ($0.id, $0.archivedAt != nil) }, into: &archivedPeopleChatIds, defaultsKey: "archivedPeopleChats")
+    }
+
+    func reconcileArchivedServers(_ list: [Server]) {
+        guard !isFixture else { return }
+        reconcileArchive(key: "s:", relay: list.map { ($0.id, $0.archivedAt != nil) }, into: &archivedServerIds, defaultsKey: "archivedServers")
+    }
+
+    /// Another device of mine flipped a row (`space_archived` / `chat_archived` push).
+    func applyRemoteArchive(spaceId: Id, kind: String, archived: Bool) {
+        archiveLocalUntil.removeValue(forKey: (kind == "server" ? "s:" : "p:") + spaceId)
+        if kind == "server" {
+            reconcileArchive(key: "s:", relay: [(spaceId, archived)], into: &archivedServerIds, defaultsKey: "archivedServers")
+        } else {
+            reconcileArchive(key: "p:", relay: [(spaceId, archived)], into: &archivedProjectIds, defaultsKey: "archivedProjects")
+            if archived { unpinHome(projectId: spaceId) }
+        }
+    }
+
+    func applyRemoteArchive(peopleChatId: Id, archived: Bool) {
+        archiveLocalUntil.removeValue(forKey: "c:" + peopleChatId)
+        reconcileArchive(key: "c:", relay: [(peopleChatId, archived)], into: &archivedPeopleChatIds, defaultsKey: "archivedPeopleChats")
+        if archived { unpinHome(peopleChatId: peopleChatId) }
+    }
+
+    /// An archived chat got a new inbound message: the row comes back to the list.
+    func unarchiveOnActivity(chatId: Id) {
+        if peopleChat(chatId) != nil {
+            if archivedPeopleChatIds.contains(chatId) { unarchive(peopleChatId: chatId) }
+            return
+        }
+        for (pid, list) in chats where list.contains(where: { $0.id == chatId }) {
+            if archivedProjectIds.contains(pid) { unarchive(pid) }
+            return
+        }
     }
 
     // MARK: Home pins (device-local)
@@ -1247,6 +1342,7 @@ final class AppModel: ObservableObject {
             }
             projects = newProjects.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
             chats = newChats
+            reconcileArchivedProjects(newProjects)
             saveRegistryCache()
             setRelayLink(.live)
             await refreshMachine()
@@ -1851,7 +1947,11 @@ final class AppModel: ObservableObject {
                 }
             }
         }
-        if changed { applyBadge() }
+        if changed {
+            applyBadge()
+            // An archived row comes back when someone writes in it.
+            unarchiveOnActivity(chatId: chatId)
+        }
         Task { await drainPushes() }
     }
 
@@ -2116,6 +2216,7 @@ final class AppModel: ObservableObject {
             let raw = try await api.peopleChatsJSON()
             let list = raw.compactMap(PeopleChat.parse)
             peopleChats = list
+            reconcileArchivedPeople(list)
             for c in list where c.unread { peopleUnread.insert(c.id) }
             for c in list where !c.unread && visibleChatId != c.id {
                 // Loro can mark unread before the people list's head_seq catches up;
@@ -2276,10 +2377,30 @@ final class AppModel: ObservableObject {
 
     /// `GET /voices` once per launch (the relay caches it for an hour anyway). Nothing is
     /// fetched while voice mode is switched off on the relay (no picker to feed).
+    /// The call-voice catalog for the agent's Voice row and `VoicePickerView`. It is
+    /// independent of the voice-mode kill switch (spoken replies): the row picks the
+    /// voice used in calls, so the list must load while voice mode is off.
     func loadVoices() async {
-        guard voiceCatalog == nil, !isFixture, VoiceModeFlag.shared.on else { return }
+        guard voiceCatalog == nil else { return }
+        if isFixture {
+            voiceCatalog = AppModel.fixtureVoiceCatalog
+            return
+        }
         voiceCatalog = try? await api.voices()
     }
+
+    /// The Mac fixture's five voices (`fixture_voices` in arbos-mac), so the rig's picker
+    /// shows rows instead of the relay error.
+    static let fixtureVoiceCatalog = VoiceCatalog(
+        defaultId: "ara",
+        voices: [
+            Voice(id: "ara", name: "Ara", description: "Warm and clear, a touch of gravel. The current default."),
+            Voice(id: "rex", name: "Rex", description: "Low, steady, unhurried."),
+            Voice(id: "sol", name: "Sol", description: "Bright and quick; good for short answers."),
+            Voice(id: "ivy", name: "Ivy", description: "Soft, close to the mic."),
+            Voice(id: "ode", name: "Ode", description: "Even and neutral, reads long text well."),
+        ]
+    )
 
     /// Save on tap: show it at once, PATCH, then read back what the relay kept.
     func setVoice(_ projectId: Id, _ voice: String?) {
@@ -3141,6 +3262,7 @@ final class AppModel: ObservableObject {
                 if peopleChat(cid) == nil { needChats = true }
                 if !isWatching(cid) {
                     peopleUnread.insert(cid)
+                    unarchiveOnActivity(chatId: cid)
                     let sender = payload.sender
                     let from = sender.handle.isEmpty ? (payload.from_handle.isEmpty ? "someone" : payload.from_handle) : sender.handle
                     // §7c sender{} first; the chat's member list fills any gap.
@@ -3214,7 +3336,14 @@ final class AppModel: ObservableObject {
             case .serverUpdated, .serverMemberJoined, .serverMemberRemoved, .serverDeleted:
                 // D88: the relay is the control plane for servers — re-read the list.
                 needServers = true
-            case .peopleChatDeleted, .chatArchived, .peopleInviteAccepted, .machineReady:
+            case .chatArchived(let payload):
+                // Another device of mine archived / unarchived a people chat.
+                if peopleChat(payload.chat_id) != nil {
+                    applyRemoteArchive(peopleChatId: payload.chat_id, archived: payload.archived_at != nil)
+                }
+            case .spaceArchived(let payload):
+                applyRemoteArchive(spaceId: payload.space_id, kind: payload.kind, archived: payload.archived_at != nil)
+            case .peopleChatDeleted, .peopleInviteAccepted, .machineReady:
                 break
             }
         }
@@ -3375,8 +3504,10 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Delete a message for everyone via the shared chat doc. No push notification.
-    func deleteMessage(chatId: Id, messageId: Id) {
+    /// Delete a message for everyone. The relay decides (`DELETE /room/…/messages/{id}`,
+    /// 403 `not_yours` otherwise) and writes the deletion into the doc; it comes back as a
+    /// relay-signed row. No push notification.
+    func deleteMessage(chatId: Id, messageId: Id, projectId: Id? = nil) {
         guard !messageId.isEmpty else { return }
         #if DEBUG
         if isFixture {
@@ -3388,14 +3519,24 @@ final class AppModel: ObservableObject {
             return
         }
         #endif
-        guard let doc = docs[chatId] else { return }
-        do {
-            try doc.deleteMessage(messageId: messageId)
-            doc.commit()
-            clearUnacked(chatId: chatId, messageId: messageId)
-            Haptics.pick()
-        } catch {
-            notice = Notice(text: "Could not delete the message: \(error.localizedDescription)")
+        let room: String
+        if peopleChat(chatId) != nil {
+            room = "people/\(chatId)"
+        } else if let projectId, projectId != peopleSlot {
+            room = "\(projectId)/\(chatId)"
+        } else {
+            room = "people/\(chatId)"
+        }
+        Task {
+            do {
+                try await api.deleteMessage(room: room, messageId: messageId)
+                clearUnacked(chatId: chatId, messageId: messageId)
+                Haptics.pick()
+            } catch {
+                let e = error as? RelayError
+                notice = Notice(text: e?.status == 403 ? "You can only delete your own messages."
+                                 : "Could not delete the message: \(error.localizedDescription)")
+            }
         }
     }
 
@@ -3679,7 +3820,7 @@ final class AppModel: ObservableObject {
         markUnacked(chatId: chatId, messageId: messageId)
         do {
             try doc.insertUserMessage(id: messageId, text: text, deviceId: deviceId, attachments: attachments,
-                                      replyTo: replyTo)
+                                      author: projectAuthor(projectId: chat.projectId), replyTo: replyTo)
             try doc.pushCommand(command, payload: extra.merging(["messageId": messageId]) { _, new in new }, device: deviceId)
             if !chat.isPinned && chat.title == "New chat" {
                 let title = AppModel.title(from: text)
@@ -3697,6 +3838,16 @@ final class AppModel: ObservableObject {
         if let p = project(chat.projectId), p.state.isAsleep || p.state == .error {
             wake(projectId: p.id, reason: "send")
         }
+    }
+
+    /// Author fields for a row in a project chat (API §3/§7, same as the Mac): always the
+    /// handle and display name, so the agent addresses the writer by name; `sender: user:<id>`
+    /// in a project someone shared with me, so a guest's words are never read as the owner's
+    /// (#1580). A solo project keeps the plain `user` the box expects.
+    private func projectAuthor(projectId: Id) -> CoreChatDoc.Author? {
+        guard let me = user else { return nil }
+        let shared = project(projectId)?.shared == true
+        return CoreChatDoc.Author(sender: shared ? "user:\(me.id)" : "user", handle: me.login, name: me.name, avatar: nil)
     }
 
     /// A send typed before the optimistic new-chat's relay id landed.

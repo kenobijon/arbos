@@ -40,6 +40,7 @@ mod livekit;
 mod local;
 mod matrix;
 mod migrate;
+mod moderation;
 mod notices;
 mod notify;
 mod people;
@@ -463,6 +464,7 @@ async fn main() -> anyhow::Result<()> {
             get(matrix::servers::list).post(matrix::servers::create),
         )
         .route("/servers/join", post(matrix::servers::join))
+        .route("/servers/{id}/archive", put(matrix::servers::archive))
         .route("/servers/search", get(matrix::servers::search))
         .route(
             "/servers/{id}",
@@ -640,6 +642,7 @@ async fn main() -> anyhow::Result<()> {
             get(browser::browser_stream),
         )
         .route("/projects/{id}/history/{chat}", get(api::chat_history))
+        .route("/projects/{id}/archive", put(api::archive_project))
         .route("/projects/{id}/status", get(api::project_status))
         .route("/projects/{id}/inspect", get(inspect::project_inspect))
         // Read-only debugging for an account's own devices (debug_api.rs).
@@ -763,6 +766,10 @@ async fn main() -> anyhow::Result<()> {
             get(rooms::get_checkpoint).post(rooms::post_checkpoint),
         )
         .route("/room/{project}/{chat}/stats", get(rooms::room_stats))
+        .route(
+            "/room/{project}/{chat}/messages/{message_id}",
+            delete(moderation::delete_message),
+        )
         .route("/blob/{project}/{key}", get(blobs::get).put(blobs::put))
         .route("/feedback", post(feedback::submit))
         .route("/feedback/capture/{id}", post(feedback::device_capture))

@@ -306,6 +306,14 @@ pub struct ForwardTarget {
     pub last_activity: u64,
 }
 
+/// Bubble menu → Delete (feedback app-01M5MXQ90MEEWF6C8W090VCZHF): the message
+/// the "Delete message?" confirm is open for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeleteConfirm {
+    pub chat_id: Id,
+    pub message_id: Id,
+}
+
 /// The text line a forwarded attachment travels with (every client renders
 /// it as the card's hint, not a bubble; agents read it as prose).
 pub fn forwarded_from_text(by: &str) -> String {
@@ -482,6 +490,8 @@ pub struct AppState {
     pub media_viewer: Option<MediaViewer>,
     /// Bumped on every open so the shell focuses the viewer once per opening.
     pub media_viewer_generation: u64,
+    /// Bubble menu → Delete: the "Delete message?" confirm, when open.
+    pub delete_confirm: Option<DeleteConfirm>,
     pub new_project_open: bool,
     /// Debug: per-message "Show details" disclosures in the transcript.
     pub show_details: bool,
@@ -842,6 +852,7 @@ impl AppState {
             details_open: None,
             media_viewer: None,
             media_viewer_generation: 0,
+            delete_confirm: None,
             new_project_open: false,
             show_details: false,
             machine: Machine::default(),
@@ -1964,6 +1975,18 @@ impl AppState {
                 }
                 cx.notify();
             }
+            SyncEvent::SpaceArchived {
+                space_id,
+                archived_at,
+            } => {
+                // Another device archived / unarchived a sidebar space for me.
+                if let Some(p) = self.projects.iter_mut().find(|p| p.id == space_id) {
+                    p.archived_at = archived_at;
+                } else if let Some(s) = self.servers.iter_mut().find(|s| s.id == space_id) {
+                    s.archived_at = archived_at;
+                }
+                cx.notify();
+            }
             SyncEvent::ChatArchived {
                 chat_id,
                 archived_at,
@@ -2025,6 +2048,9 @@ impl AppState {
                     .map(|m| arrival_read(chat_visible, self.is_mine(m), m.role == Role::System))
                     .collect();
                 self.apply_arrival_read(&chat_id, &effects);
+                if effects.contains(&ArrivalRead::MarkUnread) {
+                    self.unarchive_on_activity(&chat_id, cx);
+                }
                 self.request_thumbnails(&chat_id);
                 if self.onboarding.is_some() {
                     self.onboarding_tick(cx);
@@ -2084,6 +2110,9 @@ impl AppState {
                         message.role == Role::System,
                     );
                     self.apply_arrival_read(&chat_id, &[effect]);
+                    if effect == ArrivalRead::MarkUnread {
+                        self.unarchive_on_activity(&chat_id, cx);
+                    }
                 }
                 if text_only && appended > 0 {
                     cx.emit(AppEvent::TranscriptText { chat_id });
@@ -2728,6 +2757,7 @@ impl AppState {
             .find(|c| c.id == chat_id)
         {
             chat.unread = false;
+            chat.unread_count = 0;
         }
         self.command(ClientCommand::OpenChat {
             chat_id: chat_id.clone(),
@@ -2842,6 +2872,7 @@ impl AppState {
             .find(|c| c.id == chat_id)
         {
             chat.unread = false;
+            chat.unread_count = 0;
         }
         self.sync_badge();
         self.command(ClientCommand::MarkRead {
@@ -2899,6 +2930,7 @@ impl AppState {
                 kind: ChatKind::Chat,
                 participants: Vec::new(),
                 unread: false,
+                unread_count: 0,
                 last_message_at: now_ms(),
                 archived_at: None,
             });
@@ -4367,6 +4399,34 @@ impl AppState {
         cx.notify();
     }
 
+    /// Bubble menu → Delete: ask first (feedback app-01M5MXQ90MEEWF6C8W090VCZHF).
+    /// The menu only offers Delete where `may_delete_message` holds, so the
+    /// confirm's one action is always "delete for everyone".
+    pub fn open_delete_confirm(&mut self, chat_id: Id, message_id: Id, cx: &mut Context<Self>) {
+        if message_id.is_empty() {
+            return;
+        }
+        self.delete_confirm = Some(DeleteConfirm {
+            chat_id,
+            message_id,
+        });
+        cx.notify();
+    }
+
+    pub fn close_delete_confirm(&mut self, cx: &mut Context<Self>) {
+        if self.delete_confirm.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// The confirm's Delete (click or Return): delete and close.
+    pub fn confirm_delete(&mut self, cx: &mut Context<Self>) {
+        let Some(confirm) = self.delete_confirm.take() else {
+            return;
+        };
+        self.delete_message(confirm.chat_id, confirm.message_id, cx);
+    }
+
     pub fn retry(&mut self, chat_id: Id, message_id: Id, cx: &mut Context<Self>) {
         self.command(ClientCommand::Retry {
             chat_id,
@@ -4956,6 +5016,88 @@ impl AppState {
         self.project(space_id).is_some_and(|p| p.muted) || self.muted.contains(space_id)
     }
 
+    /// Sidebar archive (Jacob 2026-10-23): is this space (agent, people chat
+    /// or server) hidden from my list?
+    pub fn is_space_archived(&self, space_id: &str) -> bool {
+        self.project(space_id)
+            .map(|p| p.archived_at.is_some())
+            .or_else(|| {
+                self.servers
+                    .iter()
+                    .find(|s| s.id == space_id)
+                    .map(|s| s.archived_at.is_some())
+            })
+            .unwrap_or(false)
+    }
+
+    /// Hidden spaces, newest first; what the "Hidden chats · N" footer counts.
+    pub fn archived_space_count(&self) -> usize {
+        self.projects
+            .iter()
+            .filter(|p| p.archived_at.is_some())
+            .count()
+            + self
+                .servers
+                .iter()
+                .filter(|s| s.archived_at.is_some())
+                .count()
+    }
+
+    /// Archive (hide) or unarchive a sidebar space for me, on every device.
+    /// Nothing is deleted; an archived agent keeps running its routines. A
+    /// people chat goes through the chat archive the relay already has.
+    pub fn set_space_archived(&mut self, space_id: Id, archived: bool, cx: &mut Context<Self>) {
+        let at = archived.then(now_ms);
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == space_id) {
+            p.archived_at = at;
+            let people = p.is_people();
+            if archived && self.selected_project.as_deref() == Some(space_id.as_str()) {
+                self.selected_project = None;
+                self.select_next_if_none(cx);
+            }
+            if people {
+                self.command(ClientCommand::ArchiveChat {
+                    chat_id: space_id,
+                    archived,
+                });
+            } else {
+                self.command(ClientCommand::ArchiveSpace {
+                    space_id,
+                    server: false,
+                    archived,
+                });
+            }
+            cx.notify();
+            return;
+        }
+        if let Some(s) = self.servers.iter_mut().find(|s| s.id == space_id) {
+            s.archived_at = at;
+            if archived && self.open_server.as_deref() == Some(space_id.as_str()) {
+                self.open_server = None;
+                self.selected_channel = None;
+                self.select_next_if_none(cx);
+            }
+            self.command(ClientCommand::ArchiveSpace {
+                space_id,
+                server: true,
+                archived,
+            });
+            cx.notify();
+        }
+    }
+
+    /// A hidden space comes back when something new arrives in it (Telegram).
+    fn unarchive_on_activity(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        let Some(space_id) = self
+            .project_of_chat(chat_id)
+            .filter(|p| p.archived_at.is_some())
+            .map(|p| p.id.clone())
+        else {
+            return;
+        };
+        self.set_space_archived(space_id, false, cx);
+    }
+
     pub fn toggle_mute(&mut self, space_id: Id, cx: &mut Context<Self>) {
         let now_muted = !self.is_muted(&space_id);
         let people = self.project(&space_id).is_some_and(|p| p.is_people());
@@ -5084,7 +5226,7 @@ impl AppState {
     }
 
     /// Who shared it, for the viewer's caption: name, else `@handle`, else "You" / the agent.
-    fn viewer_sender_name(&self, m: &Message) -> String {
+    pub fn viewer_sender_name(&self, m: &Message) -> String {
         if let Some(n) = m.sender_name.as_deref().filter(|n| !n.is_empty()) {
             return n.to_string();
         }
@@ -5465,6 +5607,7 @@ impl AppState {
     }
 
     /// Light the unread dot (and Dock badge) until the next refresh confirms.
+    /// Until `GET /me/unread` returns, count at least one missed message (same as iOS).
     fn mark_chat_unread(&mut self, chat_id: &str) {
         if let Some(chat) = self
             .chats
@@ -5473,6 +5616,7 @@ impl AppState {
             .find(|c| c.id == chat_id)
         {
             chat.unread = true;
+            chat.unread_count = chat.unread_count.max(1);
         }
         self.sync_badge();
     }
@@ -5801,14 +5945,14 @@ impl AppState {
         cx.activate(true);
     }
 
-    /// Dock badge = chats with something unread (cleared as they are read).
+    /// Dock badge = unread messages across chats (from `GET /me/unread`; cleared as they are read).
     pub fn sync_badge(&self) {
         let total = self
             .chats
             .values()
             .flat_map(|v| v.iter())
-            .filter(|c| c.unread)
-            .count();
+            .map(Chat::missed_count)
+            .sum();
         notify::set_badge(total);
     }
 
@@ -8536,6 +8680,7 @@ pub(crate) fn forked_chat(source: &Chat, project: &Project, id: Id) -> Option<Ch
         kind: ChatKind::Chat,
         participants: Vec::new(),
         unread: false,
+        unread_count: 0,
         last_message_at: now_ms(),
         archived_at: None,
     })
@@ -8747,6 +8892,7 @@ mod fork_tests {
             kind: ChatKind::Chat,
             participants: Vec::new(),
             unread: false,
+            unread_count: 0,
             last_message_at: 0,
             archived_at: None,
         }
