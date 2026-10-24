@@ -318,7 +318,10 @@ enum Transcript {
                     }
                 }
                 let failed = !errors.isEmpty || message.status == .error
-                if showsNothing, finished, !streaming, failed || onlyEmpty {
+                // A hand-off row (a subagent brief, an agent-to-agent send) is its own line
+                // ("Messaged ◉ X"); it never gets the stock line, even with no parts (#1466).
+                let handoffRow = handoffName != nil
+                if showsNothing, finished, !streaming, !handoffRow, failed || onlyEmpty {
                     let line: String = {
                         if let first = errors.first?.text.trimmingCharacters(in: .whitespacesAndNewlines), !first.isEmpty {
                             return first
