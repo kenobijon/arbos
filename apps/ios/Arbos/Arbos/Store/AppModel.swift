@@ -3635,6 +3635,42 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Edit a message's text in the shared chat doc (own messages). No new send
+    /// command — peers see the updated body via room sync only.
+    func editMessage(chatId: Id, messageId: Id, text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !messageId.isEmpty, !trimmed.isEmpty else { return }
+        #if DEBUG
+        if isFixture {
+            guard var list = messages[chatId],
+                  let idx = list.firstIndex(where: { $0.id == messageId })
+            else { return }
+            var parts = list[idx].parts
+            if let t = parts.lastIndex(where: {
+                if case .text = $0 { return true } else { return false }
+            }) {
+                if case .text(let id, _) = parts[t] {
+                    parts[t] = .text(id: id, text: trimmed)
+                }
+            } else {
+                parts.append(.text(id: "\(messageId)-t", text: trimmed))
+            }
+            list[idx].parts = parts
+            messages[chatId] = list
+            Haptics.pick()
+            return
+        }
+        #endif
+        guard let doc = docs[chatId] else { return }
+        do {
+            try doc.editMessage(messageId: messageId, text: trimmed)
+            doc.commit()
+            Haptics.pick()
+        } catch {
+            notice = Notice(text: "Could not edit the message: \(error.localizedDescription)")
+        }
+    }
+
     /// Paint any room doc that already has rows but no published transcript yet
     /// (checkpoint landed, catch-up still in flight). Home search reads
     /// `messages`, so this must run when the search field becomes active.
