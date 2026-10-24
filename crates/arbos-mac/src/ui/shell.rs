@@ -205,6 +205,9 @@ pub struct Shell {
     pub(crate) viewer_search: Entity<ComposerInput>,
     /// Keyboard focus while the media viewer is up (← → page, Esc closes).
     viewer_focus: FocusHandle,
+    /// The bubble whose "Forward to" picker last took the search field's focus
+    /// (`AppState::forward_message`), so it is cleared and focused once per opening.
+    forward_message_focused_for: Option<crate::model::Id>,
     /// Keyboard owner of the "Delete message?" confirm (Return / Esc).
     delete_confirm_focus: FocusHandle,
     /// The message whose confirm last took that focus, so it is focused once per opening.
@@ -227,6 +230,9 @@ pub struct Shell {
     /// `ARBOS_RIG_MESSAGE_MENU=x,y` (screenshot rig): opens the menu once the
     /// open chat has a message; cleared when it has.
     rig_message_menu: Option<gpui::Point<gpui::Pixels>>,
+    /// `ARBOS_RIG_FORWARD_MESSAGE=1` (screenshot rig): opens the "Forward to"
+    /// picker for the newest message of the open chat; cleared once it has.
+    rig_forward_message: bool,
     /// `ARBOS_RIG_DELETE_CONFIRM=1` (screenshot rig): opens the "Delete
     /// message?" confirm for the newest message of the open chat; cleared once it has.
     rig_delete_confirm: bool,
@@ -525,8 +531,17 @@ impl Shell {
             project_input.update(cx, |input, _| {
                 input.set_placeholder("Name your agent");
                 input.set_text_center(true);
+                // Shared by Create agent and Create group (D93). Enter must match
+                // the sheet's action button: agent → create, group → Next (picker).
                 input.on_submit = Some(Rc::new(move |window, cx| {
-                    let _ = weak.update(cx, |this, cx| this.submit_project(window, cx));
+                    let _ = weak.update(cx, |this, cx| {
+                        let kind = if this.create_group_open {
+                            CreateKind::Group
+                        } else {
+                            CreateKind::Agent
+                        };
+                        this.submit_create(kind, window, cx);
+                    });
                 }));
             });
         }
@@ -800,6 +815,7 @@ impl Shell {
             viewer_search,
             viewer_focus: cx.focus_handle(),
             viewer_focused_generation: 0,
+            forward_message_focused_for: None,
             delete_confirm_focus: cx.focus_handle(),
             delete_confirm_focused_for: None,
             connectors,
@@ -836,6 +852,7 @@ impl Shell {
             chat_delete_armed: false,
             message_menu: None,
             rig_message_menu: message_menu::rig_anchor(),
+            rig_forward_message: std::env::var_os("ARBOS_RIG_FORWARD_MESSAGE").is_some(),
             rig_delete_confirm: std::env::var_os("ARBOS_RIG_DELETE_CONFIRM").is_some(),
             reaction_capsule: None,
             reaction_pick_open: false,
@@ -1153,6 +1170,11 @@ impl Shell {
     }
 
     pub(crate) fn submit_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Create group reuses this field; never create an agent from a group sheet.
+        if self.create_group_open {
+            self.submit_create(CreateKind::Group, window, cx);
+            return;
+        }
         let name = self.project_input.read(cx).text().trim().to_string();
         if name.is_empty() {
             return;
@@ -1177,6 +1199,9 @@ impl Shell {
         self.create_group_open = true;
         self.create_leaf = None;
         self.create_leaf_color = None;
+        // Agent create wins the sheet if both flags are set; clear it so New
+        // group never opens as Create New Agent.
+        self.state.update(cx, |s, _| s.new_project_open = false);
         self.project_input.update(cx, |input, cx| {
             input.set_placeholder(CreateKind::Group.placeholder());
             input.clear(cx);
@@ -1957,6 +1982,11 @@ impl Shell {
     /// Escape stops a recording memo (keeping its transcript), then closes
     /// whatever floats: menus, then sheets.
     fn escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
+        if self.state.read(cx).forward_message.is_some() {
+            self.state.update(cx, |s, cx| s.close_forward_message(cx));
+            Composer::focus(&self.composer, window, cx);
+            return;
+        }
         if self.state.read(cx).delete_confirm.is_some() {
             self.state.update(cx, |s, cx| s.close_delete_confirm(cx));
             Composer::focus(&self.composer, window, cx);
@@ -3604,6 +3634,7 @@ impl Render for Shell {
         let viewer_open = state.media_viewer.is_some();
         let viewer_forward_open = state.media_viewer.as_ref().is_some_and(|v| v.forward_open);
         let viewer_generation = state.media_viewer_generation;
+        let forward_message_open = state.forward_message.as_ref().map(|f| f.message_id.clone());
         let delete_confirm_open = state.delete_confirm.as_ref().map(|d| d.message_id.clone());
         let pairing = state.pairing.clone();
         let new_chat_open = state.new_chat_open;
@@ -3772,6 +3803,36 @@ impl Render for Shell {
         }
         if let Some(menu) = message_menu::render(self, window, cx) {
             root = root.child(menu);
+        }
+        if self.rig_forward_message {
+            let target = self.state.read(cx).active_chat_id().and_then(|chat| {
+                let state = self.state.read(cx);
+                let last = state.messages.get(&chat)?.last()?.id.clone();
+                Some((chat, last))
+            });
+            if let Some((chat, message)) = target {
+                self.rig_forward_message = false;
+                self.state
+                    .update(cx, |s, cx| s.open_forward_message(chat, message, cx));
+            }
+        }
+        if let Some(picker) = media_viewer::message_forward_overlay(self, cx) {
+            // The picker's search field takes the keyboard while it is up (same
+            // field as the viewer's picker; cleared on each opening).
+            if self.forward_message_focused_for != forward_message_open {
+                self.forward_message_focused_for = forward_message_open;
+                self.viewer_search.update(cx, |input, cx| input.clear(cx));
+            }
+            let search = self.viewer_search.read(cx).focus_handle(cx);
+            if !search.is_focused(window) {
+                window.focus(&search, cx);
+            }
+            root = root.child(picker);
+        } else if self.forward_message_focused_for.is_some() {
+            self.forward_message_focused_for = None;
+            if !viewer_open {
+                Composer::focus(&self.composer, window, cx);
+            }
         }
         if let Some(at) = self.rig_reaction_capsule {
             let target = self.state.read(cx).active_chat_id().and_then(|chat| {

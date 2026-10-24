@@ -87,7 +87,8 @@ pub enum RoomAction {
         poll_machine: bool,
     },
     LinkLive,
-    /// Export the doc's updates since `relay_vv` and hand them to `on_heal` (history heal).
+    /// Export the doc's updates since `relay_vv` and always hand them to `on_heal`
+    /// (empty when nothing is missing) so the held pending resend can proceed.
     HealCheck {
         relay_vv: Vec<u8>,
     },
@@ -352,7 +353,8 @@ impl RoomSession {
         self.lock().on_local_commit(bytes);
     }
 
-    /// Answer to `RoomAction::HealCheck`: the doc's updates the relay lacked (empty = none).
+    /// Answer to `RoomAction::HealCheck`: the doc's updates the relay lacked.
+    /// Call even when empty so the session can release the held pending resend.
     pub fn on_heal(&self, bytes: Vec<u8>) {
         self.lock().on_heal(bytes);
     }
@@ -454,6 +456,10 @@ pub struct UserMessageOptsRecord {
     pub sender_handle: Option<String>,
     pub sender_name: Option<String>,
     pub sender_avatar: Option<String>,
+    /// Bubble menu → Forward: the original sender's display name, stored on the
+    /// row as `forwardedFrom` (the "Forwarded from <name>" header).
+    #[uniffi(default = None)]
+    pub forwarded_from: Option<String>,
 }
 
 impl From<UserMessageOptsRecord> for doc::UserMessageOpts {
@@ -697,10 +703,15 @@ impl ChatDoc {
         device_id: String,
         opts: UserMessageOptsRecord,
     ) -> Result<(), FfiError> {
+        let forwarded_from = opts.forwarded_from.clone();
         let core_opts = doc::UserMessageOpts::from(opts);
-        self.lock_doc()
-            .append_user_message(&id, &text, &device_id, &core_opts)
-            .map_err(write_err)
+        let doc = self.lock_doc();
+        doc.append_user_message(&id, &text, &device_id, &core_opts)
+            .map_err(write_err)?;
+        if let Some(by) = forwarded_from.as_deref().filter(|b| !b.trim().is_empty()) {
+            doc.set_message_fields(&id, &[("forwardedFrom", Value::String(by.to_owned()))]);
+        }
+        Ok(())
     }
 
     /// Append a system line. Does not commit. `link_id` is core's optional `callId`.
@@ -752,6 +763,14 @@ impl ChatDoc {
     pub fn delete_message(&self, message_id: String) -> Result<(), FfiError> {
         self.lock_doc()
             .delete_message(&message_id)
+            .map_err(write_err)
+    }
+
+    /// Replace the text of an existing message (edit). Does not commit. Sets
+    /// `editedAt`. No-op when the message or its text part is missing.
+    pub fn edit_message(&self, message_id: String, text: String) -> Result<(), FfiError> {
+        self.lock_doc()
+            .edit_message_text(&message_id, &text)
             .map_err(write_err)
     }
 
@@ -983,12 +1002,14 @@ mod tests {
                 sender_handle: Some("me".into()),
                 sender_name: Some("Me".into()),
                 sender_avatar: None,
+                forwarded_from: Some("Sam Rivera".into()),
             },
         )
         .unwrap();
         doc.commit();
         assert_eq!(doc.message_count(), 1);
         let row: Value = serde_json::from_str(&doc.read_message_json(0).unwrap()).unwrap();
+        assert_eq!(row["forwardedFrom"], "Sam Rivera");
         assert_eq!(row["role"], "user");
         assert_eq!(row["sender"], "user:me");
         assert_eq!(row["senderHandle"], "me");
@@ -1031,6 +1052,24 @@ mod tests {
         doc.delete_message("gone".into()).unwrap();
         doc.commit();
         assert_eq!(doc.message_count(), 1);
+    }
+
+    #[test]
+    fn edit_message_replaces_text() {
+        let doc = ChatDoc::open();
+        doc.insert_user_message(
+            "m1".into(),
+            "hello".into(),
+            "dev".into(),
+            UserMessageOptsRecord::default(),
+        )
+        .unwrap();
+        doc.edit_message("m1".into(), "hello edited".into())
+            .unwrap();
+        doc.commit();
+        let row: Value = serde_json::from_str(&doc.read_message_json(0).unwrap()).unwrap();
+        assert_eq!(row["parts"][0]["text"], "hello edited");
+        assert!(row["editedAt"].as_i64().unwrap_or(0) > 0);
     }
 
     #[test]

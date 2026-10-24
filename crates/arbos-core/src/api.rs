@@ -157,6 +157,13 @@ pub struct ChatMeDto {
     pub role: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub muted: Option<bool>,
+    /// People group: an admin muted this member from posting (not notification mute).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub silenced: Option<bool>,
+    /// When my admin mute ends (ms). Absent or null while muted = until unmuted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub silenced_until: Option<i64>,
     #[typeshare(serialized_as = "Option<I54>")]
     pub archived_at: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -221,6 +228,16 @@ pub struct ChatMemberDto {
     pub online: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_receipts: Option<bool>,
+    /// Human in a people group: admin muted them from posting. Agent: omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub silenced: Option<bool>,
+    /// When the admin mute ends (ms). Absent or null while muted = until unmuted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub silenced_until: Option<i64>,
+    /// Human admin: owner granted mute/ban rights (default true). Agent / member: omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub can_mute_ban: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub avatar: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -577,6 +594,23 @@ pub struct MeFeaturesDto {
     pub voice_mode: Option<bool>,
 }
 
+/// Privacy choices on `GET /me` / `PATCH /me`. Absent on an older relay → open defaults.
+/// Key names are a contract with shipped apps: only add, never rename.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MePrivacyDto {
+    /// Who may add me to a people group: `anyone` | `people_i_know` | `nobody`.
+    pub group_add: String,
+}
+
+impl Default for MePrivacyDto {
+    fn default() -> Self {
+        Self {
+            group_add: "anyone".into(),
+        }
+    }
+}
+
 /// `GET /me` success body.
 #[typeshare]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -588,6 +622,8 @@ pub struct MeResponseDto {
     #[serde(default)]
     pub features: MeFeaturesDto,
     pub machine: MeMachineDto,
+    #[serde(default)]
+    pub privacy: MePrivacyDto,
 }
 
 /// `PATCH /me` and avatar route replies: `user`, optional `avatar_url`.
@@ -1523,6 +1559,9 @@ pub struct PeopleMemberRemovedPayloadDto {
     pub user_id: String,
     pub handle: String,
     pub by_handle: String,
+    /// True when an admin banned them (they cannot rejoin). Omit / null on leave or plain remove.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub banned: Option<bool>,
 }
 
 /// `people_chat_created` payload.

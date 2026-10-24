@@ -130,8 +130,8 @@ struct HomeView: View {
                                     .listRowSeparator(.hidden)
                                     .listRowBackground(theme.bg)
                             }
-                            if !model.openGoals.isEmpty {
-                                goalsSection
+                            if !plannedTasks.isEmpty {
+                                plannedTasksSection
                             }
                         }
                         ForEach(homeRows) { entry in
@@ -149,9 +149,9 @@ struct HomeView: View {
                                 }
                                 .buttonStyle(.borderless)
                                 .contextMenu {
-                                    // Long-press: Pin (also on leading swipe), Fork (owned),
-                                    // Archive (also on the trailing swipe), then Delete for
-                                    // owned agents. Profile is the chat header.
+                                    // Long-press: Pin (also on leading swipe), reorder when
+                                    // pinned, Fork (owned), Archive (also on trailing swipe),
+                                    // then Delete for owned agents. Profile is the chat header.
                                     Button {
                                         withAnimation {
                                             if pinned { model.unpinHome(projectId: project.id) }
@@ -159,6 +159,27 @@ struct HomeView: View {
                                         }
                                     } label: {
                                         Label(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin")
+                                    }
+                                    if let pinIndex = model.homePinIndex(projectId: project.id) {
+                                        if pinIndex > 0 {
+                                            Button {
+                                                withAnimation { model.moveHomePinToTop(projectId: project.id) }
+                                            } label: {
+                                                Label("Move to top", systemImage: "arrow.up.to.line")
+                                            }
+                                            Button {
+                                                withAnimation { model.moveHomePinUp(projectId: project.id) }
+                                            } label: {
+                                                Label("Move up", systemImage: "arrow.up")
+                                            }
+                                        }
+                                        if pinIndex + 1 < model.pinnedHomeIds.count {
+                                            Button {
+                                                withAnimation { model.moveHomePinDown(projectId: project.id) }
+                                            } label: {
+                                                Label("Move down", systemImage: "arrow.down")
+                                            }
+                                        }
                                     }
                                     if !project.shared {
                                         Button { model.duplicateProject(project) } label: {
@@ -211,7 +232,8 @@ struct HomeView: View {
                                 }
                                 .buttonStyle(.borderless)
                                 .contextMenu {
-                                    // Long-press: Pin, Archive, Profile/Group info, Delete.
+                                    // Long-press: Pin, reorder when pinned, Archive,
+                                    // Mute (groups), Profile/Group info, Delete.
                                     Button {
                                         withAnimation {
                                             if pinned { model.unpinHome(peopleChatId: chat.id) }
@@ -220,10 +242,48 @@ struct HomeView: View {
                                     } label: {
                                         Label(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin")
                                     }
+                                    if let pinIndex = model.homePinIndex(peopleChatId: chat.id) {
+                                        if pinIndex > 0 {
+                                            Button {
+                                                withAnimation { model.moveHomePinToTop(peopleChatId: chat.id) }
+                                            } label: {
+                                                Label("Move to top", systemImage: "arrow.up.to.line")
+                                            }
+                                            Button {
+                                                withAnimation { model.moveHomePinUp(peopleChatId: chat.id) }
+                                            } label: {
+                                                Label("Move up", systemImage: "arrow.up")
+                                            }
+                                        }
+                                        if pinIndex + 1 < model.pinnedHomeIds.count {
+                                            Button {
+                                                withAnimation { model.moveHomePinDown(peopleChatId: chat.id) }
+                                            } label: {
+                                                Label("Move down", systemImage: "arrow.down")
+                                            }
+                                        }
+                                    }
                                     Button {
                                         withAnimation { model.archive(peopleChatId: chat.id) }
                                     } label: {
                                         Label("Archive", systemImage: "archivebox")
+                                    }
+                                    if chat.isGroup {
+                                        if model.isPeopleChatMuted(chat.id) {
+                                            Button { model.unmutePeopleChat(chat.id) } label: {
+                                                Label("Unmute", systemImage: "bell")
+                                            }
+                                        } else {
+                                            Menu {
+                                                ForEach(ChatMuteDuration.allCases) { duration in
+                                                    Button(duration.title) {
+                                                        model.mutePeopleChat(chat.id, for: duration)
+                                                    }
+                                                }
+                                            } label: {
+                                                Label("Mute", systemImage: "bell.slash")
+                                            }
+                                        }
                                     }
                                     if chat.kind == "dm", let other = chat.counterpart(me: model.user?.id) {
                                         Button { model.showProfile(.user(ProfilePerson(other))) } label: { Label("Profile", systemImage: "person.crop.circle") }
@@ -474,22 +534,56 @@ struct HomeView: View {
         return "Removes this chat from your list."
     }
 
-    /// Goals section: status, next step, last moved — tap opens the goal.
-    private var goalsSection: some View {
+    /// One planned task on Home: an agent's unfinished plan step (or next step / goal title).
+    private struct PlannedTask: Identifiable {
+        let id: String
+        let goalId: String
+        let projectId: String
+        let agentName: String
+        let text: String
+    }
+
+    /// Open goals → one planned task each (doing step, else first todo, else next_step, else title).
+    private var plannedTasks: [PlannedTask] {
+        model.openGoals.prefix(6).map { goal in
+            let agent = goal.projectName
+                ?? model.project(goal.projectId)?.name
+                ?? "Agent"
+            let doing = goal.plan.first { $0.status == "doing" }
+            let todo = goal.plan.first { $0.status == "todo" }
+            let text = doing?.title
+                ?? todo?.title
+                ?? (goal.nextStep.isEmpty ? goal.title : goal.nextStep)
+            return PlannedTask(
+                id: goal.id,
+                goalId: goal.id,
+                projectId: goal.projectId,
+                agentName: agent,
+                text: text
+            )
+        }
+    }
+
+    /// Planned tasks by agent: agent name, task text — tap opens the goal.
+    private var plannedTasksSection: some View {
         Section {
-            ForEach(model.openGoals.prefix(6)) { goal in
-                Button { openGoalId = goal.id } label: {
+            ForEach(plannedTasks) { task in
+                Button { openGoalId = task.goalId } label: {
                     HStack(spacing: 12) {
-                        Image(systemName: "flag.fill")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(theme.accent)
-                            .frame(width: 28, height: 28)
+                        if let project = model.project(task.projectId) {
+                            AgentAvatar(project: project, theme: theme, size: 28, still: true)
+                        } else {
+                            Image(systemName: "checklist")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundStyle(theme.accent)
+                                .frame(width: 28, height: 28)
+                        }
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(goal.title)
+                            Text(task.agentName)
                                 .font(theme.font(Theme.body, weight: .medium))
                                 .foregroundStyle(theme.text)
                                 .lineLimit(1)
-                            Text(goalHomeSubtitle(goal))
+                            Text(task.text)
                                 .font(theme.font(Theme.tiny))
                                 .foregroundStyle(theme.muted)
                                 .lineLimit(1)
@@ -502,6 +596,7 @@ struct HomeView: View {
                 .listRowInsets(EdgeInsets(top: 6, leading: 20, bottom: 6, trailing: 22))
                 .listRowSeparator(.hidden)
                 .listRowBackground(theme.bg)
+                .accessibilityLabel("\(task.agentName), \(task.text)")
             }
             Button { showGoals = true } label: {
                 HStack(spacing: 8) {
@@ -521,18 +616,11 @@ struct HomeView: View {
             .listRowBackground(theme.bg)
             .accessibilityLabel("All goals")
         } header: {
-            Text("Goals")
+            Text("Planned tasks")
                 .font(theme.font(Theme.tiny, weight: .medium))
                 .foregroundStyle(theme.muted)
                 .textCase(nil)
         }
-    }
-
-    private func goalHomeSubtitle(_ goal: GoalItem) -> String {
-        var parts: [String] = [goal.statusLabel]
-        if !goal.nextStep.isEmpty { parts.append(goal.nextStep) }
-        if let moved = goal.lastMovedAt { parts.append(SecretsText.ago(moved)) }
-        return parts.joined(separator: " · ")
     }
 
     /// Grok's "Hidden chats  N  ›" line under the list (measured: 15 pt muted,
@@ -711,22 +799,24 @@ struct HomeView: View {
     }
 
     /// One home row with how it matched the search (every row is a `title`
-    /// hit without a query, so the list is pinned-first by activity as before).
+    /// hit without a query, so the list is pinned-first in pin order, then by activity).
     struct HomeEntry: Identifiable {
         var row: HomeRow
         var hit: HomeSearch.Hit
         var id: String { row.id }
     }
 
-    /// Projects, DMs and servers in one list. Without a query: pinned first, then
-    /// newest activity. With one: people (display name / @handle) first, then rows
-    /// matched by title, then by a member, then by a message — newest first inside
-    /// each group; a hit beyond the row's own name is explained on its second line.
-    /// `listFilter` scopes the rows: Agents hides people and servers, People
-    /// hides agents and servers, Servers shows only servers (`HomeListFilter`).
+    /// Projects, DMs and servers in one list. Without a query: pinned first (in the
+    /// user's pin order), then newest activity. With one: people (display name /
+    /// @handle) first, then rows matched by title, then by a member, then by a
+    /// message — newest first inside each group; a hit beyond the row's own name is
+    /// explained on its second line. `listFilter` scopes the rows: Agents hides
+    /// people and servers, People hides agents and servers, Servers shows only
+    /// servers (`HomeListFilter`).
     private var homeRows: [HomeEntry] {
         let q = searchQuery
-        var rows: [(HomeSearch.Kind, Bool, Int64, HomeEntry)] = []
+        // pinRank: strip index when pinned (0 = top), Int.max when not.
+        var rows: [(HomeSearch.Kind, Int, Int64, HomeEntry)] = []
         if listFilter.showsProjects {
             for p in model.projects {
                 // Agents: my agents only (`!shared`) — no shared-in agents.
@@ -734,7 +824,8 @@ struct HomeView: View {
                 // Archived agents stay out of the home list until search (or open).
                 if q.isEmpty && model.isArchived(p.id) { continue }
                 guard let hit = projectHit(p, q: q) else { continue }
-                rows.append((hit.kind, model.isHomePinned(projectId: p.id), lastActivity(p), HomeEntry(row: .project(p), hit: hit)))
+                let pinRank = model.homePinIndex(projectId: p.id) ?? Int.max
+                rows.append((hit.kind, pinRank, lastActivity(p), HomeEntry(row: .project(p), hit: hit)))
             }
         }
         if listFilter.showsPeople {
@@ -742,7 +833,8 @@ struct HomeView: View {
                 // Archived people stay out of the home list until search (or open).
                 if q.isEmpty && model.isArchived(peopleChatId: c.id) { continue }
                 guard let hit = peopleHit(c, q: q) else { continue }
-                rows.append((hit.kind, model.isHomePinned(peopleChatId: c.id), peopleActivity(c), HomeEntry(row: .people(c), hit: hit)))
+                let pinRank = model.homePinIndex(peopleChatId: c.id) ?? Int.max
+                rows.append((hit.kind, pinRank, peopleActivity(c), HomeEntry(row: .people(c), hit: hit)))
             }
         }
         if listFilter.showsServers {
@@ -752,12 +844,12 @@ struct HomeView: View {
                 // Archived servers stay out of the home list until search (or Unarchive).
                 if q.isEmpty && model.isArchived(serverId: s.id) { continue }
                 guard let hit = HomeSearch.serverHit(name: s.name, channels: s.channels.map(\.name), q: q) else { continue }
-                rows.append((hit.kind, false, model.serverActivity(s), HomeEntry(row: .server(s), hit: hit)))
+                rows.append((hit.kind, Int.max, model.serverActivity(s), HomeEntry(row: .server(s), hit: hit)))
             }
         }
         return rows.sorted {
             if $0.0 != $1.0 { return $0.0 < $1.0 }
-            if $0.1 != $1.1 { return $0.1 && !$1.1 }
+            if $0.1 != $1.1 { return $0.1 < $1.1 }
             return $0.2 > $1.2
         }.map(\.3)
     }
@@ -1304,13 +1396,13 @@ struct PeopleRow: View {
         return other?.displayName ?? chat.title
     }
 
-    /// Same-line muted label: @handle for a DM, member count for a group.
+    /// Same-line muted label: handle (no @) for a DM, member count for a group.
     private var label: String {
         if chat.isGroup {
             let n = chat.humans.count
             return "\(n) member\(n == 1 ? "" : "s")"
         }
-        return "@\(other?.handle ?? chat.title)"
+        return other?.handle ?? chat.title
     }
 
     /// Tokenised blob URL for the group's custom picture, when one is set.
@@ -1339,8 +1431,8 @@ struct PeopleRow: View {
                 } else {
                     PersonAvatar(url: other?.avatarUrl, handle: other?.handle ?? "?", size: Theme.rowAvatar, name: other?.name, id: other?.id, colorIndex: other?.avatarColorIndex)
                 }
-                if let a = chat.agents.first?.project {
-                    AgentAvatar(project: a, theme: theme, size: 18, still: true)
+                if let a = chat.agents.first {
+                    AgentAvatar(project: model.agent(member: a, chatId: chat.id), theme: theme, size: 18, still: true)
                         .overlay(Circle().strokeBorder(theme.bg, lineWidth: 2))
                         .offset(x: 3, y: 3)
                 }

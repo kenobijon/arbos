@@ -376,6 +376,39 @@ fn fixture_working_count() -> usize {
         .unwrap_or(0)
 }
 
+/// `ARBOS_FIXTURE_FOREIGN_AGENT=1` (screenshot rig, #1592): the Launch week group holds
+/// someone else's agent — "TestAgent", run by @sami, in the roster but not in my project
+/// list — with one bubble and, under `ARBOS_FIXTURE_WORKING`, the working row, so the
+/// bubble disc, the presence row, the sidebar badge and the `@testagent` chip can be shot
+/// for an agent only the roster knows (Jacob's Arbonites screenshot).
+fn fixture_foreign_agent() -> bool {
+    std::env::var("ARBOS_FIXTURE_FOREIGN_AGENT").is_ok_and(|v| v.trim() == "1")
+}
+
+pub const PROJECT_TESTAGENT: &str = "01J9PROJTESTAGENT000000000";
+
+fn testagent_member() -> AgentMember {
+    AgentMember {
+        project_id: PROJECT_TESTAGENT.into(),
+        name: "TestAgent".into(),
+        icon: "T".into(),
+        color: "#1084fe".into(),
+        handle: "testagent".into(),
+        owner_id: "gh_459".into(),
+        owner_handle: "sami".into(),
+        reply_policy: Default::default(),
+        avatar: None,
+        avatar_color: None,
+        avatar_color_index: Some(3),
+        avatar_leaf: Some(3),
+        avatar_leaf_color: Some(7),
+        image_url: None,
+        description: None,
+        model: None,
+        owner: None,
+    }
+}
+
 /// Extra agents for the Launch week group beyond the seeded Arbos, so the
 /// group has `ARBOS_FIXTURE_WORKING` agents to show working.
 fn fixture_working_extra_agents() -> Vec<(&'static str, &'static str, &'static str, u8, u8)> {
@@ -723,7 +756,15 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     title: None,
                 })
                 .collect();
-            send_user(shared, chat_id, message_id, text, attachments, reply_to);
+            send_user(
+                shared,
+                chat_id,
+                message_id,
+                text,
+                attachments,
+                reply_to,
+                None,
+            );
         }
         ClientCommand::Forward {
             chat_id,
@@ -734,7 +775,15 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         } => {
             // No blob store to copy between: the row lands in the destination
             // chat with the same key, so its picture is already cached.
-            send_user(shared, chat_id, message_id, text, vec![attachment], None);
+            send_user(
+                shared,
+                chat_id,
+                message_id,
+                text,
+                vec![attachment],
+                None,
+                None,
+            );
         }
         ClientCommand::OpenAttachment {
             key,
@@ -760,6 +809,22 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             }
             let _ = shared.events.send(SyncEvent::AttachmentOpened { key });
         }
+        ClientCommand::ForwardText {
+            chat_id,
+            message_id,
+            text,
+            forwarded_from,
+        } => {
+            send_user(
+                shared,
+                chat_id,
+                message_id,
+                text,
+                Vec::new(),
+                None,
+                Some(forwarded_from),
+            );
+        }
         ClientCommand::Steer {
             chat_id,
             message_id,
@@ -767,7 +832,15 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             reply_to,
         } => {
             // Fixture has no live pi turn; land the bubble like a normal send.
-            send_user(shared, chat_id, message_id, text, Vec::new(), reply_to);
+            send_user(
+                shared,
+                chat_id,
+                message_id,
+                text,
+                Vec::new(),
+                reply_to,
+                None,
+            );
         }
         ClientCommand::SendVoice {
             chat_id,
@@ -786,7 +859,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 kind: Some(AttachmentKind::Audio),
                 title: None,
             }];
-            send_user(shared, chat_id, message_id, text, attachments, None);
+            send_user(shared, chat_id, message_id, text, attachments, None, None);
         }
         ClientCommand::Transcribe {
             request_id, wav, ..
@@ -1940,6 +2013,7 @@ fn send_user(
     text: String,
     attachments: Vec<Attachment>,
     reply_to: Option<String>,
+    forwarded_from: Option<String>,
 ) {
     let project_id = project_of(shared, &chat_id);
     if let Some(space) = people_space_of(shared, &chat_id) {
@@ -1958,6 +2032,9 @@ fn send_user(
         with_doc(shared, &chat_id, |doc| {
             doc.core.transact(|d| {
                 let _ = d.append_user_message(&message_id, &text, DEVICE, &opts);
+                if let Some(by) = forwarded_from.as_deref() {
+                    d.set_message_fields(&message_id, &[("forwardedFrom", json!(by))]);
+                }
                 d.push_command("send", json!({ "messageId": message_id }), DEVICE);
             });
         });
@@ -1973,6 +2050,9 @@ fn send_user(
     with_doc(shared, &chat_id, |doc| {
         doc.core.transact(|d| {
             let _ = d.append_user_message(&message_id, &text, DEVICE, &opts);
+            if let Some(by) = forwarded_from.as_deref() {
+                d.set_message_fields(&message_id, &[("forwardedFrom", json!(by))]);
+            }
             if asleep {
                 set_status(d, &message_id, MessageStatus::Queued);
             }
@@ -5270,6 +5350,10 @@ fn launch_week() -> Project {
         owner: None,
     };
     let mut agents = vec![agent];
+    // Someone else's agent first, so `ARBOS_FIXTURE_WORKING=1` shows it working (#1592).
+    if fixture_foreign_agent() {
+        agents.insert(0, testagent_member());
+    }
     // `ARBOS_FIXTURE_WORKING=<n>` (screenshot rig): the group holds n agents so
     // the presence row can show several of them working at once.
     for (project_id, name, handle, leaf, color) in fixture_working_extra_agents() {
@@ -5413,6 +5497,7 @@ fn human_message(chat_id: &str, who: &Person, text: &str, at: u64) -> Message {
         sender_avatar_color: None,
         mentions: Vec::new(),
         reply_to: None,
+        forwarded_from: None,
         asked_by_handle: None,
         owner_handle: None,
         usage: None,
@@ -5531,6 +5616,28 @@ fn seed_people_chat_docs() -> Vec<ChatDoc> {
         "Done. Slide 4 now reads 1,284 signups this week (+18 %). The chart is in `deck/v3/slide-04.png`.",
     )];
     insert_message_via_core(&group, &agent);
+    // #1592 rig: a question to someone else's agent and its first bubble — the shape of
+    // Jacob's Arbonites screenshot ("@testagent how many messages …" / "On it.").
+    if fixture_foreign_agent() {
+        let ask = human_message(
+            GROUP_LAUNCH,
+            &samir,
+            "@testagent how many messages are there in this chat?",
+            base + 362_000,
+        );
+        insert_message_via_core(&group, &ask);
+        let mut reply = human_message(GROUP_LAUNCH, &samir, "", base + 364_000);
+        reply.role = Role::Assistant;
+        reply.sender = format!("agent:{PROJECT_TESTAGENT}");
+        reply.sender_name = Some("TestAgent".into());
+        reply.sender_handle = Some("testagent".into());
+        reply.sender_avatar = None;
+        reply.asked_by_handle = Some("samir".into());
+        reply.owner_handle = Some("sami".into());
+        reply.in_reply_to = Some(ask.id.clone());
+        reply.parts = vec![text_part("On it.")];
+        insert_message_via_core(&group, &reply);
+    }
     // Two images and a file, so the group pane's Library and the attachment
     // composer have something to show (redesign mocks d / e).
     let mut shared_files = human_message(GROUP_LAUNCH, &samir, "", base + 380_000);
