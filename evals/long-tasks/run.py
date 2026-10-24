@@ -429,6 +429,10 @@ class Lane(threading.Thread):
                 self.driver_action(act, task_state)
             except Exception as e:
                 self.say(f"{tid}: cleanup action failed: {e}")
+        if not task.get("keep_dir"):
+            # the eval's own artefacts must not fill the 2 GiB workspace disk (#1641): the task dir
+            # and anything the agent installed into the workspace home for it go after grading
+            self.box.run_as_ws(self.project, f"rm -rf {D} 2>/dev/null; rm -rf {proj_dir}/.arbos/home/.rustup {proj_dir}/.arbos/home/.cargo 2>/dev/null; true", timeout=120)
         if task.get("cleanup"):
             self.box.run_as_ws(self.project, task["cleanup"].replace("{D}", D).replace("{P}", proj_dir), env=env, timeout=120)
         if task.get("cleanup_routines"):
@@ -539,6 +543,14 @@ def main():
             if rl.machine().get("state") == "awake":
                 break
     box = bx.Box()
+    code, out = box.root("df -m /work | tail -1 | awk '{print $4}'")
+    try:
+        free_mib = int(out.strip().splitlines()[-1])
+    except Exception:
+        free_mib = -1
+    print(f"preflight: /work free {free_mib} MiB", flush=True)
+    if 0 <= free_mib < 300:
+        raise SystemExit(f"preflight: only {free_mib} MiB free on /work — clean the box first (#1641)")
     spent, cap = rl.spent_today()
     if cap and cap - spent < args.budget_usd:
         print(f"WARNING: daily cap headroom ${cap - spent:.2f} < budget ${args.budget_usd}; the relay will stop the agent first", flush=True)
