@@ -1379,6 +1379,10 @@ pub struct Agent {
     pub(crate) side_notes: std::sync::Mutex<HashMap<String, Vec<String>>>,
     /// Per chat: when quick-reply model calls were made (rate limit, `status.rs`).
     pub(crate) quick_calls: std::sync::Mutex<HashMap<String, Vec<Instant>>>,
+    /// Asks running as jobs beside the main turn right now (`start_job_for_send`).
+    pub(crate) jobs_running: std::sync::atomic::AtomicUsize,
+    /// Per-agent override of `job_max_per_workspace()` (tests; the env is process-wide).
+    pub(crate) job_cap: std::sync::Mutex<Option<usize>>,
     /// Per chat: `TurnState::started` of the busy turn we already wrote a status note for
     /// (at most one note per waiting period; see `status.rs`, #1448).
     pub(crate) quick_noted: std::sync::Mutex<HashMap<String, Instant>>,
@@ -1464,6 +1468,8 @@ impl Agent {
             pending_sends: std::sync::atomic::AtomicUsize::new(0),
             side_notes: std::sync::Mutex::new(HashMap::new()),
             quick_calls: std::sync::Mutex::new(HashMap::new()),
+            jobs_running: std::sync::atomic::AtomicUsize::new(0),
+            job_cap: std::sync::Mutex::new(None),
             quick_noted: std::sync::Mutex::new(HashMap::new()),
             budget: crate::budget::BudgetState::default(),
         })
@@ -1969,6 +1975,21 @@ impl Agent {
         let quick = match cmd.kind.as_str() {
             "send" | "steer" | "guide" => self.quick_reply(chat_id, &host, &cmd).await,
             _ => crate::status::QuickOutcome::NotBusy,
+        };
+        // A new ask while a user turn runs does not wait for it (Jacob, 2026-10-23: agents
+        // multitask): it runs as its own job beside the running turn, bounded by the job caps;
+        // over the cap it queues as before. The job answers with one bubble when it is done.
+        let quick = if cmd.kind == "send" && quick == crate::status::QuickOutcome::Queued {
+            match self.start_job_for_send(chat_id, &host, &cmd).await {
+                Ok(true) => crate::status::QuickOutcome::Answered,
+                Ok(false) => quick,
+                Err(e) => {
+                    tracing::warn!(chat_id, error = %e, "job start failed; queuing for the main session");
+                    quick
+                }
+            }
+        } else {
+            quick
         };
         let res = match (cmd.kind.as_str(), quick) {
             (_, crate::status::QuickOutcome::Answered)
@@ -2527,21 +2548,29 @@ impl Agent {
 
         // The model acknowledges a hand-off in one sentence (demo review item 2); only when it
         // wrote nothing at all does agentd fill the gap so the chat never shows a bare route.
-        if matches!(
-            turn.route,
-            Some(ValidRoute::New { .. }) | Some(ValidRoute::Wake { .. })
-        ) && turn.streamed_text.trim().is_empty()
-            && turn.ack_text.trim().is_empty()
-        {
-            let h = host.lock().await;
-            if let Some(p) = h.doc.add_text_part(&assistant_msg_id, "text") {
-                h.doc.append_text(
-                    &assistant_msg_id,
-                    &p,
-                    "Handing this to a subagent; I will post its result here.",
+        if turn.streamed_text.trim().is_empty() && turn.ack_text.trim().is_empty() {
+            // No stock line ("Handing this to a subagent…", "On it."): the model's own words
+            // from the route — the `purpose` of a new subagent, the first sentence of a wake
+            // brief — are the turn's statement. A routine turn says nothing.
+            let line = match &turn.route {
+                Some(ValidRoute::New { purpose, .. }) if !turn.routine_turn => {
+                    first_sentence(purpose, 160)
+                }
+                Some(ValidRoute::Wake { brief, .. }) if !turn.routine_turn => {
+                    first_sentence(brief, 160)
+                }
+                _ => None,
+            };
+            if let Some(line) = line {
+                let h = host.lock().await;
+                if let Some(p) = h.doc.add_text_part(&assistant_msg_id, "text") {
+                    h.doc.append_text(&assistant_msg_id, &p, &line);
+                }
+                tracing::info!(
+                    chat_id,
+                    "hand-off statement taken from the route's own words"
                 );
             }
-            tracing::info!(chat_id, "ack_fallback: model wrote no sentence after route");
         }
         // An act turn that hit a hard limit and escalated says so instead of leaving an empty
         // bubble; the subagent that continues it reports back in a later message.
@@ -3083,6 +3112,10 @@ impl Agent {
                             ("subagentName", json!(name)),
                         ],
                     );
+                    // A job's answer in a people chat is attributed like any reply of this agent.
+                    if let Some(attr) = self.people_reply_fields(chat_id) {
+                        h.doc.set_message_fields(&assistant_msg_id, &attr.fields);
+                    }
                 }
                 TurnKind::ApprovalOutcome { approval_id, title } => {
                     h.doc.add_status_part(
@@ -3968,14 +4001,8 @@ impl Agent {
                     }
                     return Ok(false);
                 }
-                // Agent-flow §1: never start real work on a bare "Working…" row. If route
-                // omitted `ack`, or tools ran before route posted one, put "On it." up now.
-                let needs_ack = !t.ack_split
-                    && t.ack_text.trim().is_empty()
-                    && !matches!(t.route, Some(ValidRoute::Reply { .. }));
-                if needs_ack {
-                    self.write_ack(host, t, "On it.").await;
-                }
+                // The ack (when the model wrote one) is settled before the first tool runs; no
+                // synthetic "On it." — the working row's activity label below is the status.
                 self.maybe_split_ack(host, t, true).await;
                 self.set_activity(host, t, crate::activity::label(tool_name, args))
                     .await;
@@ -4190,14 +4217,19 @@ impl Agent {
         // user-facing sentence(s), with glued ".Word" spacing fixed.
         let cleaned = ProseFilter::clean_prose(t.ack_text.trim());
         let Some(bubble) = ack_bubble(&cleaned, &action, t.routine_turn) else {
-            t.ack_text.clear();
+            // `act`: the sentence is status — it goes on the working row (activity), the one
+            // row of the turn stays open and becomes the result. Else: nothing to show.
             t.ack_split = true;
-            tracing::info!(chat_id = %t.chat_id, action, routine_turn = t.routine_turn, "ack bubble dropped");
+            if action == "act" && !t.routine_turn && !cleaned.trim().is_empty() {
+                t.ack_text = cleaned.trim().to_owned();
+                self.set_activity(host, t, Some(t.ack_text.clone())).await;
+                tracing::info!(chat_id = %t.chat_id, ack_chars = t.ack_text.chars().count(), "ack on the working row");
+            } else {
+                t.ack_text.clear();
+                tracing::info!(chat_id = %t.chat_id, action, routine_turn = t.routine_turn, "ack bubble dropped");
+            }
             return;
         };
-        if bubble != cleaned.trim() {
-            tracing::info!(chat_id = %t.chat_id, action, "ack bubble fallback after thought-aloud strip");
-        }
         t.ack_text = bubble;
         if t.row_closed {
             self.open_row(host, t, "ack").await;
@@ -4486,13 +4518,14 @@ impl Agent {
                 if action != "reply" {
                     if let Some(host) = self.sync.host(&t.chat_id).await {
                         if t.ack_text.trim().is_empty() {
-                            let ack = args
+                            if let Some(ack) = args
                                 .get("ack")
                                 .and_then(Value::as_str)
                                 .map(str::trim)
                                 .filter(|s| !s.is_empty())
-                                .unwrap_or("On it.");
-                            self.write_ack(&host, t, ack).await;
+                            {
+                                self.write_ack(&host, t, ack).await;
+                            }
                         }
                         self.maybe_split_ack(&host, t, true).await;
                     }
@@ -4975,6 +5008,170 @@ impl Agent {
         s.push_str(&crate::media::prompt_section(&self.cfg));
         s.push_str("## Return contract\n\nEnd your final reply with one fenced ```json block:\n{ \"status\": \"done\" | \"blocked\" | \"partial\" | \"needs_input\", \"summary\": \"<= 5 lines\", \"artifacts\": [ { \"kind\": \"file\" | \"commit\" | \"url\" | \"command\", \"ref\": \"…\", \"note\": \"…\" } ], \"acceptance\": [ { \"criterion\": \"…\", \"met\": true, \"evidence\": \"…\" } ], \"open_items\": [], \"proposed_memory\": [ { \"kind\": \"decision\", \"scope\": \"project\", \"text\": \"…\" } ], \"questions\": [] }\n");
         s
+    }
+
+    /// A `send` that arrived while a user turn holds the lock: run it as its own job beside
+    /// that turn — a subagent session in this workspace whose brief is the user's message with
+    /// the chat's recent turns, answered back into this chat as one bubble by the result turn.
+    /// Returns `Ok(false)` when it should queue instead: no user turn is running (the lock is
+    /// about to free), the message is not a person's (routines, channels, voice), the chat is
+    /// a group needing the responder decision, or the job caps are reached
+    /// (`JOB_MAX_PER_WORKSPACE`, default 3; the box-wide subagent gate bounds the box).
+    pub(crate) async fn start_job_for_send(
+        self: &Arc<Self>,
+        chat_id: &str,
+        host: &SharedHost,
+        cmd: &CommandView,
+    ) -> Result<bool> {
+        if cmd.issued_by == self.cfg.device_id {
+            return Ok(false);
+        }
+        let user_msg_id = cmd
+            .payload
+            .get("messageId")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        let running_user_turn = {
+            let tl = self.turn.lock().await;
+            tl.as_ref()
+                .is_some_and(|t| !t.reply_only && !t.stopped && !t.routine_turn && !t.from_voice)
+        };
+        if !running_user_turn || !self.turn_lock_busy() {
+            return Ok(false);
+        }
+        if self.groups.kind_of(chat_id).is_some_and(|k| k != "chat") {
+            return Ok(false);
+        }
+        let (user_text, from_voice, from_routine) = {
+            let h = host.lock().await;
+            let m = h.doc.message(&user_msg_id);
+            (
+                m.as_ref().map(|m| m.text()).unwrap_or_default(),
+                m.as_ref().is_some_and(message_from_voice),
+                m.as_ref().is_some_and(message_from_routine),
+            )
+        };
+        if from_voice || from_routine || user_text.trim().is_empty() {
+            return Ok(false);
+        }
+        let cap = self
+            .job_cap
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(job_max_per_workspace);
+        let running = self.jobs_running.load(Ordering::SeqCst);
+        if running >= cap {
+            tracing::info!(
+                chat_id,
+                running,
+                cap,
+                "job cap reached; the ask queues for the main session"
+            );
+            return Ok(false);
+        }
+        self.jobs_running.fetch_add(1, Ordering::SeqCst);
+        let words: Vec<&str> = user_text.split_whitespace().collect();
+        let slug: String = words
+            .iter()
+            .take(4)
+            .map(|w| {
+                w.chars()
+                    .filter(|c| c.is_alphanumeric())
+                    .flat_map(|c| c.to_lowercase())
+                    .collect::<String>()
+            })
+            .filter(|w| !w.is_empty())
+            .collect::<Vec<_>>()
+            .join("-");
+        let name = format!(
+            "ask-{}",
+            if slug.is_empty() {
+                ulid().to_lowercase()
+            } else {
+                slug
+            }
+        );
+        let purpose: String = words.join(" ").chars().take(140).collect();
+        let recent = self
+            .store
+            .t3_thread(chat_id, None, None, 12)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.kind == "user" || r.kind == "assistant")
+            .map(|r| {
+                format!(
+                    "- {}: {}",
+                    r.role.unwrap_or_default(),
+                    r.text
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                        .chars()
+                        .take(240)
+                        .collect::<String>()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut prelude = String::new();
+        if let Some(p) = self.people_turn_context(chat_id, host, &user_msg_id).await {
+            prelude = p;
+        } else if let Some(n) = self.owner_address_note(chat_id, host, &user_msg_id).await {
+            prelude = n;
+        }
+        let brief = format!(
+            "{prelude}The user sent this message to you while you were busy with another request in the same chat; answer it now, in parallel, as yourself.\n\nMessage: {user_text}\n\nRecent turns in this chat:\n{recent}\n\nDo what the message asks (use your tools when needed) and finish with the answer the user should read: plain prose, no process narration, no mention of other requests. If it only needs a reply, reply."
+        );
+        let _ = self.store.t3_append(
+            chat_id,
+            None,
+            Some(chat_id),
+            "user",
+            Some("user"),
+            &user_text,
+            Some(&json!({ "message_id": user_msg_id, "job": true })),
+        );
+        tracing::info!(chat_id, name = %name, running = running + 1, cap, "ask runs as a job beside the running turn");
+        let me = self.clone();
+        let chat = chat_id.to_owned();
+        let host2 = host.clone();
+        tokio::spawn(async move {
+            let r = me
+                .run_subagent(
+                    &chat,
+                    &host2,
+                    &user_msg_id,
+                    None,
+                    &name,
+                    &purpose,
+                    &brief,
+                    Some(Harness::Pi),
+                    false,
+                    false,
+                )
+                .await;
+            me.jobs_running.fetch_sub(1, Ordering::SeqCst);
+            if let Err(e) = r {
+                tracing::warn!(chat_id = %chat, error = %e, "job failed");
+                let h = host2.lock().await;
+                let id = ulid();
+                h.doc
+                    .start_assistant_message(&id, &user_msg_id, &me.cfg.device_id);
+                if let Some(attr) = me.people_reply_fields(&chat) {
+                    h.doc.set_message_fields(&id, &attr.fields);
+                }
+                h.doc.add_error_part(
+                    &id,
+                    "job_failed",
+                    "I couldn't finish that one alongside the other request. Ask me again in a moment.",
+                );
+                h.doc
+                    .add_hidden_part(&id, "job_failed_detail", &e.to_string(), &json!({}));
+                h.doc.finish_message(&id, MessageStatus::Error);
+            }
+        });
+        Ok(true)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5718,24 +5915,42 @@ fn message_from_routine(m: &arbos_core::doc::MessageView) -> bool {
         || m.rest.get("agentMessage").is_some()
 }
 
-/// The ack bubble's text for a turn, or `None` for no bubble. `act`/`new`/`wake` on a user turn
-/// always show one (a thought-aloud-only ack used to leave the chat on bare "Working…" until the
-/// result — feedback AMus6 / ALYEPIee), so an empty ack falls back to "On it.". A routine-fired
-/// turn has nobody waiting for an acknowledgement: no bubble at all, the note is the whole turn
-/// (#1391: four "On it." rows before the l1 pipeline's check-ins).
+/// Whether the ack of a turn is a bubble (`Some(text)`) or belongs on the working row (`None`).
+/// Jacob's rule (2026-10-23, async jobs): status lives in the working row, never as a chat
+/// bubble — no "On it." placeholders (TestAgent, 23:58 UTC), no "Still on it…" lines. An `act`
+/// turn answers in the same turn, so its ack is status: working row only. A `new`/`wake` turn
+/// hands off and answers later; the model's own one-sentence ack is that turn's statement and
+/// stays, but nothing is invented when the model wrote none. A routine-fired turn has nobody
+/// waiting (#1391): never a bubble. `reply` acks are the reply text itself.
 fn ack_bubble(cleaned: &str, action: &str, routine_turn: bool) -> Option<String> {
     let cleaned = cleaned.trim();
-    if action == "reply" {
-        return (!cleaned.is_empty()).then(|| cleaned.to_owned());
-    }
-    if routine_turn {
+    if cleaned.is_empty() || routine_turn || action == "act" {
         return None;
     }
-    Some(if cleaned.is_empty() {
-        "On it.".to_owned()
-    } else {
-        cleaned.to_owned()
-    })
+    Some(cleaned.to_owned())
+}
+
+/// The first sentence of `text`, capped at `max` chars, as one plain line; `None` when empty.
+fn first_sentence(text: &str, max: usize) -> Option<String> {
+    let one: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let one = one.trim();
+    if one.is_empty() {
+        return None;
+    }
+    let end = one
+        .char_indices()
+        .find(|(i, c)| {
+            matches!(c, '.' | '!' | '?') && one[i + c.len_utf8()..].starts_with([' ', '\n'])
+                || (matches!(c, '.' | '!' | '?') && *i + 1 == one.len())
+        })
+        .map(|(i, c)| i + c.len_utf8())
+        .unwrap_or(one.len());
+    let mut sent: String = one[..end].chars().take(max).collect();
+    if !sent.ends_with(['.', '!', '?']) {
+        sent = sent.trim_end_matches([',', ';', ':']).to_owned();
+        sent.push('.');
+    }
+    Some(sent)
 }
 
 fn turn_deadline_secs() -> u64 {
@@ -5772,6 +5987,15 @@ pub(crate) fn subagent_start_failure_line(err: &str) -> String {
     } else {
         "I couldn't start the helper for this step.".to_owned()
     }
+}
+
+/// Concurrent asks per workspace (design note `agent-async-jobs.md`: 3; `ARBOS_JOB_MAX_PER_WORKSPACE`).
+/// The box-wide subagent gate (`workspace::BOX_MAX_SUBAGENTS`) bounds the box.
+pub(crate) fn job_max_per_workspace() -> usize {
+    std::env::var("ARBOS_JOB_MAX_PER_WORKSPACE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(3)
 }
 
 /// Relay turns (subagent result, approval outcome) only write a few sentences: their deadline
@@ -5918,6 +6142,13 @@ impl Agent {
     /// Test seam: give the held turn a live assistant row to write into.
     pub(crate) async fn test_open_row(&self, host: &SharedHost, t: &mut TurnState) {
         self.open_row(host, t, "result").await;
+    }
+
+    /// Test seam: fold one pi event into the held turn.
+    pub(crate) async fn test_fold(self: &Arc<Self>, chat_id: &str, host: &SharedHost, ev: &Event) {
+        let _ = self
+            .fold_main_event(chat_id, host, ev, Instant::now())
+            .await;
     }
 }
 
@@ -6093,9 +6324,6 @@ mod tests {
         );
     }
 
-    /// #1391: a routine-fired turn (the agent's own check-in) writes no ack bubble — the l1
-    /// pipeline showed "On it." before every progress note. User turns keep theirs, including the
-    /// "On it." fallback when the model's ack was thought-aloud only.
     #[test]
     fn reply_to_follows_the_shared_or_earlier_rule() {
         // 1:1, answering the latest message: a plain bubble.
@@ -6108,52 +6336,45 @@ mod tests {
         assert!(reply_to_wanted(false, false, true));
     }
 
+    /// Jacob's rule (2026-10-23): status lives in the working row, never as a chat bubble.
+    /// An `act` ack is status (no bubble, whatever the model wrote); a `new`/`wake` ack is the
+    /// model's own sentence or nothing — no "On it." is ever invented; routine turns (#1391)
+    /// never get one; `reply` acks are the reply text.
     #[test]
-    fn routine_turns_write_no_ack_bubble() {
-        // user turns: unchanged
+    fn acks_are_working_row_status_except_the_models_own_handoff_sentence() {
+        assert_eq!(ack_bubble("Cloning it now.", "act", false), None);
+        assert_eq!(ack_bubble("", "act", false), None);
+        assert_eq!(ack_bubble("", "new", false), None);
+        assert_eq!(ack_bubble("  ", "wake", false), None);
         assert_eq!(
-            ack_bubble("Cloning it now.", "act", false).as_deref(),
-            Some("Cloning it now.")
+            ack_bubble("Yep, doing that also.", "new", false).as_deref(),
+            Some("Yep, doing that also.")
         );
-        assert_eq!(ack_bubble("", "act", false).as_deref(), Some("On it."));
-        assert_eq!(ack_bubble("  ", "new", false).as_deref(), Some("On it."));
+        assert_eq!(
+            ack_bubble("Sure, steering that.", "wake", false).as_deref(),
+            Some("Sure, steering that.")
+        );
         assert_eq!(ack_bubble("", "reply", false), None);
         assert_eq!(
             ack_bubble("Austin.", "reply", false).as_deref(),
             Some("Austin.")
         );
-        // routine turns: no bubble for act/new/wake, whatever the model wrote
-        assert_eq!(ack_bubble("", "act", true), None);
         assert_eq!(ack_bubble("Checking the pipeline now.", "act", true), None);
         assert_eq!(ack_bubble("On it.", "wake", true), None);
         assert_eq!(ack_bubble("", "new", true), None);
-        // a `reply` on a routine turn is the note itself and stays
         assert_eq!(
-            ack_bubble("Five of 20 chunks are done.", "reply", true).as_deref(),
-            Some("Five of 20 chunks are done.")
+            first_sentence(
+                "Fetch the user's WhatsApp messages. Then summarise them.",
+                160
+            )
+            .as_deref(),
+            Some("Fetch the user's WhatsApp messages.")
         );
-
-        let routine: arbos_core::doc::MessageView = serde_json::from_value(json!({
-            "id": "m1", "role": "user", "status": "done", "parts": [],
-            "sender": "routine:01RTN", "routineName": "pipeline check", "routineRunId": "run-1"
-        }))
-        .unwrap();
-        assert!(message_from_routine(&routine));
-        let typed: arbos_core::doc::MessageView = serde_json::from_value(json!({
-            "id": "m2", "role": "user", "status": "done", "parts": [], "sender": "user"
-        }))
-        .unwrap();
-        assert!(!message_from_routine(&typed));
-        let channel: arbos_core::doc::MessageView = serde_json::from_value(json!({
-            "id": "m3", "role": "user", "status": "done", "parts": [], "sender": "channel:telegram"
-        }))
-        .unwrap();
-        assert!(
-            !message_from_routine(&channel),
-            "a person writing through a channel keeps the ack"
+        assert_eq!(first_sentence("  ", 160), None);
+        assert_eq!(
+            first_sentence("read file2.txt and report its contents,", 160).as_deref(),
+            Some("read file2.txt and report its contents.")
         );
-        // the router agrees: no ack on a routine fire
-        assert!(ROUTER_PROMPT.contains("When a routine fires, the message is your own instruction"));
     }
 
     /// The code-mode prompt names the exact script identifiers of the project tools, so the model
