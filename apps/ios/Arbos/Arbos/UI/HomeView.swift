@@ -1351,13 +1351,13 @@ struct PeopleRow: View {
         return other?.displayName ?? chat.title
     }
 
-    /// Same-line muted label: @handle for a DM, member count for a group.
+    /// Same-line muted label: handle (no @) for a DM, member count for a group.
     private var label: String {
         if chat.isGroup {
             let n = chat.humans.count
             return "\(n) member\(n == 1 ? "" : "s")"
         }
-        return "@\(other?.handle ?? chat.title)"
+        return other?.handle ?? chat.title
     }
 
     /// Tokenised blob URL for the group's custom picture, when one is set.
