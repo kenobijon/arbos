@@ -82,6 +82,10 @@ pub struct Project {
     /// People chats: my `me.muted` on the relay (synced across devices).
     #[serde(default)]
     pub muted: bool,
+    /// Sidebar archive (2026-10-23): hidden from the list for me, on every
+    /// device (the relay's per-user flag); the agent keeps running.
+    #[serde(default)]
+    pub archived_at: Option<u64>,
     /// The agent's one chat, §9b `primary_chat_id` (stored on the relay, never
     /// flips); older relays and the fixture send none and the client picks:
     /// most messages, ties → earliest created.
@@ -999,6 +1003,11 @@ pub struct Chat {
     /// S15 system tab "Projects ⇄".
     pub is_system: bool,
     pub unread: bool,
+    /// Unread message count from `GET /me/unread` (Dock badge). `0` when read or unknown.
+    /// Live arrivals may set [`Self::unread`] with this still `0` until the next refresh;
+    /// the badge treats that as one missed message.
+    #[serde(default)]
+    pub unread_count: u32,
     pub last_message_at: u64,
     /// §9c: archived for me (per user, synced by the relay); `None` = not archived.
     #[serde(default)]
@@ -1013,6 +1022,17 @@ pub struct Chat {
 impl Chat {
     pub fn is_group(&self) -> bool {
         self.kind == ChatKind::Group
+    }
+
+    /// Missed messages for the Dock badge: the relay count, or 1 when only the unread flag is lit.
+    pub fn missed_count(&self) -> usize {
+        if self.unread_count > 0 {
+            self.unread_count as usize
+        } else if self.unread {
+            1
+        } else {
+            0
+        }
     }
 }
 
@@ -1570,8 +1590,9 @@ pub struct Message {
     pub greeting: bool,
 }
 
-/// The quick-react set, in display order (the iPhone's `MessageReaction.palette`).
-pub const REACTION_PALETTE: [&str; 6] = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
+/// The reaction capsule's set, in Grok Bot's order (the iPhone's
+/// `MessageReaction.palette`); any other emoji comes from the system picker.
+pub const REACTION_PALETTE: [&str; 5] = ["😂", "👍", "👎", "❤️", "🎉"];
 
 impl Message {
     /// Reactions as `(emoji, senders)`, palette order first, then the rest
@@ -2910,6 +2931,9 @@ pub struct ServerInfo {
     pub member_count: u64,
     #[serde(default)]
     pub channels: Vec<ServerChannel>,
+    /// Sidebar archive (2026-10-23): hidden from the list for me, on every device.
+    #[serde(default)]
+    pub archived_at: Option<u64>,
     #[serde(default)]
     pub general_channel_id: Option<String>,
     #[serde(default)]

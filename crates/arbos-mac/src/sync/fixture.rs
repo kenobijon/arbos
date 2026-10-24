@@ -876,6 +876,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 kind: ChatKind::Chat,
                 participants: Vec::new(),
                 unread: false,
+                unread_count: 0,
                 last_message_at: now_ms(),
                 archived_at: None,
             });
@@ -914,6 +915,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 kind: ChatKind::Chat,
                 participants: Vec::new(),
                 unread: false,
+                unread_count: 0,
                 last_message_at: now_ms(),
                 archived_at: None,
             });
@@ -1073,6 +1075,19 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             }
             emit_projects(shared);
         }
+        ClientCommand::ArchiveSpace {
+            space_id,
+            server: _,
+            archived,
+        } => {
+            {
+                let mut projects = shared.projects.lock().unwrap();
+                if let Some(p) = projects.iter_mut().find(|p| p.id == space_id) {
+                    p.archived_at = archived.then(now_ms);
+                }
+            }
+            emit_projects(shared);
+        }
         ClientCommand::SetMuted { space_id, muted } => {
             {
                 let mut projects = shared.projects.lock().unwrap();
@@ -1140,6 +1155,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 owner_person: None,
                 machine_info: None,
                 muted: false,
+                archived_at: None,
                 primary_chat: None,
                 voice: None,
                 vision_enabled: true,
@@ -1161,6 +1177,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 kind: ChatKind::Chat,
                 participants: Vec::new(),
                 unread: false,
+                unread_count: 0,
                 last_message_at: now_ms(),
                 archived_at: None,
             });
@@ -2582,6 +2599,7 @@ fn mark_read(shared: &Shared, chat_id: &str) {
         match chats.iter_mut().find(|c| c.id == chat_id && c.unread) {
             Some(c) => {
                 c.unread = false;
+                c.unread_count = 0;
                 true
             }
             None => false,
@@ -3567,6 +3585,7 @@ fn mark_unread_if_hidden(shared: &Arc<Shared>, chat_id: &str) {
         let mut chats = shared.chats.lock().unwrap();
         if let Some(c) = chats.iter_mut().find(|c| c.id == chat_id) {
             c.unread = true;
+            c.unread_count = c.unread_count.max(1);
             c.last_message_at = now_ms();
         }
     }
@@ -3963,6 +3982,7 @@ fn seed_projects() -> Vec<Project> {
             owner_person: None,
             machine_info: None,
             muted: false,
+            archived_at: None,
             primary_chat: None,
             voice: None,
             vision_enabled: true,
@@ -3997,6 +4017,7 @@ fn seed_projects() -> Vec<Project> {
             owner_person: None,
             machine_info: None,
             muted: false,
+            archived_at: None,
             primary_chat: None,
             voice: None,
             vision_enabled: true,
@@ -4031,6 +4052,7 @@ fn seed_projects() -> Vec<Project> {
             owner_person: None,
             machine_info: None,
             muted: false,
+            archived_at: None,
             primary_chat: None,
             voice: None,
             vision_enabled: true,
@@ -4168,6 +4190,7 @@ fn seed_chats() -> Vec<Chat> {
         kind: ChatKind::Chat,
         participants: Vec::new(),
         unread: false,
+        unread_count: 0,
         last_message_at: t.saturating_sub(ago_min * 60_000),
         archived_at: None,
     };
@@ -4458,6 +4481,29 @@ impl Seeder<'_> {
                 false,
             );
         });
+    }
+
+    /// An answer to the user message two rows back: `replyTo` set (the quote header) when
+    /// `quoted`, else the plain bubble (#1521 before/after).
+    fn assistant_replying_to(&mut self, quoted: bool, text: &str) -> Id {
+        let target = self
+            .doc
+            .read_all()
+            .into_iter()
+            .filter(|m| m.role == Role::User)
+            .rev()
+            .nth(1)
+            .map(|m| m.id);
+        let id = self.assistant(TurnKind::Reply, MessageStatus::Done, vec![text_part(text)]);
+        if let Some(target) = target {
+            self.doc.core.transact(|d| {
+                d.set_message_fields(&id, &[("inReplyTo", json!(target))]);
+                if quoted {
+                    d.set_message_fields(&id, &[("replyTo", json!(target))]);
+                }
+            });
+        }
+        id
     }
 
     /// The reply that went back to that agent ("Replied to ◉ X").
@@ -4946,6 +4992,18 @@ fn seed_chat_docs() -> Vec<ChatDoc> {
             comms,
             "Announcement draft is written. I need the final build number from Arbos before I schedule it.",
         );
+        // `ARBOS_FIXTURE_REPLY_TO=1` (screenshot rig, #1521): a question asked two messages
+        // back, then the agent's answer carrying `replyTo` = that question — the bubble shows
+        // the quote header. `=0` writes the same rows without `replyTo` (the before-shot).
+        if let Ok(v) = std::env::var("ARBOS_FIXTURE_REPLY_TO") {
+            s.user("Arbos, what is the final build number for the beta?");
+            s.user("And Affine, is the export behind a flag?");
+            s.project(affine, "Yes — `canvas_export`, on by default in the beta.");
+            s.assistant_replying_to(
+                v == "1",
+                "The beta ships as build 0.6.184; Comms, that is the number for the announcement.",
+            );
+        }
     }
     out.push(group);
 
@@ -5081,6 +5139,7 @@ fn people_space(id: &str, other: Person, agents: Vec<AgentMember>) -> Project {
         owner_person: None,
         machine_info: None,
         muted: false,
+        archived_at: None,
         primary_chat: None,
         voice: None,
         vision_enabled: true,
@@ -5182,6 +5241,7 @@ fn seed_people_projects() -> Vec<Project> {
             owner_person: None,
             machine_info: None,
             muted: false,
+            archived_at: None,
             primary_chat: None,
             voice: None,
             vision_enabled: true,
@@ -5206,6 +5266,7 @@ fn seed_people_chats() -> Vec<Chat> {
             kind: ChatKind::Chat,
             participants: Vec::new(),
             unread: true,
+            unread_count: 0,
             last_message_at: now_ms().saturating_sub(12 * 60_000),
             archived_at: None,
         },
@@ -5218,6 +5279,7 @@ fn seed_people_chats() -> Vec<Chat> {
             kind: ChatKind::Chat,
             participants: Vec::new(),
             unread: false,
+            unread_count: 0,
             last_message_at: now_ms().saturating_sub(25 * 60_000),
             archived_at: None,
         },
@@ -5230,6 +5292,7 @@ fn seed_people_chats() -> Vec<Chat> {
             kind: ChatKind::Chat,
             participants: Vec::new(),
             unread: false,
+            unread_count: 0,
             last_message_at: now_ms().saturating_sub(50 * 60_000),
             archived_at: None,
         },
@@ -5744,6 +5807,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                 kind: ChatKind::Chat,
                 participants: Vec::new(),
                 unread: false,
+                unread_count: 0,
                 last_message_at: now_ms(),
                 archived_at: None,
             });
@@ -5861,6 +5925,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                 kind: ChatKind::Chat,
                 participants: Vec::new(),
                 unread: false,
+                unread_count: 0,
                 last_message_at: now_ms(),
                 archived_at: None,
             });
