@@ -4,6 +4,12 @@ import XCTest
 /// Composer @-mention autocomplete (#1596): the open `@token`, the chip spans
 /// in the plain draft, exact-handle auto-resolve, the picker's rows and what
 /// the send carries.
+///
+/// Main actor: `AppModel.mentions(in:)` / `addressesEveryone` are statics on
+/// the `@MainActor` model and `MentionTextView.makeCoordinator()` is
+/// main-actor isolated — a nonisolated test method cannot call them
+/// synchronously (main's unit-test target failed to compile, 2026-10-24).
+@MainActor
 final class MentionDraftTests: XCTestCase {
     private func project(_ id: String, _ name: String) -> Project {
         Project(id: id, name: name, icon: "A", color: "#000000", state: .awake, stateSince: nil, stateDetail: nil,
@@ -182,7 +188,6 @@ final class MentionDraftTests: XCTestCase {
         XCTAssertFalse(AppModel.addressesEveryone("@heresy"))
     }
 
-    @MainActor
     func testPlainAndAttributedOffsetsAgree() {
         let field = MentionTextView(text: .constant(""), mentions: .constant([]), caret: .constant(0), isFocused: .constant(false),
                                     placeholder: "", theme: Theme.dark)
