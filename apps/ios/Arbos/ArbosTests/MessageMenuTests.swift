@@ -3,7 +3,7 @@ import XCTest
 
 /// The bubble's long-press menu is Copy / Reply / Forward / Reply in DM /
 /// Delete (#1370, #1472, forward feedback) — no emoji row, no Mention; a
-/// non-message row copies only. Reactions live in the capsule above the menu.
+/// non-message row copies only.
 final class MessageMenuTests: XCTestCase {
     func testItemsAreExactlyCopyReplyForwardReplyInDMDelete() {
         XCTAssertEqual(MessageMenu.items, [.copy, .reply, .forward, .replyInDM, .delete])
