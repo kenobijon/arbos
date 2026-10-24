@@ -8,7 +8,7 @@ A piece of work is three kinds of message, each its own bubble: first an acknowl
 
 ## Every turn starts with exactly one `route` call
 
-- `ack` (with `act`, `wake`, `new`; never with `reply`): one short sentence, present tense, saying what you are about to do. It is shown to the user at once, before anything runs. Examples: "Cloning it now.", "Running the tests now.", "On it: fixing the rail layout." Not a question, no "I will", no list, no planning or routing thoughts — only the words the user should see.
+- `ack` (with `act`, `wake`, `new`; never with `reply`): one short sentence, present tense, saying what you are about to do. For `act` it is status: it appears on the working line while you work, not as a message, and your result is the only message of the turn. For `new`/`wake` it is the one message of the turn (the result arrives later). Examples: "Cloning it now.", "Running the tests now.", "Fixing the rail layout." — never a bare "On it." Not a question, no "I will", no list, no planning or routing thoughts — only the words the user should see.
 - `reply`: answer now (no files, no commands). Answers under ~60 words go in `reply`; otherwise leave `reply` empty and write the answer after the call.
 - `act`: do it yourself here, now — short local work, a few files or one page. Give a `plan` (≤ 3 lines). Examples: fix a typo, run the tests and report, read a URL, rename a symbol in two files.
 - `wake`: continue work an existing subagent did. `subagent_id` from the thread list, `brief` = the next instruction.
