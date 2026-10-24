@@ -492,12 +492,19 @@ final class AppModel: ObservableObject {
     static let maxHomePins = 5
 
     /// Home-list keys (`p:<projectId>` / `c:<peopleChatId>`) kept at the top.
-    @Published private(set) var pinnedHomeIds: Set<String> = {
-        Set(UserDefaults.standard.stringArray(forKey: "pinnedHome") ?? [])
+    /// Order is the pin strip: index 0 is the topmost row.
+    @Published private(set) var pinnedHomeIds: [String] = {
+        var seen = Set<String>()
+        return (UserDefaults.standard.stringArray(forKey: "pinnedHome") ?? [])
+            .filter { seen.insert($0).inserted }
     }()
 
     func isHomePinned(projectId: Id) -> Bool { pinnedHomeIds.contains("p:" + projectId) }
     func isHomePinned(peopleChatId: Id) -> Bool { pinnedHomeIds.contains("c:" + peopleChatId) }
+
+    /// Position in the pin strip (0 = top), or `nil` when not pinned.
+    func homePinIndex(projectId: Id) -> Int? { pinnedHomeIds.firstIndex(of: "p:" + projectId) }
+    func homePinIndex(peopleChatId: Id) -> Int? { pinnedHomeIds.firstIndex(of: "c:" + peopleChatId) }
 
     func pinHome(projectId: Id) {
         unarchive(projectId)
@@ -512,6 +519,18 @@ final class AppModel: ObservableObject {
     }
     func unpinHome(peopleChatId: Id) { setHomePinned("c:" + peopleChatId, false) }
 
+    /// Put a pinned home row first in the pin strip (long-press → Move to top).
+    func moveHomePinToTop(projectId: Id) { moveHomePinToTop(key: "p:" + projectId) }
+    func moveHomePinToTop(peopleChatId: Id) { moveHomePinToTop(key: "c:" + peopleChatId) }
+
+    /// Move a pinned home row one step toward the top of the strip.
+    func moveHomePinUp(projectId: Id) { moveHomePin(key: "p:" + projectId, delta: -1) }
+    func moveHomePinUp(peopleChatId: Id) { moveHomePin(key: "c:" + peopleChatId, delta: -1) }
+
+    /// Move a pinned home row one step toward the bottom of the strip.
+    func moveHomePinDown(projectId: Id) { moveHomePin(key: "p:" + projectId, delta: 1) }
+    func moveHomePinDown(peopleChatId: Id) { moveHomePin(key: "c:" + peopleChatId, delta: 1) }
+
     private func setHomePinned(_ key: String, _ pinned: Bool) {
         if pinned {
             guard !pinnedHomeIds.contains(key) else { return }
@@ -520,12 +539,28 @@ final class AppModel: ObservableObject {
                 notice = Notice(text: "You can pin up to five chats.")
                 return
             }
-            pinnedHomeIds.insert(key)
+            // New pins land at the top; later Move to top / up / down adjusts order.
+            pinnedHomeIds.insert(key, at: 0)
         } else {
-            guard pinnedHomeIds.contains(key) else { return }
-            pinnedHomeIds.remove(key)
+            guard let i = pinnedHomeIds.firstIndex(of: key) else { return }
+            pinnedHomeIds.remove(at: i)
         }
-        UserDefaults.standard.set(Array(pinnedHomeIds), forKey: "pinnedHome")
+        UserDefaults.standard.set(pinnedHomeIds, forKey: "pinnedHome")
+    }
+
+    private func moveHomePinToTop(key: String) {
+        guard let i = pinnedHomeIds.firstIndex(of: key), i > 0 else { return }
+        pinnedHomeIds.remove(at: i)
+        pinnedHomeIds.insert(key, at: 0)
+        UserDefaults.standard.set(pinnedHomeIds, forKey: "pinnedHome")
+    }
+
+    private func moveHomePin(key: String, delta: Int) {
+        guard let i = pinnedHomeIds.firstIndex(of: key) else { return }
+        let j = i + delta
+        guard pinnedHomeIds.indices.contains(j) else { return }
+        pinnedHomeIds.swapAt(i, j)
+        UserDefaults.standard.set(pinnedHomeIds, forKey: "pinnedHome")
     }
 
     @Published private(set) var machineError: String?

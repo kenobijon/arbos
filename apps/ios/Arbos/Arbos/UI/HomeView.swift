@@ -149,9 +149,9 @@ struct HomeView: View {
                                 }
                                 .buttonStyle(.borderless)
                                 .contextMenu {
-                                    // Long-press: Pin (also on leading swipe), Fork (owned),
-                                    // Archive (also on the trailing swipe), then Delete for
-                                    // owned agents. Profile is the chat header.
+                                    // Long-press: Pin (also on leading swipe), reorder when
+                                    // pinned, Fork (owned), Archive (also on trailing swipe),
+                                    // then Delete for owned agents. Profile is the chat header.
                                     Button {
                                         withAnimation {
                                             if pinned { model.unpinHome(projectId: project.id) }
@@ -159,6 +159,27 @@ struct HomeView: View {
                                         }
                                     } label: {
                                         Label(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin")
+                                    }
+                                    if let pinIndex = model.homePinIndex(projectId: project.id) {
+                                        if pinIndex > 0 {
+                                            Button {
+                                                withAnimation { model.moveHomePinToTop(projectId: project.id) }
+                                            } label: {
+                                                Label("Move to top", systemImage: "arrow.up.to.line")
+                                            }
+                                            Button {
+                                                withAnimation { model.moveHomePinUp(projectId: project.id) }
+                                            } label: {
+                                                Label("Move up", systemImage: "arrow.up")
+                                            }
+                                        }
+                                        if pinIndex + 1 < model.pinnedHomeIds.count {
+                                            Button {
+                                                withAnimation { model.moveHomePinDown(projectId: project.id) }
+                                            } label: {
+                                                Label("Move down", systemImage: "arrow.down")
+                                            }
+                                        }
                                     }
                                     if !project.shared {
                                         Button { model.duplicateProject(project) } label: {
@@ -211,7 +232,8 @@ struct HomeView: View {
                                 }
                                 .buttonStyle(.borderless)
                                 .contextMenu {
-                                    // Long-press: Pin, Archive, Profile/Group info, Delete.
+                                    // Long-press: Pin, reorder when pinned, Archive,
+                                    // Profile/Group info, Delete.
                                     Button {
                                         withAnimation {
                                             if pinned { model.unpinHome(peopleChatId: chat.id) }
@@ -219,6 +241,27 @@ struct HomeView: View {
                                         }
                                     } label: {
                                         Label(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin")
+                                    }
+                                    if let pinIndex = model.homePinIndex(peopleChatId: chat.id) {
+                                        if pinIndex > 0 {
+                                            Button {
+                                                withAnimation { model.moveHomePinToTop(peopleChatId: chat.id) }
+                                            } label: {
+                                                Label("Move to top", systemImage: "arrow.up.to.line")
+                                            }
+                                            Button {
+                                                withAnimation { model.moveHomePinUp(peopleChatId: chat.id) }
+                                            } label: {
+                                                Label("Move up", systemImage: "arrow.up")
+                                            }
+                                        }
+                                        if pinIndex + 1 < model.pinnedHomeIds.count {
+                                            Button {
+                                                withAnimation { model.moveHomePinDown(peopleChatId: chat.id) }
+                                            } label: {
+                                                Label("Move down", systemImage: "arrow.down")
+                                            }
+                                        }
                                     }
                                     Button {
                                         withAnimation { model.archive(peopleChatId: chat.id) }
@@ -711,22 +754,24 @@ struct HomeView: View {
     }
 
     /// One home row with how it matched the search (every row is a `title`
-    /// hit without a query, so the list is pinned-first by activity as before).
+    /// hit without a query, so the list is pinned-first in pin order, then by activity).
     struct HomeEntry: Identifiable {
         var row: HomeRow
         var hit: HomeSearch.Hit
         var id: String { row.id }
     }
 
-    /// Projects, DMs and servers in one list. Without a query: pinned first, then
-    /// newest activity. With one: people (display name / @handle) first, then rows
-    /// matched by title, then by a member, then by a message — newest first inside
-    /// each group; a hit beyond the row's own name is explained on its second line.
-    /// `listFilter` scopes the rows: Agents hides people and servers, People
-    /// hides agents and servers, Servers shows only servers (`HomeListFilter`).
+    /// Projects, DMs and servers in one list. Without a query: pinned first (in the
+    /// user's pin order), then newest activity. With one: people (display name /
+    /// @handle) first, then rows matched by title, then by a member, then by a
+    /// message — newest first inside each group; a hit beyond the row's own name is
+    /// explained on its second line. `listFilter` scopes the rows: Agents hides
+    /// people and servers, People hides agents and servers, Servers shows only
+    /// servers (`HomeListFilter`).
     private var homeRows: [HomeEntry] {
         let q = searchQuery
-        var rows: [(HomeSearch.Kind, Bool, Int64, HomeEntry)] = []
+        // pinRank: strip index when pinned (0 = top), Int.max when not.
+        var rows: [(HomeSearch.Kind, Int, Int64, HomeEntry)] = []
         if listFilter.showsProjects {
             for p in model.projects {
                 // Agents: my agents only (`!shared`) — no shared-in agents.
@@ -734,7 +779,8 @@ struct HomeView: View {
                 // Archived agents stay out of the home list until search (or open).
                 if q.isEmpty && model.isArchived(p.id) { continue }
                 guard let hit = projectHit(p, q: q) else { continue }
-                rows.append((hit.kind, model.isHomePinned(projectId: p.id), lastActivity(p), HomeEntry(row: .project(p), hit: hit)))
+                let pinRank = model.homePinIndex(projectId: p.id) ?? Int.max
+                rows.append((hit.kind, pinRank, lastActivity(p), HomeEntry(row: .project(p), hit: hit)))
             }
         }
         if listFilter.showsPeople {
@@ -742,7 +788,8 @@ struct HomeView: View {
                 // Archived people stay out of the home list until search (or open).
                 if q.isEmpty && model.isArchived(peopleChatId: c.id) { continue }
                 guard let hit = peopleHit(c, q: q) else { continue }
-                rows.append((hit.kind, model.isHomePinned(peopleChatId: c.id), peopleActivity(c), HomeEntry(row: .people(c), hit: hit)))
+                let pinRank = model.homePinIndex(peopleChatId: c.id) ?? Int.max
+                rows.append((hit.kind, pinRank, peopleActivity(c), HomeEntry(row: .people(c), hit: hit)))
             }
         }
         if listFilter.showsServers {
@@ -752,12 +799,12 @@ struct HomeView: View {
                 // Archived servers stay out of the home list until search (or Unarchive).
                 if q.isEmpty && model.isArchived(serverId: s.id) { continue }
                 guard let hit = HomeSearch.serverHit(name: s.name, channels: s.channels.map(\.name), q: q) else { continue }
-                rows.append((hit.kind, false, model.serverActivity(s), HomeEntry(row: .server(s), hit: hit)))
+                rows.append((hit.kind, Int.max, model.serverActivity(s), HomeEntry(row: .server(s), hit: hit)))
             }
         }
         return rows.sorted {
             if $0.0 != $1.0 { return $0.0 < $1.0 }
-            if $0.1 != $1.1 { return $0.1 && !$1.1 }
+            if $0.1 != $1.1 { return $0.1 < $1.1 }
             return $0.2 > $1.2
         }.map(\.3)
     }
