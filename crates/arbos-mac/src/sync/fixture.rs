@@ -723,7 +723,15 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     title: None,
                 })
                 .collect();
-            send_user(shared, chat_id, message_id, text, attachments, reply_to);
+            send_user(
+                shared,
+                chat_id,
+                message_id,
+                text,
+                attachments,
+                reply_to,
+                None,
+            );
         }
         ClientCommand::Forward {
             chat_id,
@@ -734,7 +742,15 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         } => {
             // No blob store to copy between: the row lands in the destination
             // chat with the same key, so its picture is already cached.
-            send_user(shared, chat_id, message_id, text, vec![attachment], None);
+            send_user(
+                shared,
+                chat_id,
+                message_id,
+                text,
+                vec![attachment],
+                None,
+                None,
+            );
         }
         ClientCommand::OpenAttachment {
             key,
@@ -760,6 +776,22 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             }
             let _ = shared.events.send(SyncEvent::AttachmentOpened { key });
         }
+        ClientCommand::ForwardText {
+            chat_id,
+            message_id,
+            text,
+            forwarded_from,
+        } => {
+            send_user(
+                shared,
+                chat_id,
+                message_id,
+                text,
+                Vec::new(),
+                None,
+                Some(forwarded_from),
+            );
+        }
         ClientCommand::Steer {
             chat_id,
             message_id,
@@ -767,7 +799,15 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             reply_to,
         } => {
             // Fixture has no live pi turn; land the bubble like a normal send.
-            send_user(shared, chat_id, message_id, text, Vec::new(), reply_to);
+            send_user(
+                shared,
+                chat_id,
+                message_id,
+                text,
+                Vec::new(),
+                reply_to,
+                None,
+            );
         }
         ClientCommand::SendVoice {
             chat_id,
@@ -786,7 +826,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 kind: Some(AttachmentKind::Audio),
                 title: None,
             }];
-            send_user(shared, chat_id, message_id, text, attachments, None);
+            send_user(shared, chat_id, message_id, text, attachments, None, None);
         }
         ClientCommand::Transcribe {
             request_id, wav, ..
@@ -1940,6 +1980,7 @@ fn send_user(
     text: String,
     attachments: Vec<Attachment>,
     reply_to: Option<String>,
+    forwarded_from: Option<String>,
 ) {
     let project_id = project_of(shared, &chat_id);
     if let Some(space) = people_space_of(shared, &chat_id) {
@@ -1958,6 +1999,9 @@ fn send_user(
         with_doc(shared, &chat_id, |doc| {
             doc.core.transact(|d| {
                 let _ = d.append_user_message(&message_id, &text, DEVICE, &opts);
+                if let Some(by) = forwarded_from.as_deref() {
+                    d.set_message_fields(&message_id, &[("forwardedFrom", json!(by))]);
+                }
                 d.push_command("send", json!({ "messageId": message_id }), DEVICE);
             });
         });
@@ -1973,6 +2017,9 @@ fn send_user(
     with_doc(shared, &chat_id, |doc| {
         doc.core.transact(|d| {
             let _ = d.append_user_message(&message_id, &text, DEVICE, &opts);
+            if let Some(by) = forwarded_from.as_deref() {
+                d.set_message_fields(&message_id, &[("forwardedFrom", json!(by))]);
+            }
             if asleep {
                 set_status(d, &message_id, MessageStatus::Queued);
             }
@@ -5413,6 +5460,7 @@ fn human_message(chat_id: &str, who: &Person, text: &str, at: u64) -> Message {
         sender_avatar_color: None,
         mentions: Vec::new(),
         reply_to: None,
+        forwarded_from: None,
         asked_by_handle: None,
         owner_handle: None,
         usage: None,

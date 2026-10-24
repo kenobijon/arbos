@@ -454,6 +454,10 @@ pub struct UserMessageOptsRecord {
     pub sender_handle: Option<String>,
     pub sender_name: Option<String>,
     pub sender_avatar: Option<String>,
+    /// Bubble menu → Forward: the original sender's display name, stored on the
+    /// row as `forwardedFrom` (the "Forwarded from <name>" header).
+    #[uniffi(default = None)]
+    pub forwarded_from: Option<String>,
 }
 
 impl From<UserMessageOptsRecord> for doc::UserMessageOpts {
@@ -697,10 +701,15 @@ impl ChatDoc {
         device_id: String,
         opts: UserMessageOptsRecord,
     ) -> Result<(), FfiError> {
+        let forwarded_from = opts.forwarded_from.clone();
         let core_opts = doc::UserMessageOpts::from(opts);
-        self.lock_doc()
-            .append_user_message(&id, &text, &device_id, &core_opts)
-            .map_err(write_err)
+        let doc = self.lock_doc();
+        doc.append_user_message(&id, &text, &device_id, &core_opts)
+            .map_err(write_err)?;
+        if let Some(by) = forwarded_from.as_deref().filter(|b| !b.trim().is_empty()) {
+            doc.set_message_fields(&id, &[("forwardedFrom", Value::String(by.to_owned()))]);
+        }
+        Ok(())
     }
 
     /// Append a system line. Does not commit. `link_id` is core's optional `callId`.
@@ -991,12 +1000,14 @@ mod tests {
                 sender_handle: Some("me".into()),
                 sender_name: Some("Me".into()),
                 sender_avatar: None,
+                forwarded_from: Some("Sam Rivera".into()),
             },
         )
         .unwrap();
         doc.commit();
         assert_eq!(doc.message_count(), 1);
         let row: Value = serde_json::from_str(&doc.read_message_json(0).unwrap()).unwrap();
+        assert_eq!(row["forwardedFrom"], "Sam Rivera");
         assert_eq!(row["role"], "user");
         assert_eq!(row["sender"], "user:me");
         assert_eq!(row["senderHandle"], "me");

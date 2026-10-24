@@ -100,9 +100,12 @@ final class CoreChatDoc {
         var avatar: String?
     }
 
+    /// `forwardedFrom` = the original sender's name on a forwarded message (the bubble's
+    /// "Forwarded from <name>" header; written as `forwardedFrom` on the row).
     func insertUserMessage(
         id: Id, text: String, deviceId: String, attachments: [Attachment] = [],
-        author: Author? = nil, mentions: [String] = [], replyTo: String? = nil
+        author: Author? = nil, mentions: [String] = [], replyTo: String? = nil,
+        forwardedFrom: String? = nil
     ) throws {
         let opts = UserMessageOptsRecord(
             attachments: attachments.map {
@@ -113,7 +116,8 @@ final class CoreChatDoc {
             sender: author?.sender,
             senderHandle: author?.handle,
             senderName: author?.name,
-            senderAvatar: author?.avatar
+            senderAvatar: author?.avatar,
+            forwardedFrom: forwardedFrom
         )
         try doc.insertUserMessage(id: id, text: text, deviceId: deviceId, opts: opts)
     }
