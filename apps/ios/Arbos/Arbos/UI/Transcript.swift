@@ -146,6 +146,10 @@ struct Row: Identifiable, Equatable {
     var replyCount: Int = 0
     /// The message's `createdAt` (ms), so the swipe-revealed time needs no lookup.
     var createdAt: Int64 = 0
+    /// Space above this row (8 pt within a run, 24 pt at a sender / turn change,
+    /// 20 pt around system lines), fixed at build time so a row's layout does not
+    /// depend on its position in the visible window.
+    var gapBefore: CGFloat = 0
 }
 
 enum Transcript {
@@ -407,7 +411,25 @@ enum Transcript {
             rows.append(contentsOf: chunk)
             prevSender = message.sender
         }
-        return Self.mergeHandoffs(rows, handoffs)
+        return Self.withGaps(Self.mergeHandoffs(rows, handoffs))
+    }
+
+    /// Spacing between neighbours (measured on the Grok Bot references).
+    static func gap(from prev: Row, to cur: Row) -> CGFloat {
+        if case .system = prev.kind { return 20 }
+        if case .system = cur.kind { return 20 }
+        if prev.role != cur.role { return 24 }
+        // Same role: still open the turn gap when an agent starts a new message.
+        if prev.messageId != cur.messageId && (cur.role == .assistant || cur.role == .project) {
+            return 24
+        }
+        return 8
+    }
+
+    private static func withGaps(_ rows: [Row]) -> [Row] {
+        var out = rows
+        for i in out.indices.dropFirst() { out[i].gapBefore = gap(from: out[i - 1], to: out[i]) }
+        return out
     }
 
     /// Parent message id for an explicit reply (`replyTo` from swipe / long-press Reply).
@@ -454,8 +476,27 @@ enum Transcript {
     /// "8:05 AM" for the time after a group / channel bubble's text.
     static func clockLabel(_ ms: Int64) -> String? {
         guard ms > 0 else { return nil }
-        return Date(timeIntervalSince1970: Double(ms) / 1000).formatted(date: .omitted, time: .shortened)
+        // One label per minute, through a reused formatter: `Date.formatted` per row made
+        // every rebuild of a long group cost ~50 µs × rows (5 000 rows: 14 s in Debug).
+        let minute = ms / 60_000
+        if let hit = clockLabels.object(forKey: NSNumber(value: minute)) { return hit as String }
+        let label = clockFormatter.string(from: Date(timeIntervalSince1970: Double(minute * 60)))
+        clockLabels.setObject(label as NSString, forKey: NSNumber(value: minute))
+        return label
     }
+
+    private static let clockFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .none
+        f.timeStyle = .short
+        return f
+    }()
+
+    private static let clockLabels: NSCache<NSNumber, NSString> = {
+        let cache = NSCache<NSNumber, NSString>()
+        cache.countLimit = 20_000
+        return cache
+    }()
 
     static func proseBlocks(_ text: String, people: Bool) -> [Block] {
         let key = (people ? "p\u{1}" : "a\u{1}") + text
@@ -792,6 +833,28 @@ enum Markdown {
     /// accent + underline on links; monospaced (a point under body) on a soft
     /// wash for ``code``. Bare `http(s)://` URLs are linked too.
     static func inline(_ text: String, color: Color, link: Color, codeChip: Color) -> AttributedString {
+        // Parsed once per text and palette: the markdown parse and the link detector
+        // ran on every bubble body, and a long group re-evaluates many bodies at once
+        // (arbonites-chat-lag). NSCache: bounded, dropped under memory pressure.
+        let key = "\(text)\u{1}\(color)\u{1}\(link)\u{1}\(codeChip)" as NSString
+        if let hit = inlineCache.object(forKey: key) { return hit.value }
+        let attr = inlineUncached(text, color: color, link: link, codeChip: codeChip)
+        inlineCache.setObject(AttributedBox(attr), forKey: key)
+        return attr
+    }
+
+    private final class AttributedBox {
+        let value: AttributedString
+        init(_ value: AttributedString) { self.value = value }
+    }
+
+    private static let inlineCache: NSCache<NSString, AttributedBox> = {
+        let cache = NSCache<NSString, AttributedBox>()
+        cache.countLimit = 4_000
+        return cache
+    }()
+
+    private static func inlineUncached(_ text: String, color: Color, link: Color, codeChip: Color) -> AttributedString {
         var attr = (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
             ?? AttributedString(text)
         linkBareURLs(&attr)
@@ -870,12 +933,16 @@ struct RowView: View, Equatable {
     /// (composer keystrokes, presence ticks). Closures / the swipe binding are
     /// not compared — they stay valid for the open chat.
     static func == (lhs: RowView, rhs: RowView) -> Bool {
-        lhs.row == rhs.row
+        let same = lhs.row == rhs.row
             && lhs.chatId == rhs.chatId
             && lhs.width == rhs.width
             && lhs.timeReveal == rhs.timeReveal
             && lhs.highlighted == rhs.highlighted
-            && lhs.mentions === rhs.mentions
+            && lhs.mentions.stamp == rhs.mentions.stamp
+        #if DEBUG
+        PerfCounters.bump(same ? "rowEqTrue" : "rowEqFalse")
+        #endif
+        return same
     }
 
     private var maxBubble: CGFloat { max(200, width - Theme.bubbleInset) }
@@ -901,6 +968,9 @@ struct RowView: View, Equatable {
     }
 
     var body: some View {
+        #if DEBUG
+        let _ = PerfCounters.bump("rowBody")
+        #endif
         VStack(spacing: 4) {
             bubble
             if !row.reactions.isEmpty {
@@ -1418,6 +1488,9 @@ struct BlockView: View {
     let mentions: MentionTable
 
     var body: some View {
+        #if DEBUG
+        let _ = PerfCounters.bump("blockBody")
+        #endif
         switch block {
         case .paragraph(let text):
             if live {
