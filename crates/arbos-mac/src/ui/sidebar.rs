@@ -2,9 +2,10 @@
 //! three round buttons on the right — search (opens the command palette,
 //! `ui::palette`; ⌘⇧F / ⌘K do the same), "+", and the collapse toggle — then
 //! the iPhone home's All · Agents · People · Servers filter, then every agent,
-//! person and server as one row — avatar, name, time, last line. The account
-//! circle (its dot is the machine state) sits at the bottom; the Update pill
-//! only while a newer build exists.
+//! person and server as one row — avatar, name, time, last line. The footer
+//! is Grok Bot's: my avatar (its dot is the machine state) and name at the
+//! left, and — only while an update is ready for a click — the blue
+//! cloud-download disc at the right end.
 //!
 //! # Three-pane rule (app-wide, Jacob 2026-10-20; `docs/mac-design-rules.md`)
 //!
@@ -134,9 +135,45 @@ pub(crate) const FOOTER_DOT: f32 = 9.0;
 pub(crate) const FOOTER_DOT_RING: f32 = 13.0;
 pub(crate) const FOOTER_DOT_OVERHANG: f32 = 2.0;
 
+/// Grok Bot's update button at the footer's right end
+/// ([feedback footer-update-button-grok-2026-10-24]): on the same ref rows
+/// as the avatar, a solid blue disc at x 449–520 px — 72 px = **36** (the
+/// button family), exactly under the strip's rightmost disc ("+" in Grok,
+/// our collapse), so it keeps the strip's right inset; fill `#326CCB`, glyph
+/// `#F5F5F5` boxed 26 × 28 px → 13 × 14 pt (`cloud-download` at 20). Grok's
+/// pill sits 8 before it (`STRIP_GAP`); our hover card does the same.
+pub(crate) const FOOTER_DISC: f32 = CONTROL;
+pub(crate) const FOOTER_DISC_INSET: f32 = STRIP_INSET;
+pub(crate) const FOOTER_DISC_GLYPH: f32 = 20.0;
+/// Hover / pressed: the solid fill lifted in lightness — brighter under the
+/// pointer, brighter still while down (the chip rule, [feedback mention-chips]).
+pub(crate) const DISC_HOVER_LIFT: f32 = 0.06;
+pub(crate) const DISC_PRESSED_LIFT: f32 = 0.12;
+/// While the disc works (download / install / relaunch) its fill pulses
+/// between this alpha and 1.
+pub(crate) const DISC_BUSY_ALPHA_MIN: f32 = 0.55;
+
+/// The disc's frame: a [`FOOTER_DISC`] circle, [`STRIP_GAP`] after the hover
+/// card, ending at the strip's right inset. Fill, glyph and handlers are the
+/// caller's (`Shell::render_update_disc`).
+pub(crate) fn footer_disc_frame(id: &'static str) -> gpui::Stateful<Div> {
+    div()
+        .id(id)
+        .size(px(FOOTER_DISC))
+        .flex_shrink_0()
+        .ml(px(STRIP_GAP))
+        .mr(px(FOOTER_DISC_INSET - FOOTER_ROW_INSET))
+        .rounded_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .debug_selector(move || id.into())
+}
+
 /// The footer band as `render` draws it: the hover card (avatar + name) fills
-/// the width inside the rows' inset, centred in the 60 pt band.
-pub(crate) fn footer_frame(row: impl IntoElement) -> Div {
+/// the width inside the rows' inset, centred in the 60 pt band; `disc` is the
+/// update button when one is due.
+pub(crate) fn footer_frame(row: impl IntoElement, disc: Option<impl IntoElement>) -> Div {
     div()
         .h(px(FOOTER_HEIGHT))
         .flex_shrink_0()
@@ -146,6 +183,7 @@ pub(crate) fn footer_frame(row: impl IntoElement) -> Div {
         .py(px(FOOTER_ROW_PAD_Y))
         .debug_selector(|| "sidebar-footer".into())
         .child(row)
+        .children(disc)
 }
 
 /// The hover card's frame: [`FOOTER_ROW_HEIGHT`] tall, [`FOOTER_ROW_PAD_X`]
@@ -907,7 +945,7 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         );
     }
 
-    // ----- bottom: Update pill (only when a newer build exists) and the account row --
+    // ----- bottom: the footer — my avatar + name, and the update disc when one is due --
     let (who, person_for_avatar, account_image) = {
         let s = shell.state.read(cx);
         match s.account.clone() {
@@ -1042,7 +1080,7 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
             }),
         );
 
-    let mut column = div()
+    let column = div()
         .relative()
         .h_full()
         .w(px(sidebar_width))
@@ -1062,10 +1100,12 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
             Some(server) => faded_list(server_channels(server, shell, &theme, cx)),
             None => faded_list(list),
         });
-    if let Some(update) = shell.render_update_button(cx) {
-        column = column.child(div().px(px(12.0)).pb(px(8.0)).child(update));
-    }
-    column.child(footer_frame(account_row)).child(resize)
+    // Grok Bot's update disc at the footer's right end, only when an update is
+    // ready for a click ([feedback footer-update-button-grok-2026-10-24]).
+    let update_disc = shell.render_update_disc(cx);
+    column
+        .child(footer_frame(account_row, update_disc))
+        .child(resize)
 }
 
 /// A server's picture: the leaf picked on its Create screen (D92 amendment),
@@ -2642,11 +2682,13 @@ mod footer_tests {
     use gpui::{div, prelude::*, px, TestAppContext};
 
     use super::{
-        footer_frame, footer_row_frame, FOOTER_AVATAR, FOOTER_BOTTOM, FOOTER_DOT,
-        FOOTER_DOT_OVERHANG, FOOTER_DOT_RING, FOOTER_HEIGHT, FOOTER_INSET, FOOTER_ROW_HEIGHT,
-        FOOTER_ROW_INSET, FOOTER_ROW_PAD_X, FOOTER_ROW_PAD_Y,
+        footer_disc_frame, footer_frame, footer_row_frame, DISC_HOVER_LIFT, DISC_PRESSED_LIFT,
+        FOOTER_AVATAR, FOOTER_BOTTOM, FOOTER_DISC, FOOTER_DISC_GLYPH, FOOTER_DISC_INSET,
+        FOOTER_DOT, FOOTER_DOT_OVERHANG, FOOTER_DOT_RING, FOOTER_HEIGHT, FOOTER_INSET,
+        FOOTER_ROW_HEIGHT, FOOTER_ROW_INSET, FOOTER_ROW_PAD_X, FOOTER_ROW_PAD_Y, STRIP_BUTTON,
+        STRIP_GAP, STRIP_INSET,
     };
-    use crate::ui::theme::{CONTROL, CONTROL_LINE, HEADER_HEIGHT};
+    use crate::ui::theme::{Theme, CONTROL, CONTROL_LINE, HEADER_HEIGHT};
 
     /// Grok Bot's footer, measured on Jacob's Oct-2026 refs
     /// (`media/group-chat-redesign/refs/1-agent-chat-topbutton-sidebar.png`,
@@ -2704,8 +2746,11 @@ mod footer_tests {
     }
 
     /// The footer as `render` frames it, laid out for real at the bottom of a
-    /// sidebar column: the avatar's box lands at Grok's pixels.
-    struct Column;
+    /// sidebar column: the avatar's box lands at Grok's pixels, and so does
+    /// the update disc when one is due.
+    struct Column {
+        with_disc: bool,
+    }
 
     impl gpui::Render for Column {
         fn render(
@@ -2729,6 +2774,7 @@ mod footer_tests {
             let row = footer_row_frame()
                 .child(avatar)
                 .child(div().flex_1().min_w_0().child("Jacob Steeves"));
+            let disc = self.with_disc.then(|| footer_disc_frame("disc"));
             div()
                 .w(px(296.0))
                 .h(px(520.0))
@@ -2736,13 +2782,13 @@ mod footer_tests {
                 .flex_col()
                 .child(div().h(px(HEADER_HEIGHT)).flex_shrink_0())
                 .child(div().flex_1().min_h_0())
-                .child(footer_frame(row).debug_selector(|| "footer".into()))
+                .child(footer_frame(row, disc).debug_selector(|| "footer".into()))
         }
     }
 
     #[gpui::test]
     fn the_footer_avatar_lands_on_groks_pixels(cx: &mut TestAppContext) {
-        let (_view, vcx) = cx.add_window_view(|_, _| Column);
+        let (_view, vcx) = cx.add_window_view(|_, _| Column { with_disc: false });
         vcx.run_until_parked();
         let footer = vcx.debug_bounds("footer").expect("footer drawn");
         let bottom: f32 = footer.bottom().into();
@@ -2783,6 +2829,108 @@ mod footer_tests {
         let card_left: f32 = card.origin.x.into();
         assert_eq!(card_left, FOOTER_ROW_INSET, "card at the rows' inset");
         assert_eq!(f32::from(card.size.height), FOOTER_ROW_HEIGHT);
+        let card_right: f32 = card.right().into();
+        assert_eq!(
+            card_right,
+            296.0 - FOOTER_ROW_INSET,
+            "no disc: the card runs to the inset"
+        );
+    }
+
+    /// Grok Bot's update disc, same refs: a 72 px blue circle at x 449–520 on
+    /// the avatar's rows — under the strip's rightmost disc ("+" in Grok at x
+    /// 449–520 too), 8 after the pill; fill `#326CCB`, glyph box 26 × 28 px.
+    mod grok_disc {
+        pub const DISC: f32 = 36.0;
+        pub const DISC_LINE: f32 = 30.0;
+        /// The glyph: 26 × 28 px → 13 × 14 pt.
+        pub const GLYPH_W: f32 = 13.0;
+        pub const GLYPH_H: f32 = 14.0;
+        pub const GAP_BEFORE: f32 = 8.0;
+        pub const FILL: u32 = 0x326ccb;
+        pub const GLYPH_FILL: u32 = 0xf5f5f5;
+    }
+
+    /// Jacob (2026-10-24): "Give us the same update button as grok also." The
+    /// disc is the button family's 36 at the strip's right inset, on the
+    /// footer's line; its cloud-download glyph draws Grok's 13 × 14 mark; the
+    /// fills are Grok's; hover and pressed lift the fill (chip rule).
+    #[test]
+    fn the_update_disc_is_groks_size_colour_and_placement() {
+        assert_eq!(FOOTER_DISC, grok_disc::DISC);
+        assert_eq!(FOOTER_DISC, CONTROL, "one button family");
+        assert_eq!(FOOTER_DISC, STRIP_BUTTON, "the strip's discs, mirrored");
+        assert_eq!(
+            FOOTER_DISC_INSET, STRIP_INSET,
+            "under the strip's last disc"
+        );
+        assert_eq!(FOOTER_HEIGHT / 2.0, grok_disc::DISC_LINE);
+        assert_eq!(
+            STRIP_GAP,
+            grok_disc::GAP_BEFORE,
+            "8 after the card, as after Grok's pill"
+        );
+        // The glyph is drawn 15.6 × 16.2 on the 24 grid (stroke included).
+        let w = (15.6 / 24.0) * FOOTER_DISC_GLYPH;
+        let h = (16.2 / 24.0) * FOOTER_DISC_GLYPH;
+        assert!((w - grok_disc::GLYPH_W).abs() <= 0.5, "glyph width {w}");
+        assert!((h - grok_disc::GLYPH_H).abs() <= 0.5, "glyph height {h}");
+        for theme in [
+            Theme::dark(crate::ui::theme::Surface::DEFAULT),
+            Theme::light(crate::ui::theme::Surface::DEFAULT),
+        ] {
+            let fill: gpui::Rgba = theme.update_disc.into();
+            let glyph: gpui::Rgba = theme.on_update_disc.into();
+            assert_eq!(rgb_u32(fill), grok_disc::FILL, "disc fill");
+            assert_eq!(rgb_u32(glyph), grok_disc::GLYPH_FILL, "glyph fill");
+            let hover = Theme::lighter(theme.update_disc, DISC_HOVER_LIFT);
+            let pressed = Theme::lighter(theme.update_disc, DISC_PRESSED_LIFT);
+            assert!(hover.l > theme.update_disc.l, "brighter under the pointer");
+            assert!(pressed.l > hover.l, "brighter still while pressed");
+            assert_eq!(hover.h, theme.update_disc.h, "same hue");
+        }
+    }
+
+    fn rgb_u32(c: gpui::Rgba) -> u32 {
+        let ch = |v: f32| (v * 255.0).round() as u32;
+        (ch(c.r) << 16) | (ch(c.g) << 8) | ch(c.b)
+    }
+
+    #[gpui::test]
+    fn the_update_disc_lands_on_groks_pixels(cx: &mut TestAppContext) {
+        let (_view, vcx) = cx.add_window_view(|_, _| Column { with_disc: true });
+        vcx.run_until_parked();
+        let footer = vcx.debug_bounds("footer").expect("footer drawn");
+        let bottom: f32 = footer.bottom().into();
+        let disc = vcx.debug_bounds("disc").expect("disc drawn");
+        let top: f32 = disc.origin.y.into();
+        let h: f32 = disc.size.height.into();
+        let w: f32 = disc.size.width.into();
+        let right: f32 = disc.right().into();
+        assert_eq!(h, grok_disc::DISC, "disc size");
+        assert_eq!(w, h, "a circle");
+        assert_eq!(right, 296.0 - STRIP_INSET, "at the strip's right inset");
+        assert_eq!(
+            bottom - (top + h / 2.0),
+            grok_disc::DISC_LINE,
+            "on the footer's line"
+        );
+        // Same rows as the avatar: Grok's pill, avatar and disc share them.
+        let avatar = vcx.debug_bounds("avatar").expect("avatar drawn");
+        assert_eq!(
+            avatar.origin.y, disc.origin.y,
+            "avatar and disc on one line"
+        );
+        let card = vcx
+            .debug_bounds("sidebar-account")
+            .expect("hover card drawn");
+        let card_right: f32 = card.right().into();
+        let disc_left: f32 = disc.origin.x.into();
+        assert_eq!(
+            disc_left - card_right,
+            grok_disc::GAP_BEFORE,
+            "8 between card and disc"
+        );
     }
 }
 
@@ -2835,7 +2983,7 @@ mod row_bounds_tests {
                 );
             }
             // The footer exactly as `render` frames it (band + hover card).
-            let account = super::footer_frame(super::footer_row_frame())
+            let account = super::footer_frame(super::footer_row_frame(), None::<gpui::Empty>)
                 .debug_selector(|| "account-row".into());
             div()
                 .w(px(280.0))
