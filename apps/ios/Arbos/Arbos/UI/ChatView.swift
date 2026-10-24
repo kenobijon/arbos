@@ -1304,7 +1304,7 @@ struct ChatView: View {
         guard !text.isEmpty else { return }
         // "Forwarded from <name>" names me by my display name, not "You".
         let from = m.role == .user && m.senderName == nil && (m.sender == "user" || m.sender == model.myUserId)
-            ? (model.user.map { $0.name.isEmpty ? $0.login : $0.name } ?? "You")
+            ? (model.user.map { me in me.name.flatMap { $0.isEmpty ? nil : $0 } ?? me.login } ?? "You")
             : MediaAlbum.senderName(m) { model.project($0)?.name }
         pendingForward = PendingForward(text: text, from: from)
     }
