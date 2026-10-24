@@ -398,7 +398,10 @@ struct ChatView: View {
     }
 
     /// Composer prompt that names the addressee so it is obvious who will answer.
+    /// With a picture or video staged, the field is the description bar for that
+    /// send — one message, not a follow-up text bubble.
     private func composerPrompt(for draft: String) -> String {
+        if pending.contains(where: Self.isCaptionablePending) { return "Add a description…" }
         if transcribing { return "Transcribing…" }
         if let channel { return "Message #\(channel.name)" }
         if !isPeople { return needsAnswer ? "Answer \(name)" : "Ask \(name)" }
@@ -1977,6 +1980,9 @@ struct ChatView: View {
                 if let data = try? Data(contentsOf: url) {
                     let mime = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
                     pending.append(.init(name: url.lastPathComponent, mime: mime, data: data))
+                    if mime.hasPrefix("image/") || mime.hasPrefix("video/") {
+                        composerFocused = true
+                    }
                 }
             }
         }
@@ -1989,10 +1995,17 @@ struct ChatView: View {
                     // POSIX stamp (no locale letters, no `:` — voice memos use the same idea).
                     let stamp = ChatView.photoStamp.string(from: Date())
                     pending.append(.init(name: "Photo \(stamp).\(picked.ext)", mime: picked.mime, data: picked.data))
+                    composerFocused = true
                 }
                 photoItem = nil
             }
         }
+    }
+
+    /// Picture or video pending in the composer — the field is their description bar.
+    private static func isCaptionablePending(_ a: AppModel.PendingAttachment) -> Bool {
+        let mime = a.mime.lowercased()
+        return mime.hasPrefix("image/") || mime.hasPrefix("video/")
     }
 
 
