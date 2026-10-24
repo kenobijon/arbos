@@ -1964,8 +1964,8 @@ impl Agent {
             }
         }
         // Busy agent (a turn holds the lock): the message gets its quick reply first — a status
-        // answer ends here, guidance goes into the running turn, anything else queues as before
-        // with its acknowledgement already in the chat (`status.rs`).
+        // answer ends here, guidance goes into the running turn, anything else queues with no
+        // acknowledgement bubble (the apps' working indicator covers the wait; `status.rs`).
         let quick = match cmd.kind.as_str() {
             "send" | "steer" | "guide" => self.quick_reply(chat_id, &host, &cmd).await,
             _ => crate::status::QuickOutcome::NotBusy,
@@ -3042,6 +3042,31 @@ impl Agent {
                         .add_status_part(&assistant_msg_id, "working", "Working…");
                     if let Some(attr) = self.people_reply_fields(chat_id) {
                         h.doc.set_message_fields(&assistant_msg_id, &attr.fields);
+                    }
+                    // The platform reply (quote header) on the row this answers: always
+                    // where attribution matters (groups, channels, people chats, a row
+                    // another agent sent), in a 1:1 only when the answer is to an earlier
+                    // message than the latest (#1521).
+                    if let Some(source) = h.doc.message(user_msg_id) {
+                        let shared = self.people.is_people_chat(chat_id)
+                            || self.groups.kind_of(chat_id).is_some_and(|k| k != "chat");
+                        let later_exists = h
+                            .doc
+                            .messages()
+                            .iter()
+                            .skip_while(|m| m.id != source.id)
+                            .skip(1)
+                            .any(|m| m.role == "user" || m.role == "project");
+                        if reply_to_wanted(
+                            shared,
+                            later_exists,
+                            source.rest.get("agentMessage").is_some(),
+                        ) {
+                            h.doc.set_message_fields(
+                                &assistant_msg_id,
+                                &[("replyTo", json!(user_msg_id))],
+                            );
+                        }
                     }
                 }
                 TurnKind::SubagentResult {
@@ -5675,6 +5700,13 @@ fn message_from_voice(m: &arbos_core::doc::MessageView) -> bool {
 
 /// The user row was written by a routine fire (`routines.rs`: `sender = routine:<id>`,
 /// `routineRunId`), i.e. the agent's own scheduled check-in — no person sent it.
+/// Whether an agent's reply row carries `replyTo` = the message it answers (#1521): always in
+/// a shared chat (group, channel, people chat) and for a row another agent sent in, else only
+/// when a newer user message already sits below the one being answered.
+pub(crate) fn reply_to_wanted(shared: bool, later_exists: bool, from_agent: bool) -> bool {
+    shared || from_agent || later_exists
+}
+
 fn message_from_routine(m: &arbos_core::doc::MessageView) -> bool {
     m.rest
         .get("sender")
@@ -6004,6 +6036,10 @@ mod tests {
             // anti gold-plating
             "smallest correct change",
             "no drive-by refactors",
+            // self-reference (#1576): re-read and cite every time; memory only orients
+            "name the file you read",
+            "a remembered answer only tells you which files to open first, it is never the source",
+            "names no path you read in this turn is not finished",
         ] {
             assert!(core.contains(rule), "core prompt lost the rule: {rule}");
         }
@@ -6017,6 +6053,9 @@ mod tests {
             "A promise with no routine behind it is a promise you will not keep",
             "## Approvals",
             "## Group chats",
+            // #1576: a question about code / files / Arbos itself is never a `reply`
+            "nor to a question about code, files, configuration or how Arbos itself works: that is `act`",
+            "re-read any file a fact rests on before you state it",
         ] {
             assert!(router.contains(rule), "router prompt lost the rule: {rule}");
         }
@@ -6057,6 +6096,18 @@ mod tests {
     /// #1391: a routine-fired turn (the agent's own check-in) writes no ack bubble — the l1
     /// pipeline showed "On it." before every progress note. User turns keep theirs, including the
     /// "On it." fallback when the model's ack was thought-aloud only.
+    #[test]
+    fn reply_to_follows_the_shared_or_earlier_rule() {
+        // 1:1, answering the latest message: a plain bubble.
+        assert!(!reply_to_wanted(false, false, false));
+        // 1:1, a newer message already arrived: quote what is being answered.
+        assert!(reply_to_wanted(false, true, false));
+        // group / channel / people chat: always.
+        assert!(reply_to_wanted(true, false, false));
+        // a row another agent sent in (agent-to-agent messaging): always.
+        assert!(reply_to_wanted(false, false, true));
+    }
+
     #[test]
     fn routine_turns_write_no_ack_bubble() {
         // user turns: unchanged
