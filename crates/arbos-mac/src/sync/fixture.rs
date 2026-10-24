@@ -616,6 +616,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             text,
             attachments,
             reply_to,
+            mentions,
         } => {
             let attachments: Vec<Attachment> = attachments
                 .iter()
@@ -632,7 +633,15 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     title: None,
                 })
                 .collect();
-            send_user(shared, chat_id, message_id, text, attachments, reply_to);
+            send_user(
+                shared,
+                chat_id,
+                message_id,
+                text,
+                attachments,
+                reply_to,
+                mentions,
+            );
         }
         ClientCommand::Forward {
             chat_id,
@@ -643,7 +652,15 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         } => {
             // No blob store to copy between: the row lands in the destination
             // chat with the same key, so its picture is already cached.
-            send_user(shared, chat_id, message_id, text, vec![attachment], None);
+            send_user(
+                shared,
+                chat_id,
+                message_id,
+                text,
+                vec![attachment],
+                None,
+                Vec::new(),
+            );
         }
         ClientCommand::OpenAttachment {
             key,
@@ -676,7 +693,15 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             reply_to,
         } => {
             // Fixture has no live pi turn; land the bubble like a normal send.
-            send_user(shared, chat_id, message_id, text, Vec::new(), reply_to);
+            send_user(
+                shared,
+                chat_id,
+                message_id,
+                text,
+                Vec::new(),
+                reply_to,
+                Vec::new(),
+            );
         }
         ClientCommand::SendVoice {
             chat_id,
@@ -695,7 +720,15 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 kind: Some(AttachmentKind::Audio),
                 title: None,
             }];
-            send_user(shared, chat_id, message_id, text, attachments, None);
+            send_user(
+                shared,
+                chat_id,
+                message_id,
+                text,
+                attachments,
+                None,
+                Vec::new(),
+            );
         }
         ClientCommand::Transcribe {
             request_id, wav, ..
@@ -1825,6 +1858,7 @@ fn seed_local() -> LocalView {
 }
 
 /// The user row (attachments first, then the text), its `send` command, and the scripted turn.
+#[allow(clippy::too_many_arguments)]
 fn send_user(
     shared: &Arc<Shared>,
     chat_id: Id,
@@ -1832,10 +1866,11 @@ fn send_user(
     text: String,
     attachments: Vec<Attachment>,
     reply_to: Option<String>,
+    tokens: Vec<String>,
 ) {
     let project_id = project_of(shared, &chat_id);
     if let Some(space) = people_space_of(shared, &chat_id) {
-        let mentions = mentions_in(&space, &text);
+        let mentions = mentions_in(&space, &text, &tokens);
         let me = me();
         let opts = UserMessageOpts {
             attachments: user_attachments(&attachments),
@@ -5575,9 +5610,15 @@ fn text_has_at_token(lower: &str, token: &str) -> bool {
 
 /// `@slug` / `@handle` tokens in the text, resolved to member ids.
 /// Group owners may also use `@here` (every human) and `@agents` (every agent).
-fn mentions_in(space: &Project, text: &str) -> Vec<String> {
+fn mentions_in(space: &Project, text: &str, tokens: &[String]) -> Vec<String> {
     let lower = text.to_lowercase();
-    let mut out = Vec::new();
+    let mut out: Vec<String> = Vec::new();
+    for t in tokens {
+        if !out.contains(t) {
+            out.push(t.clone());
+        }
+    }
+    let claimed = crate::sync::claimed_handles(space, tokens);
     let i_own_group =
         space.is_people_group() && space.owner_handle.as_deref().is_none_or(|o| o == ME_HANDLE);
     if i_own_group {
@@ -5601,6 +5642,9 @@ fn mentions_in(space: &Project, text: &str) -> Vec<String> {
     for a in &space.agents {
         let handle = a.handle.to_lowercase();
         let slug = Project::mention_slug(&a.name);
+        if claimed.contains(&handle) || claimed.contains(&slug) {
+            continue;
+        }
         if (!handle.is_empty() && text_has_at_token(&lower, &handle))
             || (!slug.is_empty() && text_has_at_token(&lower, &slug))
         {
@@ -5611,7 +5655,11 @@ fn mentions_in(space: &Project, text: &str) -> Vec<String> {
         }
     }
     for p in &space.people {
-        if lower.contains(&format!("@{}", p.handle.to_lowercase())) {
+        let handle = p.handle.to_lowercase();
+        if claimed.contains(&handle) {
+            continue;
+        }
+        if lower.contains(&format!("@{handle}")) {
             let id = format!("user:{}", p.id);
             if !out.iter().any(|x| x == &id) {
                 out.push(id);

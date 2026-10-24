@@ -837,9 +837,26 @@ fn paint_chip_picture(layout: &TextLayout, chip: &Chip, window: &mut Window, cx:
         return;
     }
     let origin = point(at.x, at.y + (line_h - d) / 2.0);
-    let bounds = Bounds::new(origin, size(d, d));
+    paint_picture(
+        &chip.mention.picture,
+        Bounds::new(origin, size(d, d)),
+        window,
+        cx,
+    );
+}
+
+/// The disc a chip's `@` cell holds — a photo, D79 initials or a D92 leaf —
+/// filling `bounds` (square). Shared by bubble chips and composer tokens.
+pub fn paint_picture(
+    picture: &mention::Picture,
+    bounds: Bounds<Pixels>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let origin = bounds.origin;
+    let d = bounds.size.width;
     let radii = Corners::all(d / 2.0);
-    match &chip.mention.picture {
+    match picture {
         mention::Picture::Image(image) => {
             let _ = window.paint_image(bounds, radii, image.clone(), 0, false);
         }

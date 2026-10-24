@@ -15,6 +15,9 @@ enum DebugHooks {
     /// With `ARBOS_OPEN_SERVER=…:panel`: the server page's tab to land on (Channels | Members | Settings).
     static var panelTab: String? { value("ARBOS_PANEL_TAB") }
     static var autoSend: String? { value("ARBOS_AUTO_SEND") }
+    /// Rig (#1596): text put in the composer of the opened chat at appear, caret at the end —
+    /// `@s` leaves the mention picker open, `@sam deck ready?` shows the resolved chip.
+    static var composerDraft: String? { value("ARBOS_COMPOSER_DRAFT").flatMap { $0.isEmpty ? nil : $0 } }
     static var pairCode: String? { value("ARBOS_PAIR_CODE") }
     static var fixture: Bool { value("ARBOS_FIXTURE") == "1" }
     /// D89 waitlist card and Machine rows: the fixture account's place in line.

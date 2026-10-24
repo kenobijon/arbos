@@ -2358,10 +2358,13 @@ final class AppModel: ObservableObject {
     /// "hey everyone" can reach every agent, without typing `@`.
     /// `chipMentions` are extra agent member ids from a multi-select on the conversation
     /// selector (any combination of agents that should all reply).
+    /// `chipTokens` (#1596) are the composer's committed mention chips, lower-case handle →
+    /// member id: an `@handle` in the text that has a chip means exactly that member.
     func sendPeople(chatId: String, text: String, replyTo: String?, address: String? = nil,
-                    chipMentions: [String] = [], attachments: [PendingAttachment] = []) {
+                    chipMentions: [String] = [], attachments: [PendingAttachment] = [],
+                    chipTokens: [String: String] = [:]) {
         guard let doc = docs[chatId], let chat = peopleChat(chatId), let me = user else { return }
-        var mentions = AppModel.mentions(in: text, members: chat.members, senderHandle: me.login)
+        var mentions = AppModel.mentions(in: text, members: chat.members, senderHandle: me.login, chipTokens: chipTokens)
         // Leading bare agent names ("Bob?", "hey Bob …", "Arbos what is your name") count as
         // addressing that agent — same as typing @bob — so the box wakes without `@`.
         // Resolve agents before people so a human display-name collision (e.g. @unarbos
@@ -2476,18 +2479,24 @@ final class AppModel: ObservableObject {
     /// `@slug` → member. Typed resolution (#1538): when a person and an agent share a slug, the
     /// slug means the AGENT if it is the sender's own handle (nobody @-mentions themselves) and
     /// the person otherwise; the autocomplete labels both so the typist can pick.
-    static func mentions(in text: String, members: [ChatMember], senderHandle: String? = nil) -> [String] {
+    static func mentions(in text: String, members: [ChatMember], senderHandle: String? = nil,
+                         chipTokens: [String: String] = [:]) -> [String] {
         var out: [String] = []
         let agents = members.filter { $0.isAgent && $0.project != nil }
         let mine = senderHandle?.lowercased()
         func appendAgents() {
             for a in agents where !out.contains(a.member) { out.append(a.member) }
         }
-        let tokens = text.split(whereSeparator: { $0.isWhitespace })
-        for t in tokens where t.hasPrefix("@") {
+        let words = text.split(whereSeparator: { $0.isWhitespace })
+        for t in words where t.hasPrefix("@") {
             let slug = t.dropFirst().trimmingCharacters(in: CharacterSet(charactersIn: ".,!?:;")).lowercased()
             if slug == "everyone" || slug == "all" {
                 appendAgents()
+                continue
+            }
+            // A committed chip says who this is (#1596) — no tie rule needed.
+            if let member = chipTokens[slug] {
+                if !out.contains(member) { out.append(member) }
                 continue
             }
             if slug == "arbos", agents.count == 1, let a = agents.first {

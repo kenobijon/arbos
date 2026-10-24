@@ -460,17 +460,26 @@ impl Shell {
                     text,
                     attachments,
                     reply_to,
+                    mentions,
                 } => {
                     let text = text.clone();
                     let attachments = attachments.clone();
                     let reply_to = reply_to.clone();
-                    this.state
-                        .update(cx, |s, cx| s.send(text, attachments, reply_to, cx));
+                    let mentions = mentions.clone();
+                    this.state.update(cx, |s, cx| {
+                        s.send(text, attachments, reply_to, mentions, cx)
+                    });
                 }
-                ComposerEvent::Guide { text, reply_to } => {
+                ComposerEvent::Guide {
+                    text,
+                    reply_to,
+                    mentions,
+                } => {
                     let text = text.clone();
                     let reply_to = reply_to.clone();
-                    this.state.update(cx, |s, cx| s.guide(text, reply_to, cx));
+                    let mentions = mentions.clone();
+                    this.state
+                        .update(cx, |s, cx| s.guide(text, reply_to, mentions, cx));
                 }
                 ComposerEvent::Stop => this.state.update(cx, |s, cx| s.stop(cx)),
             },

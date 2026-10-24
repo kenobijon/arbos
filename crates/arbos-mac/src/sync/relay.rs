@@ -152,6 +152,7 @@ struct QueuedSend {
     command: &'static str,
     answer: Option<(String, serde_json::Value)>,
     reply_to: Option<String>,
+    mentions: Vec<String>,
 }
 
 struct Shared {
@@ -2651,13 +2652,24 @@ fn text_has_at_token(lower: &str, token: &str) -> bool {
 
 /// `@slug` / `@handle` in the text → `agent:<project>` / `user:<id>` (API §3).
 /// Group/server owners may also use `@here` (every human) and `@agents` (every agent).
-fn mentions_for(shared: &Shared, chat_id: &str, text: &str) -> Vec<String> {
+/// Who a people-chat send mentions: the composer's committed chips (`tokens`,
+/// member ids, #1596) first, then every `@handle` the text names that no chip
+/// already accounts for — so a chip for one of two entities sharing a handle
+/// (#1538) is never second-guessed by the text scan, and pasted plain
+/// `@handle`s still resolve.
+fn mentions_for(shared: &Shared, chat_id: &str, text: &str, tokens: &[String]) -> Vec<String> {
     let lower = text.to_lowercase();
     let projects = shared.projects.lock().unwrap();
     let Some(space) = projects.iter().find(|p| p.id == chat_id) else {
-        return Vec::new();
+        return tokens.to_vec();
     };
-    let mut out = Vec::new();
+    let mut out: Vec<String> = Vec::new();
+    for t in tokens {
+        if !out.contains(t) {
+            out.push(t.clone());
+        }
+    }
+    let claimed = crate::sync::claimed_handles(space, tokens);
     let me_handle = shared.me_handle();
     let i_own_group =
         space.is_people_group() && space.owner_handle.as_deref().is_none_or(|o| o == me_handle);
@@ -2682,6 +2694,9 @@ fn mentions_for(shared: &Shared, chat_id: &str, text: &str) -> Vec<String> {
     for a in &space.agents {
         let handle = a.handle.to_lowercase();
         let slug = Project::mention_slug(&a.name);
+        if claimed.contains(&handle) || claimed.contains(&slug) {
+            continue;
+        }
         // Match cached handle or the live name slug so a mid-group rename
         // still encodes `agent:<id>` before membership is refreshed.
         if (!handle.is_empty() && text_has_at_token(&lower, &handle))
@@ -2695,7 +2710,7 @@ fn mentions_for(shared: &Shared, chat_id: &str, text: &str) -> Vec<String> {
     }
     for p in &space.people {
         let handle = p.handle.to_lowercase();
-        if !text_has_at_token(&lower, &handle) {
+        if claimed.contains(&handle) || !text_has_at_token(&lower, &handle) {
             continue;
         }
         // Typed resolution (#1538): a slug both a person and an agent carry means the agent
@@ -3652,6 +3667,7 @@ async fn send_message(
     command: &'static str,
     answer: Option<(String, serde_json::Value)>,
     reply_to: Option<String>,
+    mentions: Vec<String>,
 ) {
     // No room doc yet: queue while NewChat is in flight, otherwise fail visibly.
     if !shared.docs.lock().unwrap().contains_key(&chat_id) {
@@ -3666,6 +3682,7 @@ async fn send_message(
                     command,
                     answer,
                     reply_to,
+                    mentions,
                 });
                 return;
             }
@@ -3794,7 +3811,7 @@ async fn send_message(
         };
         let me = shared.me_user();
         let mentions = if in_people {
-            mentions_for(&shared, &chat_id, &text)
+            mentions_for(&shared, &chat_id, &text, &mentions)
         } else {
             Vec::new()
         };
@@ -4090,6 +4107,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 "send",
                 None,
                 None,
+                Vec::new(),
             ));
         }
         ClientCommand::Transcribe {
@@ -4844,6 +4862,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             text,
             attachments,
             reply_to,
+            mentions,
         } => {
             tokio::spawn(send_message(
                 shared.clone(),
@@ -4855,6 +4874,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 "send",
                 None,
                 reply_to,
+                mentions,
             ));
         }
         ClientCommand::Forward {
@@ -4877,6 +4897,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 "send",
                 None,
                 None,
+                Vec::new(),
             ));
         }
         ClientCommand::Steer {
@@ -4895,6 +4916,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 "steer",
                 None,
                 reply_to,
+                Vec::new(),
             ));
         }
         ClientCommand::Answer {
@@ -4915,6 +4937,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 "answer",
                 answer,
                 None,
+                Vec::new(),
             ));
         }
         ClientCommand::Stop { chat_id } => {
@@ -5249,6 +5272,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                                 q.command,
                                 q.answer,
                                 q.reply_to,
+                                q.mentions,
                             ));
                         }
                     }
