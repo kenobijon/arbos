@@ -49,7 +49,9 @@ struct ChatView: View {
         if #available(iOS 18, *) { return 80 }
         return Int.max
     }()
-    static let windowStep = 60
+    /// Rows added per step. Small on purpose: a step builds and lays out this many
+    /// bubbles in one frame (≈4 ms each in a Debug simulator build).
+    static let windowStep = 30
     /// Most rows the view tree holds while reading history. Past this, each step
     /// that adds older rows at the top also drops the same number of newest rows
     /// below the viewport, and the first row on screen is re-pinned, so the cost
@@ -2331,7 +2333,9 @@ private struct NearTopReporter: ViewModifier {
     func body(content: Content) -> some View {
         if #available(iOS 18, *), enabled {
             content.onScrollGeometryChange(for: Bool.self) { g in
-                g.contentSize.height > g.containerSize.height && g.contentOffset.y < 240
+                // About a screen ahead of the top edge, so the next slice is in place
+                // before the reader reaches it.
+                g.contentSize.height > g.containerSize.height && g.contentOffset.y < 900
             } action: { _, near in
                 if near { onNear() }
             }
