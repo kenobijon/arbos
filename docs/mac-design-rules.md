@@ -56,3 +56,23 @@ open: the query narrows the list, the segment still scopes it.
 
 Server rows draw their picture as a rounded square (corner 11/36 of the size,
 `SERVER_PICTURE_CORNER`) so servers read apart from the agent and people discs.
+
+## Message timestamps (Jacob 2026-10-24, [feedback timestamps-hover-only-2026-10-24])
+
+**Message timestamps are hover-only, never always-on.** A bubble never carries
+its time — not in a footer, not after the text, in no chat kind (1:1, group,
+channel; mine, another person's, an agent's). The time ("9:41 PM") appears only
+while the pointer is over the row, beside the bubble on its outer edge (left of
+my bubble, after the ☺ ↩ ⋯ rail of everyone else's), fading with the rail; at
+rest it is not drawn at all. On the iPhone the same rule is the iMessage
+drag-to-reveal (`timeReveal`): no inline or footer time in any bubble.
+
+Lost twice before this page existed: v0.6.183 (#1437, group bubbles got the time
+after the text) and v0.6.203 (#1496, a tester's request for an always-visible
+bottom-right footer time). The sent/seen label on my own bubbles is a separate
+element and may stay in the footer.
+
+Code: `transcript.rs` `hover_time()` (returns nothing at opacity 0) and
+`bubble_footer()` (receipt only), pinned by
+`layout_tests::the_time_is_hidden_at_rest_and_beside_the_bubble_on_hover`;
+iPhone `Transcript.swift` `RowView` + `SenderNameRowTests`.
