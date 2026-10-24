@@ -66,6 +66,12 @@ pub enum Tab {
 }
 
 impl Tab {
+    /// The tabs every target gets — agents, groups and servers alike (Jacob, 2026-10-24: the
+    /// group / server picker had lost Generate); Reset sits beside them in the bar.
+    pub fn for_target(_target: &Target) -> [Tab; 3] {
+        [Tab::Bot, Tab::Generate, Tab::Upload]
+    }
+
     fn label(self) -> &'static str {
         match self {
             Tab::Bot => "Bot",
@@ -256,7 +262,7 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
         .flex()
         .items_center()
         .gap(px(2.0));
-    for tab in [Tab::Bot, Tab::Generate, Tab::Upload] {
+    for tab in Tab::for_target(&picker.target) {
         let selected = picker.tab == tab;
         tabs = tabs.child(
             div()
@@ -651,4 +657,28 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
             MouseButton::Left,
             cx.listener(|this, _, _, cx| this.close_avatar_picker(cx)),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_target_gets_bot_generate_upload_and_reset() {
+        for target in [
+            Target::Agent("a".into()),
+            Target::Group("g".into()),
+            Target::Server("s".into()),
+        ] {
+            assert_eq!(
+                Tab::for_target(&target),
+                [Tab::Bot, Tab::Generate, Tab::Upload],
+                "{target:?}"
+            );
+            // Reset is live for every target once there is something to reset.
+            let mut pk = Picker::new(target);
+            pk.reset = true;
+            assert!(pk.dirty());
+        }
+    }
 }
