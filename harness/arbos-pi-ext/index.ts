@@ -441,8 +441,8 @@ export default function arbosPiExt(pi: ExtensionAPI) {
     name: "send_message",
     label: "Send message",
     description:
-      "Post a short progress message to the user now, as its own chat bubble, while you keep working. Only at a real milestone of longer work (something finished, something unexpected), never for each command. Optional `activity`: 2–5 plain words for the working line (\"Running tests\").",
-    promptSnippet: "send_message: post a short progress note to the user mid-task (real milestones only)",
+      "Post a short progress message to the user now, as its own chat bubble, while you keep working. Only at a real milestone of longer work (something finished, something unexpected), never for each command. Optional `activity`: 2–5 plain words for the working line (\"Running tests\"). No `to` — does not reach another agent; use mcp__arbos__send_message({to, text}) for that.",
+    promptSnippet: "send_message: progress note mid-task only (no to); mcp__arbos__send_message({to, text}) for another agent",
     parameters: Type.Object({
       text: Type.String({ description: "One or two plain sentences" }),
       activity: Type.Optional(Type.Union([Type.String(), Type.Null()], { description: "What you are doing next, 2-5 words, present tense" })),
