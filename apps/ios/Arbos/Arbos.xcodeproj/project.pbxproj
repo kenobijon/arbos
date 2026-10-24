@@ -914,7 +914,7 @@
 			repositoryURL = "https://github.com/livekit/client-sdk-swift";
 			requirement = {
 				kind = exactVersion;
-				version = 2.17.0;
+				version = 2.18.0;
 			};
 		};
 		A1D8800000000000000000E1 /* XCRemoteSwiftPackageReference "lottie-spm" */ = {
