@@ -1574,8 +1574,9 @@ pub struct Message {
     pub greeting: bool,
 }
 
-/// The quick-react set, in display order (the iPhone's `MessageReaction.palette`).
-pub const REACTION_PALETTE: [&str; 6] = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
+/// The reaction capsule's set, in Grok Bot's order (the iPhone's
+/// `MessageReaction.palette`); any other emoji comes from the system picker.
+pub const REACTION_PALETTE: [&str; 5] = ["😂", "👍", "👎", "❤️", "🎉"];
 
 impl Message {
     /// Reactions as `(emoji, senders)`, palette order first, then the rest
