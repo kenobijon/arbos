@@ -256,6 +256,8 @@ pub(crate) fn member_dto(state: &AppState, m: &Membership) -> ChatMemberDto {
         online: None,
         read_receipts: None,
         silenced: None,
+        silenced_until: None,
+        can_mute_ban: None,
         avatar: None,
         avatar_color: None,
         avatar_color_index: None,
@@ -289,7 +291,14 @@ pub(crate) fn member_dto(state: &AppState, m: &Membership) -> ChatMemberDto {
                 .and_then(Value::as_bool)
                 .unwrap_or(true),
         );
-        dto.silenced = Some(m.silenced);
+        let silenced = membership_is_silenced(m);
+        dto.silenced = Some(silenced);
+        if silenced {
+            dto.silenced_until = m.silenced_until;
+        }
+        if m.role == "admin" {
+            dto.can_mute_ban = Some(member_can_mute_ban(m));
+        }
     }
     if let Some(pid) = m.project_id() {
         if let Ok(Some(p)) = state.db.project(pid) {
@@ -536,7 +545,10 @@ pub fn people_chat_dto(
         me: ChatMeDto {
             role: Some(mine.map(|m| m.role.clone())),
             muted: Some(mine.is_some_and(|m| m.muted)),
-            silenced: Some(mine.is_some_and(|m| m.silenced)),
+            silenced: Some(mine.is_some_and(membership_is_silenced)),
+            silenced_until: mine
+                .filter(|m| membership_is_silenced(m))
+                .and_then(|m| m.silenced_until),
             archived_at,
             read_receipts: Some(
                 mine.map(|m| {
@@ -1910,9 +1922,31 @@ fn my_role<'a>(cm: &'a ChatWithMembers, me: &str) -> Option<&'a str> {
         .map(|m| m.role.as_str())
 }
 
-/// May I remove / mute / ban this human target? Owners manage everyone else;
-/// admins manage members only (not the owner or other admins).
-/// Returns `Some(error response)` when moderation is refused.
+/// True while an admin mute still blocks posting (honours timed `silenced_until`).
+fn membership_is_silenced(m: &Membership) -> bool {
+    if !m.silenced {
+        return false;
+    }
+    !matches!(m.silenced_until, Some(until) if until <= now_ms())
+}
+
+/// Owner always; an admin only when the owner left `can_mute_ban` on (default true).
+fn member_can_mute_ban(m: &Membership) -> bool {
+    if m.role == "owner" {
+        return true;
+    }
+    if m.role != "admin" {
+        return false;
+    }
+    m.settings
+        .get("can_mute_ban")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+}
+
+/// May I remove this human target? Owners manage everyone else; admins manage
+/// members only (not the owner or other admins).
+/// Returns `Some(error response)` when refused.
 fn can_moderate_member(cm: &ChatWithMembers, me: &str, target_id: &str) -> Option<Response> {
     if !can_manage_members(cm, me) {
         return Some(api_error(
@@ -1953,6 +1987,29 @@ fn can_moderate_member(cm: &ChatWithMembers, me: &str, target_id: &str) -> Optio
     None
 }
 
+/// May I mute or ban this human? Same hierarchy as remove, plus the owner can
+/// turn off mute/ban for individual admins (`can_mute_ban`).
+fn can_mute_ban_member(cm: &ChatWithMembers, me: &str, target_id: &str) -> Option<Response> {
+    if let Some(r) = can_moderate_member(cm, me, target_id) {
+        return Some(r);
+    }
+    let Some(actor) = cm.members.iter().find(|m| m.user_id() == Some(me)) else {
+        return Some(api_error(
+            StatusCode::FORBIDDEN,
+            "owner_only",
+            "only an owner or admin can mute or ban",
+        ));
+    };
+    if !member_can_mute_ban(actor) {
+        return Some(api_error(
+            StatusCode::FORBIDDEN,
+            "owner_only",
+            "the owner has not given you mute and ban rights",
+        ));
+    }
+    None
+}
+
 /// `DELETE /chats/{id}/members/{user_id}[?ban=1]` — owner/admin removes (or bans) a person.
 pub async fn member_remove(
     State(state): State<AppState>,
@@ -1964,10 +2021,15 @@ pub async fn member_remove(
         Ok(v) => v,
         Err(r) => return *r,
     };
-    if let Some(r) = can_moderate_member(&cm, &me, &user_id) {
+    let ban = q.get("ban").is_some_and(|b| b == "1");
+    // Ban needs mute/ban rights; plain remove is any owner/admin.
+    if ban {
+        if let Some(r) = can_mute_ban_member(&cm, &me, &user_id) {
+            return r;
+        }
+    } else if let Some(r) = can_moderate_member(&cm, &me, &user_id) {
         return r;
     }
-    let ban = q.get("ban").is_some_and(|b| b == "1");
     match state.db.remove_member(&id, &format!("user:{user_id}"), ban) {
         Ok(true) => {}
         Ok(false) => return api_error(StatusCode::NOT_FOUND, "not_found", "not a member"),
@@ -1999,9 +2061,17 @@ pub async fn member_remove(
 pub struct MemberPatchBody {
     /// Mute (true) or unmute (false) from posting in this group.
     pub silenced: Option<bool>,
+    /// When a mute ends (ms). Omit or null with `silenced: true` = until unmuted.
+    #[serde(default)]
+    pub silenced_until: Option<i64>,
+    /// Owner only: set this person's role to `admin` or `member`.
+    pub role: Option<String>,
+    /// Owner only: whether this admin may mute and ban members (default true).
+    pub can_mute_ban: Option<bool>,
 }
 
-/// `PUT /chats/{id}/members/{user_id}` — owner/admin mutes a member from posting (`silenced`).
+/// `PUT /chats/{id}/members/{user_id}` — mute/unmute (with optional duration), or
+/// owner sets role / mute-ban rights for an admin.
 pub async fn member_patch(
     State(state): State<AppState>,
     principal: Principal,
@@ -2012,24 +2082,142 @@ pub async fn member_patch(
         Ok(v) => v,
         Err(r) => return *r,
     };
-    if let Some(r) = can_moderate_member(&cm, &me, &user_id) {
-        return r;
-    }
-    let Some(silenced) = b.silenced else {
+    let has_silence = b.silenced.is_some();
+    let has_role = b.role.is_some();
+    let has_rights = b.can_mute_ban.is_some();
+    if !has_silence && !has_role && !has_rights {
         return api_error(
             StatusCode::BAD_REQUEST,
             "bad_request",
-            "set silenced true or false",
+            "set silenced, role, or can_mute_ban",
         );
-    };
-    match state
-        .db
-        .set_member_silenced(&id, &format!("user:{user_id}"), silenced)
-    {
-        Ok(true) => {}
-        Ok(false) => return api_error(StatusCode::NOT_FOUND, "not_found", "not a member"),
-        Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
     }
+
+    // Role / mute-ban rights: owner only, and only for someone else who is not the owner.
+    if has_role || has_rights {
+        if my_role(&cm, &me) != Some("owner") {
+            return api_error(
+                StatusCode::FORBIDDEN,
+                "owner_only",
+                "only the owner sets admin roles and mute-ban rights",
+            );
+        }
+        if user_id == me {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+                "cannot change your own role or mute-ban rights",
+            );
+        }
+        let target = cm
+            .members
+            .iter()
+            .find(|m| m.user_id() == Some(user_id.as_str()));
+        let Some(target) = target else {
+            return api_error(StatusCode::NOT_FOUND, "not_found", "not a member");
+        };
+        if target.role == "owner" {
+            return api_error(
+                StatusCode::FORBIDDEN,
+                "owner_stays",
+                "the owner cannot be demoted",
+            );
+        }
+        if let Some(role) = b.role.as_deref() {
+            if role != "admin" && role != "member" {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "bad_request",
+                    "role is admin or member",
+                );
+            }
+            match state
+                .db
+                .set_member_role(&id, &format!("user:{user_id}"), role)
+            {
+                Ok(true) => {}
+                Ok(false) => return api_error(StatusCode::NOT_FOUND, "not_found", "not a member"),
+                Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+            }
+            // Fresh admins get mute/ban on unless the same request sets it.
+            if role == "admin" && b.can_mute_ban.is_none() {
+                let mut settings = if target.settings.is_object() {
+                    target.settings.clone()
+                } else {
+                    json!({})
+                };
+                settings["can_mute_ban"] = json!(true);
+                let _ = state
+                    .db
+                    .set_member_settings(&id, &format!("user:{user_id}"), &settings);
+            }
+            if role == "member" {
+                let mut settings = if target.settings.is_object() {
+                    target.settings.clone()
+                } else {
+                    json!({})
+                };
+                if settings.get("can_mute_ban").is_some() {
+                    if let Some(obj) = settings.as_object_mut() {
+                        obj.remove("can_mute_ban");
+                    }
+                    let _ =
+                        state
+                            .db
+                            .set_member_settings(&id, &format!("user:{user_id}"), &settings);
+                }
+            }
+        }
+        if let Some(can) = b.can_mute_ban {
+            // Reload role after a possible promotion in this request.
+            let role_now = b.role.as_deref().unwrap_or(target.role.as_str());
+            if role_now != "admin" {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "bad_request",
+                    "mute-ban rights apply to admins only",
+                );
+            }
+            let fresh = state
+                .db
+                .membership(&id, &format!("user:{user_id}"))
+                .ok()
+                .flatten();
+            let mut settings = fresh
+                .as_ref()
+                .map(|m| {
+                    if m.settings.is_object() {
+                        m.settings.clone()
+                    } else {
+                        json!({})
+                    }
+                })
+                .unwrap_or_else(|| json!({}));
+            settings["can_mute_ban"] = json!(can);
+            if let Err(e) = state
+                .db
+                .set_member_settings(&id, &format!("user:{user_id}"), &settings)
+            {
+                return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
+            }
+        }
+    }
+
+    if let Some(silenced) = b.silenced {
+        if let Some(r) = can_mute_ban_member(&cm, &me, &user_id) {
+            return r;
+        }
+        let until = if silenced { b.silenced_until } else { None };
+        match state
+            .db
+            .set_member_silenced(&id, &format!("user:{user_id}"), silenced, until)
+        {
+            Ok(true) => {}
+            Ok(false) => return api_error(StatusCode::NOT_FOUND, "not_found", "not a member"),
+            Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+        }
+    }
+
     state.matrix.touch_chat(&state, &id, None);
     let event = PushEventDto::PeopleChatUpdated(PeopleChatUpdatedPayloadDto {
         chat_id: id.clone(),
@@ -2736,7 +2924,7 @@ pub fn on_room_push(
     if cm
         .members
         .iter()
-        .any(|m| m.user_id() == Some(user_id.as_str()) && m.silenced)
+        .any(|m| m.user_id() == Some(user_id.as_str()) && membership_is_silenced(m))
     {
         return Err(PushRefused::NotAvailable);
     }
@@ -3289,6 +3477,9 @@ mod agent_tests {
             Path((chat.clone(), bob.clone())),
             Json(MemberPatchBody {
                 silenced: Some(true),
+                silenced_until: None,
+                role: None,
+                can_mute_ban: None,
             }),
         )
         .await;
