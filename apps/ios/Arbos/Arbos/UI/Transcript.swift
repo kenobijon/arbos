@@ -1528,15 +1528,93 @@ struct BlockView: View {
                 .padding(10)
             }
             .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.bg.opacity(0.6)))
-        case .code(_, let code):
+        case .code(let lang, let code):
+            CodeCard(lang: lang, code: code)
+        }
+    }
+}
+
+/// A fenced ``` block: the language and a Copy pill in the header (the Mac's
+/// code card), the mono body under it. Copy puts the block on the pasteboard,
+/// tints while pressed and reads "Copied" for 1.5 s (Jacob 2026-10-24: the
+/// Mac pill showed no click effect; the iPhone card had no Copy at all).
+struct CodeCard: View {
+    @Environment(\.theme) private var theme
+    let lang: String
+    let code: String
+    /// Screenshot rig (`ARBOS_RIG_CODE_COPY=pressed|copied`): the simulator
+    /// cannot hold a touch through a capture, and "Copied" lasts 1.5 s.
+    private static let rig = ProcessInfo.processInfo.environment["ARBOS_RIG_CODE_COPY"]
+    @State private var copied = CodeCard.rig == "copied"
+
+    static let copiedFor: Duration = .seconds(1.5)
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text(lang.isEmpty ? "code" : lang)
+                    .font(theme.font(Theme.tiny))
+                    .foregroundStyle(theme.muted)
+                Spacer(minLength: 8)
+                Button {
+                    UIPasteboard.general.string = code
+                    Haptics.pick()
+                    copied = true
+                    Task { @MainActor in
+                        try? await Task.sleep(for: Self.copiedFor)
+                        copied = false
+                    }
+                } label: {
+                    HStack(spacing: 3) {
+                        if copied {
+                            Image(systemName: "checkmark").font(theme.font(11, weight: .semibold))
+                        }
+                        Text(copied ? "Copied" : "Copy")
+                            .font(theme.font(Theme.tiny, weight: .medium))
+                    }
+                    .foregroundStyle(copied ? theme.online : theme.muted)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(copied ? theme.online.opacity(0.14) : .clear)
+                    )
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(CopyPillPress(tint: theme.accent, forced: CodeCard.rig == "pressed"))
+                .accessibilityLabel(copied ? "Copied" : "Copy code")
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .overlay(alignment: .bottom) { Rectangle().fill(theme.separator).frame(height: 0.5) }
             ScrollView(.horizontal, showsIndicators: false) {
                 Text(code)
                     .font(theme.font(14, design: .monospaced))
                     .foregroundStyle(theme.text)
                     .padding(10)
             }
-            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.bg.opacity(0.6)))
         }
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.bg.opacity(0.6)))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+}
+
+/// The Copy pill while the finger is down: the chips' pressed tint (Mac
+/// `mention::PILL_ALPHA_PRESSED`, accent at 30 %) and the label in the accent.
+struct CopyPillPress: ButtonStyle {
+    let tint: Color
+    var forced = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        let pressed = configuration.isPressed || forced
+        configuration.label
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(pressed ? tint.opacity(0.30) : .clear)
+            )
+            .foregroundStyle(pressed ? tint : Color.primary)
+            .scaleEffect(pressed ? 0.96 : 1.0)
+            .animation(.easeOut(duration: 0.12), value: pressed)
     }
 }
 
