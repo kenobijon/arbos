@@ -1947,11 +1947,28 @@ impl Agent {
                 tracing::info!(
                     chat_id,
                     code = refusal.code(),
-                    "send skipped: budget block active"
+                    "send answered without a model call: budget block active"
                 );
-                if self.budget.notice_due(chat_id) {
-                    self.write_budget_line(chat_id, refusal, "block active")
-                        .await;
+                // Every message while capped gets the one line as its own answer, with the
+                // countdown as of now (#1649: the second message used to get silence).
+                let user_msg_id = cmd
+                    .payload
+                    .get("messageId")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned();
+                if !user_msg_id.is_empty() {
+                    let line = refusal
+                        .chat_line(&self.budget_owner_label(chat_id, &host, &user_msg_id).await);
+                    let h = host.lock().await;
+                    let id = ulid();
+                    h.doc
+                        .start_assistant_message(&id, &user_msg_id, &self.cfg.device_id);
+                    if let Some(attr) = self.people_reply_fields(chat_id) {
+                        h.doc.set_message_fields(&id, &attr.fields);
+                    }
+                    h.doc.add_error_part(&id, refusal.code(), &line);
+                    h.doc.finish_message(&id, MessageStatus::Error);
                 }
                 let _ = self.store.t3_append(
                     chat_id,
@@ -3300,7 +3317,7 @@ impl Agent {
             final_status = MessageStatus::Error;
         }
         let (talking_model, _) = self.live_models().await;
-        let owner_label = self.owner_label(chat_id);
+        let owner_label = self.budget_owner_label(chat_id, host, user_msg_id).await;
         // A budget refusal arms the block (`budget.rs`); the line goes in this bubble below.
         if let Some(m) = &model_failed {
             self.note_budget_refusal(chat_id, &m.detail, true).await;
