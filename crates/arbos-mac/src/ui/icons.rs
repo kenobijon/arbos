@@ -153,6 +153,19 @@ const ICONS: &[(&str, &str)] = &[
         "desktop",
         "<rect x=\"3\" y=\"4\" width=\"18\" height=\"12\" rx=\"2\"/><path d=\"M8 20h8M12 16v4\"/>"
     ),
+    // Settings → Devices tiles (Oct 23).
+    icon!(
+        "laptop",
+        "<rect x=\"3\" y=\"5\" width=\"18\" height=\"12\" rx=\"2\"/><path d=\"M2 19h20\"/>"
+    ),
+    icon!(
+        "smartphone",
+        "<rect x=\"7\" y=\"2\" width=\"10\" height=\"20\" rx=\"2\"/><path d=\"M11 18h2\"/>"
+    ),
+    icon!(
+        "bot",
+        "<rect x=\"4\" y=\"8\" width=\"16\" height=\"12\" rx=\"3\"/><path d=\"M12 4v4M9 14h.01M15 14h.01\"/>"
+    ),
     icon!(
         "circle-half",
         "<circle cx=\"12\" cy=\"12\" r=\"9\"/><path d=\"M12 3a9 9 0 0 0 0 18z\" fill=\"#000\"/>"
