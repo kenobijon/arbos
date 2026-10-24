@@ -555,12 +555,22 @@ async fn main() -> anyhow::Result<()> {
             get(people::chats_list).post(people::chats_create_group),
         )
         .route("/chats/dm", post(people::dm_create))
+        .route("/chats/join", post(people::group_join))
         .route(
             "/chats/{id}",
             get(people::chat_get)
                 .patch(people::chat_patch)
                 .delete(people::chat_delete),
         )
+        .route(
+            "/chats/{id}/invites",
+            get(people::group_invites_list).post(people::group_invites_create),
+        )
+        .route(
+            "/chats/{id}/invites/{iid}",
+            delete(people::group_invites_revoke),
+        )
+        .route("/g/{code}", get(people::group_invite_landing))
         .route("/chats/{id}/read", axum::routing::put(people::chat_read))
         .route(
             "/chats/{id}/settings",
