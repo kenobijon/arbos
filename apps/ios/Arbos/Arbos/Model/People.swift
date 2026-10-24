@@ -183,6 +183,8 @@ struct PeopleChat: Identifiable, Equatable {
     var muted: Bool
     /// Admin muted me from posting in this group.
     var silenced: Bool
+    /// Per-user sidebar archive (`archived_at` on the relay); nil = in the list.
+    var archivedAt: Int64? = nil
 
     var humans: [ChatMember] { members.filter { !$0.isAgent } }
     var agents: [ChatMember] { members.filter { $0.isAgent } }
@@ -222,6 +224,7 @@ extension PeopleChat {
         self.myRole = dto.me.role.flatMap { $0 } ?? "member"
         self.muted = dto.me.muted ?? false
         self.silenced = dto.me.silenced ?? false
+        self.archivedAt = dto.archived_at.flatMap { $0 > 0 ? $0 : nil }
     }
 
     /// Is this person already in the chat? Me (`meId`) counts as in. A handle
