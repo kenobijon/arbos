@@ -492,8 +492,10 @@ struct ChatView: View {
         .toolbar(.hidden, for: .navigationBar)
         .toolbar(.hidden, for: .tabBar)
         .navigationBarBackButtonHidden(true)
-        // Hiding the system back button also disables the edge-swipe pop; re-enable it.
-        .background(InteractivePopGestureEnabler())
+        // Hiding the system back button also disables the edge-swipe pop; re-enable it
+        // except while the composer is focused (or a reply swipe is locked) so editing
+        // / selecting text in the bar cannot edge-swipe back to Home.
+        .background(InteractivePopGestureEnabler(enabled: !composerFocused && !replySwipeActive))
         // Full-chat swipes: right → previous agent chat (or Home), left → next (or create), up → archive + previous.
         .simultaneousGesture(chatNavSwipe)
         .fullScreenCover(item: $rigViewer) { v in
@@ -2075,21 +2077,44 @@ struct WorkingStatusText: View {
 /// `.navigationBarBackButtonHidden(true)` turns off the system edge-swipe
 /// back gesture; this turns it back on for the enclosing UINavigationController.
 /// Shared with `SettingsPage` (and any other custom-back screen).
+/// Pass `enabled: false` while the composer is focused so an edge swipe
+/// (or text-selection drag near the left edge) cannot leave the chat.
 struct InteractivePopGestureEnabler: UIViewControllerRepresentable {
+    var enabled: Bool = true
+
     func makeUIViewController(context: Context) -> Controller { Controller() }
-    func updateUIViewController(_ uiViewController: Controller, context: Context) {}
+
+    func updateUIViewController(_ uiViewController: Controller, context: Context) {
+        uiViewController.isPopEnabled = enabled
+        uiViewController.applyPopEnabled()
+    }
 
     final class Controller: UIViewController, UIGestureRecognizerDelegate {
+        var isPopEnabled = true
+
         override func viewDidAppear(_ animated: Bool) {
             super.viewDidAppear(animated)
+            applyPopEnabled()
+        }
+
+        override func viewWillDisappear(_ animated: Bool) {
+            super.viewWillDisappear(animated)
+            // Leave the nav controller able to pop after this screen is gone.
+            if let pop = enclosingNavigationController()?.interactivePopGestureRecognizer {
+                pop.isEnabled = true
+            }
+        }
+
+        func applyPopEnabled() {
             guard let nav = enclosingNavigationController(),
                   let pop = nav.interactivePopGestureRecognizer else { return }
-            pop.isEnabled = true
+            pop.isEnabled = isPopEnabled
             pop.delegate = self
         }
 
         func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
-            (enclosingNavigationController()?.viewControllers.count ?? 0) > 1
+            guard isPopEnabled else { return false }
+            return (enclosingNavigationController()?.viewControllers.count ?? 0) > 1
         }
 
         /// Background representables sometimes have a nil `navigationController`;
