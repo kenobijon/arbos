@@ -17,6 +17,11 @@ enum DebugHooks {
     /// With `ARBOS_OPEN_SERVER=…:panel`: the server page's tab to land on (Channels | Members | Settings).
     static var panelTab: String? { value("ARBOS_PANEL_TAB") }
     static var autoSend: String? { value("ARBOS_AUTO_SEND") }
+    /// Rig (#1596): text put in the composer of the opened chat at appear, caret at the end —
+    /// `@s` leaves the mention picker open, `@sam deck ready?` shows the resolved chip.
+    static var composerDraft: String? { value("ARBOS_COMPOSER_DRAFT").flatMap { $0.isEmpty ? nil : $0 } }
+    /// Rig (#1596): print each people-chat send's text and `mentions` ids to the console.
+    static var traceSends: Bool { value("ARBOS_TRACE_SENDS") == "1" }
     static var pairCode: String? { value("ARBOS_PAIR_CODE") }
     static var fixture: Bool { value("ARBOS_FIXTURE") == "1" }
     /// D89 waitlist card and Machine rows: the fixture account's place in line.
@@ -30,6 +35,9 @@ enum DebugHooks {
     static var fixtureLongReply: Bool { value("ARBOS_FIXTURE_LONG_REPLY") == "1" }
     /// Presence-row rig (typing-indicator-left-2026-10-23): n agents working in the fixture group.
     static var fixtureWorking: Int { value("ARBOS_FIXTURE_WORKING").flatMap { Int($0) } ?? 0 }
+    /// #1592 rig: the fixture group holds someone else's agent ("TestAgent", run by @sami —
+    /// in the roster, not in my projects) with one bubble; with `ARBOS_FIXTURE_WORKING` it works.
+    static var fixtureForeignAgent: Bool { value("ARBOS_FIXTURE_FOREIGN_AGENT") == "1" }
     /// Presence-row rig: `1` (the chat's other person) or comma-separated handles typing.
     static var fixtureTyping: String? { value("ARBOS_FIXTURE_TYPING").flatMap { $0.isEmpty || $0 == "0" ? nil : $0 } }
     /// Join a call seen via presence automatically (two-simulator relay tests).

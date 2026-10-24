@@ -740,6 +740,23 @@ struct UserProfileView: View {
 
 }
 
+// MARK: - Group invite share sheet
+
+/// Identifiable wrapper so `.sheet(item:)` can present the system share sheet.
+private struct ShareGroupInviteItem: Identifiable {
+    var id: String { url.absoluteString }
+    let url: URL
+}
+
+/// System share sheet for a group invite URL (Messages, Mail, copy, other apps).
+private struct GroupInviteShareSheet: UIViewControllerRepresentable {
+    let url: URL
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: [url], applicationActivities: nil)
+    }
+    func updateUIViewController(_ vc: UIActivityViewController, context: Context) {}
+}
+
 // MARK: - Group page
 
 struct GroupProfileView: View {
@@ -753,6 +770,7 @@ struct GroupProfileView: View {
     @State private var projectMembers: [ProjectMember] = []
     @State private var showAdd = false
     @State private var showEdit = false
+    @State private var showActivity = false
     @State private var pendingRemoveId: String?
     @State private var pendingRemoveName: String?
     /// Ban confirm (remove and block rejoin), same shape as server member ban.
@@ -763,11 +781,16 @@ struct GroupProfileView: View {
     /// Footer confirm: leave (member) or delete (owner) this people group.
     @State private var confirmLeave = false
     @State private var confirmDelete = false
+    /// Mute notifications for 1 hour / 8 hours / until unmuted.
+    @State private var showMuteOptions = false
     /// People-group invite links (create / copy / share / revoke), same shape as server invites.
     @State private var groupInvites: [ServerInviteLink] = []
     @State private var inviteExpires = false
     @State private var inviteSingleUse = false
     @State private var inviteCopied = false
+    /// System share sheet for the group's invite link (reuses a usable link or mints one).
+    @State private var shareInviteURL: ShareGroupInviteItem?
+    @State private var sharingInvite = false
 
     private var people: PeopleChat? { model.peopleChat(chatId) }
     private var project: Project? { projectId.flatMap { model.project($0) } }
@@ -785,7 +808,7 @@ struct GroupProfileView: View {
     private var rows: [Row] {
         if let people {
             return people.members.map { m in
-                Row(id: m.id, person: ProfilePerson(m), role: m.role, agent: m.isAgent ? m.project : nil)
+                Row(id: m.id, person: ProfilePerson(m), role: m.role, agent: m.isAgent ? model.agent(member: m, chatId: people.id) : nil)
             }
         }
         var out = projectMembers.map { Row(id: $0.id, person: ProfilePerson($0), role: $0.role, agent: nil) }
@@ -853,6 +876,23 @@ struct GroupProfileView: View {
         return others.isEmpty ? people.humans : others
     }
 
+    /// Mute / Unmute above Leave — people groups only (relay `me.muted` + local duration).
+    private var muteFooter: [PaneSection] {
+        guard people?.isGroup == true, projectId == nil else { return [] }
+        let muted = model.isPeopleChatMuted(chatId)
+        let row = AnyView(Button {
+            if muted { model.unmutePeopleChat(chatId) }
+            else { showMuteOptions = true }
+        } label: {
+            PaneRow(
+                leading: .tile(muted ? "bell" : "bell.slash"),
+                title: muted ? "Unmute notifications" : "Mute notifications",
+                subtitle: model.peopleMuteSubtitle(chatId)
+            )
+        }.buttonStyle(.plain))
+        return [.card([row], separatorInset: PaneKit.separatorInset(.tile("")))]
+    }
+
     /// Footer on every tab for a people group: Leave group chat for members,
     /// Delete group chat for the owner (same rule as the chat list).
     private var leaveFooter: [PaneSection] {
@@ -886,12 +926,24 @@ struct GroupProfileView: View {
                         tabs: PaneKinds.group,
                         selected: $tab,
                         body: tab == "Members" ? membersSections + groupInviteSections : librarySections,
-                        footer: leaveFooter
+                        footer: muteFooter + leaveFooter
                     )
                     Color.clear.frame(height: 40)
                 }
             }
             ProfileTopBar { EmptyView() }
+        }
+        .confirmationDialog(
+            "Mute notifications",
+            isPresented: $showMuteOptions,
+            titleVisibility: .visible
+        ) {
+            ForEach(ChatMuteDuration.allCases) { duration in
+                Button(duration.title) { model.mutePeopleChat(chatId, for: duration) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("No banners from this group for the time you pick.")
         }
         .confirmationDialog(
             pendingRemoveName.map { "Remove \($0) from \(title)?" } ?? "Remove from chat?",
@@ -1007,6 +1059,16 @@ struct GroupProfileView: View {
         }
         .sheet(isPresented: $showEdit) {
             GroupEditSheet(chatId: chatId).environmentObject(model).environment(\.theme, theme)
+        }
+        .sheet(isPresented: $showActivity) {
+            // Admin-only activity log (joined / removed / left / deleted messages).
+            // A sheet over the profile sheet — no presentation modifiers here.
+            GroupActivityView(chatId: chatId)
+                .environmentObject(model)
+                .environment(\.theme, theme)
+        }
+        .sheet(item: $shareInviteURL) { item in
+            GroupInviteShareSheet(url: item.url)
         }
         .task {
             if let projectId { projectMembers = await model.projectMembers(projectId) }
@@ -1124,8 +1186,8 @@ struct GroupProfileView: View {
         }
     }
 
-    /// Members: Add members, then every person (name, @handle) and agent
-    /// ("Agent · run by …") as kit rows — the Mac group pane's list.
+    /// Members: Add members, Share invite link (people groups), Activity for
+    /// owners/admins, then every person (name, @handle) and agent as kit rows.
     private var membersSections: [PaneSection] {
         var list: [AnyView] = [
             AnyView(Button { showAdd = true } label: {
@@ -1133,8 +1195,53 @@ struct GroupProfileView: View {
             }
             .buttonStyle(.plain)),
         ]
+        // People groups only (not a shared project): one-tap share of the invite link.
+        if project == nil, people?.kind == "group" {
+            list.append(AnyView(Button {
+                shareGroupInvite()
+            } label: {
+                PaneRow(
+                    leading: .glyph("square.and.arrow.up"),
+                    title: sharingInvite ? "Preparing link…" : "Share invite link"
+                )
+            }
+            .buttonStyle(.plain)
+            .disabled(sharingInvite)
+            .accessibilityLabel("Share invite link")))
+        }
+        // People groups only: the activity log is built from this chat's system lines.
+        if projectId == nil, people?.isGroup == true, canManageMembers {
+            list.append(AnyView(Button { showActivity = true } label: {
+                PaneRow(leading: .glyph("list.bullet.rectangle"), title: "Activity", chevron: true)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Group activity")))
+        }
         list += rows.map { r in AnyView(memberRow(r)) }
         return [.card(list, separatorInset: PaneKit.separatorInset(.glyph("")))]
+    }
+
+    /// Reuse a usable invite URL, or mint one, then open the system share sheet.
+    private func shareGroupInvite() {
+        guard !sharingInvite else { return }
+        sharingInvite = true
+        Task {
+            if let existing = groupInvites.first(where: { $0.usable }),
+               let url = URL(string: existing.url) {
+                shareInviteURL = ShareGroupInviteItem(url: url)
+                sharingInvite = false
+                return
+            }
+            if let inv = await model.createGroupInvite(
+                chatId, expires: inviteExpires, singleUse: inviteSingleUse
+            ) {
+                groupInvites.insert(inv, at: 0)
+                if let url = URL(string: inv.url) {
+                    shareInviteURL = ShareGroupInviteItem(url: url)
+                }
+            }
+            sharingInvite = false
+        }
     }
 
     private func memberSubtitle(_ r: Row) -> String {
@@ -1367,6 +1474,155 @@ struct GroupProfileView: View {
         return out
     }
 
+}
+
+// MARK: - Group activity (admins)
+
+/// Admin-only log of a people group's membership and deletion events.
+/// Membership lines come from the relay (#1349). Deletion lines are written by
+/// the deleting device with a private marker so the main transcript stays calm.
+enum GroupActivity {
+    /// Invisible separator — Transcript skips these; Activity keeps them.
+    static let auditPrefix = "\u{2063}"
+
+    enum Kind: String, CaseIterable {
+        case deleted
+        case joined
+        case removed
+        case left
+
+        var title: String {
+            switch self {
+            case .deleted: return "Deleted messages"
+            case .joined: return "Joined"
+            case .removed: return "Removed"
+            case .left: return "Left"
+            }
+        }
+    }
+
+    struct Event: Identifiable, Equatable {
+        var id: String
+        var kind: Kind
+        var text: String
+        var at: Int64
+    }
+
+    /// System-line text for a message deleted in a people group (hidden in the chat).
+    static func deletionNotice(who: String) -> String {
+        "\(auditPrefix)\(who) deleted a message"
+    }
+
+    static func isAuditLine(_ text: String) -> Bool {
+        text.hasPrefix(auditPrefix)
+    }
+
+    static func displayText(_ raw: String) -> String {
+        isAuditLine(raw) ? String(raw.dropFirst()) : raw
+    }
+
+    /// Newest first. Only membership notices and deletion audits — not call lines.
+    static func events(from messages: [Message]) -> [Event] {
+        var out: [Event] = []
+        out.reserveCapacity(messages.count / 8)
+        for m in messages where m.role == .system {
+            let raw = m.plainText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !raw.isEmpty, let kind = classify(raw) else { continue }
+            out.append(Event(id: m.id, kind: kind, text: displayText(raw), at: m.createdAt))
+        }
+        out.sort { $0.at > $1.at }
+        return out
+    }
+
+    static func classify(_ text: String) -> Kind? {
+        if isAuditLine(text) { return .deleted }
+        // Relay membership notices (#1349): "A added B", "A removed B", "A left".
+        if text.hasSuffix(" left"), !text.contains(" added "), !text.contains(" removed ") {
+            return .left
+        }
+        if text.contains(" removed ") { return .removed }
+        if text.contains(" added ") { return .joined }
+        return nil
+    }
+
+    static func whenLabel(_ at: Int64, now: Int64 = nowMs()) -> String {
+        guard at > 0 else { return "" }
+        let date = Date(timeIntervalSince1970: Double(at) / 1000)
+        let age = max(0, now - at)
+        if age < 86_400_000 {
+            return date.formatted(date: .omitted, time: .shortened)
+        }
+        return date.formatted(date: .abbreviated, time: .shortened)
+    }
+}
+
+/// Owners and admins: deleted messages, joins, removes, and leaves for one group.
+struct GroupActivityView: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.theme) private var theme
+    let chatId: String
+
+    private var events: [GroupActivity.Event] {
+        GroupActivity.events(from: model.messages(of: chatId))
+    }
+
+    var body: some View {
+        SettingsPage(title: "Activity") {
+            if events.isEmpty {
+                SettingsGroup {
+                    Text("Joins, removals, leaves and deleted messages will show up here.")
+                        .font(theme.font(Theme.small))
+                        .foregroundStyle(theme.muted)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 12)
+                }
+            } else {
+                ForEach(GroupActivity.Kind.allCases, id: \.self) { kind in
+                    GroupActivitySection(kind: kind, events: events.filter { $0.kind == kind })
+                }
+            }
+        }
+    }
+}
+
+private struct GroupActivitySection: View {
+    let kind: GroupActivity.Kind
+    let events: [GroupActivity.Event]
+
+    var body: some View {
+        if !events.isEmpty {
+            SettingsGroup(header: kind.title) {
+                ForEach(events) { event in
+                    GroupActivityRow(event: event)
+                }
+            }
+        }
+    }
+}
+
+private struct GroupActivityRow: View {
+    @Environment(\.theme) private var theme
+    let event: GroupActivity.Event
+
+    private var when: String { GroupActivity.whenLabel(event.at) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(event.text)
+                .font(theme.font(Theme.small))
+                .foregroundStyle(theme.text)
+                .lineLimit(2)
+            if !when.isEmpty {
+                Text(when)
+                    .font(theme.font(Theme.tiny))
+                    .foregroundStyle(theme.muted)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 9)
+    }
 }
 
 // MARK: - Server page (D88)

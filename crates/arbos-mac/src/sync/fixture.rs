@@ -376,6 +376,39 @@ fn fixture_working_count() -> usize {
         .unwrap_or(0)
 }
 
+/// `ARBOS_FIXTURE_FOREIGN_AGENT=1` (screenshot rig, #1592): the Launch week group holds
+/// someone else's agent — "TestAgent", run by @sami, in the roster but not in my project
+/// list — with one bubble and, under `ARBOS_FIXTURE_WORKING`, the working row, so the
+/// bubble disc, the presence row, the sidebar badge and the `@testagent` chip can be shot
+/// for an agent only the roster knows (Jacob's Arbonites screenshot).
+fn fixture_foreign_agent() -> bool {
+    std::env::var("ARBOS_FIXTURE_FOREIGN_AGENT").is_ok_and(|v| v.trim() == "1")
+}
+
+pub const PROJECT_TESTAGENT: &str = "01J9PROJTESTAGENT000000000";
+
+fn testagent_member() -> AgentMember {
+    AgentMember {
+        project_id: PROJECT_TESTAGENT.into(),
+        name: "TestAgent".into(),
+        icon: "T".into(),
+        color: "#1084fe".into(),
+        handle: "testagent".into(),
+        owner_id: "gh_459".into(),
+        owner_handle: "sami".into(),
+        reply_policy: Default::default(),
+        avatar: None,
+        avatar_color: None,
+        avatar_color_index: Some(3),
+        avatar_leaf: Some(3),
+        avatar_leaf_color: Some(7),
+        image_url: None,
+        description: None,
+        model: None,
+        owner: None,
+    }
+}
+
 /// Extra agents for the Launch week group beyond the seeded Arbos, so the
 /// group has `ARBOS_FIXTURE_WORKING` agents to show working.
 fn fixture_working_extra_agents() -> Vec<(&'static str, &'static str, &'static str, u8, u8)> {
@@ -707,6 +740,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             text,
             attachments,
             reply_to,
+            mentions,
         } => {
             let attachments: Vec<Attachment> = attachments
                 .iter()
@@ -731,6 +765,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 attachments,
                 reply_to,
                 None,
+                mentions,
             );
         }
         ClientCommand::Forward {
@@ -750,6 +785,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 vec![attachment],
                 None,
                 None,
+                Vec::new(),
             );
         }
         ClientCommand::OpenAttachment {
@@ -790,6 +826,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 Vec::new(),
                 None,
                 Some(forwarded_from),
+                Vec::new(),
             );
         }
         ClientCommand::Steer {
@@ -807,6 +844,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 Vec::new(),
                 reply_to,
                 None,
+                Vec::new(),
             );
         }
         ClientCommand::SendVoice {
@@ -826,7 +864,16 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 kind: Some(AttachmentKind::Audio),
                 title: None,
             }];
-            send_user(shared, chat_id, message_id, text, attachments, None, None);
+            send_user(
+                shared,
+                chat_id,
+                message_id,
+                text,
+                attachments,
+                None,
+                None,
+                Vec::new(),
+            );
         }
         ClientCommand::Transcribe {
             request_id, wav, ..
@@ -1973,6 +2020,7 @@ fn seed_local() -> LocalView {
 }
 
 /// The user row (attachments first, then the text), its `send` command, and the scripted turn.
+#[allow(clippy::too_many_arguments)]
 fn send_user(
     shared: &Arc<Shared>,
     chat_id: Id,
@@ -1981,10 +2029,15 @@ fn send_user(
     attachments: Vec<Attachment>,
     reply_to: Option<String>,
     forwarded_from: Option<String>,
+    tokens: Vec<String>,
 ) {
     let project_id = project_of(shared, &chat_id);
     if let Some(space) = people_space_of(shared, &chat_id) {
-        let mentions = mentions_in(&space, &text);
+        let mentions = mentions_in(&space, &text, &tokens);
+        // Rig (#1596): `ARBOS_FIXTURE_TRACE_SENDS=1` prints what the row carries.
+        if std::env::var_os("ARBOS_FIXTURE_TRACE_SENDS").is_some() {
+            eprintln!("fixture send: text={text:?} chips={tokens:?} mentions={mentions:?}");
+        }
         let me = me();
         let opts = UserMessageOpts {
             attachments: user_attachments(&attachments),
@@ -5317,6 +5370,10 @@ fn launch_week() -> Project {
         owner: None,
     };
     let mut agents = vec![agent];
+    // Someone else's agent first, so `ARBOS_FIXTURE_WORKING=1` shows it working (#1592).
+    if fixture_foreign_agent() {
+        agents.insert(0, testagent_member());
+    }
     // `ARBOS_FIXTURE_WORKING=<n>` (screenshot rig): the group holds n agents so
     // the presence row can show several of them working at once.
     for (project_id, name, handle, leaf, color) in fixture_working_extra_agents() {
@@ -5579,6 +5636,28 @@ fn seed_people_chat_docs() -> Vec<ChatDoc> {
         "Done. Slide 4 now reads 1,284 signups this week (+18 %). The chart is in `deck/v3/slide-04.png`.",
     )];
     insert_message_via_core(&group, &agent);
+    // #1592 rig: a question to someone else's agent and its first bubble — the shape of
+    // Jacob's Arbonites screenshot ("@testagent how many messages …" / "On it.").
+    if fixture_foreign_agent() {
+        let ask = human_message(
+            GROUP_LAUNCH,
+            &samir,
+            "@testagent how many messages are there in this chat?",
+            base + 362_000,
+        );
+        insert_message_via_core(&group, &ask);
+        let mut reply = human_message(GROUP_LAUNCH, &samir, "", base + 364_000);
+        reply.role = Role::Assistant;
+        reply.sender = format!("agent:{PROJECT_TESTAGENT}");
+        reply.sender_name = Some("TestAgent".into());
+        reply.sender_handle = Some("testagent".into());
+        reply.sender_avatar = None;
+        reply.asked_by_handle = Some("samir".into());
+        reply.owner_handle = Some("sami".into());
+        reply.in_reply_to = Some(ask.id.clone());
+        reply.parts = vec![text_part("On it.")];
+        insert_message_via_core(&group, &reply);
+    }
     // Two images and a file, so the group pane's Library and the attachment
     // composer have something to show (redesign mocks d / e).
     let mut shared_files = human_message(GROUP_LAUNCH, &samir, "", base + 380_000);
@@ -5777,9 +5856,15 @@ fn text_has_at_token(lower: &str, token: &str) -> bool {
 
 /// `@slug` / `@handle` tokens in the text, resolved to member ids.
 /// Group owners may also use `@here` (every human) and `@agents` (every agent).
-fn mentions_in(space: &Project, text: &str) -> Vec<String> {
+fn mentions_in(space: &Project, text: &str, tokens: &[String]) -> Vec<String> {
     let lower = text.to_lowercase();
-    let mut out = Vec::new();
+    let mut out: Vec<String> = Vec::new();
+    for t in tokens {
+        if !out.contains(t) {
+            out.push(t.clone());
+        }
+    }
+    let claimed = crate::sync::claimed_handles(space, tokens);
     let i_own_group =
         space.is_people_group() && space.owner_handle.as_deref().is_none_or(|o| o == ME_HANDLE);
     if i_own_group {
@@ -5803,6 +5888,9 @@ fn mentions_in(space: &Project, text: &str) -> Vec<String> {
     for a in &space.agents {
         let handle = a.handle.to_lowercase();
         let slug = Project::mention_slug(&a.name);
+        if claimed.contains(&handle) || claimed.contains(&slug) {
+            continue;
+        }
         if (!handle.is_empty() && text_has_at_token(&lower, &handle))
             || (!slug.is_empty() && text_has_at_token(&lower, &slug))
         {
@@ -5813,7 +5901,11 @@ fn mentions_in(space: &Project, text: &str) -> Vec<String> {
         }
     }
     for p in &space.people {
-        if lower.contains(&format!("@{}", p.handle.to_lowercase())) {
+        let handle = p.handle.to_lowercase();
+        if claimed.contains(&handle) {
+            continue;
+        }
+        if lower.contains(&format!("@{handle}")) {
             let id = format!("user:{}", p.id);
             if !out.iter().any(|x| x == &id) {
                 out.push(id);
