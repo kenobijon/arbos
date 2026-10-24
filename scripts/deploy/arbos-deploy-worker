@@ -132,12 +132,20 @@ hold_agentd() {
 agentd_hold_release_if_fixed() {
   # A commit tagged [canary-fix] on main since the hold lifts it.
   agentd_held || return 0
-  local held_sha; held_sha="$(sed -n 's/^sha=//p' "$(agentd_hold_file)" | head -1)"
-  if git -C "$REPO" log --format=%s "${held_sha:-HEAD~50}..origin/main" 2>/dev/null | grep -qi '\[canary-fix\]'; then
-    log "agentd: a [canary-fix] commit is on main; lifting the hold"
-    event agentd "$(resolve origin/main)" roll_hold_lifted "a [canary-fix] commit landed"
-    rm -f "$(agentd_hold_file)"
-  fi
+  local held_sha c
+  held_sha="$(sed -n 's/^sha=//p' "$(agentd_hold_file)" | head -1)"
+  # Only a commit that (a) carries the tag in its subject and (b) touches agentd code lifts the hold — a
+  # commit that merely mentions the tag in prose (01:30 Oct 24: this very feature's commit, which rolled
+  # 0.1.105 without the fix) must not.
+  while read -r c; do
+    [[ -n "$c" ]] || continue
+    if git -C "$REPO" diff-tree --no-commit-id --name-only -r "$c" 2>/dev/null | grep -qE '^(crates/arbos-agentd/|image/)'; then
+      log "agentd: canary-fix commit ${c:0:9} is on main; lifting the hold"
+      event agentd "$c" roll_hold_lifted "canary-fix commit ${c:0:9} landed"
+      rm -f "$(agentd_hold_file)"
+      return 0
+    fi
+  done < <(git -C "$REPO" log --format='%H %s' "${held_sha:-HEAD~50}..origin/main" 2>/dev/null | grep -i 'canary-fix\]' | cut -d' ' -f1)
 }
 
 gh_api() {
