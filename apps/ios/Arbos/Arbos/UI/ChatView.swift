@@ -177,6 +177,8 @@ private struct ChatSession: View {
     /// Follow the end as rows stream / grow. Cleared when the user scrolls up;
     /// restored when they return near the end or tap the chevron / pill (Mac stick pin).
     @State private var pinnedToBottom = true
+    /// When this chat screen appeared (the history window does not grow in its first second).
+    @State private var appearedAt = Date()
     /// Rows that arrived while the reader was away from the end — drives the
     /// "New messages" pill. Cleared when they re-pin or jump to the latest.
     @State private var newBelowCount = 0
@@ -631,6 +633,7 @@ private struct ChatSession: View {
     var body: some View {
         #if DEBUG
         let _ = PerfCounters.bump("chatBody")
+        let _ = DebugHooks.perfChanges ? Self._printChanges() : ()
         #endif
         // Header stays outside GeometryReader (same pattern as ServerChannelsView /
         // HiddenChatsView). Nesting it inside the reader let iOS 26/27 vertically
@@ -773,7 +776,7 @@ private struct ChatSession: View {
                         },
                         onDismiss: { closeActions() },
                         bubble: {
-                            RowView(model: model, row: row, chatId: chatId, width: geo.size.width, timeReveal: 0,
+                            RowView(model: model, theme: theme, composerInset: composerSideInset, row: row, chatId: chatId, width: geo.size.width, timeReveal: 0,
                                     mentions: MentionTable.Cache.shared.table(model: model, theme: theme))
                                 .padding(.horizontal, 16)
                         }
@@ -903,6 +906,7 @@ private struct ChatSession: View {
             }
         }
         .onAppear {
+            appearedAt = Date()
             LaunchClock.mark("chat-appear", detail: "messages=\(messages.count)")
             // Force: re-PUT even if the cursor is unchanged so the relay clears
             // unread events recorded after the last PUT (other apps / badge).
@@ -1469,6 +1473,8 @@ private struct ChatSession: View {
                     // skip the ForEach when the transcript inputs are unchanged.
                     TranscriptRows(
                         model: model,
+                        theme: theme,
+                        composerInset: composerSideInset,
                         mentions: mentions,
                         shown: shown,
                         shownStamp: Self.shownStamp(rowsVersion, windowCount, windowSkipEnd, searchText, showSearch),
@@ -1527,6 +1533,10 @@ private struct ChatSession: View {
             // Nearing the top: the next older slice of rows joins the view tree; a channel
             // also asks the server for one older page.
             .modifier(NearTopReporter(enabled: true) {
+                // The first layout reports offset 0 before the bottom anchor applies; a
+                // grow step there (30 more bubbles) landed inside the open and cost a
+                // 200–300 ms frame on a long group. History waits a beat after appear.
+                guard Date().timeIntervalSince(appearedAt) > 1.0 else { return }
                 if windowCount + windowSkipEnd < visibleRows.count {
                     growWindow()
                 } else if isChannel {
@@ -2879,6 +2889,8 @@ struct ModelPickerView: View {
 /// does not rebuild every bubble when the row list is unchanged.
 private struct TranscriptRows: View, Equatable {
     let model: AppModel
+    let theme: Theme
+    let composerInset: CGFloat
     let mentions: MentionTable
     let shown: [Row]
     /// Identity of `shown` (rows version + window bounds + search): compared instead of the array.
@@ -2901,13 +2913,13 @@ private struct TranscriptRows: View, Equatable {
     static func == (lhs: TranscriptRows, rhs: TranscriptRows) -> Bool {
         let same = lhs.shownStamp == rhs.shownStamp
             && lhs.actionsRowId == rhs.actionsRowId
+            && lhs.composerInset == rhs.composerInset
+            && lhs.theme == rhs.theme
             && lhs.chatId == rhs.chatId
             && lhs.width == rhs.width
             && lhs.timeReveal == rhs.timeReveal
             && lhs.highlightedMessage == rhs.highlightedMessage
             && lhs.mentions.stamp == rhs.mentions.stamp
-            && lhs.rowsCount == rhs.rowsCount
-            && lhs.messagesCount == rhs.messagesCount
         #if DEBUG
         PerfCounters.bump(same ? "rowsEqTrue" : "rowsEqFalse")
         if !same {
@@ -2920,13 +2932,14 @@ private struct TranscriptRows: View, Equatable {
     var body: some View {
         #if DEBUG
         let _ = PerfCounters.bump("transcriptRowsBody")
+        let _ = DebugHooks.perfChanges ? Self._printChanges() : ()
         #endif
         // Rows keyed by id, never by position: a grow step prepends older rows and
         // must not touch the ones already laid out (arbonites-chat-lag).
         let firstId = shown.first?.id
         ForEach(shown) { row in
             let reply = canReply(row)
-            RowView(model: model, row: row, chatId: chatId, width: width, timeReveal: timeReveal,
+            RowView(model: model, theme: theme, composerInset: composerInset, row: row, chatId: chatId, width: width, timeReveal: timeReveal,
                     onQuoteTap: onQuoteTap,
                     highlighted: highlightedMessage == row.messageId,
                     onReply: reply ? { onReply(row) } : nil,
@@ -2939,6 +2952,9 @@ private struct TranscriptRows: View, Equatable {
                     // Once per open — not on every row (group chats fire this dozens of times).
                     if row.id == firstId {
                         LaunchClock.mark("chat-first-row", detail: "shown=\(shown.count) rows=\(rowsCount) messages=\(messagesCount)")
+                        #if DEBUG
+                        PerfLog.shared.armScrollable()
+                        #endif
                     }
                 }
                 // A message bubble: long-press → the reaction capsule + menu overlay
