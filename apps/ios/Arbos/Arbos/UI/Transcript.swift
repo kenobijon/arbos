@@ -1094,11 +1094,13 @@ struct RowView: View, Equatable {
                     if let quote {
                         quoteHeader(quote, color: theme.userText)
                     }
+                    // No `.textSelection(.enabled)`: it steals pans from the chat
+                    // ScrollView so a drag on / onto a bubble sticks
+                    // ([feedback app-01M5Q1N6C1HAKHC6P2XPEWMRSS]). Copy is on long-press.
                     Markdown.inlineText(text, color: theme.userText, link: theme.accent, codeChip: theme.userCodeChip, mentions: mentions)
                         .font(theme.font(Theme.body))
                         .lineSpacing(Theme.bodyLineSpacing)
                         .tint(theme.accent)
-                        .textSelection(.enabled)
                 }
                 .padding(.horizontal, Theme.bubbleHPad)
                 .padding(.vertical, Theme.bubbleVPad)
@@ -1136,7 +1138,6 @@ struct RowView: View, Equatable {
                         .font(theme.font(Theme.body))
                         .lineSpacing(Theme.bodyLineSpacing)
                         .tint(theme.accent)
-                        .textSelection(.enabled)
                 }
                 .padding(.horizontal, Theme.bubbleHPad)
                 .padding(.vertical, Theme.bubbleVPad)
@@ -1188,7 +1189,6 @@ struct RowView: View, Equatable {
                                         .font(theme.font(Theme.body))
                                         .lineSpacing(Theme.bodyLineSpacing)
                                         .tint(theme.accent)
-                                        .textSelection(.enabled)
                                 } else {
                                     BlockView(block: block, live: live && i == blocks.count - 1, mentions: mentions)
                                 }
@@ -1532,7 +1532,6 @@ struct BlockView: View {
                     .font(theme.font(Theme.body))
                     .lineSpacing(Theme.bodyLineSpacing)
                     .tint(theme.accent)
-                    .textSelection(.enabled)
             }
         case .heading(_, let text):
             Text(Markdown.inline(text, color: theme.text, link: theme.accent, codeChip: theme.codeChip))
@@ -1578,7 +1577,6 @@ struct BlockView: View {
                 Text(code)
                     .font(theme.font(14, design: .monospaced))
                     .foregroundStyle(theme.text)
-                    .textSelection(.enabled)
                     .padding(10)
             }
             .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.bg.opacity(0.6)))
