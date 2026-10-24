@@ -72,6 +72,33 @@ discs 20 px apart; v0.6.212–0.6.214 had the right discs centred at 21 pt
 (top 3) in a 44 pt band with the filter capsules at 50 — 9 pt too high
 against Grok, Jacob's "the top bar on mac is now too high".
 
+## Sidebar footer (Jacob 2026-10-24, [feedback footer-avatar-grok-size-2026-10-24])
+
+**The footer is the top strip mirrored at the window's bottom edge: a 60 pt
+band whose 36 pt discs are centred 30 from the bottom.** Jacob: "Make the
+profile picture at the bottom here the same size as it is on grok."
+
+Measured on Jacob's Oct-2026 Grok Bot Mac refs
+(`media/group-chat-redesign/refs/1-agent-chat-topbutton-sidebar.png` and
+`2-agent-chat-info-pane.png` in the project store; 2520 × 1670 px at 2 px/pt,
+lights 28 px / discs 72 px as in the strip measurement, window bottom at the
+image's last row, sidebar divider at x 553 px → 276.5 pt wide). Points from
+the sidebar's left edge and the window's bottom edge.
+
+| Item | Grok Bot | Arbos (`sidebar.rs` `FOOTER_*`) |
+|---|---|---|
+| Band | avatar, "Connect apps" pill and update disc all on rows 1574–1645 px → 36 tall, 12 above the bottom, centre 30 | `FOOTER_HEIGHT` = `HEADER_HEIGHT` 60; everything centred → centre `CONTROL_LINE` 30 |
+| My avatar | 72 px disc at x 26–97 → **36**, left edge **13**, bottom **12** | `FOOTER_AVATAR` = `CONTROL` 36 at `FOOTER_INSET` 13, `FOOTER_BOTTOM` 12 (was 28 at x 18, 16 above the bottom) |
+| Machine dot | — (Grok has none) | scales with the avatar: 9 pt dot in a 13 pt ring of the sidebar colour, 2 pt past the bottom-right edge (`FOOTER_DOT` / `FOOTER_DOT_RING` / `FOOTER_DOT_OVERHANG`; was 7 / 11 / 2) |
+| Hover card | — | 44 tall, inset 8 like the rows, pad 5 so the avatar lands at 13; name `TEXT_SMALL` + 1, 10 after the avatar |
+| "Connect apps" pill | 36 tall, x 114–432 px, 8 after the avatar, 8 before the update disc, fill `#1F1F1F`, 1 px `#2C2C2C` rim, text `#B8B8B8` | not built (no connectors pill in Arbos's footer; the name sits there) |
+
+Pinned by `sidebar::footer_tests::the_footer_avatar_is_groks_size_inset_and_line`
+(constants vs the table) and `the_footer_avatar_lands_on_groks_pixels` (gpui
+layout of `footer_frame` + `footer_row_frame`: avatar left 13, bottom 12,
+centre 30, dot overhang 2). `row_bounds_tests` builds the same frame under the
+list, so the list still ends above it.
+
 ## Command palette ([feedback search-palette-2026-10-24], Grok Bot's)
 
 Search never opens inline. The Search disc, **⌘⇧F** and **⌘K** open one

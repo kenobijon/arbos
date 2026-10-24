@@ -104,6 +104,66 @@ pub(crate) const FILTER_BOTTOM: f32 = 8.0;
 /// of the size) so they read apart from the agent and people discs.
 pub(crate) const SERVER_PICTURE_CORNER: f32 = 11.0 / 36.0;
 
+/// The footer — my avatar with the machine dot, my name — is Grok Bot's: the
+/// top strip mirrored at the bottom edge. Measured on Jacob's Oct-2026 Grok
+/// Mac refs (`media/group-chat-redesign/refs/1-agent-chat-topbutton-sidebar.png`
+/// in the project store, 2 px/pt, window bottom at the image's last row): the
+/// avatar is 72 px at x 26, rows 1574–1645 of 1670 → **36 pt** (`CONTROL`,
+/// the button family), **13 pt** from the sidebar's left edge, **12 pt**
+/// above the window's bottom edge, centre **30** from the bottom (`CONTROL_LINE`,
+/// the strip's discs' line) — so the footer is a 60 pt band like the strip
+/// ([feedback footer-avatar-grok-size-2026-10-24]). Before: 28 pt at x 18,
+/// 16 above the bottom (centre already at 30).
+pub(crate) const FOOTER_HEIGHT: f32 = HEADER_HEIGHT;
+pub(crate) const FOOTER_AVATAR: f32 = CONTROL;
+pub(crate) const FOOTER_INSET: f32 = 13.0;
+pub(crate) const FOOTER_BOTTOM: f32 = (FOOTER_HEIGHT - FOOTER_AVATAR) / 2.0;
+/// The hover card behind avatar + name: the rows' 8 pt side inset, so its
+/// left pad is what puts the avatar at [`FOOTER_INSET`].
+pub(crate) const FOOTER_ROW_INSET: f32 = 8.0;
+pub(crate) const FOOTER_ROW_PAD_X: f32 = FOOTER_INSET - FOOTER_ROW_INSET;
+/// The hover card's height; it is centred in the band: 60 = 8 + 44 + 8, and
+/// the card itself is 4 + 36 + 4, which is what puts the avatar 12 above the
+/// bottom edge.
+pub(crate) const FOOTER_ROW_HEIGHT: f32 = 44.0;
+pub(crate) const FOOTER_ROW_PAD_Y: f32 = FOOTER_BOTTOM - (FOOTER_ROW_HEIGHT - FOOTER_AVATAR) / 2.0;
+/// The machine dot scales with the avatar (28 → 36 carried 7 / 11 to 9 / 13):
+/// a 9 pt dot in a 13 pt ring of the sidebar colour, 2 pt past the avatar's
+/// bottom-right edge.
+pub(crate) const FOOTER_DOT: f32 = 9.0;
+pub(crate) const FOOTER_DOT_RING: f32 = 13.0;
+pub(crate) const FOOTER_DOT_OVERHANG: f32 = 2.0;
+
+/// The footer band as `render` draws it: the hover card (avatar + name) fills
+/// the width inside the rows' inset, centred in the 60 pt band.
+pub(crate) fn footer_frame(row: impl IntoElement) -> Div {
+    div()
+        .h(px(FOOTER_HEIGHT))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .px(px(FOOTER_ROW_INSET))
+        .py(px(FOOTER_ROW_PAD_Y))
+        .debug_selector(|| "sidebar-footer".into())
+        .child(row)
+}
+
+/// The hover card's frame: [`FOOTER_ROW_HEIGHT`] tall, [`FOOTER_ROW_PAD_X`]
+/// inside, avatar then name 10 apart.
+pub(crate) fn footer_row_frame() -> gpui::Stateful<Div> {
+    div()
+        .id("sidebar-account")
+        .flex_1()
+        .min_w_0()
+        .h(px(FOOTER_ROW_HEIGHT))
+        .px(px(FOOTER_ROW_PAD_X))
+        .flex()
+        .items_center()
+        .gap(px(10.0))
+        .rounded(px(PANEL_RADIUS - 4.0))
+        .debug_selector(|| "sidebar-account".into())
+}
+
 /// One control of the top strip, left to right.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StripControl {
@@ -882,83 +942,80 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
             None => ("Settings".to_string(), None, None),
         }
     };
-    let account_row = div()
-        .id("sidebar-account")
-        .mx(px(8.0))
-        .mb(px(8.0))
-        .h(px(44.0))
-        .px(px(10.0))
-        .flex()
-        .items_center()
-        .gap(px(10.0))
-        .rounded(px(PANEL_RADIUS - 4.0))
-        .cursor_pointer()
-        .hover(|s| s.bg(theme.surface_2))
-        .child(
-            div()
-                .relative()
-                .size(px(28.0))
-                .flex_shrink_0()
-                .child(match &person_for_avatar {
-                    Some(p) => people::avatar(account_image, p, 28.0, &theme),
-                    None => div()
-                        .size(px(28.0))
-                        .rounded_full()
-                        .bg(theme.surface_2)
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(icon("person", 14.0, theme.text)),
-                })
-                .child(
-                    div()
-                        .absolute()
-                        .right(px(-2.0))
-                        .bottom(px(-2.0))
-                        .size(px(11.0))
-                        .rounded_full()
-                        .bg(theme.sidebar)
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(div().size(px(7.0)).rounded_full().bg(Theme::with_alpha(
-                            machine_dot(machine, &theme),
-                            if machine == MachineState::Waking {
-                                0.4 + 0.6 * PulseClock::phase(cx, 1100)
-                            } else {
-                                1.0
-                            },
-                        ))),
-                ),
-        )
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .truncate()
-                .text_size(px(TEXT_SMALL + 1.0))
-                .text_color(theme.text)
-                .child(who),
-        )
-        // My avatar opens my profile and every setting in the right pane
-        // (three-pane rule, mockup g); a second click folds it away.
-        .on_mouse_down(
-            gpui::MouseButton::Left,
-            cx.listener(|this, _, window, cx| {
-                cx.stop_propagation();
-                this.menu_open = false;
-                let open = this.state.read(cx).profile == Some(crate::app::ProfilePage::Me);
-                if open {
-                    this.close_profile(window, cx);
-                } else {
-                    this.state.update(cx, |s, cx| {
-                        s.open_profile(crate::app::ProfilePage::Me, cx);
-                        s.set_profile_tab(1, cx);
-                    });
-                }
-                cx.notify();
-            }),
-        );
+    // Grok Bot's footer avatar: 36 pt at x 13, 12 above the bottom edge
+    // ([feedback footer-avatar-grok-size-2026-10-24]; the constants above).
+    let account_row =
+        footer_row_frame()
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.surface_2))
+            .child(
+                div()
+                    .relative()
+                    .size(px(FOOTER_AVATAR))
+                    .flex_shrink_0()
+                    .debug_selector(|| "sidebar-account-avatar".into())
+                    .child(match &person_for_avatar {
+                        Some(p) => people::avatar(account_image, p, FOOTER_AVATAR, &theme),
+                        None => div()
+                            .size(px(FOOTER_AVATAR))
+                            .rounded_full()
+                            .bg(theme.surface_2)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(icon("person", FOOTER_AVATAR / 2.0, theme.text)),
+                    })
+                    .child(
+                        div()
+                            .absolute()
+                            .right(px(-FOOTER_DOT_OVERHANG))
+                            .bottom(px(-FOOTER_DOT_OVERHANG))
+                            .size(px(FOOTER_DOT_RING))
+                            .rounded_full()
+                            .bg(theme.sidebar)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(div().size(px(FOOTER_DOT)).rounded_full().bg(
+                                Theme::with_alpha(
+                                    machine_dot(machine, &theme),
+                                    if machine == MachineState::Waking {
+                                        0.4 + 0.6 * PulseClock::phase(cx, 1100)
+                                    } else {
+                                        1.0
+                                    },
+                                ),
+                            )),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(TEXT_SMALL + 1.0))
+                    .text_color(theme.text)
+                    .child(who),
+            )
+            // My avatar opens my profile and every setting in the right pane
+            // (three-pane rule, mockup g); a second click folds it away.
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.menu_open = false;
+                    let open = this.state.read(cx).profile == Some(crate::app::ProfilePage::Me);
+                    if open {
+                        this.close_profile(window, cx);
+                    } else {
+                        this.state.update(cx, |s, cx| {
+                            s.open_profile(crate::app::ProfilePage::Me, cx);
+                            s.set_profile_tab(1, cx);
+                        });
+                    }
+                    cx.notify();
+                }),
+            );
 
     // Drag handle on the right edge: a slim hit target (col-resize cursor) that
     // lets the user make the chat list slimmer or wider
@@ -1008,7 +1065,7 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
     if let Some(update) = shell.render_update_button(cx) {
         column = column.child(div().px(px(12.0)).pb(px(8.0)).child(update));
     }
-    column.child(account_row).child(resize)
+    column.child(footer_frame(account_row)).child(resize)
 }
 
 /// A server's picture: the leaf picked on its Create screen (D92 amendment),
@@ -2581,6 +2638,155 @@ mod strip_tests {
 }
 
 #[cfg(test)]
+mod footer_tests {
+    use gpui::{div, prelude::*, px, TestAppContext};
+
+    use super::{
+        footer_frame, footer_row_frame, FOOTER_AVATAR, FOOTER_BOTTOM, FOOTER_DOT,
+        FOOTER_DOT_OVERHANG, FOOTER_DOT_RING, FOOTER_HEIGHT, FOOTER_INSET, FOOTER_ROW_HEIGHT,
+        FOOTER_ROW_INSET, FOOTER_ROW_PAD_X, FOOTER_ROW_PAD_Y,
+    };
+    use crate::ui::theme::{CONTROL, CONTROL_LINE, HEADER_HEIGHT};
+
+    /// Grok Bot's footer, measured on Jacob's Oct-2026 refs
+    /// (`media/group-chat-redesign/refs/1-agent-chat-topbutton-sidebar.png`,
+    /// 2520 × 1670 px = 2 px/pt, window bottom at the last row) — Jacob
+    /// 2026-10-24: "Make the profile picture at the bottom here the same size
+    /// as it is on grok" ([feedback footer-avatar-grok-size-2026-10-24]).
+    /// Points from the sidebar's left edge and the window's bottom edge.
+    mod grok {
+        /// Avatar: x 26–97, rows 1574–1645 px → 72 px disc.
+        pub const AVATAR: f32 = 36.0;
+        pub const AVATAR_LEFT: f32 = 13.0;
+        /// 1670 − 1646 = 24 px under the disc.
+        pub const AVATAR_BOTTOM: f32 = 12.0;
+        /// Centre row 1609.5 → 60.5 px ≈ 30 pt from the bottom: the strip's
+        /// discs' line, mirrored. (Grok's "Connect apps" pill and its update
+        /// disc share the same 72 px rows.)
+        pub const AVATAR_LINE: f32 = 30.0;
+    }
+
+    /// The footer avatar is Grok's: the button family's 36, 13 from the left,
+    /// 12 above the bottom, centred on the discs' line — a 60 band like the
+    /// strip. The dot scales with it (2 pt ring, 2 pt overhang).
+    #[test]
+    fn the_footer_avatar_is_groks_size_inset_and_line() {
+        assert_eq!(FOOTER_AVATAR, grok::AVATAR);
+        assert_eq!(FOOTER_AVATAR, CONTROL, "one button family");
+        assert_eq!(FOOTER_INSET, grok::AVATAR_LEFT);
+        assert_eq!(FOOTER_BOTTOM, grok::AVATAR_BOTTOM);
+        assert_eq!(
+            FOOTER_HEIGHT - FOOTER_AVATAR - 2.0 * FOOTER_BOTTOM,
+            0.0,
+            "centred: 12 above and below"
+        );
+        assert_eq!(
+            FOOTER_HEIGHT / 2.0,
+            grok::AVATAR_LINE,
+            "centre 30 from the bottom"
+        );
+        assert_eq!(
+            FOOTER_HEIGHT / 2.0,
+            CONTROL_LINE,
+            "the strip's line, mirrored"
+        );
+        assert_eq!(FOOTER_HEIGHT, HEADER_HEIGHT, "the strip's band, mirrored");
+        assert_eq!(FOOTER_ROW_INSET + FOOTER_ROW_PAD_X, FOOTER_INSET);
+        assert_eq!(
+            2.0 * FOOTER_ROW_PAD_Y + FOOTER_ROW_HEIGHT,
+            FOOTER_HEIGHT,
+            "band = pad + card + pad"
+        );
+        assert_eq!(FOOTER_DOT_RING - FOOTER_DOT, 4.0, "2 pt ring");
+        assert_eq!(FOOTER_DOT_OVERHANG, 2.0);
+        // 28 → 36 scaled the 7 / 11 dot to 9 / 14; the ring stays 2 pt.
+        assert_eq!(FOOTER_DOT, (7.0f32 * 36.0 / 28.0).round());
+    }
+
+    /// The footer as `render` frames it, laid out for real at the bottom of a
+    /// sidebar column: the avatar's box lands at Grok's pixels.
+    struct Column;
+
+    impl gpui::Render for Column {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let avatar = div()
+                .relative()
+                .size(px(FOOTER_AVATAR))
+                .flex_shrink_0()
+                .debug_selector(|| "avatar".into())
+                .child(
+                    div()
+                        .absolute()
+                        .right(px(-FOOTER_DOT_OVERHANG))
+                        .bottom(px(-FOOTER_DOT_OVERHANG))
+                        .size(px(FOOTER_DOT_RING))
+                        .debug_selector(|| "dot-ring".into()),
+                );
+            let row = footer_row_frame()
+                .child(avatar)
+                .child(div().flex_1().min_w_0().child("Jacob Steeves"));
+            div()
+                .w(px(296.0))
+                .h(px(520.0))
+                .flex()
+                .flex_col()
+                .child(div().h(px(HEADER_HEIGHT)).flex_shrink_0())
+                .child(div().flex_1().min_h_0())
+                .child(footer_frame(row).debug_selector(|| "footer".into()))
+        }
+    }
+
+    #[gpui::test]
+    fn the_footer_avatar_lands_on_groks_pixels(cx: &mut TestAppContext) {
+        let (_view, vcx) = cx.add_window_view(|_, _| Column);
+        vcx.run_until_parked();
+        let footer = vcx.debug_bounds("footer").expect("footer drawn");
+        let bottom: f32 = footer.bottom().into();
+        assert_eq!(bottom, 520.0, "the footer is the column's last band");
+        assert_eq!(f32::from(footer.size.height), FOOTER_HEIGHT);
+        let avatar = vcx.debug_bounds("avatar").expect("avatar drawn");
+        let left: f32 = avatar.origin.x.into();
+        let top: f32 = avatar.origin.y.into();
+        let h: f32 = avatar.size.height.into();
+        assert_eq!(h, grok::AVATAR, "avatar size");
+        assert_eq!(left, grok::AVATAR_LEFT, "avatar left inset");
+        assert_eq!(
+            bottom - (top + h),
+            grok::AVATAR_BOTTOM,
+            "avatar above the bottom"
+        );
+        assert_eq!(
+            bottom - (top + h / 2.0),
+            grok::AVATAR_LINE,
+            "avatar centre line"
+        );
+        let ring = vcx.debug_bounds("dot-ring").expect("dot ring drawn");
+        let ring_right: f32 = ring.right().into();
+        let ring_bottom: f32 = ring.bottom().into();
+        assert_eq!(
+            ring_right,
+            left + h + FOOTER_DOT_OVERHANG,
+            "dot overhangs right"
+        );
+        assert_eq!(
+            ring_bottom,
+            top + h + FOOTER_DOT_OVERHANG,
+            "dot overhangs bottom"
+        );
+        let card = vcx
+            .debug_bounds("sidebar-account")
+            .expect("hover card drawn");
+        let card_left: f32 = card.origin.x.into();
+        assert_eq!(card_left, FOOTER_ROW_INSET, "card at the rows' inset");
+        assert_eq!(f32::from(card.size.height), FOOTER_ROW_HEIGHT);
+    }
+}
+
+#[cfg(test)]
 mod row_bounds_tests {
     use gpui::{div, prelude::*, px, ScrollHandle, TestAppContext};
 
@@ -2628,9 +2834,8 @@ mod row_bounds_tests {
                         .child(format!("Chat {i}")),
                 );
             }
-            let account = div()
-                .h(px(44.0))
-                .flex_shrink_0()
+            // The footer exactly as `render` frames it (band + hover card).
+            let account = super::footer_frame(super::footer_row_frame())
                 .debug_selector(|| "account-row".into());
             div()
                 .w(px(280.0))
