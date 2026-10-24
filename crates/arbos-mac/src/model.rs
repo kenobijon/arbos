@@ -1585,6 +1585,10 @@ pub struct Message {
     pub mentions: Vec<String>,
     #[serde(default)]
     pub reply_to: Option<String>,
+    /// Bubble menu → Forward: the original sender's display name; the bubble
+    /// shows "Forwarded from <name>" above the text (`forwardedFrom`).
+    #[serde(default)]
+    pub forwarded_from: Option<String>,
     /// On an agent's reply in a people chat: who asked and whose machine answered.
     #[serde(default)]
     pub asked_by_handle: Option<String>,

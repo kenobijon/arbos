@@ -22,9 +22,17 @@ enum Block: Equatable, Hashable {
 /// Grok Bot's quote header inside a reply bubble: speech-bubble glyph, then the replied-to
 /// message's first words in quotes, one line, truncated with "…". Tapping it reveals the original.
 struct Quote: Equatable, Hashable {
-    /// The message replied to (`replyTo` on the row).
+    /// The message replied to (`replyTo` on the row); empty on a forward header.
     var messageId: Id
     var text: String
+    /// Set on a forwarded message: the header reads "Forwarded from <name>" with the
+    /// forward glyph instead of a reply quote, and does not scroll anywhere.
+    var forwardedFrom: String? = nil
+
+    /// The header for a forwarded message (`forwardedFrom` on the row).
+    static func forwarded(from name: String) -> Quote {
+        Quote(messageId: "", text: name, forwardedFrom: name)
+    }
 
     /// The header shows this many characters of the original before "…".
     static let maxChars = 64
@@ -211,7 +219,13 @@ enum Transcript {
                 // Generic labels ("Image", "Photo", …) are not prose — the attachment
                 // row already carries the media. Showing them as a bubble is noise.
                 if !text.isEmpty, forwarded == nil, !(hasImage && Self.isGenericMediaLabel(text)) {
-                    let quote = message.replyTo.flatMap { $0.isEmpty ? nil : Quote.forReply($0, in: byId) }
+                    // A forward carries its "Forwarded from" header where a reply carries its quote.
+                    let quote: Quote?
+                    if let by = message.forwardedFrom?.trimmingCharacters(in: .whitespacesAndNewlines), !by.isEmpty {
+                        quote = .forwarded(from: by)
+                    } else {
+                        quote = message.replyTo.flatMap { $0.isEmpty ? nil : Quote.forReply($0, in: byId) }
+                    }
                     if mine {
                         chunk.append(Row(id: "\(message.id)#user", messageId: message.id, role: .user,
                                          kind: .user(text: text, pending: message.pending, quote: quote)))
@@ -1321,7 +1335,26 @@ struct RowView: View, Equatable {
 
     /// Grok Bot's quote header at the top of a reply bubble: speech-bubble glyph, then the
     /// original's first words in quotes on one line. Tap → the chat scrolls to the original.
+    @ViewBuilder
     private func quoteHeader(_ quote: Quote, color: Color) -> some View {
+        if let by = quote.forwardedFrom {
+            // Telegram / iMessage: forward glyph + "Forwarded from <name>", one line, not tappable.
+            HStack(spacing: 6) {
+                Image(systemName: "arrowshape.turn.up.right")
+                    .font(.system(size: 11, weight: .medium))
+                Text(MediaAlbum.forwardedPrefix + by)
+                    .font(theme.font(Theme.small, weight: .medium))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            .foregroundStyle(color.opacity(0.72))
+            .accessibilityLabel("Forwarded from \(by)")
+        } else {
+            replyQuoteHeader(quote, color: color)
+        }
+    }
+
+    private func replyQuoteHeader(_ quote: Quote, color: Color) -> some View {
         Button {
             onQuoteTap?(quote.messageId)
         } label: {

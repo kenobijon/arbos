@@ -23,6 +23,7 @@ pub const MENU_EDGE_MARGIN: f32 = 8.0;
 pub enum MessageMenuItem {
     Copy,
     Reply,
+    Forward,
     Delete,
 }
 
@@ -31,6 +32,7 @@ impl MessageMenuItem {
         match self {
             MessageMenuItem::Copy => "Copy",
             MessageMenuItem::Reply => "Reply",
+            MessageMenuItem::Forward => "Forward",
             MessageMenuItem::Delete => "Delete",
         }
     }
@@ -39,6 +41,7 @@ impl MessageMenuItem {
         match self {
             MessageMenuItem::Copy => "copy",
             MessageMenuItem::Reply => "reply",
+            MessageMenuItem::Forward => "forward",
             MessageMenuItem::Delete => "trash",
         }
     }
@@ -50,9 +53,10 @@ impl MessageMenuItem {
 
 /// The menu's items, in order. One list for every bubble: the set is the
 /// contract, not a per-row choice.
-pub const ITEMS: [MessageMenuItem; 3] = [
+pub const ITEMS: [MessageMenuItem; 4] = [
     MessageMenuItem::Copy,
     MessageMenuItem::Reply,
+    MessageMenuItem::Forward,
     MessageMenuItem::Delete,
 ];
 
@@ -203,6 +207,11 @@ fn run(
                 .state
                 .update(cx, |s, cx| s.set_reply_to(chat_id, message_id, cx));
         }
+        MessageMenuItem::Forward => {
+            shell
+                .state
+                .update(cx, |s, cx| s.open_forward_message(chat_id, message_id, cx));
+        }
         MessageMenuItem::Delete => {
             // Asks first ("Delete message?", `delete_confirm`); nothing is deleted yet.
             shell
@@ -226,9 +235,11 @@ mod tests {
     }
 
     #[test]
-    fn items_are_exactly_copy_reply_delete() {
+    fn items_are_exactly_copy_reply_forward_delete() {
         let labels: Vec<&str> = ITEMS.iter().map(|i| i.label()).collect();
-        assert_eq!(labels, ["Copy", "Reply", "Delete"]);
+        assert_eq!(labels, ["Copy", "Reply", "Forward", "Delete"]);
+        // Forward sits above the divider, with the plain actions; Delete alone is red.
+        assert!(!MessageMenuItem::Forward.danger());
         // No emoji row: every label is plain ASCII text.
         assert!(ITEMS.iter().all(|i| i.label().is_ascii()));
     }
@@ -236,8 +247,11 @@ mod tests {
     #[test]
     fn delete_is_offered_only_when_allowed() {
         let labels = |v: Vec<MessageMenuItem>| v.iter().map(|i| i.label()).collect::<Vec<_>>();
-        assert_eq!(labels(items_for(true)), ["Copy", "Reply", "Delete"]);
-        assert_eq!(labels(items_for(false)), ["Copy", "Reply"]);
+        assert_eq!(
+            labels(items_for(true)),
+            ["Copy", "Reply", "Forward", "Delete"]
+        );
+        assert_eq!(labels(items_for(false)), ["Copy", "Reply", "Forward"]);
     }
 
     #[test]

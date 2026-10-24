@@ -492,12 +492,19 @@ final class AppModel: ObservableObject {
     static let maxHomePins = 5
 
     /// Home-list keys (`p:<projectId>` / `c:<peopleChatId>`) kept at the top.
-    @Published private(set) var pinnedHomeIds: Set<String> = {
-        Set(UserDefaults.standard.stringArray(forKey: "pinnedHome") ?? [])
+    /// Order is the pin strip: index 0 is the topmost row.
+    @Published private(set) var pinnedHomeIds: [String] = {
+        var seen = Set<String>()
+        return (UserDefaults.standard.stringArray(forKey: "pinnedHome") ?? [])
+            .filter { seen.insert($0).inserted }
     }()
 
     func isHomePinned(projectId: Id) -> Bool { pinnedHomeIds.contains("p:" + projectId) }
     func isHomePinned(peopleChatId: Id) -> Bool { pinnedHomeIds.contains("c:" + peopleChatId) }
+
+    /// Position in the pin strip (0 = top), or `nil` when not pinned.
+    func homePinIndex(projectId: Id) -> Int? { pinnedHomeIds.firstIndex(of: "p:" + projectId) }
+    func homePinIndex(peopleChatId: Id) -> Int? { pinnedHomeIds.firstIndex(of: "c:" + peopleChatId) }
 
     func pinHome(projectId: Id) {
         unarchive(projectId)
@@ -512,6 +519,18 @@ final class AppModel: ObservableObject {
     }
     func unpinHome(peopleChatId: Id) { setHomePinned("c:" + peopleChatId, false) }
 
+    /// Put a pinned home row first in the pin strip (long-press → Move to top).
+    func moveHomePinToTop(projectId: Id) { moveHomePinToTop(key: "p:" + projectId) }
+    func moveHomePinToTop(peopleChatId: Id) { moveHomePinToTop(key: "c:" + peopleChatId) }
+
+    /// Move a pinned home row one step toward the top of the strip.
+    func moveHomePinUp(projectId: Id) { moveHomePin(key: "p:" + projectId, delta: -1) }
+    func moveHomePinUp(peopleChatId: Id) { moveHomePin(key: "c:" + peopleChatId, delta: -1) }
+
+    /// Move a pinned home row one step toward the bottom of the strip.
+    func moveHomePinDown(projectId: Id) { moveHomePin(key: "p:" + projectId, delta: 1) }
+    func moveHomePinDown(peopleChatId: Id) { moveHomePin(key: "c:" + peopleChatId, delta: 1) }
+
     private func setHomePinned(_ key: String, _ pinned: Bool) {
         if pinned {
             guard !pinnedHomeIds.contains(key) else { return }
@@ -520,12 +539,28 @@ final class AppModel: ObservableObject {
                 notice = Notice(text: "You can pin up to five chats.")
                 return
             }
-            pinnedHomeIds.insert(key)
+            // New pins land at the top; later Move to top / up / down adjusts order.
+            pinnedHomeIds.insert(key, at: 0)
         } else {
-            guard pinnedHomeIds.contains(key) else { return }
-            pinnedHomeIds.remove(key)
+            guard let i = pinnedHomeIds.firstIndex(of: key) else { return }
+            pinnedHomeIds.remove(at: i)
         }
-        UserDefaults.standard.set(Array(pinnedHomeIds), forKey: "pinnedHome")
+        UserDefaults.standard.set(pinnedHomeIds, forKey: "pinnedHome")
+    }
+
+    private func moveHomePinToTop(key: String) {
+        guard let i = pinnedHomeIds.firstIndex(of: key), i > 0 else { return }
+        pinnedHomeIds.remove(at: i)
+        pinnedHomeIds.insert(key, at: 0)
+        UserDefaults.standard.set(pinnedHomeIds, forKey: "pinnedHome")
+    }
+
+    private func moveHomePin(key: String, delta: Int) {
+        guard let i = pinnedHomeIds.firstIndex(of: key) else { return }
+        let j = i + delta
+        guard pinnedHomeIds.indices.contains(j) else { return }
+        pinnedHomeIds.swapAt(i, j)
+        UserDefaults.standard.set(pinnedHomeIds, forKey: "pinnedHome")
     }
 
     @Published private(set) var machineError: String?
@@ -2480,7 +2515,8 @@ final class AppModel: ObservableObject {
     /// `chipMentions` are extra agent member ids from a multi-select on the conversation
     /// selector (any combination of agents that should all reply).
     func sendPeople(chatId: String, text: String, replyTo: String?, address: String? = nil,
-                    chipMentions: [String] = [], attachments: [PendingAttachment] = []) {
+                    chipMentions: [String] = [], attachments: [PendingAttachment] = [],
+                    forwardedFrom: String? = nil) {
         guard let doc = docs[chatId], let chat = peopleChat(chatId), let me = user else { return }
         var mentions = AppModel.mentions(in: text, members: chat.members, senderHandle: me.login)
         // Leading bare agent names ("Bob?", "hey Bob …", "Arbos what is your name") count as
@@ -2550,7 +2586,7 @@ final class AppModel: ObservableObject {
         // the room ACK raced a still-queued commit.
         if attachments.isEmpty {
             commitPeople(chatId: chatId, doc: doc, messageId: messageId, text: text, author: author,
-                         mentions: mentions, reply: reply, attachments: [])
+                         mentions: mentions, reply: reply, attachments: [], forwardedFrom: forwardedFrom)
             return
         }
         markUnacked(chatId: chatId, messageId: messageId)
@@ -2574,11 +2610,12 @@ final class AppModel: ObservableObject {
     /// reserved the id before an attachment upload.
     private func commitPeople(chatId: String, doc: CoreChatDoc, messageId: Id, text: String,
                               author: CoreChatDoc.Author, mentions: [String], reply: String?,
-                              attachments: [Attachment], alreadyUnacked: Bool = false) {
+                              attachments: [Attachment], alreadyUnacked: Bool = false,
+                              forwardedFrom: String? = nil) {
         if !alreadyUnacked { markUnacked(chatId: chatId, messageId: messageId) }
         do {
             try doc.insertUserMessage(id: messageId, text: text, deviceId: deviceId, attachments: attachments,
-                                      author: author, mentions: mentions, replyTo: reply)
+                                      author: author, mentions: mentions, replyTo: reply, forwardedFrom: forwardedFrom)
             try doc.pushCommand("send", payload: ["messageId": messageId], device: deviceId)
         } catch {
             clearUnacked(chatId: chatId, messageId: messageId)
@@ -3635,6 +3672,42 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Edit a message's text in the shared chat doc (own messages). No new send
+    /// command — peers see the updated body via room sync only.
+    func editMessage(chatId: Id, messageId: Id, text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !messageId.isEmpty, !trimmed.isEmpty else { return }
+        #if DEBUG
+        if isFixture {
+            guard var list = messages[chatId],
+                  let idx = list.firstIndex(where: { $0.id == messageId })
+            else { return }
+            var parts = list[idx].parts
+            if let t = parts.lastIndex(where: {
+                if case .text = $0 { return true } else { return false }
+            }) {
+                if case .text(let id, _) = parts[t] {
+                    parts[t] = .text(id: id, text: trimmed)
+                }
+            } else {
+                parts.append(.text(id: "\(messageId)-t", text: trimmed))
+            }
+            list[idx].parts = parts
+            messages[chatId] = list
+            Haptics.pick()
+            return
+        }
+        #endif
+        guard let doc = docs[chatId] else { return }
+        do {
+            try doc.editMessage(messageId: messageId, text: trimmed)
+            doc.commit()
+            Haptics.pick()
+        } catch {
+            notice = Notice(text: "Could not edit the message: \(error.localizedDescription)")
+        }
+    }
+
     /// Paint any room doc that already has rows but no published transcript yet
     /// (checkpoint landed, catch-up still in flight). Home search reads
     /// `messages`, so this must run when the search field becomes active.
@@ -3754,9 +3827,11 @@ final class AppModel: ObservableObject {
 
     /// `replyTo` = the message this send answers (reply-to); it lands on the row as `replyTo`
     /// so every client draws the quote header and agentd puts the quoted message in the turn.
-    func send(chatId: Id, text: String, attachments: [PendingAttachment] = [], replyTo: Id? = nil) {
+    func send(chatId: Id, text: String, attachments: [PendingAttachment] = [], replyTo: Id? = nil,
+              forwardedFrom: String? = nil) {
         if attachments.isEmpty {
-            write(chatId: chatId, text: text, command: "send", attachments: [], replyTo: replyTo)
+            write(chatId: chatId, text: text, command: "send", attachments: [], replyTo: replyTo,
+                  forwardedFrom: forwardedFrom)
             return
         }
         guard let chat = chat(chatId) else { return }
@@ -3897,7 +3972,8 @@ final class AppModel: ObservableObject {
     }
 
     private func write(chatId: Id, text: String, command: String, attachments: [Attachment],
-                       extra: [String: Any] = [:], messageId presetId: Id? = nil, replyTo: Id? = nil) {
+                       extra: [String: Any] = [:], messageId presetId: Id? = nil, replyTo: Id? = nil,
+                       forwardedFrom: String? = nil) {
         guard let chat = chat(chatId) else {
             #if DEBUG
             if isFixture { fixtureAppend(chatId: chatId, text: text, attachments: attachments, replyTo: replyTo) }
@@ -3908,14 +3984,16 @@ final class AppModel: ObservableObject {
         // Echo the bubble now and flush once `finalizeNewChat` swaps the id.
         guard let doc = docs[chatId] else {
             enqueueOptimisticSend(chatId: chatId, chat: chat, text: text, command: command,
-                                  attachments: attachments, extra: extra, replyTo: replyTo)
+                                  attachments: attachments, extra: extra, replyTo: replyTo,
+                                  forwardedFrom: forwardedFrom)
             return
         }
         let messageId = presetId ?? newId()
         markUnacked(chatId: chatId, messageId: messageId)
         do {
             try doc.insertUserMessage(id: messageId, text: text, deviceId: deviceId, attachments: attachments,
-                                      author: projectAuthor(projectId: chat.projectId), replyTo: replyTo)
+                                      author: projectAuthor(projectId: chat.projectId), replyTo: replyTo,
+                                      forwardedFrom: forwardedFrom)
             try doc.pushCommand(command, payload: extra.merging(["messageId": messageId]) { _, new in new }, device: deviceId)
             if !chat.isPinned && chat.title == "New chat" {
                 let title = AppModel.title(from: text)
@@ -3953,6 +4031,7 @@ final class AppModel: ObservableObject {
         var attachments: [Attachment]
         var extra: [String: Any]
         var replyTo: Id?
+        var forwardedFrom: String?
     }
     private var optimisticSends: [Id: [OptimisticSend]] = [:]
     /// Local chat ids still waiting on `POST /projects/{id}/chats`.
@@ -3967,7 +4046,8 @@ final class AppModel: ObservableObject {
     }
 
     private func enqueueOptimisticSend(chatId: Id, chat: Chat, text: String, command: String,
-                                       attachments: [Attachment], extra: [String: Any], replyTo: Id? = nil) {
+                                       attachments: [Attachment], extra: [String: Any], replyTo: Id? = nil,
+                                       forwardedFrom: String? = nil) {
         guard optimisticChatIds.contains(chatId) else {
             notice = Notice(text: "Could not write the message: chat is not ready yet")
             return
@@ -3981,6 +4061,7 @@ final class AppModel: ObservableObject {
                             + (text.isEmpty ? [] : [.text(id: "\(messageId)-t", text: text)]),
                         hiddenCount: 0)
         m.replyTo = replyTo
+        m.forwardedFrom = forwardedFrom
         // Keep attachment-only rows valid when text is empty.
         if m.parts.isEmpty { m.parts = [.text(id: "\(messageId)-t", text: text)] }
         messages[chatId, default: []].append(m)
@@ -3989,7 +4070,7 @@ final class AppModel: ObservableObject {
         }
         optimisticSends[chatId, default: []].append(
             OptimisticSend(messageId: messageId, text: text, command: command,
-                           attachments: attachments, extra: extra, replyTo: replyTo)
+                           attachments: attachments, extra: extra, replyTo: replyTo, forwardedFrom: forwardedFrom)
         )
         markActivity(chatId: chatId)
         if let p = project(chat.projectId), p.state.isAsleep || p.state == .error {
@@ -4139,7 +4220,8 @@ final class AppModel: ObservableObject {
         // the same ids so emitSnapshot replaces them in place (no flicker).
         for item in queued {
             write(chatId: real.id, text: item.text, command: item.command,
-                  attachments: item.attachments, extra: item.extra, messageId: item.messageId, replyTo: item.replyTo)
+                  attachments: item.attachments, extra: item.extra, messageId: item.messageId, replyTo: item.replyTo,
+                  forwardedFrom: item.forwardedFrom)
         }
 
         // Swap the navigation id for the real one, then drop the local mirrors.

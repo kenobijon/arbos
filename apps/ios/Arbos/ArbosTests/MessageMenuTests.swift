@@ -3,7 +3,8 @@ import XCTest
 
 /// The bubble's long-press menu is Copy / Reply / Forward / Reply in DM /
 /// Delete (#1370, #1472, forward feedback), plus View thread when the message
-/// has replies — no emoji row, no Mention; a non-message row copies only.
+/// has replies and Edit on the user's own text — no emoji row, no Mention; a
+/// non-message row copies only.
 final class MessageMenuTests: XCTestCase {
     func testItemsAreExactlyCopyReplyForwardReplyInDMDelete() {
         XCTAssertEqual(MessageMenu.items, [.copy, .reply, .forward, .replyInDM, .delete])
@@ -14,12 +15,31 @@ final class MessageMenuTests: XCTestCase {
                        ["Copy", "Reply", "View thread", "Forward", "Reply in DM", "Delete"])
     }
 
+    func testOwnMessageAddsEditBeforeDelete() {
+        XCTAssertEqual(
+            MessageMenu.items(forMessage: true, canEdit: true, canDelete: true),
+            [.copy, .reply, .forward, .replyInDM, .edit, .delete]
+        )
+        XCTAssertEqual(
+            MessageMenu.items(forMessage: true, canEdit: true, canDelete: true).map(\.label),
+            ["Copy", "Reply", "Forward", "Reply in DM", "Edit", "Delete"]
+        )
+        XCTAssertEqual(
+            MessageMenu.items(forMessage: true, canEdit: true, canDelete: false),
+            [.copy, .reply, .forward, .replyInDM, .edit]
+        )
+        XCTAssertEqual(
+            MessageMenu.items(forMessage: true, canEdit: true, canDelete: true, hasReplies: true),
+            [.copy, .reply, .viewThread, .forward, .replyInDM, .edit, .delete]
+        )
+    }
+
     func testNoEmojiOrExtraItems() {
         for item in MessageMenuItem.allCases {
             XCTAssertTrue(item.label.unicodeScalars.allSatisfy { $0.isASCII }, "\(item) label carries non-ASCII text")
             XCTAssertFalse(MessageReaction.palette.contains(item.label))
         }
-        XCTAssertEqual(MessageMenuItem.allCases.count, 6)
+        XCTAssertEqual(MessageMenuItem.allCases.count, 7)
     }
 
     func testOnlyDeleteIsDestructive() {
@@ -28,6 +48,7 @@ final class MessageMenuTests: XCTestCase {
 
     func testNonMessageRowsCopyOnly() {
         XCTAssertEqual(MessageMenu.items(forMessage: false), [.copy])
+        XCTAssertEqual(MessageMenu.items(forMessage: false, canEdit: true), [.copy])
     }
 
     /// feedback app-01M5MXQ90MEEWF6C8W090VCZHF: Delete asks first. My own message gets the

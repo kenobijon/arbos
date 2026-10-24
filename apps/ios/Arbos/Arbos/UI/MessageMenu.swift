@@ -1,17 +1,18 @@
 import SwiftUI
 
 /// The message bubble's menu under the reaction capsule (`MessageActions.swift`):
-/// **Copy, Reply, View thread, Forward, Reply in DM, Delete** (#1370 + #1472;
-/// View thread when the message has replies); reactions live in the capsule,
-/// never here (Jacob, 2026-10-23). Forward opens the same chat picker the media
-/// viewer uses; Reply in DM opens a private chat with the human who wrote the
-/// message. Non-message rows get `copyOnly` as a plain `.contextMenu`.
+/// **Copy, Reply, View thread, Forward, Reply in DM, Edit (own messages), Delete**
+/// (#1370 + #1472; View thread when the message has replies); reactions live in
+/// the capsule, never here (Jacob, 2026-10-23). Forward opens the same chat
+/// picker the media viewer uses; Reply in DM opens a private chat with the human
+/// who wrote the message. Non-message rows get `copyOnly` as a plain `.contextMenu`.
 enum MessageMenuItem: CaseIterable, Equatable {
     case copy
     case reply
     case viewThread
     case forward
     case replyInDM
+    case edit
     case delete
 
     var label: String {
@@ -21,6 +22,7 @@ enum MessageMenuItem: CaseIterable, Equatable {
         case .viewThread: return "View thread"
         case .forward: return "Forward"
         case .replyInDM: return "Reply in DM"
+        case .edit: return "Edit"
         case .delete: return "Delete"
         }
     }
@@ -32,6 +34,7 @@ enum MessageMenuItem: CaseIterable, Equatable {
         case .viewThread: return "bubble.left.and.bubble.right"
         case .forward: return "arrowshape.turn.up.right"
         case .replyInDM: return "bubble.left"
+        case .edit: return "pencil"
         case .delete: return "trash"
         }
     }
@@ -40,10 +43,12 @@ enum MessageMenuItem: CaseIterable, Equatable {
 }
 
 enum MessageMenu {
-    /// The items, in order, for every real message bubble (no replies yet).
+    /// The items, in order, for every real message bubble (Edit / Delete / View
+    /// thread are gated per row via `items(forMessage:canEdit:canDelete:hasReplies:)`).
     static let items: [MessageMenuItem] = [.copy, .reply, .forward, .replyInDM, .delete]
 
-    /// Same as `items`, plus View thread after Reply when the message has replies.
+    /// Same as `items`, plus View thread after Reply when the message has replies
+    /// (no Edit — that still comes from `canEdit` on the row).
     static let itemsWithThread: [MessageMenuItem] = [.copy, .reply, .viewThread, .forward, .replyInDM, .delete]
 
     /// Rows that are not a message in a shared doc (channels, date / system
@@ -51,16 +56,20 @@ enum MessageMenu {
     static let copyOnly: [MessageMenuItem] = [.copy]
 
     static func items(forMessage: Bool) -> [MessageMenuItem] {
-        items(forMessage: forMessage, canDelete: true, hasReplies: false)
+        items(forMessage: forMessage, canEdit: false, canDelete: true, hasReplies: false)
     }
 
-    /// The items for one bubble: View thread when `hasReplies`; Delete only when the
-    /// relay would let this user delete it (`MessageDeleteRule.mayDelete`) — a member
-    /// sees Copy / Reply / Forward on someone else's message, the owner sees all.
-    static func items(forMessage: Bool, canDelete: Bool, hasReplies: Bool = false) -> [MessageMenuItem] {
+    /// View thread when `hasReplies`; Edit only on the user's own text; Delete only
+    /// when the relay would allow it (`MessageDeleteRule.mayDelete`).
+    static func items(forMessage: Bool, canEdit: Bool = false, canDelete: Bool = true,
+                      hasReplies: Bool = false) -> [MessageMenuItem] {
         guard forMessage else { return copyOnly }
-        let base = hasReplies ? itemsWithThread : items
-        return canDelete ? base : base.filter { !$0.isDestructive }
+        var out: [MessageMenuItem] = [.copy, .reply]
+        if hasReplies { out.append(.viewThread) }
+        out.append(contentsOf: [.forward, .replyInDM])
+        if canEdit { out.append(.edit) }
+        if canDelete { out.append(.delete) }
+        return out
     }
 }
 
@@ -82,7 +91,8 @@ enum MessageDeleteRule {
     }
 }
 
-/// The menu's buttons, for `.contextMenu { MessageMenuContent(...) }`.
+/// The menu's buttons, for `.contextMenu { MessageMenuContent(...) }` and the
+/// long-press overlay under the reaction capsule.
 struct MessageMenuContent: View {
     let items: [MessageMenuItem]
     let action: (MessageMenuItem) -> Void
