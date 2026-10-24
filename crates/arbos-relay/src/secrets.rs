@@ -2177,7 +2177,11 @@ pub(crate) async fn decide(
             // The ask came from a person who is not the owner: the answer also puts them on
             // the People list — for this chat, or standing (Jacob, 2026-10-23: "Always allow
             // @person" adds them).
-            if let Some(person) = rq.asked_by.as_deref().filter(|p| *p != user_id) {
+            if let Some(person) = rq
+                .asked_by
+                .as_deref()
+                .filter(|p| *p != user_id && *p != arbos_core::UNKNOWN_ASKER)
+            {
                 let now = now_ms();
                 let existing = state.db.secret_director(&s.id, person).map_err(internal)?;
                 let is_new = existing.is_none();

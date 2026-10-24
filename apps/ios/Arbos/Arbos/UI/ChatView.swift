@@ -1210,8 +1210,9 @@ struct ChatView: View {
     }
 
     /// "@sam" / "Bob" (the agent of this chat) / "you" for the composer's reply preview.
+    /// My own rows carry `sender: user:<my id>` in shared projects — still "you".
     private func replyLabel(for m: Message) -> String {
-        if let h = m.senderHandle, m.sender != "user" { return "@\(h)" }
+        if let h = m.senderHandle, m.sender != "user", m.sender != model.myUserId { return "@\(h)" }
         if m.role == .assistant || m.role == .project { return project?.name ?? "the agent" }
         return "you"
     }
