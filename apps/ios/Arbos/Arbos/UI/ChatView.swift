@@ -33,6 +33,9 @@ struct ChatView: View {
     @State private var rows: [Row] = []
     /// The message list the current `rows` were built from (last id / count checks).
     @State private var rowsSource: [Message] = []
+    /// Bumped by every `refreshRows`; with the window bounds it identifies `shown`
+    /// without comparing the row array (that compare ran once per row per change).
+    @State private var rowsVersion = 0
     /// id → message for the rows on screen (menus, search, replies); rebuilt with `rows`.
     @State private var messageById: [Id: Message] = [:]
     /// How many of the newest rows are in the view tree. The transcript is a plain
@@ -112,6 +115,13 @@ struct ChatView: View {
         let q = searchText.trimmingCharacters(in: .whitespaces)
         guard showSearch, !q.isEmpty else { return rows }
         return rows.filter { m_text($0).localizedCaseInsensitiveContains(q) }
+    }
+
+    static func shownStamp(_ rowsVersion: Int, _ windowCount: Int, _ windowSkipEnd: Int, _ query: String, _ searching: Bool) -> Int {
+        var h = Hasher()
+        h.combine(rowsVersion); h.combine(windowCount); h.combine(windowSkipEnd)
+        if searching { h.combine(query) }
+        return h.finalize()
     }
 
     /// The newest `windowCount` of `visibleRows`: what the VStack actually holds.
@@ -422,6 +432,7 @@ struct ChatView: View {
         }
         messageById = byId
         rows = next
+        rowsVersion &+= 1
     }
 
     var body: some View {
@@ -1131,6 +1142,7 @@ struct ChatView: View {
                         model: model,
                         mentions: mentions,
                         shown: shown,
+                        shownStamp: Self.shownStamp(rowsVersion, windowCount, windowSkipEnd, searchText, showSearch),
                         chatId: chatId,
                         width: width,
                         timeReveal: timeReveal,
@@ -2245,6 +2257,8 @@ private struct TranscriptRows: View, Equatable {
     let model: AppModel
     let mentions: MentionTable
     let shown: [Row]
+    /// Identity of `shown` (rows version + window bounds + search): compared instead of the array.
+    let shownStamp: Int
     let chatId: Id
     let width: CGFloat
     let timeReveal: CGFloat
@@ -2258,7 +2272,7 @@ private struct TranscriptRows: View, Equatable {
     let onMenu: (MessageMenuItem, Row) -> Void
 
     static func == (lhs: TranscriptRows, rhs: TranscriptRows) -> Bool {
-        let same = lhs.shown == rhs.shown
+        let same = lhs.shownStamp == rhs.shownStamp
             && lhs.chatId == rhs.chatId
             && lhs.width == rhs.width
             && lhs.timeReveal == rhs.timeReveal
@@ -2269,7 +2283,7 @@ private struct TranscriptRows: View, Equatable {
         #if DEBUG
         PerfCounters.bump(same ? "rowsEqTrue" : "rowsEqFalse")
         if !same {
-            PerfCounters.bump("rowsEq.\(lhs.shown == rhs.shown ? "" : "shown,")\(lhs.width == rhs.width ? "" : "width,")\(lhs.timeReveal == rhs.timeReveal ? "" : "reveal,")\(lhs.mentions.stamp == rhs.mentions.stamp ? "" : "stamp,")\(lhs.highlightedMessage == rhs.highlightedMessage ? "" : "hl,")")
+            PerfCounters.bump("rowsEq.\(lhs.shownStamp == rhs.shownStamp ? "" : "shown,")\(lhs.width == rhs.width ? "" : "width,")\(lhs.timeReveal == rhs.timeReveal ? "" : "reveal,")\(lhs.mentions.stamp == rhs.mentions.stamp ? "" : "stamp,")\(lhs.highlightedMessage == rhs.highlightedMessage ? "" : "hl,")")
         }
         #endif
         return same
