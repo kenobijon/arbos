@@ -108,7 +108,8 @@ struct ChatView: View {
     @State private var memoCancelArmed = false
     /// Hold-to-talk: horizontal drag (≤ 0) while the mic is pressed.
     @State private var memoDragX: CGFloat = 0
-    @FocusState private var composerFocused: Bool
+    /// The field (a `UITextView`, #1596) follows this both ways.
+    @State private var composerFocused = false
 
     /// Hold-to-talk: slide the mic this far left to discard instead of send.
     private static let memoCancelDistance: CGFloat = 56
@@ -733,7 +734,7 @@ struct ChatView: View {
             model.markRead(chatId: chatId, force: true)
             model.visibleChatId = chatId
             // Restore unsent text left when the user backed out of this thread.
-            let saved = model.composerDraft(for: chatId)
+            let saved = DebugHooks.composerDraft ?? model.composerDraft(for: chatId)
             composerDraft.onChange = { [chatId] d in
                 // Keep the draft while the view is still up so a process kill mid-type
                 // is not required — leaving the thread saves on disappear too.
@@ -745,14 +746,23 @@ struct ChatView: View {
                 }
                 let everyone = AppModel.addressesEveryone(d)
                 if everyone != draftAddressesEveryone { draftAddressesEveryone = everyone }
-                // `@` completion: the token the caret is in (approximated by the last token).
-                var q: String? = nil
-                if isPeople, let last = d.split(separator: " ", omittingEmptySubsequences: false).last, last.hasPrefix("@"), !d.hasSuffix(" ") {
-                    q = String(last.dropFirst()).lowercased()
+                // `@handle` + a separator typed right after it: a chip, no picker (behaviour 5).
+                if isPeople, let m = MentionDraft.autoResolve(text: d, caret: composerDraft.caret, mentions: composerDraft.mentions,
+                                                              members: people?.members ?? [], me: model.user?.login) {
+                    var next = composerDraft.mentions
+                    next.append(m)
+                    next.sort { $0.range.lowerBound < $1.range.lowerBound }
+                    composerDraft.mentions = next
                 }
-                if q != mentionQuery { mentionQuery = q }
+                updateMentionQuery()
             }
-            if composerDraft.text.isEmpty, !saved.isEmpty { composerDraft.text = saved }
+            composerDraft.onCaretOrMentions = { updateMentionQuery() }
+            if composerDraft.text.isEmpty, !saved.isEmpty {
+                composerDraft.text = saved
+                composerDraft.caret = (saved as NSString).length
+                composerDraft.mentions = MentionDraft.resolveAll(text: saved, mentions: [], members: people?.members ?? [], me: model.user?.login)
+                if DebugHooks.composerDraft != nil { composerFocused = true }
+            }
             if isPeople { model.markPeopleRead(chatId, force: true) }
             if isChannel {
                 // The newest page now, live rows through the listener from here on.
@@ -1636,6 +1646,8 @@ struct ChatView: View {
         replyTo = nil
         editing = m
         composerDraft.text = m.plainText
+        composerDraft.caret = (m.plainText as NSString).length
+        composerDraft.mentions = MentionDraft.resolveAll(text: m.plainText, mentions: [], members: people?.members ?? [], me: model.user?.login)
         composerFocused = true
     }
 
@@ -1972,6 +1984,8 @@ struct ChatView: View {
             draft: composerDraft,
             recorder: recorder,
             focus: $composerFocused,
+            chatId: chatId,
+            model: model,
             isChannel: isChannel,
             needsAnswer: needsAnswer,
             hasPending: !pending.isEmpty,
@@ -2080,69 +2094,115 @@ struct ChatView: View {
         recorder.cancel()
     }
 
+    /// Empty the field after a send (text, chips, caret, the saved draft).
+    private func clearDraft() {
+        composerDraft.text = ""
+        composerDraft.mentions = []
+        composerDraft.caret = 0
+        model.setComposerDraft("", for: chatId)
+    }
+
     private var canSend: Bool {
         !composerDraft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !pending.isEmpty
     }
 
 
-    /// Members whose handle/slug starts with the typed `@` prefix; agents first.
-    /// Agents without a live `project` (soft-deleted) are omitted — they cannot reply.
+    /// `@` completion: the `@token` the caret sits at the end of (nil closes the picker).
+    private func updateMentionQuery() {
+        // Set only on change: this runs per keystroke from the draft hook, and the
+        // screen must not re-render for a value that did not move.
+        let next: String? = isPeople ? MentionDraft.openToken(text: composerDraft.text, caret: composerDraft.caret, mentions: composerDraft.mentions)?.query : nil
+        if next != mentionQuery { mentionQuery = next }
+    }
+
+    /// The `@` picker (#1596, the approved mock): a card above the field inset
+    /// like it, one 44 pt row per entity — 28 pt picture · name · `@handle`,
+    /// hairlines between rows — people and agents in one list (behaviour 2).
+    /// Tap inserts the chip.
     private func mentionList(_ people: PeopleChat, query: String) -> some View {
-        let agents = people.agents.filter { $0.project != nil && (query.isEmpty || mentionSlug($0.project?.name ?? $0.handle).hasPrefix(query)) }
-        let humans = people.humans.filter { $0.id != model.user?.id && (query.isEmpty || $0.handle.lowercased().hasPrefix(query)) }
-        let items = agents + humans
-        // A slug both an agent and a person carry (#1538) gets a kind label on each chip.
-        let slugs = items.map { $0.isAgent ? mentionSlug($0.project?.name ?? $0.handle) : $0.handle.lowercased() }
-        func label(_ m: ChatMember) -> String {
-            let slug = m.isAgent ? mentionSlug(m.project?.name ?? m.handle) : m.handle.lowercased()
-            let shared = slugs.filter { $0 == slug }.count > 1 || slug == model.user?.login.lowercased()
-            return shared ? (m.isAgent ? "agent" : "person") : ""
-        }
+        let rows = MentionDraft.candidates(query: query, members: people.members, me: model.user?.login)
         return Group {
-            if !items.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        ForEach(items) { m in
-                            Button { completeMention(m) } label: {
-                                HStack(spacing: 6) {
-                                    if m.isAgent { AgentAvatar(project: model.agent(member: m, chatId: chatId), theme: theme, size: 20, still: true) } else { PersonAvatar(url: m.avatarUrl, handle: m.handle, size: 20, name: m.name, id: m.id, colorIndex: m.avatarColorIndex) }
-                                    Text("@\(m.isAgent ? mentionSlug(m.project?.name ?? m.handle) : m.handle)")
-                                        .font(theme.font(Theme.small, weight: .medium)).foregroundStyle(theme.text)
-                                    if !label(m).isEmpty {
-                                        Text(label(m)).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
+            if !rows.isEmpty {
+                VStack(spacing: 0) {
+                    ForEach(Array(rows.enumerated()), id: \.element.id) { i, m in
+                        Button { completeMention(m) } label: {
+                            HStack(spacing: 12) {
+                                if m.isAgent {
+                                    AgentAvatar(project: model.agent(member: m, chatId: chatId), theme: theme, size: 28, still: true)
+                                } else {
+                                    PersonAvatar(url: m.avatarUrl, handle: m.handle, size: 28, name: m.name, id: m.id, colorIndex: m.avatarColorIndex)
+                                }
+                                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                    Text(m.isAgent ? (m.project?.name ?? m.handle) : (m.name?.isEmpty == false ? m.name! : m.handle))
+                                        .font(theme.font(Theme.body)).foregroundStyle(theme.text).lineLimit(1)
+                                    Text("@" + ComposerMention.handle(of: m))
+                                        .font(theme.font(Theme.small)).foregroundStyle(theme.muted).lineLimit(1)
+                                    if let tag = MentionDraft.tag(for: m, among: rows, me: model.user?.login) {
+                                        Text(tag).font(theme.font(Theme.tiny)).foregroundStyle(theme.placeholder)
                                     }
                                 }
-                                .padding(.leading, 6).padding(.trailing, 12).padding(.vertical, 7)
-                                .background(Capsule().fill(theme.bubbleAssistant))
+                                Spacer(minLength: 0)
                             }
-                            .buttonStyle(.plain)
+                            .padding(.horizontal, 12)
+                            .frame(height: 44)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        if i < rows.count - 1 {
+                            Rectangle().fill(theme.isDark ? Color.white.opacity(0.08) : Color.black.opacity(0.08))
+                                .frame(height: 0.5)
+                                .padding(.leading, 12 + 28 + 12)
+                                .padding(.trailing, 12)
                         }
                     }
-                    .padding(.leading, Theme.plusButton + 12)
                 }
+                .padding(.vertical, 6)
+                .background(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(theme.card)
+                        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .stroke(theme.isDark ? Color.white.opacity(0.10) : Color.black.opacity(0.08), lineWidth: 0.5))
+                        .shadow(color: .black.opacity(theme.isDark ? 0.4 : 0.12), radius: 14, y: 8)
+                )
+                .padding(.horizontal, composerSideInset)
             }
         }
     }
 
+    /// The picked row becomes one chip over the open `@token` (behaviour 4).
     private func completeMention(_ m: ChatMember) {
         ensureMention(m)
         talkTo = [m.member]
         mentionQuery = nil
     }
 
-    /// Put `@slug` in the draft if it is not already there (multi-select agent chips).
+    /// Put `m`'s chip in the draft: over the open `@token` when there is one,
+    /// else at the end — unless the chip is already there (conversation chips).
     private func ensureMention(_ m: ChatMember) {
-        let slug = m.isAgent ? mentionSlug(m.project?.name ?? m.handle) : m.handle
-        let token = "@\(slug)"
-        let lower = composerDraft.text.lowercased()
-        if lower.split(whereSeparator: { $0.isWhitespace }).contains(where: {
-            $0.trimmingCharacters(in: CharacterSet(charactersIn: ".,!?:;")).lowercased() == token.lowercased()
-        }) {
-            return
+        let handle = ComposerMention.handle(of: m).lowercased()
+        if composerDraft.mentions.contains(where: { $0.memberId == m.member }) { return }
+        var text = composerDraft.text
+        var mentions = composerDraft.mentions
+        let caret: Int
+        if let open = MentionDraft.openToken(text: text, caret: composerDraft.caret, mentions: mentions) {
+            caret = MentionDraft.insert(m, at: open.range, text: &text, mentions: &mentions)
+        } else {
+            let lower = text.lowercased()
+            let present = lower.split(whereSeparator: { $0.isWhitespace }).contains(where: {
+                $0.trimmingCharacters(in: CharacterSet(charactersIn: ".,!?:;")) == "@" + handle
+            })
+            if present {
+                // Typed by hand: just make it the chip.
+                composerDraft.mentions = MentionDraft.resolveAll(text: text, mentions: mentions, members: [m], me: nil)
+                return
+            }
+            if !text.isEmpty, !text.hasSuffix(" ") { text += " " }
+            let end = (text as NSString).length
+            caret = MentionDraft.insert(m, at: end..<end, text: &text, mentions: &mentions)
         }
-        var parts = composerDraft.text.split(separator: " ", omittingEmptySubsequences: false).map(String.init)
-        if let last = parts.last, last.hasPrefix("@") { parts[parts.count - 1] = token } else { parts.append(token) }
-        composerDraft.text = parts.joined(separator: " ") + " "
+        composerDraft.mentions = mentions
+        composerDraft.text = text
+        composerDraft.caret = caret
     }
 
     /// Fixed-locale stamp for photo attachment names (relay blob keys must be ASCII).
@@ -2182,7 +2242,7 @@ struct ChatView: View {
         if talkingToEveryone || AppModel.addressesEveryone(text) { return "everyone" }
         if talkToAgents.count > 1 { return nil }
         let members = people?.members ?? []
-        if AppModel.mentions(in: text, members: members).contains(where: { $0.hasPrefix("agent:") }) {
+        if AppModel.mentions(in: text, members: members, chipTokens: MentionDraft.tokens(composerDraft.mentions)).contains(where: { $0.hasPrefix("agent:") }) {
             return effectiveTalkTo
         }
         // Person @handle wins; display-name-only people matches must not block agent slugs.
@@ -2213,9 +2273,9 @@ struct ChatView: View {
         let reply = replyTo?.id
         let address = sendAddress(for: typed)
         let chips = chipMentions(for: typed)
+        let tokens = MentionDraft.tokens(composerDraft.mentions)
         pending.removeAll()
-        composerDraft.text = ""
-        model.setComposerDraft("", for: chatId)
+        clearDraft()
         replyTo = nil
         editing = nil
         mentionQuery = nil
@@ -2232,7 +2292,7 @@ struct ChatView: View {
                 if !text.isEmpty { model.sendChannel(chatId: chatId, text: text) }
             } else if isPeople {
                 model.sendPeople(chatId: chatId, text: text, replyTo: reply, address: address,
-                                 chipMentions: chips, attachments: extras)
+                                 chipMentions: chips, attachments: extras, chipTokens: tokens)
             } else if needsAnswer && extras.isEmpty {
                 model.answer(chatId: chatId, text: text)
             } else {
@@ -2274,8 +2334,7 @@ struct ChatView: View {
             guard !text.isEmpty else { return }
             model.editMessage(chatId: chatId, messageId: edit.id, text: text)
             pending.removeAll()
-            composerDraft.text = ""
-            model.setComposerDraft("", for: chatId)
+            clearDraft()
             editing = nil
             replyTo = nil
             sentOnce = true
@@ -2286,8 +2345,7 @@ struct ChatView: View {
             guard !text.isEmpty else { return }
             model.sendChannel(chatId: chatId, text: text)
             pending.removeAll()
-            composerDraft.text = ""
-            model.setComposerDraft("", for: chatId)
+            clearDraft()
             replyTo = nil
             sentOnce = true
             return
@@ -2296,10 +2354,10 @@ struct ChatView: View {
             let address = sendAddress(for: text)
             let chips = chipMentions(for: text)
             model.sendPeople(chatId: chatId, text: text, replyTo: replyTo?.id, address: address,
-                             chipMentions: chips, attachments: pending)
+                             chipMentions: chips, attachments: pending,
+                             chipTokens: MentionDraft.tokens(composerDraft.mentions))
             pending.removeAll()
-            composerDraft.text = ""
-            model.setComposerDraft("", for: chatId)
+            clearDraft()
             replyTo = nil
             mentionQuery = nil
             pinTalkTo(afterSending: address, chipMentions: chips)
@@ -2312,8 +2370,7 @@ struct ChatView: View {
             model.send(chatId: chatId, text: text, attachments: pending, replyTo: replyTo?.id)
         }
         pending.removeAll()
-        composerDraft.text = ""
-        model.setComposerDraft("", for: chatId)
+        clearDraft()
         replyTo = nil
         sentOnce = true
     }
@@ -2765,10 +2822,21 @@ private struct AwayFromBottomReporter: ViewModifier {
 /// things it shows elsewhere (the `@` picker, "everyone" chips) through `onChange`.
 @MainActor
 final class ComposerDraft: ObservableObject {
+    /// The plain draft: `@handle` where the mention chips are (#1596).
     @Published var text = "" {
         didSet { if text != oldValue { onChange?(text) } }
     }
+    /// The committed mention chips in `text` (spans + members); the field draws
+    /// them as attachments and the send carries their member ids.
+    @Published var mentions: [ComposerMention] = [] {
+        didSet { if mentions != oldValue { onCaretOrMentions?() } }
+    }
+    /// Caret in `text` (UTF-16 offset), kept by the field.
+    @Published var caret = 0 {
+        didSet { if caret != oldValue { onCaretOrMentions?() } }
+    }
     var onChange: ((String) -> Void)?
+    var onCaretOrMentions: (() -> Void)?
 }
 
 /// The field, mic and send / call button. Owns nothing: every action calls back
@@ -2777,7 +2845,9 @@ private struct ComposerField: View {
     @Environment(\.theme) private var theme
     @ObservedObject var draft: ComposerDraft
     @ObservedObject var recorder: MemoRecorder
-    var focus: FocusState<Bool>.Binding
+    @Binding var focus: Bool
+    let chatId: Id
+    let model: AppModel
     let isChannel: Bool
     let needsAnswer: Bool
     let hasPending: Bool
@@ -2859,16 +2929,12 @@ private struct ComposerField: View {
                     }
                 }
             } else {
-                TextField("", text: $draft.text, prompt: Text(prompt(draft.text)).foregroundStyle(theme.placeholder), axis: .vertical)
-                    .lineLimit(1...8)
-                    // Size to the typed text (one line when empty), not the offered height.
+                // The field with mention chips (#1596): one to eight lines, the
+                // chips as attachments; `draft.text` stays the plain `@handle` text.
+                MentionTextView(text: $draft.text, mentions: $draft.mentions, caret: $draft.caret, isFocused: $focus,
+                                placeholder: prompt(draft.text), theme: theme,
+                                agentProject: { model.agent(member: $0, chatId: chatId) })
                     .fixedSize(horizontal: false, vertical: true)
-                    .font(theme.font(Theme.body))
-                    .foregroundStyle(theme.text)
-                    .tint(Color(hex: "#1084FE")!)
-                    .focused(focus)
-                    .padding(.leading, 16)
-                    .padding(.vertical, 10)
             }
             if draft.text.isEmpty || recorder.recording {
                 // Press/release like Mac: tap toggles recording on; hold ≥0.25s then

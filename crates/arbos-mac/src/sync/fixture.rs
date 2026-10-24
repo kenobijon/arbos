@@ -740,6 +740,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             text,
             attachments,
             reply_to,
+            mentions,
         } => {
             let attachments: Vec<Attachment> = attachments
                 .iter()
@@ -764,6 +765,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 attachments,
                 reply_to,
                 None,
+                mentions,
             );
         }
         ClientCommand::Forward {
@@ -783,6 +785,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 vec![attachment],
                 None,
                 None,
+                Vec::new(),
             );
         }
         ClientCommand::OpenAttachment {
@@ -823,6 +826,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 Vec::new(),
                 None,
                 Some(forwarded_from),
+                Vec::new(),
             );
         }
         ClientCommand::Steer {
@@ -840,6 +844,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 Vec::new(),
                 reply_to,
                 None,
+                Vec::new(),
             );
         }
         ClientCommand::SendVoice {
@@ -859,7 +864,16 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 kind: Some(AttachmentKind::Audio),
                 title: None,
             }];
-            send_user(shared, chat_id, message_id, text, attachments, None, None);
+            send_user(
+                shared,
+                chat_id,
+                message_id,
+                text,
+                attachments,
+                None,
+                None,
+                Vec::new(),
+            );
         }
         ClientCommand::Transcribe {
             request_id, wav, ..
@@ -2006,6 +2020,7 @@ fn seed_local() -> LocalView {
 }
 
 /// The user row (attachments first, then the text), its `send` command, and the scripted turn.
+#[allow(clippy::too_many_arguments)]
 fn send_user(
     shared: &Arc<Shared>,
     chat_id: Id,
@@ -2014,10 +2029,15 @@ fn send_user(
     attachments: Vec<Attachment>,
     reply_to: Option<String>,
     forwarded_from: Option<String>,
+    tokens: Vec<String>,
 ) {
     let project_id = project_of(shared, &chat_id);
     if let Some(space) = people_space_of(shared, &chat_id) {
-        let mentions = mentions_in(&space, &text);
+        let mentions = mentions_in(&space, &text, &tokens);
+        // Rig (#1596): `ARBOS_FIXTURE_TRACE_SENDS=1` prints what the row carries.
+        if std::env::var_os("ARBOS_FIXTURE_TRACE_SENDS").is_some() {
+            eprintln!("fixture send: text={text:?} chips={tokens:?} mentions={mentions:?}");
+        }
         let me = me();
         let opts = UserMessageOpts {
             attachments: user_attachments(&attachments),
@@ -5836,9 +5856,15 @@ fn text_has_at_token(lower: &str, token: &str) -> bool {
 
 /// `@slug` / `@handle` tokens in the text, resolved to member ids.
 /// Group owners may also use `@here` (every human) and `@agents` (every agent).
-fn mentions_in(space: &Project, text: &str) -> Vec<String> {
+fn mentions_in(space: &Project, text: &str, tokens: &[String]) -> Vec<String> {
     let lower = text.to_lowercase();
-    let mut out = Vec::new();
+    let mut out: Vec<String> = Vec::new();
+    for t in tokens {
+        if !out.contains(t) {
+            out.push(t.clone());
+        }
+    }
+    let claimed = crate::sync::claimed_handles(space, tokens);
     let i_own_group =
         space.is_people_group() && space.owner_handle.as_deref().is_none_or(|o| o == ME_HANDLE);
     if i_own_group {
@@ -5862,6 +5888,9 @@ fn mentions_in(space: &Project, text: &str) -> Vec<String> {
     for a in &space.agents {
         let handle = a.handle.to_lowercase();
         let slug = Project::mention_slug(&a.name);
+        if claimed.contains(&handle) || claimed.contains(&slug) {
+            continue;
+        }
         if (!handle.is_empty() && text_has_at_token(&lower, &handle))
             || (!slug.is_empty() && text_has_at_token(&lower, &slug))
         {
@@ -5872,7 +5901,11 @@ fn mentions_in(space: &Project, text: &str) -> Vec<String> {
         }
     }
     for p in &space.people {
-        if lower.contains(&format!("@{}", p.handle.to_lowercase())) {
+        let handle = p.handle.to_lowercase();
+        if claimed.contains(&handle) {
+            continue;
+        }
+        if lower.contains(&format!("@{handle}")) {
             let id = format!("user:{}", p.id);
             if !out.iter().any(|x| x == &id) {
                 out.push(id);

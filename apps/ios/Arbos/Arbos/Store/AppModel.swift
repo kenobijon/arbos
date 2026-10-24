@@ -2604,11 +2604,13 @@ final class AppModel: ObservableObject {
     /// "hey everyone" can reach every agent, without typing `@`.
     /// `chipMentions` are extra agent member ids from a multi-select on the conversation
     /// selector (any combination of agents that should all reply).
+    /// `chipTokens` (#1596) are the composer's committed mention chips, lower-case handle →
+    /// member id: an `@handle` in the text that has a chip means exactly that member.
     func sendPeople(chatId: String, text: String, replyTo: String?, address: String? = nil,
                     chipMentions: [String] = [], attachments: [PendingAttachment] = [],
-                    forwardedFrom: String? = nil) {
+                    forwardedFrom: String? = nil, chipTokens: [String: String] = [:]) {
         guard let doc = docs[chatId], let chat = peopleChat(chatId), let me = user else { return }
-        var mentions = AppModel.mentions(in: text, members: chat.members, senderHandle: me.login)
+        var mentions = AppModel.mentions(in: text, members: chat.members, senderHandle: me.login, chipTokens: chipTokens)
         // Leading bare agent names ("Bob?", "hey Bob …", "Arbos what is your name") count as
         // addressing that agent — same as typing @bob — so the box wakes without `@`.
         // Resolve agents before people so a human display-name collision (e.g. @unarbos
@@ -2703,6 +2705,10 @@ final class AppModel: ObservableObject {
                               attachments: [Attachment], alreadyUnacked: Bool = false,
                               forwardedFrom: String? = nil) {
         if !alreadyUnacked { markUnacked(chatId: chatId, messageId: messageId) }
+        // Rig (#1596): `ARBOS_TRACE_SENDS=1` prints what the row carries.
+        if DebugHooks.traceSends {
+            print("[arbos send] text=\(text.debugDescription) mentions=\(mentions)")
+        }
         do {
             try doc.insertUserMessage(id: messageId, text: text, deviceId: deviceId, attachments: attachments,
                                       author: author, mentions: mentions, replyTo: reply, forwardedFrom: forwardedFrom)
@@ -2724,18 +2730,24 @@ final class AppModel: ObservableObject {
     /// `@slug` → member. Typed resolution (#1538): when a person and an agent share a slug, the
     /// slug means the AGENT if it is the sender's own handle (nobody @-mentions themselves) and
     /// the person otherwise; the autocomplete labels both so the typist can pick.
-    static func mentions(in text: String, members: [ChatMember], senderHandle: String? = nil) -> [String] {
+    static func mentions(in text: String, members: [ChatMember], senderHandle: String? = nil,
+                         chipTokens: [String: String] = [:]) -> [String] {
         var out: [String] = []
         let agents = members.filter { $0.isAgent && $0.project != nil }
         let mine = senderHandle?.lowercased()
         func appendAgents() {
             for a in agents where !out.contains(a.member) { out.append(a.member) }
         }
-        let tokens = text.split(whereSeparator: { $0.isWhitespace })
-        for t in tokens where t.hasPrefix("@") {
+        let words = text.split(whereSeparator: { $0.isWhitespace })
+        for t in words where t.hasPrefix("@") {
             let slug = t.dropFirst().trimmingCharacters(in: CharacterSet(charactersIn: ".,!?:;")).lowercased()
             if slug == "everyone" || slug == "all" {
                 appendAgents()
+                continue
+            }
+            // A committed chip says who this is (#1596) — no tie rule needed.
+            if let member = chipTokens[slug] {
+                if !out.contains(member) { out.append(member) }
                 continue
             }
             if slug == "arbos", agents.count == 1, let a = agents.first {
@@ -3797,19 +3809,35 @@ final class AppModel: ObservableObject {
 
     /// Delete a message for everyone. The relay decides (`DELETE /room/…/messages/{id}`,
     /// 403 `not_yours` otherwise) and writes the deletion into the doc; it comes back as a
-    /// relay-signed row. No push notification.
+    /// relay-signed row. No push notification. In a people group, this device also writes a
+    /// hidden admin audit line for the Activity screen before asking the relay.
     func deleteMessage(chatId: Id, messageId: Id, projectId: Id? = nil) {
         guard !messageId.isEmpty else { return }
+        let audit = groupDeletionAuditLine(chatId: chatId)
         #if DEBUG
         if isFixture {
             guard var list = messages[chatId] else { return }
             list.removeAll { $0.id == messageId }
+            if let audit {
+                let m = Message(id: newId(), chatId: chatId, role: .system, sender: "system", status: .done, turn: nil, decision: nil,
+                                subagentId: nil, subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: nowMs(),
+                                completedAt: nowMs(), pending: false, parts: [.text(id: newId(), text: audit)], hiddenCount: 0)
+                list.append(m)
+            }
             messages[chatId] = list
             clearUnacked(chatId: chatId, messageId: messageId)
             Haptics.pick()
             return
         }
         #endif
+        if let audit, let doc = docs[chatId] {
+            do {
+                try doc.insertSystemLine(id: newId(), text: audit, deviceId: deviceId)
+                doc.commit()
+            } catch {
+                // Activity can miss this delete; the relay delete still runs.
+            }
+        }
         let room: String
         if peopleChat(chatId) != nil {
             room = "people/\(chatId)"
@@ -3865,6 +3893,19 @@ final class AppModel: ObservableObject {
         } catch {
             notice = Notice(text: "Could not edit the message: \(error.localizedDescription)")
         }
+    }
+
+    /// Text for a people-group deletion audit, or nil when this chat is not a group.
+    private func groupDeletionAuditLine(chatId: Id) -> String? {
+        guard let people = peopleChat(chatId), people.isGroup else { return nil }
+        let who: String = {
+            if let name = user?.name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
+                return name
+            }
+            if let login = user?.login, !login.isEmpty { return "@\(login)" }
+            return "Someone"
+        }()
+        return GroupActivity.deletionNotice(who: who)
     }
 
     /// Paint any room doc that already has rows but no published transcript yet
