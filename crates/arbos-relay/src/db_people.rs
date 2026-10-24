@@ -736,6 +736,71 @@ impl Db {
         })
     }
 
+    /// Count events in the window first; insert one only when under `limit`. Returns `true` when
+    /// the event was noted (allowed), `false` when the user is already at the limit (refused
+    /// pushes must not count, or a reconnect storm never drains).
+    pub fn rate_check_and_note(
+        &self,
+        user_id: &str,
+        kind: &str,
+        window_ms: i64,
+        limit: i64,
+    ) -> Result<bool> {
+        let now = now_ms();
+        self.with(|c| {
+            let count: i64 = c.query_row(
+                "SELECT COUNT(*) FROM rate_events WHERE user_id = ?1 AND kind = ?2 AND at >= ?3",
+                params![user_id, kind, now - window_ms],
+                |r| r.get(0),
+            )?;
+            if count >= limit {
+                return Ok(false);
+            }
+            c.execute(
+                "INSERT INTO rate_events(user_id, kind, at) VALUES (?1, ?2, ?3)",
+                params![user_id, kind, now],
+            )?;
+            c.execute(
+                "DELETE FROM rate_events WHERE at < ?1",
+                params![now - 24 * 3_600_000],
+            )?;
+            Ok(true)
+        })
+    }
+
+    /// How many events of this kind the user has in the window (no insert).
+    #[cfg(test)]
+    pub fn rate_count(&self, user_id: &str, kind: &str, window_ms: i64) -> Result<i64> {
+        let now = now_ms();
+        self.with(|c| {
+            c.query_row(
+                "SELECT COUNT(*) FROM rate_events WHERE user_id = ?1 AND kind = ?2 AND at >= ?3",
+                params![user_id, kind, now - window_ms],
+                |r| r.get(0),
+            )
+        })
+    }
+
+    /// Seconds until the oldest event of this kind leaves `window_ms` (at least 1). Used for
+    /// `retryS` on a `rate_limited` room error frame.
+    pub fn rate_retry_s(&self, user_id: &str, kind: &str, window_ms: i64) -> Result<i64> {
+        let now = now_ms();
+        self.with(|c| {
+            let oldest: Option<i64> = c
+                .query_row(
+                    "SELECT MIN(at) FROM rate_events WHERE user_id = ?1 AND kind = ?2 AND at >= ?3",
+                    params![user_id, kind, now - window_ms],
+                    |r| r.get::<_, Option<i64>>(0),
+                )
+                .optional()?
+                .flatten();
+            Ok(match oldest {
+                Some(at) => ((at + window_ms - now + 999) / 1000).max(1),
+                None => 1,
+            })
+        })
+    }
+
     // ---- projects together (step 3) -----------------------------------------------------------
 
     pub fn add_project_member(

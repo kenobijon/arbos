@@ -40,6 +40,11 @@ final class CoreChatDoc {
         try doc.apply(bytes: bytes)
     }
 
+    /// Import an update; `true` when Loro parked it as pending (dependencies missing).
+    func importUpdateReportingPending(_ bytes: Data) throws -> Bool {
+        try doc.applyUpdate(bytes: bytes)
+    }
+
     /// Does the replica already contain this checkpoint frontier?
     func contains(frontier: Data) -> Bool {
         doc.containsFrontier(frontier: frontier)

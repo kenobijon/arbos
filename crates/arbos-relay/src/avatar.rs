@@ -126,18 +126,18 @@ pub fn check_leaf_pick(
     Ok(())
 }
 
-/// `GET /avatar-leaves` body: the D92 shapes, colours, ink and index rule, so a site or a
-/// third client can draw the same leaf.
+/// `GET /avatar-leaves` body: the D92 (v2) shapes, hues and index rule, so a site or a third
+/// client can draw the same leaf — a pastel disc (`hex`) with the darker same-hue leaf (`ink`).
 pub fn leaves_json() -> Value {
     json!({
         "rule": {
             "version": leaf::LEAF_RULE_VERSION,
             "hash": "fnv1a64(project_id)",
-            "leaf": "hash mod 9",
-            "color": "(hash div 9) mod 10",
-            "override": "avatar_leaf 0–8, avatar_leaf_color 0–9 on PATCH /projects/{id}; null = automatic",
+            "leaf": "hash mod 16",
+            "color": "the leaf's default_color",
+            "render": "disc = colors[color].hex; leaf = colors[color].ink, path drawn edge to edge (it spans 71 of 100 units, centred), even-odd fill",
+            "override": "avatar_leaf 0–15, avatar_leaf_color 0–9 on PATCH /projects/{id}; null = automatic",
         },
-        "ink": leaf::LEAF_INK.hex(),
         "scale": leaf::LEAF_SCALE,
         "leaves": leaf::LEAVES.iter().enumerate().map(|(i, l)| json!({
             "index": i, "slug": l.slug, "name": l.name, "path": leaf::path_data(i as u8),
@@ -145,7 +145,7 @@ pub fn leaves_json() -> Value {
             "default_color": l.default_color,
         })).collect::<Vec<_>>(),
         "colors": leaf::COLORS.iter().enumerate().map(|(i, c)| json!({
-            "index": i, "name": c.name, "hex": c.rgb.hex(),
+            "index": i, "name": c.name, "hex": c.rgb.hex(), "ink": c.ink.hex(),
         })).collect::<Vec<_>>(),
     })
 }
