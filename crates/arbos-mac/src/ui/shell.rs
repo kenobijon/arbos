@@ -2813,7 +2813,9 @@ impl Shell {
                 hero_data.unwrap_or((avatars::AvatarState::Idle, None));
             let _ = avatar_state;
             if !is_people {
-                hero = hero.child(avatars::project(&space, 88.0, &theme));
+                // D92 amendment: an agent's uploaded / generated picture wins over the leaf.
+                let state = self.state.read(cx);
+                hero = hero.child(crate::ui::groups::picture(&space, state, 88.0, &theme));
             } else if let Some(person) = space.person() {
                 hero = hero.child(people::avatar(person_image, person, 88.0, &theme));
             } else {
