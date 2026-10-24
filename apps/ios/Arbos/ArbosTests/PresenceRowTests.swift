@@ -50,16 +50,18 @@ final class PresenceRowTests: XCTestCase {
     }
 
     func testPictureIsTheBubblePictureOnThePlusColumn() {
-        // Jacob 15:15 / 15:20: the row's picture and the bubble's picture are one size at
-        // one x, and that x is the composer's `+` column (keyboard up: 19 + 42 / 2 = 40);
-        // the row's gap is the bubble row's gap, so the text starts where the body does.
+        // Same rule as Mac (`SENDER_DISC = PLUS_BUTTON`): the row's picture and the
+        // bubble's picture are the `+` size at the `+` centre (keyboard up:
+        // 19 + 42 / 2 = 40); the row's gap is the bubble row's gap, so the text
+        // starts where the body does.
+        XCTAssertEqual(Theme.memberAvatar, Theme.plusButton, "avatar disc = + disc")
         XCTAssertEqual(PresenceRow.avatar, Theme.memberAvatar)
         XCTAssertEqual(PresenceRow.inset, Theme.avatarColumnInset)
         XCTAssertEqual(PresenceRow.gap, Theme.memberAvatarGap)
         let center = 16 + Theme.avatarColumnInset + Theme.memberAvatar / 2
         let plusCenter = Theme.composerInsetKeyboard + Theme.plusButton / 2
         XCTAssertEqual(center, plusCenter, accuracy: 1)
-        XCTAssertEqual(16 + Theme.memberLane, 67, "text and bubble body at Grok's 67 pt")
+        XCTAssertEqual(16 + Theme.memberLane, 74, "text and bubble body after the larger disc")
         XCTAssertEqual(PresenceRow.maxPictures, 3)
     }
 }
