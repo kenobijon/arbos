@@ -238,6 +238,9 @@ pub struct Shell {
     /// app-01M5ATBWSY9E1HHBKH2QQVDEZX). Nothing renders it; escapes and
     /// click-outside still clear it so leftover true never sticks.
     pub(crate) menu_open: bool,
+    /// Sidebar: the "Hidden chats" list is showing instead of the chat list
+    /// (Jacob 2026-10-23; the footer opens it, ‹ back returns).
+    pub(crate) hidden_open: bool,
     /// D88: the name/invite/channel field of the server sheets and the inline channel rename
     /// on the server page; `channel_rename` is the channel being renamed there.
     pub(crate) server_input: Entity<ComposerInput>,
@@ -820,6 +823,7 @@ impl Shell {
             fixture_drag_over: std::env::var("ARBOS_FIXTURE_DRAG_OVER").is_ok_and(|v| v == "1"),
             signing_in: false,
             menu_open: false,
+            hidden_open: false,
             server_input,
             channel_rename: None,
             invite_expires: false,

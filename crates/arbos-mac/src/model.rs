@@ -82,6 +82,10 @@ pub struct Project {
     /// People chats: my `me.muted` on the relay (synced across devices).
     #[serde(default)]
     pub muted: bool,
+    /// Sidebar archive (2026-10-23): hidden from the list for me, on every
+    /// device (the relay's per-user flag); the agent keeps running.
+    #[serde(default)]
+    pub archived_at: Option<u64>,
     /// The agent's one chat, §9b `primary_chat_id` (stored on the relay, never
     /// flips); older relays and the fixture send none and the client picks:
     /// most messages, ties → earliest created.
@@ -2910,6 +2914,9 @@ pub struct ServerInfo {
     pub member_count: u64,
     #[serde(default)]
     pub channels: Vec<ServerChannel>,
+    /// Sidebar archive (2026-10-23): hidden from the list for me, on every device.
+    #[serde(default)]
+    pub archived_at: Option<u64>,
     #[serde(default)]
     pub general_channel_id: Option<String>,
     #[serde(default)]
