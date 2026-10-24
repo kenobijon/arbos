@@ -672,6 +672,18 @@ final class AppModel: ObservableObject {
     /// Re-reading the transcript at most this often keeps the paint moving and the
     /// decode cost linear in the backfill, not quadratic.
     static let snapshotCoalesceMs = 80
+    /// While a room catches up (not yet `caughtUp`) every doc change — list or message
+    /// touch — folds into one re-read per this window, and the home list's activity bump
+    /// happens with that re-read, not per row. 72 rows replayed per row cost 11 s of
+    /// blocked main thread on a 1 500-message group (iphone-open-scroll-block, 2026-10-24).
+    static let catchUpCoalesceMs = 250
+    /// Lists at or above this size are decoded off the main actor (`emitSnapshot`).
+    static let asyncSnapshotMinRows = 300
+    /// Per-chat generation of the last requested snapshot; a slower background decode
+    /// that finishes after a newer one is dropped.
+    private var snapshotGeneration: [Id: Int] = [:]
+    /// Rooms whose home-list activity bump waits for the next snapshot (catch-up).
+    private var activityPending: Set<Id> = []
     private var registryTask: Task<Void, Never>?
 
     // MARK: On-device store (#929)
@@ -1835,19 +1847,18 @@ final class AppModel: ObservableObject {
                 self.markDirty(key)
                 if isProjectDoc {
                     self.applyProjectDoc(projectId)
+                } else if !self.caughtUp.contains(key), touched.listChanged || !touched.messages.isEmpty {
+                    // Catching up: the relay streams one row per frame. One re-read per
+                    // window for all of them (list or message touches alike), and the
+                    // home-list bump rides along instead of re-sorting per row.
+                    self.activityPending.insert(key)
+                    self.requestSnapshot(key, windowMs: Self.catchUpCoalesceMs)
                 } else if touched.listChanged {
-                    if self.caughtUp.contains(key) {
-                        self.emitSnapshot(key)
-                        self.markActivity(chatId: key)
-                        // Loro is live; /me/pushes and /me/unread can lag — light the
-                        // blue circle and drain the push queue as soon as a new row lands.
-                        self.noteLiveUnread(chatId: key)
-                    } else {
-                        // Catching up: the relay sends one row per frame; re-read the
-                        // transcript once per window, not once per row.
-                        self.requestSnapshot(key)
-                        self.markActivity(chatId: key)
-                    }
+                    self.emitSnapshot(key)
+                    self.markActivity(chatId: key)
+                    // Loro is live; /me/pushes and /me/unread can lag — light the
+                    // blue circle and drain the push queue as soon as a new row lands.
+                    self.noteLiveUnread(chatId: key)
                 } else if !touched.messages.isEmpty {
                     self.emitMessages(key, indexes: touched.messages)
                     // Same kick project chats get via `chats` in markActivity — people
@@ -1991,9 +2002,9 @@ final class AppModel: ObservableObject {
     /// A list change from the doc: re-read now when the room was quiet, else once
     /// at the end of the coalesce window. Direct `emitSnapshot` callers (catch-up,
     /// checkpoint paint, ACK) still read at once and clear a pending request.
-    private func requestSnapshot(_ chatId: Id) {
+    private func requestSnapshot(_ chatId: Id, windowMs: Int = AppModel.snapshotCoalesceMs) {
         guard !snapshotPending.contains(chatId) else { return }
-        let window = Double(Self.snapshotCoalesceMs) / 1000
+        let window = Double(windowMs) / 1000
         let since = Date().timeIntervalSince1970 - (snapshotLastAt[chatId] ?? 0)
         guard since < window else {
             emitSnapshot(chatId)
@@ -2012,7 +2023,26 @@ final class AppModel: ObservableObject {
         snapshotPending.remove(chatId)
         snapshotLastAt[chatId] = Date().timeIntervalSince1970
         guard let doc = docs[chatId] else { return }
-        var list = doc.readAll()
+        let gen = (snapshotGeneration[chatId] ?? 0) &+ 1
+        snapshotGeneration[chatId] = gen
+        // Short lists decode inline (tests and the fixture read `messages` right after);
+        // a long group's 1 MB of rows is read and parsed off the main actor — the FFI doc
+        // is thread-safe — and applied when it is back, unless a newer read superseded it.
+        if doc.count < Self.asyncSnapshotMinRows {
+            applySnapshot(chatId, list: doc.readAll())
+            return
+        }
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let list = doc.readAll()
+            await MainActor.run {
+                guard let self, self.snapshotGeneration[chatId] == gen else { return }
+                self.applySnapshot(chatId, list: list)
+            }
+        }
+    }
+
+    private func applySnapshot(_ chatId: Id, list: [Message]) {
+        var list = list
         let pendingIds = unacked[chatId] ?? []
         for i in list.indices where list[i].role == .user {
             list[i].pending = pendingIds.contains(list[i].id)
@@ -2023,6 +2053,9 @@ final class AppModel: ObservableObject {
         var next = messages
         next[chatId] = list
         messages = next
+        if activityPending.remove(chatId) != nil {
+            markActivity(chatId: chatId)
+        }
     }
 
     private func emitMessages(_ chatId: Id, indexes: Set<Int>) {

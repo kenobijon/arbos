@@ -2867,8 +2867,6 @@ private struct TranscriptRows: View, Equatable {
             && lhs.timeReveal == rhs.timeReveal
             && lhs.highlightedMessage == rhs.highlightedMessage
             && lhs.mentions.stamp == rhs.mentions.stamp
-            && lhs.rowsCount == rhs.rowsCount
-            && lhs.messagesCount == rhs.messagesCount
         #if DEBUG
         PerfCounters.bump(same ? "rowsEqTrue" : "rowsEqFalse")
         if !same {
