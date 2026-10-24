@@ -306,6 +306,16 @@ pub struct ForwardTarget {
     pub last_activity: u64,
 }
 
+/// Bubble menu → Forward (feedback app-01M5MXRZ7609S70P9S9P2RZDDF): the text
+/// message the open picker will send on, and who wrote it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ForwardMessage {
+    pub chat_id: Id,
+    pub message_id: Id,
+    /// The original sender's display name ("Forwarded from <by>").
+    pub by: String,
+}
+
 /// The text line a forwarded attachment travels with (every client renders
 /// it as the card's hint, not a bubble; agents read it as prose).
 pub fn forwarded_from_text(by: &str) -> String {
@@ -482,6 +492,8 @@ pub struct AppState {
     pub media_viewer: Option<MediaViewer>,
     /// Bumped on every open so the shell focuses the viewer once per opening.
     pub media_viewer_generation: u64,
+    /// Bubble menu → Forward: the message the "Forward to" picker is open for.
+    pub forward_message: Option<ForwardMessage>,
     pub new_project_open: bool,
     /// Debug: per-message "Show details" disclosures in the transcript.
     pub show_details: bool,
@@ -842,6 +854,7 @@ impl AppState {
             details_open: None,
             media_viewer: None,
             media_viewer_generation: 0,
+            forward_message: None,
             new_project_open: false,
             show_details: false,
             machine: Machine::default(),
@@ -3153,6 +3166,7 @@ impl AppState {
                 sender_avatar_color: None,
                 mentions: Vec::new(),
                 reply_to: reply_to.clone(),
+                forwarded_from: None,
                 asked_by_handle: None,
                 owner_handle: None,
                 usage: None,
@@ -3877,6 +3891,7 @@ impl AppState {
                 sender_avatar_color: None,
                 mentions: Vec::new(),
                 reply_to: None,
+                forwarded_from: None,
                 asked_by_handle: None,
                 owner_handle: None,
                 usage: None,
@@ -4276,6 +4291,7 @@ impl AppState {
                 sender_avatar_color: None,
                 mentions: Vec::new(),
                 reply_to: None,
+                forwarded_from: None,
                 asked_by_handle: None,
                 owner_handle: None,
                 created_at: now_ms(),
@@ -5484,6 +5500,7 @@ impl AppState {
                 sender_avatar_color: None,
                 mentions: Vec::new(),
                 reply_to: None,
+                forwarded_from: None,
                 asked_by_handle: None,
                 owner_handle: None,
                 usage: None,
@@ -5507,6 +5524,135 @@ impl AppState {
             from_slot,
             attachment,
             text,
+        });
+        self.push_notice(format!("Forwarded to {}", target.name));
+        cx.emit(AppEvent::TranscriptChanged {
+            chat_id: target.chat_id,
+        });
+        cx.notify();
+    }
+
+    // ----- bubble menu → Forward (feedback app-01M5MXRZ7609S70P9S9P2RZDDF) -----
+
+    /// Who a message is from, for "Forwarded from <name>": the row's sender
+    /// name, else the person's display name, my own name for my bubbles, else
+    /// the agent's name.
+    pub fn forward_sender_name(&self, m: &Message) -> String {
+        if self.is_mine(m) {
+            if let Some(a) = self.account.as_ref() {
+                let name = if a.name.trim().is_empty() {
+                    a.login.clone()
+                } else {
+                    a.name.clone()
+                };
+                if !name.is_empty() {
+                    return name;
+                }
+            }
+        }
+        self.viewer_sender_name(m)
+    }
+
+    /// Open the "Forward to" picker for a bubble (the media viewer's picker,
+    /// over the chat).
+    pub fn open_forward_message(&mut self, chat_id: Id, message_id: Id, cx: &mut Context<Self>) {
+        let Some(message) = self
+            .messages
+            .get(&chat_id)
+            .and_then(|ms| ms.iter().find(|m| m.id == message_id))
+        else {
+            return;
+        };
+        if message.plain_text().trim().is_empty() {
+            self.push_notice("Nothing to forward");
+            cx.notify();
+            return;
+        }
+        let by = self.forward_sender_name(message);
+        self.forward_message = Some(ForwardMessage {
+            chat_id,
+            message_id,
+            by,
+        });
+        cx.notify();
+    }
+
+    pub fn close_forward_message(&mut self, cx: &mut Context<Self>) {
+        if self.forward_message.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Forward the picked message's text to `target` as a new message of mine
+    /// there (no reply quote), carrying `forwardedFrom: <name>` so every client
+    /// draws the "Forwarded from <name>" header on the bubble.
+    pub fn forward_message_to(&mut self, target: ForwardTarget, cx: &mut Context<Self>) {
+        let Some(source) = self.forward_message.take() else {
+            return;
+        };
+        let Some(text) = self
+            .messages
+            .get(&source.chat_id)
+            .and_then(|ms| ms.iter().find(|m| m.id == source.message_id))
+            .map(|m| m.plain_text().trim().to_owned())
+            .filter(|t| !t.is_empty())
+        else {
+            cx.notify();
+            return;
+        };
+        let message_id = new_id();
+        let parts = vec![Part::Text {
+            id: new_id(),
+            text: text.clone(),
+        }];
+        self.messages
+            .entry(target.chat_id.clone())
+            .or_default()
+            .push(Message {
+                id: message_id.clone(),
+                chat_id: target.chat_id.clone(),
+                role: Role::User,
+                sender: "user".into(),
+                status: MessageStatus::Queued,
+                turn: None,
+                decision: None,
+                subagent_id: None,
+                subagent_name: None,
+                handoff_messages: None,
+                agent_reply_to: None,
+                reactions: Default::default(),
+                in_reply_to: None,
+                routine_name: None,
+                sender_name: None,
+                sender_icon: None,
+                sender_handle: None,
+                sender_avatar: None,
+                sender_avatar_color: None,
+                mentions: Vec::new(),
+                reply_to: None,
+                forwarded_from: Some(source.by.clone()),
+                asked_by_handle: None,
+                owner_handle: None,
+                usage: None,
+                return_contract: None,
+                waiting_user: false,
+                waiting_approval: false,
+                model: None,
+                effort: None,
+                created_at: now_ms(),
+                completed_at: None,
+                call_id: None,
+                activity: None,
+                pending: true,
+                parts,
+                hidden_parts: Vec::new(),
+                greeting: false,
+            });
+        self.command(ClientCommand::ForwardText {
+            chat_id: target.chat_id.clone(),
+            message_id,
+            text,
+            forwarded_from: source.by,
         });
         self.push_notice(format!("Forwarded to {}", target.name));
         cx.emit(AppEvent::TranscriptChanged {

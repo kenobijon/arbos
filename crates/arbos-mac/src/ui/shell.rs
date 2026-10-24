@@ -195,6 +195,9 @@ pub struct Shell {
     pub(crate) viewer_search: Entity<ComposerInput>,
     /// Keyboard focus while the media viewer is up (← → page, Esc closes).
     viewer_focus: FocusHandle,
+    /// The bubble whose "Forward to" picker last took the search field's focus
+    /// (`AppState::forward_message`), so it is cleared and focused once per opening.
+    forward_message_focused_for: Option<crate::model::Id>,
     /// `AppState::media_viewer_generation` the viewer was last focused for.
     viewer_focused_generation: u64,
     pub(crate) connectors: Entity<ConnectorsPanel>,
@@ -213,6 +216,9 @@ pub struct Shell {
     /// `ARBOS_RIG_MESSAGE_MENU=x,y` (screenshot rig): opens the menu once the
     /// open chat has a message; cleared when it has.
     rig_message_menu: Option<gpui::Point<gpui::Pixels>>,
+    /// `ARBOS_RIG_FORWARD_MESSAGE=1` (screenshot rig): opens the "Forward to"
+    /// picker for the newest message of the open chat; cleared once it has.
+    rig_forward_message: bool,
     /// The reaction capsule over a bubble (`reactions`): (chat, message, the smiley's click).
     pub(crate) reaction_capsule: Option<(
         crate::model::Id,
@@ -777,6 +783,7 @@ impl Shell {
             viewer_search,
             viewer_focus: cx.focus_handle(),
             viewer_focused_generation: 0,
+            forward_message_focused_for: None,
             connectors,
             skills,
             local,
@@ -811,6 +818,7 @@ impl Shell {
             chat_delete_armed: false,
             message_menu: None,
             rig_message_menu: message_menu::rig_anchor(),
+            rig_forward_message: std::env::var_os("ARBOS_RIG_FORWARD_MESSAGE").is_some(),
             reaction_capsule: None,
             reaction_pick_open: false,
             reaction_pick,
@@ -1898,6 +1906,11 @@ impl Shell {
     /// Escape stops a recording memo (keeping its transcript), then closes
     /// whatever floats: menus, then sheets.
     fn escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
+        if self.state.read(cx).forward_message.is_some() {
+            self.state.update(cx, |s, cx| s.close_forward_message(cx));
+            Composer::focus(&self.composer, window, cx);
+            return;
+        }
         if let Some(viewer) = self.state.read(cx).media_viewer.as_ref() {
             // Esc closes the Forward picker first, then the viewer.
             if viewer.forward_open {
@@ -3541,6 +3554,7 @@ impl Render for Shell {
         let viewer_open = state.media_viewer.is_some();
         let viewer_forward_open = state.media_viewer.as_ref().is_some_and(|v| v.forward_open);
         let viewer_generation = state.media_viewer_generation;
+        let forward_message_open = state.forward_message.as_ref().map(|f| f.message_id.clone());
         let pairing = state.pairing.clone();
         let new_chat_open = state.new_chat_open;
         let people_space = state.selected().filter(|p| p.is_people()).cloned();
@@ -3700,6 +3714,36 @@ impl Render for Shell {
         }
         if let Some(menu) = message_menu::render(self, window, cx) {
             root = root.child(menu);
+        }
+        if self.rig_forward_message {
+            let target = self.state.read(cx).active_chat_id().and_then(|chat| {
+                let state = self.state.read(cx);
+                let last = state.messages.get(&chat)?.last()?.id.clone();
+                Some((chat, last))
+            });
+            if let Some((chat, message)) = target {
+                self.rig_forward_message = false;
+                self.state
+                    .update(cx, |s, cx| s.open_forward_message(chat, message, cx));
+            }
+        }
+        if let Some(picker) = media_viewer::message_forward_overlay(self, cx) {
+            // The picker's search field takes the keyboard while it is up (same
+            // field as the viewer's picker; cleared on each opening).
+            if self.forward_message_focused_for != forward_message_open {
+                self.forward_message_focused_for = forward_message_open;
+                self.viewer_search.update(cx, |input, cx| input.clear(cx));
+            }
+            let search = self.viewer_search.read(cx).focus_handle(cx);
+            if !search.is_focused(window) {
+                window.focus(&search, cx);
+            }
+            root = root.child(picker);
+        } else if self.forward_message_focused_for.is_some() {
+            self.forward_message_focused_for = None;
+            if !viewer_open {
+                Composer::focus(&self.composer, window, cx);
+            }
         }
         if let Some(at) = self.rig_reaction_capsule {
             let target = self.state.read(cx).active_chat_id().and_then(|chat| {

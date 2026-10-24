@@ -521,7 +521,7 @@ struct ChatView: View {
         .sheet(item: $pendingForward) { pending in
             ForwardSheet(fromName: pending.from) { target in
                 pendingForward = nil
-                model.forwardText(pending.text, to: target)
+                model.forwardText(pending.text, from: pending.from, to: target)
                 model.notice = Notice(text: "Forwarded to \(target.title)")
             }
             .environmentObject(model)
@@ -1284,7 +1284,10 @@ struct ChatView: View {
         guard let m = messageById[row.messageId] else { return }
         let text = m.plainText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
-        let from = MediaAlbum.senderName(m) { model.project($0)?.name }
+        // "Forwarded from <name>" names me by my display name, not "You".
+        let from = m.role == .user && m.senderName == nil && (m.sender == "user" || m.sender == model.myUserId)
+            ? (model.user.map { $0.name.isEmpty ? $0.login : $0.name } ?? "You")
+            : MediaAlbum.senderName(m) { model.project($0)?.name }
         pendingForward = PendingForward(text: text, from: from)
     }
 
