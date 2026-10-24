@@ -1,8 +1,8 @@
 //! The one Create screen (D93: one style, parameterised by entity) for a new
 //! agent, group or server — Grok Bot's "Create New Bot" layout with the D92
 //! leaves: header with a close ×, the swaying preview of the chosen leaf on
-//! its colour, a centred name field, the nine leaves in a 5 / 4 grid, the ten
-//! autumn colours in two rows of five, and a footer with Cancel + the action
+//! its colour, a centred name field, the sixteen leaves as their 4 × 4 sheet (v2), the ten
+//! hues in two rows of five, and a footer with Cancel + the action
 //! (disabled until named). Agents create from here; groups go on to the
 //! existing member picker as step two ("Next"); servers keep their one-line
 //! explainer under the field. Every size is Grok's, measured on the 2x
@@ -28,15 +28,17 @@ const PREVIEW_TOP: f32 = 62.0;
 const FIELD_TOP: f32 = 183.0;
 const FIELD_H: f32 = 35.0;
 const FIELD_INSET: f32 = 16.5;
-const LEAF_ROWS: [f32; 2] = [264.0, 320.0];
-const LEAF_PITCH: f32 = 56.0;
-const LEAF_DISC: f32 = 33.0;
-const LEAF_RING: f32 = 40.0;
-const SWATCH_ROWS: [f32; 2] = [386.0, 426.0];
+/// The v2 leaf sheet is 4 × 4 (sixteen leaves): four rows on a 48 pt pitch where Grok's two
+/// rows sat, then the hues; everything below the field moved down by the two extra rows.
+const LEAF_ROWS: [f32; 4] = [264.0, 312.0, 360.0, 408.0];
+const LEAF_PITCH: f32 = 48.0;
+const LEAF_DISC: f32 = 30.0;
+const LEAF_RING: f32 = 36.0;
+const SWATCH_ROWS: [f32; 2] = [466.0, 506.0];
 const SWATCH_PITCH: f32 = 40.0;
 const SWATCH: f32 = 24.0;
 const SWATCH_RING: f32 = 32.0;
-const FOOTER_TOP: f32 = 466.0;
+const FOOTER_TOP: f32 = 546.0;
 const FOOTER_H: f32 = 56.5;
 const PILL_H: f32 = 27.0;
 const HEIGHT: f32 = FOOTER_TOP + FOOTER_H;
@@ -277,11 +279,7 @@ pub fn sheet(shell: &Shell, kind: Kind, cx: &mut Context<Shell>) -> Div {
 
     let mut rows: Vec<Div> = Vec::new();
     for (r, top) in LEAF_ROWS.iter().enumerate() {
-        let leaves: Vec<u8> = if r == 0 {
-            (0..5).collect()
-        } else {
-            (5..9).collect()
-        };
+        let leaves: Vec<u8> = (r as u8 * 4..r as u8 * 4 + 4).collect();
         let mut row = div()
             .absolute()
             .left_0()

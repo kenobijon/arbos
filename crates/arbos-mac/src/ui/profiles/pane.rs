@@ -66,7 +66,8 @@ pub enum Picture {
 pub enum Section {
     /// Small caps title over a card ("Images · 4", "Archived").
     Title(SharedString),
-    /// Rows from `kit`; separators sit between rows only (`kit::section`).
+    /// Rows from `kit` (each draws its own hung hairline). Plain content
+    /// without a hairline uses `kit::section` instead.
     Card(Vec<AnyElement>),
     /// A card whose row `open` has just unfolded a picker under it (Model,
     /// Reasoning): the pane scrolls so that row is in view, once.
@@ -158,20 +159,25 @@ fn glyph_tile(glyph: &'static str, theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
-/// Which child of `kit::section` is row `open` (separators sit between rows).
+/// Child index of row `open` in a kit card (one child per row — kit rows
+/// carry their own hairlines, so the card does not interleave separators).
 fn child_index_of_row(rows: usize, open: usize) -> Option<usize> {
-    kit::section_parts(rows)
-        .iter()
-        .position(|p| *p == kit::SectionPart::Row(open))
+    (open < rows).then_some(open)
+}
+
+/// A pane card of kit rows: one fill, no extra separators (each `kit::row`
+/// hangs its own hairline; stacking `kit::section` on top doubled the line).
+fn kit_card(rows: Vec<AnyElement>, theme: &Theme) -> Div {
+    kit::card(theme).children(rows)
 }
 
 fn section(part: Section, shell: &Shell, theme: &Theme, cx: &mut Context<Shell>) -> AnyElement {
     match part {
         Section::Title(t) => kit::section_title(t, theme).into_any_element(),
-        Section::Card(rows) => kit::section(rows, kit::INSET, theme).into_any_element(),
+        Section::Card(rows) => kit_card(rows, theme).into_any_element(),
         Section::Reveal { rows, open } => {
             let child = child_index_of_row(rows.len(), open);
-            let card = kit::section(rows, kit::INSET, theme);
+            let card = kit_card(rows, theme);
             match child {
                 Some(ix) => {
                     let reveal =
@@ -363,13 +369,13 @@ mod tests {
         }
     }
 
-    /// `kit::section` interleaves a separator between rows, so row `i` is
-    /// child `2i`; a row past the end is no child at all.
+    /// Kit cards are one child per row (hairlines hang from the rows), so
+    /// row `i` is child `i`; a row past the end is no child at all.
     #[test]
     fn reveal_row_maps_to_section_child() {
         assert_eq!(child_index_of_row(2, 0), Some(0));
-        assert_eq!(child_index_of_row(2, 1), Some(2));
-        assert_eq!(child_index_of_row(3, 2), Some(4));
+        assert_eq!(child_index_of_row(2, 1), Some(1));
+        assert_eq!(child_index_of_row(3, 2), Some(2));
         assert_eq!(child_index_of_row(2, 2), None);
         assert_eq!(child_index_of_row(0, 0), None);
     }

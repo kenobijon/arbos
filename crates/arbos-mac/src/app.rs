@@ -20,11 +20,12 @@ use crate::model::{
 };
 use crate::model::{
     new_id, now_ms, Attachment, AttachmentKind, BoxState, ChannelSel, ChannelsView, Chat, ChatKind,
-    ConnectorsView, Effort, Id, Link, LinkState, LocalView, Machine, Message, MessageStatus,
-    NewSecret, Part, Project, ProjectDocView, ProjectSecrets, QuestionState, Role, Routine,
-    RoutineRun, RoutineTrigger, SecretDirector, SecretScope, SecretsView, ServerInfo, Skill,
-    StatusKind,
+    ConnectorsView, DevicesView, Effort, Id, Link, LinkState, LocalView, Machine, Message,
+    MessageStatus, NewSecret, Part, Project, ProjectDocView, ProjectSecrets, QuestionState, Role,
+    Routine, RoutineRun, RoutineTrigger, SecretDirector, SecretScope, SecretsView, ServerInfo,
+    Skill, StatusKind,
 };
+use crate::search;
 use crate::sign_in;
 use crate::sync::{ClientCommand, SyncEvent, SyncSource};
 use crate::ui::notify::{self, Gate, Notifier, NotifyEvent, NotifyKind};
@@ -133,6 +134,10 @@ fn muted_path() -> PathBuf {
     crate::sync::credentials::config_dir().join("muted.json")
 }
 
+fn read_receipts_path() -> PathBuf {
+    crate::sync::credentials::config_dir().join("read_receipts.json")
+}
+
 /// Multi-chat (several chats per agent: tabs, "+", ⌘T, archive) is on by
 /// default. `ARBOS_MULTI_CHAT=0` or `{"multi_chat": false}` in
 /// `<config>/settings.json` turns it off (one chat per agent).
@@ -160,6 +165,20 @@ fn save_muted(muted: &HashSet<Id>) {
     if let Ok(json) = serde_json::to_string(&muted.iter().collect::<Vec<_>>()) {
         let _ = std::fs::write(muted_path(), json);
     }
+}
+
+/// Settings → Notifications "Read receipts" (default on, matching the relay).
+fn load_read_receipts() -> bool {
+    std::fs::read_to_string(read_receipts_path())
+        .ok()
+        .and_then(|s| serde_json::from_str::<bool>(&s).ok())
+        .unwrap_or(true)
+}
+
+fn save_read_receipts(enabled: bool) {
+    let dir = crate::sync::credentials::config_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(read_receipts_path(), if enabled { "true" } else { "false" });
 }
 
 /// "3 min ago", "2 h ago", "yesterday", "5 days ago".
@@ -348,6 +367,9 @@ pub struct AppState {
     pub new_group_agents: Vec<Id>,
     pub people_query: String,
     pub people_results: Vec<Person>,
+    /// The people I block, as the relay lists them (`GET /blocks`; `SyncEvent::Blocked`).
+    /// The person pane's Block user / Unblock row derives from this, never from a local flag.
+    pub blocked: Vec<Person>,
     pub people_busy: bool,
     pub people_error: Option<String>,
     /// Everyone on Arbos (`GET /users`), fetched once the account is known and
@@ -369,6 +391,9 @@ pub struct AppState {
     awaiting_group: Option<Vec<String>>,
     /// The sheet invites into this project instead of starting a DM (step 3).
     pub invite_target: Option<Id>,
+    /// "Who may message X" (agent-to-agent messaging): the agent whose grant list a pick in
+    /// the people sheet adds to.
+    pub message_grant_target: Option<Id>,
     /// The group picker adds to this people group instead of creating one
     /// (the group pane's "Add members").
     pub add_members_target: Option<Id>,
@@ -466,6 +491,8 @@ pub struct AppState {
     pub connectors: ConnectorsView,
     /// Settings → Secrets (D83).
     pub secrets: SecretsView,
+    /// Settings → Devices (`GET /auth/devices`).
+    pub devices: DevicesView,
     /// Agent profile → Secrets, per project.
     pub project_secrets: std::collections::HashMap<Id, ProjectSecrets>,
     /// Settings → Routines, per project (F3).
@@ -509,6 +536,11 @@ pub struct AppState {
     pub renaming_project: Option<Id>,
     /// Spaces whose notifications are muted (`<config>/muted.json`).
     pub muted: HashSet<Id>,
+    /// Settings → Notifications: send and show Presence `{seen}` read receipts
+    /// (`<config>/read_receipts.json`, default on).
+    pub read_receipts: bool,
+    /// People-chat read receipts: chat id → (peer handle → last seen message id).
+    pub message_receipts: HashMap<Id, HashMap<String, Id>>,
     /// Last presence frame seen per handle (ms): "online" while fresh.
     pub presence_seen: HashMap<String, u64>,
     /// Answered this session: never re-arm it on a later sync, even when the
@@ -582,6 +614,9 @@ pub struct AppState {
     /// Rig: `ARBOS_OPEN_PROFILE=group:member-menu[:confirm]` — the shell opens the first
     /// other member's row menu on the group pane (`true` = with the Remove confirm armed).
     pub rig_member_menu: Option<bool>,
+    /// Rig: `ARBOS_OPEN_PROFILE=user:block:unblock` — unblock this person as soon as the
+    /// block list names them (the row must read Unblock first, then Block user again).
+    pub rig_unblock: Option<Person>,
     /// Rig: `ARBOS_OPEN_SPACE` applied once.
     pub rig_space_opened: bool,
     /// D88: the room list from the homeserver (previews, unread, `can_post`).
@@ -755,6 +790,7 @@ impl AppState {
             new_group_agents: Vec::new(),
             people_query: String::new(),
             people_results: Vec::new(),
+            blocked: Vec::new(),
             people_busy: false,
             people_error: None,
             people_directory: Vec::new(),
@@ -764,6 +800,7 @@ impl AppState {
             awaiting_dm: None,
             awaiting_group: None,
             invite_target: None,
+            message_grant_target: None,
             add_members_target: None,
             add_members_server: None,
             add_members_secret: None,
@@ -810,6 +847,7 @@ impl AppState {
             machine: Machine::default(),
             connectors: ConnectorsView::default(),
             secrets: SecretsView::default(),
+            devices: DevicesView::default(),
             project_secrets: std::collections::HashMap::new(),
             routines: HashMap::new(),
             routine_runs: HashMap::new(),
@@ -827,6 +865,8 @@ impl AppState {
             profile_editing_name: false,
             renaming_project: None,
             muted: load_muted(),
+            read_receipts: load_read_receipts(),
+            message_receipts: HashMap::new(),
             presence_seen: HashMap::new(),
             notify_prompt_answered: false,
             focus_sent: None,
@@ -864,6 +904,7 @@ impl AppState {
             open_server_hook_done: false,
             rig_channel_menu: None,
             rig_member_menu: None,
+            rig_unblock: None,
             rig_space_opened: false,
             servers: Vec::new(),
             matrix_snapshot: Snapshot::default(),
@@ -1212,6 +1253,13 @@ impl AppState {
                 if self.account.is_some() {
                     self.maybe_prompt_notifications();
                     self.prefetch_directory();
+                    // Align the sync source with the saved Settings → Notifications
+                    // preference (Shared defaults to on); no PUT on every launch.
+                    let enabled = self.read_receipts;
+                    self.command(ClientCommand::SetReadReceipts {
+                        enabled,
+                        persist: false,
+                    });
                 }
                 if let Some(url) = self.account.as_ref().map(|a| a.avatar_url.clone()) {
                     self.want_avatar(url);
@@ -1278,6 +1326,16 @@ impl AppState {
                 self.push_notice(message);
                 cx.notify();
             }
+            SyncEvent::Blocked(people) => {
+                self.blocked = people;
+                if let Some(person) = self
+                    .rig_unblock
+                    .take_if(|p| blocked_entry(&self.blocked, p).is_some())
+                {
+                    self.unblock_user(&person, cx);
+                }
+                cx.notify();
+            }
             SyncEvent::PeopleError(err) => {
                 self.people_busy = false;
                 self.people_error = Some(err);
@@ -1293,9 +1351,19 @@ impl AppState {
                     self.group_created(chat_id, cx);
                 }
             }
-            SyncEvent::Presence { handle } => {
-                self.presence_seen.insert(handle, now_ms());
-                if self.profile.is_some() {
+            SyncEvent::Presence {
+                handle,
+                chat_id,
+                seen,
+            } => {
+                self.presence_seen.insert(handle.clone(), now_ms());
+                if let (Some(chat_id), Some(seen)) = (chat_id, seen) {
+                    self.message_receipts
+                        .entry(chat_id)
+                        .or_default()
+                        .insert(handle, seen);
+                    cx.notify();
+                } else if self.profile.is_some() {
                     cx.notify();
                 }
             }
@@ -1465,8 +1533,8 @@ impl AppState {
                 // Signed in and synced (also the path without a sign-in event).
                 if !projects.is_empty() {
                     self.maybe_prompt_notifications();
-                    // The "Voice · <name>" label needs the list once (only with voice mode on).
-                    if !self.voices_requested && self.voice_mode_feature {
+                    // The agent pane's "Voice · <name>" row needs the list once.
+                    if !self.voices_requested {
                         self.voices_requested = true;
                         self.fetch_voices();
                     }
@@ -1748,21 +1816,29 @@ impl AppState {
                                     );
                                 }
                             }
-                        } else if spec == "user" {
-                            if let Some(handle) = self
+                        } else if let Some(rest) = spec.strip_prefix("user") {
+                            // `user[:block[:unblock]]` (#1545 rig): the DM peer's pane, then the
+                            // same block / unblock commands the footer row sends.
+                            if let Some(person) = self
                                 .projects
                                 .iter()
                                 .find(|p| p.id == project_id)
                                 .and_then(|p| p.person())
-                                .map(|person| person.handle.clone())
+                                .cloned()
                             {
                                 self.open_profile(
                                     ProfilePage::User {
-                                        handle,
+                                        handle: person.handle.clone(),
                                         space_id: Some(project_id),
                                     },
                                     cx,
                                 );
+                                if rest.starts_with(":block") {
+                                    self.block_user(person.handle.clone(), cx);
+                                }
+                                if rest == ":block:unblock" {
+                                    self.rig_unblock = Some(person);
+                                }
                             }
                         } else if spec == "me" {
                             self.open_profile(ProfilePage::Me, cx);
@@ -2057,6 +2133,17 @@ impl AppState {
             }
             SyncEvent::Secrets(view) => {
                 self.secrets = view;
+                cx.notify();
+            }
+            SyncEvent::Devices(result) => {
+                match result {
+                    Ok(items) => {
+                        self.devices.items = items;
+                        self.devices.error = None;
+                    }
+                    Err(why) => self.devices.error = Some(why),
+                }
+                self.devices.loaded = true;
                 cx.notify();
             }
             SyncEvent::Routines {
@@ -2612,7 +2699,7 @@ impl AppState {
     /// Home-search row click: open the chat that holds the matching message and
     /// ask the transcript to scroll to it. Name-only matches open normally.
     pub fn open_from_home_search(&mut self, project_id: Id, query: &str, cx: &mut Context<Self>) {
-        let q = query.trim().to_lowercase();
+        let q = search::normalize_query(query);
         let hit = if q.is_empty() {
             None
         } else {
@@ -2673,60 +2760,54 @@ impl AppState {
         .detach();
     }
 
-    /// Newest user/assistant/project message whose prose contains `query`
-    /// (already lowercased). Searches every chat under the space.
+    /// The message a `Message` search hit points at: newest user/assistant/
+    /// project message under the space whose prose contains `query`
+    /// (already normalized). Name / title / member hits carry no message.
     fn find_message_match(&self, project_id: &str, query: &str) -> Option<(Id, Id)> {
-        let mut best: Option<(u64, Id, Id)> = None;
+        let space = self.project(project_id)?;
+        self.space_search_hit(space, query)?.message
+    }
+
+    /// Every user/assistant/project message with prose under the space, as
+    /// the search module reads them (system lines never count).
+    fn searchable_messages(&self, project_id: &str) -> Vec<search::MessageText> {
+        let mut out = Vec::new();
         for chat in self.tabs(project_id) {
             for m in self.messages_of(&chat.id) {
                 match m.role {
                     Role::User | Role::Assistant | Role::Project => {}
                     Role::System => continue,
                 }
-                let text = m.plain_text();
-                if text.trim().is_empty() {
+                let text = crate::ui::sidebar::plain(&m.plain_text());
+                if text.is_empty() {
                     continue;
                 }
-                if !text.to_lowercase().contains(query) {
-                    continue;
-                }
-                let better = best
-                    .as_ref()
-                    .map(|(at, _, _)| m.created_at >= *at)
-                    .unwrap_or(true);
-                if better {
-                    best = Some((m.created_at, chat.id.clone(), m.id.clone()));
-                }
+                out.push(search::MessageText {
+                    chat_id: chat.id.clone(),
+                    message_id: m.id.clone(),
+                    created_at: m.created_at,
+                    text,
+                });
             }
         }
-        best.map(|(_, chat, msg)| (chat, msg))
+        out
     }
 
-    /// Whether the space name, a chat title, or any loaded message matches `query`.
-    pub fn space_matches_query(&self, space: &Project, query: &str) -> bool {
-        let q = query.trim().to_lowercase();
-        if q.is_empty() {
-            return true;
-        }
-        let hay = format!(
-            "{} {}",
-            space.name.to_lowercase(),
-            space
-                .person()
-                .map(|x| x.handle.to_lowercase())
-                .unwrap_or_default()
-        );
-        if hay.contains(&q) {
-            return true;
-        }
-        if self
-            .tabs(&space.id)
-            .iter()
-            .any(|c| c.title.to_lowercase().contains(&q))
-        {
-            return true;
-        }
-        self.find_message_match(&space.id, &q).is_some()
+    /// How the sidebar row for `space` matches `query` (`search::normalize_query`
+    /// output): the person's display name / @handle, the title, a member, a
+    /// chat title, or a loaded message — `None` when it does not match at all.
+    pub fn space_search_hit(&self, space: &Project, query: &str) -> Option<search::SearchHit> {
+        let me = self.me_handle();
+        search::space_hit(
+            space,
+            &me,
+            self.tabs(&space.id)
+                .iter()
+                .filter(|c| !c.is_system)
+                .map(|c| (c.id.as_str(), c.title.as_str())),
+            || self.searchable_messages(&space.id),
+            query,
+        )
     }
 
     pub fn select_tab(&mut self, chat_id: Id, cx: &mut Context<Self>) {
@@ -2771,8 +2852,23 @@ impl AppState {
         cx.notify();
     }
 
+    /// Can the open space take a new tab (⌘T, the pill's "+", the dropdown's
+    /// New tab)? Only an agent's own chats: people DMs and groups and server
+    /// channels have no project chats, so there the shortcut is a no-op and
+    /// the controls are absent (Jacob 2026-10-23: "New chat failed: HTTP 404
+    /// no such project" from ⌘T in a group).
+    pub fn can_new_tab(&self) -> bool {
+        new_tab_allowed(
+            self.multi_chat,
+            self.selected_project
+                .as_deref()
+                .and_then(|id| self.project(id)),
+            self.selected_channel.is_some(),
+        )
+    }
+
     pub fn new_tab(&mut self, cx: &mut Context<Self>) {
-        if !self.multi_chat {
+        if !self.can_new_tab() {
             return;
         }
         let Some(project_id) = self.selected_project.clone() else {
@@ -3028,6 +3124,7 @@ impl AppState {
                 subagent_id: None,
                 subagent_name: None,
                 handoff_messages: None,
+                agent_reply_to: None,
                 reactions: Default::default(),
                 in_reply_to: None,
                 routine_name: None,
@@ -3751,6 +3848,7 @@ impl AppState {
                 subagent_id: None,
                 subagent_name: None,
                 handoff_messages: None,
+                agent_reply_to: None,
                 reactions: Default::default(),
                 in_reply_to: None,
                 routine_name: None,
@@ -4143,6 +4241,7 @@ impl AppState {
                 subagent_id: None,
                 subagent_name: None,
                 handoff_messages: None,
+                agent_reply_to: None,
                 reactions: Default::default(),
                 in_reply_to: None,
                 usage: None,
@@ -4400,12 +4499,9 @@ impl AppState {
         cx.notify();
     }
 
-    /// Ask the relay for the voice list (the picker opening).
+    /// Ask the relay for the voice list (the agent pane's Voice row and the
+    /// call-voice picker need it; the list is independent of voice mode).
     pub fn fetch_voices(&mut self) {
-        // No voice picker while the feature is off: nothing needs the list.
-        if !self.voice_mode_feature {
-            return;
-        }
         self.command(ClientCommand::FetchVoices);
     }
 
@@ -5277,6 +5373,7 @@ impl AppState {
                 subagent_id: None,
                 subagent_name: None,
                 handoff_messages: None,
+                agent_reply_to: None,
                 reactions: Default::default(),
                 in_reply_to: None,
                 routine_name: None,
@@ -5765,6 +5862,23 @@ impl AppState {
         cx.notify();
     }
 
+    /// Settings → Notifications "Read receipts": Presence `{seen}` on/off.
+    pub fn set_read_receipts(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.read_receipts == enabled {
+            return;
+        }
+        self.read_receipts = enabled;
+        save_read_receipts(enabled);
+        if !enabled {
+            self.message_receipts.clear();
+        }
+        self.command(ClientCommand::SetReadReceipts {
+            enabled,
+            persist: true,
+        });
+        cx.notify();
+    }
+
     pub fn push_notice(&mut self, text: impl Into<String>) {
         let now = now_ms();
         self.notices
@@ -5964,6 +6078,7 @@ impl AppState {
         self.new_group_picked.clear();
         self.new_group_agents.clear();
         self.invite_target = None;
+        self.message_grant_target = None;
         self.add_members_target = None;
         self.add_members_server = None;
         self.add_members_secret = None;
@@ -5995,6 +6110,50 @@ impl AppState {
         cx.notify();
     }
 
+    /// Agent pane › "Give a person access…": the same sheet; a pick lets that person's agents
+    /// message this agent (`PUT /projects/{id}/message-access`).
+    pub fn open_message_grant_picker(&mut self, project_id: Id, cx: &mut Context<Self>) {
+        self.open_new_chat(cx);
+        self.message_grant_target = Some(project_id);
+        cx.notify();
+    }
+
+    pub fn set_message_grant(
+        &mut self,
+        project_id: Id,
+        grantee: String,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == project_id) {
+            if let Some(g) = p.message_grants.iter_mut().find(|g| g.grantee == grantee) {
+                g.enabled = enabled;
+            }
+        }
+        self.command(ClientCommand::SetMessageGrant {
+            project_id,
+            grantee,
+            enabled,
+        });
+        cx.notify();
+    }
+
+    pub fn remove_message_grant(
+        &mut self,
+        project_id: Id,
+        grantee: String,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == project_id) {
+            p.message_grants.retain(|g| g.grantee != grantee);
+        }
+        self.command(ClientCommand::RemoveMessageGrant {
+            project_id,
+            grantee,
+        });
+        cx.notify();
+    }
+
     pub fn close_new_chat(&mut self, cx: &mut Context<Self>) {
         self.new_chat_open = false;
         self.new_group_open = false;
@@ -6003,6 +6162,7 @@ impl AppState {
         self.awaiting_dm = None;
         self.awaiting_group = None;
         self.invite_target = None;
+        self.message_grant_target = None;
         self.add_members_target = None;
         self.add_members_server = None;
         self.add_members_secret = None;
@@ -6349,6 +6509,19 @@ impl AppState {
             }
             return;
         }
+        if let Some(project_id) = self.message_grant_target.take() {
+            self.new_chat_open = false;
+            let handle = handle.trim().trim_start_matches('@').to_string();
+            if !handle.is_empty() {
+                self.command(ClientCommand::SetMessageGrant {
+                    project_id,
+                    grantee: format!("@{handle}"),
+                    enabled: true,
+                });
+            }
+            cx.notify();
+            return;
+        }
         match self.invite_target.clone() {
             Some(project_id) => {
                 self.new_chat_open = false;
@@ -6499,6 +6672,35 @@ impl AppState {
 
     pub fn block_user(&mut self, handle: String, cx: &mut Context<Self>) {
         self.command(ClientCommand::BlockUser { handle });
+        cx.notify();
+    }
+
+    /// Is this person on my block list? Matched the way the relay keys blocks — by user
+    /// id — with the handle as the fallback for rows that only carry a handle.
+    pub fn is_blocked(&self, person: &Person) -> bool {
+        blocked_entry(&self.blocked, person).is_some()
+    }
+
+    /// `DELETE /blocks/{user_id}` for the block-list entry that matches `person`; a no-op
+    /// when the relay does not list them (the row already reads Block user).
+    pub fn unblock_user(&mut self, person: &Person, cx: &mut Context<Self>) {
+        let Some(entry) = blocked_entry(&self.blocked, person) else {
+            return;
+        };
+        let user_id = if entry.id.is_empty() {
+            person.id.clone()
+        } else {
+            entry.id.clone()
+        };
+        if user_id.is_empty() {
+            return;
+        }
+        let handle = if entry.handle.is_empty() {
+            person.handle.clone()
+        } else {
+            entry.handle.clone()
+        };
+        self.command(ClientCommand::UnblockUser { user_id, handle });
         cx.notify();
     }
 
@@ -6934,6 +7136,26 @@ impl AppState {
 
     pub fn secrets_refresh(&mut self, cx: &mut Context<Self>) {
         self.command(ClientCommand::SecretsRefresh);
+        cx.notify();
+    }
+
+    // ----- devices (Settings → Devices, Oct 23) ---------------------------
+
+    /// Settings → Devices opened: ask the relay for the list (the page shows
+    /// "Loading…" until the answer, the last list meanwhile).
+    pub fn devices_refresh(&mut self, cx: &mut Context<Self>) {
+        self.devices.error = None;
+        self.command(ClientCommand::DevicesRefresh);
+        cx.notify();
+    }
+
+    /// Sign another device out. The current device never goes through here
+    /// (its row offers Sign out instead), so the user is never stranded.
+    pub fn revoke_device(&mut self, id: Id, cx: &mut Context<Self>) {
+        if !crate::ui::devices::remove_other(&mut self.devices.items, &id) {
+            return;
+        }
+        self.command(ClientCommand::DeviceRevoke { id });
         cx.notify();
     }
 
@@ -7539,6 +7761,10 @@ impl AppState {
 
     pub fn toggle_call_mute(&mut self, cx: &mut Context<Self>) {
         if let Some(c) = self.my_call.as_mut() {
+            // Hosted group calls: listen-only until the host invites you to speak.
+            if c.call.can_speak == Some(false) {
+                return;
+            }
             c.muted = !c.muted;
             let _ = self.call_commands.send(CallCmd::SetMuted(c.muted));
             cx.notify();
@@ -7614,10 +7840,11 @@ impl AppState {
             cx.notify();
             return;
         };
+        let listen_only = call.can_speak == Some(false);
         let active = self.my_call.get_or_insert_with(|| ActiveCall {
             call: call.clone(),
             status: CallStatus::Connecting,
-            muted: false,
+            muted: listen_only,
             camera,
             participants: Vec::new(),
             local_video: None,
@@ -7630,6 +7857,9 @@ impl AppState {
         });
         active.call = call.clone();
         active.status = CallStatus::Connecting;
+        if listen_only {
+            active.muted = true;
+        }
         if created {
             active.outgoing = true;
             active.reachable = reachable_line(&reachable);
@@ -7639,6 +7869,9 @@ impl AppState {
             token,
             camera,
         });
+        if listen_only {
+            let _ = self.call_commands.send(CallCmd::SetMuted(true));
+        }
         self.incoming_call = None;
         self.sync_tones();
         cx.notify();
@@ -8043,14 +8276,36 @@ pub fn decode_image(bytes: &[u8]) -> Option<RenderImage> {
     decode_rgba(bytes).and_then(bgra_frame)
 }
 
+/// Longest side kept for chat-bubble (and lightbox) bitmaps.
+/// Bubbles paint at most ~360×420 pt; 2× covers Retina. Caps GPU memory so
+/// scrolling a chat full of screenshots stays smooth (feedback
+/// app-01M5MXPJZARN5QMCE3EZ3EMSGW).
+pub const CHAT_IMAGE_MAX_SIDE: u32 = 840;
+
+/// Shrink `img` so its longer side is at most `CHAT_IMAGE_MAX_SIDE`.
+pub fn downscale_for_chat(img: image::RgbaImage) -> image::RgbaImage {
+    let (w, h) = img.dimensions();
+    let long = w.max(h);
+    if long <= CHAT_IMAGE_MAX_SIDE {
+        return img;
+    }
+    let scale = CHAT_IMAGE_MAX_SIDE as f32 / long as f32;
+    let nw = ((w as f32) * scale).round().max(1.0) as u32;
+    let nh = ((h as f32) * scale).round().max(1.0) as u32;
+    image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Triangle)
+}
+
 /// The picture, plus a copy with its uniform border trimmed when there is one
 /// (feedback chat-preview-cards-2026-10-23: a screenshot's empty page margin
-/// must not become a white band in the bubble). The viewer shows the full picture.
+/// must not become a white band in the bubble). The viewer shows the untrimmed
+/// picture. Both are capped to [`CHAT_IMAGE_MAX_SIDE`] so the transcript can
+/// scroll without holding full-resolution textures.
 pub fn decode_image_pair(bytes: &[u8]) -> Option<(RenderImage, Option<RenderImage>)> {
     let rgba = decode_rgba(bytes)?;
     let trimmed = trim_rect(&rgba)
-        .map(|(x, y, w, h)| image::imageops::crop_imm(&rgba, x, y, w, h).to_image());
-    let full = bgra_frame(rgba)?;
+        .map(|(x, y, w, h)| image::imageops::crop_imm(&rgba, x, y, w, h).to_image())
+        .map(downscale_for_chat);
+    let full = bgra_frame(downscale_for_chat(rgba))?;
     Some((full, trimmed.and_then(bgra_frame)))
 }
 
@@ -8230,6 +8485,21 @@ fn device_name() -> String {
     }
 }
 
+/// The one rule behind ⌘T, the header pill's "+" and the tab dropdown's New
+/// tab: only an agent's own space takes a new tab. People DMs and groups
+/// (`SpaceKind::Dm` / `Group`) have no project chats, a server channel has no
+/// space at all, and the whole thing sits behind the multi-chat flag.
+pub(crate) fn new_tab_allowed(
+    multi_chat: bool,
+    space: Option<&Project>,
+    channel_open: bool,
+) -> bool {
+    if !multi_chat || channel_open {
+        return false;
+    }
+    space.is_some_and(|p| !p.is_people())
+}
+
 /// The local row of a session fork (#1257): the same project, a plain chat
 /// titled `<title> (fork)`, nothing pinned or shared. `None` when `source`
 /// cannot be forked (groups, system tabs, chats of shared or people spaces).
@@ -8308,6 +8578,65 @@ mod unread_arrival_tests {
         assert_eq!(arrival_read(false, false, false), ArrivalRead::MarkUnread);
         assert_eq!(arrival_read(false, false, true), ArrivalRead::Nothing);
         assert_eq!(arrival_read(true, false, true), ArrivalRead::Nothing);
+    }
+}
+
+/// The block-list row for `person`: same non-empty id, else the same handle (GitHub logins
+/// are case-insensitive).
+pub(crate) fn blocked_entry<'a>(blocked: &'a [Person], person: &Person) -> Option<&'a Person> {
+    blocked.iter().find(|b| {
+        (!b.id.is_empty() && b.id == person.id)
+            || (!b.handle.is_empty() && b.handle.eq_ignore_ascii_case(&person.handle))
+    })
+}
+
+#[cfg(test)]
+mod block_state_tests {
+    //! #1545 (Jacob, 2026-10-23): after "Block user" the row kept reading Block user. The
+    //! row now derives from the relay's block list (`SyncEvent::Blocked`), so it flips to
+    //! Unblock once the list names the person and back once it no longer does.
+    use super::blocked_entry;
+    use crate::model::Person;
+    use crate::ui::profiles::user::block_row_label;
+
+    fn person(id: &str, handle: &str) -> Person {
+        Person {
+            id: id.into(),
+            handle: handle.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn blocked_matches_by_id_then_handle() {
+        let ken = person("gh_1", "kenobijon");
+        let list = vec![ken.clone()];
+        assert!(blocked_entry(&list, &ken).is_some());
+        // The pane may open from a row that only knows the handle.
+        assert!(blocked_entry(&list, &person("", "KenobiJon")).is_some());
+        // A different id with a different handle is not blocked.
+        assert!(blocked_entry(&list, &person("gh_2", "sami")).is_none());
+        assert!(blocked_entry(&[], &ken).is_none());
+    }
+
+    #[test]
+    fn block_row_flips_with_the_list() {
+        let ken = person("gh_1", "kenobijon");
+        let mut list: Vec<Person> = Vec::new();
+        assert_eq!(
+            block_row_label(blocked_entry(&list, &ken).is_some()),
+            "Block user"
+        );
+        list.push(ken.clone());
+        assert_eq!(
+            block_row_label(blocked_entry(&list, &ken).is_some()),
+            "Unblock"
+        );
+        list.retain(|p| p.id != ken.id);
+        assert_eq!(
+            block_row_label(blocked_entry(&list, &ken).is_some()),
+            "Block user"
+        );
     }
 }
 
@@ -8495,5 +8824,83 @@ mod trim_tests {
             }
         });
         assert!(trim_rect(&img).is_none());
+    }
+}
+
+#[cfg(test)]
+mod new_tab_scope_tests {
+    //! Jacob (2026-10-23, Arbonites group): ⌘T in a group chat tried to create
+    //! a project chat and the relay answered "no such project". New tab is an
+    //! agent-space affordance only — the same gate decides the shortcut, the
+    //! pill's "+" and the dropdown row, so none of them exist for people rooms
+    //! or channels.
+    use super::*;
+    use crate::model::SpaceKind;
+
+    fn space(kind: SpaceKind) -> Project {
+        Project {
+            id: "s-1".into(),
+            name: "Space".into(),
+            kind,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn agent_space_keeps_new_tab() {
+        assert!(new_tab_allowed(
+            true,
+            Some(&space(SpaceKind::Project)),
+            false
+        ));
+    }
+
+    #[test]
+    fn people_rooms_and_channels_have_no_new_tab() {
+        assert!(!new_tab_allowed(
+            true,
+            Some(&space(SpaceKind::Group)),
+            false
+        ));
+        assert!(!new_tab_allowed(true, Some(&space(SpaceKind::Dm)), false));
+        // A channel in the centre: no space selected, channel open.
+        assert!(!new_tab_allowed(true, None, true));
+        // Nothing open at all.
+        assert!(!new_tab_allowed(true, None, false));
+    }
+
+    #[test]
+    fn multi_chat_off_hides_it_everywhere() {
+        assert!(!new_tab_allowed(
+            false,
+            Some(&space(SpaceKind::Project)),
+            false
+        ));
+    }
+}
+
+#[cfg(test)]
+mod chat_image_scale_tests {
+    use super::{downscale_for_chat, CHAT_IMAGE_MAX_SIDE};
+    use image::{Rgba, RgbaImage};
+
+    #[test]
+    fn a_small_picture_is_left_alone() {
+        let img = RgbaImage::from_pixel(320, 200, Rgba([10, 20, 30, 255]));
+        let out = downscale_for_chat(img);
+        assert_eq!(out.dimensions(), (320, 200));
+    }
+
+    #[test]
+    fn a_huge_screenshot_fits_the_chat_budget() {
+        // Typical Retina capture: far past the bubble's paint size.
+        let img = RgbaImage::from_pixel(3024, 1964, Rgba([40, 40, 40, 255]));
+        let out = downscale_for_chat(img);
+        let (w, h) = out.dimensions();
+        assert_eq!(w.max(h), CHAT_IMAGE_MAX_SIDE);
+        assert!(w.min(h) < CHAT_IMAGE_MAX_SIDE);
+        // Aspect ≈ 3024/1964.
+        let ratio = w as f32 / h as f32;
+        assert!((ratio - 3024.0 / 1964.0).abs() < 0.02);
     }
 }

@@ -262,6 +262,9 @@ final class AppModel: ObservableObject {
             }
         }
     }
+    /// Telegram-style root tab (Contacts · Calls · Chats · Settings). Opening a
+    /// chat from Contacts/Calls switches to Chats so `path` lands on HomeView's stack.
+    @Published var mainTab: MainTab = .chats
     /// True when the Debug fixture replaced the relay (screenshots).
     var isFixture = false
     /// Debug demo tours run once per process, whichever view instance starts them.
@@ -440,6 +443,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var connectorsBusy = false
     /// Settings → Secrets (D83). `nil` until the first `GET /secrets`.
     @Published var secrets: SecretsOverview?
+    /// Settings → Devices (`GET /auth/devices`, Oct 23).
+    @Published var devices: [AuthDevice] = []
+    @Published var devicesLoaded = false
+    @Published var devicesError: String?
     /// Agent profile → Secrets, per project.
     @Published var projectSecrets: [Id: ProjectSecrets] = [:]
     /// Fixture only: the Vault page's item list (the relay answers this live).
@@ -2354,7 +2361,7 @@ final class AppModel: ObservableObject {
     func sendPeople(chatId: String, text: String, replyTo: String?, address: String? = nil,
                     chipMentions: [String] = [], attachments: [PendingAttachment] = []) {
         guard let doc = docs[chatId], let chat = peopleChat(chatId), let me = user else { return }
-        var mentions = AppModel.mentions(in: text, members: chat.members)
+        var mentions = AppModel.mentions(in: text, members: chat.members, senderHandle: me.login)
         // Leading bare agent names ("Bob?", "hey Bob …", "Arbos what is your name") count as
         // addressing that agent — same as typing @bob — so the box wakes without `@`.
         // Resolve agents before people so a human display-name collision (e.g. @unarbos
@@ -2466,9 +2473,13 @@ final class AppModel: ObservableObject {
     /// `@slug` tokens that name a member: agents by their mention slug, people by handle.
     /// `@everyone` / `@all` and a leading "hey everyone" (etc.) address every agent in the chat.
     /// Soft-deleted agents (no nested `project`) are skipped — they cannot wake or reply.
-    static func mentions(in text: String, members: [ChatMember]) -> [String] {
+    /// `@slug` → member. Typed resolution (#1538): when a person and an agent share a slug, the
+    /// slug means the AGENT if it is the sender's own handle (nobody @-mentions themselves) and
+    /// the person otherwise; the autocomplete labels both so the typist can pick.
+    static func mentions(in text: String, members: [ChatMember], senderHandle: String? = nil) -> [String] {
         var out: [String] = []
         let agents = members.filter { $0.isAgent && $0.project != nil }
+        let mine = senderHandle?.lowercased()
         func appendAgents() {
             for a in agents where !out.contains(a.member) { out.append(a.member) }
         }
@@ -2483,10 +2494,12 @@ final class AppModel: ObservableObject {
                 if !out.contains(a.member) { out.append(a.member) }
                 continue
             }
-            if let m = members.first(where: {
+            let hits = members.filter {
                 $0.handle.lowercased() == slug
                     || ($0.isAgent && $0.project != nil && mentionSlug($0.project?.name ?? "") == slug)
-            }) {
+            }
+            let preferAgent = slug == mine
+            if let m = hits.first(where: { $0.isAgent == preferAgent }) ?? hits.first {
                 if !out.contains(m.member) { out.append(m.member) }
             }
         }
@@ -3067,8 +3080,14 @@ final class AppModel: ObservableObject {
     }
 
     func unblock(_ person: Person) {
-        blocked.removeAll { $0.id == person.id }
-        Task { try? await api.unblock(userId: person.id) }
+        Task {
+            do { try await api.unblock(userId: person.id) }
+            catch let e as RelayError where e.status == 404 {
+                // Already not blocked on the relay; the list below says so.
+            }
+            catch { notice = Notice(text: "Unblock failed: \(error.localizedDescription)") }
+            await refreshBlocks()
+        }
     }
 
     func refreshBlocks() async {
@@ -3379,9 +3398,10 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Lowercased blob of every loaded message in a chat (for home search).
-    /// Falls back to a one-shot doc read when the published array is still nil.
-    func searchableMessageText(of chatId: Id) -> String {
+    /// Every loaded user / assistant / project message with prose in a chat
+    /// (home search; system lines never count). Falls back to a one-shot doc
+    /// read when the published array is still nil.
+    func searchableMessages(of chatId: Id) -> [Message] {
         let list: [Message]
         if let published = messages[chatId] {
             list = published
@@ -3390,7 +3410,7 @@ final class AppModel: ObservableObject {
         } else {
             list = []
         }
-        return list.map(\.plainText).joined(separator: "\n").lowercased()
+        return list.filter { $0.role != .system && !$0.plainText.isEmpty }
     }
 
     /// S8: the last assistant message asked a question and nothing was sent since.

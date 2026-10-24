@@ -171,6 +171,7 @@ struct ServerChannelsView: View {
             header
         }
         .toolbar(.hidden, for: .navigationBar)
+        .toolbar(.hidden, for: .tabBar)
         .navigationBarBackButtonHidden(true)
         // Custom back hides the system edge-swipe; List also eats
         // InteractivePopGestureEnabler. Same swipe-right → Home as ChatView.

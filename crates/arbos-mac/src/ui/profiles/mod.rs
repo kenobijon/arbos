@@ -15,7 +15,7 @@ pub(crate) mod kit;
 mod me;
 pub(crate) mod pane;
 mod server;
-mod user;
+pub(crate) mod user;
 
 use std::rc::Rc;
 use std::sync::Arc;

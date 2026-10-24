@@ -21,7 +21,7 @@ use crate::ui::avatar_picker;
 use crate::ui::avatars::{self, leaf, LeafPick};
 use crate::ui::callview;
 use crate::ui::channels::{ChannelsEvent, ChannelsPanel};
-use crate::ui::composer::{Composer, ComposerEvent, ComposerInput};
+use crate::ui::composer::{self, Composer, ComposerEvent, ComposerInput};
 use crate::ui::connectors::{ConnectorsEvent, ConnectorsPanel};
 use crate::ui::create_entity::{self, Kind as CreateKind};
 use crate::ui::dropzone;
@@ -110,6 +110,8 @@ pub(crate) enum SettingsPage {
     Skills,
     ThisMac,
     Secrets,
+    /// Signed-in devices of my account: list + sign out another (Oct 23).
+    Devices,
 }
 
 impl SettingsPage {
@@ -128,6 +130,7 @@ impl SettingsPage {
             SettingsPage::Skills => "Skills",
             SettingsPage::ThisMac => "This Mac",
             SettingsPage::Secrets => "Secrets",
+            SettingsPage::Devices => "Devices",
         }
     }
 
@@ -141,6 +144,7 @@ impl SettingsPage {
                 | SettingsPage::Notifications
                 | SettingsPage::Updates
                 | SettingsPage::About
+                | SettingsPage::Devices
         )
     }
 
@@ -157,7 +161,8 @@ impl SettingsPage {
             | SettingsPage::Connectors
             | SettingsPage::Channels
             | SettingsPage::ThisMac
-            | SettingsPage::Secrets => SETTINGS_WIDTH,
+            | SettingsPage::Secrets
+            | SettingsPage::Devices => SETTINGS_WIDTH,
             SettingsPage::Routines => crate::ui::routines::PANEL_WIDTH + 32.0,
             SettingsPage::Skills => skills::CARD_WIDTH + 32.0,
         }
@@ -268,6 +273,8 @@ pub struct Shell {
     /// Group pane › Members: the row whose ✕ was clicked (`user:<id>` or
     /// `agent:<project>`); it shows "Remove … ?" with Cancel / Remove.
     pub(crate) member_remove_armed: Option<String>,
+    /// Settings → Devices: the device whose Sign out is asking (Oct 23).
+    pub(crate) device_revoke_armed: Option<String>,
     /// A member row's menu on the group pane (Shift-click / right-click): View
     /// profile, Remove from group → arms `member_remove_armed`.
     pub(crate) member_menu: Option<member_menu::MemberMenu>,
@@ -336,6 +343,7 @@ impl Shell {
                 || v == "about"
                 || v == "appearance"
                 || v == "credits"
+                || v == "devices"
                 || v.starts_with("secrets")
         });
         let settings_scroll = ScrollHandle::new();
@@ -625,6 +633,14 @@ impl Shell {
         if std::env::var("ARBOS_OPEN_NEW_CHAT").is_ok_and(|v| v == "1") {
             state.update(cx, |s, cx| s.open_new_chat(cx));
         }
+        // Rig: `ARBOS_SEARCH=<text>` opens the sidebar search with that query
+        // (synthetic key events do not reach the GPUI field on the shared display).
+        let search_query = std::env::var("ARBOS_SEARCH")
+            .ok()
+            .filter(|q| !q.trim().is_empty());
+        if let Some(q) = &search_query {
+            search_input.update(cx, |input, cx| input.set_text(q.clone(), cx));
+        }
         if std::env::var("ARBOS_OPEN_NEW_AGENT").is_ok_and(|v| v == "1") {
             state.update(cx, |s, cx| {
                 s.open_new_chat(cx);
@@ -770,6 +786,7 @@ impl Shell {
                 Some("about") => SettingsPage::About,
                 Some("appearance") => SettingsPage::Appearance,
                 Some("credits") => SettingsPage::Credits,
+                Some("devices") => SettingsPage::Devices,
                 Some(v) if v.starts_with("secrets") => SettingsPage::Secrets,
                 _ => SettingsPage::Root,
             },
@@ -780,6 +797,7 @@ impl Shell {
             row_delete_armed: false,
             agent_delete_armed: false,
             member_remove_armed: None,
+            device_revoke_armed: None,
             member_menu: None,
             chat_menu: None,
             chat_delete_armed: false,
@@ -834,6 +852,9 @@ impl Shell {
                 s.open_profile(ProfilePage::Me, cx);
                 s.set_profile_tab(1, cx);
             });
+            if shell.settings_page == SettingsPage::Devices {
+                shell.state.update(cx, |s, cx| s.devices_refresh(cx));
+            }
         }
         shell
     }
@@ -884,6 +905,49 @@ impl Shell {
         self.feedback.update(cx, |sheet, cx| sheet.open(window, cx));
     }
 
+    /// Edit → Paste / ⌘V when focus is not already on a text field (e.g. after
+    /// selecting a bubble): land the clipboard in the chat composer.
+    fn paste_into_chat(
+        &mut self,
+        _: &composer::Paste,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // A focused ComposerInput (chat, search, secrets, …) already handles
+        // Paste; running again here would insert the text twice.
+        if self.text_field_focused(window, cx) {
+            return;
+        }
+        Composer::focus(&self.composer, window, cx);
+        let input = self.composer.read(cx).input.clone();
+        input.update(cx, |input, cx| input.paste_clipboard(window, cx));
+    }
+
+    /// True when a one-line or chat text field owns the keyboard.
+    fn text_field_focused(&self, window: &Window, cx: &App) -> bool {
+        let focused =
+            |input: &Entity<ComposerInput>| input.read(cx).focus_handle(cx).is_focused(window);
+        focused(&self.composer.read(cx).input)
+            || focused(&self.pairing_input)
+            || focused(&self.project_input)
+            || focused(&self.search_input)
+            || focused(&self.viewer_search)
+            || focused(&self.people_input)
+            || focused(&self.server_input)
+            || focused(&self.name_input)
+            || focused(&self.handle_input)
+            || focused(&self.agent_name_input)
+            || focused(&self.description_input)
+            || focused(&self.avatar_prompt_input)
+            || focused(&self.model_search_input)
+            || focused(&self.tab_rename_input)
+            || focused(&self.feedback.read(cx).note)
+            || self.connectors.read(cx).input_focused(window, cx)
+            || self.secrets.read(cx).input_focused(window, cx)
+            || self.skills.read(cx).has_focus(window, cx)
+            || (self.routines_open && self.routines.read(cx).has_focus(window, cx))
+    }
+
     pub(crate) fn open_feedback(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.menu_open = false;
         self.close_settings(cx);
@@ -908,6 +972,7 @@ impl Shell {
             | SettingsPage::Notifications
             | SettingsPage::Updates
             | SettingsPage::About => {}
+            SettingsPage::Devices => self.state.update(cx, |s, cx| s.devices_refresh(cx)),
             SettingsPage::Connectors => self.connectors.update(cx, |p, cx| {
                 p.show(cx);
                 p.embedded = true;
@@ -955,7 +1020,8 @@ impl Shell {
             | SettingsPage::Appearance
             | SettingsPage::Notifications
             | SettingsPage::Updates
-            | SettingsPage::About => {}
+            | SettingsPage::About
+            | SettingsPage::Devices => {}
             SettingsPage::Connectors => self.connectors.update(cx, |p, cx| p.hide(cx)),
             SettingsPage::Routines => {
                 self.routines_open = false;
@@ -1007,7 +1073,8 @@ impl Shell {
             | SettingsPage::Appearance
             | SettingsPage::Notifications
             | SettingsPage::Updates
-            | SettingsPage::About => true,
+            | SettingsPage::About
+            | SettingsPage::Devices => true,
             SettingsPage::Connectors => self.connectors.read(cx).is_open(),
             SettingsPage::Routines => self.routines_open,
             SettingsPage::Channels => self.channels.read(cx).is_open(),
@@ -3479,6 +3546,7 @@ impl Render for Shell {
             .on_action(cx.listener(Self::toggle_rail))
             .on_action(cx.listener(Self::escape))
             .on_action(cx.listener(Self::send_feedback))
+            .on_action(cx.listener(Self::paste_into_chat))
             // Clicks on chrome must not strand keyboard focus: unless another
             // text field took it, the composer keeps it. Floating menus close.
             .on_mouse_down(

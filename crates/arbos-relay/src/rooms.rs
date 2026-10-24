@@ -28,21 +28,11 @@ const CATCHUP_HOLD: Duration = Duration::from_secs(10);
 /// A device may push back history the relay lacks once per connection (`PushHeader.heal`).
 const HEALS_PER_CONNECTION: u32 = 1;
 
-/// Encoded version vector of the room's stored doc (checkpoint ∪ rows), cached on the room by
-/// head so a reconnect storm rebuilds it once per head change, not once per socket.
-fn room_version_vector(
-    state: &AppState,
-    room: &crate::state::Room,
-    room_name: &str,
-) -> anyhow::Result<Vec<u8>> {
-    use arbos_core::doc::{encode_vv, ChatDoc};
+/// Full rebuild of the room's stored doc (checkpoint ∪ every row). Runs off the socket task via
+/// `spawn_blocking` on a cold cache.
+fn build_room_doc(state: &AppState, room_name: &str) -> anyhow::Result<crate::state::RoomDocCache> {
+    use arbos_core::doc::ChatDoc;
     let st = state.db.room_state(room_name)?;
-    let key = (st.head, st.floor);
-    if let Some((k, vv)) = room.vv_cache.lock().unwrap().as_ref() {
-        if *k == key {
-            return Ok(vv.clone());
-        }
-    }
     let mut doc = match state.db.checkpoint_bytes(room_name)? {
         Some((_, bytes)) => ChatDoc::from_snapshot(None, false, &bytes)?,
         None => ChatDoc::new(None, false),
@@ -59,8 +49,88 @@ fn room_version_vector(
             break;
         }
     }
-    let vv = encode_vv(&doc.oplog_vv());
-    *room.vv_cache.lock().unwrap() = Some((key, vv.clone()));
+    Ok(crate::state::RoomDocCache {
+        key: (st.head, st.floor),
+        doc,
+    })
+}
+
+/// Import only rows after the cached head when the head moved; rebuild when the floor moved.
+fn advance_room_doc(
+    state: &AppState,
+    room_name: &str,
+    cached: &mut crate::state::RoomDocCache,
+) -> anyhow::Result<()> {
+    let st = state.db.room_state(room_name)?;
+    let key = (st.head, st.floor);
+    if cached.key == key {
+        return Ok(());
+    }
+    if cached.key.1 != st.floor || st.head < cached.key.0 {
+        *cached = build_room_doc(state, room_name)?;
+        return Ok(());
+    }
+    let mut after = cached.key.0;
+    loop {
+        let rows = state.db.rows_after(room_name, after, None, ROWS_BATCH)?;
+        let n = rows.len() as i64;
+        for r in rows {
+            after = r.seq;
+            let _ = cached.doc.import(&r.bytes);
+        }
+        if n < ROWS_BATCH {
+            break;
+        }
+    }
+    cached.key = key;
+    Ok(())
+}
+
+/// Encoded version vector of the room's stored doc (checkpoint ∪ rows). Keeps a ChatDoc on the
+/// room: head moves import only new rows; the first build runs in `spawn_blocking`.
+async fn room_version_vector(
+    state: &AppState,
+    room: &crate::state::Room,
+    room_name: &str,
+) -> anyhow::Result<Vec<u8>> {
+    use arbos_core::doc::encode_vv;
+    {
+        let mut guard = room.doc_cache.lock().unwrap();
+        if let Some(cached) = guard.as_mut() {
+            advance_room_doc(state, room_name, cached)?;
+            return Ok(encode_vv(&cached.doc.oplog_vv()));
+        }
+    }
+    let state_c = state.clone();
+    let name = room_name.to_owned();
+    let built = tokio::task::spawn_blocking(move || build_room_doc(&state_c, &name))
+        .await
+        .map_err(|e| anyhow::anyhow!("room doc rebuild: {e}"))??;
+    let vv = encode_vv(&built.doc.oplog_vv());
+    *room.doc_cache.lock().unwrap() = Some(built);
+    Ok(vv)
+}
+
+/// Version vector of the room's stored doc (same cache as [`room_version_vector`]).
+async fn room_oplog_vv(
+    state: &AppState,
+    room: &crate::state::Room,
+    room_name: &str,
+) -> anyhow::Result<arbos_core::doc::VersionVector> {
+    {
+        let mut guard = room.doc_cache.lock().unwrap();
+        if let Some(cached) = guard.as_mut() {
+            advance_room_doc(state, room_name, cached)?;
+            return Ok(cached.doc.oplog_vv());
+        }
+    }
+    let state_c = state.clone();
+    let name = room_name.to_owned();
+    let built = tokio::task::spawn_blocking(move || build_room_doc(&state_c, &name))
+        .await
+        .map_err(|e| anyhow::anyhow!("room doc rebuild: {e}"))??;
+    let vv = built.doc.oplog_vv();
+    *room.doc_cache.lock().unwrap() = Some(built);
     Ok(vv)
 }
 
@@ -147,6 +217,19 @@ fn error_frame(code: &str, message: &str) -> Message {
     )
 }
 
+/// People-push refusal: always carries `batchId`; `rate_limited` also carries `retryS`.
+fn push_refused_frame(refused: &people::PushRefused, batch_id: &str) -> Message {
+    let mut header = json!({
+        "code": refused.code(),
+        "message": refused.message(),
+        "batchId": batch_id,
+    });
+    if let Some(retry_s) = refused.retry_s() {
+        header["retryS"] = json!(retry_s);
+    }
+    frame(FrameType::Error, header, Bytes::new())
+}
+
 /// The close frame a planned restart sends: 1012 Service Restart. Clients treat it as "redial
 /// now" rather than a fault (connection pill, #1339).
 fn restart_close() -> Message {
@@ -173,6 +256,18 @@ impl Drop for OpenSocket {
     }
 }
 
+/// Drops the room's rebuilt doc when this was the last socket. Declared before the broadcast
+/// subscribe so it runs after the subscribe is dropped (reverse drop order).
+struct LastSocketDocCacheClear(Arc<crate::state::Room>);
+
+impl Drop for LastSocketDocCacheClear {
+    fn drop(&mut self) {
+        if self.0.tx.receiver_count() == 0 {
+            *self.0.doc_cache.lock().unwrap() = None;
+        }
+    }
+}
+
 async fn run(
     socket: WebSocket,
     state: AppState,
@@ -182,6 +277,8 @@ async fn run(
 ) {
     let conn_id = state.conn_seq.fetch_add(1, Ordering::Relaxed) + 1;
     let room = state.room(&room_name).await;
+    // Before subscribe: Drop runs after `rx` is gone, so receiver_count excludes this socket.
+    let _clear_doc = LastSocketDocCacheClear(room.clone());
     let mut rx = room.tx.subscribe();
     let (mut sink, mut stream) = socket.split();
     // A planned restart (restart.rs): the socket closes with 1012 so the client redials at once
@@ -310,6 +407,8 @@ async fn run(
     if is_box {
         boxes::box_disconnected(&state, &box_user).await;
     }
+    // `_clear_doc` (declared before `rx`) drops after `rx`, clearing the doc cache when this
+    // was the last socket.
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -375,7 +474,9 @@ async fn handle_frame(
             // The payload is the relay's version vector for the room (checkpoint ∪ rows): a
             // device compares it with its own doc and pushes back what the relay lacks
             // (`PushHeader.heal`), so one complete device heals a room whose rows were lost.
-            let relay_vv = room_version_vector(state, room, room_name).unwrap_or_default();
+            let relay_vv = room_version_vector(state, room, room_name)
+                .await
+                .unwrap_or_default();
             sink.send(frame(
                 FrameType::RowsDone,
                 json!({ "headSeq": after }),
@@ -404,6 +505,33 @@ async fn handle_frame(
                     "history heal: a device pushed ops the relay lacked"
                 );
             }
+            // A batch id the room already stored is a dup before the people gates — no rate
+            // event, no store, no broadcast.
+            if let Some(seq) = state.db.row_seq_for_batch(room_name, &p.batch_id)? {
+                sink.send(frame(
+                    FrameType::Ack,
+                    json!({ "batchId": p.batch_id, "seq": seq, "dup": true }),
+                    Bytes::new(),
+                ))
+                .await?;
+                return Ok(());
+            }
+            // Covered pushes are duplicates: ops the room already holds (often a reconnect
+            // resending refused heals as ordinary pushes). ACK with dup, skip gates and store.
+            if !p.heal {
+                if let Ok(vv) = room_oplog_vv(state, room, room_name).await {
+                    if arbos_core::doc::update_covered_by(&f.payload, &vv) {
+                        let seq = state.db.room_state(room_name).map(|s| s.head).unwrap_or(0);
+                        sink.send(frame(
+                            FrameType::Ack,
+                            json!({ "batchId": p.batch_id, "seq": seq, "dup": true }),
+                            Bytes::new(),
+                        ))
+                        .await?;
+                        return Ok(());
+                    }
+                }
+            }
             let mut wake_owners = Vec::new();
             // A heal carries other members' history, not a message of this device: the
             // message gates (rate limit, blocks, member pushes) do not apply — the socket's ACL
@@ -417,7 +545,7 @@ async fn handle_frame(
                 match people::on_room_push(state, principal, chat_id) {
                     Ok(owners) => wake_owners = owners,
                     Err(r) => {
-                        sink.send(error_frame(r.code(), r.message())).await?;
+                        sink.send(push_refused_frame(&r, &p.batch_id)).await?;
                         return Ok(());
                     }
                 }
@@ -1656,5 +1784,360 @@ mod history_tests {
             live.healed_bytes, healed_before,
             "no second heal once the relay is whole"
         );
+    }
+}
+
+#[cfg(test)]
+mod covered_push_tests {
+    //! Reconnect storm (#1570): pending batches whose ops the room already holds must ACK as
+    //! `dup` before the people gates — no new rows, no rate events — or every connect is refused
+    //! with `rate_limited` forever.
+
+    use axum::routing::get;
+    use axum::Router;
+    use futures::{SinkExt, StreamExt};
+    use serde_json::json;
+    use std::net::SocketAddr;
+    use std::time::Duration;
+    use tokio_tungstenite::tungstenite::Message as TMsg;
+
+    use arbos_core::doc::{encode_vv, ChatDoc, UserMessageOpts};
+    use arbos_core::ids::ulid;
+    use arbos_core::wire::{Frame, FrameType};
+
+    use crate::people::tests_support::{dm, person};
+    use crate::state::test_support::test_state;
+    use crate::state::{AppState, AuthMode};
+
+    async fn serve(state: AppState) -> SocketAddr {
+        let app = Router::new()
+            .route("/room/{project}/{chat}", get(super::ws_room))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        addr
+    }
+
+    fn device_token(state: &AppState, user: &str) -> String {
+        let token = format!("adv_{}", ulid().to_ascii_lowercase());
+        state
+            .db
+            .insert_device(
+                &ulid(),
+                "t",
+                &arbos_core::auth::hash(&token),
+                user,
+                "paircode",
+            )
+            .unwrap();
+        token
+    }
+
+    fn decode(m: TMsg) -> Option<Frame> {
+        match m {
+            TMsg::Binary(b) => Frame::decode(b).ok().flatten(),
+            _ => None,
+        }
+    }
+
+    /// HELLO + ROWS_REQ through ROWS_DONE, then push `batches` and collect ACK / error frames.
+    async fn push_after_catchup(
+        addr: SocketAddr,
+        room: &str,
+        token: &str,
+        device: &str,
+        batches: &[(String, Vec<u8>)],
+    ) -> Vec<Frame> {
+        let url = format!("ws://{addr}/room/{room}?token={token}");
+        let (ws, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+        let (mut sink, mut stream) = ws.split();
+        sink.send(TMsg::Binary(
+            Frame::new(
+                FrameType::Hello,
+                json!({
+                    "cursor": 0,
+                    "device": device,
+                    "room": room,
+                    "proto": arbos_core::PROTO_VERSION
+                }),
+                bytes::Bytes::new(),
+            )
+            .encode(),
+        ))
+        .await
+        .unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let m = tokio::time::timeout_at(deadline, stream.next())
+                .await
+                .expect("relay answers")
+                .unwrap()
+                .unwrap();
+            let Some(f) = decode(m) else { continue };
+            match f.ty {
+                FrameType::State => {
+                    sink.send(TMsg::Binary(
+                        Frame::new(
+                            FrameType::RowsReq,
+                            json!({ "after": 0, "excludeOwn": false }),
+                            bytes::Bytes::new(),
+                        )
+                        .encode(),
+                    ))
+                    .await
+                    .unwrap();
+                }
+                FrameType::RowsDone => break,
+                FrameType::Row | FrameType::Error | FrameType::Ack => {}
+                _ => {}
+            }
+        }
+        for (batch_id, bytes) in batches {
+            sink.send(TMsg::Binary(
+                Frame::new(
+                    FrameType::Push,
+                    json!({ "batchId": batch_id }),
+                    bytes::Bytes::from(bytes.clone()),
+                )
+                .encode(),
+            ))
+            .await
+            .unwrap();
+        }
+        let mut out = Vec::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        while out.len() < batches.len() {
+            let m = tokio::time::timeout_at(deadline, stream.next())
+                .await
+                .expect("ack/error")
+                .unwrap()
+                .unwrap();
+            if let Some(f) = decode(m) {
+                if matches!(f.ty, FrameType::Ack | FrameType::Error) {
+                    out.push(f);
+                }
+            }
+        }
+        out
+    }
+
+    /// 250 pending batches whose ops the room already holds → 250 dup ACKs, no new rows, no
+    /// rate events.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn covered_pending_batches_ack_as_dup_without_rate_events() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let (bob, _) = person(&state, 2);
+        let chat = dm(&state, &alice, &bob);
+        let room = format!("people/{chat}");
+        let token = device_token(&state, &alice);
+
+        // Room already holds 250 message ops (written under bob).
+        let writer = ChatDoc::new(Some(7), false);
+        let base = writer.oplog_vv();
+        writer.init_meta(&chat, "people", 1);
+        state
+            .db
+            .append_row(
+                &room,
+                "dev:bob",
+                "meta",
+                &writer.export_updates_since(&base),
+            )
+            .unwrap();
+        let mut pending = Vec::new();
+        for i in 0..250 {
+            let before = writer.oplog_vv();
+            writer
+                .append_user_message(
+                    &format!("m{i}"),
+                    &format!("msg {i}"),
+                    "dev:bob",
+                    &UserMessageOpts::default(),
+                )
+                .unwrap();
+            let bytes = writer.export_updates_since(&before);
+            state
+                .db
+                .append_row(&room, "dev:bob", &format!("stored-{i}"), &bytes)
+                .unwrap();
+            // Alice's pending list uses different batch ids for the same ops (refused heals
+            // resent as ordinary pushes).
+            pending.push((format!("pending-{i}"), bytes));
+        }
+        let head_before = state.db.room_state(&room).unwrap().head;
+        let rates_before = state.db.rate_count(&alice, "msg", 60_000).unwrap();
+
+        let addr = serve(state.clone()).await;
+        let frames = push_after_catchup(addr, &room, &token, "dev:alice", &pending).await;
+
+        assert_eq!(frames.len(), 250);
+        for f in &frames {
+            assert_eq!(f.ty, FrameType::Ack, "header={}", f.header);
+            assert_eq!(f.header["dup"], true, "header={}", f.header);
+        }
+        assert_eq!(
+            state.db.room_state(&room).unwrap().head,
+            head_before,
+            "no new rows stored"
+        );
+        assert_eq!(
+            state.db.rate_count(&alice, "msg", 60_000).unwrap(),
+            rates_before,
+            "covered dups must not count as messages"
+        );
+    }
+
+    /// A batch id the room already stored is a dup before the gates (no rate event).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn resent_stored_batch_id_is_dup_before_gates() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let (bob, _) = person(&state, 2);
+        let chat = dm(&state, &alice, &bob);
+        let room = format!("people/{chat}");
+        let token = device_token(&state, &alice);
+
+        let doc = ChatDoc::new(Some(7), false);
+        let before = doc.oplog_vv();
+        doc.init_meta(&chat, "people", 1);
+        doc.append_user_message("m1", "hi", "dev:alice", &UserMessageOpts::default())
+            .unwrap();
+        let bytes = doc.export_updates_since(&before);
+        let (seq, _) = state
+            .db
+            .append_row(&room, "dev:alice", "same-batch", &bytes)
+            .unwrap();
+        let rates_before = state.db.rate_count(&alice, "msg", 60_000).unwrap();
+
+        let addr = serve(state.clone()).await;
+        let frames = push_after_catchup(
+            addr,
+            &room,
+            &token,
+            "dev:alice",
+            &[(("same-batch".into()), bytes)],
+        )
+        .await;
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].ty, FrameType::Ack);
+        assert_eq!(frames[0].header["dup"], true);
+        assert_eq!(frames[0].header["seq"], seq);
+        assert_eq!(
+            state.db.rate_count(&alice, "msg", 60_000).unwrap(),
+            rates_before
+        );
+    }
+
+    /// Rate-limit refusal carries batchId + retryS; a refused push adds no rate event.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn rate_limited_error_has_batch_id_and_retry_s_and_does_not_count() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let (bob, _) = person(&state, 2);
+        let chat = dm(&state, &alice, &bob);
+        let room = format!("people/{chat}");
+        let token = device_token(&state, &alice);
+
+        // Fill the message window to the young-account limit (half of 200).
+        let limit = 100; // young accounts in test_state are brand-new
+        for _ in 0..limit {
+            assert!(state
+                .db
+                .rate_check_and_note(&alice, "msg", 60_000, limit)
+                .unwrap());
+        }
+        assert_eq!(state.db.rate_count(&alice, "msg", 60_000).unwrap(), limit);
+
+        let doc = ChatDoc::new(Some(11), false);
+        let before = doc.oplog_vv();
+        doc.append_user_message("m-new", "fresh", "dev:alice", &UserMessageOpts::default())
+            .unwrap();
+        let bytes = doc.export_updates_since(&before);
+        let batch_id = ulid();
+
+        let addr = serve(state.clone()).await;
+        let frames = push_after_catchup(
+            addr,
+            &room,
+            &token,
+            "dev:alice",
+            &[(batch_id.clone(), bytes)],
+        )
+        .await;
+        assert_eq!(frames.len(), 1);
+        let err = &frames[0];
+        assert_eq!(err.ty, FrameType::Error);
+        assert_eq!(err.header["code"], "rate_limited");
+        assert_eq!(err.header["message"], "slow down");
+        assert_eq!(err.header["batchId"], batch_id);
+        assert!(
+            err.header["retryS"].as_i64().unwrap_or(0) >= 1,
+            "retryS={}",
+            err.header["retryS"]
+        );
+        assert_eq!(
+            state.db.rate_count(&alice, "msg", 60_000).unwrap(),
+            limit,
+            "refused push must not insert a rate event"
+        );
+    }
+
+    /// Cached room version vector matches a full rebuild after rows are appended.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cached_vv_matches_full_rebuild_after_append() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let (bob, _) = person(&state, 2);
+        let chat = dm(&state, &alice, &bob);
+        let room_name = format!("people/{chat}");
+        let room = state.room(&room_name).await;
+
+        let doc = ChatDoc::new(Some(7), false);
+        for i in 0..5 {
+            let before = doc.oplog_vv();
+            doc.append_user_message(&format!("m{i}"), "x", "dev", &UserMessageOpts::default())
+                .unwrap();
+            state
+                .db
+                .append_row(
+                    &room_name,
+                    "dev",
+                    &format!("b{i}"),
+                    &doc.export_updates_since(&before),
+                )
+                .unwrap();
+        }
+        let vv1 = super::room_version_vector(&state, &room, &room_name)
+            .await
+            .unwrap();
+        // Append more rows; the cache must advance by importing only the new ones.
+        for i in 5..12 {
+            let before = doc.oplog_vv();
+            doc.append_user_message(&format!("m{i}"), "y", "dev", &UserMessageOpts::default())
+                .unwrap();
+            state
+                .db
+                .append_row(
+                    &room_name,
+                    "dev",
+                    &format!("b{i}"),
+                    &doc.export_updates_since(&before),
+                )
+                .unwrap();
+        }
+        let vv_cached = super::room_version_vector(&state, &room, &room_name)
+            .await
+            .unwrap();
+        // Full rebuild (ignore cache).
+        *room.doc_cache.lock().unwrap() = None;
+        let vv_full = super::room_version_vector(&state, &room, &room_name)
+            .await
+            .unwrap();
+        assert_eq!(vv_cached, vv_full);
+        assert_ne!(vv1, vv_cached);
+        // And it equals encoding the writer's own vv once the room holds the same ops.
+        assert_eq!(vv_cached, encode_vv(&doc.oplog_vv()));
     }
 }

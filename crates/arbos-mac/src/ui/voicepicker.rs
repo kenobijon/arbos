@@ -281,3 +281,16 @@ pub fn list(
     }
     list
 }
+
+/// The current voice's name for the agent pane's Voice row ("Default" when
+/// the agent uses the relay's default; the raw id until the list arrives).
+pub fn current_label(space: &Project, voices: &[Voice]) -> String {
+    match space.voice.as_deref() {
+        None => "Default".into(),
+        Some(id) => voices
+            .iter()
+            .find(|v| v.id == id)
+            .map(|v| v.name.clone())
+            .unwrap_or_else(|| id.to_string()),
+    }
+}
