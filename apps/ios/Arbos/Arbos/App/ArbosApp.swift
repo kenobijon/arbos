@@ -47,6 +47,7 @@ struct RootView: View {
         .onAppear {
             #if DEBUG
             PerfLog.shared.startIfRequested()
+            PerfLog.shared.observe(model)
             #endif
             if DebugHooks.show == "onboarding" {
                 model.demoFirstLogin(stage: DebugHooks.onboardingStage)

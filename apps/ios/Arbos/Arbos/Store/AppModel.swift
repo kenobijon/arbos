@@ -148,7 +148,13 @@ final class AppModel: ObservableObject {
     /// `machine.waitlisted` / `machine.waitlist_position`). nil = not waitlisted.
     @Published var waitlistPosition: Int?
     /// People chats (D72): DMs I am a member of, newest activity first.
-    @Published var peopleChats: [PeopleChat] = []
+    @Published var peopleChats: [PeopleChat] = [] {
+        didSet {
+            #if DEBUG
+            PerfCounters.bump("pub.peopleChats")
+            #endif
+        }
+    }
     /// Chat ids with unread rows: the relay's per-user `unread` flag plus live rows from
     /// others that landed while the chat was off screen (never `head_seq > read_seq`, #1438).
     @Published var peopleUnread: Set<String> = []
@@ -245,7 +251,13 @@ final class AppModel: ObservableObject {
         didSet {
         }
     }
-    @Published var chats: [Id: [Chat]] = [:]
+    @Published var chats: [Id: [Chat]] = [:] {
+        didSet {
+            #if DEBUG
+            PerfCounters.bump("pub.chats")
+            #endif
+        }
+    }
     @Published var messages: [Id: [Message]] = [:] {
         didSet { bumpVersions(from: oldValue, to: messages) }
     }
@@ -260,6 +272,9 @@ final class AppModel: ObservableObject {
     /// off the version. Arrays are COW, so unchanged chats share storage with the old
     /// dictionary and keep their version (arbonites-chat-lag, 2026-10-24).
     private func bumpVersions(from old: [Id: [Message]], to new: [Id: [Message]]) {
+        #if DEBUG
+        PerfCounters.bump("pub.messages")
+        #endif
         for (id, list) in new where !Self.sameStorage(list, old[id]) {
             messagesVersion[id, default: 0] &+= 1
             activityCache[id] = nil
@@ -276,7 +291,13 @@ final class AppModel: ObservableObject {
         if a.isEmpty { return true }
         return a.withUnsafeBufferPointer { pa in b.withUnsafeBufferPointer { pb in pa.baseAddress == pb.baseAddress } }
     }
-    @Published var caughtUp: Set<Id> = []
+    @Published var caughtUp: Set<Id> = [] {
+        didSet {
+            #if DEBUG
+            PerfCounters.bump("pub.caughtUp")
+            #endif
+        }
+    }
     @Published var link: Link = .connecting
     /// Per-room link, for the chat header's connection pill. The pill must not
     /// use the global `link`: any other room's brief reconnect was painting

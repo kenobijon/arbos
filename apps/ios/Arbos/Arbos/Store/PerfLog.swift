@@ -7,6 +7,7 @@
 //   log show --predicate 'subsystem == "com.unarbos.arbos.ios" AND category == "perf"'
 
 #if DEBUG
+import Combine
 import Foundation
 import QuartzCore
 import os
@@ -34,6 +35,14 @@ final class PerfLog {
         scrollableArmedAt = CACurrentMediaTime()
         smoothRun = 0
         scrollableLogged = false
+    }
+
+    private var publishSink: AnyCancellable?
+
+    /// Count every AppModel publish (any `@Published` write) into the perf line.
+    func observe(_ model: AppModel) {
+        guard DebugHooks.perfLog, publishSink == nil else { return }
+        publishSink = model.objectWillChange.sink { _ in PerfCounters.bump("pub.any") }
     }
 
     func startIfRequested() {
