@@ -217,6 +217,31 @@ Code: `transcript.rs` `hover_time()` (returns nothing at opacity 0) and
 `layout_tests::the_time_is_hidden_at_rest_and_beside_the_bubble_on_hover`;
 iPhone `Transcript.swift` `RowView` + `SenderNameRowTests`.
 
+## Agent bubble width (Jacob 2026-10-24, [feedback bubble-width-2026-10-24])
+
+**An agent bubble is at most 560 pt wide, and never closer than 84 pt to the
+column's right edge.** Measured on Jacob's Grok Bot shots of 2026-10-24
+(`media/feedback/grok-parity-test/grok-chat-1.png`, `grok-chat-2-research.png`,
+3456 × 2172 px = 2 px/pt, a 1728 pt window with the right pane open): Grok's
+chat column is 1128 pt, its composer 960 pt, and every wrapped agent bubble
+(the three-line answer, the table, the research bullets) ends at **1120 px =
+560 pt** — 58 % of the composer, 50 % of the column; the list bubble is
+content-sized at 531. Arbos in the same window: column 1041, composer 876
+(`COLUMN_MAX_WIDTH`), bubble 792 = column − 84 (90 %). Grok's older narrow-pane
+refs (57: 612 in a 696 pill; 58: 310 in 392) show the fixed 84 pt gap governing
+below the ceiling, so the rule is the smaller of the two:
+`assistant_cap(slot) = min(slot − 84, 560)`; the crossover is a 644 pt slot.
+At our 876 pt column the bubble is 560 = 64 % of the column (Grok's composer is
+wider than ours; matching the absolute width is what reads as "the same
+bubble" side by side). Question / approval cards share the slot and the cap
+(#1374 / #1440); my own bubbles keep their 72 % rule.
+
+Code: `transcript.rs` `ASSISTANT_MAX_WIDTH`, `assistant_cap()`, the inner
+`chat-bubble-cap` frame of `assistant_slot()`; `onboarding::bubble_target`
+predicts with the same function. Pinned by
+`layout_tests::the_agent_bubble_cap_is_the_column_minus_the_grok_gap_at_most_grok_width`
+and `cards_share_the_bubbles_left_edge_and_cap`.
+
 ## Bubble hover rail (Jacob 2026-10-24, [feedback bubble-hover-rail-2026-10-24])
 
 **The ☺ ↩ ⋯ rail is vertically centred beside the bubble and shows while the
