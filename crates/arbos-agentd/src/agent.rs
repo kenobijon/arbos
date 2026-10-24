@@ -1379,6 +1379,10 @@ pub struct Agent {
     pub(crate) side_notes: std::sync::Mutex<HashMap<String, Vec<String>>>,
     /// Per chat: when quick-reply model calls were made (rate limit, `status.rs`).
     pub(crate) quick_calls: std::sync::Mutex<HashMap<String, Vec<Instant>>>,
+    /// Asks running as jobs beside the main turn right now (`start_job_for_send`).
+    pub(crate) jobs_running: std::sync::atomic::AtomicUsize,
+    /// Per-agent override of `job_max_per_workspace()` (tests; the env is process-wide).
+    pub(crate) job_cap: std::sync::Mutex<Option<usize>>,
     /// Per chat: `TurnState::started` of the busy turn we already wrote a status note for
     /// (at most one note per waiting period; see `status.rs`, #1448).
     pub(crate) quick_noted: std::sync::Mutex<HashMap<String, Instant>>,
@@ -1464,6 +1468,8 @@ impl Agent {
             pending_sends: std::sync::atomic::AtomicUsize::new(0),
             side_notes: std::sync::Mutex::new(HashMap::new()),
             quick_calls: std::sync::Mutex::new(HashMap::new()),
+            jobs_running: std::sync::atomic::AtomicUsize::new(0),
+            job_cap: std::sync::Mutex::new(None),
             quick_noted: std::sync::Mutex::new(HashMap::new()),
             budget: crate::budget::BudgetState::default(),
         })
@@ -1969,6 +1975,21 @@ impl Agent {
         let quick = match cmd.kind.as_str() {
             "send" | "steer" | "guide" => self.quick_reply(chat_id, &host, &cmd).await,
             _ => crate::status::QuickOutcome::NotBusy,
+        };
+        // A new ask while a user turn runs does not wait for it (Jacob, 2026-10-23: agents
+        // multitask): it runs as its own job beside the running turn, bounded by the job caps;
+        // over the cap it queues as before. The job answers with one bubble when it is done.
+        let quick = if cmd.kind == "send" && quick == crate::status::QuickOutcome::Queued {
+            match self.start_job_for_send(chat_id, &host, &cmd).await {
+                Ok(true) => crate::status::QuickOutcome::Answered,
+                Ok(false) => quick,
+                Err(e) => {
+                    tracing::warn!(chat_id, error = %e, "job start failed; queuing for the main session");
+                    quick
+                }
+            }
+        } else {
+            quick
         };
         let res = match (cmd.kind.as_str(), quick) {
             (_, crate::status::QuickOutcome::Answered)
@@ -3066,6 +3087,10 @@ impl Agent {
                             ("subagentName", json!(name)),
                         ],
                     );
+                    // A job's answer in a people chat is attributed like any reply of this agent.
+                    if let Some(attr) = self.people_reply_fields(chat_id) {
+                        h.doc.set_message_fields(&assistant_msg_id, &attr.fields);
+                    }
                 }
                 TurnKind::ApprovalOutcome { approval_id, title } => {
                     h.doc.add_status_part(
@@ -4961,6 +4986,170 @@ impl Agent {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// A `send` that arrived while a user turn holds the lock: run it as its own job beside
+    /// that turn — a subagent session in this workspace whose brief is the user's message with
+    /// the chat's recent turns, answered back into this chat as one bubble by the result turn.
+    /// Returns `Ok(false)` when it should queue instead: no user turn is running (the lock is
+    /// about to free), the message is not a person's (routines, channels, voice), the chat is
+    /// a group needing the responder decision, or the job caps are reached
+    /// (`JOB_MAX_PER_WORKSPACE`, default 3; the box-wide subagent gate bounds the box).
+    pub(crate) async fn start_job_for_send(
+        self: &Arc<Self>,
+        chat_id: &str,
+        host: &SharedHost,
+        cmd: &CommandView,
+    ) -> Result<bool> {
+        if cmd.issued_by == self.cfg.device_id {
+            return Ok(false);
+        }
+        let user_msg_id = cmd
+            .payload
+            .get("messageId")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        let running_user_turn = {
+            let tl = self.turn.lock().await;
+            tl.as_ref()
+                .is_some_and(|t| !t.reply_only && !t.stopped && !t.routine_turn && !t.from_voice)
+        };
+        if !running_user_turn || !self.turn_lock_busy() {
+            return Ok(false);
+        }
+        if self.groups.kind_of(chat_id).is_some_and(|k| k != "chat") {
+            return Ok(false);
+        }
+        let (user_text, from_voice, from_routine) = {
+            let h = host.lock().await;
+            let m = h.doc.message(&user_msg_id);
+            (
+                m.as_ref().map(|m| m.text()).unwrap_or_default(),
+                m.as_ref().is_some_and(message_from_voice),
+                m.as_ref().is_some_and(message_from_routine),
+            )
+        };
+        if from_voice || from_routine || user_text.trim().is_empty() {
+            return Ok(false);
+        }
+        let cap = self
+            .job_cap
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(job_max_per_workspace);
+        let running = self.jobs_running.load(Ordering::SeqCst);
+        if running >= cap {
+            tracing::info!(
+                chat_id,
+                running,
+                cap,
+                "job cap reached; the ask queues for the main session"
+            );
+            return Ok(false);
+        }
+        self.jobs_running.fetch_add(1, Ordering::SeqCst);
+        let words: Vec<&str> = user_text.split_whitespace().collect();
+        let slug: String = words
+            .iter()
+            .take(4)
+            .map(|w| {
+                w.chars()
+                    .filter(|c| c.is_alphanumeric())
+                    .flat_map(|c| c.to_lowercase())
+                    .collect::<String>()
+            })
+            .filter(|w| !w.is_empty())
+            .collect::<Vec<_>>()
+            .join("-");
+        let name = format!(
+            "ask-{}",
+            if slug.is_empty() {
+                ulid().to_lowercase()
+            } else {
+                slug
+            }
+        );
+        let purpose: String = words.join(" ").chars().take(140).collect();
+        let recent = self
+            .store
+            .t3_thread(chat_id, None, None, 12)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.kind == "user" || r.kind == "assistant")
+            .map(|r| {
+                format!(
+                    "- {}: {}",
+                    r.role.unwrap_or_default(),
+                    r.text
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                        .chars()
+                        .take(240)
+                        .collect::<String>()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut prelude = String::new();
+        if let Some(p) = self.people_turn_context(chat_id, host, &user_msg_id).await {
+            prelude = p;
+        } else if let Some(n) = self.owner_address_note(chat_id, host, &user_msg_id).await {
+            prelude = n;
+        }
+        let brief = format!(
+            "{prelude}The user sent this message to you while you were busy with another request in the same chat; answer it now, in parallel, as yourself.\n\nMessage: {user_text}\n\nRecent turns in this chat:\n{recent}\n\nDo what the message asks (use your tools when needed) and finish with the answer the user should read: plain prose, no process narration, no mention of other requests. If it only needs a reply, reply."
+        );
+        let _ = self.store.t3_append(
+            chat_id,
+            None,
+            Some(chat_id),
+            "user",
+            Some("user"),
+            &user_text,
+            Some(&json!({ "message_id": user_msg_id, "job": true })),
+        );
+        tracing::info!(chat_id, name = %name, running = running + 1, cap, "ask runs as a job beside the running turn");
+        let me = self.clone();
+        let chat = chat_id.to_owned();
+        let host2 = host.clone();
+        tokio::spawn(async move {
+            let r = me
+                .run_subagent(
+                    &chat,
+                    &host2,
+                    &user_msg_id,
+                    None,
+                    &name,
+                    &purpose,
+                    &brief,
+                    Some(Harness::Pi),
+                    false,
+                    false,
+                )
+                .await;
+            me.jobs_running.fetch_sub(1, Ordering::SeqCst);
+            if let Err(e) = r {
+                tracing::warn!(chat_id = %chat, error = %e, "job failed");
+                let h = host2.lock().await;
+                let id = ulid();
+                h.doc
+                    .start_assistant_message(&id, &user_msg_id, &me.cfg.device_id);
+                if let Some(attr) = me.people_reply_fields(&chat) {
+                    h.doc.set_message_fields(&id, &attr.fields);
+                }
+                h.doc.add_error_part(
+                    &id,
+                    "job_failed",
+                    "I couldn't finish that one alongside the other request. Ask me again in a moment.",
+                );
+                h.doc
+                    .add_hidden_part(&id, "job_failed_detail", &e.to_string(), &json!({}));
+                h.doc.finish_message(&id, MessageStatus::Error);
+            }
+        });
+        Ok(true)
+    }
+
     pub async fn run_subagent(
         self: &Arc<Self>,
         chat_id: &str,
@@ -5766,6 +5955,15 @@ pub(crate) fn subagent_start_failure_line(err: &str) -> String {
     } else {
         "I couldn't start the helper for this step.".to_owned()
     }
+}
+
+/// Concurrent asks per workspace (design note `agent-async-jobs.md`: 3; `ARBOS_JOB_MAX_PER_WORKSPACE`).
+/// The box-wide subagent gate (`workspace::BOX_MAX_SUBAGENTS`) bounds the box.
+pub(crate) fn job_max_per_workspace() -> usize {
+    std::env::var("ARBOS_JOB_MAX_PER_WORKSPACE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(3)
 }
 
 /// Relay turns (subagent result, approval outcome) only write a few sentences: their deadline

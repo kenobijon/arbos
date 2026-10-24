@@ -1112,6 +1112,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn busy_agent_queues_a_new_task_without_a_placeholder_row() {
         let (agent, root) = test_agent().await;
+        *agent.job_cap.lock().unwrap() = Some(0);
         let chat = "01TESTCHATQUICKREPLY000001";
         let host = agent.sync.open_room(chat).await.unwrap();
         let busy = agent.test_hold_turn(chat).await;
@@ -1338,6 +1339,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn capped_quick_reply_queues_instead_of_a_fragment_or_placeholder() {
         let (agent, root) = test_agent().await;
+        *agent.job_cap.lock().unwrap() = Some(0);
         let chat = "01TESTCHATQUICKREPLY000005";
         let host = agent.sync.open_room(chat).await.unwrap();
         let busy = agent.test_hold_turn(chat).await;
@@ -1358,6 +1360,45 @@ pub(crate) mod tests {
         );
         waiting.abort();
         drop(busy);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Jacob (2026-10-23): a new ask while a user turn runs is answered beside it, not after it.
+    /// The job path takes the send (no waiter on the lock, no placeholder row); over the cap it
+    /// queues; a relay turn holding the lock does not count as "busy with the user".
+    #[tokio::test]
+    async fn new_ask_during_a_user_turn_runs_as_a_job_within_the_cap() {
+        let (agent, root) = test_agent().await;
+        *agent.job_cap.lock().unwrap() = Some(1);
+        let chat = "01TESTCHATQUICKREPLY000007";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        let (msg_id, cmd) = send_cmd(&host, "also count the files in the project folder");
+        let took = agent.start_job_for_send(chat, &host, &cmd).await.unwrap();
+        assert!(took, "the ask runs as a job beside the running turn");
+        assert_eq!(
+            agent.jobs_running.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert!(
+            reply_rows(&host, &msg_id)
+                .iter()
+                .all(|r| r.text().trim().is_empty()),
+            "no placeholder"
+        );
+        let (_m2, cmd2) = send_cmd(&host, "and list the biggest one");
+        assert!(
+            !agent.start_job_for_send(chat, &host, &cmd2).await.unwrap(),
+            "cap reached: queue"
+        );
+        agent.turn.lock().await.as_mut().unwrap().reply_only = true;
+        agent
+            .jobs_running
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            !agent.start_job_for_send(chat, &host, &cmd2).await.unwrap(),
+            "relay turn: queue"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
