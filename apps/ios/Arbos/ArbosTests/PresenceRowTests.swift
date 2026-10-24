@@ -54,12 +54,18 @@ final class PresenceRowTests: XCTestCase {
         // one x, and that x is the composer's `+` column (keyboard up: 19 + 42 / 2 = 40);
         // the row's gap is the bubble row's gap, so the text starts where the body does.
         XCTAssertEqual(PresenceRow.avatar, Theme.memberAvatar)
-        XCTAssertEqual(PresenceRow.inset, Theme.avatarColumnInset)
         XCTAssertEqual(PresenceRow.gap, Theme.memberAvatarGap)
-        let center = 16 + Theme.avatarColumnInset + Theme.memberAvatar / 2
-        let plusCenter = Theme.composerInsetKeyboard + Theme.plusButton / 2
-        XCTAssertEqual(center, plusCenter, accuracy: 1)
-        XCTAssertEqual(16 + Theme.memberLane, 67, "text and bubble body at Grok's 67 pt")
+        // The column follows the `+` through both composer insets (keyboard down / up).
+        for composerInset in [Theme.composerInset, Theme.composerInsetKeyboard] {
+            let center = 16 + Theme.avatarColumnInset(composerInset: composerInset) + Theme.memberAvatar / 2
+            let plusCenter = composerInset + Theme.plusButton / 2
+            XCTAssertEqual(center, plusCenter, accuracy: 1, "inset \(composerInset)")
+            XCTAssertEqual(16 + Theme.memberLane(composerInset: composerInset),
+                           16 + Theme.avatarColumnInset(composerInset: composerInset) + Theme.memberAvatar + Theme.memberAvatarGap)
+        }
+        // Grok iPhone ref 01 (keyboard up): avatar 26–54, text at 67.
+        XCTAssertEqual(16 + Theme.avatarColumnInset(composerInset: Theme.composerInsetKeyboard), 26)
+        XCTAssertEqual(16 + Theme.memberLane(composerInset: Theme.composerInsetKeyboard), 67)
         XCTAssertEqual(PresenceRow.maxPictures, 3)
     }
 }
