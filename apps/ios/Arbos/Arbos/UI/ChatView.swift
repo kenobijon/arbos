@@ -255,6 +255,8 @@ struct ChatView: View {
         Task { await calls.start(chatId: chatId, projectId: isPeople ? nil : projectId, kind: kind, title: callTitle) }
     }
     @State private var replyTo: Message?
+    /// Long-press → Edit: the own message whose text is in the composer.
+    @State private var editing: Message?
     /// Drives the connection pill's dot pulse while it is reconnecting / syncing.
     @State private var pulsePhase = false
     /// The original a quote tap scrolled to; tinted until the fade timer clears it.
@@ -530,6 +532,14 @@ struct ChatView: View {
                             .frame(maxWidth: .infinity)
                             .frame(height: Theme.fieldHeight)
                             .accessibilityIdentifier("channel-read-only")
+                    } else if isPeople, people?.isSilencedNow == true {
+                        // Group admin muted me from posting — one quiet line, no composer.
+                        Text("You've been muted in this group")
+                            .font(theme.font(Theme.small))
+                            .foregroundStyle(theme.muted)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: Theme.fieldHeight)
+                            .accessibilityIdentifier("group-silenced")
                     } else {
                         composer
                     }
@@ -559,7 +569,7 @@ struct ChatView: View {
                         safeTop: geo.safeAreaInsets.top,
                         safeBottom: geo.safeAreaInsets.bottom,
                         held: heldReactions(row),
-                        items: MessageMenu.items(forMessage: true, canDelete: canDelete(row)),
+                        items: MessageMenu.items(forMessage: true, canEdit: canEditMessage(row), canDelete: canDelete(row)),
                         onReact: { emoji in
                             closeActions()
                             model.toggleReaction(chatId: chatId, messageId: row.messageId, emoji: emoji)
@@ -625,7 +635,7 @@ struct ChatView: View {
         .sheet(item: $pendingForward) { pending in
             ForwardSheet(fromName: pending.from) { target in
                 pendingForward = nil
-                model.forwardText(pending.text, to: target)
+                model.forwardText(pending.text, from: pending.from, to: target)
                 model.notice = Notice(text: "Forwarded to \(target.title)")
             }
             .environmentObject(model)
@@ -804,6 +814,18 @@ struct ChatView: View {
                         #if DEBUG
                         if model.isFixture {
                             model.fixtureAgentMessage(chatId: chatId, received: show == "agent-message-received")
+                        }
+                        #endif
+                    case "forward":
+                        // Rig: the Forward sheet for the newest message bubble.
+                        if let row = rows.last(where: { isMessageRow($0) }) { beginForward(row) }
+                    case "forwarded":
+                        // Rig: a sent bubble forwarded from Sam Rivera (fixture only).
+                        #if DEBUG
+                        if model.isFixture {
+                            model.fixtureAppend(chatId: chatId,
+                                                text: "Sending in a sec. Also: can we add your Arbos agent here so it can pull the numbers while we talk?",
+                                                attachments: [], forwardedFrom: "Sam Rivera")
                         }
                         #endif
                     case "actions":
@@ -1474,7 +1496,7 @@ struct ChatView: View {
     /// The long-press menu's actions (`MessageMenu`): Copy the text, Reply
     /// (in a people chat the agent that wrote it becomes the recipient),
     /// Forward to another chat, Reply in DM (open a private chat with the human
-    /// who wrote it), Delete for everyone.
+    /// who wrote it), Edit (own text), Delete for everyone.
     private func runMessageMenu(_ item: MessageMenuItem, row: Row) {
         switch item {
         case .copy:
@@ -1493,9 +1515,26 @@ struct ChatView: View {
                   m.sender != model.myUserId
             else { return }
             Task { _ = await model.openDM(handle: handle) }
+        case .edit:
+            beginEdit(row)
         case .delete:
             beginDelete(row)
         }
+    }
+
+    /// Own user text the long-press menu may offer Edit for.
+    private func canEditMessage(_ row: Row) -> Bool {
+        guard isMessageRow(row), let m = messageById[row.messageId] else { return false }
+        guard isOwnMessage(m) else { return false }
+        return !m.plainText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// A message this device's user wrote (people `user:<id>`, or bare `user` in
+    /// a solo project chat).
+    private func isOwnMessage(_ m: Message) -> Bool {
+        guard m.role == .user else { return false }
+        if let me = model.myUserId, m.sender == me { return true }
+        return m.sender == "user" || m.sender.isEmpty
     }
 
     /// Long-press → Delete: ask first. The title names the sender when it is not my message
@@ -1512,7 +1551,10 @@ struct ChatView: View {
         guard let m = messageById[row.messageId] else { return }
         let text = m.plainText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
-        let from = MediaAlbum.senderName(m) { model.project($0)?.name }
+        // "Forwarded from <name>" names me by my display name, not "You".
+        let from = m.role == .user && m.senderName == nil && (m.sender == "user" || m.sender == model.myUserId)
+            ? (model.user.map { me in me.name.flatMap { $0.isEmpty ? nil : $0 } ?? me.login } ?? "You")
+            : MediaAlbum.senderName(m) { model.project($0)?.name }
         pendingForward = PendingForward(text: text, from: from)
     }
 
@@ -1520,10 +1562,22 @@ struct ChatView: View {
     /// Shared by the long-press Reply item and swipe-right-to-reply on the bubble.
     private func beginReply(to row: Row) {
         guard let m = messageById[row.messageId] else { return }
+        editing = nil
         replyTo = m
         if isPeople, let member = agentMember(for: m)?.member {
             talkTo = [member]
         }
+        composerFocused = true
+    }
+
+    /// Edit this own message: put its text in the composer with an Editing bar.
+    private func beginEdit(_ row: Row) {
+        guard let m = messageById[row.messageId] else { return }
+        let text = m.plainText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, isOwnMessage(m) else { return }
+        replyTo = nil
+        editing = m
+        composerDraft.text = m.plainText
         composerFocused = true
     }
 
@@ -1633,6 +1687,7 @@ struct ChatView: View {
                             composerFocused = true
                         }
                         replyTo = nil
+                        editing = nil
                     } label: {
                         HStack(spacing: 6) {
                             if m.isAgent, let p = m.project {
@@ -1717,6 +1772,28 @@ struct ChatView: View {
         .accessibilityElement(children: .combine)
     }
 
+    /// Same height/shape as the reply preview: glyph, "Editing", one truncated line, ×.
+    private func editPreview(_ m: Message) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "pencil").font(.system(size: 12)).foregroundStyle(theme.muted)
+            Text("Editing").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
+                .lineLimit(1).fixedSize()
+            Text(Quote.line(of: m, maxChars: Theme.replyPreviewChars))
+                .font(theme.font(Theme.tiny)).foregroundStyle(theme.text)
+                .lineLimit(1).truncationMode(.tail)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button { editing = nil } label: { Image(systemName: "xmark").font(.system(size: 11, weight: .bold)).foregroundStyle(theme.muted) }
+                .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 14)
+        .frame(maxWidth: .infinity)
+        .frame(height: Theme.replyPreviewHeight)
+        .clipped()
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(theme.bubbleAssistant))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Editing message")
+    }
+
     /// The blob of the first picture on the quoted message, for the preview's thumbnail.
     private func quotedImageRef(_ m: Message) -> String? {
         for part in m.parts {
@@ -1730,7 +1807,9 @@ struct ChatView: View {
             if let q = mentionQuery, isPeople, let people {
                 mentionList(people, query: q)
             }
-            if let r = replyTo {
+            if let e = editing {
+                editPreview(e)
+            } else if let r = replyTo {
                 replyPreview(r)
             }
             if !pending.isEmpty {
@@ -2048,6 +2127,7 @@ struct ChatView: View {
         composerDraft.text = ""
         model.setComposerDraft("", for: chatId)
         replyTo = nil
+        editing = nil
         mentionQuery = nil
         pinTalkTo(afterSending: address, chipMentions: chips)
         sentOnce = true
@@ -2099,6 +2179,18 @@ struct ChatView: View {
         awayFromBottom = false
         newBelowCount = 0
         resetWindowToTail()
+        if let edit = editing {
+            // Save the edit in place — no new bubble, no send command.
+            guard !text.isEmpty else { return }
+            model.editMessage(chatId: chatId, messageId: edit.id, text: text)
+            pending.removeAll()
+            composerDraft.text = ""
+            model.setComposerDraft("", for: chatId)
+            editing = nil
+            replyTo = nil
+            sentOnce = true
+            return
+        }
         if isChannel {
             // Rule 3/9: the composer sends through the shared client's `sendText`.
             guard !text.isEmpty else { return }

@@ -1340,6 +1340,8 @@ class Loop:
         rows = []
         for fid in self.store.items():
             st = self.store.state(fid)
+            if not gate:
+                break  # gate off: nothing is held; the list is empty by definition
             if st.get("status") not in ("awaiting_jacob",) and not (st.get("awaiting") and st.get("status") == "gating" and not st.get("approved_by_jacob")):
                 continue
             aw = st.get("awaiting") or {}
@@ -1442,7 +1444,7 @@ class Loop:
             self.store.event(fid, "unparked", to=st["status"])
             if st.get("issue"):
                 with contextlib.suppress(HttpError):
-                    self.gh.set_labels(st["issue"], [], ["frozen"])
+                    self.gh.set_labels(st["issue"], [], ["frozen"] + (["awaiting-jacob"] if not self.approval_state() else []))
             n += 1
         (self.cfg.state_dir / self.FREEZE_FILE).unlink(missing_ok=True)
         return n
@@ -4431,7 +4433,22 @@ def main(argv: list[str]) -> int:
         # `approval-gate on --allow unarbos,arbos,const [--by <who>]` / `approval-gate off`
         args = argv[2:]
         if args[:1] == ["off"]:
-            (cfg.state_dir / Loop.APPROVAL_FILE).unlink(missing_ok=True); print("release-approval gate off"); return 0
+            (cfg.state_dir / Loop.APPROVAL_FILE).unlink(missing_ok=True)
+            # Nothing is held any more: release every awaiting item to the normal merge path and drop the label
+            # (03:0x Oct 24: 22 issues kept `awaiting-jacob` after the first gate-off pass).
+            n = 0
+            with (cfg.state_dir / ".lock").open("w") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                for fid in loop.store.items():
+                    st = loop.store.state(fid)
+                    if st.get("status") == "awaiting_jacob":
+                        st["status"] = "gating"; st["released_from_awaiting"] = iso(); loop.store.save_state(fid, st)
+                        loop.store.event(fid, "approval_gate_off", why="gate switched off; back to the normal merge path")
+                    if st.get("awaiting") and st.get("issue") and st.get("status") not in TERMINAL:
+                        with contextlib.suppress(HttpError):
+                            loop.gh.set_labels(st["issue"], [], ["awaiting-jacob"])
+                        n += 1
+            print(f"release-approval gate off; {n} awaiting item(s) released, label dropped"); return 0
         allow = [a.strip() for a in (args[args.index("--allow") + 1] if "--allow" in args else "").split(",") if a.strip()]
         if args[:1] != ["on"] or not allow:
             print("approval-gate on --allow <reporter,...> | approval-gate off"); return 2
