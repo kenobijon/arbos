@@ -765,6 +765,7 @@ struct RowView: View, Equatable {
     /// transcript changes; actions call through this reference.
     let model: AppModel
     @Environment(\.theme) private var theme
+    @Environment(\.composerInset) private var composerInset
     let row: Row
     let chatId: Id
     let width: CGFloat
@@ -936,7 +937,7 @@ struct RowView: View, Equatable {
                     PersonAvatar(url: avatar, handle: handle, size: Theme.memberAvatar, name: model.personName(handle: handle), id: model.personId(handle: handle))
                 }
                 .buttonStyle(.plain)
-                .padding(.leading, Theme.avatarColumnInset)
+                .padding(.leading, Theme.avatarColumnInset(composerInset: composerInset))
                 .accessibilityLabel("@\(handle), profile")
                 // Group / channel: the name inside the bubble, in the sender's colour,
                 // then the reply quote, then the text with the time after it.
@@ -964,7 +965,7 @@ struct RowView: View, Equatable {
                 .padding(.vertical, Theme.bubbleVPad)
                 .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
                 .modifier(LiveSenderBar(url: avatar, seed: model.personId(handle: handle) ?? handle))
-                .frame(maxWidth: maxBubble - Theme.memberLane, alignment: .leading)
+                .frame(maxWidth: maxBubble - Theme.memberLane(composerInset: composerInset), alignment: .leading)
                 Spacer(minLength: 0)
             }
             .task(id: avatar) { SenderAccents.shared.load(url: avatar) }
@@ -981,7 +982,7 @@ struct RowView: View, Equatable {
             }()
             HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
                 Button(action: openMember) { peopleAvatar(handle: handle, avatar: avatar) }
-                    .padding(.leading, Theme.avatarColumnInset)
+                    .padding(.leading, Theme.avatarColumnInset(composerInset: composerInset))
                     .buttonStyle(.plain)
                     .accessibilityLabel("@\(handle), profile")
                 memberBubble(
@@ -1018,7 +1019,7 @@ struct RowView: View, Equatable {
                         }
                     }
                 )
-                .frame(maxWidth: maxBubble - Theme.memberLane, alignment: .leading)
+                .frame(maxWidth: maxBubble - Theme.memberLane(composerInset: composerInset), alignment: .leading)
                 Spacer(minLength: 0)
             }
             .task(id: avatar) {
@@ -1068,10 +1069,10 @@ struct RowView: View, Equatable {
             // The card is a transcript row like a bubble: the same left edge (after the avatar
             // lane in a people chat) and the same cap width as an incoming bubble.
             HStack(spacing: 0) {
-                if lane { Color.clear.frame(width: Theme.memberLane, height: 1) }
+                if lane { Color.clear.frame(width: Theme.memberLane(composerInset: composerInset), height: 1) }
                 QuestionCard(rowId: row.id, chatId: chatId, questionId: questionId, title: text, options: options,
                              multi: multi, picked: picked, open: open)
-                    .frame(maxWidth: lane ? maxBubble - Theme.memberLane : maxBubble, alignment: .leading)
+                    .frame(maxWidth: lane ? maxBubble - Theme.memberLane(composerInset: composerInset) : maxBubble, alignment: .leading)
                 Spacer(minLength: 0)
             }
         case .file(let item, let subtitle):
@@ -1156,8 +1157,8 @@ struct RowView: View, Equatable {
     /// Match the avatar offset used by people-chat bubbles (26 pt + 8 pt gap).
     private var reactionLeading: CGFloat {
         switch row.kind {
-        case .other, .member: return Theme.memberLane
-        case .question(_, _, _, _, _, _, let lane): return lane ? Theme.memberLane : 0
+        case .other, .member: return Theme.memberLane(composerInset: composerInset)
+        case .question(_, _, _, _, _, _, let lane): return lane ? Theme.memberLane(composerInset: composerInset) : 0
         default: return 0
         }
     }
