@@ -20,10 +20,10 @@ use crate::model::{
 };
 use crate::model::{
     new_id, now_ms, Attachment, AttachmentKind, BoxState, ChannelSel, ChannelsView, Chat, ChatKind,
-    ConnectorsView, Effort, Id, Link, LinkState, LocalView, Machine, Message, MessageStatus,
-    NewSecret, Part, Project, ProjectDocView, ProjectSecrets, QuestionState, Role, Routine,
-    RoutineRun, RoutineTrigger, SecretDirector, SecretScope, SecretsView, ServerInfo, Skill,
-    StatusKind,
+    ConnectorsView, DevicesView, Effort, Id, Link, LinkState, LocalView, Machine, Message,
+    MessageStatus, NewSecret, Part, Project, ProjectDocView, ProjectSecrets, QuestionState, Role,
+    Routine, RoutineRun, RoutineTrigger, SecretDirector, SecretScope, SecretsView, ServerInfo,
+    Skill, StatusKind,
 };
 use crate::search;
 use crate::sign_in;
@@ -473,6 +473,8 @@ pub struct AppState {
     pub connectors: ConnectorsView,
     /// Settings → Secrets (D83).
     pub secrets: SecretsView,
+    /// Settings → Devices (`GET /auth/devices`).
+    pub devices: DevicesView,
     /// Agent profile → Secrets, per project.
     pub project_secrets: std::collections::HashMap<Id, ProjectSecrets>,
     /// Settings → Routines, per project (F3).
@@ -822,6 +824,7 @@ impl AppState {
             machine: Machine::default(),
             connectors: ConnectorsView::default(),
             secrets: SecretsView::default(),
+            devices: DevicesView::default(),
             project_secrets: std::collections::HashMap::new(),
             routines: HashMap::new(),
             routine_runs: HashMap::new(),
@@ -2088,6 +2091,17 @@ impl AppState {
             }
             SyncEvent::Secrets(view) => {
                 self.secrets = view;
+                cx.notify();
+            }
+            SyncEvent::Devices(result) => {
+                match result {
+                    Ok(items) => {
+                        self.devices.items = items;
+                        self.devices.error = None;
+                    }
+                    Err(why) => self.devices.error = Some(why),
+                }
+                self.devices.loaded = true;
                 cx.notify();
             }
             SyncEvent::Routines {
@@ -7051,6 +7065,26 @@ impl AppState {
 
     pub fn secrets_refresh(&mut self, cx: &mut Context<Self>) {
         self.command(ClientCommand::SecretsRefresh);
+        cx.notify();
+    }
+
+    // ----- devices (Settings → Devices, Oct 23) ---------------------------
+
+    /// Settings → Devices opened: ask the relay for the list (the page shows
+    /// "Loading…" until the answer, the last list meanwhile).
+    pub fn devices_refresh(&mut self, cx: &mut Context<Self>) {
+        self.devices.error = None;
+        self.command(ClientCommand::DevicesRefresh);
+        cx.notify();
+    }
+
+    /// Sign another device out. The current device never goes through here
+    /// (its row offers Sign out instead), so the user is never stranded.
+    pub fn revoke_device(&mut self, id: Id, cx: &mut Context<Self>) {
+        if !crate::ui::devices::remove_other(&mut self.devices.items, &id) {
+            return;
+        }
+        self.command(ClientCommand::DeviceRevoke { id });
         cx.notify();
     }
 

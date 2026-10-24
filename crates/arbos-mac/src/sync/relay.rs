@@ -6151,6 +6151,21 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 refresh_secrets(&shared).await;
             });
         }
+        ClientCommand::DevicesRefresh => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                refresh_devices(&shared).await;
+            });
+        }
+        ClientCommand::DeviceRevoke { id } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Err(err) = shared.delete(&format!("/auth/devices/{id}")).await {
+                    shared.notice(format!("Sign out device: {}", relay_message(&err)));
+                }
+                refresh_devices(&shared).await;
+            });
+        }
         ClientCommand::ProjectSecretsRefresh { project_id } => {
             let shared = shared.clone();
             tokio::spawn(async move {
@@ -6906,6 +6921,16 @@ async fn refresh_secrets(shared: &Arc<Shared>) {
     let _ = shared.events.send(SyncEvent::Secrets(secrets_view_from_dto(
         &overview, &requests,
     )));
+}
+
+/// Settings → Devices (`GET /auth/devices`): the list, or why it could not be read.
+async fn refresh_devices(shared: &Arc<Shared>) {
+    let result = match shared.get_json("/auth/devices").await {
+        Ok(value) => serde_json::from_value::<Vec<crate::model::DeviceView>>(value)
+            .map_err(|e| format!("unexpected reply: {e}")),
+        Err(err) => Err(relay_message(&err)),
+    };
+    let _ = shared.events.send(SyncEvent::Devices(result));
 }
 
 /// One agent's Secrets page (`GET /projects/{id}/secrets`).

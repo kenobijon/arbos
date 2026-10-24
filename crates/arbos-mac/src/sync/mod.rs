@@ -28,9 +28,9 @@ use crate::model::{
     Voice,
 };
 use crate::model::{
-    Attachment, BoxState, ChannelsView, Chat, ConnectorsView, Effort, Id, Link, LinkState,
-    LocalView, Machine, Message, NewSecret, Project, ProjectDocView, ProjectSecrets, Routine,
-    RoutineRun, RoutineTrigger, SecretsView, Skill,
+    Attachment, BoxState, ChannelsView, Chat, ConnectorsView, DeviceView, Effort, Id, Link,
+    LinkState, LocalView, Machine, Message, NewSecret, Project, ProjectDocView, ProjectSecrets,
+    Routine, RoutineRun, RoutineTrigger, SecretsView, Skill,
 };
 
 /// Something the source learned; the UI applies it to its mirror.
@@ -263,6 +263,8 @@ pub enum SyncEvent {
     },
     /// Settings → Secrets: secrets, accesses, requests, activity (never values; D83).
     Secrets(SecretsView),
+    /// Settings → Devices: this account's signed-in devices, or why they could not be read.
+    Devices(Result<Vec<DeviceView>, String>),
     /// One agent's secrets page (`GET /projects/{id}/secrets`).
     ProjectSecrets {
         project_id: Id,
@@ -727,6 +729,12 @@ pub enum ClientCommand {
     },
     /// Settings → Secrets opened or asked for a refresh.
     SecretsRefresh,
+    /// Settings → Devices opened or asked for a refresh (`GET /auth/devices`).
+    DevicesRefresh,
+    /// Settings → Devices: sign another device out (`DELETE /auth/devices/{id}`).
+    DeviceRevoke {
+        id: Id,
+    },
     /// An agent's Secrets page opened.
     ProjectSecretsRefresh {
         project_id: Id,
