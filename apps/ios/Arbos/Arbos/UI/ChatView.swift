@@ -939,7 +939,7 @@ private struct ChatSession: View {
             if composerDraft.text.isEmpty, !saved.isEmpty {
                 composerDraft.text = saved
                 composerDraft.caret = (saved as NSString).length
-                composerDraft.mentions = MentionDraft.resolveAll(text: saved, mentions: [], members: people?.members ?? [], me: model.user?.login)
+                composerDraft.mentions = MentionDraft.resolveAll(text: saved, mentions: [], members: people?.members ?? [], me: model.user?.login, collectives: isPeople)
                 if DebugHooks.composerDraft != nil { composerFocused = true }
             }
             if isPeople { model.markPeopleRead(chatId, force: true) }
@@ -975,6 +975,7 @@ private struct ChatSession: View {
                     case "userprofile": if let c = counterpart { model.showProfile(.user(ProfilePerson(c))) }
                     // `addmembers`: the group pane opens its Add members sheet on appear.
                     case "groupprofile", "addmembers", "removemember": model.showProfile(.group(chatId: chatId, projectId: isPeople ? nil : projectId))
+                    case let s where s.hasPrefix("groupavatar"): model.showProfile(.group(chatId: chatId, projectId: isPeople ? nil : projectId))
                     case "member":
                         // The group page, then its first other member pushed over it (rig).
                         openHeaderProfile()
@@ -1838,7 +1839,7 @@ private struct ChatSession: View {
         editing = m
         composerDraft.text = m.plainText
         composerDraft.caret = (m.plainText as NSString).length
-        composerDraft.mentions = MentionDraft.resolveAll(text: m.plainText, mentions: [], members: people?.members ?? [], me: model.user?.login)
+        composerDraft.mentions = MentionDraft.resolveAll(text: m.plainText, mentions: [], members: people?.members ?? [], me: model.user?.login, collectives: isPeople)
         composerFocused = true
     }
 
@@ -2324,9 +2325,36 @@ private struct ChatSession: View {
     /// Tap inserts the chip.
     private func mentionList(_ people: PeopleChat, query: String) -> some View {
         let rows = MentionDraft.candidates(query: query, members: people.members, me: model.user?.login)
+        // `@here` / `@agents` first (Jacob, 2026-10-24): every member of a group or people chat may use them.
+        let collectives = MentionDraft.collectiveCandidates(query: query)
+        let hairline = Rectangle().fill(theme.isDark ? Color.white.opacity(0.08) : Color.black.opacity(0.08))
+            .frame(height: 0.5)
+            .padding(.leading, 12 + 28 + 12)
+            .padding(.trailing, 12)
         return Group {
-            if !rows.isEmpty {
+            if !rows.isEmpty || !collectives.isEmpty {
                 VStack(spacing: 0) {
+                    ForEach(collectives, id: \.rawValue) { c in
+                        Button { completeMention(.collective(c)) } label: {
+                            HStack(spacing: 12) {
+                                InitialsAvatar(name: c.handle, handle: c.handle, id: c.handle, size: 28)
+                                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                    Text("@" + c.handle)
+                                        .font(theme.font(Theme.body)).foregroundStyle(theme.text).lineLimit(1)
+                                    Text("· " + c.description)
+                                        .font(theme.font(Theme.small)).foregroundStyle(theme.muted).lineLimit(1)
+                                }
+                                Spacer(minLength: 0)
+                            }
+                            .padding(.horizontal, 12)
+                            .frame(height: 44)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        if c != collectives.last || !rows.isEmpty {
+                            hairline
+                        }
+                    }
                     ForEach(Array(rows.enumerated()), id: \.element.id) { i, m in
                         Button { completeMention(m) } label: {
                             HStack(spacing: 12) {
@@ -2352,10 +2380,7 @@ private struct ChatSession: View {
                         }
                         .buttonStyle(.plain)
                         if i < rows.count - 1 {
-                            Rectangle().fill(theme.isDark ? Color.white.opacity(0.08) : Color.black.opacity(0.08))
-                                .frame(height: 0.5)
-                                .padding(.leading, 12 + 28 + 12)
-                                .padding(.trailing, 12)
+                            hairline
                         }
                     }
                 }
@@ -2374,21 +2399,34 @@ private struct ChatSession: View {
 
     /// The picked row becomes one chip over the open `@token` (behaviour 4).
     private func completeMention(_ m: ChatMember) {
-        ensureMention(m)
-        talkTo = [m.member]
+        completeMention(.member(m))
+    }
+
+    /// A collective chip addresses everyone: no sticky conversation chip.
+    private func completeMention(_ target: ComposerMentionTarget) {
+        ensureMention(target)
+        switch target {
+        case .member(let m): talkTo = [m.member]
+        case .collective: talkTo = []
+        }
         mentionQuery = nil
     }
 
-    /// Put `m`'s chip in the draft: over the open `@token` when there is one,
-    /// else at the end — unless the chip is already there (conversation chips).
     private func ensureMention(_ m: ChatMember) {
-        let handle = ComposerMention.handle(of: m).lowercased()
-        if composerDraft.mentions.contains(where: { $0.memberId == m.member }) { return }
+        ensureMention(.member(m))
+    }
+
+    /// Put the chip in the draft: over the open `@token` when there is one,
+    /// else at the end — unless the chip is already there (conversation chips).
+    private func ensureMention(_ target: ComposerMentionTarget) {
+        let probe = ComposerMention(range: 0..<0, target: target)
+        let handle = probe.handle.lowercased()
+        if composerDraft.mentions.contains(where: { $0.memberId == probe.memberId }) { return }
         var text = composerDraft.text
         var mentions = composerDraft.mentions
         let caret: Int
         if let open = MentionDraft.openToken(text: text, caret: composerDraft.caret, mentions: mentions) {
-            caret = MentionDraft.insert(m, at: open.range, text: &text, mentions: &mentions)
+            caret = MentionDraft.insert(target, at: open.range, text: &text, mentions: &mentions)
         } else {
             let lower = text.lowercased()
             let present = lower.split(whereSeparator: { $0.isWhitespace }).contains(where: {
@@ -2396,12 +2434,13 @@ private struct ChatSession: View {
             })
             if present {
                 // Typed by hand: just make it the chip.
-                composerDraft.mentions = MentionDraft.resolveAll(text: text, mentions: mentions, members: [m], me: nil)
+                let members: [ChatMember] = probe.member.map { [$0] } ?? []
+                composerDraft.mentions = MentionDraft.resolveAll(text: text, mentions: mentions, members: members, me: nil)
                 return
             }
             if !text.isEmpty, !text.hasSuffix(" ") { text += " " }
             let end = (text as NSString).length
-            caret = MentionDraft.insert(m, at: end..<end, text: &text, mentions: &mentions)
+            caret = MentionDraft.insert(target, at: end..<end, text: &text, mentions: &mentions)
         }
         composerDraft.mentions = mentions
         composerDraft.text = text

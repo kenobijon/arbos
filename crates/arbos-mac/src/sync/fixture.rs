@@ -636,7 +636,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         | ClientCommand::SetGroupImage { .. }
         | ClientCommand::SetGroupLeaf { .. }
         | ClientCommand::SetProjectImage { .. }
-        | ClientCommand::GenerateProjectImage { .. }
+        | ClientCommand::SetGroupImageKey { .. }
+        | ClientCommand::SetServerImage { .. }
+        | ClientCommand::SetServerLeaf { .. }
+        | ClientCommand::GenerateImage { .. }
         | ClientCommand::CloseChat { .. } => {}
         // D88 servers live on the relay only; the fixture has none.
         ClientCommand::ServersRefresh
@@ -5977,33 +5980,8 @@ fn text_has_at_token(lower: &str, token: &str) -> bool {
 /// Group owners may also use `@here` (every human) and `@agents` (every agent).
 fn mentions_in(space: &Project, text: &str, tokens: &[String]) -> Vec<String> {
     let lower = text.to_lowercase();
-    let mut out: Vec<String> = Vec::new();
-    for t in tokens {
-        if !out.contains(t) {
-            out.push(t.clone());
-        }
-    }
+    let mut out = crate::sync::expand_collectives(space, &lower, tokens, ME_ID);
     let claimed = crate::sync::claimed_handles(space, tokens);
-    let i_own_group =
-        space.is_people_group() && space.owner_handle.as_deref().is_none_or(|o| o == ME_HANDLE);
-    if i_own_group {
-        if text_has_at_token(&lower, "here") {
-            for p in &space.people {
-                let id = format!("user:{}", p.id);
-                if !out.iter().any(|x| x == &id) {
-                    out.push(id);
-                }
-            }
-        }
-        if text_has_at_token(&lower, "agents") {
-            for a in &space.agents {
-                let id = format!("agent:{}", a.project_id);
-                if !out.iter().any(|x| x == &id) {
-                    out.push(id);
-                }
-            }
-        }
-    }
     for a in &space.agents {
         let handle = a.handle.to_lowercase();
         let slug = Project::mention_slug(&a.name);
@@ -6681,17 +6659,17 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             emit_projects(shared);
             true
         }
-        ClientCommand::GenerateProjectImage { project_id, prompt } => {
+        ClientCommand::GenerateImage { target, prompt } => {
             // The demo "generates" after a short wait: a seeded picture named after the prompt.
             let key = format!("gen-{}", prompt.trim().to_lowercase().replace(' ', "-"));
-            let url = format!("fixture://avatar/agent-{key}");
+            let url = format!("fixture://avatar/{}-{key}", target.id());
             let shared = shared.clone();
-            let project_id = project_id.clone();
+            let target = target.clone();
             tokio::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_millis(1400)).await;
                 emit_avatar(&shared, &url);
-                let _ = shared.events.send(SyncEvent::ProjectImageGenerated {
-                    project_id,
+                let _ = shared.events.send(SyncEvent::ImageGenerated {
+                    target,
                     image_key: Some(key),
                     url: Some(url),
                     error: None,
@@ -6699,6 +6677,19 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             });
             true
         }
+        ClientCommand::SetGroupImageKey { chat_id, key } => {
+            let url = format!("fixture://avatar/{chat_id}-{key}");
+            {
+                let mut projects = shared.projects.lock().unwrap();
+                if let Some(p) = projects.iter_mut().find(|p| p.id == *chat_id) {
+                    p.image_url = Some(url.clone());
+                }
+            }
+            emit_avatar(shared, &url);
+            emit_projects(shared);
+            true
+        }
+        ClientCommand::SetServerImage { .. } | ClientCommand::SetServerLeaf { .. } => true,
         _ => false,
     }
 }

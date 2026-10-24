@@ -7,6 +7,7 @@ mod calls;
 mod image_picker;
 mod model;
 mod onboarding;
+mod palette;
 mod search;
 mod sign_in;
 mod sync;
@@ -27,8 +28,10 @@ use crate::ui::delete_confirm;
 use crate::ui::feedback;
 use crate::ui::media_viewer;
 use crate::ui::motion::{self, PulseClock};
+use crate::ui::palette as palette_ui;
 use crate::ui::shell::{self, Shell};
 use crate::ui::theme::{reapply_window_background, AppearancePref, Surface, Theme};
+use crate::ui::traffic_lights;
 use crate::ui::transcript;
 use crate::ui::widgets;
 
@@ -134,7 +137,12 @@ fn main() {
                     titlebar: Some(TitlebarOptions {
                         title: Some("Arbos".into()),
                         appears_transparent: cfg!(target_os = "macos"),
-                        traffic_light_position: Some(point(px(14.0), px(14.0))),
+                        // Full screen paints its own lights at the same spot
+                        // (`ui::traffic_lights`); keep the two in step.
+                        traffic_light_position: Some(point(
+                            px(traffic_lights::TRAFFIC_LIGHT_POSITION),
+                            px(traffic_lights::TRAFFIC_LIGHT_POSITION),
+                        )),
                     }),
                     app_owns_titlebar_drag: cfg!(target_os = "macos"),
                     window_background: theme.window_background_appearance(),
@@ -151,12 +159,20 @@ fn main() {
         let _ = window.update(cx, |_, _, cx| cx.activate(true));
         // Some X servers (Xvfb, no compositor) do not present the first frame
         // until an event arrives; nudge a second frame shortly after launch.
+        // Rig: `ARBOS_FULLSCREEN=1` enters native full screen once the window
+        // is up (screenshots without a pointer).
+        let enter_fullscreen = std::env::var("ARBOS_FULLSCREEN").is_ok_and(|v| v == "1");
         cx.spawn(async move |cx| {
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(400))
                 .await;
             cx.update(|cx| {
-                let _ = window.update(cx, |_, window, _| window.refresh());
+                let _ = window.update(cx, |_, window, _| {
+                    window.refresh();
+                    if enter_fullscreen {
+                        window.toggle_fullscreen();
+                    }
+                });
             });
         })
         .detach();
@@ -166,7 +182,8 @@ fn main() {
 
 /// The menu bar: the app menu, Edit (Undo / Redo / Cut / Copy / Paste — ⌘V
 /// reaches the chat through AppKit's `paste:` selector), and Help → Send
-/// Feedback… (⌘⇧F).
+/// Feedback… (⌘⌥F; ⌘⇧F is the app-wide search palette since
+/// [feedback search-palette-2026-10-24]).
 fn set_menus(cx: &mut App) {
     cx.set_menus(vec![
         Menu {
@@ -273,9 +290,23 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-t", shell::NewTab, None),
         KeyBinding::new("cmd-b", shell::ToggleRail, None),
         KeyBinding::new("ctrl-b", shell::ToggleRail, None),
-        // ⌘F expands the chat list's round search button into its field.
-        KeyBinding::new("cmd-f", shell::FocusSearch, None),
-        KeyBinding::new("ctrl-f", shell::FocusSearch, None),
+        // App-wide search (Jacob 2026-10-24): ⌘⇧F opens the command palette,
+        // ⌘K is its alias (free before this). ⌘F is deliberately unbound — it
+        // is reserved for in-chat search, which does not exist yet.
+        KeyBinding::new("cmd-shift-f", shell::OpenPalette, None),
+        KeyBinding::new("ctrl-shift-f", shell::OpenPalette, None),
+        KeyBinding::new("cmd-k", shell::OpenPalette, None),
+        KeyBinding::new("ctrl-k", shell::OpenPalette, None),
+        // Palette open: ⌘1–⌘9 open that row (↑ ↓ ⏎ Esc are the field's and the shell's).
+        KeyBinding::new("cmd-1", palette_ui::Pick1, Some("Palette")),
+        KeyBinding::new("cmd-2", palette_ui::Pick2, Some("Palette")),
+        KeyBinding::new("cmd-3", palette_ui::Pick3, Some("Palette")),
+        KeyBinding::new("cmd-4", palette_ui::Pick4, Some("Palette")),
+        KeyBinding::new("cmd-5", palette_ui::Pick5, Some("Palette")),
+        KeyBinding::new("cmd-6", palette_ui::Pick6, Some("Palette")),
+        KeyBinding::new("cmd-7", palette_ui::Pick7, Some("Palette")),
+        KeyBinding::new("cmd-8", palette_ui::Pick8, Some("Palette")),
+        KeyBinding::new("cmd-9", palette_ui::Pick9, Some("Palette")),
         KeyBinding::new("escape", shell::Escape, None),
         // "Delete message?": Return confirms (Esc cancels via the shell).
         KeyBinding::new(
@@ -287,8 +318,9 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("left", media_viewer::Prev, Some("MediaViewer")),
         KeyBinding::new("right", media_viewer::Next, Some("MediaViewer")),
         KeyBinding::new("cmd-q", shell::Quit, None),
-        KeyBinding::new("cmd-shift-f", feedback::SendFeedback, None),
-        KeyBinding::new("ctrl-shift-f", feedback::SendFeedback, None),
+        // Send Feedback moved off ⌘⇧F when the palette took it (2026-10-24).
+        KeyBinding::new("cmd-alt-f", feedback::SendFeedback, None),
+        KeyBinding::new("ctrl-alt-f", feedback::SendFeedback, None),
         // Sheet open: Enter in the note (ComposerInput → on_submit) or ⌘⏎ / Ctrl⏎ anywhere in it.
         KeyBinding::new("cmd-enter", feedback::SubmitFeedback, Some("FeedbackSheet")),
         KeyBinding::new(
@@ -297,4 +329,60 @@ fn bind_keys(cx: &mut App) {
             Some("FeedbackSheet"),
         ),
     ]);
+}
+
+#[cfg(test)]
+mod keymap_tests {
+    //! Jacob's shortcut rules (search-palette-2026-10-24, 13:49 UTC): ⌘⇧F =
+    //! app-wide search (the palette), ⌘K its alias, ⌘F reserved for in-chat
+    //! search and so bound to nothing, Send Feedback on ⌘⌥F.
+    use gpui::{Keystroke, TestAppContext};
+
+    use super::*;
+
+    fn actions_for(cx: &mut TestAppContext, keys: &str) -> Vec<String> {
+        cx.update(|cx| {
+            bind_keys(cx);
+            let stroke = Keystroke::parse(keys).expect("keystroke");
+            let mut names: Vec<String> = cx
+                .all_bindings_for_input(&[stroke])
+                .iter()
+                .map(|b| b.action().name().to_string())
+                .collect();
+            // `bind_keys` runs once per lookup here; the table itself has each
+            // binding once.
+            names.dedup();
+            names
+        })
+    }
+
+    #[gpui::test]
+    fn cmd_shift_f_and_cmd_k_open_the_palette(cx: &mut TestAppContext) {
+        assert_eq!(actions_for(cx, "cmd-shift-f"), vec!["shell::OpenPalette"]);
+        assert_eq!(actions_for(cx, "cmd-k"), vec!["shell::OpenPalette"]);
+    }
+
+    #[gpui::test]
+    fn cmd_f_stays_unbound_for_in_chat_search(cx: &mut TestAppContext) {
+        assert!(
+            actions_for(cx, "cmd-f").is_empty(),
+            "⌘F is reserved for in-chat search (not built yet)"
+        );
+    }
+
+    #[gpui::test]
+    fn send_feedback_moved_to_cmd_alt_f(cx: &mut TestAppContext) {
+        assert_eq!(actions_for(cx, "cmd-alt-f"), vec!["feedback::SendFeedback"]);
+    }
+
+    #[gpui::test]
+    fn cmd_digits_pick_palette_rows(cx: &mut TestAppContext) {
+        for n in 1..=9 {
+            assert_eq!(
+                actions_for(cx, &format!("cmd-{n}")),
+                vec![format!("palette::Pick{n}")],
+                "⌘{n}"
+            );
+        }
+    }
 }

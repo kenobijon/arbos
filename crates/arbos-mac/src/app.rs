@@ -25,6 +25,7 @@ use crate::model::{
     Routine, RoutineRun, RoutineTrigger, SecretDirector, SecretScope, SecretsView, ServerInfo,
     Skill, StatusKind,
 };
+use crate::palette;
 use crate::search;
 use crate::sign_in;
 use crate::sync::{ClientCommand, SyncEvent, SyncSource};
@@ -375,7 +376,7 @@ const CHANNEL_PAGE: usize = 50;
 /// The relay's answer to the avatar picker's Generate tab.
 #[derive(Clone, Debug)]
 pub struct AvatarGenerated {
-    pub project_id: Id,
+    pub target: crate::sync::PictureTarget,
     pub image_key: Option<String>,
     pub url: Option<String>,
     pub error: Option<String>,
@@ -1417,8 +1418,8 @@ impl AppState {
                 }
                 cx.notify();
             }
-            SyncEvent::ProjectImageGenerated {
-                project_id,
+            SyncEvent::ImageGenerated {
+                target,
                 image_key,
                 url,
                 error,
@@ -1427,7 +1428,7 @@ impl AppState {
                     self.want_avatar(u);
                 }
                 self.avatar_generated = Some(AvatarGenerated {
-                    project_id,
+                    target,
                     image_key,
                     url,
                     error,
@@ -1829,6 +1830,16 @@ impl AppState {
                             );
                             if rest == ":library" {
                                 self.set_profile_tab(1, cx);
+                            } else if let Some(tab) = rest.strip_prefix(":avatar") {
+                                // `group:avatar[:generate|:upload]` — the avatar picker (D92
+                                // amendment) for the group's picture.
+                                use crate::ui::avatar_picker::{Tab, Target};
+                                let tab = match tab {
+                                    ":generate" => Tab::Generate,
+                                    ":upload" => Tab::Upload,
+                                    _ => Tab::Bot,
+                                };
+                                self.open_avatar_picker(Target::Group(project_id), tab, cx);
                             } else if rest == ":add-members" {
                                 // The pane's Add members sheet over the Members tab.
                                 self.open_add_members(project_id, cx);
@@ -2765,35 +2776,7 @@ impl AppState {
             self.select_project(project_id, cx);
             return;
         };
-        self.search_chat = Some(chat_id.clone());
-        if self.archived_chats.remove(&chat_id) {
-            self.command(ClientCommand::ArchiveChat {
-                chat_id: chat_id.clone(),
-                archived: false,
-            });
-        }
-        self.selected_channel = None;
-        self.selected_project = Some(project_id.clone());
-        self.sidebar_overlay = false;
-        self.active_tab.insert(project_id.clone(), chat_id.clone());
-        self.last_chats.insert(project_id, chat_id.clone());
-        if let Some(chat) = self
-            .chats
-            .values_mut()
-            .flat_map(|v| v.iter_mut())
-            .find(|c| c.id == chat_id)
-        {
-            chat.unread = false;
-            chat.unread_count = 0;
-        }
-        self.command(ClientCommand::OpenChat {
-            chat_id: chat_id.clone(),
-        });
-        self.highlight_message = Some(message_id.clone());
-        self.reveal_message = Some((chat_id, message_id));
-        self.reveal_nonce += 1;
-        self.sync_focus();
-        cx.notify();
+        self.reveal_search_message(project_id, chat_id, message_id, cx);
     }
 
     /// Click on a reply bubble's quote header: scroll to the original in the
@@ -2865,6 +2848,221 @@ impl AppState {
             || self.searchable_messages(&space.id),
             query,
         )
+    }
+
+    /// Everything the command palette can find for `query` (already
+    /// `search::normalize_query`'d; empty = recents): chat rows through the
+    /// #1477 matcher, servers and their channels by name, and the files,
+    /// pictures and links shared in loaded chats ([feedback
+    /// search-palette-2026-10-24]). Ordering and grouping is `palette::arrange`.
+    pub fn palette_entries(&self, query: &str) -> Vec<palette::Entry> {
+        use crate::palette::{Entry, Kind, Target};
+        let mut out = Vec::new();
+        for space in &self.projects {
+            let Some(hit) = self.space_search_hit(space, query) else {
+                continue;
+            };
+            let when = crate::ui::sidebar::last_activity(self, space);
+            out.push(palette::space_entry(space, hit, when, query));
+        }
+        for server in &self.servers {
+            let when = self.server_last_activity(server);
+            if query.is_empty() || search::fold(&server.name).contains(query) {
+                out.push(Entry {
+                    kind: Kind::Server,
+                    title: server.name.clone(),
+                    subtitle: palette::server_subtitle(server.channels.len(), server.member_count),
+                    when,
+                    indirect: false,
+                    target: Target::Server(server.id.clone()),
+                });
+            }
+            if query.is_empty() {
+                continue;
+            }
+            for channel in &server.channels {
+                if !search::fold(&channel.name).contains(query) {
+                    continue;
+                }
+                let when = self
+                    .channel_row(channel)
+                    .map(|r| r.last_ts as u64)
+                    .filter(|t| *t > 0)
+                    .unwrap_or(when);
+                out.push(Entry {
+                    kind: Kind::Channel,
+                    title: format!("#{}", channel.name),
+                    subtitle: server.name.clone(),
+                    when,
+                    indirect: false,
+                    target: Target::Channel {
+                        server_id: server.id.clone(),
+                        channel_id: channel.id.clone(),
+                    },
+                });
+            }
+        }
+        if query.is_empty() {
+            return out;
+        }
+        for space in &self.projects {
+            for chat in self.tabs(&space.id) {
+                for m in self.messages_of(&chat.id) {
+                    let by = m
+                        .sender_name
+                        .clone()
+                        .filter(|n| !n.is_empty())
+                        .or_else(|| m.sender_handle.clone().map(|h| format!("@{h}")))
+                        .unwrap_or_else(|| {
+                            if self.is_mine(m) {
+                                "You".into()
+                            } else {
+                                space.name.clone()
+                            }
+                        });
+                    let where_ = if space.is_people() {
+                        if let Some(p) = space.person().filter(|_| !space.is_people_group()) {
+                            p.display_name()
+                        } else {
+                            space.name.clone()
+                        }
+                    } else {
+                        space.name.clone()
+                    };
+                    for part in &m.parts {
+                        match part {
+                            Part::Attachment { id, attachment } => {
+                                let name = attachment.title();
+                                if !search::fold(name).contains(query)
+                                    && !search::fold(&attachment.name).contains(query)
+                                {
+                                    continue;
+                                }
+                                let kind = match attachment.kind() {
+                                    AttachmentKind::Image | AttachmentKind::Video => Kind::Media,
+                                    _ => Kind::File,
+                                };
+                                let mut meta = attachment.kind().label().to_string();
+                                let size = attachment.size_label();
+                                if !size.is_empty() {
+                                    meta.push_str(" · ");
+                                    meta.push_str(&size);
+                                }
+                                out.push(Entry {
+                                    kind,
+                                    title: name.to_string(),
+                                    subtitle: format!("{meta} · {by} in {where_}"),
+                                    when: m.created_at,
+                                    indirect: false,
+                                    target: Target::Media {
+                                        chat_id: chat.id.clone(),
+                                        message_id: m.id.clone(),
+                                        part_id: id.clone(),
+                                    },
+                                });
+                            }
+                            Part::Text { text, .. } => {
+                                for url in crate::ui::profiles::urls_in(text) {
+                                    if !search::fold(&url).contains(query) {
+                                        continue;
+                                    }
+                                    out.push(Entry {
+                                        kind: Kind::Link,
+                                        title: url
+                                            .trim_start_matches("https://")
+                                            .trim_start_matches("http://")
+                                            .to_string(),
+                                        subtitle: format!(
+                                            "{} · {by} in {where_}",
+                                            palette::link_host(&url)
+                                        ),
+                                        when: m.created_at,
+                                        indirect: false,
+                                        target: Target::Link(url),
+                                    });
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        out.dedup_by(|a, b| a.kind == Kind::Link && b.kind == Kind::Link && a.target == b.target);
+        out
+    }
+
+    /// Open what a palette row points at ([feedback search-palette-2026-10-24]).
+    pub fn open_palette_target(&mut self, target: palette::Target, cx: &mut Context<Self>) {
+        use crate::palette::Target;
+        match target {
+            Target::Space(space_id) => {
+                self.open_server = None;
+                self.select_project(space_id, cx);
+            }
+            Target::Message {
+                space_id,
+                chat_id,
+                message_id,
+            } => {
+                self.open_server = None;
+                self.reveal_search_message(space_id, chat_id, message_id, cx);
+            }
+            Target::Server(server_id) => self.enter_server(server_id, cx),
+            Target::Channel {
+                server_id,
+                channel_id,
+            } => {
+                self.open_server = Some(server_id.clone());
+                self.select_channel(server_id, channel_id, cx);
+            }
+            Target::Media {
+                chat_id,
+                message_id,
+                part_id,
+            } => self.open_media_in_chat(&chat_id, &message_id, &part_id, cx),
+            Target::Link(url) => cx.open_url(&url),
+        }
+    }
+
+    /// Open `chat_id` under `project_id` scrolled to `message_id` (a palette
+    /// row that matched a message body); shares the home-search path.
+    fn reveal_search_message(
+        &mut self,
+        project_id: Id,
+        chat_id: Id,
+        message_id: Id,
+        cx: &mut Context<Self>,
+    ) {
+        self.search_chat = Some(chat_id.clone());
+        if self.archived_chats.remove(&chat_id) {
+            self.command(ClientCommand::ArchiveChat {
+                chat_id: chat_id.clone(),
+                archived: false,
+            });
+        }
+        self.selected_channel = None;
+        self.selected_project = Some(project_id.clone());
+        self.sidebar_overlay = false;
+        self.active_tab.insert(project_id.clone(), chat_id.clone());
+        self.last_chats.insert(project_id, chat_id.clone());
+        if let Some(chat) = self
+            .chats
+            .values_mut()
+            .flat_map(|v| v.iter_mut())
+            .find(|c| c.id == chat_id)
+        {
+            chat.unread = false;
+            chat.unread_count = 0;
+        }
+        self.command(ClientCommand::OpenChat {
+            chat_id: chat_id.clone(),
+        });
+        self.highlight_message = Some(message_id.clone());
+        self.reveal_message = Some((chat_id, message_id));
+        self.reveal_nonce += 1;
+        self.sync_focus();
+        cx.notify();
     }
 
     pub fn select_tab(&mut self, chat_id: Id, cx: &mut Context<Self>) {
@@ -3981,6 +4179,9 @@ impl AppState {
             .filter(|o| !merged.iter().any(|s| s.id == o.id))
             .map(|o| o.id.clone())
             .collect();
+        for url in merged.iter().filter_map(|s| s.image_url.clone()) {
+            self.want_avatar(url);
+        }
         self.servers = merged;
         for id in gone {
             self.drop_server(&id, cx);
@@ -4066,6 +4267,9 @@ impl AppState {
         if self.server_sheet.is_some() {
             // A channel was created: the sheet is done.
             self.server_sheet = None;
+        }
+        if let Some(url) = server.image_url.clone() {
+            self.want_avatar(url);
         }
         match self.servers.iter_mut().find(|s| s.id == server.id) {
             Some(slot) => *slot = server,
@@ -4752,13 +4956,47 @@ impl AppState {
     }
 
     /// Generate tab: ask the relay for a picture; the answer lands in `avatar_generated`.
-    pub fn generate_project_image(
+    pub fn generate_image(
         &mut self,
-        project_id: Id,
+        target: crate::sync::PictureTarget,
         prompt: String,
         cx: &mut Context<Self>,
     ) {
-        self.command(ClientCommand::GenerateProjectImage { project_id, prompt });
+        self.command(ClientCommand::GenerateImage { target, prompt });
+        cx.notify();
+    }
+
+    /// A people group's picture from a key the relay already holds (the Generate tab's answer).
+    pub fn set_group_image_key(&mut self, chat_id: Id, key: String, cx: &mut Context<Self>) {
+        self.command(ClientCommand::SetGroupImageKey { chat_id, key });
+        cx.notify();
+    }
+
+    /// A server's picture from the avatar picker (owner / admins).
+    pub fn set_server_image(
+        &mut self,
+        server_id: Id,
+        source: crate::sync::PictureSource,
+        cx: &mut Context<Self>,
+    ) {
+        self.command(ClientCommand::SetServerImage { server_id, source });
+        cx.notify();
+    }
+
+    /// A server's leaf picture (`None` = initials; drops the uploaded picture).
+    pub fn set_server_leaf(
+        &mut self,
+        server_id: Id,
+        pick: Option<crate::ui::avatars::LeafPick>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(s) = self.servers.iter_mut().find(|s| s.id == server_id) {
+            s.avatar_leaf = pick.map(|l| l.leaf);
+            s.avatar_leaf_color = pick.map(|l| l.color);
+            s.image_key = None;
+            s.image_url = None;
+        }
+        self.command(ClientCommand::SetServerLeaf { server_id, pick });
         cx.notify();
     }
 

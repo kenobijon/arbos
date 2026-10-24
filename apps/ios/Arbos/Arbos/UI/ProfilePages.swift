@@ -740,21 +740,21 @@ struct UserProfileView: View {
 
 }
 
-// MARK: - Group invite share sheet
+// MARK: - Group invite share
 
-/// Identifiable wrapper so `.sheet(item:)` can present the system share sheet.
-private struct ShareGroupInviteItem: Identifiable {
-    var id: String { url.absoluteString }
-    let url: URL
-}
-
-/// System share sheet for a group invite URL (Messages, Mail, copy, other apps).
-private struct GroupInviteShareSheet: UIViewControllerRepresentable {
-    let url: URL
-    func makeUIViewController(context: Context) -> UIActivityViewController {
-        UIActivityViewController(activityItems: [url], applicationActivities: nil)
-    }
-    func updateUIViewController(_ vc: UIActivityViewController, context: Context) {}
+/// Present the system share sheet from the top UIKit controller.
+/// Wrapping `UIActivityViewController` in a SwiftUI `.sheet` paints blank on
+/// iPhone when the host is already a sheet (the group profile).
+@MainActor
+private func presentShareSheet(items: [Any]) {
+    let activity = UIActivityViewController(activityItems: items, applicationActivities: nil)
+    let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+    guard let scene = scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first,
+          let root = (scene.windows.first(where: \.isKeyWindow) ?? scene.windows.first)?.rootViewController
+    else { return }
+    var top = root
+    while let presented = top.presentedViewController { top = presented }
+    top.present(activity, animated: true)
 }
 
 // MARK: - Group page
@@ -770,6 +770,8 @@ struct GroupProfileView: View {
     @State private var projectMembers: [ProjectMember] = []
     @State private var showAdd = false
     @State private var showEdit = false
+    /// Rig only: the avatar picker opened straight from the pane (users go through Edit group).
+    @State private var showAvatarPicker: AvatarPickerTab? = nil
     @State private var showActivity = false
     @State private var pendingRemoveId: String?
     @State private var pendingRemoveName: String?
@@ -788,8 +790,7 @@ struct GroupProfileView: View {
     @State private var inviteExpires = false
     @State private var inviteSingleUse = false
     @State private var inviteCopied = false
-    /// System share sheet for the group's invite link (reuses a usable link or mints one).
-    @State private var shareInviteURL: ShareGroupInviteItem?
+    /// True while minting an invite link before opening the system share sheet.
     @State private var sharingInvite = false
 
     private var people: PeopleChat? { model.peopleChat(chatId) }
@@ -1074,9 +1075,6 @@ struct GroupProfileView: View {
                 .environmentObject(model)
                 .environment(\.theme, theme)
         }
-        .sheet(item: $shareInviteURL) { item in
-            GroupInviteShareSheet(url: item.url)
-        }
         .task {
             if let projectId { projectMembers = await model.projectMembers(projectId) }
             if projectId == nil, people?.kind == "group" {
@@ -1096,7 +1094,16 @@ struct GroupProfileView: View {
             if DebugHooks.show == "addmembers", project == nil {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { showAdd = true }
             }
+            // Rig: `ARBOS_SHOW=groupavatar[-generate|-upload]` opens the avatar picker on that tab.
+            if let show = DebugHooks.show, show.hasPrefix("groupavatar"), project == nil {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                    showAvatarPicker = show.hasSuffix("generate") ? .generate : (show.hasSuffix("upload") ? .upload : .bot)
+                }
+            }
             if let t = DebugHooks.panelTab, PaneKinds.group.contains(t) { tab = t }
+        }
+        .sheet(item: $showAvatarPicker) { initial in
+            AvatarPickerSheet(target: .group(chatId), initialTab: initial).environmentObject(model).environment(\.theme, theme)
         }
     }
 
@@ -1293,7 +1300,7 @@ struct GroupProfileView: View {
         Task {
             if let existing = groupInvites.first(where: { $0.usable }),
                let url = URL(string: existing.url) {
-                shareInviteURL = ShareGroupInviteItem(url: url)
+                presentShareSheet(items: [url])
                 sharingInvite = false
                 return
             }
@@ -1302,7 +1309,7 @@ struct GroupProfileView: View {
             ) {
                 groupInvites.insert(inv, at: 0)
                 if let url = URL(string: inv.url) {
-                    shareInviteURL = ShareGroupInviteItem(url: url)
+                    presentShareSheet(items: [url])
                 }
             }
             sharingInvite = false
@@ -1705,6 +1712,8 @@ struct ServerProfileView: View {
     @State private var tab = "Channels"
     @State private var showRename = false
     @State private var renameDraft = ""
+    @State private var showAvatarPicker = false
+    @State private var avatarPickerTab: AvatarPickerTab = .bot
     @State private var showNewChannel = false
     @State private var renamingChannel: ServerChannel?
     @State private var channelDraft = ""
@@ -1791,16 +1800,15 @@ struct ServerProfileView: View {
     private func heroPicture(_ server: Server) -> some View {
         Group {
             if isAdmin {
-                Button {
-                    renameDraft = server.name
-                    showRename = true
-                } label: {
+                // D92 amendment: the avatar picker (Bot | Generate | Upload) for the server's
+                // picture; Rename lives on the Settings tab.
+                Button { showAvatarPicker = true } label: {
                     ServerAvatar(server: server, size: PaneHeader<EmptyView>.avatarSize)
                         .paneCrayon()
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("Rename server")
+                .accessibilityLabel("Change server picture")
             } else {
                 ServerAvatar(server: server, size: PaneHeader<EmptyView>.avatarSize)
             }
@@ -1905,6 +1913,16 @@ struct ServerProfileView: View {
 
     private func channelDialogs<V: View>(_ v: V) -> some View {
         v
+            .sheet(isPresented: $showAvatarPicker) {
+                AvatarPickerSheet(target: .server(serverId), initialTab: avatarPickerTab).environmentObject(model).environment(\.theme, theme)
+            }
+            .onAppear {
+                // Rig: `ARBOS_SHOW=serveravatar[-generate|-upload]` opens the avatar picker on that tab.
+                if let show = DebugHooks.show, show.hasPrefix("serveravatar") {
+                    avatarPickerTab = show.hasSuffix("generate") ? .generate : (show.hasSuffix("upload") ? .upload : .bot)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { showAvatarPicker = true }
+                }
+            }
             .alert("Rename server", isPresented: $showRename) {
                 TextField("Server name", text: $renameDraft)
                 Button("Save") { Task { await model.renameServer(serverId, name: renameDraft) } }

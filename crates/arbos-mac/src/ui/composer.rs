@@ -12,14 +12,16 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Instant;
 
 use gpui::{
     actions, div, fill, img, point, prelude::*, px, relative, size, App, Bounds, ClipboardEntry,
-    ClipboardItem, Context, Corners, CursorStyle, Div, Element, ElementId, ElementInputHandler,
-    Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, FontWeight, GlobalElementId,
-    InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ObjectFit, PaintQuad, Pixels, Point, Render, RenderImage, SharedString, Style,
-    TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine,
+    ClipboardItem, Context, Corners, CursorStyle, DispatchPhase, Div, Element, ElementId,
+    ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
+    FontWeight, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, PaintQuad, Pixels, Point,
+    Render, RenderImage, SharedString, Style, TextAlign, TextRun, UTF16Selection, UnderlineStyle,
+    Window, WrappedLine,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -29,7 +31,7 @@ use crate::ui::callview;
 use crate::ui::frost::{frosted, PANEL_BLUR};
 use crate::ui::glass;
 use crate::ui::icons::icon;
-use crate::ui::mention::{self, MentionToken, Mentions};
+use crate::ui::mention::{self, Mention, MentionToken, Mentions};
 use crate::ui::select::{self, word_range};
 use crate::ui::theme::{
     Theme, COMPOSER_HEIGHT, LINE_HEIGHT, PANEL_RADIUS, PLUS_BUTTON, SEND_BUTTON, TEXT_BODY,
@@ -93,6 +95,9 @@ pub const COMPOSER_RADIUS: f32 = COMPOSER_HEIGHT / 2.0;
 pub type SubmitHandler = Rc<dyn Fn(&mut Window, &mut App)>;
 /// Returns true when the @-mention menu handled the key (skip caret / send).
 pub type MentionKeyHandler = Rc<dyn Fn(&mut App) -> bool>;
+/// ↑ (−1) / ↓ (+1) in a single-line picker field: the owner moves its list
+/// highlight; the caret stays put.
+pub type ArrowHandler = Rc<dyn Fn(i32, &mut App)>;
 /// Files and images from a ⌘V, for the owner to stage.
 pub type PasteMediaHandler = Rc<dyn Fn(Vec<PathBuf>, Vec<gpui::Image>, &mut App)>;
 
@@ -192,6 +197,9 @@ pub enum ComposerEvent {
 struct Layout {
     lines: Vec<(usize, WrappedLine)>,
     bounds: Bounds<Pixels>,
+    /// Where the clickable chips were painted (tests aim the pointer).
+    #[cfg(test)]
+    chips: Vec<(Range<usize>, Vec<Bounds<Pixels>>)>,
 }
 
 pub struct ComposerInput {
@@ -203,6 +211,11 @@ pub struct ComposerInput {
     marked_range: Option<Range<usize>>,
     layout: Option<Layout>,
     is_selecting: bool,
+    /// The pointer over the committed chips (hover / pressed), by chip range.
+    chips: mention::ChipPointer<Range<usize>>,
+    /// The cursor the chip layer last asked for while hovered (tests).
+    #[cfg(test)]
+    chip_cursor: CursorStyle,
     /// Vertical scroll inside the box once it reaches `MAX_LINES`.
     scroll_y: f32,
     /// Prior text states for ⌘Z (paste, word-delete, typing, cut).
@@ -220,6 +233,9 @@ pub struct ComposerInput {
     pub on_mention_accept: Option<MentionKeyHandler>,
     /// Esc while the `@` mention menu is open: close it for this token.
     pub on_mention_escape: Option<MentionKeyHandler>,
+    /// Pickers (the command palette): ↑ / ↓ walk the result list instead of
+    /// moving the caret in this one-line field.
+    pub on_arrow: Option<ArrowHandler>,
     /// ⌘V with files or an image on the clipboard: the owner stages them.
     pub on_paste_media: Option<PasteMediaHandler>,
     /// Multi-line editors (skill bodies): Enter inserts a newline instead of
@@ -257,6 +273,9 @@ impl ComposerInput {
             marked_range: None,
             layout: None,
             is_selecting: false,
+            chips: mention::ChipPointer::default(),
+            #[cfg(test)]
+            chip_cursor: CursorStyle::Arrow,
             scroll_y: 0.0,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -265,6 +284,7 @@ impl ComposerInput {
             on_mention_prev: None,
             on_mention_accept: None,
             on_mention_escape: None,
+            on_arrow: None,
             on_paste_media: None,
             enter_inserts_newline: false,
             masked: false,
@@ -405,6 +425,7 @@ impl ComposerInput {
             handle: handle.to_string(),
             name: name.to_string(),
             id,
+            kind: MentionToken::kind_of(handle),
         };
         let at = self
             .tokens
@@ -444,6 +465,7 @@ impl ComposerInput {
             let replaced = self.splice(range.clone(), &chip);
             let token = MentionToken {
                 range: replaced.start..replaced.start + chip.len(),
+                kind: MentionToken::kind_of(&handle),
                 handle,
                 name: m.name.clone(),
                 id: m.id.clone(),
@@ -677,6 +699,16 @@ impl ComposerInput {
         true
     }
 
+    /// A picker's ↑/↓: hand the step to the owner after this update ends
+    /// (same re-entrancy rule as the mention keys); `false` with no handler.
+    fn defer_arrow(&self, delta: i32, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(cb) = self.on_arrow.clone() else {
+            return false;
+        };
+        window.defer(cx, move |_, cx| cb(delta, cx));
+        true
+    }
+
     /// Complete the open `@token` with `handle`: a chip when the table knows
     /// the handle, else the plain `@handle ` text. What `Composer` does through
     /// `insert_mention` with a picker row; kept for the Enter tests.
@@ -782,6 +814,9 @@ impl ComposerInput {
         if self.defer_mention_key(self.on_mention_prev.clone(), window, cx) {
             return;
         }
+        if self.defer_arrow(-1, window, cx) {
+            return;
+        }
         if self.selected_range.is_empty() {
             self.move_to(self.offset_for_vertical_move(true), cx);
         } else {
@@ -791,6 +826,9 @@ impl ComposerInput {
 
     fn down(&mut self, _: &Down, window: &mut Window, cx: &mut Context<Self>) {
         if self.defer_mention_key(self.on_mention_next.clone(), window, cx) {
+            return;
+        }
+        if self.defer_arrow(1, window, cx) {
             return;
         }
         if self.selected_range.is_empty() {
@@ -1467,7 +1505,32 @@ struct Prepaint {
     /// Mention chips (#1596): pills under the text, pictures over it.
     pills: Vec<PaintQuad>,
     pictures: Vec<(Bounds<Pixels>, mention::Picture)>,
+    /// The chips the pointer can click: the token's range, its entity and
+    /// the pill rectangles (window coordinates) it covers.
+    chip_hits: Vec<ChipHit>,
+    /// Whether a pill is mid-fade (paint again next frame).
+    fading: bool,
+    hitbox: Hitbox,
     scroll_y: f32,
+}
+
+#[derive(Clone)]
+struct ChipHit {
+    range: Range<usize>,
+    mention: Rc<Mention>,
+    pills: Vec<Bounds<Pixels>>,
+}
+
+impl ChipHit {
+    fn contains(&self, position: Point<Pixels>) -> bool {
+        self.pills.iter().any(|b| b.contains(&position))
+    }
+}
+
+/// The clickable chip under `position`, if any.
+fn chip_hit_at(hits: &[ChipHit], position: Point<Pixels>) -> Option<&ChipHit> {
+    hits.iter()
+        .find(|h| h.mention.page.is_some() && h.contains(position))
 }
 
 impl IntoElement for InputElement {
@@ -1546,10 +1609,20 @@ impl Element for InputElement {
         } else {
             input.tokens.clone()
         };
-        let pill_color = Theme::with_alpha(theme.accent, 0.14);
-        let token_pictures: Vec<Option<mention::Picture>> = tokens
+        let token_mentions: Vec<Option<Rc<Mention>>> = tokens
             .iter()
-            .map(|t| input.mentions.picture_for(t).cloned())
+            .map(|t| input.mentions.mention_for(t).cloned())
+            .collect();
+        let now = Instant::now();
+        let snap = cx.reduce_motion();
+        let mut fading = false;
+        let pill_alphas: Vec<f32> = tokens
+            .iter()
+            .map(|t| {
+                let (alpha, still) = input.chips.alpha(&t.range, now, snap);
+                fading |= still;
+                alpha
+            })
             .collect();
 
         let mut font = style.font();
@@ -1641,7 +1714,8 @@ impl Element for InputElement {
         // coordinates shifted by the scroll.
         let mut pills = Vec::new();
         let mut pictures = Vec::new();
-        for (t, picture) in tokens.iter().zip(token_pictures) {
+        let mut chip_hits = Vec::new();
+        for ((t, mention), alpha) in tokens.iter().zip(token_mentions).zip(pill_alphas) {
             let (Some(a), Some(b)) = (
                 position_for_index(&lines, t.range.start, bounds.size.width, text_center),
                 position_for_index(&lines, t.range.end, bounds.size.width, text_center),
@@ -1653,27 +1727,33 @@ impl Element for InputElement {
             } else {
                 vec![(a.x, bounds.size.width, a.y), (px(0.0), b.x, b.y)]
             };
+            let mut rects = Vec::with_capacity(fragments.len());
             for (x0, x1, top) in fragments {
+                let pill = Bounds::new(
+                    point(
+                        bounds.left() + x0 - px(mention::PILL_PAD_X),
+                        bounds.top() + top - dy - px(mention::PILL_PAD_Y),
+                    ),
+                    size(
+                        x1 - x0 + px(mention::PILL_PAD_X * 2.0),
+                        lh + px(mention::PILL_PAD_Y * 2.0),
+                    ),
+                );
+                rects.push(pill);
                 pills.push(
-                    fill(
-                        Bounds::new(
-                            point(
-                                bounds.left() + x0 - px(mention::PILL_PAD_X),
-                                bounds.top() + top - dy - px(mention::PILL_PAD_Y),
-                            ),
-                            size(
-                                x1 - x0 + px(mention::PILL_PAD_X * 2.0),
-                                lh + px(mention::PILL_PAD_Y * 2.0),
-                            ),
-                        ),
-                        pill_color,
-                    )
-                    .corner_radii(Corners::all(px(mention::PILL_RADIUS))),
+                    fill(pill, mention::pill_color(mention_accent, alpha))
+                        .corner_radii(Corners::all(px(mention::PILL_RADIUS))),
                 );
             }
-            let Some(picture) = picture else {
+            let Some(mention) = mention else {
                 continue;
             };
+            chip_hits.push(ChipHit {
+                range: t.range.clone(),
+                mention: mention.clone(),
+                pills: rects,
+            });
+            let picture = mention.picture.clone();
             let Some(after_cell) = position_for_index(
                 &lines,
                 t.range.start + mention::CELL.len(),
@@ -1763,6 +1843,9 @@ impl Element for InputElement {
             selections,
             pills,
             pictures,
+            chip_hits,
+            fading,
+            hitbox: window.insert_hitbox(bounds, HitboxBehavior::Normal),
             scroll_y,
         }
     }
@@ -1818,6 +1901,13 @@ impl Element for InputElement {
                 }
             }
         });
+        #[cfg(test)]
+        let chip_rects: Vec<(Range<usize>, Vec<Bounds<Pixels>>)> = prepaint
+            .chip_hits
+            .iter()
+            .map(|h| (h.range.clone(), h.pills.clone()))
+            .collect();
+        self.paint_chip_pointer(prepaint, window, cx);
         let lines = std::mem::take(&mut prepaint.lines);
         let measured: usize = lines
             .iter()
@@ -1833,7 +1923,12 @@ impl Element for InputElement {
             .map(|l| l.bounds.size.width != bounds.size.width)
             .unwrap_or(true);
         self.input.update(cx, |input, _| {
-            input.layout = Some(Layout { lines, bounds });
+            input.layout = Some(Layout {
+                lines,
+                bounds,
+                #[cfg(test)]
+                chips: chip_rects,
+            });
             input.scroll_y = scroll_y;
         });
         // First layout after a width change, a big insert, or a programmatic
@@ -1843,6 +1938,112 @@ impl Element for InputElement {
         if grew {
             window.request_animation_frame();
         }
+    }
+}
+
+impl InputElement {
+    /// The pointer over the chips (Jacob, Oct 24): a pointing hand and a
+    /// brighter pill under the pointer, brighter still while pressed, and a
+    /// plain click (no drag) opens the entity's page — the same as a bubble
+    /// chip. The caret still lands at the chip's edge as before.
+    fn paint_chip_pointer(&self, prepaint: &mut Prepaint, window: &mut Window, cx: &mut App) {
+        if prepaint.fading {
+            window.request_animation_frame();
+        }
+        let hits: Rc<Vec<ChipHit>> = Rc::new(std::mem::take(&mut prepaint.chip_hits));
+        let hitbox = prepaint.hitbox.clone();
+        let now = Instant::now();
+        let under_pointer = hitbox
+            .is_hovered(window)
+            .then(|| chip_hit_at(&hits, window.mouse_position()))
+            .flatten()
+            .map(|h| h.range.clone());
+        self.input.update(cx, |input, _| {
+            input.chips.tidy(now);
+            // The text moved under a still pointer: a hot chip that is no
+            // longer under it cools now, not at the next mouse move.
+            if under_pointer.is_none() && input.chips.hot().is_some() {
+                input.chips.hover(None, now);
+            }
+        });
+        if hits.is_empty() && self.input.read(cx).chips.hot().is_none() {
+            return;
+        }
+        let over = under_pointer.is_some();
+        if over {
+            window.set_cursor_style(CursorStyle::PointingHand, &hitbox);
+        }
+        #[cfg(test)]
+        if hitbox.is_hovered(window) {
+            self.input.update(cx, |input, _| {
+                input.chip_cursor = if over {
+                    CursorStyle::PointingHand
+                } else {
+                    CursorStyle::IBeam
+                }
+            });
+        }
+
+        window.on_mouse_event({
+            let (hitbox, hits, input) = (hitbox.clone(), hits.clone(), self.input.clone());
+            move |event: &MouseMoveEvent, phase, window, cx| {
+                if phase != DispatchPhase::Bubble {
+                    return;
+                }
+                let dragging_text = event.pressed_button == Some(MouseButton::Left)
+                    && input.read(cx).chips.pressed().is_none();
+                let over = (hitbox.is_hovered(window) && !dragging_text)
+                    .then(|| chip_hit_at(&hits, event.position))
+                    .flatten()
+                    .map(|h| h.range.clone());
+                if input.update(cx, |input, _| input.chips.hover(over, Instant::now())) {
+                    window.refresh();
+                }
+            }
+        });
+        window.on_mouse_event({
+            let (hitbox, hits, input) = (hitbox.clone(), hits.clone(), self.input.clone());
+            move |event: &MouseDownEvent, phase, window, cx| {
+                if phase != DispatchPhase::Bubble
+                    || event.button != MouseButton::Left
+                    || !hitbox.is_hovered(window)
+                {
+                    return;
+                }
+                let Some(hit) = chip_hit_at(&hits, event.position) else {
+                    return;
+                };
+                let range = hit.range.clone();
+                if input.update(cx, |input, _| input.chips.press(range, Instant::now())) {
+                    window.refresh();
+                }
+            }
+        });
+        window.on_mouse_event({
+            let input = self.input.clone();
+            move |event: &MouseUpEvent, phase, window, cx| {
+                if phase != DispatchPhase::Bubble || event.button != MouseButton::Left {
+                    return;
+                }
+                let pressed = input.update(cx, |input, _| input.chips.release(Instant::now()));
+                let Some(range) = pressed else {
+                    return;
+                };
+                window.refresh();
+                let hit = hits
+                    .iter()
+                    .find(|h| h.range == range && h.contains(event.position));
+                let (Some(hit), true) = (hit, event.click_count == 1) else {
+                    return;
+                };
+                // A drag that selected text is not a click.
+                if !input.read(cx).selected_range.is_empty() {
+                    return;
+                }
+                let mentions = input.read(cx).mentions.clone();
+                mentions.open(&hit.mention, cx);
+            }
+        });
     }
 }
 
@@ -2387,9 +2588,10 @@ impl Composer {
     }
 
     /// Who the `@token` can mean here (#1596, behaviours 1–2): people and
-    /// agents of the current space, `@here` / `@agents` for the owner of a
-    /// group; a server channel keeps the owner-only collective pings (the
-    /// client has no member list for a server yet). Case-insensitive prefix on
+    /// agents of the current space, plus `@here` (everyone in this chat) and
+    /// `@agents` (all agents here) for any member of a group or people chat
+    /// (Jacob, 2026-10-24); a server channel keeps the owner-only collective
+    /// pings (the client has no member list for a server yet). Case-insensitive prefix on
     /// the handle or on any word of the display name; handle matches first,
     /// then name matches, alphabetical by handle; at most six rows. A handle
     /// an agent and a person both carry (#1538) tags each of those two rows.
@@ -2404,23 +2606,30 @@ impl Composer {
         let state = self.state.read(cx);
         let me_handle = state.me_handle();
         let mut out: Vec<MentionCandidate> = Vec::new();
-        let collective = |handle: &str, name: &str, is_agent: bool| MentionCandidate {
-            handle: handle.into(),
-            name: name.into(),
-            id: None,
-            is_agent,
-            picture: mention::initials_picture(handle, handle, None, &theme),
-            tag: None,
+        // The chip reads `here` / `agents` (as the bubble chips do); the row
+        // says `@here · everyone in this chat`.
+        let collective =
+            |handle: &str, description: &'static str, is_agent: bool| MentionCandidate {
+                handle: handle.into(),
+                name: handle.into(),
+                id: Some(handle.into()),
+                is_agent,
+                picture: mention::initials_picture(handle, handle, None, &theme),
+                tag: None,
+                description: Some(description),
+            };
+        let collectives = |out: &mut Vec<MentionCandidate>| {
+            if "here".starts_with(&query) {
+                out.push(collective("here", "everyone in this chat", false));
+            }
+            if "agents".starts_with(&query) {
+                out.push(collective("agents", "all agents here", true));
+            }
         };
 
         if let Some((server, _)) = state.selected_channel_info() {
             if server.is_owner() {
-                if "here".starts_with(&query) {
-                    out.push(collective("here", "Everyone here", false));
-                }
-                if "agents".starts_with(&query) {
-                    out.push(collective("agents", "All agents", true));
-                }
+                collectives(&mut out);
             }
             return out;
         }
@@ -2431,16 +2640,7 @@ impl Composer {
         if !space.is_people() && space.people.is_empty() {
             return Vec::new();
         }
-        let i_own_group =
-            space.is_people_group() && space.owner_handle.as_deref().is_none_or(|o| o == me_handle);
-        if i_own_group {
-            if "here".starts_with(&query) {
-                out.push(collective("here", "Everyone here", false));
-            }
-            if "agents".starts_with(&query) {
-                out.push(collective("agents", "All agents", true));
-            }
-        }
+        collectives(&mut out);
         let mut members: Vec<(MentionCandidate, bool)> = Vec::new();
         for a in &space.agents {
             let Some(by_handle) = mention_match(&query, &a.handle, &a.name) else {
@@ -2454,6 +2654,7 @@ impl Composer {
                     is_agent: true,
                     picture: mention::agent_member_picture(state, Some(space), a, &theme),
                     tag: None,
+                    description: None,
                 },
                 by_handle,
             ));
@@ -2473,6 +2674,7 @@ impl Composer {
                     is_agent: false,
                     picture: mention::person_picture(state, p, &theme),
                     tag: None,
+                    description: None,
                 },
                 by_handle,
             ));
@@ -2505,6 +2707,7 @@ impl Composer {
                 is_agent: true,
                 picture: mention::agent_member_picture(state, Some(space), a, &theme),
                 tag: Some("the agent in this chat"),
+                description: None,
             });
         }
         out.truncate(MENTION_ROWS_MAX);
@@ -2627,7 +2830,10 @@ impl Composer {
                         .text_size(px(TEXT_SMALL))
                         .text_color(theme.text)
                         .whitespace_nowrap()
-                        .child(c.name.clone()),
+                        .child(match c.description {
+                            Some(_) => format!("@{}", c.handle),
+                            None => c.name.clone(),
+                        }),
                 )
                 .child(
                     div()
@@ -2637,7 +2843,10 @@ impl Composer {
                         .text_color(theme.text_muted)
                         .whitespace_nowrap()
                         .overflow_hidden()
-                        .child(format!("@{}", c.handle)),
+                        .child(match c.description {
+                            Some(d) => format!("· {d}"),
+                            None => format!("@{}", c.handle),
+                        }),
                 );
             if let Some(tag) = c.tag {
                 row = row.child(
@@ -2675,12 +2884,16 @@ impl Composer {
 pub struct MentionCandidate {
     pub handle: String,
     pub name: String,
-    /// `user:<id>` / `agent:<project-id>`; `None` for `@here` / `@agents`.
+    /// `user:<id>` / `agent:<project-id>`, or the collective marker
+    /// (`here` / `agents`) the source expands into the chat's members.
     pub id: Option<String>,
     pub is_agent: bool,
     pub picture: mention::Picture,
     /// `agent` / `person` when the handle is shared (#1538), or a note.
     pub tag: Option<&'static str>,
+    /// A collective's row text in place of `@handle`: `@here · everyone in
+    /// this chat`, `@agents · all agents here`.
+    pub description: Option<&'static str>,
 }
 
 /// Picker geometry (pt), the approved mock: a 320 pt card, 32 pt rows with a
@@ -3992,6 +4205,33 @@ mod mention_token_tests {
                         },
                     ),
                 ),
+                // The collectives, as `Mentions::from_state` adds them.
+                (
+                    "here",
+                    mention::Mention {
+                        page: None,
+                        name: "here".into(),
+                        picture: mention::Picture::Initials {
+                            text: "H".into(),
+                            top: gpui::Hsla::default(),
+                            bottom: gpui::Hsla::default(),
+                        },
+                        id: Some("here".into()),
+                    },
+                ),
+                (
+                    "agents",
+                    mention::Mention {
+                        page: None,
+                        name: "agents".into(),
+                        picture: mention::Picture::Initials {
+                            text: "A".into(),
+                            top: gpui::Hsla::default(),
+                            bottom: gpui::Hsla::default(),
+                        },
+                        id: Some("agents".into()),
+                    },
+                ),
                 // `@arbos` is an agent and a person (#1538).
                 (
                     "arbos",
@@ -4054,6 +4294,119 @@ mod mention_token_tests {
 
     fn chip(name: &str) -> String {
         format!("{}{name}", mention::CELL)
+    }
+
+    /// Jacob (Oct 24): the composer's chips answer the pointer like bubble
+    /// chips — hand cursor, brighter pill on hover, brighter still pressed,
+    /// and a plain click opens the entity's page. Plain text keeps the I-beam.
+    #[gpui::test]
+    fn a_composer_chip_brightens_under_the_pointer_and_opens_on_click(cx: &mut TestAppContext) {
+        use crate::ui::mention::{ChipState, PILL_ALPHA, PILL_ALPHA_HOVER, PILL_ALPHA_PRESSED};
+        use std::cell::RefCell;
+        let opened: Rc<RefCell<Vec<ProfilePage>>> = Rc::new(RefCell::new(Vec::new()));
+        let record = opened.clone();
+        let (input, cx) = input(cx);
+        cx.update(|_, cx| {
+            input.update(cx, |i, _| {
+                i.set_mentions(Mentions::with_table(
+                    vec![(
+                        "sam",
+                        stub(
+                            "Sam Rivera",
+                            ProfilePage::User {
+                                handle: "sam".into(),
+                                space_id: None,
+                            },
+                        ),
+                    )],
+                    move |page, _| record.borrow_mut().push(page.clone()),
+                ))
+            })
+        });
+        cx.simulate_input("hi @s");
+        cx.update(|_, cx| {
+            input.update(cx, |i, cx| {
+                i.insert_mention("sam", "Sam Rivera", Some("user:gh_sam".into()), cx)
+            })
+        });
+        cx.simulate_input("and more words here");
+        cx.run_until_parked();
+        let (key, rects) =
+            cx.update(|_, cx| input.read(cx).layout.as_ref().unwrap().chips[0].clone());
+        assert_eq!(key, 3..3 + chip("Sam Rivera").len());
+        let on_chip = rects[0].center();
+        let bounds = cx.update(|_, cx| input.read(cx).layout.as_ref().unwrap().bounds);
+        let on_text = point(bounds.right() - px(6.0), on_chip.y);
+        let none = gpui::Modifiers::default();
+        let settled = |i: &ComposerInput, snap: bool| {
+            i.chips
+                .alpha(&key, Instant::now() + mention::PILL_FADE, snap)
+                .0
+        };
+
+        cx.simulate_mouse_move(on_text, None, none);
+        cx.update(|_, cx| input.update(cx, |_, cx| cx.notify()));
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            let i = input.read(cx);
+            assert_eq!(i.chips.hot(), None);
+            assert_eq!(i.chip_cursor, CursorStyle::IBeam, "plain text: I-beam");
+        });
+
+        cx.simulate_mouse_move(on_chip, None, none);
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            let i = input.read(cx);
+            assert_eq!(i.chips.state(&key), ChipState::Hover);
+            assert_eq!(
+                i.chip_cursor,
+                CursorStyle::PointingHand,
+                "a hand over the chip"
+            );
+            assert_eq!(settled(i, false), PILL_ALPHA_HOVER);
+        });
+
+        cx.simulate_mouse_down(on_chip, MouseButton::Left, none);
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            let i = input.read(cx);
+            assert_eq!(i.chips.state(&key), ChipState::Pressed);
+            assert_eq!(settled(i, false), PILL_ALPHA_PRESSED);
+        });
+
+        cx.simulate_mouse_up(on_chip, MouseButton::Left, none);
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            let i = input.read(cx);
+            assert_eq!(
+                i.chips.state(&key),
+                ChipState::Hover,
+                "released: hover again"
+            );
+            assert!(
+                i.selected_range.is_empty() && i.token_around(i.cursor_offset()).is_none(),
+                "the caret sits at the chip's edge, not inside it"
+            );
+        });
+        assert_eq!(opened.borrow().len(), 1, "a plain click opens the page");
+        assert!(matches!(&opened.borrow()[0], ProfilePage::User { handle, .. } if handle == "sam"));
+
+        cx.simulate_mouse_move(on_text, None, none);
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            let i = input.read(cx);
+            assert_eq!(i.chips.state(&key), ChipState::Rest);
+            assert_eq!(i.chip_cursor, CursorStyle::IBeam);
+            assert_eq!(settled(i, false), PILL_ALPHA, "fades back to rest");
+        });
+
+        // A drag that starts on the chip and selects text is not a click.
+        cx.simulate_mouse_down(on_chip, MouseButton::Left, none);
+        cx.simulate_mouse_move(on_text, MouseButton::Left, none);
+        cx.simulate_mouse_up(on_text, MouseButton::Left, none);
+        cx.run_until_parked();
+        assert_eq!(opened.borrow().len(), 1, "a drag opens nothing");
+        assert!(!cx.update(|_, cx| input.read(cx).selected_range.is_empty()));
     }
 
     #[gpui::test]
@@ -4196,6 +4549,48 @@ mod mention_token_tests {
         assert_eq!(
             sent(&input, cx),
             ("hi @sam ok".into(), vec!["user:gh_sam".into()])
+        );
+    }
+
+    #[gpui::test]
+    fn here_and_agents_become_collective_chips_whose_marker_the_send_carries(
+        cx: &mut TestAppContext,
+    ) {
+        let (input, cx) = input(cx);
+        // Typed with a space: a chip without the picker (Jacob's iPhone bug, 2026-10-24).
+        cx.simulate_input("how is the iphone now @here ");
+        let tokens = cx.update(|_, cx| input.read(cx).tokens().to_vec());
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].kind, mention::TokenKind::Collective);
+        assert_eq!(tokens[0].handle, "here");
+        assert_eq!(
+            sent(&input, cx),
+            ("how is the iphone now @here ".into(), vec!["here".into()])
+        );
+        assert_eq!(
+            text(&input, cx),
+            format!("how is the iphone now {} ", chip("here"))
+        );
+        // Picked from the menu as the Composer does it; Enter resolves a trailing one too.
+        cx.update(|_, cx| {
+            input.update(cx, |i, cx| {
+                i.insert_mention("agents", "agents", Some("agents".into()), cx)
+            })
+        });
+        cx.simulate_input("and @sam");
+        cx.update(|_, cx| input.update(cx, |i, cx| i.resolve_exact_handles(cx)));
+        let tokens = cx.update(|_, cx| input.read(cx).tokens().to_vec());
+        assert_eq!(
+            tokens.iter().map(|t| t.kind).collect::<Vec<_>>(),
+            vec![
+                mention::TokenKind::Collective,
+                mention::TokenKind::Collective,
+                mention::TokenKind::Member
+            ]
+        );
+        assert_eq!(
+            sent(&input, cx).1,
+            vec!["here".to_string(), "agents".into(), "user:gh_sam".into()]
         );
     }
 
