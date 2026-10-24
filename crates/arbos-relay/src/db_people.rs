@@ -50,6 +50,11 @@ CREATE TABLE IF NOT EXISTS invites (
   accepted_at INTEGER, accepted_user_id TEXT, revoked_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS invites_login ON invites(github_login);
+CREATE TABLE IF NOT EXISTS people_chat_invites (
+  id TEXT PRIMARY KEY, chat_id TEXT NOT NULL, code TEXT NOT NULL UNIQUE, created_by TEXT NOT NULL,
+  created_at INTEGER NOT NULL, expires_at INTEGER, uses_left INTEGER, revoked_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS people_chat_invites_chat ON people_chat_invites(chat_id, created_at);
 CREATE TABLE IF NOT EXISTS rate_events (
   user_id TEXT NOT NULL, kind TEXT NOT NULL, at INTEGER NOT NULL
 );
@@ -86,6 +91,28 @@ pub struct Invite {
     pub accepted_at: Option<i64>,
     pub accepted_user_id: Option<String>,
     pub revoked_at: Option<i64>,
+}
+
+/// One invite link of a people group chat (same shape as server invites: optional expiry
+/// and use count; `revoked_at` ends it early).
+#[derive(Debug, Clone, Serialize)]
+pub struct GroupInvite {
+    pub id: String,
+    pub chat_id: String,
+    pub code: String,
+    pub created_by: String,
+    pub created_at: i64,
+    pub expires_at: Option<i64>,
+    pub uses_left: Option<i64>,
+    pub revoked_at: Option<i64>,
+}
+
+impl GroupInvite {
+    pub fn usable(&self, now: i64) -> bool {
+        self.revoked_at.is_none()
+            && self.expires_at.is_none_or(|t| t > now)
+            && self.uses_left.is_none_or(|n| n > 0)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -711,6 +738,92 @@ impl Db {
                 params![code, inviter, now_ms()],
             )
             .map(|n| n > 0)
+        })
+    }
+
+    // ---- group chat invite links --------------------------------------------------------------
+
+    const GROUP_INVITE_COLS: &'static str =
+        "id, chat_id, code, created_by, created_at, expires_at, uses_left, revoked_at";
+
+    fn group_invite_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<GroupInvite> {
+        Ok(GroupInvite {
+            id: r.get(0)?,
+            chat_id: r.get(1)?,
+            code: r.get(2)?,
+            created_by: r.get(3)?,
+            created_at: r.get(4)?,
+            expires_at: r.get(5)?,
+            uses_left: r.get(6)?,
+            revoked_at: r.get(7)?,
+        })
+    }
+
+    pub fn insert_group_invite(&self, inv: &GroupInvite) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                &format!(
+                    "INSERT INTO people_chat_invites({}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    Self::GROUP_INVITE_COLS
+                ),
+                params![
+                    inv.id,
+                    inv.chat_id,
+                    inv.code,
+                    inv.created_by,
+                    inv.created_at,
+                    inv.expires_at,
+                    inv.uses_left,
+                    inv.revoked_at
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Live invites of a group (not revoked), newest first; expired / used-up ones included
+    /// so members see why a link stopped working.
+    pub fn invites_of_group(&self, chat_id: &str) -> Result<Vec<GroupInvite>> {
+        self.with(|c| {
+            let mut st = c.prepare(&format!(
+                "SELECT {} FROM people_chat_invites WHERE chat_id = ?1 AND revoked_at IS NULL ORDER BY created_at DESC",
+                Self::GROUP_INVITE_COLS
+            ))?;
+            let rows = st.query_map(params![chat_id], Self::group_invite_from_row)?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+        })
+    }
+
+    pub fn group_invite_by_code(&self, code: &str) -> Result<Option<GroupInvite>> {
+        self.with(|c| {
+            c.query_row(
+                &format!(
+                    "SELECT {} FROM people_chat_invites WHERE code = ?1",
+                    Self::GROUP_INVITE_COLS
+                ),
+                params![code],
+                Self::group_invite_from_row,
+            )
+            .optional()
+        })
+    }
+
+    pub fn revoke_group_invite(&self, chat_id: &str, invite_id: &str) -> Result<bool> {
+        self.with(|c| {
+            Ok(c.execute(
+                "UPDATE people_chat_invites SET revoked_at = ?3 WHERE chat_id = ?1 AND id = ?2 AND revoked_at IS NULL",
+                params![chat_id, invite_id, now_ms()],
+            )? > 0)
+        })
+    }
+
+    /// One use of a limited group link; `false` when it had none left.
+    pub fn consume_group_invite_use(&self, invite_id: &str) -> Result<bool> {
+        self.with(|c| {
+            Ok(c.execute(
+                "UPDATE people_chat_invites SET uses_left = uses_left - 1 WHERE id = ?1 AND (uses_left IS NULL OR uses_left > 0)",
+                params![invite_id],
+            )? > 0)
         })
     }
 

@@ -2670,6 +2670,53 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Group profile › Invite links › New link (any member).
+    func createGroupInvite(_ chatId: Id, expires: Bool, singleUse: Bool) async -> ServerInviteLink? {
+        do {
+            return try await api.createGroupInvite(chatId, expires: expires, maxUses: singleUse ? 1 : nil)
+        } catch {
+            notice = Notice(text: "Could not make an invite link: \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    /// Group profile › Invite links › list.
+    func groupInvites(_ chatId: Id) async -> [ServerInviteLink] {
+        (try? await api.groupInvites(chatId)) ?? []
+    }
+
+    /// Group profile › Invite links › revoke.
+    func revokeGroupInvite(_ chatId: Id, inviteId: String) async -> Bool {
+        do {
+            try await api.revokeGroupInvite(chatId, inviteId: inviteId)
+            return true
+        } catch {
+            notice = Notice(text: "Could not revoke the link: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    /// `arbos://join-group/<code>` (the site's group invite page): join and open the chat.
+    func joinGroupFromLink(code: String) async {
+        let code = code.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
+        guard !code.isEmpty else { return }
+        do {
+            let chat = try await api.joinGroup(code: code)
+            if let i = peopleChats.firstIndex(where: { $0.id == chat.id }) {
+                peopleChats[i] = chat
+            } else {
+                peopleChats.insert(chat, at: 0)
+            }
+            ensureRoom(projectId: peopleSlot, key: chat.id, roomChat: chat.id)
+            open(peopleChat: chat)
+        } catch {
+            let type = (error as? RelayError)?.type
+            notice = Notice(text: type == "not_available" ? "You can't join this group."
+                            : type == "not_found" || (error as? RelayError)?.status == 404 ? "That invite link is not valid."
+                            : "Could not join the group: \(error.localizedDescription)")
+        }
+    }
+
     /// The group pane's Add members: every pick goes to THIS chat — people by
     /// `POST /chats/{id}/members`, agents by `POST /chats/{id}/agents`. All are
     /// tried; the first failure is reported once and the call returns false.

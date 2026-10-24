@@ -27,7 +27,7 @@ use arbos_core::wire;
 
 use crate::auth::Principal;
 use crate::blobs::{no_such_image, not_an_image, stored_image, StoredImage};
-use crate::db_people::{ChatWithMembers, Invite, Membership, PeopleChat};
+use crate::db_people::{ChatWithMembers, GroupInvite, Invite, Membership, PeopleChat};
 use crate::notices;
 use crate::signin::api_error;
 use crate::state::AppState;
@@ -2559,6 +2559,323 @@ fn html_escape(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+// ---- group chat invite links (join by sharing a link) -------------------------------------------
+
+/// Seven days: the only expiry the apps offer (same as server invites).
+const GROUP_INVITE_EXPIRY_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+
+/// Group invite links live on the site (`arbos.life/g/<code>` deep-links into the app) when
+/// `ARBOS_SITE_URL` is set; the relay's own `/g/<code>` otherwise.
+fn group_invite_url(state: &AppState, code: &str) -> String {
+    let base = std::env::var("ARBOS_SITE_URL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| state.cfg.public_url.clone());
+    format!("{}/g/{}", base.trim_end_matches('/'), code)
+}
+
+fn group_invite_json(state: &AppState, i: &GroupInvite) -> Value {
+    json!({
+        "id": i.id, "code": i.code, "url": group_invite_url(state, &i.code),
+        "chat_id": i.chat_id, "created_by": i.created_by,
+        "created_at": i.created_at, "expires_at": i.expires_at, "uses_left": i.uses_left,
+        "usable": i.usable(now_ms()),
+    })
+}
+
+#[derive(Deserialize, Default)]
+pub struct GroupInviteBody {
+    /// Expire after seven days.
+    #[serde(default)]
+    pub expires: bool,
+    /// Number of joins the link allows; absent = unlimited.
+    #[serde(default)]
+    pub max_uses: Option<i64>,
+}
+
+/// `GET /chats/{id}/invites` — invite links for a people group (any human member).
+pub async fn group_invites_list(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+) -> Response {
+    let (_me, cm) = match member_chat(&state, &principal, &id) {
+        Ok(v) => v,
+        Err(r) => return *r,
+    };
+    if cm.chat.kind != "group" {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "not_group",
+            "invite links are for group chats",
+        );
+    }
+    let list: Vec<Value> = state
+        .db
+        .invites_of_group(&id)
+        .unwrap_or_default()
+        .iter()
+        .map(|i| group_invite_json(&state, i))
+        .collect();
+    Json(json!({ "invites": list })).into_response()
+}
+
+/// `POST /chats/{id}/invites {expires?, max_uses?}` — any human member mints a link.
+pub async fn group_invites_create(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+    body: Option<Json<GroupInviteBody>>,
+) -> Response {
+    let (me, cm) = match member_chat(&state, &principal, &id) {
+        Ok(v) => v,
+        Err(r) => return *r,
+    };
+    if cm.chat.kind != "group" {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "not_group",
+            "invite links are for group chats",
+        );
+    }
+    let b = body.map(|b| b.0).unwrap_or_default();
+    let max_uses = b.max_uses.filter(|n| *n > 0).map(|n| n.min(1000));
+    let inv = GroupInvite {
+        id: ulid(),
+        chat_id: id.clone(),
+        code: invite_code(),
+        created_by: me,
+        created_at: now_ms(),
+        expires_at: b.expires.then(|| now_ms() + GROUP_INVITE_EXPIRY_MS),
+        uses_left: max_uses,
+        revoked_at: None,
+    };
+    if let Err(e) = state.db.insert_group_invite(&inv) {
+        return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
+    }
+    (StatusCode::CREATED, Json(group_invite_json(&state, &inv))).into_response()
+}
+
+/// `DELETE /chats/{id}/invites/{iid}` — any human member revokes a link.
+pub async fn group_invites_revoke(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path((id, iid)): Path<(String, String)>,
+) -> Response {
+    let (_me, cm) = match member_chat(&state, &principal, &id) {
+        Ok(v) => v,
+        Err(r) => return *r,
+    };
+    if cm.chat.kind != "group" {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "not_group",
+            "invite links are for group chats",
+        );
+    }
+    match state.db.revoke_group_invite(&id, &iid) {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => api_error(StatusCode::NOT_FOUND, "not_found", "no such invite"),
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct GroupJoinBody {
+    /// Invite link or its code.
+    pub code: String,
+}
+
+/// `POST /chats/join {code}` — join a people group from an invite link.
+pub async fn group_join(
+    State(state): State<AppState>,
+    principal: Principal,
+    Json(b): Json<GroupJoinBody>,
+) -> Response {
+    let me = match user_of(&principal) {
+        Ok(u) => u,
+        Err(r) => return *r,
+    };
+    let code = b
+        .code
+        .trim()
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .to_owned();
+    if code.is_empty() {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "paste a group invite link",
+        );
+    }
+    let Some(inv) = state
+        .db
+        .group_invite_by_code(&code)
+        .ok()
+        .flatten()
+        .filter(|i| i.usable(now_ms()))
+    else {
+        return api_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "that invite link is not valid any more",
+        );
+    };
+    let cm = match load_chat(&state, &inv.chat_id) {
+        Ok(cm) => cm,
+        Err(r) => return *r,
+    };
+    if cm.chat.kind != "group" {
+        return api_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "that invite link is not valid any more",
+        );
+    }
+    // Already a member: return the chat (re-tapping the link).
+    if cm.members.iter().any(|m| m.user_id() == Some(me.as_str())) {
+        return Json(chat_json(&state, &cm, &me, &device_of(&principal))).into_response();
+    }
+    if state
+        .db
+        .blocked_either_way(&me, &cm.chat.created_by)
+        .unwrap_or(false)
+    {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "not_available",
+            "this group is not available",
+        );
+    }
+    let humans = human_user_ids(&cm);
+    if state.db.blocked_by_any(&me, &humans).unwrap_or(false) {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "not_available",
+            "this group is not available",
+        );
+    }
+    if inv.uses_left.is_some() && !state.db.consume_group_invite_use(&inv.id).unwrap_or(false) {
+        return api_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "that invite link has been used up",
+        );
+    }
+    if let Err(e) = state.db.add_member(
+        &inv.chat_id,
+        &format!("user:{me}"),
+        "member",
+        &me,
+        &json!({}),
+    ) {
+        return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
+    }
+    let event = PushEventDto::PeopleMemberAdded(PeopleMemberAddedPayloadDto {
+        chat_id: inv.chat_id.clone(),
+        user_id: me.clone(),
+        handle: handle_of(&state, &me),
+        by_handle: handle_of(&state, &inv.created_by),
+    });
+    notify_members(&state, &cm, &me, &event);
+    state.matrix.touch_chat(&state, &inv.chat_id, None);
+    let line = format!("{} joined", notices::person_name(&state, &me));
+    if let Err(e) = notices::post_people_notice(&state, &inv.chat_id, &line).await {
+        tracing::warn!(chat = %inv.chat_id, error = %e, "join notice not written");
+    }
+    match load_chat(&state, &inv.chat_id) {
+        Ok(cm) => Json(chat_json(&state, &cm, &me, &device_of(&principal))).into_response(),
+        Err(r) => *r,
+    }
+}
+
+/// `GET /g/{code}` — the group invite link. JSON for the apps; for a browser an HTML page that
+/// opens `arbos://join-group/<code>` and otherwise explains how to join.
+pub async fn group_invite_landing(
+    State(state): State<AppState>,
+    Path(code): Path<String>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let wants_html = headers
+        .get(header::ACCEPT)
+        .and_then(|a| a.to_str().ok())
+        .is_some_and(|a| a.contains("text/html"));
+    let inv = state.db.group_invite_by_code(&code).ok().flatten();
+    let chat = inv
+        .as_ref()
+        .and_then(|i| state.db.people_chat(&i.chat_id).ok().flatten());
+    let (Some(inv), Some(chat)) = (inv, chat) else {
+        return if wants_html {
+            group_invite_page("<p>This invite link is not valid.</p>")
+        } else {
+            api_error(StatusCode::NOT_FOUND, "not_found", "no such invite")
+        };
+    };
+    let usable = inv.usable(now_ms());
+    let members = state
+        .db
+        .members_of(&chat.id)
+        .map(|m| m.iter().filter(|m| m.user_id().is_some()).count())
+        .unwrap_or(0);
+    let title = chat
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .unwrap_or("a group");
+    let download = format!(
+        "{}/download/mac",
+        state.cfg.public_url.trim_end_matches('/')
+    );
+    if !wants_html {
+        return Json(json!({
+            "code": code, "usable": usable, "expires_at": inv.expires_at, "uses_left": inv.uses_left,
+            "chat": { "id": chat.id, "title": title, "member_count": members, "image_key": chat.image_key },
+            "download_url": download,
+        }))
+        .into_response();
+    }
+    if !usable {
+        let why = if inv.revoked_at.is_some() {
+            "was revoked"
+        } else if inv.uses_left == Some(0) {
+            "has been used up"
+        } else {
+            "has expired"
+        };
+        return group_invite_page(&format!(
+            "<p>This invite to <strong>{}</strong> {why}. Ask someone in the group for a new link.</p>",
+            html_escape(title)
+        ));
+    }
+    let safe_code = html_escape(&code);
+    group_invite_page_with_head(
+        &format!("<meta http-equiv=\"refresh\" content=\"0;url=arbos://join-group/{safe_code}\">"),
+        &format!(
+            "<p>You are invited to the group <strong>{name}</strong> on Arbos ({members} members).</p>\
+             <p><a class=\"btn\" href=\"arbos://join-group/{safe_code}\">Open in Arbos</a></p>\
+             <p>No Arbos yet? <a href=\"{download}\">Download for Mac</a>, then open this link again.</p>",
+            name = html_escape(title),
+        ),
+    )
+}
+
+fn group_invite_page(body: &str) -> Response {
+    group_invite_page_with_head("", body)
+}
+
+fn group_invite_page_with_head(head: &str, body: &str) -> Response {
+    let html = format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Arbos group invite</title>{head}\
+         <style>body{{font:16px/1.5 -apple-system,system-ui,sans-serif;background:#0b0b0d;color:#e8e8ea;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}}\
+         main{{max-width:28rem;padding:2rem}}h1{{font-size:1.4rem;margin:0 0 1rem}}.btn{{display:inline-block;background:#e8e8ea;color:#0b0b0d;padding:.6rem 1rem;border-radius:.6rem;text-decoration:none;font-weight:600}}</style></head>\
+         <body><main><h1>Arbos</h1>{body}</main></body></html>"
+    );
+    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
 }
 
 // ---- room hooks ---------------------------------------------------------------------------------
