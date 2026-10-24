@@ -176,6 +176,9 @@ class Config:
     github_repo: str
     priority: set[str]
     blocklist: set[str]
+    # Priority testers who nevertheless keep the malicious-intent screen (owner decision 2026-10-23 23:47 for
+    # @dawizzaa: first in line and no daily cap, screen unchanged).
+    screen_always: set[str]
     relay_url: str
     relay_admin_token: str
     openrouter_key: str
@@ -218,6 +221,7 @@ class Config:
         priority = listed("FEEDBACK_PRIORITY", "FEEDBACK_PRIORITY_FILE", "/etc/arbos/feedback-priority.txt")
         priority |= listed("FEEDBACK_ALLOWLIST", "FEEDBACK_ALLOWLIST_FILE", "/etc/arbos/feedback-allowlist.txt")
         blocklist = listed("FEEDBACK_BLOCKLIST", "FEEDBACK_BLOCKLIST_FILE", "/etc/arbos/feedback-blocklist.txt")
+        screen_always = listed("FEEDBACK_SCREEN_ALWAYS", "FEEDBACK_SCREEN_ALWAYS_FILE", "/etc/arbos/feedback-screen-always.txt")
         # Internal testers (owner decision 2026-10-21: Jacob, Ken, Robert, Etienne) get a higher daily launch cap.
         internal = listed("FEEDBACK_INTERNAL", "FEEDBACK_INTERNAL_FILE", "/etc/arbos/feedback-internal.txt")
         # Deferred product areas: "<regex> :: <comment>" per line; matching feedback gets its issue,
@@ -261,6 +265,7 @@ class Config:
             github_repo=env.get("GITHUB_REPO", "unarbos/arbos"),
             priority=priority,
             blocklist=blocklist,
+            screen_always=screen_always,
             relay_url=env.get("ARBOS_RELAY_URL", "").rstrip("/"),
             relay_admin_token=env.get("ARBOS_RELAY_ADMIN_TOKEN", ""),
             openrouter_key=env.get("OPENROUTER_API_KEY", ""),
@@ -1268,7 +1273,12 @@ class Loop:
         2026-10-22 07:18 CR after the word filter had caught three of Ken's long technical reports (#1175,
         #1178, #1300), each costing a resubmission; their intent is not in question. Everyone else: the
         pattern check, then the model."""
-        if tier == "priority":
+        keys = {self.tester_key(info)}
+        if info.get("handle"):
+            keys.add("@" + info["handle"].lower())
+        if info.get("email"):
+            keys.add(info["email"].lower())
+        if tier == "priority" and not keys & self.cfg.screen_always:
             return "ok", "priority tester — intent screen exempt (owner decision 2026-10-22)"
         text = (info.get("comment") or "").strip()
         # The submit_feedback tool appends "— filed by the user's agent <name> …": boilerplate, not the user's
@@ -1784,11 +1794,15 @@ class Loop:
         head = st["branch_head"]
         st["gated_head"] = head
         retries = st.get("gate_retries", 0)
+        st["main_conflicts"] = st.get("main_conflicts", 0) + 1
+        self.arm_solo_slot(fid, st)
         if st.get("handed_off_to"):
             st["status"] = "handed_off"
             self.store.save_state(fid, st)
+            solo = (" Your next push runs ALONE in the slot right after the current gate run (ahead of the pool), and this issue "
+                    "gets a note each time main moves so the merge can land right after a settle." if st.get("solo_next") else "")
             self.gh.comment(st["issue"], f"`{st['branch']}`@{head[:8]} conflicts with `main` — not merged. {st['handed_off_to']}: "
-                            "merge `origin/main` into the branch (a merge, never a rebase), resolve, push; the loop re-gates."
+                            "merge `origin/main` into the branch (a merge, never a rebase), resolve, push; the loop re-gates." + solo
                             + (f"\n\n```\n{detail[-2000:]}\n```" if detail else ""))
             return
         if retries >= 2:
@@ -1936,22 +1950,29 @@ class Loop:
             bounced = self.release_bounced_pins()
             if bounced:
                 log(f"Gate: pinned item(s) {', '.join(bounced)} are back with their owner; pin released, the pool runs on")
-        while plan and not members:
-            half = plan.pop(0)
-            # Match by item, gate at its CURRENT head: a bisected item whose owner pushed a repair meanwhile keeps
-            # its place in the queue instead of dropping to the back.
-            members = self.compatible_batch([(f, st) for f, st in ready if f in half])
+        if not members:
+            solo = sorted(((f, st) for f, st in ready if st.get("solo_next")), key=lambda fs: fs[1].get("created") or "")
+            if solo:
+                fid, st = solo[0]
+                members = {fid: st["branch_head"]}
+                log(f"Gate: solo slot for {fid} (bumped {st.get('sibling_conflicts') or 0}× / {st.get('main_conflicts') or 0} main conflicts; runs alone)")
         if not members:
             # Fairness (2026-10-23 22:2x): a branch bumped twice for sibling conflicts gets a batch of the
-            # deferred items only, ahead of the pool — oldest-deferred first, so inside that batch the older
-            # one merges and the newer one is bumped. Without it #1532/#1534/#1543 sat behind older siblings
-            # that touch the same files (sidebar.rs, HomeView.swift) for three rounds while the pool kept
-            # re-merging the same conflicts.
+            # deferred items only, right after the current run — ahead of bisect / plan halves AND the pool
+            # (23:10: a leftover bisect half of 15 went first and the 14 deferred items waited another round).
+            # Oldest-deferred first, so inside that batch the older one merges and the newer one is bumped.
+            # Without it #1532/#1534/#1543 sat behind older siblings that touch the same files (sidebar.rs,
+            # HomeView.swift) for three rounds while the pool kept re-merging the same conflicts.
             deferred = sorted(((f, st) for f, st in ready if (st.get("sibling_conflicts") or 0) >= self.DEFER_AFTER),
                               key=lambda fs: (-(fs[1].get("sibling_conflicts") or 0), fs[1].get("created") or ""))
             if deferred:
                 members = self.compatible_batch(deferred)
                 log(f"Gate: deferred-fairness batch of {len(members)} (bumped ≥ {self.DEFER_AFTER}× for sibling conflicts): " + ", ".join(members))
+        while plan and not members:
+            half = plan.pop(0)
+            # Match by item, gate at its CURRENT head: a bisected item whose owner pushed a repair meanwhile keeps
+            # its place in the queue instead of dropping to the back.
+            members = self.compatible_batch([(f, st) for f, st in ready if f in half])
         if not members:
             members = self.compatible_batch(list(ready))
         cur["rust_gate_plan"] = plan
@@ -1993,6 +2014,45 @@ class Loop:
             log(f"Rust gate Mac unreachable: {str(e)[-200:]}")
             return None
 
+    def merge_revert_probe(self, fid: str, head: str) -> list[str]:
+        """Cheap pre-integration check (2026-10-23 23:3x, #1532's be8ab46): the branch's diff against main must
+        only touch files its own non-merge commits touch. A file that differs from main although no commit of
+        the branch edited it was changed by a MERGE commit — i.e. the merge resolution reverted main's version
+        (12 agentd files came back stale that way; the gate would have carried them into main). Such a branch
+        goes back to its owner with the file list instead of into the integration tree."""
+        st = self.store.state(fid)
+        if st.get("merge_revert_checked") == head:
+            return []
+        try:
+            cmp = self.gh.compare("main", head)
+        except HttpError:
+            return []
+        files = {f["filename"] for f in cmp.get("files", [])}
+        commits = cmp.get("commits", [])
+        if not files or not commits or not any(len(c.get("parents") or []) > 1 for c in commits):
+            return []  # no merge commit on the branch: nothing a merge could have reverted
+        own: set[str] = set()
+        for c in commits:
+            if len(c.get("parents") or []) > 1:
+                continue
+            try:
+                own |= {f["filename"] for f in self.gh.commit(c["sha"]).get("files", [])}
+            except HttpError:
+                return []
+        stray = sorted(files - own)
+        st["merge_revert_checked"] = head
+        self.store.save_state(fid, st)
+        if not stray:
+            return []
+        log(f"[{fid}] merge-revert probe: {len(stray)} file(s) differ from main that no commit of the branch edited; not integrated")
+        self.store.event(fid, "merge_revert", head=head, files=stray[:50])
+        self.gate_followup(fid, st, "rust",
+                           "Pre-integration probe: these files differ from `main` on your branch although no commit of the branch edits them — "
+                           "a merge commit on the branch resolved them to a stale copy, i.e. it reverts main's changes. Redo the merge of "
+                           "`origin/main` taking main's side for them (or `git checkout origin/main -- <files>` and commit), then push.\n\n"
+                           + "\n".join(stray[:60]) + ("\n…" if len(stray) > 60 else ""))
+        return stray
+
     def rust_gate_start(self, members: dict[str, str]) -> None:
         """Build the integration branch gate/<run> on GitHub (main + every member, in order); CI starts on the
         push; the Mac release build starts if the Mac answers (else it is started on a later tick)."""
@@ -2003,6 +2063,10 @@ class Loop:
         merged: list[str] = []
         conflicts: dict[str, str] = {}
         for n, (fid, head) in enumerate(members.items()):
+            stray = self.merge_revert_probe(fid, head)
+            if stray:
+                conflicts[fid] = "merge-revert"
+                continue
             res = self.gh.merge_into(branch, head, f"gate: merge feedback/{fid} [gate {run_id}]")
             if res is None:
                 # A conflict after a sibling merged may still be a conflict with MAIN (the branch is stale): probe
@@ -2037,6 +2101,8 @@ class Loop:
                             "ios": "pending" if ios else "skipped", "mac_started": None}
         self.store.save_cursor(cur)
         for fid, kind in conflicts.items():
+            if kind == "merge-revert":
+                continue  # already sent back by merge_revert_probe
             self.rust_gate_conflict(fid, members[fid], kind, run_id)
         if not merged:
             self.gh.delete_branch(branch)
@@ -2228,6 +2294,35 @@ class Loop:
     # first); bumped SIBLING_LIMIT times (so at least two rounds among deferred items) → treated as a main conflict.
     DEFER_AFTER = 2
     SIBLING_LIMIT = 4
+    # Solo slot (operator rule, 2026-10-23 23:34): an item bumped 3× by siblings, or sent to its owner twice for a
+    # main conflict caused by pool landings, runs ALONE in the slot right after the current run once its owner
+    # pushes again — ahead of the deferred batch and the pool. While it waits with its owner, every landing on
+    # main is announced on its issue so the merge-main can follow a settle immediately.
+    SOLO_AFTER_SIBLING = 3
+    SOLO_AFTER_MAIN = 2
+
+    def arm_solo_slot(self, fid: str, st: dict) -> None:
+        if st.get("solo_next"):
+            return
+        if (st.get("sibling_conflicts") or 0) >= self.SOLO_AFTER_SIBLING or (st.get("main_conflicts") or 0) >= self.SOLO_AFTER_MAIN:
+            st["solo_next"] = True
+            self.store.event(fid, "solo_slot_armed", sibling=st.get("sibling_conflicts") or 0, main=st.get("main_conflicts") or 0)
+            log(f"[{fid}] solo slot armed (sibling bumps {st.get('sibling_conflicts') or 0}, main conflicts {st.get('main_conflicts') or 0}); runs alone after its next push")
+
+    def announce_main_moved(self, landed: str) -> None:
+        """A gate run landed on main: tell every owner holding a solo-slot item (conflict → with owner) once per
+        landing, so the merge-main lands right after this settle and the branch runs alone next."""
+        for fid in self.store.items():
+            st = self.store.state(fid)
+            if not (st.get("solo_next") and st.get("status") == "handed_off" and st.get("handed_off_to") and st.get("issue")):
+                continue
+            if st.get("main_moved_noted") == landed:
+                continue
+            st["main_moved_noted"] = landed
+            self.store.save_state(fid, st)
+            with contextlib.suppress(HttpError):
+                self.gh.comment(st["issue"], f"{st['handed_off_to']}: main just moved (gate run landed as `{landed[:8]}`). Merge `origin/main` into "
+                                f"`{st.get('branch') or 'feedback/' + fid}` now and push — your branch runs ALONE in the next gate slot, ahead of the pool.")
 
     def rust_gate_conflict(self, fid: str, head: str, kind: str, run_id: str) -> None:
         st = self.store.state(fid)
@@ -2236,6 +2331,7 @@ class Loop:
         if kind == "conflict-sibling":
             st["sibling_conflicts"] = st.get("sibling_conflicts", 0) + 1
             if st["sibling_conflicts"] < self.SIBLING_LIMIT:
+                self.arm_solo_slot(fid, st)
                 self.store.save_state(fid, st)
                 log(f"[{fid}] conflicts with a sibling branch in gate {run_id}; retried in the next batch"
                     + (" (deferred-fairness batch next)" if st["sibling_conflicts"] >= self.DEFER_AFTER else ""))
@@ -2319,6 +2415,8 @@ class Loop:
             cur["rust_gate_warm"] = active["tree"] if active["mac"] == "ok" else None
             self.store.save_cursor(cur)
             self.note_green_half(active)
+            with contextlib.suppress(Exception):
+                self.announce_main_moved(self.gh.branch_head("main") or active["tree"])
             return
         diagnostics = ""
         if active["linux"] == "fail":
@@ -3497,16 +3595,23 @@ class Loop:
             if members:
                 print(f"  pinned batch {i}: " + ", ".join(tag(f) for f in members))
                 queued |= set(members)
+        solo = [fid for fid, st in ready if fid not in queued and st.get("solo_next")]
+        if solo:
+            print(f"  solo slots (one per run, right after the current run, {len(solo)}): " + ", ".join(tag(f) for f in solo))
+            queued |= set(solo)
+        solo_waiting = [fid for fid in self.store.items() if self.store.state(fid).get("solo_next") and self.store.state(fid).get("status") == "handed_off"]
+        if solo_waiting:
+            print(f"  solo slot reserved, waiting for the owner's push ({len(solo_waiting)}): " + ", ".join(tag(f) for f in solo_waiting))
+        deferred = [fid for fid, st in ready if fid not in queued and (st.get("sibling_conflicts") or 0) >= self.DEFER_AFTER]
+        if deferred:
+            print(f"  deferred-fairness batch (bumped ≥{self.DEFER_AFTER}× by sibling conflicts; next after the pins, {len(deferred)}): " + ", ".join(tag(f) for f in deferred))
+            queued |= set(deferred)
         planned = [b for b in (cur.get("rust_gate_plan") or []) if b not in pinned_batches]
         for b in planned:
             members = [f for f in b if f in gating and f not in queued]
             if members:
                 print("  planned batch (bisect half / operator plan): " + ", ".join(tag(f) for f in members))
                 queued |= set(members)
-        deferred = [fid for fid, st in ready if fid not in queued and (st.get("sibling_conflicts") or 0) >= self.DEFER_AFTER]
-        if deferred:
-            print(f"  deferred-fairness batch (bumped ≥{self.DEFER_AFTER}× by sibling conflicts; runs before the pool, {len(deferred)}): " + ", ".join(tag(f) for f in deferred))
-            queued |= set(deferred)
         pool = [fid for fid, _ in ready if fid not in queued]
         if pool:
             print(f"  pool (next batch after the pins, oldest first, {len(pool)}): " + ", ".join(tag(f) for f in pool))

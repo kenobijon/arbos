@@ -110,6 +110,8 @@ pub(crate) enum SettingsPage {
     Skills,
     ThisMac,
     Secrets,
+    /// Signed-in devices of my account: list + sign out another (Oct 23).
+    Devices,
 }
 
 impl SettingsPage {
@@ -128,6 +130,7 @@ impl SettingsPage {
             SettingsPage::Skills => "Skills",
             SettingsPage::ThisMac => "This Mac",
             SettingsPage::Secrets => "Secrets",
+            SettingsPage::Devices => "Devices",
         }
     }
 
@@ -141,6 +144,7 @@ impl SettingsPage {
                 | SettingsPage::Notifications
                 | SettingsPage::Updates
                 | SettingsPage::About
+                | SettingsPage::Devices
         )
     }
 
@@ -157,7 +161,8 @@ impl SettingsPage {
             | SettingsPage::Connectors
             | SettingsPage::Channels
             | SettingsPage::ThisMac
-            | SettingsPage::Secrets => SETTINGS_WIDTH,
+            | SettingsPage::Secrets
+            | SettingsPage::Devices => SETTINGS_WIDTH,
             SettingsPage::Routines => crate::ui::routines::PANEL_WIDTH + 32.0,
             SettingsPage::Skills => skills::CARD_WIDTH + 32.0,
         }
@@ -271,6 +276,8 @@ pub struct Shell {
     /// Group pane › Members: the row whose ✕ was clicked (`user:<id>` or
     /// `agent:<project>`); it shows "Remove … ?" with Cancel / Remove.
     pub(crate) member_remove_armed: Option<String>,
+    /// Settings → Devices: the device whose Sign out is asking (Oct 23).
+    pub(crate) device_revoke_armed: Option<String>,
     /// A member row's menu on the group pane (Shift-click / right-click): View
     /// profile, Remove from group → arms `member_remove_armed`.
     pub(crate) member_menu: Option<member_menu::MemberMenu>,
@@ -339,6 +346,7 @@ impl Shell {
                 || v == "about"
                 || v == "appearance"
                 || v == "credits"
+                || v == "devices"
                 || v.starts_with("secrets")
         });
         let settings_scroll = ScrollHandle::new();
@@ -781,6 +789,7 @@ impl Shell {
                 Some("about") => SettingsPage::About,
                 Some("appearance") => SettingsPage::Appearance,
                 Some("credits") => SettingsPage::Credits,
+                Some("devices") => SettingsPage::Devices,
                 Some(v) if v.starts_with("secrets") => SettingsPage::Secrets,
                 _ => SettingsPage::Root,
             },
@@ -791,6 +800,7 @@ impl Shell {
             row_delete_armed: false,
             agent_delete_armed: false,
             member_remove_armed: None,
+            device_revoke_armed: None,
             member_menu: None,
             chat_menu: None,
             chat_delete_armed: false,
@@ -846,6 +856,9 @@ impl Shell {
                 s.open_profile(ProfilePage::Me, cx);
                 s.set_profile_tab(1, cx);
             });
+            if shell.settings_page == SettingsPage::Devices {
+                shell.state.update(cx, |s, cx| s.devices_refresh(cx));
+            }
         }
         shell
     }
@@ -963,6 +976,7 @@ impl Shell {
             | SettingsPage::Notifications
             | SettingsPage::Updates
             | SettingsPage::About => {}
+            SettingsPage::Devices => self.state.update(cx, |s, cx| s.devices_refresh(cx)),
             SettingsPage::Connectors => self.connectors.update(cx, |p, cx| {
                 p.show(cx);
                 p.embedded = true;
@@ -1010,7 +1024,8 @@ impl Shell {
             | SettingsPage::Appearance
             | SettingsPage::Notifications
             | SettingsPage::Updates
-            | SettingsPage::About => {}
+            | SettingsPage::About
+            | SettingsPage::Devices => {}
             SettingsPage::Connectors => self.connectors.update(cx, |p, cx| p.hide(cx)),
             SettingsPage::Routines => {
                 self.routines_open = false;
@@ -1062,7 +1077,8 @@ impl Shell {
             | SettingsPage::Appearance
             | SettingsPage::Notifications
             | SettingsPage::Updates
-            | SettingsPage::About => true,
+            | SettingsPage::About
+            | SettingsPage::Devices => true,
             SettingsPage::Connectors => self.connectors.read(cx).is_open(),
             SettingsPage::Routines => self.routines_open,
             SettingsPage::Channels => self.channels.read(cx).is_open(),

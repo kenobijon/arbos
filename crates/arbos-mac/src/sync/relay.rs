@@ -190,6 +190,9 @@ struct Shared {
     /// The chat on screen in a focused window; presence frames carry it as
     /// `focused_chat` so the relay does not push this device for it (§7c).
     focused_chat: Mutex<Option<Id>>,
+    /// Settings → Notifications "Read receipts": when true, people-chat presence
+    /// frames carry `seen: <newest message id>` (API chat settings / §7c).
+    read_receipts: AtomicBool,
     /// Calls v1: `in_call` on every presence frame while this device is in one (§8).
     in_call: Mutex<Option<String>>,
     /// On-device store (#929); `None` without credentials or with `ARBOS_NO_STORE=1`.
@@ -214,8 +217,10 @@ fn project_doc_key(project_id: &str) -> String {
 }
 
 impl Shared {
-    /// `{device, at, focused_chat?}` — every presence frame (15 s tick, typing,
-    /// focus change) says which chat this device is looking at, if any.
+    /// `{device, at, focused_chat?, seen?}` — every presence frame (15 s tick,
+    /// typing, focus change) says which chat this device is looking at, if any.
+    /// When read receipts are on and the focused chat is a people chat, `seen`
+    /// is the newest message id in that chat (read-receipt Presence).
     fn presence_header(&self) -> Value {
         let mut header = json!({
             "device": self.device_id(),
@@ -223,13 +228,26 @@ impl Shared {
             "user": self.me_id(),
             "handle": self.me_handle(),
         });
-        if let Some(chat) = self.focused_chat.lock().unwrap().as_deref() {
+        let focused = self.focused_chat.lock().unwrap().clone();
+        if let Some(chat) = focused.as_deref() {
             header["focused_chat"] = json!(chat);
+            if self.read_receipts.load(Ordering::Relaxed) && self.is_people(chat) {
+                if let Some(seen) = self.newest_message_id(chat) {
+                    header["seen"] = json!(seen);
+                }
+            }
         }
         if let Some(call) = self.in_call.lock().unwrap().as_deref() {
             header["in_call"] = json!(call);
         }
         header
+    }
+
+    /// Newest message id in a chat doc, if the doc is open and non-empty.
+    fn newest_message_id(&self, chat_id: &str) -> Option<String> {
+        let docs = self.docs.lock().unwrap();
+        let doc = docs.get(chat_id)?;
+        doc.read_all().last().map(|m| m.id.clone())
     }
 
     fn token(&self) -> String {
@@ -682,6 +700,7 @@ impl SyncSource for RelaySource {
                 docs: Mutex::new(HashMap::new()),
                 rooms: Mutex::new(HashMap::new()),
                 focused_chat: Mutex::new(None),
+                read_receipts: AtomicBool::new(true),
                 in_call: Mutex::new(None),
                 projects: Mutex::new(Vec::new()),
                 chats: Mutex::new(Vec::new()),
@@ -3288,7 +3307,7 @@ async fn perform_room_actions(
                     typing,
                     in_call,
                     mine,
-                    header: _,
+                    header,
                 } => {
                     if let Some(call_id) = in_call {
                         if !mine
@@ -3301,8 +3320,15 @@ async fn perform_room_actions(
                         }
                     }
                     if let (false, Some(handle)) = (mine, handle) {
+                        let seen = header
+                            .get("seen")
+                            .and_then(Value::as_str)
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_string);
                         let _ = shared.events.send(SyncEvent::Presence {
                             handle: handle.clone(),
+                            chat_id: is_people.then(|| room_chat.to_string()),
+                            seen,
                         });
                         if is_people {
                             if let Some(active) = typing {
@@ -5698,6 +5724,28 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 }
             });
         }
+        ClientCommand::SetReadReceipts { enabled, persist } => {
+            shared.read_receipts.store(enabled, Ordering::Relaxed);
+            // Refresh presence so peers drop or pick up our `seen` at once.
+            for room in shared.rooms.lock().unwrap().values() {
+                let _ = room.cmds.send(RoomCmd::Presence);
+            }
+            if persist {
+                // Mirror onto every people chat we know (`PUT …/settings`).
+                let people: Vec<Id> = shared.people.lock().unwrap().iter().cloned().collect();
+                let shared = shared.clone();
+                tokio::spawn(async move {
+                    for chat_id in people {
+                        let _ = shared
+                            .put_json(
+                                &format!("/chats/{chat_id}/settings"),
+                                json!({ "read_receipts": enabled }),
+                            )
+                            .await;
+                    }
+                });
+            }
+        }
         ClientCommand::FetchVoices => {
             let shared = shared.clone();
             tokio::spawn(async move {
@@ -6193,6 +6241,21 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             let shared = shared.clone();
             tokio::spawn(async move {
                 refresh_secrets(&shared).await;
+            });
+        }
+        ClientCommand::DevicesRefresh => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                refresh_devices(&shared).await;
+            });
+        }
+        ClientCommand::DeviceRevoke { id } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Err(err) = shared.delete(&format!("/auth/devices/{id}")).await {
+                    shared.notice(format!("Sign out device: {}", relay_message(&err)));
+                }
+                refresh_devices(&shared).await;
             });
         }
         ClientCommand::ProjectSecretsRefresh { project_id } => {
@@ -6950,6 +7013,16 @@ async fn refresh_secrets(shared: &Arc<Shared>) {
     let _ = shared.events.send(SyncEvent::Secrets(secrets_view_from_dto(
         &overview, &requests,
     )));
+}
+
+/// Settings → Devices (`GET /auth/devices`): the list, or why it could not be read.
+async fn refresh_devices(shared: &Arc<Shared>) {
+    let result = match shared.get_json("/auth/devices").await {
+        Ok(value) => serde_json::from_value::<Vec<crate::model::DeviceView>>(value)
+            .map_err(|e| format!("unexpected reply: {e}")),
+        Err(err) => Err(relay_message(&err)),
+    };
+    let _ = shared.events.send(SyncEvent::Devices(result));
 }
 
 /// One agent's Secrets page (`GET /projects/{id}/secrets`).

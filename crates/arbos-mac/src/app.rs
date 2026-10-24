@@ -20,10 +20,10 @@ use crate::model::{
 };
 use crate::model::{
     new_id, now_ms, Attachment, AttachmentKind, BoxState, ChannelSel, ChannelsView, Chat, ChatKind,
-    ConnectorsView, Effort, Id, Link, LinkState, LocalView, Machine, Message, MessageStatus,
-    NewSecret, Part, Project, ProjectDocView, ProjectSecrets, QuestionState, Role, Routine,
-    RoutineRun, RoutineTrigger, SecretDirector, SecretScope, SecretsView, ServerInfo, Skill,
-    StatusKind,
+    ConnectorsView, DevicesView, Effort, Id, Link, LinkState, LocalView, Machine, Message,
+    MessageStatus, NewSecret, Part, Project, ProjectDocView, ProjectSecrets, QuestionState, Role,
+    Routine, RoutineRun, RoutineTrigger, SecretDirector, SecretScope, SecretsView, ServerInfo,
+    Skill, StatusKind,
 };
 use crate::search;
 use crate::sign_in;
@@ -134,6 +134,10 @@ fn muted_path() -> PathBuf {
     crate::sync::credentials::config_dir().join("muted.json")
 }
 
+fn read_receipts_path() -> PathBuf {
+    crate::sync::credentials::config_dir().join("read_receipts.json")
+}
+
 /// Multi-chat (several chats per agent: tabs, "+", ⌘T, archive) is on by
 /// default. `ARBOS_MULTI_CHAT=0` or `{"multi_chat": false}` in
 /// `<config>/settings.json` turns it off (one chat per agent).
@@ -161,6 +165,20 @@ fn save_muted(muted: &HashSet<Id>) {
     if let Ok(json) = serde_json::to_string(&muted.iter().collect::<Vec<_>>()) {
         let _ = std::fs::write(muted_path(), json);
     }
+}
+
+/// Settings → Notifications "Read receipts" (default on, matching the relay).
+fn load_read_receipts() -> bool {
+    std::fs::read_to_string(read_receipts_path())
+        .ok()
+        .and_then(|s| serde_json::from_str::<bool>(&s).ok())
+        .unwrap_or(true)
+}
+
+fn save_read_receipts(enabled: bool) {
+    let dir = crate::sync::credentials::config_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(read_receipts_path(), if enabled { "true" } else { "false" });
 }
 
 /// "3 min ago", "2 h ago", "yesterday", "5 days ago".
@@ -473,6 +491,8 @@ pub struct AppState {
     pub connectors: ConnectorsView,
     /// Settings → Secrets (D83).
     pub secrets: SecretsView,
+    /// Settings → Devices (`GET /auth/devices`).
+    pub devices: DevicesView,
     /// Agent profile → Secrets, per project.
     pub project_secrets: std::collections::HashMap<Id, ProjectSecrets>,
     /// Settings → Routines, per project (F3).
@@ -516,6 +536,11 @@ pub struct AppState {
     pub renaming_project: Option<Id>,
     /// Spaces whose notifications are muted (`<config>/muted.json`).
     pub muted: HashSet<Id>,
+    /// Settings → Notifications: send and show Presence `{seen}` read receipts
+    /// (`<config>/read_receipts.json`, default on).
+    pub read_receipts: bool,
+    /// People-chat read receipts: chat id → (peer handle → last seen message id).
+    pub message_receipts: HashMap<Id, HashMap<String, Id>>,
     /// Last presence frame seen per handle (ms): "online" while fresh.
     pub presence_seen: HashMap<String, u64>,
     /// Answered this session: never re-arm it on a later sync, even when the
@@ -822,6 +847,7 @@ impl AppState {
             machine: Machine::default(),
             connectors: ConnectorsView::default(),
             secrets: SecretsView::default(),
+            devices: DevicesView::default(),
             project_secrets: std::collections::HashMap::new(),
             routines: HashMap::new(),
             routine_runs: HashMap::new(),
@@ -839,6 +865,8 @@ impl AppState {
             profile_editing_name: false,
             renaming_project: None,
             muted: load_muted(),
+            read_receipts: load_read_receipts(),
+            message_receipts: HashMap::new(),
             presence_seen: HashMap::new(),
             notify_prompt_answered: false,
             focus_sent: None,
@@ -1225,6 +1253,13 @@ impl AppState {
                 if self.account.is_some() {
                     self.maybe_prompt_notifications();
                     self.prefetch_directory();
+                    // Align the sync source with the saved Settings → Notifications
+                    // preference (Shared defaults to on); no PUT on every launch.
+                    let enabled = self.read_receipts;
+                    self.command(ClientCommand::SetReadReceipts {
+                        enabled,
+                        persist: false,
+                    });
                 }
                 if let Some(url) = self.account.as_ref().map(|a| a.avatar_url.clone()) {
                     self.want_avatar(url);
@@ -1316,9 +1351,19 @@ impl AppState {
                     self.group_created(chat_id, cx);
                 }
             }
-            SyncEvent::Presence { handle } => {
-                self.presence_seen.insert(handle, now_ms());
-                if self.profile.is_some() {
+            SyncEvent::Presence {
+                handle,
+                chat_id,
+                seen,
+            } => {
+                self.presence_seen.insert(handle.clone(), now_ms());
+                if let (Some(chat_id), Some(seen)) = (chat_id, seen) {
+                    self.message_receipts
+                        .entry(chat_id)
+                        .or_default()
+                        .insert(handle, seen);
+                    cx.notify();
+                } else if self.profile.is_some() {
                     cx.notify();
                 }
             }
@@ -1488,8 +1533,8 @@ impl AppState {
                 // Signed in and synced (also the path without a sign-in event).
                 if !projects.is_empty() {
                     self.maybe_prompt_notifications();
-                    // The "Voice · <name>" label needs the list once (only with voice mode on).
-                    if !self.voices_requested && self.voice_mode_feature {
+                    // The agent pane's "Voice · <name>" row needs the list once.
+                    if !self.voices_requested {
                         self.voices_requested = true;
                         self.fetch_voices();
                     }
@@ -2106,6 +2151,17 @@ impl AppState {
             }
             SyncEvent::Secrets(view) => {
                 self.secrets = view;
+                cx.notify();
+            }
+            SyncEvent::Devices(result) => {
+                match result {
+                    Ok(items) => {
+                        self.devices.items = items;
+                        self.devices.error = None;
+                    }
+                    Err(why) => self.devices.error = Some(why),
+                }
+                self.devices.loaded = true;
                 cx.notify();
             }
             SyncEvent::Routines {
@@ -2814,8 +2870,23 @@ impl AppState {
         cx.notify();
     }
 
+    /// Can the open space take a new tab (⌘T, the pill's "+", the dropdown's
+    /// New tab)? Only an agent's own chats: people DMs and groups and server
+    /// channels have no project chats, so there the shortcut is a no-op and
+    /// the controls are absent (Jacob 2026-10-23: "New chat failed: HTTP 404
+    /// no such project" from ⌘T in a group).
+    pub fn can_new_tab(&self) -> bool {
+        new_tab_allowed(
+            self.multi_chat,
+            self.selected_project
+                .as_deref()
+                .and_then(|id| self.project(id)),
+            self.selected_channel.is_some(),
+        )
+    }
+
     pub fn new_tab(&mut self, cx: &mut Context<Self>) {
-        if !self.multi_chat {
+        if !self.can_new_tab() {
             return;
         }
         let Some(project_id) = self.selected_project.clone() else {
@@ -4446,12 +4517,9 @@ impl AppState {
         cx.notify();
     }
 
-    /// Ask the relay for the voice list (the picker opening).
+    /// Ask the relay for the voice list (the agent pane's Voice row and the
+    /// call-voice picker need it; the list is independent of voice mode).
     pub fn fetch_voices(&mut self) {
-        // No voice picker while the feature is off: nothing needs the list.
-        if !self.voice_mode_feature {
-            return;
-        }
         self.command(ClientCommand::FetchVoices);
     }
 
@@ -5894,6 +5962,23 @@ impl AppState {
         cx.notify();
     }
 
+    /// Settings → Notifications "Read receipts": Presence `{seen}` on/off.
+    pub fn set_read_receipts(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.read_receipts == enabled {
+            return;
+        }
+        self.read_receipts = enabled;
+        save_read_receipts(enabled);
+        if !enabled {
+            self.message_receipts.clear();
+        }
+        self.command(ClientCommand::SetReadReceipts {
+            enabled,
+            persist: true,
+        });
+        cx.notify();
+    }
+
     pub fn push_notice(&mut self, text: impl Into<String>) {
         let now = now_ms();
         self.notices
@@ -7151,6 +7236,26 @@ impl AppState {
 
     pub fn secrets_refresh(&mut self, cx: &mut Context<Self>) {
         self.command(ClientCommand::SecretsRefresh);
+        cx.notify();
+    }
+
+    // ----- devices (Settings → Devices, Oct 23) ---------------------------
+
+    /// Settings → Devices opened: ask the relay for the list (the page shows
+    /// "Loading…" until the answer, the last list meanwhile).
+    pub fn devices_refresh(&mut self, cx: &mut Context<Self>) {
+        self.devices.error = None;
+        self.command(ClientCommand::DevicesRefresh);
+        cx.notify();
+    }
+
+    /// Sign another device out. The current device never goes through here
+    /// (its row offers Sign out instead), so the user is never stranded.
+    pub fn revoke_device(&mut self, id: Id, cx: &mut Context<Self>) {
+        if !crate::ui::devices::remove_other(&mut self.devices.items, &id) {
+            return;
+        }
+        self.command(ClientCommand::DeviceRevoke { id });
         cx.notify();
     }
 
@@ -8480,6 +8585,21 @@ fn device_name() -> String {
     }
 }
 
+/// The one rule behind ⌘T, the header pill's "+" and the tab dropdown's New
+/// tab: only an agent's own space takes a new tab. People DMs and groups
+/// (`SpaceKind::Dm` / `Group`) have no project chats, a server channel has no
+/// space at all, and the whole thing sits behind the multi-chat flag.
+pub(crate) fn new_tab_allowed(
+    multi_chat: bool,
+    space: Option<&Project>,
+    channel_open: bool,
+) -> bool {
+    if !multi_chat || channel_open {
+        return false;
+    }
+    space.is_some_and(|p| !p.is_people())
+}
+
 /// The local row of a session fork (#1257): the same project, a plain chat
 /// titled `<title> (fork)`, nothing pinned or shared. `None` when `source`
 /// cannot be forked (groups, system tabs, chats of shared or people spaces).
@@ -8804,6 +8924,58 @@ mod trim_tests {
             }
         });
         assert!(trim_rect(&img).is_none());
+    }
+}
+
+#[cfg(test)]
+mod new_tab_scope_tests {
+    //! Jacob (2026-10-23, Arbonites group): ⌘T in a group chat tried to create
+    //! a project chat and the relay answered "no such project". New tab is an
+    //! agent-space affordance only — the same gate decides the shortcut, the
+    //! pill's "+" and the dropdown row, so none of them exist for people rooms
+    //! or channels.
+    use super::*;
+    use crate::model::SpaceKind;
+
+    fn space(kind: SpaceKind) -> Project {
+        Project {
+            id: "s-1".into(),
+            name: "Space".into(),
+            kind,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn agent_space_keeps_new_tab() {
+        assert!(new_tab_allowed(
+            true,
+            Some(&space(SpaceKind::Project)),
+            false
+        ));
+    }
+
+    #[test]
+    fn people_rooms_and_channels_have_no_new_tab() {
+        assert!(!new_tab_allowed(
+            true,
+            Some(&space(SpaceKind::Group)),
+            false
+        ));
+        assert!(!new_tab_allowed(true, Some(&space(SpaceKind::Dm)), false));
+        // A channel in the centre: no space selected, channel open.
+        assert!(!new_tab_allowed(true, None, true));
+        // Nothing open at all.
+        assert!(!new_tab_allowed(true, None, false));
+    }
+
+    #[test]
+    fn multi_chat_off_hides_it_everywhere() {
+        assert!(!new_tab_allowed(
+            false,
+            Some(&space(SpaceKind::Project)),
+            false
+        ));
     }
 }
 

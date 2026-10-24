@@ -347,6 +347,10 @@ pub enum RowKind {
         /// Under another person's bubble (chips clear the avatar column).
         indent: bool,
     },
+    /// Optional read receipt under my last outbound bubble ("Seen").
+    Seen {
+        label: String,
+    },
     /// Grok's hand-off line: "Messaged ◉ A" / "N messages with ◉ A, ◉ B and ◉ C".
     Handoff {
         names: Vec<String>,
@@ -845,8 +849,6 @@ impl Transcript {
             .as_deref()
             .map(|id| state.messages_of(id).to_vec())
             .unwrap_or_default();
-        self.chat_id = chat_id;
-
         let show_details = state.show_details;
         let speech = SpeechRows {
             enabled: state.voice_mode_available(),
@@ -861,6 +863,15 @@ impl Transcript {
             state.active_chat(),
             state.selected_channel.is_some(),
         );
+        // Optional Seen under my last outbound bubble (Settings → Notifications).
+        let seen_label = if state.read_receipts {
+            chat_id
+                .as_deref()
+                .and_then(|id| seen_label_for(state, id, &messages, &me_id))
+        } else {
+            None
+        };
+        self.chat_id = chat_id;
         let new_rows = build_rows(
             &messages,
             show_details,
@@ -869,6 +880,7 @@ impl Transcript {
             &thumb_keys,
             &self.mentions,
             multi_party,
+            seen_label,
         );
         self.multi_party = multi_party;
         // A sender change opens the turn gap. So does every new assistant /
@@ -1925,6 +1937,17 @@ impl Transcript {
                     .child(chips)
                     .into_any_element()
             }
+            RowKind::Seen { label } => div()
+                .w_full()
+                .flex()
+                .justify_end()
+                .mt(px(-2.0))
+                .pb(px(ROW_GAP_HALF))
+                .pr(px(6.0))
+                .text_size(px(TEXT_TINY))
+                .text_color(theme.text_muted)
+                .child(label)
+                .into_any_element(),
             RowKind::Handoff { names, total } => {
                 // "Messaged ◉ A" while only the brief went out; "N messages with
                 // ◉ A, ◉ B and ◉ C" once replies came back (Grok refs 13/58).
@@ -2475,6 +2498,9 @@ fn is_json_block(block: &Block) -> bool {
 ///
 /// `thumb_keys` are blob refs that already have a decoded preview; they are
 /// mixed into row versions so a late thumbnail reloads the picture row.
+/// `names_senders` and `seen_label` landed from parallel feedbacks; keep them
+/// as plain args rather than a one-off options struct.
+#[allow(clippy::too_many_arguments)]
 pub fn build_rows(
     messages: &[Message],
     show_details: bool,
@@ -2483,6 +2509,7 @@ pub fn build_rows(
     thumb_keys: &HashSet<&str>,
     mentions: &Mentions,
     names_senders: bool,
+    seen_label: Option<String>,
 ) -> Vec<Row> {
     let mine = |m: &Message| {
         m.sender == "user" || m.sender.is_empty() || m.sender == format!("user:{me_id}")
@@ -2496,6 +2523,11 @@ pub fn build_rows(
     let last_reply = messages
         .iter()
         .rposition(|m| m.role == Role::Assistant && !m.is_streaming());
+    // Last outbound message from me: optional Seen sits under it (and its reactions).
+    let last_mine_id = messages
+        .iter()
+        .rfind(|m| m.role == Role::User && mine(m))
+        .map(|m| m.id.clone());
     let mut last_stamp_at: u64 = 0;
     // Who spoke last in a people chat: a bubble carries its sender's name only when
     // the sender changed or a date stamp broke the run (Grok Bot's group style), and
@@ -2634,6 +2666,16 @@ pub fn build_rows(
                     queued = true;
                 }
                 push_reactions(&mut rows, message, mine(message));
+                if last_mine_id.as_deref() == Some(message.id.as_str()) {
+                    if let Some(label) = seen_label.clone() {
+                        rows.push(Row {
+                            version: hash_version(&label, false),
+                            id: format!("{}#seen", message.id),
+                            message_id: message.id.clone(),
+                            kind: RowKind::Seen { label },
+                        });
+                    }
+                }
             }
             Role::System => {
                 // Call lines and membership notices ("Jacob added Home, hjkb and
@@ -3097,6 +3139,36 @@ pub fn build_rows(
         });
     }
     rows
+}
+
+/// "Seen" when at least one peer's Presence `seen` covers my last outbound
+/// message in this chat (Settings → Notifications read receipts on).
+fn seen_label_for(
+    state: &AppState,
+    chat_id: &str,
+    messages: &[Message],
+    me_id: &str,
+) -> Option<String> {
+    let mine = |m: &Message| {
+        m.sender == "user" || m.sender.is_empty() || m.sender == format!("user:{me_id}")
+    };
+    let last_mine = messages.iter().rfind(|m| m.role == Role::User && mine(m))?;
+    if last_mine.pending {
+        return None;
+    }
+    let receipts = state.message_receipts.get(chat_id)?;
+    if receipts.is_empty() {
+        return None;
+    }
+    let my_ix = messages.iter().position(|m| m.id == last_mine.id)?;
+    let any = receipts.values().any(|seen_id| {
+        messages
+            .iter()
+            .position(|m| &m.id == seen_id)
+            .is_some_and(|ix| ix >= my_ix)
+            || seen_id == &last_mine.id
+    });
+    any.then(|| "Seen".to_owned())
 }
 
 /// One chips row under a message that carries reactions.
@@ -5039,6 +5111,7 @@ mod system_line_tests {
             &HashSet::new(),
             &Mentions::empty(),
             true,
+            None,
         );
         let kinds: Vec<&RowKind> = rows.iter().map(|r| &r.kind).collect();
         // Date stamp, Bob (named), the notice, Bob again (named again).
@@ -5097,6 +5170,7 @@ mod system_line_tests {
             &HashSet::new(),
             &Mentions::empty(),
             true,
+            None,
         );
         // The name sits inside each reply's first bubble (sender-name-in-bubble-2026-10-23).
         let named_bubbles: Vec<bool> = rows
@@ -5180,6 +5254,7 @@ mod system_line_tests {
             &HashSet::new(),
             &Mentions::empty(),
             true,
+            None,
         );
         assert_eq!(
             names(&rows),
@@ -5212,6 +5287,7 @@ mod system_line_tests {
             &HashSet::new(),
             &Mentions::empty(),
             false,
+            None,
         );
         assert_eq!(
             names(&rows),
@@ -5320,6 +5396,7 @@ mod presence_rows_tests {
             &HashSet::new(),
             &Mentions::empty(),
             true,
+            None,
         )
     }
 

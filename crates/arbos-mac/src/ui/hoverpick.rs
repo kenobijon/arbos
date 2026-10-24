@@ -16,7 +16,8 @@ use crate::ui::composer::Composer;
 use crate::ui::icons::icon;
 use crate::ui::profiles::kit::{self, Leading};
 use crate::ui::shell::Shell;
-use crate::ui::theme::{Theme, TEXT_SMALL};
+use crate::ui::theme::{Theme, TEXT_SMALL, TEXT_TINY};
+use crate::ui::voicepicker;
 
 /// How tall the model / voice lists may grow before they scroll.
 const LIST_MAX_HEIGHT: f32 = 260.0;
@@ -346,6 +347,35 @@ pub fn reasoning_panel(project: &Project, cx: &mut Context<Shell>) -> AnyElement
         );
     }
     list.into_any_element()
+}
+
+/// The Voice dropdown: the call-voice picker's list (Default first, play
+/// buttons, checkmark), inline — the same list as the voice sheet and the
+/// iPhone's `VoicePickerView`. A pick saves and folds the row.
+pub fn voice_panel(shell: &Shell, project: &Project, cx: &mut Context<Shell>) -> AnyElement {
+    let theme = Theme::of(cx).clone();
+    // 6 pt under the row's hairline so the first voice is never tucked under it.
+    div()
+        .mx(px(10.0))
+        .mt(px(6.0))
+        .mb(px(10.0))
+        .child(voicepicker::list(
+            shell,
+            project,
+            "agent-voice",
+            LIST_MAX_HEIGHT,
+            true,
+            cx,
+        ))
+        .child(
+            div()
+                .pt(px(6.0))
+                .px(px(4.0))
+                .text_size(px(TEXT_TINY))
+                .text_color(theme.text_muted)
+                .child("Press play to hear a sample; a click saves."),
+        )
+        .into_any_element()
 }
 
 #[cfg(test)]
