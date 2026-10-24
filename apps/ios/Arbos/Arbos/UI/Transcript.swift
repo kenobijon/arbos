@@ -233,8 +233,9 @@ enum Transcript {
                 }
             case .system:
                 // Call lines and other system notes: one muted centred line.
+                // Admin deletion audits stay out of the chat (GroupActivity screen only).
                 let text = message.plainText.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !text.isEmpty {
+                if !text.isEmpty, !GroupActivity.isAuditLine(text) {
                     let icon = text.hasPrefix("Call ended") ? "phone.down.fill" : (text.contains(" call") ? "phone.fill" : nil)
                     chunk.append(Row(id: "\(message.id)#system", messageId: message.id, role: .system,
                                      kind: .system(icon: icon, text: text, avatarProject: nil)))

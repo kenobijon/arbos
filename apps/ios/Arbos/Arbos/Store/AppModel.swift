@@ -3766,19 +3766,35 @@ final class AppModel: ObservableObject {
 
     /// Delete a message for everyone. The relay decides (`DELETE /room/…/messages/{id}`,
     /// 403 `not_yours` otherwise) and writes the deletion into the doc; it comes back as a
-    /// relay-signed row. No push notification.
+    /// relay-signed row. No push notification. In a people group, this device also writes a
+    /// hidden admin audit line for the Activity screen before asking the relay.
     func deleteMessage(chatId: Id, messageId: Id, projectId: Id? = nil) {
         guard !messageId.isEmpty else { return }
+        let audit = groupDeletionAuditLine(chatId: chatId)
         #if DEBUG
         if isFixture {
             guard var list = messages[chatId] else { return }
             list.removeAll { $0.id == messageId }
+            if let audit {
+                let m = Message(id: newId(), chatId: chatId, role: .system, sender: "system", status: .done, turn: nil, decision: nil,
+                                subagentId: nil, subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: nowMs(),
+                                completedAt: nowMs(), pending: false, parts: [.text(id: newId(), text: audit)], hiddenCount: 0)
+                list.append(m)
+            }
             messages[chatId] = list
             clearUnacked(chatId: chatId, messageId: messageId)
             Haptics.pick()
             return
         }
         #endif
+        if let audit, let doc = docs[chatId] {
+            do {
+                try doc.insertSystemLine(id: newId(), text: audit, deviceId: deviceId)
+                doc.commit()
+            } catch {
+                // Activity can miss this delete; the relay delete still runs.
+            }
+        }
         let room: String
         if peopleChat(chatId) != nil {
             room = "people/\(chatId)"
@@ -3834,6 +3850,19 @@ final class AppModel: ObservableObject {
         } catch {
             notice = Notice(text: "Could not edit the message: \(error.localizedDescription)")
         }
+    }
+
+    /// Text for a people-group deletion audit, or nil when this chat is not a group.
+    private func groupDeletionAuditLine(chatId: Id) -> String? {
+        guard let people = peopleChat(chatId), people.isGroup else { return nil }
+        let who: String = {
+            if let name = user?.name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
+                return name
+            }
+            if let login = user?.login, !login.isEmpty { return "@\(login)" }
+            return "Someone"
+        }()
+        return GroupActivity.deletionNotice(who: who)
     }
 
     /// Paint any room doc that already has rows but no published transcript yet
