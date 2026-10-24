@@ -397,17 +397,25 @@ final class SessionRoom {
         case .healCheck(let relayVv):
             // The relay told us what it holds; if this replica has more (a lost checkpoint,
             // #1518), push the difference back once so the room heals from this device.
+            // Always answer (even empty) so the session can release the held pending resend.
             let missing = doc.updatesBeyond(relayVv)
             if !missing.isEmpty {
                 NSLog("relay room \(roomChat): history heal, pushing \(missing.count) bytes the relay lacked")
-                session.onHeal(bytes: missing)
             }
+            session.onHeal(bytes: missing)
         case .scheduleReconnect(let afterMs):
             applyScheduleReconnect(afterMs: afterMs)
         case .sessionError(let code, let message):
             if code == "state_timeout" { stateTimeouts += 1 }
             // The relay restarts in a few seconds (#1340): the pill says so; the clean close that follows redials.
             if code == "restart_soon" { onLinkState?(.restartSoon); return }
+            // Push refused permanently for this room — no redial; surface like HTTP 403/404.
+            if code == "not_available" {
+                lastError = "\(roomChat): not_available"
+                onUnavailable?()
+                NSLog("relay room \(roomChat): error \(code): \(message)")
+                return
+            }
             NSLog("relay room \(roomChat): error \(code): \(message)")
         case .presence(_, _, let typing, _, let mine, let headerJson):
             guard !mine else { return }
