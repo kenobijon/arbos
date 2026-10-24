@@ -223,7 +223,9 @@ struct ChatView: View {
     private var presenceParticipants: [PresenceParticipant] {
         var out: [PresenceParticipant] = []
         for handle in model.typingHandles(in: chatId) {
-            let m = people?.members.first { !$0.isAgent && $0.handle == handle }
+            let m = people?.members.first {
+                !$0.isAgent && $0.handle.caseInsensitiveCompare(handle) == .orderedSame
+            }
             out.append(PresenceParticipant(
                 id: "typing:\(handle)",
                 name: m?.name.flatMap { $0.isEmpty ? nil : $0 } ?? "@\(handle)",
@@ -1671,6 +1673,11 @@ struct ChatView: View {
                         // Keep the draft while the view is still up so a process kill mid-type
                         // is not required — leaving the thread saves on disappear too.
                         model.setComposerDraft(d, for: chatId)
+                        // People chats (DM + group): tell the room we are typing so peers
+                        // see names on the presence row ([feedback app-01M5N7WSA1VCYHE9BE3CX4V0R6]).
+                        if isPeople, !d.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            model.typedIn(chatId: chatId)
+                        }
                         // `@` completion: the token the caret is in (approximated by the last token).
                         guard isPeople, let last = d.split(separator: " ", omittingEmptySubsequences: false).last, last.hasPrefix("@"), !d.hasSuffix(" ") else {
                             mentionQuery = nil
