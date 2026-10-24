@@ -41,18 +41,38 @@ use serde_json::Value;
 
 actions!(transcript, [Copy]);
 
-/// Delivery label inside my bubble footer: plain text only (not ticks).
+/// Where one of my own bubbles is on its way. No caption says it (Jacob,
+/// 2026-10-24: "remove these 'sent' items, just use coloring"): the bubble's
+/// opacity does — see [`Delivery::opacity`] and docs/mac-design-rules.md.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum ReceiptStatus {
+pub enum Delivery {
+    /// Not yet acknowledged by the relay.
+    Pending,
+    /// The relay refused it; a red glyph marks it beside the bubble.
+    Failed,
+    /// Acknowledged, nobody has opened past it yet.
     Sent,
+    /// A peer's read watermark covers it, an agent answered after it, or read
+    /// receipts are off (nothing to wait for).
     Seen,
 }
 
-impl ReceiptStatus {
-    fn label(self) -> &'static str {
+/// Whole-bubble opacity of a sent-but-unseen bubble. Measured on both themes
+/// (white text, bubble `#5c5c5c` on `#141414` / `#111111` on `#fcfcfc`): the
+/// composited text keeps a 4.9 : 1 (dark) and 7.7 : 1 (light) contrast on its
+/// fill, while the fill drops to L* 30 from 39 (dark) and to `#535353` from
+/// `#111111` (light) — visibly lighter next to a seen bubble, still readable.
+pub const BUBBLE_ALPHA_SENT: f32 = 0.72;
+/// A pending bubble sits below a sent one (3.4 : 1 / 3.6 : 1 text contrast —
+/// transient, it lasts until the relay's ACK).
+pub const BUBBLE_ALPHA_PENDING: f32 = 0.5;
+
+impl Delivery {
+    pub fn opacity(self) -> f32 {
         match self {
-            ReceiptStatus::Sent => "sent",
-            ReceiptStatus::Seen => "seen",
+            Delivery::Pending => BUBBLE_ALPHA_PENDING,
+            Delivery::Sent => BUBBLE_ALPHA_SENT,
+            Delivery::Failed | Delivery::Seen => 1.0,
         }
     }
 }
@@ -331,7 +351,6 @@ pub fn quote_text(message: &Message) -> String {
 pub enum RowKind {
     User {
         text: String,
-        pending: bool,
         /// Caption for prompts not typed by the user (a routine, another project).
         sender_label: Option<String>,
         /// Another person's bubble carries their name inside it, at the top, when
@@ -343,9 +362,10 @@ pub enum RowKind {
         from: Option<Person>,
         /// "9:41 PM", revealed at the bubble's outer edge on hover only.
         time: Option<String>,
-        /// My own messages: "sent" after the relay ACKs, "seen" when a peer
-        /// opened the chat (or an agent answered). Never set on others' bubbles.
-        receipt: Option<ReceiptStatus>,
+        /// My own messages: pending → failed / sent → seen, shown as the
+        /// bubble's opacity (plus a red glyph when failed). `None` on others'
+        /// bubbles.
+        delivery: Option<Delivery>,
         /// Set when this message replies to another: Grok's quote header
         /// sits inside the bubble above the text.
         quote: Option<Quote>,
@@ -1716,12 +1736,11 @@ impl Transcript {
         let inner: AnyElement = match row.kind {
             RowKind::User {
                 text,
-                pending,
                 sender_label,
                 from,
                 named,
                 time,
-                receipt,
+                delivery,
                 quote,
                 forwarded_from,
             } => {
@@ -1734,11 +1753,6 @@ impl Transcript {
                         theme.bubble_text(),
                         selectable.with_color(Theme::with_alpha(theme.accent, 0.45)),
                     )
-                };
-                let meta_color = if from.is_some() {
-                    theme.text_muted
-                } else {
-                    Theme::with_alpha(theme.bubble_text(), 0.55)
                 };
                 // A forward carries its "Forwarded from" header where a reply
                 // would carry its quote (a forward never quotes).
@@ -1812,8 +1826,7 @@ impl Transcript {
                         name_el,
                         quote_header.map(|q| q.into_any_element()),
                         body,
-                    ))
-                    .children(bubble_footer(receipt, meta_color));
+                    ));
                 if let Some(person) = from {
                     // Someone else: left-aligned, their avatar beside the bubble on
                     // the avatar column. A small coloured left-edge sliver marks a
@@ -1857,8 +1870,7 @@ impl Transcript {
                                                 .bg(theme.bubble_assistant)
                                                 .text_color(theme.text)
                                                 .border_l_2()
-                                                .border_color(Theme::with_alpha(color, 0.7))
-                                                .when(pending, |el| el.opacity(0.6)),
+                                                .border_color(Theme::with_alpha(color, 0.7)),
                                         )
                                         .child(actions.ml(px(6.0)))
                                         .children(
@@ -1886,15 +1898,19 @@ impl Transcript {
                         })
                         .child({
                             // My bubble sits right, so its outer edge (and the
-                            // hover-only time) is on the left; sent/seen lives inside it.
+                            // hover-only time) is on the left. Its delivery state is
+                            // its opacity: pending < sent < seen; failed is full with
+                            // a red glyph at the outer edge (no captions).
                             let (row_el, reveal) = self.hover_row(&row.id, now, window, cx);
                             let actions =
                                 self.hover_rail(&row.id, &row.message_id, reveal, &theme, cx);
+                            let delivery = delivery.unwrap_or(Delivery::Seen);
                             row_el
                                 .justify_end()
                                 .children(hover_time(time, reveal, &theme).map(|t| t.mr(px(8.0))))
                                 .child(actions.mr(px(6.0)))
-                                .child(bubble.when(pending, |el| el.opacity(0.6)))
+                                .children(failed_glyph(delivery, &theme).map(|g| g.mr(px(8.0))))
+                                .child(own_bubble(bubble, delivery))
                         })
                         .into_any_element()
                 }
@@ -2583,24 +2599,31 @@ fn clock_label(ms: u64) -> Option<String> {
         .map(|t| t.format("%-I:%M %p").to_string())
 }
 
-/// My own bubble's sent/seen label. Pending sends have none; after ACK we show
-/// "sent", then "seen" when read receipts are on and a peer opened past this
-/// message (or an agent answered after it).
-fn receipt_status(
+/// Where my own bubble is: pending until the relay ACKs, failed when it
+/// refused, then sent until a peer opened past it (or an agent answered after
+/// it). With read receipts off there is nothing to wait for, so an ACKed
+/// bubble is `Seen` (full opacity) at once. `None` for someone else's bubble.
+pub fn delivery_state(
     message: &Message,
     messages: &[Message],
     mix: usize,
     is_mine: bool,
     receipts: Option<&HashMap<String, Id>>,
     read_receipts: bool,
-) -> Option<ReceiptStatus> {
-    if !is_mine || message.pending {
+) -> Option<Delivery> {
+    if !is_mine {
         return None;
     }
-    if read_receipts && message_is_seen(message, messages, mix, receipts) {
-        return Some(ReceiptStatus::Seen);
+    if message.pending {
+        return Some(Delivery::Pending);
     }
-    Some(ReceiptStatus::Sent)
+    if message.status == MessageStatus::Error {
+        return Some(Delivery::Failed);
+    }
+    if !read_receipts || message_is_seen(message, messages, mix, receipts) {
+        return Some(Delivery::Seen);
+    }
+    Some(Delivery::Sent)
 }
 
 /// True when a peer's read watermark covers this message, or an agent/project
@@ -2649,26 +2672,38 @@ fn hover_time(time: Option<String>, opacity: f32, theme: &Theme) -> Option<Div> 
     })
 }
 
-/// My own bubble's sent/seen label at the bottom-right inside it. The time
-/// never sits here (see [`hover_time`]).
-fn bubble_footer(receipt: Option<ReceiptStatus>, color: gpui::Hsla) -> Option<Div> {
-    receipt.map(|r| {
+/// My own bubble at its delivery opacity (see [`Delivery::opacity`]). One
+/// wrapper for every own bubble so the layout tests can read the state back.
+fn own_bubble(bubble: impl IntoElement, delivery: Delivery) -> Div {
+    div()
+        .max_w_full()
+        .min_w_0()
+        .debug_selector(|| {
+            match delivery {
+                Delivery::Pending => "own-bubble-pending",
+                Delivery::Failed => "own-bubble-failed",
+                Delivery::Sent => "own-bubble-sent",
+                Delivery::Seen => "own-bubble-seen",
+            }
+            .into()
+        })
+        .opacity(delivery.opacity())
+        .child(bubble)
+}
+
+/// The red mark beside a bubble the relay refused: always visible, outside
+/// the bubble on its outer edge. (There is no resend yet — the composer keeps
+/// the text, the mark says the row is not on the relay.)
+fn failed_glyph(delivery: Delivery, theme: &Theme) -> Option<Div> {
+    (delivery == Delivery::Failed).then(|| {
         div()
-            .w_full()
+            .flex_shrink_0()
+            .size(px(RAIL_GLYPH))
             .flex()
-            .justify_end()
             .items_center()
-            .pt(px(4.0))
-            .text_size(px(11.0))
-            .line_height(px(14.0))
-            .text_color(color)
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .whitespace_nowrap()
-                    .debug_selector(|| "bubble-receipt".into())
-                    .child(r.label()),
-            )
+            .justify_center()
+            .debug_selector(|| "own-bubble-failed-glyph".into())
+            .child(icon("exclamation", RAIL_GLYPH, theme.danger))
     })
 }
 
@@ -2834,8 +2869,8 @@ pub fn build_rows(
                         .as_deref()
                         .filter(|id| !id.is_empty())
                         .map(|id| Quote::for_reply(id, messages));
-                    let receipt =
-                        receipt_status(message, messages, mix, is_mine, receipts, read_receipts);
+                    let delivery =
+                        delivery_state(message, messages, mix, is_mine, receipts, read_receipts);
                     let forwarded_from = message
                         .forwarded_from
                         .as_deref()
@@ -2846,11 +2881,10 @@ pub fn build_rows(
                         version: hash_version(
                             &(
                                 &text,
-                                message.pending,
                                 &sender_label,
                                 from.as_ref().map(|p| &p.handle),
                                 &quote,
-                                receipt,
+                                delivery,
                                 &forwarded_from,
                             ),
                             false,
@@ -2859,12 +2893,11 @@ pub fn build_rows(
                         message_id: message.id.clone(),
                         kind: RowKind::User {
                             text,
-                            pending: message.pending,
                             sender_label,
                             from,
                             named,
                             time: clock_label(message.created_at),
-                            receipt,
+                            delivery,
                             quote,
                             forwarded_from,
                         },
@@ -5795,6 +5828,240 @@ mod presence_rows_tests {
                 .count(),
             1,
             "one name, inside the first bubble"
+        );
+    }
+}
+
+#[cfg(test)]
+mod delivery_tests {
+    //! Jacob, 2026-10-24 ("remove these 'sent' items, just use coloring, make the
+    //! bubble less opaque"): no caption on my bubbles; a sent-but-unseen bubble is
+    //! lighter, a seen one is full; pending sits lower still and a failed one is
+    //! full with a red mark. Rule: docs/mac-design-rules.md.
+    use std::collections::{HashMap, HashSet};
+
+    use gpui::TestAppContext;
+
+    use super::*;
+
+    fn message(
+        id: &str,
+        role: &str,
+        sender: &str,
+        status: &str,
+        pending: bool,
+        at: u64,
+    ) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "chatId": "chat_dm",
+            "role": role,
+            "sender": sender,
+            "senderHandle": if sender.starts_with("user:") { "sam" } else { "" },
+            "status": status,
+            "pending": pending,
+            "createdAt": at,
+            "parts": [{ "id": format!("p-{id}"), "kind": "text", "text": "fish?" }],
+        }))
+        .expect("message")
+    }
+
+    fn mine(id: &str, at: u64) -> Message {
+        message(id, "user", "user:gh_me", "done", false, at)
+    }
+
+    #[test]
+    fn opacity_is_the_state() {
+        assert_eq!(Delivery::Seen.opacity(), 1.0);
+        assert_eq!(Delivery::Failed.opacity(), 1.0);
+        assert_eq!(Delivery::Sent.opacity(), BUBBLE_ALPHA_SENT);
+        assert_eq!(Delivery::Pending.opacity(), BUBBLE_ALPHA_PENDING);
+        let order = [Delivery::Pending, Delivery::Sent, Delivery::Seen].map(Delivery::opacity);
+        assert!(
+            order.windows(2).all(|w| w[0] < w[1]),
+            "pending < sent < seen: {order:?}"
+        );
+    }
+
+    #[test]
+    fn unseen_is_sent_and_a_watermark_or_a_reply_makes_it_seen() {
+        let t = 1_700_000_000_000u64;
+        let messages = vec![mine("a", t), mine("b", t + 1_000), mine("c", t + 2_000)];
+        let no_receipts: HashMap<String, Id> = HashMap::new();
+        for ix in 0..3 {
+            assert_eq!(
+                delivery_state(&messages[ix], &messages, ix, true, Some(&no_receipts), true),
+                Some(Delivery::Sent),
+                "nobody opened the chat: lighter"
+            );
+        }
+        // Sam's watermark is "b": a and b are seen, c is still only sent.
+        let receipts: HashMap<String, Id> = HashMap::from([("sam".to_owned(), "b".to_owned())]);
+        let got: Vec<_> = (0..3)
+            .map(|ix| delivery_state(&messages[ix], &messages, ix, true, Some(&receipts), true))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                Some(Delivery::Seen),
+                Some(Delivery::Seen),
+                Some(Delivery::Sent)
+            ]
+        );
+        // An agent's answer after my message is the "opened" signal in agent chats.
+        let with_reply = vec![
+            mine("a", t),
+            message("r", "assistant", "agent:arbos", "done", false, t + 500),
+            mine("b", t + 1_000),
+        ];
+        assert_eq!(
+            delivery_state(&with_reply[0], &with_reply, 0, true, None, true),
+            Some(Delivery::Seen)
+        );
+        assert_eq!(
+            delivery_state(&with_reply[2], &with_reply, 2, true, None, true),
+            Some(Delivery::Sent)
+        );
+    }
+
+    #[test]
+    fn pending_failed_and_receipts_off_are_unchanged_states() {
+        let t = 1_700_000_000_000u64;
+        let pending = message("p", "user", "user:gh_me", "queued", true, t);
+        let failed = message("f", "user", "user:gh_me", "error", false, t + 1);
+        let sent = mine("s", t + 2);
+        let messages = vec![pending.clone(), failed.clone(), sent.clone()];
+        assert_eq!(
+            delivery_state(&pending, &messages, 0, true, None, true),
+            Some(Delivery::Pending)
+        );
+        assert_eq!(
+            delivery_state(&failed, &messages, 1, true, None, true),
+            Some(Delivery::Failed)
+        );
+        // Read receipts off: nothing to wait for, an ACKed bubble is full at once.
+        assert_eq!(
+            delivery_state(&sent, &messages, 2, true, None, false),
+            Some(Delivery::Seen)
+        );
+        // Someone else's bubble carries no delivery state at all.
+        assert_eq!(delivery_state(&sent, &messages, 2, false, None, true), None);
+    }
+
+    #[test]
+    fn build_rows_puts_the_state_on_my_bubbles_only() {
+        let t = 1_700_000_000_000u64;
+        let messages = vec![
+            mine("a", t),
+            message("o", "user", "user:gh_sam", "done", false, t + 1_000),
+            mine("b", t + 2_000),
+        ];
+        let spoken = HashSet::new();
+        let failed = HashMap::new();
+        let speech = SpeechRows {
+            enabled: false,
+            spoken: &spoken,
+            failed: &failed,
+            voice_mode: false,
+        };
+        let receipts: HashMap<String, Id> = HashMap::from([("sam".to_owned(), "a".to_owned())]);
+        let rows = build_rows(
+            &messages,
+            false,
+            speech,
+            "gh_me",
+            &HashSet::new(),
+            &Mentions::empty(),
+            false,
+            Some(&receipts),
+            true,
+        );
+        let states: Vec<Option<Delivery>> = rows
+            .iter()
+            .filter_map(|r| match &r.kind {
+                RowKind::User { delivery, .. } => Some(*delivery),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            states,
+            vec![Some(Delivery::Seen), None, Some(Delivery::Sent)],
+            "mine: seen up to Sam's watermark, then sent; Sam's bubble: no state"
+        );
+    }
+
+    /// The four states as the row draws them: one wrapper per own bubble named by
+    /// state, no caption anywhere, and the red mark only beside a failed bubble.
+    struct OwnBubbles;
+
+    impl gpui::Render for OwnBubbles {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let theme = Theme::dark(crate::ui::theme::Surface::Matte);
+            let bubble = |text: &'static str| {
+                div()
+                    .px(px(BUBBLE_PAD_X))
+                    .py(px(BUBBLE_PAD_Y))
+                    .rounded(px(BUBBLE_RADIUS))
+                    .bg(theme.bubble)
+                    .text_color(theme.bubble_text())
+                    .child(text)
+            };
+            div()
+                .w(px(600.0))
+                .h(px(400.0))
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .children(
+                    [
+                        Delivery::Pending,
+                        Delivery::Failed,
+                        Delivery::Sent,
+                        Delivery::Seen,
+                    ]
+                    .into_iter()
+                    .map(|d| {
+                        div()
+                            .flex()
+                            .justify_end()
+                            .items_center()
+                            .children(failed_glyph(d, &theme).map(|g| g.mr(px(8.0))))
+                            .child(own_bubble(bubble("fish?"), d))
+                    }),
+                )
+        }
+    }
+
+    #[gpui::test]
+    fn every_state_draws_a_bubble_and_only_failed_gets_the_mark(cx: &mut TestAppContext) {
+        let (_view, vcx) = cx.add_window_view(|_, _| OwnBubbles);
+        vcx.run_until_parked();
+        for sel in [
+            "own-bubble-pending",
+            "own-bubble-failed",
+            "own-bubble-sent",
+            "own-bubble-seen",
+        ] {
+            vcx.debug_bounds(sel)
+                .unwrap_or_else(|| panic!("{sel} drawn"));
+        }
+        assert!(
+            vcx.debug_bounds("bubble-receipt").is_none(),
+            "no sent/seen caption anywhere"
+        );
+        let glyph = vcx
+            .debug_bounds("own-bubble-failed-glyph")
+            .expect("red mark beside the failed bubble");
+        let failed = vcx
+            .debug_bounds("own-bubble-failed")
+            .expect("failed bubble");
+        assert!(
+            f32::from(glyph.origin.x + glyph.size.width) <= f32::from(failed.origin.x),
+            "the mark sits outside the bubble, on its outer edge"
         );
     }
 }
