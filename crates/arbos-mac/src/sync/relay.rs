@@ -3557,28 +3557,43 @@ pub(crate) fn mime_for(path: &Path) -> &'static str {
 }
 
 /// `GET /blob/{slot}/{key}` → (mime, bytes); `id` is a project id or a people chat id.
-async fn fetch_blob_bytes(shared: &Shared, id: &str, key: &str) -> Result<(String, Vec<u8>)> {
-    let r = shared
-        .http
-        .get(format!(
-            "{}/blob/{}/{}",
-            shared.http_url,
-            shared.blob_slot(id),
-            key
-        ))
-        .bearer_auth(shared.token())
-        .send()
-        .await?;
-    if !r.status().is_success() {
-        anyhow::bail!("HTTP {}", r.status());
+async fn fetch_blob_bytes(shared: &Arc<Shared>, id: &str, key: &str) -> Result<(String, Vec<u8>)> {
+    // Same refresh-once path as `get_json`: an expired access token must not leave
+    // thumbnails / downloads stuck on "No preview" and a weekly `mac:thumbnail:* http 401`
+    // diagnostic while the JSON APIs quietly rotate and succeed.
+    let mut refreshed = false;
+    loop {
+        let token = shared.token();
+        let r = shared
+            .http
+            .get(format!(
+                "{}/blob/{}/{}",
+                shared.http_url,
+                shared.blob_slot(id),
+                key
+            ))
+            .bearer_auth(&token)
+            .send()
+            .await?;
+        if !r.status().is_success() {
+            let status = r.status();
+            let body = r.text().await.unwrap_or_default();
+            let err = RelayError::from_body(status, &body);
+            if err.is_token_expired() && !refreshed {
+                refreshed = true;
+                shared.refresh_tokens(Some(&token)).await?;
+                continue;
+            }
+            return Err(err.into());
+        }
+        let mime = r
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("application/octet-stream")
+            .to_string();
+        return Ok((mime, r.bytes().await?.to_vec()));
     }
-    let mime = r
-        .headers()
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("application/octet-stream")
-        .to_string();
-    Ok((mime, r.bytes().await?.to_vec()))
 }
 
 /// `~/Downloads/<name>`, or `<stem> (2).<ext>` when the name is taken.
