@@ -2324,7 +2324,7 @@ private struct TranscriptRows: View, Equatable {
     }
 }
 
-/// Fires once each time the scroll view comes within 240 pt of its top (iOS 18+;
+/// Fires once each time the scroll view comes within 900 pt of its top (iOS 18+;
 /// a channel loads one older page then). Earlier systems keep the newest page.
 private struct NearTopReporter: ViewModifier {
     let enabled: Bool
