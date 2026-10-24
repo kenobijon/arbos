@@ -355,13 +355,10 @@ pub(crate) fn member_dto(state: &AppState, m: &Membership) -> ChatMemberDto {
     dto
 }
 
-/// The `@slug` a project agent answers to: its name lower-cased, spaces to hyphens.
+/// The `@slug` a project agent answers to — the shared rule (`arbos_core::avatar::identity`),
+/// so the roster's `handle`, agentd's attribution and both clients' lookups agree (#1592).
 pub fn agent_slug(name: &str) -> String {
-    name.trim()
-        .to_lowercase()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join("-")
+    arbos_core::avatar::identity::agent_slug(name)
 }
 
 /// An agent's `@slug` must not be a person's `@handle`: when Jacob (@unarbos) named an agent

@@ -777,7 +777,7 @@ struct GroupProfileView: View {
     private var rows: [Row] {
         if let people {
             return people.members.map { m in
-                Row(id: m.id, person: ProfilePerson(m), role: m.role, agent: m.isAgent ? m.project : nil)
+                Row(id: m.id, person: ProfilePerson(m), role: m.role, agent: m.isAgent ? model.agent(member: m, chatId: people.id) : nil)
             }
         }
         var out = projectMembers.map { Row(id: $0.id, person: ProfilePerson($0), role: $0.role, agent: nil) }

@@ -122,6 +122,9 @@ extension ChatMember {
             project?.avatarColorIndexEffective = Int(p.avatar_color_index_effective)
             project?.avatarLeaf = p.avatar_leaf.map(Int.init)
             project?.avatarLeafColor = p.avatar_leaf_color.map(Int.init)
+            // The uploaded / generated picture travels with the roster card (#1592); the
+            // fetch URL is built by `AppModel.agent(member:)` where the relay token lives.
+            project?.imageKey = p.image_key.flatMap { $0.isEmpty ? nil : $0 }
         }
         self.id = id
         self.kind = isAgent ? .agent : .user

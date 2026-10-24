@@ -15,8 +15,9 @@ struct CallPersonAvatar: View {
     @Environment(\.theme) private var theme
 
     var body: some View {
-        if person.isAgent, let p = model.project(person.id) {
-            AgentAvatar(project: p, theme: theme, size: size, still: true)
+        if person.isAgent {
+            // The same identity the chat draws (#1592): a shared agent on a call is not a person.
+            AgentAvatar(project: model.agent(id: person.id, handle: person.handle, name: person.name), theme: theme, size: size, still: true)
         } else {
             PersonAvatar(url: person.avatarUrl, handle: person.handle, size: size, name: person.name, id: person.id, colorIndex: person.avatarColorIndex)
         }
