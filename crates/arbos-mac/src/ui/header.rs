@@ -26,7 +26,9 @@ use crate::ui::motion::PulseClock;
 use crate::ui::people;
 use crate::ui::shell::Shell;
 use crate::ui::sidebar::{self, machine_dot};
-use crate::ui::theme::{Theme, AVATAR_HEADER, CONTROL, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
+use crate::ui::theme::{
+    Theme, AVATAR_HEADER, CONTROL, CONTROL_GLYPH_WIDE, TEXT_BODY, TEXT_SMALL, TEXT_TINY,
+};
 
 /// The pinned chat reads "Main" until it is renamed away from the agent's name.
 pub(crate) fn tab_title(chat: &Chat, space: &Project) -> String {
@@ -96,11 +98,10 @@ pub fn render(
             }),
         );
 
-    // Semibold name: a notch above the old 13 pt so it matches the larger
-    // picture ([feedback app-01M5MX8XS2BS7KZCNAS12BXNKD]).
+    // Grok Mac's title: 13 pt semibold (ref 57) — the topbar-unify mock's size too.
     let name_label = |text: String, theme: &Theme| {
         div()
-            .text_size(px(TEXT_BODY))
+            .text_size(px(TEXT_SMALL))
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(theme.text)
             .truncate()
@@ -167,7 +168,7 @@ pub fn render(
                 .bg(theme.field)
                 .border_1()
                 .border_color(theme.field_border)
-                .text_size(px(TEXT_BODY))
+                .text_size(px(TEXT_SMALL))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme.text)
                 .child(shell.agent_name_input.clone())
@@ -344,7 +345,7 @@ fn sidebar_toggle(shell: &Shell, theme: &Theme, cx: &mut Context<Shell>) -> Stat
         .cursor_pointer()
         .bg(theme.surface_2)
         .hover(|s| s.bg(Theme::with_alpha(theme.text, 0.14)))
-        .child(icon("sidebar-left", 16.0, theme.text))
+        .child(icon("sidebar-left", CONTROL_GLYPH_WIDE, theme.text))
         // The bar is a window-drag region; a control is not part of it.
         .on_mouse_down(
             gpui::MouseButton::Left,
@@ -364,17 +365,22 @@ fn sidebar_toggle(shell: &Shell, theme: &Theme, cx: &mut Context<Shell>) -> Stat
 
 /// Geometry every chat header shares — one number each, read by the tests.
 pub mod metrics {
-    use crate::ui::theme::HEADER_HEIGHT;
+    use crate::ui::theme::{CONTROL, HEADER_HEIGHT};
     /// The bar: Grok's 44 pt.
     pub const HEIGHT: f32 = HEADER_HEIGHT;
     /// The bar's content box is centred on the traffic lights' line (20.75 pt
     /// in this window): 2 pt off the bottom.
     pub const BOTTOM_PAD: f32 = 2.0;
-    /// The pill: 34 pt tall. Top inset is a few points below the window edge
-    /// so the name and picture breathe ([feedback
-    /// app-01M5MX8XS2BS7KZCNAS12BXNKD]; was 7 pt).
-    pub const PILL_HEIGHT: f32 = 34.0;
-    pub const PILL_TOP: f32 = 10.0;
+    /// The pill is as tall as the sidebar's collapse / search discs — one
+    /// button family at Grok Bot's size (Jacob 2026-10-24, [feedback
+    /// search-palette-2026-10-24]; was 34 with its top 7 pt under the window
+    /// edge). Centred in the bar — Jacob's rule (#1130, #1336;
+    /// `docs/mac-design-rules.md`), restored by [feedback
+    /// header-pill-restore-2026-10-24] after #1493 moved it top-left.
+    pub const PILL_HEIGHT: f32 = CONTROL;
+    /// The pill shares the sidebar toggle's line: both are centred in the
+    /// bar's content box (3 pt from the top at 44 / 2 / 36).
+    pub const PILL_TOP: f32 = (HEIGHT - BOTTOM_PAD - PILL_HEIGHT) / 2.0;
     /// Top margin inside the bar that lands the pill at `PILL_TOP`. The bar
     /// packs from the top (`items_start`): a centred cross-axis would drop the
     /// pill mid-pane if the floating overlay ever stretched taller than
@@ -390,14 +396,11 @@ pub mod metrics {
     /// child of the pill slot and takes no room in the bar.
     pub const LINK_PILL_HEIGHT: f32 = 22.0;
     pub const LINK_PILL_GAP: f32 = 3.0;
-    /// Leading inset before the pill when the sidebar toggle is absent
-    /// (sidebar open): the chat pane's left pad.
-    pub const PILL_LEADING: f32 = 12.0;
 }
 
 /// The frame of every chat header — agent, DM, group, server channel: 44 pt,
 /// equal side slots (the sidebar toggle left when the sidebar is hidden), the
-/// pill centred with a little air under the window edge, the whole bar a
+/// pill centred with its top 7 pt under the window edge, the whole bar a
 /// window-drag region (the pill and the toggle stop the drag themselves). The
 /// list runs under it and fades (`metrics::FADE_BAND`), so there is no hairline.
 pub(crate) fn bar_frame(left: Option<AnyElement>, pill: AnyElement) -> Div {
@@ -416,15 +419,16 @@ pub(crate) fn bar_frame(left: Option<AnyElement>, pill: AnyElement) -> Div {
         .items_start()
         .justify_between()
         .gap(px(10.0))
-        .pl(px(metrics::PILL_LEADING))
+        .pl(px(12.0))
         .pr(px(10.0))
         .pb(px(metrics::BOTTOM_PAD))
         .overflow_hidden()
         .window_drag()
         .debug_selector(|| "chat-header-bar".into())
-        // Always reserve the left slot so the pill stays centred whether the
-        // sidebar toggle is present or not ([feedback
-        // app-01M5Q1CQZ5JBNY33WCKPN0Y8G9]).
+        // The left slot is always there (empty when the sidebar is open) so the
+        // two side slots match and the pill sits on the bar's centre line
+        // ([feedback app-01M5Q1CQZ5JBNY33WCKPN0Y8G9], [feedback
+        // header-pill-restore-2026-10-24]).
         .child(
             div()
                 .w(side)
@@ -1047,6 +1051,7 @@ mod header_tests {
                 div()
                     .id("toggle")
                     .size(px(crate::ui::sidebar::STRIP_BUTTON))
+                    .debug_selector(|| "toggle".into())
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .into_any_element()
             });
@@ -1086,6 +1091,15 @@ mod header_tests {
         vcx.update(|_, cx| cx.default_global::<WindowDragPress>().moves)
     }
 
+    fn pill_w(kind: Kind) -> f32 {
+        match kind {
+            Kind::Agent => 150.0,
+            Kind::Dm => 110.0,
+            Kind::Group => 130.0,
+            Kind::Channel => 170.0,
+        }
+    }
+
     #[gpui::test]
     fn every_kind_has_the_same_bar_height_and_pill_position(cx: &mut TestAppContext) {
         for kind in [Kind::Agent, Kind::Dm, Kind::Group, Kind::Channel] {
@@ -1100,11 +1114,70 @@ mod header_tests {
                 assert_eq!(h, metrics::HEIGHT, "bar height, folded={folded}");
                 assert_eq!(top, metrics::PILL_TOP, "pill top, folded={folded}");
                 assert_eq!(ph, metrics::PILL_HEIGHT, "pill height, folded={folded}");
+                if folded {
+                    // One button family (Jacob 2026-10-24): the pill is exactly
+                    // as tall as the sidebar toggle beside it and shares its line.
+                    let toggle = vcx.debug_bounds("toggle").expect("toggle drawn");
+                    let th: f32 = toggle.size.height.into();
+                    let t_top: f32 = (toggle.origin.y - bar.origin.y).into();
+                    assert_eq!(ph, th, "pill as tall as the toggle");
+                    assert!(
+                        (t_top - top).abs() <= 0.5,
+                        "pill ({top}) and toggle ({t_top}) share one line"
+                    );
+                }
                 let cx_pill: f32 = (pill.origin.x + pill.size.width / 2.0).into();
                 let cx_bar: f32 = (bar.origin.x + bar.size.width / 2.0).into();
                 assert!(
                     (cx_pill - cx_bar).abs() <= 1.0,
                     "pill centred, folded={folded}"
+                );
+            }
+        }
+    }
+
+    /// Jacob's rule (#1130, #1336; `docs/mac-design-rules.md`): the pill sits
+    /// on the bar's centre line — for every chat kind, sidebar open or folded —
+    /// at the button family's height (`CONTROL`, picture `CONTROL − 8`;
+    /// [feedback search-palette-2026-10-24] sized it, the placement is this
+    /// item's). #1493 moved it to the left
+    /// edge on a tester's "personal preference"; [feedback
+    /// header-pill-restore-2026-10-24] put it back. This pins the geometry so
+    /// the next drift fails here.
+    #[gpui::test]
+    fn the_pill_is_centred_not_parked_at_the_left_edge(cx: &mut TestAppContext) {
+        assert_eq!(
+            metrics::PILL_HEIGHT,
+            CONTROL,
+            "pill height: the button family's"
+        );
+        assert_eq!(
+            metrics::PILL_TOP,
+            (metrics::HEIGHT - metrics::BOTTOM_PAD - CONTROL) / 2.0,
+            "pill top: centred on the toggle's line"
+        );
+        assert_eq!(AVATAR_HEADER, CONTROL - 8.0, "header picture");
+        for kind in [Kind::Agent, Kind::Dm, Kind::Group, Kind::Channel] {
+            for folded in [false, true] {
+                let (_view, vcx) = cx.add_window_view(|_, _| Bar { kind, folded });
+                vcx.run_until_parked();
+                let bar = vcx.debug_bounds("chat-header-bar").expect("bar drawn");
+                let pill = vcx.debug_bounds("chat-header-pill").expect("pill drawn");
+                let left: f32 = (pill.origin.x - bar.origin.x).into();
+                let right: f32 =
+                    ((bar.origin.x + bar.size.width) - (pill.origin.x + pill.size.width)).into();
+                let w: f32 = pill.size.width.into();
+                assert_eq!(w, pill_w(kind), "pill keeps its own width, folded={folded}");
+                // Equal air either side (the bar pads 12 left / 10 right, so
+                // the margins differ by those 2 pt): not hugging the leading
+                // pad, not the trailing one.
+                assert!(
+                    (left - right).abs() <= 2.0,
+                    "equal margins, folded={folded}: left={left} right={right}"
+                );
+                assert!(
+                    left > 100.0,
+                    "pill is not at the left edge, folded={folded}: left={left}"
                 );
             }
         }
@@ -1175,7 +1248,7 @@ mod header_tests {
     #[gpui::test]
     fn the_empty_band_drags_for_every_kind_and_the_pill_does_not(cx: &mut TestAppContext) {
         for kind in [Kind::Agent, Kind::Dm, Kind::Group, Kind::Channel] {
-            // Left of the pill, right of the side slot.
+            // Left of the centred pill, right of the side slot.
             assert_eq!(moves_after(cx, kind, false, 120.0), 1, "band drags");
             assert_eq!(
                 moves_after(cx, kind, true, 72.0 + 60.0),
@@ -1190,7 +1263,7 @@ mod header_tests {
             );
             // The toggle.
             assert_eq!(
-                moves_after(cx, kind, true, 72.0 + metrics::PILL_LEADING + 14.0),
+                moves_after(cx, kind, true, 72.0 + 12.0 + 14.0),
                 0,
                 "toggle is a control"
             );
@@ -1212,10 +1285,17 @@ mod header_tests {
         assert!(fade >= height, "the fade must cover the bar");
         assert_eq!(fade, height + 6.0);
         assert_eq!(overhang, 24.0);
+        // One button family (Jacob 2026-10-24): the pill is a CONTROL tall,
+        // like the strip discs and the sidebar toggle, and sits on their line —
+        // centred in the bar's content box (44 − 2 pad − 36) / 2 = 3.
+        assert_eq!(pill_h, CONTROL, "pill height is the button family's");
+        assert_eq!(pill_h, crate::ui::sidebar::STRIP_BUTTON);
         assert_eq!(
-            pill_top + pill_h,
-            height,
-            "the pill sits with more top air and meets the bar's bottom edge"
+            pill_top,
+            (height - metrics::BOTTOM_PAD - pill_h) / 2.0,
+            "the pill is centred on the toggle's line"
         );
+        assert!(pill_top + pill_h <= height - metrics::BOTTOM_PAD);
+        assert_eq!(AVATAR_HEADER, CONTROL - 8.0, "picture 4 pt inside the pill");
     }
 }
