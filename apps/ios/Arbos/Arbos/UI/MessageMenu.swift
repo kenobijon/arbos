@@ -1,13 +1,15 @@
 import SwiftUI
 
 /// The message bubble's menu under the reaction capsule (`MessageActions.swift`):
-/// **Copy, Reply, Forward, Reply in DM, Delete** (#1370 + #1472); reactions live
-/// in the capsule, never here (Jacob, 2026-10-23). Forward opens the same chat
-/// picker the media viewer uses; Reply in DM opens a private chat with the human
-/// who wrote the message. Non-message rows get `copyOnly` as a plain `.contextMenu`.
+/// **Copy, Reply, View thread, Forward, Reply in DM, Delete** (#1370 + #1472;
+/// View thread when the message has replies); reactions live in the capsule,
+/// never here (Jacob, 2026-10-23). Forward opens the same chat picker the media
+/// viewer uses; Reply in DM opens a private chat with the human who wrote the
+/// message. Non-message rows get `copyOnly` as a plain `.contextMenu`.
 enum MessageMenuItem: CaseIterable, Equatable {
     case copy
     case reply
+    case viewThread
     case forward
     case replyInDM
     case delete
@@ -16,6 +18,7 @@ enum MessageMenuItem: CaseIterable, Equatable {
         switch self {
         case .copy: return "Copy"
         case .reply: return "Reply"
+        case .viewThread: return "View thread"
         case .forward: return "Forward"
         case .replyInDM: return "Reply in DM"
         case .delete: return "Delete"
@@ -26,6 +29,7 @@ enum MessageMenuItem: CaseIterable, Equatable {
         switch self {
         case .copy: return "doc.on.doc"
         case .reply: return "arrowshape.turn.up.left"
+        case .viewThread: return "bubble.left.and.bubble.right"
         case .forward: return "arrowshape.turn.up.right"
         case .replyInDM: return "bubble.left"
         case .delete: return "trash"
@@ -36,23 +40,27 @@ enum MessageMenuItem: CaseIterable, Equatable {
 }
 
 enum MessageMenu {
-    /// The items, in order, for every real message bubble.
+    /// The items, in order, for every real message bubble (no replies yet).
     static let items: [MessageMenuItem] = [.copy, .reply, .forward, .replyInDM, .delete]
+
+    /// Same as `items`, plus View thread after Reply when the message has replies.
+    static let itemsWithThread: [MessageMenuItem] = [.copy, .reply, .viewThread, .forward, .replyInDM, .delete]
 
     /// Rows that are not a message in a shared doc (channels, date / system
     /// lines) can only be copied.
     static let copyOnly: [MessageMenuItem] = [.copy]
 
     static func items(forMessage: Bool) -> [MessageMenuItem] {
-        forMessage ? items : copyOnly
+        items(forMessage: forMessage, canDelete: true, hasReplies: false)
     }
 
-    /// The items for one bubble: Delete only when the relay would let this user delete it
-    /// (`MessageDeleteRule.mayDelete`) — a member sees Copy / Reply / Forward on someone
-    /// else's message, the owner sees all.
-    static func items(forMessage: Bool, canDelete: Bool) -> [MessageMenuItem] {
+    /// The items for one bubble: View thread when `hasReplies`; Delete only when the
+    /// relay would let this user delete it (`MessageDeleteRule.mayDelete`) — a member
+    /// sees Copy / Reply / Forward on someone else's message, the owner sees all.
+    static func items(forMessage: Bool, canDelete: Bool, hasReplies: Bool = false) -> [MessageMenuItem] {
         guard forMessage else { return copyOnly }
-        return canDelete ? items : items.filter { !$0.isDestructive }
+        let base = hasReplies ? itemsWithThread : items
+        return canDelete ? base : base.filter { !$0.isDestructive }
     }
 }
 
@@ -101,5 +109,97 @@ enum MessageDeleteCopy {
         let name = sender.trimmingCharacters(in: .whitespacesAndNewlines)
         if mine || name.isEmpty { return "Delete message?" }
         return "Delete \(name)’s message?"
+    }
+}
+
+/// Long-press → View thread: the held message and every reply in its chain.
+struct MessageThreadSheet: View {
+    @Environment(\.theme) private var theme
+    @Environment(\.dismiss) private var dismiss
+    let root: Message
+    let replies: [Message]
+
+    private var title: String {
+        replies.count == 1 ? "1 reply" : "\(replies.count) replies"
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    threadRow(root, showCount: true)
+                    ForEach(replies) { message in
+                        threadRow(message, showCount: false)
+                    }
+                }
+                .padding(16)
+            }
+            .background(theme.bg)
+            .navigationTitle(title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }
+                        .foregroundStyle(theme.text)
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+        .presentationBackground(theme.bg)
+        .preferredColorScheme(theme.isDark ? .dark : .light)
+    }
+
+    private func threadRow(_ message: Message, showCount: Bool) -> some View {
+        let mine = message.role == .user
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(senderLabel(message))
+                    .font(theme.font(Theme.tiny, weight: .semibold))
+                    .foregroundStyle(mine ? theme.userText.opacity(0.7) : theme.muted)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                if showCount, !replies.isEmpty {
+                    Text("\(replies.count)")
+                        .font(theme.font(11, weight: .semibold))
+                        .foregroundStyle(mine ? theme.userText.opacity(0.7) : theme.muted)
+                        .accessibilityLabel("\(replies.count) \(replies.count == 1 ? "reply" : "replies")")
+                }
+            }
+            Text(bodyText(message))
+                .font(theme.font(Theme.body))
+                .foregroundStyle(mine ? theme.userText : theme.text)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .textSelection(.enabled)
+        }
+        .padding(.horizontal, Theme.bubbleHPad)
+        .padding(.vertical, Theme.bubbleVPad)
+        .background(
+            RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous)
+                .fill(mine ? theme.bubbleUser : theme.bubbleAssistant)
+        )
+    }
+
+    private func senderLabel(_ message: Message) -> String {
+        if let handle = message.senderHandle?.trimmingCharacters(in: .whitespaces), !handle.isEmpty {
+            return "@\(handle)"
+        }
+        if let name = message.senderName?.trimmingCharacters(in: .whitespaces), !name.isEmpty {
+            return name
+        }
+        switch message.role {
+        case .user: return "You"
+        case .assistant, .project: return "Agent"
+        case .system: return "System"
+        }
+    }
+
+    private func bodyText(_ message: Message) -> String {
+        let text = message.plainText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !text.isEmpty { return text }
+        for part in message.parts {
+            if case .attachment(_, let a) = part { return a.name }
+        }
+        return "Message"
     }
 }

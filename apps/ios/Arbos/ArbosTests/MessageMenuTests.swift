@@ -2,13 +2,16 @@ import XCTest
 @testable import Arbos
 
 /// The bubble's long-press menu is Copy / Reply / Forward / Reply in DM /
-/// Delete (#1370, #1472, forward feedback) — no emoji row, no Mention; a
-/// non-message row copies only.
+/// Delete (#1370, #1472, forward feedback), plus View thread when the message
+/// has replies — no emoji row, no Mention; a non-message row copies only.
 final class MessageMenuTests: XCTestCase {
     func testItemsAreExactlyCopyReplyForwardReplyInDMDelete() {
         XCTAssertEqual(MessageMenu.items, [.copy, .reply, .forward, .replyInDM, .delete])
         XCTAssertEqual(MessageMenu.items.map(\.label), ["Copy", "Reply", "Forward", "Reply in DM", "Delete"])
         XCTAssertEqual(MessageMenu.items(forMessage: true), MessageMenu.items)
+        XCTAssertEqual(MessageMenu.items(forMessage: true, canDelete: true, hasReplies: true), MessageMenu.itemsWithThread)
+        XCTAssertEqual(MessageMenu.itemsWithThread.map(\.label),
+                       ["Copy", "Reply", "View thread", "Forward", "Reply in DM", "Delete"])
     }
 
     func testNoEmojiOrExtraItems() {
@@ -16,7 +19,7 @@ final class MessageMenuTests: XCTestCase {
             XCTAssertTrue(item.label.unicodeScalars.allSatisfy { $0.isASCII }, "\(item) label carries non-ASCII text")
             XCTAssertFalse(MessageReaction.palette.contains(item.label))
         }
-        XCTAssertEqual(MessageMenuItem.allCases.count, 5)
+        XCTAssertEqual(MessageMenuItem.allCases.count, 6)
     }
 
     func testOnlyDeleteIsDestructive() {

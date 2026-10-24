@@ -134,6 +134,8 @@ struct Row: Identifiable, Equatable {
     var kind: RowKind
     /// Emoji reactions shown under this bubble (stamped on the last prose/media row of a message).
     var reactions: [MessageReaction] = []
+    /// How many messages reply to this one via `replyTo` (swipe / long-press Reply); shown top-right when > 0.
+    var replyCount: Int = 0
     /// The message's `createdAt` (ms), so the swipe-revealed time needs no lookup.
     var createdAt: Int64 = 0
 }
@@ -169,6 +171,7 @@ enum Transcript {
         var prevSender: String? = nil
         /// Hand-off rows by id (name, messages exchanged), merged into one line when consecutive.
         var handoffs: [String: (String, Int)] = [:]
+        let replyCounts = Self.replyCounts(in: messages)
         for message in messages {
             // Voice-call transcript lines stay in the doc for the agent; they are not
             // chat bubbles (Grok: typed prose, attachments, and call start/end notes only).
@@ -369,6 +372,16 @@ enum Transcript {
                }) {
                 chunk[ix].reactions = message.reactions
             }
+            // Reply count on the first prose/media row so the badge sits on the message's top bubble.
+            if let count = replyCounts[message.id], count > 0,
+               let ix = chunk.firstIndex(where: {
+                   switch $0.kind {
+                   case .user, .other, .member, .assistant, .image, .file, .voiceMemo: return true
+                   default: return false
+                   }
+               }) {
+                chunk[ix].replyCount = count
+            }
             // Date separators when the gap is over an hour (Grok: "Today 8:00 AM").
             if dateBreak {
                 rows.append(Row(id: "\(message.id)#date", messageId: message.id, role: .system,
@@ -380,6 +393,44 @@ enum Transcript {
             prevSender = message.sender
         }
         return Self.mergeHandoffs(rows, handoffs)
+    }
+
+    /// Parent message id for an explicit reply (`replyTo` from swipe / long-press Reply).
+    /// Agent turn links (`inReplyTo`) are not comment-thread parents — counting them would
+    /// put a badge on every answered user message in a 1:1 agent chat.
+    static func replyParentId(of message: Message) -> Id? {
+        if let p = message.replyTo, !p.isEmpty { return p }
+        return nil
+    }
+
+    /// How many messages point at each parent via `replyTo`.
+    static func replyCounts(in messages: [Message]) -> [Id: Int] {
+        var counts: [Id: Int] = [:]
+        for message in messages {
+            guard let parent = replyParentId(of: message) else { continue }
+            counts[parent, default: 0] += 1
+        }
+        return counts
+    }
+
+    /// Direct and nested `replyTo` replies to `rootId`, in transcript order (root itself excluded).
+    static func threadReplies(rootId: Id, in messages: [Message]) -> [Message] {
+        var parentOf: [Id: Id] = [:]
+        parentOf.reserveCapacity(messages.count)
+        for message in messages {
+            if let parent = replyParentId(of: message) { parentOf[message.id] = parent }
+        }
+        func inThread(_ id: Id) -> Bool {
+            var cur: Id? = id
+            var guardCount = 0
+            while let c = cur, guardCount < 64 {
+                if c == rootId { return true }
+                cur = parentOf[c]
+                guardCount += 1
+            }
+            return false
+        }
+        return messages.filter { $0.id != rootId && inThread($0.id) }
     }
 
     /// Blocks for one text part — polished, split, JSON dropped. Cached by text: a rebuild
@@ -936,6 +987,7 @@ struct RowView: View, Equatable {
                 .padding(.horizontal, Theme.bubbleHPad)
                 .padding(.vertical, Theme.bubbleVPad)
                 .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleUser))
+                .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: true) }
                 .frame(maxWidth: maxBubble, alignment: .trailing)
                 .opacity(pending ? 0.6 : 1)
             }
@@ -973,6 +1025,7 @@ struct RowView: View, Equatable {
                 .padding(.horizontal, Theme.bubbleHPad)
                 .padding(.vertical, Theme.bubbleVPad)
                 .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
+                .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: false) }
                 .modifier(LiveSenderBar(url: avatar, seed: model.personId(handle: handle) ?? handle))
                 .frame(maxWidth: maxBubble - Theme.memberLane(composerInset: composerInset), alignment: .leading)
                 Spacer(minLength: 0)
@@ -1028,6 +1081,7 @@ struct RowView: View, Equatable {
                         }
                     }
                 )
+                .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: false) }
                 .frame(maxWidth: maxBubble - Theme.memberLane(composerInset: composerInset), alignment: .leading)
                 Spacer(minLength: 0)
             }
@@ -1052,6 +1106,7 @@ struct RowView: View, Equatable {
                 .padding(.horizontal, Theme.bubbleHPad)
                 .padding(.vertical, Theme.bubbleVPad)
                 .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
+                .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: false) }
                 .background {
                     // D82: while the first-login terminal morphs into this bubble it
                     // needs the bubble's exact frame; only the greeting row reports.
@@ -1091,6 +1146,7 @@ struct RowView: View, Equatable {
             HStack {
                 if row.role == .user { Spacer(minLength: 0) }
                 FileCard(item: item, subtitle: subtitle, chatId: chatId, fromUser: row.role == .user)
+                    .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: row.role == .user) }
                     .frame(maxWidth: maxBubble, alignment: row.role == .user ? .trailing : .leading)
                 if row.role != .user { Spacer(minLength: 0) }
             }
@@ -1105,6 +1161,7 @@ struct RowView: View, Equatable {
             HStack {
                 if fromUser { Spacer(minLength: 0) }
                 VoiceMemoBubble(name: name, projectId: projectId, blobRef: ref, fromUser: fromUser)
+                    .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: fromUser) }
                     .frame(maxWidth: maxBubble, alignment: fromUser ? .trailing : .leading)
                 if !fromUser { Spacer(minLength: 0) }
             }
@@ -1112,6 +1169,7 @@ struct RowView: View, Equatable {
             HStack {
                 if fromUser { Spacer(minLength: 0) }
                 ImageBubble(item: item, chatId: chatId, fromUser: fromUser, maxWidth: maxBubble)
+                    .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: fromUser) }
                 if !fromUser { Spacer(minLength: 0) }
             }
         case .error(let code, let message):
@@ -1126,6 +1184,19 @@ struct RowView: View, Equatable {
             }
             .padding(.horizontal, Theme.bubbleHPad).padding(.vertical, 10)
             .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.dangerSoft))
+        }
+    }
+
+    /// Reply count in the bubble's top-right corner when this message has replies.
+    @ViewBuilder
+    private func replyCountBadge(userBubble: Bool) -> some View {
+        if row.replyCount > 0 {
+            Text("\(row.replyCount)")
+                .font(theme.font(11, weight: .semibold))
+                .foregroundStyle(userBubble ? theme.userText.opacity(0.7) : theme.muted)
+                .padding(.top, 6)
+                .padding(.trailing, 8)
+                .accessibilityLabel("\(row.replyCount) \(row.replyCount == 1 ? "reply" : "replies")")
         }
     }
 
