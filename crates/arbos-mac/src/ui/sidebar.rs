@@ -64,7 +64,12 @@ impl Render for SidebarResizeDragGhost {
 /// the lights' line: macOS draws them at 20.75 pt in this window, so the 44
 /// band is centred 1 pt high (Grok: 21.75 / 21.75). The collapse toggle keeps
 /// the right end so folding the pane stays intuitive (#1491).
-fn top_strip() -> f32 {
+///
+/// Native full screen keeps this exact band: the shell paints the traffic
+/// lights into it (`traffic_lights::overlay`) and nothing is added above the
+/// strip ([feedback fullscreen-traffic-lights-2026-10-24]; pinned by
+/// `traffic_lights::tests::full_screen_adds_no_band_above_the_strip`).
+pub(crate) fn top_strip(_fullscreen: bool) -> f32 {
     if cfg!(target_os = "macos") {
         HEADER_HEIGHT
     } else {
@@ -596,7 +601,7 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
             .on_click(cx.listener(|this, _, window, cx| this.open_palette(window, cx)))
     };
     let mut strip = div()
-        .h(px(top_strip()))
+        .h(px(top_strip(shell.fullscreen)))
         .flex_shrink_0()
         .flex()
         .items_center()
@@ -804,7 +809,7 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
     for (_, entry) in rows {
         list = match entry {
             ListEntry::Chat(row) => list.child(render_row(*row, shell, &theme, cx)),
-            ListEntry::Server(row) => list.child(render_server_row(*row, &theme, cx)),
+            ListEntry::Server(row) => list.child(render_server_row(*row, shell, &theme, cx)),
         };
     }
     if !hidden_mode && hidden_count > 0 {
@@ -1001,7 +1006,25 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
 
 /// A server's picture: the leaf picked on its Create screen (D92 amendment),
 /// else the D79 disc — initials from its name, the relay's gradient index.
-pub fn server_picture(server: &ServerInfo, size: f32, theme: &Theme) -> Div {
+pub fn server_picture(server: &ServerInfo, state: &AppState, size: f32, theme: &Theme) -> Div {
+    // D92 amendment: an uploaded / generated picture wins over the leaf.
+    if let Some(image) = server
+        .image_url
+        .as_deref()
+        .and_then(|url| state.avatar(url))
+    {
+        return div()
+            .size(px(size))
+            .flex_shrink_0()
+            .rounded_full()
+            .overflow_hidden()
+            .child(
+                gpui::img(image)
+                    .size(px(size))
+                    .rounded_full()
+                    .object_fit(gpui::ObjectFit::Cover),
+            );
+    }
     if let (true, Some(leaf), Some(color)) = (
         avatars::leaf_avatars_on(),
         server.avatar_leaf,
@@ -1025,14 +1048,15 @@ pub fn server_picture(server: &ServerInfo, size: f32, theme: &Theme) -> Div {
 /// A server row's picture: [`server_picture`] on a rounded square instead of
 /// the disc, so servers read apart from agents and people in the one list
 /// (approved mock, [feedback sidebar-strip-filter-2026-10-24]).
-pub fn server_row_picture(server: &ServerInfo, size: f32, theme: &Theme) -> Div {
-    server_picture(server, size, theme).rounded(px(size * SERVER_PICTURE_CORNER))
+pub fn server_row_picture(server: &ServerInfo, state: &AppState, size: f32, theme: &Theme) -> Div {
+    server_picture(server, state, size, theme).rounded(px(size * SERVER_PICTURE_CORNER))
 }
 
 /// A server row (D88 rule 1): drawn like a group row — picture, name, time, last line,
 /// unread dot. No badge, no count, no disclosure. The picture is a rounded square.
 fn render_server_row(
     row: ServerRowView,
+    shell: &Shell,
     theme: &Theme,
     cx: &mut Context<Shell>,
 ) -> gpui::Stateful<Div> {
@@ -1043,6 +1067,7 @@ fn render_server_row(
         preview,
         time,
     } = row;
+    let picture = server_row_picture(&server, shell.state.read(cx), AVATAR_ROW, theme);
     let id: Id = server.id.clone();
     let menu_id: Id = server.id.clone();
     let ctrl_menu_id: Id = server.id.clone();
@@ -1115,7 +1140,7 @@ fn render_server_row(
                 .relative()
                 .size(px(AVATAR_ROW))
                 .flex_shrink_0()
-                .child(server_row_picture(&server, AVATAR_ROW, theme)),
+                .child(picture),
         )
         .child(
             div()
@@ -1223,7 +1248,7 @@ fn server_channels(
                 .min_w_0()
                 .flex_1()
                 .cursor_pointer()
-                .child(server_picture(server, 26.0, theme))
+                .child(server_picture(server, state, 26.0, theme))
                 .child(
                     div()
                         .min_w_0()
@@ -2394,7 +2419,7 @@ mod row_bounds_tests {
             _: &mut gpui::Context<Self>,
         ) -> impl IntoElement {
             let strip = div()
-                .h(px(top_strip()))
+                .h(px(top_strip(false)))
                 .flex_shrink_0()
                 .debug_selector(|| "sidebar-strip".into());
             let mut list = div()

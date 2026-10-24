@@ -2741,8 +2741,18 @@ final class AppModel: ObservableObject {
         let words = text.split(whereSeparator: { $0.isWhitespace })
         for t in words where t.hasPrefix("@") {
             let slug = t.dropFirst().trimmingCharacters(in: CharacterSet(charactersIn: ".,!?:;")).lowercased()
-            if slug == "everyone" || slug == "all" {
+            if slug == "everyone" || slug == "all" || slug == "agents" {
                 appendAgents()
+                continue
+            }
+            // `@here` (Jacob, 2026-10-24): everyone in this chat — its people but me, and its
+            // agents — as member ids, which is what every agent's gate reads (rule 3), so they wake.
+            if slug == "here" {
+                for m in members where !out.contains(m.member) {
+                    if !m.isAgent, let mine, m.handle.lowercased() == mine { continue }
+                    if m.isAgent, m.project == nil { continue }
+                    out.append(m.member)
+                }
                 continue
             }
             // A committed chip says who this is (#1596) — no tie rule needed.
@@ -2775,6 +2785,13 @@ final class AppModel: ObservableObject {
     /// addresses every agent in the chat.
     static func addressesEveryone(_ text: String) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        // `@here` / `@agents` chips (collective mentions, 2026-10-24) address every agent.
+        if trimmed.split(whereSeparator: { $0.isWhitespace }).contains(where: {
+            let t = $0.trimmingCharacters(in: CharacterSet(charactersIn: ".,!?:;"))
+            return t == "@here" || t == "@agents"
+        }) {
+            return true
+        }
         for g in [
             "hey everyone", "hi everyone", "hello everyone", "yo everyone", "ok everyone", "okay everyone",
             "hey agents", "hi agents", "hello agents", "yo agents", "ok agents", "okay agents",
@@ -3207,6 +3224,24 @@ final class AppModel: ObservableObject {
             return "fixture-gen-\(prompt.lowercased().replacingOccurrences(of: " ", with: "-"))"
         }
         return try await api.generateProjectAvatar(projectId, prompt: prompt)
+    }
+
+    /// The same for a people group's picture (any member) — the key lands in `people:{chat}`.
+    func generateGroupAvatar(chatId: String, prompt: String) async throws -> String {
+        if isFixture {
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            return "fixture-gen-\(prompt.lowercased().replacingOccurrences(of: " ", with: "-"))"
+        }
+        return try await api.generateGroupAvatar(chatId, prompt: prompt)
+    }
+
+    /// Set a group picture from a key the relay already holds (the Generate tab's answer).
+    func setGroupImageKey(chatId: String, key: String) async -> Bool {
+        if isFixture {
+            if let i = peopleChats.firstIndex(where: { $0.id == chatId }) { peopleChats[i].imageKey = key }
+            return true
+        }
+        return await patchPeopleChat(chatId, imageKey: key)
     }
 
     /// D92 amendment: a group's leaf picture (nil = initials); drops the uploaded picture.

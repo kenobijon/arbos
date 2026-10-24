@@ -52,6 +52,7 @@ use crate::ui::theme::{
     COMPOSER_BOTTOM, COMPOSER_WIDTH, DRAWER_WIDTH, GLASS_OPACITY_MAX, GLASS_OPACITY_MIN,
     HEADER_HEIGHT, LINE_HEIGHT, PANEL_RADIUS, TAB_BAR_HEIGHT, TEXT_BODY, TEXT_SMALL, TEXT_TINY,
 };
+use crate::ui::traffic_lights;
 use crate::ui::transcript::{column_row, Transcript, TranscriptEvent};
 use crate::ui::voice::Voice;
 use crate::ui::voicepicker;
@@ -270,6 +271,9 @@ pub struct Shell {
     fixture_drag_over: bool,
     /// True while the sign-in screen is up; its clearing focuses the composer.
     signing_in: bool,
+    /// The window is in native full screen (read at each render): the shell
+    /// paints the traffic lights itself (`traffic_lights::overlay`).
+    pub(crate) fullscreen: bool,
     /// Flag of the header's former "…" menu (removed, feedback
     /// app-01M5ATBWSY9E1HHBKH2QQVDEZX). Nothing renders it; escapes and
     /// click-outside still clear it so leftover true never sticks.
@@ -456,7 +460,7 @@ impl Shell {
             }
             if let Some(done) = state.update(cx, |s, _| s.avatar_generated.take()) {
                 if let Some(pk) = this.avatar_picker.as_mut() {
-                    if pk.target.id() == &done.project_id {
+                    if pk.target == done.target {
                         pk.generating = false;
                         match (done.image_key, done.url) {
                             (Some(key), Some(url)) => {
@@ -917,6 +921,7 @@ impl Shell {
             file_drop_over: false,
             fixture_drag_over: std::env::var("ARBOS_FIXTURE_DRAG_OVER").is_ok_and(|v| v == "1"),
             signing_in: false,
+            fullscreen: false,
             menu_open: false,
             // Rig: `ARBOS_SIDEBAR_FILTER=all|agents|people|servers` selects a segment at launch.
             list_filter: std::env::var("ARBOS_SIDEBAR_FILTER")
@@ -1365,14 +1370,12 @@ impl Shell {
         if prompt.is_empty() || pk.generating {
             return;
         }
-        let avatar_picker::Target::Agent(project_id) = pk.target.clone() else {
-            return;
-        };
+        let target = pk.target.clone();
         pk.generating = true;
         pk.error = None;
         pk.reset = false;
         self.state.update(cx, |s, cx| {
-            s.generate_project_image(project_id, prompt, cx);
+            s.generate_image(target, prompt, cx);
         });
         cx.notify();
     }
@@ -1461,7 +1464,50 @@ impl Shell {
                                 s.set_group_image(id, path, cx);
                             }
                         }
-                        avatar_picker::Tab::Generate => {}
+                        avatar_picker::Tab::Generate => {
+                            if let Some((key, _)) = pk.generated {
+                                s.set_group_image_key(id, key, cx);
+                            }
+                        }
+                    }
+                }
+            }
+            avatar_picker::Target::Server(_) => {
+                if pk.reset {
+                    s.set_server_leaf(id, None, cx);
+                } else {
+                    match pk.tab {
+                        avatar_picker::Tab::Bot => {
+                            let current = s
+                                .servers
+                                .iter()
+                                .find(|x| x.id == id)
+                                .and_then(|x| {
+                                    Some(LeafPick {
+                                        leaf: x.avatar_leaf?,
+                                        color: x.avatar_leaf_color?,
+                                    })
+                                })
+                                .unwrap_or_else(|| leaf::pick_for(&id, None, None));
+                            s.set_server_leaf(
+                                id,
+                                Some(LeafPick {
+                                    leaf: pk.leaf.unwrap_or(current.leaf),
+                                    color: pk.color.unwrap_or(current.color),
+                                }),
+                                cx,
+                            );
+                        }
+                        avatar_picker::Tab::Upload => {
+                            if let Some(path) = pk.upload {
+                                s.set_server_image(id, PictureSource::File(path), cx);
+                            }
+                        }
+                        avatar_picker::Tab::Generate => {
+                            if let Some((key, _)) = pk.generated {
+                                s.set_server_image(id, PictureSource::Key(key), cx);
+                            }
+                        }
                     }
                 }
             }
@@ -2900,7 +2946,9 @@ impl Shell {
                 hero_data.unwrap_or((avatars::AvatarState::Idle, None));
             let _ = avatar_state;
             if !is_people {
-                hero = hero.child(avatars::project(&space, 88.0, &theme));
+                // D92 amendment: an agent's uploaded / generated picture wins over the leaf.
+                let state = self.state.read(cx);
+                hero = hero.child(crate::ui::groups::picture(&space, state, 88.0, &theme));
             } else if let Some(person) = space.person() {
                 hero = hero.child(people::avatar(person_image, person, 88.0, &theme));
             } else {
@@ -3776,6 +3824,7 @@ impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
         let width: f32 = window.viewport_size().width.into();
+        self.fullscreen = window.is_fullscreen();
         let state = self.state.read(cx);
         let sidebar_hidden = state.rail_collapsed || state.window_is_narrow(width);
         let sidebar_overlay = sidebar_hidden && state.sidebar_overlay;
@@ -3873,6 +3922,7 @@ impl Render for Shell {
             self.signing_in = true;
             return root
                 .child(self.render_pairing(&pairing, cx))
+                .children(traffic_lights::overlay(window, cx))
                 .into_any_element();
         }
         if self.signing_in {
@@ -3925,6 +3975,10 @@ impl Render for Shell {
                 root = root.child(pane);
             }
         }
+        // Native full screen: the three panes are laid out as in windowed mode and
+        // the traffic lights are painted into the strip's band; menus and sheets
+        // below paint over them, as they paint over the rest of the chrome.
+        root = root.children(traffic_lights::overlay(window, cx));
         if let Some(menu) = sidebar::row_menu(self, cx) {
             root = root.child(menu);
         }
