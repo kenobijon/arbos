@@ -711,6 +711,12 @@ struct ChatView: View {
                             model.fixtureAgentMessage(chatId: chatId, received: show == "agent-message-received")
                         }
                         #endif
+                    case "actions":
+                        // Rig: the long-press actions (capsule + menu) on the newest bubble.
+                        if let row = rows.last(where: { isMessageRow($0) }) { actionsRow = row }
+                    case "delete":
+                        // Rig: the "Delete message?" confirm for the newest bubble.
+                        if let row = rows.last(where: { isMessageRow($0) }) { beginDelete(row) }
                     case "replied":
                         // Rig: a sent bubble quoting the newest agent message (fixture only).
                         #if DEBUG

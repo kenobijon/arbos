@@ -218,6 +218,9 @@ pub struct Shell {
     /// `ARBOS_RIG_MESSAGE_MENU=x,y` (screenshot rig): opens the menu once the
     /// open chat has a message; cleared when it has.
     rig_message_menu: Option<gpui::Point<gpui::Pixels>>,
+    /// `ARBOS_RIG_DELETE_CONFIRM=1` (screenshot rig): opens the "Delete
+    /// message?" confirm for the newest message of the open chat; cleared once it has.
+    rig_delete_confirm: bool,
     /// The reaction capsule over a bubble (`reactions`): (chat, message, the smiley's click).
     pub(crate) reaction_capsule: Option<(
         crate::model::Id,
@@ -818,6 +821,7 @@ impl Shell {
             chat_delete_armed: false,
             message_menu: None,
             rig_message_menu: message_menu::rig_anchor(),
+            rig_delete_confirm: std::env::var_os("ARBOS_RIG_DELETE_CONFIRM").is_some(),
             reaction_capsule: None,
             reaction_pick_open: false,
             reaction_pick,
@@ -3734,6 +3738,18 @@ impl Render for Shell {
         }
         if let Some(capsule) = reactions::render(self, window, cx) {
             root = root.child(capsule);
+        }
+        if self.rig_delete_confirm {
+            let target = self.state.read(cx).active_chat_id().and_then(|chat| {
+                let state = self.state.read(cx);
+                let last = state.messages.get(&chat)?.last()?.id.clone();
+                Some((chat, last))
+            });
+            if let Some((chat, message)) = target {
+                self.rig_delete_confirm = false;
+                self.state
+                    .update(cx, |s, cx| s.open_delete_confirm(chat, message, cx));
+            }
         }
         if let Some(confirm) = delete_confirm::overlay(self, &self.delete_confirm_focus, cx) {
             // Return / Esc go to the card while it is up; focus moves there once per opening.
