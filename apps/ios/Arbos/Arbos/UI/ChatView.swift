@@ -272,26 +272,21 @@ struct ChatView: View {
             let recent = nowMs() - 15 * 60 * 1000
             var seen = Set<String>()
             for m in messages.reversed() where m.role == .assistant && m.isStreaming && m.createdAt >= recent {
-                let key = m.senderHandle ?? m.senderName ?? m.sender
-                guard seen.insert(key).inserted else { continue }
-                let agent = people?.agents.first { mentionSlug($0.project?.name ?? "") == key || $0.handle == key }
-                if let p = agent?.project {
-                    out.append(PresenceParticipant(
-                        id: "working:\(key)", name: p.name, activity: .working,
-                        picture: AnyView(AgentAvatar(project: p, theme: theme, size: PresenceRow.avatar, working: true))
-                    ))
-                } else {
-                    let shown = m.senderName ?? key
-                    out.append(PresenceParticipant(
-                        id: "working:\(key)", name: shown, activity: .working,
-                        picture: AnyView(InitialsAvatar(name: shown, handle: key, id: m.sender, size: PresenceRow.avatar))
-                    ))
-                }
+                // The same question the bubble asks (#1592): the row's sender, handle and
+                // name through `AppModel.agent` — one identity, so the row's picture is the
+                // bubble's disc and its words the bubble's caption, never the raw handle.
+                let p = model.agent(sender: m.sender, handle: m.senderHandle, name: m.senderName, chatId: chatId)
+                guard seen.insert(p.id).inserted else { continue }
+                out.append(PresenceParticipant(
+                    id: "working:\(p.id)", name: p.name, activity: .working,
+                    picture: AnyView(AgentAvatar(project: p, theme: theme, size: PresenceRow.avatar, working: true))
+                ))
             }
         } else if let project {
+            let p = model.agent(id: project.id, name: project.name)
             out.append(PresenceParticipant(
-                id: "working:\(project.id)", name: project.name, activity: .working,
-                picture: AnyView(AgentAvatar(project: project, theme: theme, size: PresenceRow.avatar, working: true))
+                id: "working:\(p.id)", name: p.name, activity: .working,
+                picture: AnyView(AgentAvatar(project: p, theme: theme, size: PresenceRow.avatar, working: true))
             ))
         }
         return out
@@ -1594,8 +1589,8 @@ struct ChatView: View {
                         editing = nil
                     } label: {
                         HStack(spacing: 6) {
-                            if m.isAgent, let p = m.project {
-                                AgentAvatar(project: p, theme: theme, size: 18, still: true)
+                            if m.isAgent {
+                                AgentAvatar(project: model.agent(member: m, chatId: chatId), theme: theme, size: 18, still: true)
                             } else {
                                 PersonAvatar(url: m.avatarUrl, handle: m.handle, size: 18, name: m.name, id: m.id, colorIndex: m.avatarColorIndex)
                             }
@@ -2076,7 +2071,7 @@ struct ChatView: View {
                         ForEach(items) { m in
                             Button { completeMention(m) } label: {
                                 HStack(spacing: 6) {
-                                    if m.isAgent, let p = m.project { AgentAvatar(project: p, theme: theme, size: 20, still: true) } else { PersonAvatar(url: m.avatarUrl, handle: m.handle, size: 20, name: m.name, id: m.id, colorIndex: m.avatarColorIndex) }
+                                    if m.isAgent { AgentAvatar(project: model.agent(member: m, chatId: chatId), theme: theme, size: 20, still: true) } else { PersonAvatar(url: m.avatarUrl, handle: m.handle, size: 20, name: m.name, id: m.id, colorIndex: m.avatarColorIndex) }
                                     Text("@\(m.isAgent ? mentionSlug(m.project?.name ?? m.handle) : m.handle)")
                                         .font(theme.font(Theme.small, weight: .medium)).foregroundStyle(theme.text)
                                     if !label(m).isEmpty {

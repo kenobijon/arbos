@@ -1414,8 +1414,8 @@ struct PeopleRow: View {
                 } else {
                     PersonAvatar(url: other?.avatarUrl, handle: other?.handle ?? "?", size: Theme.rowAvatar, name: other?.name, id: other?.id, colorIndex: other?.avatarColorIndex)
                 }
-                if let a = chat.agents.first?.project {
-                    AgentAvatar(project: a, theme: theme, size: 18, still: true)
+                if let a = chat.agents.first {
+                    AgentAvatar(project: model.agent(member: a, chatId: chat.id), theme: theme, size: 18, still: true)
                         .overlay(Circle().strokeBorder(theme.bg, lineWidth: 2))
                         .offset(x: 3, y: 3)
                 }

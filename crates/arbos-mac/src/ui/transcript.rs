@@ -1252,58 +1252,25 @@ impl Transcript {
         (a.name, a.seed, a.color_index, a.project_id)
     }
 
-    /// `agent_identity` plus the D92 leaf pair in effect.
+    /// `agent_identity` plus the D92 leaf pair in effect — the shared rule
+    /// (`avatars::agent_identity`, #1592): the open chat's roster, then my projects, then
+    /// every other roster; the row's own name when no card knows the agent. The presence
+    /// row asks the same function with the same row, so the two can never disagree.
     fn agent_identity_full(&self, seed: &str, name: &str, cx: &Context<Self>) -> AgentIdentity {
         let state = self.state.read(cx);
-        let agent_pid = seed
-            .strip_prefix("agent:")
-            .or_else(|| seed.strip_prefix("project:"))
-            .map(str::to_string);
-        let member = agent_pid.as_deref().and_then(|pid| {
-            state
-                .selected()
-                .and_then(|space| space.agents.iter().find(|a| a.project_id == pid))
-                .map(|a| {
-                    (
-                        a.name.clone(),
-                        a.avatar_color_index,
-                        (a.avatar_leaf, a.avatar_leaf_color),
-                        a.image_url.clone(),
-                    )
-                })
-                .or_else(|| {
-                    state.projects.iter().find(|p| p.id == pid).map(|p| {
-                        (
-                            p.name.clone(),
-                            p.avatar_color_index,
-                            (p.avatar_leaf, p.avatar_leaf_color),
-                            p.image_url.clone(),
-                        )
-                    })
-                })
-        });
-        let resolved_name = match &member {
-            Some((n, _, _, _)) if name == "Agent" || name == "Project" => n.clone(),
-            _ => name.to_string(),
-        };
-        let color_index = member.as_ref().and_then(|(_, c, _, _)| *c);
-        let leaf = member
-            .as_ref()
-            .map(|(_, _, l, _)| *l)
-            .unwrap_or((None, None));
+        let hint =
+            (name != "Agent" && name != "Project" && !name.trim().is_empty()).then_some(name);
+        let a = avatars::agent_identity(state.selected(), &state.projects, seed, None, hint);
+        let had_id = seed.starts_with("agent:") || seed.starts_with("project:");
         // D92 amendment: the agent's uploaded / generated picture, once the loader has it.
-        let image = member
-            .as_ref()
-            .and_then(|(_, _, _, url)| url.as_deref())
-            .and_then(|url| state.avatar(url));
-        let disc_seed = agent_pid.clone().unwrap_or_else(|| seed.to_string());
+        let image = a.image_key.as_deref().and_then(|url| state.avatar(url));
         AgentIdentity {
-            name: resolved_name,
-            seed: disc_seed,
-            color_index,
-            leaf,
+            name: a.name,
+            seed: a.id.clone(),
+            color_index: Some(a.color_index),
+            leaf: (Some(a.leaf.leaf), Some(a.leaf.color)),
             image,
-            project_id: agent_pid,
+            project_id: (a.known || had_id).then_some(a.id),
         }
     }
 

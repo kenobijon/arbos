@@ -3325,11 +3325,10 @@ final class AppModel: ObservableObject {
     /// people-chat member row (someone else's agent in a DM).
     func foreignAgent(_ projectId: Id) -> Project? {
         for c in peopleChats {
-            if let a = c.agents.first(where: { $0.id == projectId }), var p = a.project {
-                if p.ownerHandle == nil { p.ownerHandle = a.ownerHandle }
-                p.shared = true
-                if p.description.isEmpty, let d = a.description { p.description = d }
-                return p
+            if let a = c.agents.first(where: { $0.id == projectId }) {
+                // Through the shared identity (#1592): the same name, leaf and picture every
+                // other surface draws for this agent.
+                return agent(member: a, chatId: c.id)
             }
         }
         return nil
