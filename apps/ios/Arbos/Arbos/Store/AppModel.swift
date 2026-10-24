@@ -3259,6 +3259,8 @@ final class AppModel: ObservableObject {
     /// with `typing`; the presence row over the composer reads it
     /// ([feedback typing-indicator-left-2026-10-23], Mac `AppState.typing`).
     @Published var typing: [Id: [String: Int64]] = [:]
+    /// Last time we told the room we are typing, per chat (Mac `typing_sent_at`).
+    private var typingSentAt: [Id: Int64] = [:]
 
     /// Draft text for a chat, or `""` when none.
     func composerDraft(for chatId: Id) -> String {
@@ -3343,7 +3345,9 @@ final class AppModel: ObservableObject {
     /// 6 s (the sender refreshes every 3 s), off → gone at once.
     func noteTyping(_ header: [String: Any], chatId: Id) {
         guard let handle = header["handle"] as? String, !handle.isEmpty,
-              let active = header["typing"] as? Bool else { return }
+              header["typing"] != nil else { return }
+        // `DocJSON.bool` accepts Bool and NSNumber; a bare `as? Bool` missed live frames.
+        let active = DocJSON.bool(header["typing"])
         if handle == user?.login { return }
         var chat = typing[chatId] ?? [:]
         if active {
@@ -3352,6 +3356,18 @@ final class AppModel: ObservableObject {
             chat[handle] = nil
         }
         typing[chatId] = chat.isEmpty ? nil : chat
+    }
+
+    /// Composer keystroke in a people chat (DM or group): at most one presence
+    /// typing ping per 3 s so peers see who is typing ([feedback
+    /// app-01M5N7WSA1VCYHE9BE3CX4V0R6], Mac `AppState::typed_in`).
+    func typedIn(chatId: Id) {
+        guard peopleChat(chatId) != nil else { return }
+        let now = nowMs()
+        let last = typingSentAt[chatId] ?? 0
+        guard now - last > 3_000 else { return }
+        typingSentAt[chatId] = now
+        rooms[chatId]?.setTyping(true)
     }
 
     /// Handles typing in `chatId` right now, the most recently seen first.

@@ -409,10 +409,13 @@ final class SessionRoom {
             // The relay restarts in a few seconds (#1340): the pill says so; the clean close that follows redials.
             if code == "restart_soon" { onLinkState?(.restartSoon); return }
             NSLog("relay room \(roomChat): error \(code): \(message)")
-        case .presence(_, _, _, _, let mine, let headerJson):
+        case .presence(_, _, let typing, _, let mine, let headerJson):
             guard !mine else { return }
             if let data = headerJson.data(using: .utf8),
-               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+               var obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                // RoomAction carries a real Bool; JSONSerialization would leave
+                // `typing` as NSNumber and `as? Bool` in noteTyping would miss it.
+                if let typing { obj["typing"] = typing }
                 onPresence?(obj)
             }
         case .droppedOversize(let bytes):
@@ -509,15 +512,29 @@ final class SessionRoom {
         }
     }
 
-    private func sendPresence() {
+    /// Presence header JSON shared by the 15 s tick and typing pings (Mac `presence_header`).
+    private func presenceHeaderJSON() -> String? {
         var header: [String: Any] = ["device": deviceId(), "at": nowMs()]
         if let u = presenceUser() { header["user"] = u.id; header["handle"] = u.handle }
         if focused { header["focused_chat"] = roomChat }
         if let inCall { header["in_call"] = inCall }
-        if let data = try? JSONSerialization.data(withJSONObject: header),
-           let json = String(data: data, encoding: .utf8) {
-            session.presence(presenceHeader: json)
-        }
+        guard let data = try? JSONSerialization.data(withJSONObject: header),
+              let json = String(data: data, encoding: .utf8) else { return nil }
+        return json
+    }
+
+    private func sendPresence() {
+        guard let json = presenceHeaderJSON() else { return }
+        session.presence(presenceHeader: json)
+        drain()
+    }
+
+    /// Composer keystroke in a people chat: set / clear the `typing` field on a
+    /// presence frame so peers show "<name> is typing…" ([feedback
+    /// app-01M5N7WSA1VCYHE9BE3CX4V0R6], Mac `RoomCmd::Typing`).
+    func setTyping(_ active: Bool) {
+        guard let json = presenceHeaderJSON() else { return }
+        session.typing(presenceHeader: json, active: active)
         drain()
     }
 
