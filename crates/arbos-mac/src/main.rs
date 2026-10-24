@@ -164,8 +164,9 @@ fn main() {
     });
 }
 
-/// The menu bar: the app menu, Edit (Cut / Copy / Paste — ⌘V reaches the chat
-/// through AppKit's `paste:` selector), and Help → Send Feedback… (⌘⇧F).
+/// The menu bar: the app menu, Edit (Undo / Redo / Cut / Copy / Paste — ⌘V
+/// reaches the chat through AppKit's `paste:` selector), and Help → Send
+/// Feedback… (⌘⇧F).
 fn set_menus(cx: &mut App) {
     cx.set_menus(vec![
         Menu {
@@ -176,6 +177,9 @@ fn set_menus(cx: &mut App) {
         Menu {
             name: "Edit".into(),
             items: vec![
+                MenuItem::os_action("Undo", composer::Undo, OsAction::Undo),
+                MenuItem::os_action("Redo", composer::Redo, OsAction::Redo),
+                MenuItem::separator(),
                 MenuItem::os_action("Cut", composer::Cut, OsAction::Cut),
                 MenuItem::os_action("Copy", composer::Copy, OsAction::Copy),
                 MenuItem::os_action("Paste", composer::Paste, OsAction::Paste),
@@ -241,6 +245,12 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-c", composer::Copy, input),
         KeyBinding::new("cmd-x", composer::Cut, input),
         KeyBinding::new("ctrl-x", composer::Cut, input),
+        KeyBinding::new("cmd-z", composer::Undo, input),
+        KeyBinding::new("ctrl-z", composer::Undo, input),
+        KeyBinding::new("cmd-shift-z", composer::Redo, input),
+        KeyBinding::new("ctrl-shift-z", composer::Redo, input),
+        KeyBinding::new("cmd-y", composer::Redo, input),
+        KeyBinding::new("ctrl-y", composer::Redo, input),
         KeyBinding::new("enter", widgets::SubmitAnswer, Some("QuestionCard")),
         KeyBinding::new("down", widgets::NextOption, Some("QuestionCard")),
         KeyBinding::new("right", widgets::NextOption, Some("QuestionCard")),
