@@ -974,11 +974,10 @@ mod avatar_generate_tests {
             bob_dev.clone(),
             Path(chat.clone()),
             Json(crate::people::PatchChatBody {
-                title: None,
-                description: None,
                 image_key: Some(key.to_owned()),
-                avatar_leaf: None,
-                avatar_leaf_color: None,
+                // Every other field at its wire default, so a sibling adding one does not break
+                // this test in a shared gate tree.
+                ..serde_json::from_str("{}").unwrap()
             }),
         )
         .await;
@@ -1055,11 +1054,10 @@ mod avatar_generate_tests {
             alice_dev.clone(),
             Path(server.id.clone()),
             Json(crate::matrix::servers::PatchBody {
-                name: None,
                 image_key: Some(json!(key)),
-                open: None,
                 avatar_leaf: Some(None),
                 avatar_leaf_color: Some(None),
+                ..serde_json::from_str("{}").unwrap()
             }),
         )
         .await;
