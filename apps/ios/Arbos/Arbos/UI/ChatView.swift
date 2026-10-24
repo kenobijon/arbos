@@ -47,6 +47,15 @@ struct ChatView: View {
         return Int.max
     }()
     static let windowStep = 60
+    /// Most rows the view tree holds while reading history. Past this, each step
+    /// that adds older rows at the top also drops the same number of newest rows
+    /// below the viewport, and the first row on screen is re-pinned, so the cost
+    /// of a page of history stays flat however far back the reader goes
+    /// (arbonites-chat-lag: 0.3–0.8 s frames and 600 MB at 600+ rows).
+    static let windowMax = 360
+    /// Newest rows dropped below the viewport while reading history; 0 when the
+    /// window is the tail of the transcript.
+    @State private var windowSkipEnd = 0
     @State private var showModelPicker = false
     /// Rig: the media viewer opened by `ARBOS_SHOW=media…` (media-viewer-2026-10-23).
     @State private var rigViewer: MediaViewerState?
@@ -108,14 +117,47 @@ struct ChatView: View {
     /// The newest `windowCount` of `visibleRows`: what the VStack actually holds.
     private var windowedRows: [Row] {
         let all = visibleRows
-        return all.count > windowCount ? Array(all.suffix(windowCount)) : all
+        let kept = windowSkipEnd > 0 && windowSkipEnd < all.count ? all.dropLast(windowSkipEnd) : all[...]
+        return kept.count > windowCount ? Array(kept.suffix(windowCount)) : Array(kept)
     }
 
     /// Nearing the top: bring the next older slice into the view tree. The scroll view is
     /// anchored at the bottom, so the rows on screen stay put while the content grows above.
+    /// Never inside the caller's animation: an animated change to the row list makes
+    /// SwiftUI diff the whole window per frame.
     private func growWindow() {
-        guard windowCount < visibleRows.count else { return }
-        windowCount = min(visibleRows.count, windowCount + Self.windowStep)
+        let all = visibleRows
+        let available = all.count - windowSkipEnd
+        guard windowCount < available else { return }
+        let step = min(Self.windowStep, available - windowCount)
+        let firstShown = windowedRows.first?.id
+        var t = Transaction()
+        t.disablesAnimations = true
+        withTransaction(t) {
+            if windowCount + step > Self.windowMax {
+                // Slide: the oldest shown rows stay, the same number of newest rows leave.
+                windowSkipEnd += step
+            } else {
+                windowCount += step
+            }
+        }
+        if windowCount + step > Self.windowMax, let firstShown, let proxy = scroller {
+            // Rows left below the viewport and the bottom anchor would shift what is on
+            // screen; put the row that was at the top back where it was.
+            DispatchQueue.main.async { proxy.scrollTo(firstShown, anchor: .top) }
+        }
+    }
+
+    /// Back at the tail (a send, the new-messages pill, settle): the window is the
+    /// newest rows again.
+    private func resetWindowToTail() {
+        guard windowSkipEnd > 0 || windowCount > Self.windowMax else { return }
+        var t = Transaction()
+        t.disablesAnimations = true
+        withTransaction(t) {
+            windowSkipEnd = 0
+            windowCount = min(windowCount, Self.windowMax)
+        }
     }
 
     /// Make sure the row for `messageId` is in the window (quote taps into older history).
@@ -124,8 +166,13 @@ struct ChatView: View {
         let all = visibleRows
         guard let ix = all.firstIndex(where: { $0.messageId == messageId }) else { return false }
         let needed = all.count - ix + Self.windowStep / 2
-        guard needed > windowCount else { return false }
-        windowCount = min(all.count, needed)
+        guard needed > windowCount || windowSkipEnd > 0 else { return false }
+        var t = Transaction()
+        t.disablesAnimations = true
+        withTransaction(t) {
+            windowSkipEnd = 0
+            windowCount = min(all.count, max(windowCount, needed))
+        }
         return true
     }
 
@@ -364,10 +411,14 @@ struct ChatView: View {
         // oldest row on screen does not fall out of the view tree when a new one lands.
         // History that arrives above it — the first snapshot, a backfill, an older
         // channel page — does not widen the window.
-        if windowCount < next.count, let lastId = rows.last?.id,
+        if windowSkipEnd == 0, windowCount < next.count, let lastId = rows.last?.id,
            let j = next.lastIndex(where: { $0.id == lastId }) {
             let appended = next.count - 1 - j
             if appended > 0 { windowCount = min(next.count, windowCount + appended) }
+        } else if windowSkipEnd > 0, next.count > rows.count {
+            // Reading history: rows that arrive below stay outside the window (the pill
+            // counts them) and must not push the shown slice.
+            windowSkipEnd += next.count - rows.count
         }
         messageById = byId
         rows = next
@@ -923,6 +974,7 @@ struct ChatView: View {
         pinnedToBottom = true
         awayFromBottom = false
         newBelowCount = 0
+        resetWindowToTail()
         withAnimation(.easeOut(duration: 0.3)) { scroller?.scrollTo("bottom", anchor: .bottom) }
     }
 
@@ -1127,7 +1179,7 @@ struct ChatView: View {
             // Nearing the top: the next older slice of rows joins the view tree; a channel
             // also asks the server for one older page.
             .modifier(NearTopReporter(enabled: true) {
-                if windowCount < visibleRows.count {
+                if windowCount + windowSkipEnd < visibleRows.count {
                     growWindow()
                 } else if isChannel {
                     model.loadOlderChannel(chatId)
@@ -1180,8 +1232,12 @@ struct ChatView: View {
                 }
             }
             .onChange(of: awayFromBottom) { _, away in
-                // Reader scrolled back to the end by hand — clear the pill.
-                if !away { newBelowCount = 0 }
+                // Reader scrolled back to the end by hand — clear the pill; when the window
+                // had slid into history, its end is not the tail: jump to the real end.
+                if !away {
+                    newBelowCount = 0
+                    if windowSkipEnd > 0 { settleToBottom(proxy) }
+                }
             }
         }
     }
@@ -1205,7 +1261,7 @@ struct ChatView: View {
                 withAnimation(.easeInOut(duration: 0.35)) { proxy.scrollTo(target, anchor: .top) }
                 try? await Task.sleep(for: .milliseconds(500))
                 hops += 1
-                if target == topId, windowCount >= visibleRows.count { break }
+                if target == topId, windowCount + windowSkipEnd >= visibleRows.count { break }
             }
             PerfLog.mark("phase scroll top", ms: 0)
             try? await Task.sleep(for: .seconds(1))
@@ -1251,6 +1307,7 @@ struct ChatView: View {
         pinnedToBottom = true
         awayFromBottom = false
         newBelowCount = 0
+        resetWindowToTail()
         proxy.scrollTo("bottom", anchor: .bottom)
         DispatchQueue.main.async { proxy.scrollTo("bottom", anchor: .bottom) }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { proxy.scrollTo("bottom", anchor: .bottom) }
@@ -1916,6 +1973,7 @@ struct ChatView: View {
         pinnedToBottom = true
         awayFromBottom = false
         newBelowCount = 0
+        resetWindowToTail()
         if isChannel {
             // Rule 3/9: the composer sends through the shared client's `sendText`.
             guard !text.isEmpty else { return }
