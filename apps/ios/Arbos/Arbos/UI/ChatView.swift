@@ -498,6 +498,10 @@ struct ChatView: View {
                     })
             }
             headerBlur
+            // Hug content height: a horizontal ScrollView (member chips) inside this
+            // stack is flexible on the vertical axis, so without fixedSize the VStack
+            // fills the proposed height and iOS 27 lays the back button / title mid-screen
+            // with the chips over the composer ([feedback APuu1qHpbKmmpqZeUusEi0Q]).
             VStack(spacing: 8) {
                 header
                 linkPill.padding(.top, -5)
@@ -530,6 +534,8 @@ struct ChatView: View {
                     .padding(.horizontal, 16)
                 }
             }
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .top)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .overlay(alignment: .bottom) {
@@ -1821,7 +1827,9 @@ struct ChatView: View {
             // Room for avatar + padding so a horizontal ScrollView does not clip chips.
             .padding(.vertical, 4)
         }
-        .fixedSize(horizontal: false, vertical: true)
+        // Cap height so the chip strip cannot expand vertically inside the header stack
+        // (horizontal ScrollView is flexible on both axes by default).
+        .frame(height: 36)
     }
 
     /// The presence row over the composer: ticks once a second so time-capped
