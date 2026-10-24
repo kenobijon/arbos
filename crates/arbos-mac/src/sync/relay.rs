@@ -1264,6 +1264,19 @@ async fn poll_me_pushes(shared: &Arc<Shared>) {
                     let _ = shared.events.send(SyncEvent::CallStarted { call, sender });
                 }
             }
+            PushEventDto::SpaceArchived(payload) => {
+                let at = payload.archived_at.filter(|t| *t > 0).map(|t| t as u64);
+                if payload.kind != "server" {
+                    let mut projects = shared.projects.lock().unwrap();
+                    if let Some(p) = projects.iter_mut().find(|p| p.id == payload.space_id) {
+                        p.archived_at = at;
+                    }
+                }
+                let _ = shared.events.send(SyncEvent::SpaceArchived {
+                    space_id: payload.space_id.clone(),
+                    archived_at: at,
+                });
+            }
             PushEventDto::ChatArchived(payload) => {
                 let chat_id = payload.chat_id.clone();
                 if chat_id.is_empty() {
@@ -2048,17 +2061,18 @@ fn people_error(err: &anyhow::Error) -> String {
 }
 
 /// `GET /projects` then `GET /projects/{id}` for chats, models and spend.
-/// `GET /me/unread` → chat id → has unread, for every chat the relay counts unread in. The
-/// list is the user's one read cursor (shared by all their devices; own messages never
-/// count), so a chat it does not name has nothing unread. `None` when the relay did not
-/// answer it (older relay, transport error): the per-chat flag decides then.
-async fn fetch_unread_map(shared: &Arc<Shared>) -> Option<HashMap<Id, bool>> {
+/// `GET /me/unread` → chat id → unread message count, for every chat the relay counts
+/// unread in. The list is the user's one read cursor (shared by all their devices; own
+/// messages never count), so a chat it does not name has nothing unread. `None` when the
+/// relay did not answer it (older relay, transport error): the per-chat flag decides then.
+async fn fetch_unread_map(shared: &Arc<Shared>) -> Option<HashMap<Id, u32>> {
     match shared.get_json("/me/unread").await {
         Ok(v) => match serde_json::from_value::<UnreadDto>(v) {
             Ok(dto) => Some(
                 dto.chats
                     .into_iter()
-                    .map(|c| (c.chat_id, c.unread > 0))
+                    .filter(|c| c.unread > 0)
+                    .map(|c| (c.chat_id, c.unread as u32))
                     .collect(),
             ),
             Err(err) => {
@@ -2318,9 +2332,12 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
             &pending_ids,
         );
         for c in &mut merged {
-            let relay_unread = relay_unread_for(unread_by_chat.as_ref(), &c.id, c.unread);
+            let relay_count =
+                relay_unread_for(unread_by_chat.as_ref(), &c.id, c.unread, c.unread_count);
             let local_read = local_reads.get(&c.id).copied();
-            c.unread = merged_unread(relay_unread, local_read, c.last_message_at as i64);
+            let count = merged_unread(relay_count, local_read, c.last_message_at as i64);
+            c.unread_count = count;
+            c.unread = count > 0;
         }
         *local = merged;
     }
@@ -4238,6 +4255,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 let mut chats = shared.chats.lock().unwrap();
                 if let Some(c) = chats.iter_mut().find(|c| c.id == chat_id) {
                     c.unread = false;
+                    c.unread_count = 0;
                 }
             }
             shared
@@ -5184,6 +5202,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         kind: crate::model::ChatKind::Chat,
                         participants: Vec::new(),
                         unread: false,
+                        unread_count: 0,
                         last_message_at: now_ms(),
                         archived_at: None,
                     });
@@ -5652,6 +5671,37 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .await
                 {
                     shared.notice(format!("Rename: {err:#}"));
+                }
+            });
+        }
+        ClientCommand::ArchiveSpace {
+            space_id,
+            server,
+            archived,
+        } => {
+            // Optimistic in the project cache the next refresh is built from
+            // (servers come straight from `GET /servers`, which carries the flag).
+            if !server {
+                let mut projects = shared.projects.lock().unwrap();
+                if let Some(p) = projects.iter_mut().find(|p| p.id == space_id) {
+                    p.archived_at = archived.then(now_ms);
+                }
+            }
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let path = if server {
+                    format!("/servers/{space_id}/archive")
+                } else {
+                    format!("/projects/{space_id}/archive")
+                };
+                if let Err(err) = shared
+                    .put_json(&path, json!({ "archived": archived }))
+                    .await
+                {
+                    // Older relay: the Mac keeps its local state until the next refresh.
+                    if !err.to_string().contains("HTTP 404") {
+                        shared.notice(format!("Archive: {}", people_error(&err)));
+                    }
                 }
             });
         }
