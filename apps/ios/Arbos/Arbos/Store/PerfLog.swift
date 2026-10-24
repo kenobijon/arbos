@@ -24,6 +24,17 @@ final class PerfLog {
     private var worstMs = 0.0
     private var overBudgetMs = 0.0
     private var started = false
+    /// "Scrollable": after `armScrollable()`, the first moment 30 frames in a row stay
+    /// under 33 ms — the main thread has been free for half a second.
+    private var scrollableArmedAt: CFTimeInterval = 0
+    private var smoothRun = 0
+    private var scrollableLogged = false
+
+    func armScrollable() {
+        scrollableArmedAt = CACurrentMediaTime()
+        smoothRun = 0
+        scrollableLogged = false
+    }
 
     func startIfRequested() {
         guard DebugHooks.perfLog, !started else { return }
@@ -44,6 +55,14 @@ final class PerfLog {
         let frameMs = (now - lastTimestamp) * 1000
         let nominalMs = link.duration * 1000
         frames += 1
+        if scrollableArmedAt > 0, !scrollableLogged {
+            smoothRun = frameMs < 33 ? smoothRun + 1 : 0
+            if smoothRun >= 30 {
+                scrollableLogged = true
+                let sinceArm = (now - scrollableArmedAt) * 1000 - 30 * nominalMs
+                Self.log.notice("first-scrollable +\(Int(max(0, sinceArm)))ms after chat-first-row t=\(LaunchClock.msSinceLaunch())ms")
+            }
+        }
         if frameMs > nominalMs * 1.5 {
             dropped += 1
             overBudgetMs += frameMs - nominalMs

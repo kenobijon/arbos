@@ -2900,6 +2900,9 @@ private struct TranscriptRows: View, Equatable {
                     // Once per open — not on every row (group chats fire this dozens of times).
                     if row.id == firstId {
                         LaunchClock.mark("chat-first-row", detail: "shown=\(shown.count) rows=\(rowsCount) messages=\(messagesCount)")
+                        #if DEBUG
+                        PerfLog.shared.armScrollable()
+                        #endif
                     }
                 }
                 // A message bubble: long-press → the reaction capsule + menu overlay

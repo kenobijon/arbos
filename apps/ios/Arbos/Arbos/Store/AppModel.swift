@@ -1753,6 +1753,59 @@ final class AppModel: ObservableObject {
 
     /// `restored`: a doc imported from the on-device store with the relay
     /// cursor it was saved at and the pushes the relay never ACKed.
+    #if DEBUG
+    /// Perf rig (iphone-open-scroll-block): the fixture group as a real room restored from
+    /// an exported checkpoint, then the exported rows imported on the main actor one by
+    /// one — the same `onChange` → `requestSnapshot` → `emitSnapshot` path a live socket
+    /// drives. `rooms` > 1 adds clones under other ids so several chats catch up at once.
+    func perfReplay(checkpointPath: String, rowsPath: String, rooms: Int, gapMs: Int, afterMs: Int) {
+        guard let ckpt = FileManager.default.contents(atPath: checkpointPath),
+              let rowsText = try? String(contentsOfFile: rowsPath, encoding: .utf8) else {
+            NSLog("perf replay: missing files")
+            return
+        }
+        let rowBytes: [Data] = rowsText.split(separator: "\n").compactMap { line in
+            guard let bar = line.firstIndex(of: "|") else { return nil }
+            return Data(hexString: String(line[line.index(after: bar)...]))
+        }
+        var keys: [Id] = ["fx-group-launch"]
+        for i in 1..<max(1, rooms) { keys.append("fx-replay-\(i)") }
+        var docs: [(Id, CoreChatDoc)] = []
+        for key in keys {
+            guard let doc = try? CoreChatDoc(key: key, snapshot: ckpt) else { continue }
+            if key != "fx-group-launch", let group = peopleChats.first(where: { $0.id == "fx-group-launch" }) {
+                var clone = group
+                clone.id = key
+                clone.title = "Replay \(key)"
+                peopleChats.append(clone)
+            }
+            // Store-restore shape: the doc and its decoded list land before the room starts.
+            ensureRoom(projectId: peopleSlot, key: key, roomChat: key, restored: (doc, 0, [], doc.readAll()))
+            caughtUp.remove(key)
+            docs.append((key, doc))
+        }
+        LaunchClock.mark("replay-restored", detail: "rooms=\(docs.count) rows=\(rowBytes.count) ckpt=\(ckpt.count)B")
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(afterMs))
+            PerfLog.mark("phase replay begin", ms: 0)
+            let started = Date()
+            for (ix, bytes) in rowBytes.enumerated() {
+                for (_, doc) in docs {
+                    _ = try? doc.importUpdateReportingPending(bytes)
+                }
+                if gapMs > 0 { try? await Task.sleep(for: .milliseconds(gapMs)) } else { await Task.yield() }
+                if ix == rowBytes.count - 1 {
+                    for (key, _) in docs {
+                        emitSnapshot(key)
+                        caughtUp.insert(key)
+                    }
+                }
+            }
+            PerfLog.mark("phase replay end", ms: Date().timeIntervalSince(started) * 1000)
+        }
+    }
+    #endif
+
     private func ensureRoom(projectId: Id, key: Id, roomChat: String,
                             restored: (doc: CoreChatDoc, cursor: Int64, pending: [(String, Data)], messages: [Message]?)? = nil) {
         guard rooms[key] == nil else { return }
