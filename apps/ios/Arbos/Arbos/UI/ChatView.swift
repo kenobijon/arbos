@@ -24,7 +24,12 @@ struct ChatView: View {
     let chatId: Id
     let projectId: Id
 
-    @State private var draft = ""
+    /// The composer text lives in its own observable so a keystroke re-renders the
+    /// field, not this 2 000-line screen (arbonites-chat-lag, 2026-10-24). Read it as
+    /// `composerDraft.text` for actions; the field observes it for display.
+    @State private var composerDraft = ComposerDraft()
+    /// `AppModel.addressesEveryone(text)` for the current draft, updated only when it flips.
+    @State private var draftAddressesEveryone = false
     @State private var rows: [Row] = []
     /// The message list the current `rows` were built from (last id / count checks).
     @State private var rowsSource: [Message] = []
@@ -269,7 +274,7 @@ struct ChatView: View {
 
     /// True when every agent in the chat is selected (or the draft says "hey agents").
     private var talkingToEveryone: Bool {
-        if AppModel.addressesEveryone(draft) { return true }
+        if draftAddressesEveryone { return true }
         guard let agents = people?.agents, agents.count > 1 else { return false }
         return talkToAgents.count == agents.count
     }
@@ -297,7 +302,7 @@ struct ChatView: View {
     }
 
     /// Composer prompt that names the addressee so it is obvious who will answer.
-    private var composerPrompt: String {
+    private func composerPrompt(for draft: String) -> String {
         if transcribing { return "Transcribing…" }
         if let channel { return "Message #\(channel.name)" }
         if !isPeople { return needsAnswer ? "Answer \(name)" : "Ask \(name)" }
@@ -511,7 +516,7 @@ struct ChatView: View {
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             composerFocused = true
             try? await Task.sleep(nanoseconds: 800_000_000)
-            for ch in text { draft.append(ch); try? await Task.sleep(nanoseconds: 45_000_000) }
+            for ch in text { composerDraft.text.append(ch); try? await Task.sleep(nanoseconds: 45_000_000) }
             try? await Task.sleep(nanoseconds: 600_000_000)
             send()
             try? await Task.sleep(nanoseconds: 400_000_000)
@@ -537,7 +542,7 @@ struct ChatView: View {
             composerFocused = true
             try? await Task.sleep(nanoseconds: 900_000_000)
             for ch in "Also keep your replies short, please." {
-                draft.append(ch)
+                composerDraft.text.append(ch)
                 try? await Task.sleep(nanoseconds: 55_000_000)
             }
             try? await Task.sleep(nanoseconds: 500_000_000)
@@ -564,7 +569,20 @@ struct ChatView: View {
             model.visibleChatId = chatId
             // Restore unsent text left when the user backed out of this thread.
             let saved = model.composerDraft(for: chatId)
-            if draft.isEmpty, !saved.isEmpty { draft = saved }
+            composerDraft.onChange = { [chatId] d in
+                // Keep the draft while the view is still up so a process kill mid-type
+                // is not required — leaving the thread saves on disappear too.
+                model.setComposerDraft(d, for: chatId)
+                let everyone = AppModel.addressesEveryone(d)
+                if everyone != draftAddressesEveryone { draftAddressesEveryone = everyone }
+                // `@` completion: the token the caret is in (approximated by the last token).
+                var q: String? = nil
+                if isPeople, let last = d.split(separator: " ", omittingEmptySubsequences: false).last, last.hasPrefix("@"), !d.hasSuffix(" ") {
+                    q = String(last.dropFirst()).lowercased()
+                }
+                if q != mentionQuery { mentionQuery = q }
+            }
+            if composerDraft.text.isEmpty, !saved.isEmpty { composerDraft.text = saved }
             if isPeople { model.markPeopleRead(chatId, force: true) }
             if isChannel {
                 // The newest page now, live rows through the listener from here on.
@@ -679,7 +697,7 @@ struct ChatView: View {
         }
         .onDisappear {
             // Keep the typed draft so coming back to this thread restores it.
-            model.setComposerDraft(draft, for: chatId)
+            model.setComposerDraft(composerDraft.text, for: chatId)
             // Catch notifies that landed after the last onChange mark-read while we were still in the chat
             // (including rows that arrived while the app was inactive on a call — isWatching was false).
             if isPeople { model.markPeopleRead(chatId) }
@@ -717,13 +735,13 @@ struct ChatView: View {
                 // Several messages separated by " ||| " go out a few seconds apart
                 // (multitasking checks: the composer never waits for a reply).
                 let parts = text.components(separatedBy: " ||| ").filter { !$0.isEmpty }
-                draft = parts.first ?? text
+                composerDraft.text = parts.first ?? text
                 send()
                 if parts.count > 1 {
                     Task {
                         for p in parts.dropFirst() {
                             try? await Task.sleep(nanoseconds: 3_000_000_000)
-                            draft = p
+                            composerDraft.text = p
                             send()
                         }
                     }
@@ -1201,14 +1219,14 @@ struct ChatView: View {
             try? await Task.sleep(for: .milliseconds(800))
             for ch in "hey everyone, is the launch call still at ten?" {
                 let t = Date()
-                draft.append(ch)
+                composerDraft.text.append(ch)
                 await Task.yield()
                 PerfCounters.time("keystroke", ms: Date().timeIntervalSince(t) * 1000)
                 try? await Task.sleep(for: .milliseconds(90))
             }
             try? await Task.sleep(for: .seconds(1))
             PerfLog.mark("phase type end", ms: 0)
-            draft = ""
+            composerDraft.text = ""
             composerFocused = false
         }
         if drive.contains("typing") {
@@ -1627,127 +1645,59 @@ struct ChatView: View {
         }
     }
 
-    /// Max height for the growing composer field.
-    ///
-    /// A vertical `TextField` fills the height its parent proposes (up to
-    /// `lineLimit`), so an empty field inside `safeAreaInset` was stretching to
-    /// eight lines and covering the transcript. Hug content with `fixedSize`,
-    /// and still cap at 8 lines (Grok's 22 pt body pitch) for wrap glitches.
-    private var composerFieldMaxHeight: CGFloat {
-        Theme.fieldHeight + 7 * 22
-    }
 
     /// Composer field: type normally, or hold the mic to dictate. The mic stays
     /// mounted while recording so release can finish and send without a second tap.
     private var textField: some View {
-        HStack(spacing: 8) {
-            if recorder.recording {
-                Button {
-                    memoHoldActive = false
+        ComposerField(
+            draft: composerDraft,
+            recorder: recorder,
+            focus: $composerFocused,
+            isChannel: isChannel,
+            needsAnswer: needsAnswer,
+            hasPending: !pending.isEmpty,
+            prompt: { composerPrompt(for: $0) },
+            onCancelRecording: {
+                memoHoldActive = false
+                memoIgnoreRelease = false
+                memoFinishWhenPermission = false
+                memoPressStartedAt = nil
+                recorder.cancel()
+            },
+            onMicPress: {
+                guard !memoHoldActive else { return }
+                memoHoldActive = true
+                memoPressStartedAt = Date()
+                memoFinishWhenPermission = false
+                if recorder.recording {
+                    memoIgnoreRelease = true
+                    finishMemoHold()
+                } else {
                     memoIgnoreRelease = false
-                    memoFinishWhenPermission = false
-                    memoPressStartedAt = nil
-                    recorder.cancel()
-                } label: {
-                    Image(systemName: "xmark").font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.icon)
+                    Haptics.recordStart()
+                    recorder.start()
                 }
-                .buttonStyle(.plain)
-                .padding(.leading, 14)
-                Circle().fill(theme.danger).frame(width: 8, height: 8)
-                // Level bars drawn into whatever width is left (newest on the right),
-                // so the recorder row never pushes the composer past the screen edge.
-                Canvas { ctx, size in
-                    let pitch: CGFloat = 5, w: CGFloat = 3
-                    let levels = recorder.levels
-                    let n = min(levels.count, max(0, Int(size.width / pitch)))
-                    for i in 0..<n {
-                        let l = CGFloat(levels[levels.count - n + i])
-                        let h = min(size.height, 4 + l * 20)
-                        let x = size.width - CGFloat(n - i) * pitch
-                        let rect = CGRect(x: x, y: (size.height - h) / 2, width: w, height: h)
-                        ctx.fill(Path(roundedRect: rect, cornerRadius: w / 2), with: .color(theme.text))
+            },
+            onMicRelease: {
+                let held = Date().timeIntervalSince(memoPressStartedAt ?? Date())
+                memoHoldActive = false
+                memoPressStartedAt = nil
+                if memoIgnoreRelease {
+                    memoIgnoreRelease = false
+                    return
+                }
+                // Hold-to-talk: release after the threshold sends.
+                if held >= 0.25 {
+                    if recorder.recording {
+                        finishMemoHold()
+                    } else {
+                        // Permission still pending; finish when it starts.
+                        memoFinishWhenPermission = true
                     }
                 }
-                .frame(maxWidth: .infinity, maxHeight: 24)
-                Text(recorder.timeLabel)
-                    .font(theme.font(Theme.small, design: .monospaced))
-                    .foregroundStyle(theme.text)
-            } else {
-                TextField("", text: $draft, prompt: Text(composerPrompt).foregroundStyle(theme.placeholder), axis: .vertical)
-                    .lineLimit(1...8)
-                    // Size to the typed text (one line when empty), not the offered height.
-                    .fixedSize(horizontal: false, vertical: true)
-                    .font(theme.font(Theme.body))
-                    .foregroundStyle(theme.text)
-                    .tint(Color(hex: "#1084FE")!)
-                    .focused($composerFocused)
-                    .padding(.leading, 16)
-                    .padding(.vertical, 10)
-                    .onChange(of: draft) { _, d in
-                        // Keep the draft while the view is still up so a process kill mid-type
-                        // is not required — leaving the thread saves on disappear too.
-                        model.setComposerDraft(d, for: chatId)
-                        // `@` completion: the token the caret is in (approximated by the last token).
-                        guard isPeople, let last = d.split(separator: " ", omittingEmptySubsequences: false).last, last.hasPrefix("@"), !d.hasSuffix(" ") else {
-                            mentionQuery = nil
-                            return
-                        }
-                        mentionQuery = String(last.dropFirst()).lowercased()
-                    }
-            }
-            if draft.isEmpty || recorder.recording {
-                // Press/release like Mac: tap toggles recording on; hold ≥0.25s then
-                // release sends. highPriorityGesture so a focused TextField cannot
-                // steal the touch. The mic stays mounted while recording so release
-                // can finish without a second tap.
-                Image(systemName: "mic")
-                    .font(theme.font(17))
-                    .foregroundStyle(recorder.recording ? theme.danger : theme.icon)
-                    .frame(width: 44, height: Theme.fieldHeight)
-                    .contentShape(Rectangle())
-                    .padding(.trailing, 2)
-                    .id("memo-mic")
-                    .highPriorityGesture(
-                        DragGesture(minimumDistance: 0)
-                            .onChanged { _ in
-                                guard !memoHoldActive else { return }
-                                memoHoldActive = true
-                                memoPressStartedAt = Date()
-                                memoFinishWhenPermission = false
-                                if recorder.recording {
-                                    memoIgnoreRelease = true
-                                    finishMemoHold()
-                                } else {
-                                    memoIgnoreRelease = false
-                                    Haptics.recordStart()
-                                    recorder.start()
-                                }
-                            }
-                            .onEnded { _ in
-                                let held = Date().timeIntervalSince(memoPressStartedAt ?? Date())
-                                memoHoldActive = false
-                                memoPressStartedAt = nil
-                                if memoIgnoreRelease {
-                                    memoIgnoreRelease = false
-                                    return
-                                }
-                                // Hold-to-talk: release after the threshold sends.
-                                if held >= 0.25 {
-                                    if recorder.recording {
-                                        finishMemoHold()
-                                    } else {
-                                        // Permission still pending; finish when it starts.
-                                        memoFinishWhenPermission = true
-                                    }
-                                }
-                                // Short tap: leave recording on (click-to-toggle).
-                            }
-                    )
-            }
-            // While recording: tap send also finishes (same as release). Otherwise
-            // Grok keeps the composer usable while the bot works: text sends, an
-            // empty field starts a voice call with the agent (phone icon next to mic).
-            Button(action: {
+                // Short tap: leave recording on (click-to-toggle).
+            },
+            onPrimary: {
                 if recorder.recording {
                     memoHoldActive = false
                     memoIgnoreRelease = false
@@ -1759,39 +1709,8 @@ struct ChatView: View {
                 } else if !isChannel {
                     startCall(.voice)
                 }
-            }) {
-                Circle()
-                    .fill(theme.primary)
-                    .frame(width: Theme.voiceButton, height: Theme.voiceButton)
-                    .overlay(
-                        Image(systemName: (canSend || recorder.recording) ? "arrow.up" : idleButtonGlyph)
-                            .font(theme.font(16, weight: .bold))
-                            .foregroundStyle(theme.onPrimary)
-                    )
-                    .contentShape(Circle().inset(by: -(44 - Theme.voiceButton) / 2))
             }
-            .buttonStyle(.plain)
-            .opacity(isChannel && !canSend && !recorder.recording ? 0.45 : 1)
-            .accessibilityLabel((canSend || recorder.recording) ? "Send" : (isChannel ? "Send" : "Call"))
-            .padding(.trailing, 3)
-        }
-        // Hard max so a TextField layout glitch cannot paint over the transcript.
-        .frame(minHeight: Theme.fieldHeight, maxHeight: composerFieldMaxHeight, alignment: .bottom)
-        .fixedSize(horizontal: false, vertical: true)
-        .background(RoundedRectangle(cornerRadius: Theme.fieldHeight / 2, style: .continuous).fill(theme.field))
-        .overlay(
-            RoundedRectangle(cornerRadius: Theme.fieldHeight / 2, style: .continuous)
-                .strokeBorder(
-                    recorder.recording ? theme.danger.opacity(0.5)
-                        : (needsAnswer ? theme.warn.opacity(0.7) : theme.fieldBorder),
-                    lineWidth: 1
-                )
         )
-        .alert("Microphone access is off", isPresented: $recorder.permissionDenied) {
-            Button("OK", role: .cancel) { }
-        } message: {
-            Text("Allow the microphone in Settings to record a voice memo.")
-        }
         // Hold released before permission returned: finish once recording starts.
         // A short tap leaves recording on (click-to-toggle), so do not auto-finish then.
         .onChange(of: recorder.recording) { _, isOn in
@@ -1811,12 +1730,9 @@ struct ChatView: View {
     }
 
     private var canSend: Bool {
-        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !pending.isEmpty
+        !composerDraft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !pending.isEmpty
     }
 
-    /// Idle round button: phone — starts a voice call (agent or people chat).
-    /// Channels have no calls (C1): the arrow stays, dimmed until there is text.
-    private var idleButtonGlyph: String { isChannel ? "arrow.up" : "phone.fill" }
 
     /// Members whose handle/slug starts with the typed `@` prefix; agents first.
     /// Agents without a live `project` (soft-deleted) are omitted — they cannot reply.
@@ -1867,15 +1783,15 @@ struct ChatView: View {
     private func ensureMention(_ m: ChatMember) {
         let slug = m.isAgent ? mentionSlug(m.project?.name ?? m.handle) : m.handle
         let token = "@\(slug)"
-        let lower = draft.lowercased()
+        let lower = composerDraft.text.lowercased()
         if lower.split(whereSeparator: { $0.isWhitespace }).contains(where: {
             $0.trimmingCharacters(in: CharacterSet(charactersIn: ".,!?:;")).lowercased() == token.lowercased()
         }) {
             return
         }
-        var parts = draft.split(separator: " ", omittingEmptySubsequences: false).map(String.init)
+        var parts = composerDraft.text.split(separator: " ", omittingEmptySubsequences: false).map(String.init)
         if let last = parts.last, last.hasPrefix("@") { parts[parts.count - 1] = token } else { parts.append(token) }
-        draft = parts.joined(separator: " ") + " "
+        composerDraft.text = parts.joined(separator: " ") + " "
     }
 
     /// Fixed-locale stamp for photo attachment names (relay blob keys must be ASCII).
@@ -1941,13 +1857,13 @@ struct ChatView: View {
     /// Finish dictation and send: transcript (plus any typed draft) goes out as text.
     /// The audio is only used for STT — it is not attached to the chat.
     private func sendMemo(_ memo: AppModel.PendingAttachment) {
-        let typed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let typed = composerDraft.text.trimmingCharacters(in: .whitespacesAndNewlines)
         let extras = pending
         let reply = replyTo?.id
         let address = sendAddress(for: typed)
         let chips = chipMentions(for: typed)
         pending.removeAll()
-        draft = ""
+        composerDraft.text = ""
         model.setComposerDraft("", for: chatId)
         replyTo = nil
         mentionQuery = nil
@@ -1993,7 +1909,7 @@ struct ChatView: View {
     }
 
     private func send() {
-        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = composerDraft.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !pending.isEmpty else { return }
         Haptics.send()
         // A send means follow the reply: re-pin even if the reader had scrolled up.
@@ -2005,7 +1921,7 @@ struct ChatView: View {
             guard !text.isEmpty else { return }
             model.sendChannel(chatId: chatId, text: text)
             pending.removeAll()
-            draft = ""
+            composerDraft.text = ""
             model.setComposerDraft("", for: chatId)
             replyTo = nil
             sentOnce = true
@@ -2017,7 +1933,7 @@ struct ChatView: View {
             model.sendPeople(chatId: chatId, text: text, replyTo: replyTo?.id, address: address,
                              chipMentions: chips, attachments: pending)
             pending.removeAll()
-            draft = ""
+            composerDraft.text = ""
             model.setComposerDraft("", for: chatId)
             replyTo = nil
             mentionQuery = nil
@@ -2031,7 +1947,7 @@ struct ChatView: View {
             model.send(chatId: chatId, text: text, attachments: pending, replyTo: replyTo?.id)
         }
         pending.removeAll()
-        draft = ""
+        composerDraft.text = ""
         model.setComposerDraft("", for: chatId)
         replyTo = nil
         sentOnce = true
@@ -2265,7 +2181,7 @@ struct ModelPickerView: View {
 }
 
 /// The visible transcript rows. Equatable so a composer keystroke (ChatView's
-/// `draft` `@State`) or an AppModel presence tick that re-evaluates ChatView
+/// composer draft) or an AppModel presence tick that re-evaluates ChatView
 /// does not rebuild every bubble when the row list is unchanged.
 private struct TranscriptRows: View, Equatable {
     let model: AppModel
@@ -2398,6 +2314,147 @@ private struct AwayFromBottomReporter: ViewModifier {
             }
         } else {
             content
+        }
+    }
+}
+
+/// The composer's text, observed by `ComposerField` alone. Typing re-renders the
+/// field; the chat screen reads `text` at action time and is told about the two
+/// things it shows elsewhere (the `@` picker, "everyone" chips) through `onChange`.
+@MainActor
+final class ComposerDraft: ObservableObject {
+    @Published var text = "" {
+        didSet { if text != oldValue { onChange?(text) } }
+    }
+    var onChange: ((String) -> Void)?
+}
+
+/// The field, mic and send / call button. Owns nothing: every action calls back
+/// into the chat screen, whose memo and send logic is unchanged.
+private struct ComposerField: View {
+    @Environment(\.theme) private var theme
+    @ObservedObject var draft: ComposerDraft
+    @ObservedObject var recorder: MemoRecorder
+    var focus: FocusState<Bool>.Binding
+    let isChannel: Bool
+    let needsAnswer: Bool
+    let hasPending: Bool
+    let prompt: (String) -> String
+    let onCancelRecording: () -> Void
+    let onMicPress: () -> Void
+    let onMicRelease: () -> Void
+    let onPrimary: () -> Void
+
+    private var canSend: Bool {
+        !draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || hasPending
+    }
+
+    /// Idle round button: phone — starts a voice call (agent or people chat).
+    /// Channels have no calls (C1): the arrow stays, dimmed until there is text.
+    private var idleButtonGlyph: String { isChannel ? "arrow.up" : "phone.fill" }
+
+    /// Max height for the growing composer field.
+    ///
+    /// A vertical `TextField` fills the height its parent proposes (up to
+    /// `lineLimit`), so an empty field inside `safeAreaInset` was stretching to
+    /// eight lines and covering the transcript. Hug content with `fixedSize`,
+    /// and still cap at 8 lines (Grok's 22 pt body pitch) for wrap glitches.
+    private var composerFieldMaxHeight: CGFloat {
+        Theme.fieldHeight + 7 * 22
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if recorder.recording {
+                Button(action: onCancelRecording) {
+                    Image(systemName: "xmark").font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.icon)
+                }
+                .buttonStyle(.plain)
+                .padding(.leading, 14)
+                Circle().fill(theme.danger).frame(width: 8, height: 8)
+                // Level bars drawn into whatever width is left (newest on the right),
+                // so the recorder row never pushes the composer past the screen edge.
+                Canvas { ctx, size in
+                    let pitch: CGFloat = 5, w: CGFloat = 3
+                    let levels = recorder.levels
+                    let n = min(levels.count, max(0, Int(size.width / pitch)))
+                    for i in 0..<n {
+                        let l = CGFloat(levels[levels.count - n + i])
+                        let h = min(size.height, 4 + l * 20)
+                        let x = size.width - CGFloat(n - i) * pitch
+                        let rect = CGRect(x: x, y: (size.height - h) / 2, width: w, height: h)
+                        ctx.fill(Path(roundedRect: rect, cornerRadius: w / 2), with: .color(theme.text))
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: 24)
+                Text(recorder.timeLabel)
+                    .font(theme.font(Theme.small, design: .monospaced))
+                    .foregroundStyle(theme.text)
+            } else {
+                TextField("", text: $draft.text, prompt: Text(prompt(draft.text)).foregroundStyle(theme.placeholder), axis: .vertical)
+                    .lineLimit(1...8)
+                    // Size to the typed text (one line when empty), not the offered height.
+                    .fixedSize(horizontal: false, vertical: true)
+                    .font(theme.font(Theme.body))
+                    .foregroundStyle(theme.text)
+                    .tint(Color(hex: "#1084FE")!)
+                    .focused(focus)
+                    .padding(.leading, 16)
+                    .padding(.vertical, 10)
+            }
+            if draft.text.isEmpty || recorder.recording {
+                // Press/release like Mac: tap toggles recording on; hold ≥0.25s then
+                // release sends. highPriorityGesture so a focused TextField cannot
+                // steal the touch. The mic stays mounted while recording so release
+                // can finish without a second tap.
+                Image(systemName: "mic")
+                    .font(theme.font(17))
+                    .foregroundStyle(recorder.recording ? theme.danger : theme.icon)
+                    .frame(width: 44, height: Theme.fieldHeight)
+                    .contentShape(Rectangle())
+                    .padding(.trailing, 2)
+                    .id("memo-mic")
+                    .highPriorityGesture(
+                        DragGesture(minimumDistance: 0)
+                            .onChanged { _ in onMicPress() }
+                            .onEnded { _ in onMicRelease() }
+                    )
+            }
+            // While recording: tap send also finishes (same as release). Otherwise
+            // Grok keeps the composer usable while the bot works: text sends, an
+            // empty field starts a voice call with the agent (phone icon next to mic).
+            Button(action: onPrimary) {
+                Circle()
+                    .fill(theme.primary)
+                    .frame(width: Theme.voiceButton, height: Theme.voiceButton)
+                    .overlay(
+                        Image(systemName: (canSend || recorder.recording) ? "arrow.up" : idleButtonGlyph)
+                            .font(theme.font(16, weight: .bold))
+                            .foregroundStyle(theme.onPrimary)
+                    )
+                    .contentShape(Circle().inset(by: -(44 - Theme.voiceButton) / 2))
+            }
+            .buttonStyle(.plain)
+            .opacity(isChannel && !canSend && !recorder.recording ? 0.45 : 1)
+            .accessibilityLabel((canSend || recorder.recording) ? "Send" : (isChannel ? "Send" : "Call"))
+            .padding(.trailing, 3)
+        }
+        // Hard max so a TextField layout glitch cannot paint over the transcript.
+        .frame(minHeight: Theme.fieldHeight, maxHeight: composerFieldMaxHeight, alignment: .bottom)
+        .fixedSize(horizontal: false, vertical: true)
+        .background(RoundedRectangle(cornerRadius: Theme.fieldHeight / 2, style: .continuous).fill(theme.field))
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.fieldHeight / 2, style: .continuous)
+                .strokeBorder(
+                    recorder.recording ? theme.danger.opacity(0.5)
+                        : (needsAnswer ? theme.warn.opacity(0.7) : theme.fieldBorder),
+                    lineWidth: 1
+                )
+        )
+        .alert("Microphone access is off", isPresented: $recorder.permissionDenied) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text("Allow the microphone in Settings to record a voice memo.")
         }
     }
 }
