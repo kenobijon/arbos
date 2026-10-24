@@ -1835,6 +1835,9 @@ final class AppModel: ObservableObject {
                 if ix == rowBytes.count - 1 {
                     for (key, _) in docs {
                         caughtUp.insert(key)
+                        #if DEBUG
+                        PerfCounters.bump("emit.L1838")
+                        #endif
                         emitSnapshot(key)
                     }
                 }
@@ -1880,6 +1883,9 @@ final class AppModel: ObservableObject {
                     self.activityPending.insert(key)
                     self.requestSnapshot(key, windowMs: Self.catchUpCoalesceMs, deferAlways: true)
                 } else if touched.listChanged {
+                    #if DEBUG
+                    PerfCounters.bump("emit.L1883")
+                    #endif
                     self.emitSnapshot(key)
                     self.markActivity(chatId: key)
                     // Loro is live; /me/pushes and /me/unread can lag — light the
@@ -1894,6 +1900,9 @@ final class AppModel: ObservableObject {
                 } else if self.messages[key] == nil, let doc = self.docs[key], doc.count > 0 {
                     // Checkpoint / bulk import sometimes reports no list path —
                     // still paint so home search can see the transcript.
+                    #if DEBUG
+                    PerfCounters.bump("emit.L1897")
+                    #endif
                     self.emitSnapshot(key)
                 }
             }
@@ -1923,6 +1932,9 @@ final class AppModel: ObservableObject {
         }
         room.onDocPaint = { [weak self] in
             guard let self, !isProjectDoc else { return }
+            #if DEBUG
+            PerfCounters.bump("emit.L1926")
+            #endif
             self.emitSnapshot(key)
         }
         room.onCaughtUp = { [weak self] in
@@ -1932,6 +1944,9 @@ final class AppModel: ObservableObject {
             } else {
                 // Live before the final read, so that read also bumps the home list.
                 self.caughtUp.insert(key)
+                #if DEBUG
+                PerfCounters.bump("emit.L1935")
+                #endif
                 self.emitSnapshot(key)
                 self.firstLoginChatSynced(key)
             }
@@ -1942,6 +1957,9 @@ final class AppModel: ObservableObject {
             guard let self, !isProjectDoc else { return }
             guard self.unacked[key] != nil else { return }
             self.unacked[key] = nil
+            #if DEBUG
+            PerfCounters.bump("emit.L1945")
+            #endif
             self.emitSnapshot(key)
         }
         if !isProjectDoc {
@@ -1963,6 +1981,9 @@ final class AppModel: ObservableObject {
             } else if let list = effective.messages {
                 messages[key] = list
             } else {
+                #if DEBUG
+                PerfCounters.bump("emit.L1966")
+                #endif
                 emitSnapshot(key)
             }
         }
@@ -2037,6 +2058,9 @@ final class AppModel: ObservableObject {
         let window = Double(windowMs) / 1000
         let since = Date().timeIntervalSince1970 - (snapshotLastAt[chatId] ?? 0)
         guard since < window || deferAlways else {
+            #if DEBUG
+            PerfCounters.bump("emit.L2040")
+            #endif
             emitSnapshot(chatId)
             return
         }
@@ -2045,6 +2069,9 @@ final class AppModel: ObservableObject {
         Task { @MainActor [weak self] in
             try? await Task.sleep(for: .milliseconds(delayMs))
             guard let self, self.snapshotPending.contains(chatId) else { return }
+            #if DEBUG
+            PerfCounters.bump("emit.L2048")
+            #endif
             self.emitSnapshot(chatId)
         }
     }
@@ -2116,6 +2143,9 @@ final class AppModel: ObservableObject {
             }
         }
         if needSnapshot {
+            #if DEBUG
+            PerfCounters.bump("emit.L2119")
+            #endif
             emitSnapshot(chatId)
         } else {
             var next = messages
@@ -4063,6 +4093,9 @@ final class AppModel: ObservableObject {
         for (key, doc) in docs {
             guard rooms[key]?.roomChat != projectDocChatId else { continue }
             if messages[key] == nil, doc.count > 0 {
+                #if DEBUG
+                PerfCounters.bump("emit.L4066")
+                #endif
                 emitSnapshot(key)
             }
         }
