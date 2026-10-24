@@ -382,12 +382,15 @@ public struct ChatMeDto: Codable {
 	/// People chats always send this (null when the viewer is not a member). Project chats omit it.
 	public let role: String??
 	public let muted: Bool?
+	/// People group: an admin muted this member from posting (not notification mute).
+	public let silenced: Bool?
 	public let archived_at: Int64?
 	public let read_receipts: Bool?
 
-	public init(role: String??, muted: Bool?, archived_at: Int64?, read_receipts: Bool?) {
+	public init(role: String??, muted: Bool?, silenced: Bool?, archived_at: Int64?, read_receipts: Bool?) {
 		self.role = role
 		self.muted = muted
+		self.silenced = silenced
 		self.archived_at = archived_at
 		self.read_receipts = read_receipts
 	}
@@ -513,6 +516,8 @@ public struct ChatMemberDto: Codable {
 	public let last_seen_at: Int64??
 	public let online: Bool?
 	public let read_receipts: Bool?
+	/// Human in a people group: admin muted them from posting. Agent: omitted.
+	public let silenced: Bool?
 	public let avatar: String?
 	public let avatar_color: String?
 	public let avatar_color_index: Int64??
@@ -528,7 +533,7 @@ public struct ChatMemberDto: Codable {
 	public let owner: String?
 	public let owner_handle: String??
 
-	public init(member: String, role: String, added_by: String, joined_at: Int64, handle: String?, avatar_url: String??, name: String??, status: String?, user_id: String?, last_seen_at: Int64??, online: Bool?, read_receipts: Bool?, avatar: String?, avatar_color: String?, avatar_color_index: Int64??, avatar_color_index_effective: Int64?, avatar_leaf: Int64??, avatar_leaf_color: Int64??, avatar_leaf_effective: Int64?, avatar_leaf_color_effective: Int64?, project: ChatMemberProjectDto?, description: String?, owner: String?, owner_handle: String??) {
+	public init(member: String, role: String, added_by: String, joined_at: Int64, handle: String?, avatar_url: String??, name: String??, status: String?, user_id: String?, last_seen_at: Int64??, online: Bool?, read_receipts: Bool?, silenced: Bool?, avatar: String?, avatar_color: String?, avatar_color_index: Int64??, avatar_color_index_effective: Int64?, avatar_leaf: Int64??, avatar_leaf_color: Int64??, avatar_leaf_effective: Int64?, avatar_leaf_color_effective: Int64?, project: ChatMemberProjectDto?, description: String?, owner: String?, owner_handle: String??) {
 		self.member = member
 		self.role = role
 		self.added_by = added_by
@@ -541,6 +546,7 @@ public struct ChatMemberDto: Codable {
 		self.last_seen_at = last_seen_at
 		self.online = online
 		self.read_receipts = read_receipts
+		self.silenced = silenced
 		self.avatar = avatar
 		self.avatar_color = avatar_color
 		self.avatar_color_index = avatar_color_index
@@ -1622,12 +1628,15 @@ public struct PeopleMemberRemovedPayloadDto: Codable {
 	public let user_id: String
 	public let handle: String
 	public let by_handle: String
+	/// True when an admin banned them (they cannot rejoin). Omit / null on leave or plain remove.
+	public let banned: Bool?
 
-	public init(chat_id: String, user_id: String, handle: String, by_handle: String) {
+	public init(chat_id: String, user_id: String, handle: String, by_handle: String, banned: Bool?) {
 		self.chat_id = chat_id
 		self.user_id = user_id
 		self.handle = handle
 		self.by_handle = by_handle
+		self.banned = banned
 	}
 }
 

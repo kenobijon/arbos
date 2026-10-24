@@ -755,6 +755,9 @@ struct GroupProfileView: View {
     @State private var showEdit = false
     @State private var pendingRemoveId: String?
     @State private var pendingRemoveName: String?
+    /// Ban confirm (remove and block rejoin), same shape as server member ban.
+    @State private var pendingBanId: String?
+    @State private var pendingBanName: String?
     /// Human member (not you) whose row was tapped: offer View profile / Send private message.
     @State private var memberActions: ProfilePerson?
     /// Footer confirm: leave (member) or delete (owner) this people group.
@@ -872,7 +875,7 @@ struct GroupProfileView: View {
                     if rows.first(where: { $0.id == id })?.agent != nil {
                         model.removeAgent(chatId: chatId, projectId: id)
                     } else {
-                        model.removeMember(chatId: chatId, userId: id)
+                        model.removeMember(chatId: chatId, userId: id, ban: false)
                     }
                 }
                 pendingRemoveId = nil
@@ -882,6 +885,30 @@ struct GroupProfileView: View {
                 pendingRemoveId = nil
                 pendingRemoveName = nil
             }
+        } message: {
+            Text("They can be added again later.")
+        }
+        .confirmationDialog(
+            pendingBanName.map { "Ban \($0) from \(title)?" } ?? "Ban from chat?",
+            isPresented: Binding(
+                get: { pendingBanId != nil },
+                set: { if !$0 { pendingBanId = nil; pendingBanName = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Ban", role: .destructive) {
+                if let id = pendingBanId {
+                    model.removeMember(chatId: chatId, userId: id, ban: true)
+                }
+                pendingBanId = nil
+                pendingBanName = nil
+            }
+            Button("Cancel", role: .cancel) {
+                pendingBanId = nil
+                pendingBanName = nil
+            }
+        } message: {
+            Text("They are removed and cannot rejoin.")
         }
         .confirmationDialog(
             "Leave \(title)?",
@@ -1016,21 +1043,45 @@ struct GroupProfileView: View {
         let title = r.agent?.name ?? (isMe ? "\(r.person.displayName) (you)" : r.person.displayName)
         let avatar: AnyView = r.agent.map { AnyView(AgentAvatar(project: $0, theme: theme, size: PaneKit.avatar, still: true)) }
             ?? AnyView(PersonAvatar(url: r.person.avatarUrl, handle: r.person.handle, size: PaneKit.avatar, name: r.person.name, id: r.person.id, colorIndex: r.person.avatarColorIndex))
-        // Jacob (2026-10-20): a small ✕ at the trailing edge removes a member in
-        // one tap plus the confirmation; owners only.
-        let remove: AnyView? = canRemove(r) ? AnyView(
-            Button {
-                pendingRemoveId = r.person.id
-                pendingRemoveName = r.agent?.name ?? "@\(r.person.handle)"
+        let isSilenced = r.agent == nil && (people?.members.first(where: { !$0.isAgent && $0.id == r.person.id })?.silenced ?? false)
+        let label = r.agent?.name ?? "@\(r.person.handle)"
+        // Owners/admins: Mute / Unmute, Remove, Ban (people); agents keep Remove only.
+        // Same ellipsis menu pattern as the server member row.
+        let manage: AnyView? = canRemove(r) ? AnyView(
+            Menu {
+                if r.agent == nil {
+                    if isSilenced {
+                        Button {
+                            model.setMemberSilenced(chatId: chatId, userId: r.person.id, silenced: false)
+                        } label: { Label("Unmute", systemImage: "speaker.wave.2") }
+                    } else {
+                        Button {
+                            model.setMemberSilenced(chatId: chatId, userId: r.person.id, silenced: true)
+                        } label: { Label("Mute", systemImage: "speaker.slash") }
+                    }
+                    Divider()
+                    Button(role: .destructive) {
+                        pendingRemoveId = r.person.id
+                        pendingRemoveName = label
+                    } label: { Label("Remove", systemImage: "person.badge.minus") }
+                    Button(role: .destructive) {
+                        pendingBanId = r.person.id
+                        pendingBanName = label
+                    } label: { Label("Ban", systemImage: "hand.raised") }
+                } else {
+                    Button(role: .destructive) {
+                        pendingRemoveId = r.person.id
+                        pendingRemoveName = label
+                    } label: { Label("Remove", systemImage: "person.badge.minus") }
+                }
             } label: {
-                Image(systemName: "xmark")
-                    .font(theme.font(12, weight: .semibold))
+                Image(systemName: "ellipsis.circle")
+                    .font(theme.font(17))
                     .foregroundStyle(theme.muted)
                     .frame(width: 32, height: 44)
                     .contentShape(Rectangle())
             }
-            .buttonStyle(.borderless)
-            .accessibilityLabel("Remove @\(r.person.handle)")
+            .accessibilityLabel("Member options")
         ) : nil
         // borderless (not .plain): .plain steals long-press on recent iOS,
         // so the remove context menu never appears (same as HomeView rows).
@@ -1044,14 +1095,18 @@ struct GroupProfileView: View {
                 memberActions = r.person
             }
         } label: {
-            PaneRow(leading: .avatar(avatar), title: title, subtitle: memberSubtitle(r), trailing: remove)
+            PaneRow(
+                leading: .avatar(avatar),
+                title: title,
+                subtitle: isSilenced ? "\(memberSubtitle(r)) · Muted" : memberSubtitle(r),
+                trailing: manage
+            )
         }
         .buttonStyle(.borderless)
         // Long-press (Jacob, 2026-10-22; the Mac's Shift-/right-click menu): View profile,
-        // Send private message (other people), and for whoever may remove this member a
-        // divider and Remove from group — which asks first (the confirm above) and then
-        // lets the relay write "<me> removed X". Your own row never offers Remove;
-        // leaving is the pane footer's Leave group chat (or Delete for the owner).
+        // Send private message (other people), and for whoever may manage this member
+        // Mute / Unmute, Remove, Ban. Your own row never offers those; leaving is the
+        // pane footer's Leave group chat (or Delete for the owner).
         .contextMenu {
             if r.agent == nil && !isMe {
                 Button {
@@ -1066,10 +1121,30 @@ struct GroupProfileView: View {
             } label: { Label("View profile", systemImage: "person.crop.circle") }
             if canRemove(r) {
                 Divider()
-                Button(role: .destructive) {
-                    pendingRemoveId = r.person.id
-                    pendingRemoveName = r.agent?.name ?? "@\(r.person.handle)"
-                } label: { Label("Remove from group", systemImage: "xmark") }
+                if r.agent == nil {
+                    if isSilenced {
+                        Button {
+                            model.setMemberSilenced(chatId: chatId, userId: r.person.id, silenced: false)
+                        } label: { Label("Unmute", systemImage: "speaker.wave.2") }
+                    } else {
+                        Button {
+                            model.setMemberSilenced(chatId: chatId, userId: r.person.id, silenced: true)
+                        } label: { Label("Mute", systemImage: "speaker.slash") }
+                    }
+                    Button(role: .destructive) {
+                        pendingRemoveId = r.person.id
+                        pendingRemoveName = label
+                    } label: { Label("Remove from group", systemImage: "person.badge.minus") }
+                    Button(role: .destructive) {
+                        pendingBanId = r.person.id
+                        pendingBanName = label
+                    } label: { Label("Ban from group", systemImage: "hand.raised") }
+                } else {
+                    Button(role: .destructive) {
+                        pendingRemoveId = r.person.id
+                        pendingRemoveName = label
+                    } label: { Label("Remove from group", systemImage: "xmark") }
+                }
             }
         }
     }

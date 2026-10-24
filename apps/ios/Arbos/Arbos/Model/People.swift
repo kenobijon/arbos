@@ -89,6 +89,8 @@ struct ChatMember: Identifiable, Equatable {
     var description: String? = nil
     /// D79 `avatar_color_index_effective` from the relay (nil → derived from `id`).
     var avatarColorIndex: Int? = nil
+    /// Group admin muted this person from posting (not notification mute).
+    var silenced: Bool = false
 
     var isAgent: Bool { kind == .agent }
     var displayName: String { kind == .agent ? (project?.name ?? handle) : (name?.isEmpty == false ? name! : handle) }
@@ -140,6 +142,7 @@ extension ChatMember {
         self.online = dto.online ?? false
         self.avatarColorIndex = dto.avatar_color_index_effective.map(Int.init)
         self.description = dto.description ?? dto.project?.description
+        self.silenced = dto.silenced ?? false
     }
 
     static func parse(_ raw: Any) -> ChatMember? {
@@ -178,6 +181,8 @@ struct PeopleChat: Identifiable, Equatable {
     var lastActivityAt: Int64
     var myRole: String
     var muted: Bool
+    /// Admin muted me from posting in this group.
+    var silenced: Bool
 
     var humans: [ChatMember] { members.filter { !$0.isAgent } }
     var agents: [ChatMember] { members.filter { $0.isAgent } }
@@ -216,6 +221,7 @@ extension PeopleChat {
         self.lastActivityAt = dto.last_activity_at
         self.myRole = dto.me.role.flatMap { $0 } ?? "member"
         self.muted = dto.me.muted ?? false
+        self.silenced = dto.me.silenced ?? false
     }
 
     /// Is this person already in the chat? Me (`meId`) counts as in. A handle

@@ -152,6 +152,9 @@ pub struct ChatMeDto {
     pub role: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub muted: Option<bool>,
+    /// People group: an admin muted this member from posting (not notification mute).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub silenced: Option<bool>,
     #[typeshare(serialized_as = "Option<I54>")]
     pub archived_at: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -216,6 +219,9 @@ pub struct ChatMemberDto {
     pub online: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_receipts: Option<bool>,
+    /// Human in a people group: admin muted them from posting. Agent: omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub silenced: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub avatar: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1518,6 +1524,9 @@ pub struct PeopleMemberRemovedPayloadDto {
     pub user_id: String,
     pub handle: String,
     pub by_handle: String,
+    /// True when an admin banned them (they cannot rejoin). Omit / null on leave or plain remove.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub banned: Option<bool>,
 }
 
 /// `people_chat_created` payload.
