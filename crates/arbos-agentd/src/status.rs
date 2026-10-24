@@ -636,8 +636,6 @@ impl Agent {
         if text.is_empty() {
             return QuickOutcome::Queued;
         }
-        // Status / guide only: open the row after we know we have a real sentence to post.
-        let row_id = ulid();
         // The decision row for debugging readers (`inspect`, kind `quick_reply`): which side the
         // model read the message as, whether a model call was made, how long the user waited.
         let _ = self.store.t3_append(
@@ -1344,7 +1342,6 @@ pub(crate) mod tests {
         let host = agent.sync.open_room(chat).await.unwrap();
         let busy = agent.test_hold_turn(chat).await;
         let (msg_id, cmd) = send_cmd(&host, "did the logger finish? what did it print?");
-        let t0 = Instant::now();
         let a2 = agent.clone();
         let chat2 = chat.to_owned();
         let waiting = tokio::spawn(async move { a2.handle_command(&chat2, cmd).await });
