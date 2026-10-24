@@ -1964,8 +1964,8 @@ impl Agent {
             }
         }
         // Busy agent (a turn holds the lock): the message gets its quick reply first — a status
-        // answer ends here, guidance goes into the running turn, anything else queues as before
-        // with its acknowledgement already in the chat (`status.rs`).
+        // answer ends here, guidance goes into the running turn, anything else queues with no
+        // acknowledgement bubble (the apps' working indicator covers the wait; `status.rs`).
         let quick = match cmd.kind.as_str() {
             "send" | "steer" | "guide" => self.quick_reply(chat_id, &host, &cmd).await,
             _ => crate::status::QuickOutcome::NotBusy,
