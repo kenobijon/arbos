@@ -63,6 +63,14 @@ const ICONS: &[(&str, &str)] = &[
         "<path d=\"M7 3h10M7 21h10M8 3c0 5 4 6 4 9s-4 4-4 9M16 3c0 5-4 6-4 9s4 4 4 9\"/>"
     ),
     icon!("xmark", "<path d=\"M6 6l12 12M18 6L6 18\"/>"),
+    // Grok Bot's share disc glyph (SF `square.and.arrow.up`): an open-topped
+    // box with the arrow rising out of it. Measured 14 × 14 pt in the 36 pt
+    // disc on `grok-right-pane-details.png` (2 px/pt); the mark spans 16 of
+    // the 24 grid, so `glass::PANE_SHARE_GLYPH` 21 paints 14 pt.
+    icon!(
+        "share",
+        "<path d=\"M8 10H6a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6a2 2 0 0 0-2-2h-2\" stroke-width=\"1.8\"/><path d=\"M12 15V4M8.5 7.5L12 4l3.5 3.5\" stroke-width=\"1.8\"/>"
+    ),
     icon!(
         "archivebox",
         "<rect x=\"3\" y=\"4\" width=\"18\" height=\"4\" rx=\"1\"/><path d=\"M5 8v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8M10 12h4\"/>"
@@ -180,6 +188,10 @@ const ICONS: &[(&str, &str)] = &[
         "<circle cx=\"12\" cy=\"12\" r=\"9\"/><path d=\"M12 3a9 9 0 0 0 0 18z\" fill=\"#000\"/>"
     ),
     icon!("info", "<circle cx=\"12\" cy=\"12\" r=\"9\"/><path d=\"M12 11v6M12 8h.01\"/>"),
+    icon!(
+        "exclamation",
+        "<circle cx=\"12\" cy=\"12\" r=\"9\"/><path d=\"M12 7v6M12 16.5h.01\" stroke-width=\"2.4\"/>"
+    ),
     icon!("minus", "<path d=\"M5 12h14\"/>"),
     icon!(
         "envelope",

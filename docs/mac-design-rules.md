@@ -212,10 +212,43 @@ after the text) and v0.6.203 (#1496, a tester's request for an always-visible
 bottom-right footer time). The sent/seen label on my own bubbles is a separate
 element and may stay in the footer.
 
-Code: `transcript.rs` `hover_time()` (returns nothing at opacity 0) and
-`bubble_footer()` (receipt only), pinned by
+Code: `transcript.rs` `hover_time()` (returns nothing at opacity 0), pinned by
 `layout_tests::the_time_is_hidden_at_rest_and_beside_the_bubble_on_hover`;
 iPhone `Transcript.swift` `RowView` + `SenderNameRowTests`.
+
+## Own-bubble delivery (Jacob 2026-10-24, [feedback sent-state-opacity-2026-10-24])
+
+**No "sent" / "seen" caption on my bubbles — the bubble's opacity is the
+state.** Grok Bot's user bubble carries no delivery label (refs 03/web-01), and
+Jacob asked for "coloring" only: "remove these 'sent' items, just use coloring
+to make it clear, make the bubble less opaque."
+
+| State | Meaning | Whole-bubble alpha | Extra |
+|---|---|---|---|
+| Pending | not yet ACKed by the relay | **0.50** (`BUBBLE_ALPHA_PENDING`) | — |
+| Failed | the relay refused it | 1.00 | red ⓘ-style `exclamation` glyph (16 pt, `danger`) on the bubble's outer edge, always visible |
+| Sent | ACKed, nobody opened past it yet | **0.72** (`BUBBLE_ALPHA_SENT`) | — |
+| Seen | a peer's read watermark covers it, an agent answered after it, or read receipts are off | 1.00 | — |
+
+Why 0.72 and not a lighter fill: whole-bubble alpha dims the text with the fill,
+which is what makes the difference read in dark mode (fill L* 39 → 30, text
+L* 100 → 76). Measured contrast of the composited text on its composited fill:
+dark 4.9 : 1, light 7.7 : 1 (≥ 4.5 AA); pending 3.4 : 1 / 3.6 : 1 (transient).
+The fill alone at 0.72 would move dark only 8 L* and read as "slightly
+different grey". Same values on the iPhone (`Delivery.sentAlpha` /
+`pendingAlpha`); its own bubble colours are the Mac's (`#5C5C5C` / `#111111`,
+white text).
+
+The "seen" caption from #1496 went with the "sent" one (same component); full
+opacity carries it. With read receipts **off** every ACKed bubble is full at
+once — there is nothing to wait for, and a transcript that is lighter forever
+would read as broken.
+
+Code: `transcript.rs` `Delivery` + `delivery_state()` + `own_bubble()` +
+`failed_glyph()`, pinned by `delivery_tests`; iPhone `Transcript.swift`
+`Delivery` / `ReadReceipts` / `DeliveryFade` + `DeliveryStateTests`. The iPhone
+also sends the `seen` watermark in its presence header now (`SessionRoom
+.newestMessageId`), so a Mac bubble read on a phone goes full.
 
 ## iPhone bubble gestures (Jacob 2026-10-24, [feedback iphone-open-scroll-block-2026-10-24] #1645 + #1629)
 
@@ -257,6 +290,35 @@ screen in full screen: an `NSToolbar` keeps the title bar on screen but the
 buttons in it at alpha 0, an `NSTitlebarAccessoryViewController` shows its
 own view there but not the buttons, and the AppKit-owned alpha / view tree is
 reset on every reveal (the #1637 probes, `media/feedback/fullscreen-traffic-lights/appkit-probes/`).
+
+## Right info pane chrome (Jacob 2026-10-24, [feedback info-pane-chrome-2026-10-24])
+
+**The right pane is the window, not a panel: the chat's surface on both sides
+of the join, no hairline between them, Grok Bot's two round discs (share ·
+close) at its top right, a plain hero picture, inset cards under section
+labels, and no "Delete agent" button.** Jacob's side-by-side of a fresh Grok
+Bot and a fresh Arbos agent (2026-10-24, `media/feedback/grok-parity-test/` in
+the project store; items 19–22, 26–27 of `docs/arbos-vs-grok-traits.md`).
+
+Measured on `grok-right-pane-details.png` and `grok-chat-1.png` (2 px/pt,
+window top at row 0; pane 639 px = 319.5 pt wide). Points.
+
+| Item | Grok Bot | Arbos (`profiles/mod.rs`, `profiles/kit.rs`, `theme.rs`) |
+|---|---|---|
+| Pane fill | `#121212` — the chat's own colour; sidebar `#0E0E0E` | `Theme::pane()` = `chat_wash()` (nothing on matte / dark glass, the white wash on light glass); `theme.pane` is gone |
+| Join | a half-point `#1F1F1F` line (+13) that reads as none | **no border** (`border_l_1` removed from the pane and the mid-slide blank) |
+| Cards | `#1F1F1F` on `#121212` (+13), inset **16 / 16**, radius **12** | `pane_card` `#232323` on `#141414` (+15), `kit::INSET` 16, `kit::CARD_RADIUS` 12 (was `PANEL_RADIUS` 14); light: `#F2F2F2` on `#FCFCFC` (white on white was no card) |
+| Rows | one-line **41**, two-line **51**, 13 pt title / 13 pt muted subtitle | `kit::ROW_MIN_H` 41 (was 48); a title + subtitle row lands on 51–52 by its own padding; row type unchanged (`TEXT_BODY` / `TEXT_SMALL`) |
+| Section label | "Coding" / "Routines": text **28** from the pane edge, 13.5 pt `#A5A5A5`; glyphs 24 under the pill, 26 under the card before, 10 over the card after | `kit::section_title`: `INSET + SECTION_TITLE_INDENT` 28, `TEXT_SMALL` muted on a 16 pt line, padding 10 / 8 over `CARD_GAP` 14; a leading label pulls the fade spacer in by `pane::FIRST_TITLE_PULL` 7 |
+| Share · close discs | **36** each, fill `#1F1F1F`, glyph `#E0E0E0`; **8** apart, **12** from the pane edge, centred on the strip discs' line (top 12 in the 60 band; `grok-chat-1.png` rows 28–99 for both sets) | `glass::control_disc` — the strip's disc (`CONTROL` 36, `surface_2`, `text`); `top_bar()` pads `PANE_DISC_INSET` 12, gaps `CONTROL_GAP` 8; close `xmark` at `PANE_CLOSE_GLYPH` 22 → 11 pt mark (Grok 11); share `share` at `PANE_SHARE_GLYPH` 21 → 14 pt (Grok 14). Before: a 30 pt `glass::circle` with a 6.5 pt × at top 17, inset 10 |
+| Share disc action | — | the invite sheet (agent: let a person in on this agent; group: Add members). Pages with nothing to share (person, channel, server, own profile) draw the × alone |
+| Top bar fill | none | none (was `card()`); the body still fades under the pinned hero + pill |
+| Hero picture | plain bot mark, 58 pt, 73.5 under the window top | `HERO_TOP` 14 under the 60 band (was 4); the agent's leaf **without its pastel disc** (`avatars::project_hero_bare`: the hue's pastel as ink on dark, its ink on light) and **no presence dot** — presence stays on the sidebar row; `HERO_AVATAR` 72 kept (Jacob's mock b) |
+| Delete agent | — | **gone from the pane** (footer and `Shell.agent_delete_armed` removed). Deleting an agent is the sidebar row's menu → Delete, at once (`sidebar::row_menu`, the Delete-is-immediate rule below) |
+
+Pinned by `profiles::chrome_tests` (`the_pane_is_the_chats_surface_in_both_appearances`,
+`the_constants_are_groks`, `the_share_and_close_discs_land_on_groks_pixels`,
+`cards_are_inset_and_labelled_at_groks_margins`) and `pane::tests::every_kind_lays_out_hero_then_pill_then_options`.
 
 ## Pane animations (Jacob 2026-10-24, [feedback right-pane-slide-2026-10-24], [feedback sidebar-slide-2026-10-24])
 
