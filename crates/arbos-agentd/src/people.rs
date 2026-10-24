@@ -1447,9 +1447,14 @@ mod address_tests {
 
 impl Agent {
     /// Fields on a reply in a people chat (called right after the assistant message starts).
+    ///
+    /// Always writes the agent's sender / handle / name / avatar so clients put the bubble
+    /// on the avatar column (#1604). Asker fields (`askedBy*`, `inReplyTo`, `replyTo`) are
+    /// added when this chat still has an asker — a late subagent-result turn may run after
+    /// the asker map was cleared, and must still look like this agent.
     pub fn people_reply_fields(&self, chat_id: &str) -> Option<ReplyAttribution> {
         let info = self.people.info(chat_id)?;
-        let asker = self.people.asker(chat_id)?;
+        let asker = self.people.asker(chat_id);
         let mine = info
             .members
             .iter()
@@ -1480,21 +1485,23 @@ impl Agent {
                 live
             }
         };
-        let fields = vec![
+        let mut fields = vec![
             ("sender", json!(format!("agent:{}", self.cfg.project_id))),
             ("senderHandle", json!(handle)),
             ("senderName", json!(name)),
             ("senderAvatar", json!(avatar)),
             ("senderAvatarColor", json!(avatar_color)),
             ("ownerHandle", json!(info.owner_handle())),
-            ("askedBy", json!(format!("user:{}", asker.user_id))),
-            ("askedByHandle", json!(asker.handle)),
-            ("inReplyTo", json!(asker.message_id)),
+        ];
+        if let Some(asker) = asker {
+            fields.push(("askedBy", json!(format!("user:{}", asker.user_id))));
+            fields.push(("askedByHandle", json!(asker.handle)));
+            fields.push(("inReplyTo", json!(asker.message_id)));
             // Platform reply feature: thread this bubble to the asker's message
             // so everyone sees which line is being answered (feedback
             // app-01M5MPKJ9K6HGHFH6BZWR9CME0).
-            ("replyTo", json!(asker.message_id)),
-        ];
+            fields.push(("replyTo", json!(asker.message_id)));
+        }
         Some(ReplyAttribution { fields })
     }
 
