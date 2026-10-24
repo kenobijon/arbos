@@ -27,7 +27,7 @@ use crate::ui::icons::icon;
 use crate::ui::markdown::{
     has_fenced_code, inline_plain, inline_spans, polish_assistant_prose, split_blocks, Block,
 };
-use crate::ui::mention::Mentions;
+use crate::ui::mention::{self, Mentions};
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
 use crate::ui::select::{BubbleSelectable, Selectable, TextSelection};
@@ -608,6 +608,8 @@ pub struct Transcript {
     multi_party: bool,
     /// Message whose hover copy glyph is showing a checkmark, and when it started.
     copied_feedback: Option<(Id, Instant)>,
+    /// The code card Copy pill reading "Copied" right now (its id, when).
+    code_copied: Option<(SharedString, Instant)>,
     /// `ARBOS_RIG_SELECT=all|<from>..<to>|word@<i>|para@<i>` (screenshot rig):
     /// once the open chat shows a settled agent bubble, select that much of
     /// the newest one — the drag / double-click / triple-click the EC2 Mac's
@@ -660,6 +662,7 @@ impl Transcript {
             turn_starts: HashSet::new(),
             multi_party: false,
             copied_feedback: None,
+            code_copied: None,
             rig_select: std::env::var("ARBOS_RIG_SELECT").ok().map(|spec| {
                 let after = std::env::var("ARBOS_RIG_SELECT_AFTER_MS")
                     .ok()
@@ -1211,6 +1214,38 @@ impl Transcript {
         }
     }
 
+    /// A code card's Copy pill: the block's text to the clipboard and the pill
+    /// reads "Copied" for [`CODE_COPY_FEEDBACK_MS`].
+    pub(crate) fn copy_code(&mut self, pill: SharedString, code: String, cx: &mut Context<Self>) {
+        copy_code_to_clipboard(&mut self.code_copied, pill, code, cx);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(CODE_COPY_FEEDBACK_MS))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.code_copied.as_ref().is_some_and(|(_, at)| {
+                    at.elapsed() >= Duration::from_millis(CODE_COPY_FEEDBACK_MS)
+                }) {
+                    this.code_copied = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// The code cards' Copy wiring for this frame.
+    fn code_copy(&self, cx: &Context<Self>) -> CodeCopy {
+        let this = cx.entity().downgrade();
+        CodeCopy {
+            copied: copied_pill(&self.code_copied, Instant::now()),
+            on_copy: Some(Rc::new(move |id, code, _, cx| {
+                let _ = this.update(cx, |t, cx| t.copy_code(id, code, cx));
+            })),
+        }
+    }
+
     /// Right-click → the message menu (Copy / Reply / Delete, `message_menu`).
     /// Control-click → copy the message text.
     fn menu_target(
@@ -1656,6 +1691,7 @@ impl Transcript {
                     now,
                     theme,
                     &selectable.bubble(format!("{message_id}#text"), bubble_text.text),
+                    &self.code_copy(cx),
                 ),
             ));
         let (row_el, reveal) = self.hover_row(row_id, now, window, cx);
@@ -1763,8 +1799,14 @@ impl Transcript {
                 // Triple-backtick fences render as code cards (same as agent
                 // replies); other text stays plain so "# heading" is still literal.
                 // Bare `http(s)://…` URLs are still accented and clickable.
-                let body =
-                    user_message_body(&row.id, &text, text_color, &theme, &bubble_selectable);
+                let body = user_message_body(
+                    &row.id,
+                    &text,
+                    text_color,
+                    &theme,
+                    &bubble_selectable,
+                    &self.code_copy(cx),
+                );
                 // Someone else's bubble in a group / channel: their name inside
                 // it (their colour); the time is hover-only; my own bubble carries
                 // its sent/seen label in the footer.
@@ -3617,6 +3659,7 @@ fn user_message_body(
     color: gpui::Hsla,
     theme: &Theme,
     selectable: &Selectable,
+    copy: &CodeCopy,
 ) -> AnyElement {
     let key = format!("{row_id}.u");
     if !has_fenced_code(text) {
@@ -3643,6 +3686,7 @@ fn user_message_body(
                 at,
                 None,
                 Instant::now(),
+                copy,
             )),
             // Prose, lists and tables stay literal in a typed bubble (a
             // "# heading" is still a "# heading"); one element per block.
@@ -3785,6 +3829,7 @@ fn apply_veil(
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_block(
     row_id: &str,
     block: &Block,
@@ -3793,6 +3838,7 @@ fn render_block(
     now: Instant,
     theme: &Theme,
     bubble: &BubbleSelectable,
+    copy: &CodeCopy,
 ) -> AnyElement {
     // No `min_w_0` here. Inside a flex-column bubble (a quote header stacked
     // over the text, #1447) taffy sizes the column from its items, and an
@@ -3936,9 +3982,70 @@ fn render_block(
             table.into_any_element()
         }
         Block::Code { lang, code } => code_fence_card(
-            row_id, lang, code, theme.text, theme, bubble, starts[0], veil, now,
+            row_id, lang, code, theme.text, theme, bubble, starts[0], veil, now, copy,
         ),
     }
+}
+
+/// The code card's Copy pill, wired to its owner (Jacob 2026-10-24 22:22:
+/// the pill showed no click effect). `on_copy` puts the code on the
+/// clipboard and starts the "Copied" feedback for pill `id`; `copied` is the
+/// pill showing it right now.
+#[derive(Clone, Default)]
+pub struct CodeCopy {
+    pub copied: Option<SharedString>,
+    #[allow(clippy::type_complexity)]
+    pub on_copy: Option<Rc<dyn Fn(SharedString, String, &mut Window, &mut App)>>,
+}
+
+/// How long the Copy pill reads "Copied" (Jacob: ~1.5 s).
+pub const CODE_COPY_FEEDBACK_MS: u64 = 1_500;
+
+/// The block's text to the clipboard; `slot` remembers which pill to show
+/// "Copied" on and since when.
+fn copy_code_to_clipboard(
+    slot: &mut Option<(SharedString, Instant)>,
+    pill: SharedString,
+    code: String,
+    cx: &mut App,
+) {
+    cx.write_to_clipboard(gpui::ClipboardItem::new_string(code));
+    *slot = Some((pill, Instant::now()));
+}
+
+/// The pill still inside its "Copied" window at `now`, if any.
+fn copied_pill(slot: &Option<(SharedString, Instant)>, now: Instant) -> Option<SharedString> {
+    slot.as_ref()
+        .filter(|(_, at)| {
+            now.saturating_duration_since(*at) < Duration::from_millis(CODE_COPY_FEEDBACK_MS)
+        })
+        .map(|(id, _)| id.clone())
+}
+
+/// The Copy pill's (background, text) at rest, under the pointer, while the
+/// button is down (the chips' pressed tint, #1636) and while it says
+/// "Copied" (the rail's check colour).
+pub fn copy_pill_colors(theme: &Theme, state: CopyPillState) -> (gpui::Hsla, gpui::Hsla) {
+    match state {
+        CopyPillState::Rest => (gpui::transparent_black(), theme.text_faint),
+        CopyPillState::Hover => (theme.surface_2, theme.text),
+        CopyPillState::Pressed => (
+            mention::pill_color(theme.accent, mention::PILL_ALPHA_PRESSED),
+            theme.accent,
+        ),
+        CopyPillState::Copied => (
+            Theme::with_alpha(theme.online, mention::PILL_ALPHA),
+            theme.online,
+        ),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CopyPillState {
+    Rest,
+    Hover,
+    Pressed,
+    Copied,
 }
 
 /// Fenced ``` block: lang label, Copy, mono body on `code_bg` (Grok's code card).
@@ -3953,6 +4060,7 @@ fn code_fence_card(
     at: usize,
     veil: Option<&Veil>,
     now: Instant,
+    copy: &CodeCopy,
 ) -> AnyElement {
     let mut card = div()
         .flex()
@@ -3978,21 +4086,7 @@ fn code_fence_card(
             } else {
                 lang.to_string()
             })
-            .child({
-                // Copies the block (Grok's code header); the label is the hit target.
-                let source = code.to_string();
-                div()
-                    .id(SharedString::from(format!("{row_id}#copy")))
-                    .px(px(6.0))
-                    .py(px(2.0))
-                    .rounded(px(5.0))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme.surface_2).text_color(theme.text))
-                    .child("Copy")
-                    .on_click(move |_, _, cx| {
-                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(source.clone()));
-                    })
-            }),
+            .child(copy_pill(row_id, code, theme, copy)),
     );
     let mono = gpui::Font {
         family: theme.font_mono.into(),
@@ -4022,6 +4116,63 @@ fn code_fence_card(
             .child(bubble.text(at, code.to_string(), runs)),
     );
     card.into_any_element()
+}
+
+/// The code card's Copy pill (Grok's code header): the label is the hit
+/// target. It answers the pointer — hover, a pressed tint while the button is
+/// down — and reads "✓ Copied" for [`CODE_COPY_FEEDBACK_MS`] after a click.
+fn copy_pill(row_id: &str, code: &str, theme: &Theme, copy: &CodeCopy) -> AnyElement {
+    let id = SharedString::from(format!("{row_id}#copy"));
+    let rig = rig_copy_pill();
+    let copied = copy.copied.as_ref() == Some(&id) || rig == Some(CopyPillState::Copied);
+    let state = match rig {
+        Some(state) if !copied => state,
+        _ if copied => CopyPillState::Copied,
+        _ => CopyPillState::Rest,
+    };
+    let (bg, fg) = copy_pill_colors(theme, state);
+    let (hover_bg, hover_fg) = copy_pill_colors(theme, CopyPillState::Hover);
+    let (down_bg, down_fg) = copy_pill_colors(theme, CopyPillState::Pressed);
+    let source = code.to_string();
+    let on_copy = copy.on_copy.clone();
+    let pill_id = id.clone();
+    div()
+        .id(id)
+        .debug_selector(move || format!("{row_id}#copy-pill"))
+        .flex()
+        .items_center()
+        .gap(px(3.0))
+        .px(px(6.0))
+        .py(px(2.0))
+        .rounded(px(5.0))
+        .cursor_pointer()
+        .bg(bg)
+        .text_color(fg)
+        .when(!copied, |el| {
+            el.hover(move |s| s.bg(hover_bg).text_color(hover_fg))
+                .active(move |s| s.bg(down_bg).text_color(down_fg))
+        })
+        .when(copied, |el| el.child(icon("check", 11.0, fg)))
+        .child(if copied { "Copied" } else { "Copy" })
+        .on_click(move |_, window, cx| {
+            if let Some(on_copy) = &on_copy {
+                on_copy(pill_id.clone(), source.clone(), window, cx);
+            }
+        })
+        .into_any_element()
+}
+
+/// Screenshot rig (`ARBOS_RIG_CODE_COPY=hover|pressed|copied`): every Copy
+/// pill paints in that state — the EC2 Mac's VNC session cannot hold a
+/// button through a capture, and "Copied" lasts 1.5 s.
+fn rig_copy_pill() -> Option<CopyPillState> {
+    static RIG: std::sync::OnceLock<Option<CopyPillState>> = std::sync::OnceLock::new();
+    *RIG.get_or_init(|| match std::env::var("ARBOS_RIG_CODE_COPY").ok()?.trim() {
+        "hover" => Some(CopyPillState::Hover),
+        "pressed" => Some(CopyPillState::Pressed),
+        "copied" => Some(CopyPillState::Copied),
+        _ => None,
+    })
 }
 
 /// Gap from the sender's name to the text (Jacob's reference: tight) and from
@@ -4243,6 +4394,7 @@ mod selection_tests {
                             Instant::now(),
                             &theme,
                             &bubble,
+                            &CodeCopy::default(),
                         )),
                 );
             }
@@ -4283,6 +4435,126 @@ mod selection_tests {
             assert!(f32::from(b.size.height) > 0.0, "block {i} has height");
             bottom = f32::from(b.origin.y + b.size.height);
         }
+    }
+
+    /// A code card on its own, with the Copy pill wired the way the
+    /// transcript wires it (Jacob 2026-10-24 22:22).
+    struct CodeCard {
+        selection: Entity<TextSelection>,
+        code_copied: Option<(SharedString, Instant)>,
+    }
+
+    const SNIPPET: &str = "fn main() {\n    println!(\"hi\");\n}";
+
+    impl gpui::Render for CodeCard {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let theme = Theme::of(cx).clone();
+            let block = Block::Code {
+                lang: "rust".into(),
+                code: SNIPPET.into(),
+            };
+            let texts = BubbleText::for_blocks(std::slice::from_ref(&block), false);
+            let selectable = Selectable::new(&self.selection, theme.accent_soft, cx);
+            let bubble = selectable.bubble("m1#text", texts[0].text.clone());
+            let this = cx.entity().downgrade();
+            let copy = CodeCopy {
+                copied: copied_pill(&self.code_copied, Instant::now()),
+                on_copy: Some(Rc::new(move |id, code, _, cx| {
+                    let _ = this.update(cx, |v, cx| {
+                        copy_code_to_clipboard(&mut v.code_copied, id, code, cx);
+                        cx.notify();
+                    });
+                })),
+            };
+            div().w(px(600.0)).child(render_block(
+                "m1#t.0",
+                &block,
+                texts[0].at,
+                None,
+                Instant::now(),
+                &theme,
+                &bubble,
+                &copy,
+            ))
+        }
+    }
+
+    #[gpui::test]
+    fn the_copy_pill_puts_the_code_on_the_clipboard_and_says_copied(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let theme = crate::ui::theme::Theme::for_pref(
+                crate::ui::theme::AppearancePref::Dark,
+                crate::ui::theme::Surface::Matte,
+                cx,
+            );
+            cx.set_global(theme);
+        });
+        let (view, vcx) = cx.add_window_view(|_, cx| CodeCard {
+            selection: cx.new(TextSelection::new),
+            code_copied: None,
+        });
+        vcx.run_until_parked();
+        let pill = vcx
+            .debug_bounds("m1#t.0#copy-pill")
+            .expect("Copy pill drawn");
+        let before = pill.size.width;
+        vcx.simulate_click(pill.center(), gpui::Modifiers::default());
+        vcx.run_until_parked();
+        let clipboard = vcx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()));
+        assert_eq!(
+            clipboard.as_deref(),
+            Some(SNIPPET),
+            "the block's text, verbatim"
+        );
+        view.read_with(vcx, |v, _| {
+            assert_eq!(
+                copied_pill(&v.code_copied, Instant::now()).as_deref(),
+                Some("m1#t.0#copy"),
+                "the pill says Copied"
+            );
+            assert_eq!(
+                copied_pill(
+                    &v.code_copied,
+                    Instant::now() + Duration::from_millis(CODE_COPY_FEEDBACK_MS)
+                ),
+                None,
+                "and reads Copy again after the window"
+            );
+        });
+        // "✓ Copied" is wider than "Copy": the swap really painted.
+        let pill = vcx
+            .debug_bounds("m1#t.0#copy-pill")
+            .expect("pill still drawn");
+        assert!(
+            pill.size.width > before + px(10.0),
+            "{} vs {before}",
+            pill.size.width
+        );
+    }
+
+    #[test]
+    fn the_copy_pill_has_a_pressed_and_a_copied_look() {
+        let theme = Theme::dark(crate::ui::theme::Surface::Matte);
+        let (rest_bg, rest_fg) = copy_pill_colors(&theme, CopyPillState::Rest);
+        let (hover_bg, _) = copy_pill_colors(&theme, CopyPillState::Hover);
+        let (down_bg, down_fg) = copy_pill_colors(&theme, CopyPillState::Pressed);
+        let (done_bg, done_fg) = copy_pill_colors(&theme, CopyPillState::Copied);
+        assert_eq!(rest_bg.a, 0.0, "nothing behind the label at rest");
+        assert_ne!(hover_bg, rest_bg);
+        assert_eq!(
+            down_bg.a,
+            mention::PILL_ALPHA_PRESSED,
+            "the chips' pressed tint"
+        );
+        assert_eq!(down_fg, theme.accent);
+        assert_ne!(down_bg, hover_bg, "pressed is not just hover");
+        assert_eq!(done_fg, theme.online);
+        assert_eq!(done_bg.a, mention::PILL_ALPHA);
+        assert_ne!(rest_fg, down_fg);
     }
 
     /// Triple-click on the second paragraph takes that paragraph only; a
@@ -4892,6 +5164,7 @@ mod layout_tests {
                         Instant::now(),
                         &theme,
                         &bubble_sel,
+                        &CodeCopy::default(),
                     ),
                 ));
             let row = div()
@@ -5036,6 +5309,7 @@ mod layout_tests {
                                 Instant::now(),
                                 &theme,
                                 &bubble_sel,
+                                &CodeCopy::default(),
                             ),
                         ))
                         // The rail (glyphs · time) out of the flow, as `markdown_bubble` does.
@@ -5061,8 +5335,14 @@ mod layout_tests {
                         .child(assistant_slot(bubble))
                 }
                 Who::Mine | Who::Other => {
-                    let body =
-                        user_message_body("u", self.text, theme.bubble_text(), &theme, &selectable);
+                    let body = user_message_body(
+                        "u",
+                        self.text,
+                        theme.bubble_text(),
+                        &theme,
+                        &selectable,
+                        &CodeCopy::default(),
+                    );
                     let other = matches!(self.who, Who::Other);
                     let bubble = div()
                         .debug_selector(|| "test-bubble".into())
