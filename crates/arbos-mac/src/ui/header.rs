@@ -420,7 +420,9 @@ pub(crate) fn bar_frame(left: Option<AnyElement>, pill: AnyElement) -> Div {
         .window_drag()
         .debug_selector(|| "chat-header-bar".into())
         // The left slot is always there (empty when the sidebar is open) so the
-        // two side slots match and the pill sits on the bar's centre line.
+        // two side slots match and the pill sits on the bar's centre line
+        // ([feedback app-01M5Q1CQZ5JBNY33WCKPN0Y8G9], [feedback
+        // header-pill-restore-2026-10-24]).
         .child(
             div()
                 .w(side)

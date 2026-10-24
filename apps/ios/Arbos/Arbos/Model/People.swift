@@ -264,6 +264,8 @@ struct PeopleChat: Identifiable, Equatable {
     var silencedUntil: Int64? = nil
     /// Per-user sidebar archive (`archived_at` on the relay); nil = in the list.
     var archivedAt: Int64? = nil
+    /// Banned people (owner/admin with mute-ban rights); Unban from the member list.
+    var banned: [ChatMember] = []
 
     /// True while I am muted from posting (honours timed mute).
     var isSilencedNow: Bool {
@@ -316,6 +318,7 @@ extension PeopleChat {
         self.silenced = dto.me.silenced ?? false
         self.silencedUntil = dto.me.silenced_until
         self.archivedAt = dto.archived_at.flatMap { $0 > 0 ? $0 : nil }
+        self.banned = (dto.banned ?? []).map { ChatMember(dto: $0) }
     }
 
     /// Is this person already in the chat? Me (`meId`) counts as in. A handle
