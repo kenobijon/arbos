@@ -152,6 +152,7 @@ struct QueuedSend {
     command: &'static str,
     answer: Option<(String, serde_json::Value)>,
     reply_to: Option<String>,
+    forwarded_from: Option<String>,
 }
 
 struct Shared {
@@ -3669,6 +3670,7 @@ async fn send_message(
     command: &'static str,
     answer: Option<(String, serde_json::Value)>,
     reply_to: Option<String>,
+    forwarded_from: Option<String>,
 ) {
     // No room doc yet: queue while NewChat is in flight, otherwise fail visibly.
     if !shared.docs.lock().unwrap().contains_key(&chat_id) {
@@ -3683,6 +3685,7 @@ async fn send_message(
                     command,
                     answer,
                     reply_to,
+                    forwarded_from,
                 });
                 return;
             }
@@ -3857,6 +3860,9 @@ async fn send_message(
         let device = shared.device_id();
         doc.core.transact(|d| {
             let _ = d.append_user_message(&message_id, &text, &device, &opts);
+            if let Some(by) = forwarded_from.as_deref() {
+                d.set_message_fields(&message_id, &[("forwardedFrom", json!(by))]);
+            }
             d.push_command(command, payload, &device);
             if let Some(ref title) = title {
                 d.push_command("retitle", json!({ "title": title }), &device);
@@ -4105,6 +4111,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 Vec::new(),
                 Some(wav),
                 "send",
+                None,
                 None,
                 None,
             ));
@@ -4873,6 +4880,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 "send",
                 None,
                 reply_to,
+                None,
             ));
         }
         ClientCommand::Forward {
@@ -4895,6 +4903,26 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 "send",
                 None,
                 None,
+                None,
+            ));
+        }
+        ClientCommand::ForwardText {
+            chat_id,
+            message_id,
+            text,
+            forwarded_from,
+        } => {
+            tokio::spawn(send_message(
+                shared.clone(),
+                chat_id,
+                message_id,
+                text,
+                Vec::new(),
+                None,
+                "send",
+                None,
+                None,
+                Some(forwarded_from),
             ));
         }
         ClientCommand::Steer {
@@ -4913,6 +4941,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 "steer",
                 None,
                 reply_to,
+                None,
             ));
         }
         ClientCommand::Answer {
@@ -4932,6 +4961,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 None,
                 "answer",
                 answer,
+                None,
                 None,
             ));
         }
@@ -5290,6 +5320,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                                 q.command,
                                 q.answer,
                                 q.reply_to,
+                                q.forwarded_from,
                             ));
                         }
                     }
