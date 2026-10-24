@@ -28,7 +28,7 @@ use crate::ui::delete_confirm;
 use crate::ui::feedback;
 use crate::ui::media_viewer;
 use crate::ui::motion::{self, PulseClock};
-use crate::ui::palette;
+use crate::ui::palette as palette_ui;
 use crate::ui::shell::{self, Shell};
 use crate::ui::theme::{reapply_window_background, AppearancePref, Surface, Theme};
 use crate::ui::transcript;
@@ -284,15 +284,15 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-k", shell::OpenPalette, None),
         KeyBinding::new("ctrl-k", shell::OpenPalette, None),
         // Palette open: ⌘1–⌘9 open that row (↑ ↓ ⏎ Esc are the field's and the shell's).
-        KeyBinding::new("cmd-1", palette::Pick1, Some("Palette")),
-        KeyBinding::new("cmd-2", palette::Pick2, Some("Palette")),
-        KeyBinding::new("cmd-3", palette::Pick3, Some("Palette")),
-        KeyBinding::new("cmd-4", palette::Pick4, Some("Palette")),
-        KeyBinding::new("cmd-5", palette::Pick5, Some("Palette")),
-        KeyBinding::new("cmd-6", palette::Pick6, Some("Palette")),
-        KeyBinding::new("cmd-7", palette::Pick7, Some("Palette")),
-        KeyBinding::new("cmd-8", palette::Pick8, Some("Palette")),
-        KeyBinding::new("cmd-9", palette::Pick9, Some("Palette")),
+        KeyBinding::new("cmd-1", palette_ui::Pick1, Some("Palette")),
+        KeyBinding::new("cmd-2", palette_ui::Pick2, Some("Palette")),
+        KeyBinding::new("cmd-3", palette_ui::Pick3, Some("Palette")),
+        KeyBinding::new("cmd-4", palette_ui::Pick4, Some("Palette")),
+        KeyBinding::new("cmd-5", palette_ui::Pick5, Some("Palette")),
+        KeyBinding::new("cmd-6", palette_ui::Pick6, Some("Palette")),
+        KeyBinding::new("cmd-7", palette_ui::Pick7, Some("Palette")),
+        KeyBinding::new("cmd-8", palette_ui::Pick8, Some("Palette")),
+        KeyBinding::new("cmd-9", palette_ui::Pick9, Some("Palette")),
         KeyBinding::new("escape", shell::Escape, None),
         // "Delete message?": Return confirms (Esc cancels via the shell).
         KeyBinding::new(
@@ -315,4 +315,60 @@ fn bind_keys(cx: &mut App) {
             Some("FeedbackSheet"),
         ),
     ]);
+}
+
+#[cfg(test)]
+mod keymap_tests {
+    //! Jacob's shortcut rules (search-palette-2026-10-24, 13:49 UTC): ⌘⇧F =
+    //! app-wide search (the palette), ⌘K its alias, ⌘F reserved for in-chat
+    //! search and so bound to nothing, Send Feedback on ⌘⌥F.
+    use gpui::{Keystroke, TestAppContext};
+
+    use super::*;
+
+    fn actions_for(cx: &mut TestAppContext, keys: &str) -> Vec<String> {
+        cx.update(|cx| {
+            bind_keys(cx);
+            let stroke = Keystroke::parse(keys).expect("keystroke");
+            let mut names: Vec<String> = cx
+                .all_bindings_for_input(&[stroke])
+                .iter()
+                .map(|b| b.action().name().to_string())
+                .collect();
+            // `bind_keys` runs once per lookup here; the table itself has each
+            // binding once.
+            names.dedup();
+            names
+        })
+    }
+
+    #[gpui::test]
+    fn cmd_shift_f_and_cmd_k_open_the_palette(cx: &mut TestAppContext) {
+        assert_eq!(actions_for(cx, "cmd-shift-f"), vec!["shell::OpenPalette"]);
+        assert_eq!(actions_for(cx, "cmd-k"), vec!["shell::OpenPalette"]);
+    }
+
+    #[gpui::test]
+    fn cmd_f_stays_unbound_for_in_chat_search(cx: &mut TestAppContext) {
+        assert!(
+            actions_for(cx, "cmd-f").is_empty(),
+            "⌘F is reserved for in-chat search (not built yet)"
+        );
+    }
+
+    #[gpui::test]
+    fn send_feedback_moved_to_cmd_alt_f(cx: &mut TestAppContext) {
+        assert_eq!(actions_for(cx, "cmd-alt-f"), vec!["feedback::SendFeedback"]);
+    }
+
+    #[gpui::test]
+    fn cmd_digits_pick_palette_rows(cx: &mut TestAppContext) {
+        for n in 1..=9 {
+            assert_eq!(
+                actions_for(cx, &format!("cmd-{n}")),
+                vec![format!("palette::Pick{n}")],
+                "⌘{n}"
+            );
+        }
+    }
 }

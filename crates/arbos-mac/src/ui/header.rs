@@ -1051,6 +1051,7 @@ mod header_tests {
                 div()
                     .id("toggle")
                     .size(px(crate::ui::sidebar::STRIP_BUTTON))
+                    .debug_selector(|| "toggle".into())
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .into_any_element()
             });
@@ -1145,7 +1146,11 @@ mod header_tests {
     /// the next drift fails here.
     #[gpui::test]
     fn the_pill_is_centred_not_parked_at_the_left_edge(cx: &mut TestAppContext) {
-        assert_eq!(metrics::PILL_HEIGHT, CONTROL, "pill height: the button family's");
+        assert_eq!(
+            metrics::PILL_HEIGHT,
+            CONTROL,
+            "pill height: the button family's"
+        );
         assert_eq!(
             metrics::PILL_TOP,
             (metrics::HEIGHT - metrics::BOTTOM_PAD - CONTROL) / 2.0,

@@ -720,8 +720,7 @@ impl Shell {
             search_input.update(cx, |input, cx| input.set_text(q.clone(), cx));
         }
         let palette = palette::PaletteState {
-            open: search_query.is_some()
-                || std::env::var("ARBOS_PALETTE").is_ok_and(|v| v == "1"),
+            open: search_query.is_some() || std::env::var("ARBOS_PALETTE").is_ok_and(|v| v == "1"),
             cursor: crate::palette::Cursor {
                 selected: std::env::var("ARBOS_PALETTE_SELECT")
                     .ok()
@@ -2034,7 +2033,12 @@ impl Shell {
     /// centred over the window ([feedback search-palette-2026-10-24]). ⌘F is
     /// not bound here — Jacob keeps it for in-chat search, which does not
     /// exist yet.
-    fn open_palette_action(&mut self, _: &OpenPalette, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_palette_action(
+        &mut self,
+        _: &OpenPalette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.open_palette(window, cx);
     }
 
@@ -2073,16 +2077,8 @@ impl Shell {
         }
         let len = self.palette.len;
         self.palette.cursor.step(delta, len);
-        // Section captions sit between rows, so the child index is not the
-        // row index; the list is short enough that scrolling by row pitch
-        // keeps the highlight in view.
-        let y = -(self.palette.cursor.selected as f32) * (palette::ROW_HEIGHT + palette::ROW_GAP);
-        let current: f32 = self.palette_scroll.offset().y.into();
-        let visible = palette::ROW_HEIGHT * 6.0;
-        if y < current - visible || y > current {
-            self.palette_scroll
-                .set_offset(gpui::point(px(0.0), px((y + visible).min(0.0))));
-        }
+        // The list scrolls the highlight into view on the next frame.
+        self.palette.reveal = 2;
         cx.notify();
     }
 

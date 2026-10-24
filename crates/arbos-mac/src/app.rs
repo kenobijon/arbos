@@ -2853,45 +2853,7 @@ impl AppState {
                 continue;
             };
             let when = crate::ui::sidebar::last_activity(self, space);
-            let kind = if space.is_people_group() {
-                Kind::Group
-            } else if space.is_people() {
-                Kind::Person
-            } else {
-                Kind::Agent
-            };
-            let title = match (kind, space.person()) {
-                (Kind::Person, Some(p)) => p.display_name(),
-                _ => space.name.clone(),
-            };
-            let own_line = match (kind, space.person()) {
-                (Kind::Person, Some(p)) => format!("@{}", p.handle),
-                (Kind::Group, _) => palette::group_subtitle(space.people.len()),
-                _ => space
-                    .description
-                    .clone()
-                    .filter(|d| !d.trim().is_empty())
-                    .unwrap_or_else(|| "Agent".into()),
-            };
-            let indirect = (!query.is_empty()
-                && matches!(hit.kind, search::HitKind::Member | search::HitKind::Message))
-                || hit.reason.as_deref().is_some_and(|r| r.starts_with("Chat · "));
-            let target = match &hit.message {
-                Some((chat_id, message_id)) => Target::Message {
-                    space_id: space.id.clone(),
-                    chat_id: chat_id.clone(),
-                    message_id: message_id.clone(),
-                },
-                None => Target::Space(space.id.clone()),
-            };
-            out.push(Entry {
-                kind,
-                title,
-                subtitle: hit.reason.unwrap_or(own_line),
-                when,
-                indirect,
-                target,
-            });
+            out.push(palette::space_entry(space, hit, when, query));
         }
         for server in &self.servers {
             let when = self.server_last_activity(server);

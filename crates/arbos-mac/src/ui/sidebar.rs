@@ -2363,7 +2363,10 @@ mod strip_tests {
     /// point 4): drawn whenever the chat list is, never inside a server.
     #[test]
     fn the_filter_stays_under_the_strip() {
-        assert!(super::filter_shown(false), "filter drawn with the chat list");
+        assert!(
+            super::filter_shown(false),
+            "filter drawn with the chat list"
+        );
         assert!(!super::filter_shown(true), "no filter inside a server");
     }
 }

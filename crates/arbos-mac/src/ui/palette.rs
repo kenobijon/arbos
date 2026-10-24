@@ -14,8 +14,8 @@
 //! 16 px → 8 from the row's right edge.
 
 use gpui::{
-    actions, div, prelude::*, px, AnyElement, Context, Div, ElementId, FontWeight, ScrollHandle,
-    SharedString, Window,
+    actions, div, prelude::*, px, AnyElement, Context, Div, ElementId, Focusable as _, FontWeight,
+    ScrollHandle, Stateful, Window,
 };
 
 use crate::palette::{arrange, flatten, shortcut_label, Cursor, Entry, Kind, Section, Target};
@@ -84,6 +84,10 @@ pub struct PaletteState {
     pub len: usize,
     /// The query the highlight was computed for: typing resets it to the top.
     pub last_query: String,
+    /// Frames left in which to scroll the highlight into view (keys, the
+    /// rig): two, because GPUI clamps a scroll offset against the previous
+    /// frame's content size, so the first attempt after rows appear is lost.
+    pub reveal: u8,
 }
 
 /// ⌘1–⌘9 → row index.
@@ -125,7 +129,12 @@ pub fn overlay(
     let rows = flatten(&arranged);
     if shell.palette.last_query != query {
         shell.palette.last_query = query.clone();
-        shell.palette.cursor = Cursor::default();
+        // Typing resets the highlight to the top; the very first frame keeps
+        // a preset one (the rig's `ARBOS_PALETTE_SELECT`).
+        if shell.palette.len != 0 {
+            shell.palette.cursor = Cursor::default();
+        }
+        shell.palette.reveal = 2;
     }
     shell.palette.len = rows.len();
     shell.palette.cursor.clamp(rows.len());
@@ -135,6 +144,13 @@ pub fn overlay(
     let height: f32 = viewport.height.into();
     let top = (height * TOP_FRACTION).max(MIN_TOP);
     let max_h = (height * MAX_HEIGHT_FRACTION).max(FIELD_ROW + ROW_HEIGHT * 2.0);
+    if shell.palette.reveal > 0 && !rows.is_empty() {
+        shell.palette.reveal -= 1;
+        reveal_row(scroll, &arranged, selected, max_h);
+        if shell.palette.reveal > 0 {
+            cx.notify();
+        }
+    }
 
     let field = div()
         .id("palette-field")
@@ -232,27 +248,57 @@ pub fn overlay(
         .child(hairline)
         .child(list);
 
-    // Spotlight hangs high, not mid-window: the modal backdrop centres its
-    // card, so the card is a column that pins the panel at `top`.
-    let column = div()
-        .absolute()
-        .inset_0()
-        .flex()
-        .flex_col()
-        .items_center()
-        .pt(px(top))
-        .pb(px(24.0))
-        .child(panel);
+    // Spotlight hangs high, not mid-window: the shared backdrop hangs the
+    // panel `top` under the window edge.
     let close = cx.listener(|this: &mut Shell, _: &(), window, cx| this.close_palette(window, cx));
     Some(
-        modal::modal_overlay(
+        modal::modal_overlay_top(
             "palette-backdrop",
             move |window, cx| close(&(), window, cx),
-            column,
+            top,
+            panel,
         )
         .debug_selector(|| "palette-backdrop".into())
         .into_any_element(),
     )
+}
+
+/// Scroll the list so row `selected` is inside the visible part (the panel's
+/// list box is `max_h` minus the field row, the hairline and the paddings).
+fn reveal_row(
+    scroll: &ScrollHandle,
+    arranged: &[(Section, Vec<Entry>)],
+    selected: usize,
+    max_h: f32,
+) {
+    let mut y = 0.0;
+    let mut index = 0usize;
+    let mut row_top = None;
+    for (section, entries) in arranged {
+        if *section != Section::Recent {
+            y += SECTION_HEIGHT + ROW_GAP;
+        }
+        for _ in entries {
+            if index == selected {
+                row_top = Some(y);
+            }
+            y += ROW_HEIGHT + ROW_GAP;
+            index += 1;
+        }
+    }
+    let Some(row_top) = row_top else {
+        return;
+    };
+    let visible = max_h - FIELD_ROW - 1.0 - LIST_PAD_TOP - LIST_PAD_BOTTOM;
+    let current: f32 = -f32::from(scroll.offset().y);
+    let next = if row_top < current {
+        row_top
+    } else if row_top + ROW_HEIGHT > current + visible {
+        row_top + ROW_HEIGHT - visible
+    } else {
+        return;
+    };
+    scroll.set_offset(gpui::point(px(0.0), px(-next.max(0.0))));
 }
 
 fn section_caption(section: Section, theme: &Theme) -> Div {
@@ -277,7 +323,7 @@ fn row(
     selected: bool,
     theme: &Theme,
     cx: &mut Context<Shell>,
-) -> Div {
+) -> Stateful<Div> {
     let target = entry.target.clone();
     let mut row = div()
         .id(ElementId::NamedInteger("palette-row".into(), index as u64))
@@ -289,7 +335,7 @@ fn row(
         .items_center()
         .gap(px(AVATAR_GAP))
         .cursor_pointer()
-        .debug_selector(move || SharedString::from(format!("palette-row-{index}")))
+        .debug_selector(move || format!("palette-row-{index}"))
         .when(selected, |el| el.bg(theme.surface_2))
         .hover(|s| s.bg(theme.surface_2))
         .child(picture(shell, entry, theme, cx))
@@ -339,7 +385,7 @@ fn row(
                 .justify_center()
                 .text_size(px(BADGE_FONT))
                 .text_color(theme.text_muted)
-                .debug_selector(move || SharedString::from(format!("palette-shortcut-{index}")))
+                .debug_selector(move || format!("palette-shortcut-{index}"))
                 .child(label),
         );
     }
@@ -476,7 +522,8 @@ mod tests {
             }
             let mut messages = div().flex().flex_col();
             for i in 0..60 {
-                messages = messages.child(div().h(px(40.0)).flex_shrink_0().child(format!("m {i}")));
+                messages =
+                    messages.child(div().h(px(40.0)).flex_shrink_0().child(format!("m {i}")));
             }
             let transcript = div()
                 .id("transcript")
@@ -502,13 +549,19 @@ mod tests {
             if self.open {
                 let field = div()
                     .h(px(FIELD_ROW))
+                    .flex_shrink_0()
                     .pl(px(FIELD_INSET))
                     .flex()
                     .items_center()
                     .gap(px(FIELD_GAP))
                     .debug_selector(|| "palette-field".into())
                     .child(icon("search", FIELD_GLYPH, theme.text_muted))
-                    .child(div().flex_1().text_size(px(FIELD_FONT)).child(self.field.clone()));
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(FIELD_FONT))
+                            .child(self.field.clone()),
+                    );
                 let mut list = glass::contained_y_scroll("palette-list")
                     .flex_1()
                     .min_h_0()
@@ -519,8 +572,7 @@ mod tests {
                     .gap(px(ROW_GAP))
                     .debug_selector(|| "palette-list".into());
                 for i in 0..ROWS {
-                    let sel: &'static str =
-                        Box::leak(format!("palette-row-{i}").into_boxed_str());
+                    let sel: &'static str = Box::leak(format!("palette-row-{i}").into_boxed_str());
                     let mut row = div()
                         .h(px(ROW_HEIGHT))
                         .flex_shrink_0()
@@ -557,19 +609,12 @@ mod tests {
                     .child(field)
                     .child(div().h(px(1.0)))
                     .child(list);
-                let column = div()
-                    .absolute()
-                    .inset_0()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .pt(px((H * TOP_FRACTION).max(MIN_TOP)))
-                    .child(panel);
                 let closed = self.closed.clone();
-                root = root.child(modal::modal_overlay(
+                root = root.child(modal::modal_overlay_top(
                     "palette-backdrop",
                     move |_, _| closed.set(true),
-                    column,
+                    (H * TOP_FRACTION).max(MIN_TOP),
+                    panel,
                 ));
             }
             root
@@ -665,10 +710,16 @@ mod tests {
         let panel = vcx.debug_bounds("palette-panel").expect("panel");
         vcx.simulate_click(panel.center(), Default::default());
         vcx.run_until_parked();
-        assert!(!view.read_with(vcx, |s, _| s.closed.get()), "inside closed it");
+        assert!(
+            !view.read_with(vcx, |s, _| s.closed.get()),
+            "inside closed it"
+        );
         vcx.simulate_click(point(px(30.0), px(H - 30.0)), Default::default());
         vcx.run_until_parked();
-        assert!(view.read_with(vcx, |s, _| s.closed.get()), "outside did not close");
+        assert!(
+            view.read_with(vcx, |s, _| s.closed.get()),
+            "outside did not close"
+        );
     }
 
     /// The measured geometry: panel 558 wide hanging at 12 % of the height,
