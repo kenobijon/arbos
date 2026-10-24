@@ -126,10 +126,13 @@ enum RowKind: Equatable {
     /// belongs to (#1440 follow-up: the card must share the bubble's left edge and cap width).
     case question(questionId: String?, text: String, options: [ChoiceOption], multi: Bool, picked: [String], open: Bool, lane: Bool)
     /// A file card; tap opens the media viewer on it (Open → Quick Look).
-    case file(item: MediaItem, subtitle: String)
+    /// `caption` is an optional description bar under a video when the sender typed
+    /// one with the attachment — not a separate text bubble.
+    case file(item: MediaItem, subtitle: String, caption: String?)
     case voiceMemo(name: String, projectId: Id, ref: String?, fromUser: Bool)
     /// A picture; tap opens the media viewer at its place in the chat's album.
-    case image(item: MediaItem, fromUser: Bool)
+    /// `caption` is the description bar under the picture when the send carried text.
+    case image(item: MediaItem, fromUser: Bool, caption: String?)
     /// "Forwarded from <name>" under a forwarded attachment (media-viewer-2026-10-23).
     case forwardHint(text: String, fromUser: Bool)
     case error(code: String, message: String)
@@ -204,25 +207,43 @@ enum Transcript {
                 var hasImage = false
                 var hasAttachment = false
                 let mine = !people || me == nil || message.sender == me || message.sender == "user"
+                // Collect picture / video attachments first so a typed description can sit
+                // as a caption bar on the last one instead of a second bubble.
+                var mediaParts: [(id: String, a: Attachment)] = []
                 for part in message.parts {
                     if case .attachment(let id, let a) = part {
                         if a.isImage { hasImage = true }
                         hasAttachment = true
-                        // Another person's picture / file sits left like their bubble.
-                        chunk.append(attachmentRow(id: "\(message.id)#\(id)", message: message, a: a, projectId: projectId, fromUser: mine, agentNames: agentNames))
+                        mediaParts.append((id, a))
                     }
                 }
                 let text = message.plainText
                 // A forwarded attachment's "Forwarded from …" line is a hint under
                 // the card, not a bubble of its own.
                 let forwarded = hasAttachment ? MediaAlbum.forwardedFrom(text) : nil
+                // Only pictures and videos take a description bar; a PDF + note
+                // still uses a normal text bubble.
+                let lastCaptionable = mediaParts.lastIndex { Self.isCaptionableMedia($0.a) }
+                let mediaCaption: String? = {
+                    guard forwarded == nil, lastCaptionable != nil, !text.isEmpty,
+                          !Self.isGenericMediaLabel(text) else { return nil }
+                    return text
+                }()
+                for (i, part) in mediaParts.enumerated() {
+                    let cap = (i == lastCaptionable) ? mediaCaption : nil
+                    // Another person's picture / file sits left like their bubble.
+                    chunk.append(attachmentRow(id: "\(message.id)#\(part.id)", message: message, a: part.a,
+                                               projectId: projectId, fromUser: mine, agentNames: agentNames,
+                                               caption: cap))
+                }
                 if let forwarded {
                     chunk.append(Row(id: "\(message.id)#forwarded", messageId: message.id, role: mine ? .user : .project,
                                      kind: .forwardHint(text: forwarded, fromUser: mine)))
                 }
                 // Generic labels ("Image", "Photo", …) are not prose — the attachment
                 // row already carries the media. Showing them as a bubble is noise.
-                if !text.isEmpty, forwarded == nil, !(hasImage && Self.isGenericMediaLabel(text)) {
+                // A real description on a picture/video is the caption bar on that row.
+                if !text.isEmpty, forwarded == nil, mediaCaption == nil, !(hasImage && Self.isGenericMediaLabel(text)) {
                     // A forward carries its "Forwarded from" header where a reply carries its quote.
                     let quote: Quote?
                     if let by = message.forwardedFrom?.trimmingCharacters(in: .whitespacesAndNewlines), !by.isEmpty {
@@ -581,7 +602,7 @@ enum Transcript {
     }
 
     private static func attachmentRow(id: String, message: Message, a: Attachment, projectId: Id, fromUser: Bool,
-                                      agentNames: [String: String]) -> Row {
+                                      agentNames: [String: String], caption: String? = nil) -> Row {
         guard let kind = MediaAlbum.kind(of: a) else {
             return Row(id: id, messageId: message.id, role: fromUser ? .user : .assistant,
                        kind: .voiceMemo(name: a.name, projectId: projectId, ref: a.blobRef, fromUser: fromUser))
@@ -590,11 +611,21 @@ enum Transcript {
                                    projectName: { agentNames[$0] })
         if kind == .image {
             return Row(id: id, messageId: message.id, role: fromUser ? .user : .assistant,
-                       kind: .image(item: item, fromUser: fromUser))
+                       kind: .image(item: item, fromUser: fromUser, caption: caption))
         }
         // Video shows as a file card in the bubble (poster + Play live in the viewer).
+        // A typed description rides the card as a caption bar (pictures/videos only).
         return Row(id: id, messageId: message.id, role: fromUser ? .user : .assistant,
-                   kind: .file(item: item, subtitle: subtitle(for: a)))
+                   kind: .file(item: item, subtitle: subtitle(for: a),
+                               caption: kind == .video ? caption : nil))
+    }
+
+    /// Picture or video — the kinds that take a description bar with the send.
+    private static func isCaptionableMedia(_ a: Attachment) -> Bool {
+        switch MediaAlbum.kind(of: a) {
+        case .image, .video: return true
+        case .file, .none: return false
+        }
     }
 
     /// UTType-style labels some clients leave as the only text on a media-only send.
@@ -1226,10 +1257,10 @@ struct RowView: View, Equatable {
                     .frame(maxWidth: lane ? maxBubble - Theme.memberLane(composerInset: composerInset) : maxBubble, alignment: .leading)
                 Spacer(minLength: 0)
             }
-        case .file(let item, let subtitle):
+        case .file(let item, let subtitle, let caption):
             HStack {
                 if row.role == .user { Spacer(minLength: 0) }
-                FileCard(item: item, subtitle: subtitle, chatId: chatId, fromUser: row.role == .user)
+                FileCard(item: item, subtitle: subtitle, chatId: chatId, fromUser: row.role == .user, caption: caption)
                     .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: row.role == .user) }
                     .frame(maxWidth: maxBubble, alignment: row.role == .user ? .trailing : .leading)
                 if row.role != .user { Spacer(minLength: 0) }
@@ -1249,10 +1280,10 @@ struct RowView: View, Equatable {
                     .frame(maxWidth: maxBubble, alignment: fromUser ? .trailing : .leading)
                 if !fromUser { Spacer(minLength: 0) }
             }
-        case .image(let item, let fromUser):
+        case .image(let item, let fromUser, let caption):
             HStack {
                 if fromUser { Spacer(minLength: 0) }
-                ImageBubble(item: item, chatId: chatId, fromUser: fromUser, maxWidth: maxBubble)
+                ImageBubble(item: item, chatId: chatId, fromUser: fromUser, maxWidth: maxBubble, caption: caption)
                     .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: fromUser) }
                 if !fromUser { Spacer(minLength: 0) }
             }
@@ -1861,6 +1892,8 @@ struct AvatarCluster: View {
 /// picture is its own bubble — uniform margins trimmed, aspect-fit at the
 /// bubble radius, no frame and no footer (Download / Forward live in the viewer
 /// it opens). Loaded with the device bearer (same as voice memos).
+/// When the send carried a description, a caption bar sits under the picture
+/// in the same bubble so the note is not a second message.
 struct ImageBubble: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
@@ -1868,6 +1901,7 @@ struct ImageBubble: View {
     let chatId: Id
     let fromUser: Bool
     let maxWidth: CGFloat
+    var caption: String? = nil
 
     @State private var image: UIImage?
     @State private var failed = false
@@ -1880,6 +1914,11 @@ struct ImageBubble: View {
 
     private var bubbleWidth: CGFloat { min(280, maxWidth) }
     private var fill: Color { fromUser ? theme.bubbleUser : theme.bubbleAssistant }
+    private var captionText: String? {
+        guard let caption else { return nil }
+        let t = caption.trimmingCharacters(in: .whitespacesAndNewlines)
+        return t.isEmpty ? nil : t
+    }
 
     private var size: CGSize {
         guard let image, image.size.width > 0, image.size.height > 0 else { return Self.placeholder }
@@ -1899,25 +1938,37 @@ struct ImageBubble: View {
 
     var body: some View {
         Button { viewer = MediaOpen.state(for: item, chatId: chatId, model: model) } label: {
-            ZStack {
-                fill
-                if let image {
-                    Image(uiImage: image)
-                        .resizable()
-                        .scaledToFit()
-                } else if failed || item.blobRef == nil {
-                    Image(systemName: "photo")
-                        .font(theme.font(28))
-                        .foregroundStyle(fromUser ? theme.userText.opacity(0.7) : theme.muted)
-                } else {
-                    ProgressView().tint(fromUser ? theme.userText.opacity(0.7) : theme.muted)
+            VStack(alignment: .leading, spacing: 0) {
+                ZStack {
+                    fill
+                    if let image {
+                        Image(uiImage: image)
+                            .resizable()
+                            .scaledToFit()
+                    } else if failed || item.blobRef == nil {
+                        Image(systemName: "photo")
+                            .font(theme.font(28))
+                            .foregroundStyle(fromUser ? theme.userText.opacity(0.7) : theme.muted)
+                    } else {
+                        ProgressView().tint(fromUser ? theme.userText.opacity(0.7) : theme.muted)
+                    }
+                }
+                .frame(width: size.width, height: size.height)
+                if let captionText {
+                    Text(captionText)
+                        .font(theme.font(Theme.body))
+                        .foregroundStyle(fromUser ? theme.userText : theme.text)
+                        .multilineTextAlignment(.leading)
+                        .padding(.horizontal, Theme.bubbleHPad)
+                        .padding(.vertical, Theme.bubbleVPad)
+                        .frame(width: size.width, alignment: .leading)
+                        .background(fill)
                 }
             }
-            .frame(width: size.width, height: size.height)
             .clipShape(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous))
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Image, tap to view")
+        .accessibilityLabel(captionText == nil ? "Image, tap to view" : "Image with description, tap to view")
         .task(id: item.blobRef) { await load() }
         .fullScreenCover(item: $viewer) { v in
             MediaViewer(album: v.items, index: v.index, onClose: { viewer = nil })
@@ -2045,6 +2096,7 @@ enum MediaOpen {
 
 /// Document card (Grok: icon, title, domain) for a non-audio attachment.
 /// Tap opens the media viewer on it (Open there = Quick Look, plus Download / Forward).
+/// A video's typed description sits as a caption bar under the card.
 struct FileCard: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
@@ -2052,8 +2104,15 @@ struct FileCard: View {
     let subtitle: String
     let chatId: Id
     let fromUser: Bool
+    var caption: String? = nil
 
     @State private var viewer: MediaViewerState?
+
+    private var captionText: String? {
+        guard let caption else { return nil }
+        let t = caption.trimmingCharacters(in: .whitespacesAndNewlines)
+        return t.isEmpty ? nil : t
+    }
 
     var body: some View {
         Button {
@@ -2061,19 +2120,31 @@ struct FileCard: View {
         } label: {
             // Grok's file card (web-08, measured): 61 pt tall, 20×27 icon at 15 pt,
             // text 16 pt after the icon, 17 pt title over a 15 pt muted subtitle.
-            HStack(spacing: 14) {
-                RoundedRectangle(cornerRadius: 5, style: .continuous)
-                    .fill(FileCard.kindColor(item, theme: theme))
-                    .frame(width: 21, height: 27)
-                    .overlay(Image(systemName: item.kind == .video ? "play.fill" : "doc.text").font(.system(size: 12, weight: .bold)).foregroundStyle(.black))
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(item.name).font(theme.font(Theme.body)).foregroundStyle(fromUser ? theme.userText : theme.text).lineLimit(1)
-                    Text(subtitle).font(theme.font(Theme.small)).foregroundStyle(fromUser ? theme.userText.opacity(0.7) : theme.muted).lineLimit(1)
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: 14) {
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(FileCard.kindColor(item, theme: theme))
+                        .frame(width: 21, height: 27)
+                        .overlay(Image(systemName: item.kind == .video ? "play.fill" : "doc.text").font(.system(size: 12, weight: .bold)).foregroundStyle(.black))
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(item.name).font(theme.font(Theme.body)).foregroundStyle(fromUser ? theme.userText : theme.text).lineLimit(1)
+                        Text(subtitle).font(theme.font(Theme.small)).foregroundStyle(fromUser ? theme.userText.opacity(0.7) : theme.muted).lineLimit(1)
+                    }
+                }
+                .padding(.leading, 15)
+                .padding(.trailing, Theme.bubbleHPad + 4)
+                .padding(.vertical, 13)
+                if let captionText {
+                    Text(captionText)
+                        .font(theme.font(Theme.body))
+                        .foregroundStyle(fromUser ? theme.userText : theme.text)
+                        .multilineTextAlignment(.leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, Theme.bubbleHPad)
+                        .padding(.bottom, Theme.bubbleVPad)
+                        .padding(.top, 2)
                 }
             }
-            .padding(.leading, 15)
-            .padding(.trailing, Theme.bubbleHPad + 4)
-            .padding(.vertical, 13)
             .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(fromUser ? theme.bubbleUser : theme.bubbleAssistant))
             .contentShape(Rectangle())
         }
