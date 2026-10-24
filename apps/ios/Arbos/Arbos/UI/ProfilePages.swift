@@ -1182,7 +1182,7 @@ struct GroupProfileView: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Edit group name and picture")
+            .accessibilityLabel("Edit group name, description and picture")
         }
     }
 
@@ -1195,6 +1195,20 @@ struct GroupProfileView: View {
             }
             .buttonStyle(.plain)),
         ]
+        // People groups: description lives in Edit group (same sheet as name + picture).
+        if projectId == nil, people?.isGroup == true {
+            let desc = people?.description ?? ""
+            list.append(AnyView(Button { showEdit = true } label: {
+                PaneRow(
+                    leading: .glyph("text.alignleft"),
+                    title: "Description",
+                    value: desc.isEmpty ? "Add a description" : desc,
+                    chevron: true
+                )
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(desc.isEmpty ? "Add a description" : "Edit description")))
+        }
         // People groups only (not a shared project): one-tap share of the invite link.
         if project == nil, people?.kind == "group" {
             list.append(AnyView(Button {
@@ -2176,13 +2190,15 @@ private struct SelectAllOnDoubleTap: UIViewRepresentable {
     }
 }
 
-/// Name the group and optionally pick a picture. Saves with `PATCH /chats/{id}`.
+/// Name the group, set an optional description, and optionally pick a picture.
+/// Saves with `PATCH /chats/{id}`.
 struct GroupEditSheet: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
     let chatId: String
     @State private var name = ""
+    @State private var descriptionText = ""
     @State private var showAvatarPicker = false
     @State private var saving = false
     @FocusState private var nameFocused: Bool
@@ -2235,7 +2251,20 @@ struct GroupEditSheet: View {
                     }
                     .padding(.horizontal, 16)
 
-                    Text("A name and picture help everyone recognise this chat. Leave the name blank to use member handles.")
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Description").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
+                        TextField("", text: $descriptionText, prompt: Text("What this group is for").foregroundStyle(theme.placeholder), axis: .vertical)
+                            .font(theme.font(Theme.body))
+                            .foregroundStyle(theme.text)
+                            .lineLimit(3...6)
+                            .padding(.horizontal, 14).padding(.vertical, 12)
+                            .frame(minHeight: Theme.fieldHeight, alignment: .topLeading)
+                            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.field))
+                            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+                    }
+                    .padding(.horizontal, 16)
+
+                    Text("A name, description and picture help everyone recognise this chat. Leave the name blank to use member handles.")
                         .font(theme.font(Theme.tiny))
                         .foregroundStyle(theme.muted)
                         .multilineTextAlignment(.center)
@@ -2269,6 +2298,7 @@ struct GroupEditSheet: View {
             }
             .onAppear {
                 name = people?.title ?? ""
+                descriptionText = people?.description ?? ""
                 nameFocused = true
             }
             .sheet(isPresented: $showAvatarPicker) {
@@ -2280,7 +2310,8 @@ struct GroupEditSheet: View {
     private func save() async {
         saving = true
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let ok = await model.patchPeopleChat(chatId, title: trimmed)
+        let desc = String(descriptionText.trimmingCharacters(in: .whitespacesAndNewlines).prefix(200))
+        let ok = await model.patchPeopleChat(chatId, title: trimmed, description: desc)
         saving = false
         if ok { dismiss() }
     }

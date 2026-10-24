@@ -15,7 +15,8 @@ use crate::db::Db;
 pub const PEOPLE_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS people_chats (
   id TEXT PRIMARY KEY, kind TEXT NOT NULL, created_by TEXT NOT NULL, created_at INTEGER NOT NULL,
-  deleted_at INTEGER, title TEXT, image_key TEXT, avatar_leaf INTEGER, avatar_leaf_color INTEGER
+  deleted_at INTEGER, title TEXT, image_key TEXT, avatar_leaf INTEGER, avatar_leaf_color INTEGER,
+  description TEXT
 );
 CREATE TABLE IF NOT EXISTS people_members (
   chat_id TEXT NOT NULL, member TEXT NOT NULL, role TEXT NOT NULL, added_by TEXT NOT NULL,
@@ -77,6 +78,7 @@ pub fn migrate_people(c: &Connection) {
         "ALTER TABLE people_chats ADD COLUMN avatar_leaf_color INTEGER",
         [],
     );
+    let _ = c.execute("ALTER TABLE people_chats ADD COLUMN description TEXT", []);
     // Group admin mute (can't post) and ban (can't rejoin).
     let _ = c.execute(
         "ALTER TABLE people_members ADD COLUMN silenced INTEGER NOT NULL DEFAULT 0",
@@ -147,6 +149,9 @@ pub struct PeopleChat {
     pub avatar_leaf: Option<i64>,
     #[serde(default)]
     pub avatar_leaf_color: Option<i64>,
+    /// Optional about text for a people group (≤200 chars); `None` or empty = unset.
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -212,6 +217,7 @@ fn people_chat_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<PeopleChat> {
         image_key: r.get(5)?,
         avatar_leaf: r.get(6)?,
         avatar_leaf_color: r.get(7)?,
+        description: r.get(8)?,
     })
 }
 
@@ -221,8 +227,8 @@ impl Db {
     pub fn insert_people_chat(&self, chat: &PeopleChat) -> Result<()> {
         self.with(|c| {
             c.execute(
-                "INSERT INTO people_chats(id, kind, created_by, created_at, title, avatar_leaf, avatar_leaf_color) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![chat.id, chat.kind, chat.created_by, chat.created_at, chat.title, chat.avatar_leaf, chat.avatar_leaf_color],
+                "INSERT INTO people_chats(id, kind, created_by, created_at, title, avatar_leaf, avatar_leaf_color, description) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![chat.id, chat.kind, chat.created_by, chat.created_at, chat.title, chat.avatar_leaf, chat.avatar_leaf_color, chat.description],
             )
             .map(|_| ())
         })
@@ -231,7 +237,7 @@ impl Db {
     pub fn people_chat(&self, id: &str) -> Result<Option<PeopleChat>> {
         self.with(|c| {
             c.query_row(
-                "SELECT id, kind, created_by, created_at, title, image_key, avatar_leaf, avatar_leaf_color FROM people_chats WHERE id = ?1 AND deleted_at IS NULL",
+                "SELECT id, kind, created_by, created_at, title, image_key, avatar_leaf, avatar_leaf_color, description FROM people_chats WHERE id = ?1 AND deleted_at IS NULL",
                 params![id],
                 people_chat_from_row,
             )
@@ -239,13 +245,14 @@ impl Db {
         })
     }
 
-    /// Set a custom group title and/or picture key. Empty strings clear the field.
+    /// Set a custom group title, picture key, and/or description. Empty strings clear the field.
     pub fn update_people_chat_profile(
         &self,
         chat_id: &str,
         title: Option<Option<&str>>,
         image_key: Option<Option<&str>>,
         leaf: Option<Option<(i64, i64)>>,
+        description: Option<Option<&str>>,
     ) -> Result<bool> {
         self.with(|c| {
             if let Some(l) = leaf {
@@ -264,6 +271,12 @@ impl Db {
                 c.execute(
                     "UPDATE people_chats SET image_key = ?2 WHERE id = ?1 AND deleted_at IS NULL",
                     params![chat_id, k],
+                )?;
+            }
+            if let Some(d) = description {
+                c.execute(
+                    "UPDATE people_chats SET description = ?2 WHERE id = ?1 AND deleted_at IS NULL",
+                    params![chat_id, d],
                 )?;
             }
             Ok(true)
@@ -404,7 +417,7 @@ impl Db {
     pub fn chats_of_member(&self, member: &str) -> Result<Vec<ChatWithMembers>> {
         let chats: Vec<PeopleChat> = self.with(|c| {
             let mut st = c.prepare(
-                "SELECT p.id, p.kind, p.created_by, p.created_at, p.title, p.image_key, p.avatar_leaf, p.avatar_leaf_color FROM people_chats p
+                "SELECT p.id, p.kind, p.created_by, p.created_at, p.title, p.image_key, p.avatar_leaf, p.avatar_leaf_color, p.description FROM people_chats p
                  JOIN people_members m ON m.chat_id = p.id
                  WHERE m.member = ?1 AND m.left_at IS NULL AND p.deleted_at IS NULL
                  ORDER BY p.created_at DESC",
@@ -425,7 +438,7 @@ impl Db {
     pub fn dm_between(&self, a: &str, b: &str) -> Result<Option<PeopleChat>> {
         self.with(|c| {
             c.query_row(
-                "SELECT p.id, p.kind, p.created_by, p.created_at, p.title, p.image_key, p.avatar_leaf, p.avatar_leaf_color FROM people_chats p
+                "SELECT p.id, p.kind, p.created_by, p.created_at, p.title, p.image_key, p.avatar_leaf, p.avatar_leaf_color, p.description FROM people_chats p
                  JOIN people_members ma ON ma.chat_id = p.id AND ma.member = ?1 AND ma.left_at IS NULL
                  JOIN people_members mb ON mb.chat_id = p.id AND mb.member = ?2 AND mb.left_at IS NULL
                  WHERE p.kind = 'dm' AND p.deleted_at IS NULL ORDER BY p.created_at LIMIT 1",

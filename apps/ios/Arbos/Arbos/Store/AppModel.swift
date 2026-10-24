@@ -3127,10 +3127,10 @@ final class AppModel: ObservableObject {
         Task { try? await api.leaveChat(chatId) }
     }
 
-    /// Rename a people group and/or set its picture blob key (`PATCH /chats/{id}`).
-    func patchPeopleChat(_ chatId: String, title: String? = nil, imageKey: String? = nil) async -> Bool {
+    /// Rename a people group and/or set its picture blob key or description (`PATCH /chats/{id}`).
+    func patchPeopleChat(_ chatId: String, title: String? = nil, imageKey: String? = nil, description: String? = nil) async -> Bool {
         do {
-            let chat = try await api.patchPeopleChat(chatId, title: title, imageKey: imageKey)
+            let chat = try await api.patchPeopleChat(chatId, title: title, imageKey: imageKey, description: description)
             if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
                 peopleChats[i] = chat
             } else {

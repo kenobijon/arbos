@@ -545,6 +545,13 @@ pub fn people_chat_dto(
         image_key: cm.chat.image_key.clone(),
         avatar_leaf: cm.chat.avatar_leaf,
         avatar_leaf_color: cm.chat.avatar_leaf_color,
+        description: cm
+            .chat
+            .description
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(str::to_owned),
         pending,
         members,
         room: format!("/room/{PEOPLE_PROJECT}/{}", cm.chat.id),
@@ -775,6 +782,9 @@ pub struct CreateGroupBody {
     pub avatar_leaf: Option<i64>,
     #[serde(default)]
     pub avatar_leaf_color: Option<i64>,
+    /// Optional about text (≤200 chars).
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 /// `POST /chats {kind: "group", members: [handles…], agent_ids: [project ids…]}` — a new people
@@ -891,6 +901,12 @@ pub async fn chats_create_group(
         image_key: None,
         avatar_leaf: leaf.map(|l| l.0),
         avatar_leaf_color: leaf.map(|l| l.1),
+        description: b
+            .description
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(|t| t.chars().take(200).collect()),
     };
     if let Err(e) = state.db.insert_people_chat(&chat) {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
@@ -1015,6 +1031,7 @@ pub async fn dm_create(
         image_key: None,
         avatar_leaf: None,
         avatar_leaf_color: None,
+        description: None,
     };
     if let Err(e) = state.db.insert_people_chat(&chat) {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
@@ -1103,6 +1120,9 @@ pub struct PatchChatBody {
         deserialize_with = "crate::api::deserialize_double_option_i64"
     )]
     pub avatar_leaf_color: Option<Option<i64>>,
+    /// Optional about text. Empty string clears it.
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 /// `None` = untouched, `Some(None)` = clear, `Some(Some((leaf, colour)))` = set.
@@ -1134,8 +1154,9 @@ fn safe_image_key(k: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' || c == ':')
 }
 
-/// `PATCH /chats/{id} {"title"?, "image_key"?}` — any human member can name the group
-/// and set an optional picture (uploaded first via `PUT /blob/people:{id}/…`).
+/// `PATCH /chats/{id} {"title"?, "image_key"?, "description"?}` — any human member can
+/// name the group, set an optional picture (uploaded first via `PUT /blob/people:{id}/…`),
+/// and set an optional description.
 pub async fn chat_patch(
     State(state): State<AppState>,
     principal: Principal,
@@ -1150,7 +1171,7 @@ pub async fn chat_patch(
         Ok(l) => l,
         Err((st, msg)) => return api_error(st, "bad_leaf", msg),
     };
-    if b.title.is_none() && b.image_key.is_none() && leaf.is_none() {
+    if b.title.is_none() && b.image_key.is_none() && leaf.is_none() && b.description.is_none() {
         return Json(chat_json(&state, &cm, &me, &device_of(&principal))).into_response();
     }
     let title = b.title.as_ref().map(|t| {
@@ -1159,6 +1180,14 @@ pub async fn chat_patch(
             None
         } else {
             Some(trimmed.chars().take(80).collect::<String>())
+        }
+    });
+    let description = b.description.as_ref().map(|t| {
+        let trimmed = t.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.chars().take(200).collect::<String>())
         }
     });
     let image_key = match &b.image_key {
@@ -1185,9 +1214,11 @@ pub async fn chat_patch(
     }
     let title_ref = title.as_ref().map(|o| o.as_ref().map(|s| s.as_str()));
     let image_ref = image_key.as_ref().map(|o| o.as_ref().map(|s| s.as_str()));
-    if let Err(e) = state
-        .db
-        .update_people_chat_profile(&id, title_ref, image_ref, leaf)
+    let description_ref = description.as_ref().map(|o| o.as_ref().map(|s| s.as_str()));
+    if let Err(e) =
+        state
+            .db
+            .update_people_chat_profile(&id, title_ref, image_ref, leaf, description_ref)
     {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
     }
@@ -2779,6 +2810,7 @@ pub async fn invite_create(
                     image_key: None,
                     avatar_leaf: None,
                     avatar_leaf_color: None,
+                    description: None,
                 };
                 if let Err(e) = state.db.insert_people_chat(&chat) {
                     return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
@@ -3968,6 +4000,7 @@ mod agent_tests {
                 title: None,
                 avatar_leaf: None,
                 avatar_leaf_color: None,
+                description: None,
             }),
         )
         .await;
@@ -4015,6 +4048,7 @@ mod agent_tests {
                 title: None,
                 avatar_leaf: None,
                 avatar_leaf_color: None,
+                description: None,
             }),
         )
         .await;
@@ -4071,6 +4105,7 @@ mod membership_notice_tests {
                 title: None,
                 avatar_leaf: None,
                 avatar_leaf_color: None,
+                description: None,
             }),
         )
         .await;
@@ -4323,6 +4358,7 @@ mod create_group_tests {
                 title: None,
                 avatar_leaf: None,
                 avatar_leaf_color: None,
+                description: None,
             }),
         )
         .await;
@@ -4374,6 +4410,7 @@ mod create_group_tests {
                 title: None,
                 avatar_leaf: None,
                 avatar_leaf_color: None,
+                description: None,
             }),
         )
         .await;
@@ -4389,6 +4426,7 @@ mod create_group_tests {
                 title: None,
                 avatar_leaf: None,
                 avatar_leaf_color: None,
+                description: None,
             }),
         )
         .await;
@@ -4434,6 +4472,7 @@ mod group_add_privacy_tests {
                 title: Some("Spam".into()),
                 avatar_leaf: None,
                 avatar_leaf_color: None,
+                description: None,
             }),
         )
         .await;
@@ -4454,6 +4493,7 @@ mod group_add_privacy_tests {
                 title: Some("Alice's".into()),
                 avatar_leaf: None,
                 avatar_leaf_color: None,
+                description: None,
             }),
         )
         .await;
@@ -4520,6 +4560,7 @@ mod group_add_privacy_tests {
                 title: Some("With Bob".into()),
                 avatar_leaf: None,
                 avatar_leaf_color: None,
+                description: None,
             }),
         )
         .await;
@@ -4535,6 +4576,7 @@ mod group_add_privacy_tests {
                 title: Some("With Carol".into()),
                 avatar_leaf: None,
                 avatar_leaf_color: None,
+                description: None,
             }),
         )
         .await;
@@ -4667,6 +4709,7 @@ pub(crate) mod tests_support {
             image_key: None,
             avatar_leaf: None,
             avatar_leaf_color: None,
+            description: None,
         };
         state.db.insert_people_chat(&chat).expect("chat");
         for u in [a, b] {
@@ -4771,6 +4814,7 @@ mod picture_tests {
                 image_key: Some(key.to_owned()),
                 avatar_leaf: None,
                 avatar_leaf_color: None,
+                description: None,
             }),
         )
         .await
