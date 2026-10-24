@@ -242,6 +242,29 @@ predicts with the same function. Pinned by
 `layout_tests::the_agent_bubble_cap_is_the_column_minus_the_grok_gap_at_most_grok_width`
 and `cards_share_the_bubbles_left_edge_and_cap`.
 
+## Markdown inside bubbles (Jacob 2026-10-24, [feedback bubble-markdown-2026-10-24])
+
+**Lists and headings read like Grok Bot's: bold headings, real bullet discs,
+Grok's line, item and block rhythm.** Measured on Jacob's `grok-chat-1.png`
+(2 px/pt) against Arbos v0.6.221 (`arbos-chat-right-pane-1.png`):
+
+| | Grok Bot | Arbos before | Rule |
+|---|---|---|---|
+| Text line (wrapped paragraph, agent and user bubbles) | 44 px = **22 pt** | 20 pt | `CHAT_LINE_HEIGHT` 22 |
+| List item pitch | 52 px = **26 pt** | 23 | `LIST_ITEM_GAP` 4 over the 22 line |
+| Block pitch (paragraph → heading → list → paragraph) | 64 px = **32 pt** | 24–26 | `BLOCK_GAP_HALF` 5 above and below every block row (10 between blocks) |
+| Bullet | **4.5 pt disc**, muted, centre 8.5 pt from the block's left; item text at **20 pt** | the font's "•" (a 3 pt dot 2 pt in), text at 24 | `BULLET_DOT` 4.5, `BULLET_CENTRE` 8.5, `LIST_INDENT` 20 (26 for two-digit numbers) |
+| Heading / `**bold**` | bold (700); "Surf gear" renders 3 % wider than the same semibold string | semibold (600) | `STRONG_WEIGHT` = `FontWeight::BOLD` for `#` headings and strong spans |
+
+Jacob's "headings" in the surf list are `**bold**` paragraphs (same glyph
+height as the body), so the weight rule covers both. `#` heading sizes (20 /
+17 / 15) are unchanged. Copy text keeps its "• " markers.
+
+Code: `transcript.rs` `render_block` (lists, headings), `inline_runs`,
+`markdown_bubble` block padding; `theme.rs` `CHAT_LINE_HEIGHT`. Pinned by
+`markdown_tests` (rhythm constants, bold runs, a headless render of a bullet
+list: disc size / place, indent, 26 pt pitch, dot on the first line's centre).
+
 ## Bubble hover rail (Jacob 2026-10-24, [feedback bubble-hover-rail-2026-10-24])
 
 **The ☺ ↩ ⋯ rail is vertically centred beside the bubble and shows while the
