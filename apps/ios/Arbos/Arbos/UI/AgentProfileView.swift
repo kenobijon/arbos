@@ -227,6 +227,8 @@ struct AgentProfileView: View {
     @State private var showDescription = false
     @State private var descriptionDraft = ""
     @State private var showReasoning = false
+    /// The call-voice picker (#1316's `VoicePickerView`) from the Settings tab's Voice row.
+    @State private var showVoice = false
     @State private var confirmDelete = false
     @State private var showMessageGrantPicker = false
     @State private var messageGrantError: String?
@@ -285,9 +287,19 @@ struct AgentProfileView: View {
                 let tab: AvatarPickerTab = show.hasSuffix("generate") ? .generate : (show.hasSuffix("upload") ? .upload : .bot)
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { showAvatarPicker = tab }
             }
+            // Rig: `ARBOS_PANEL_TAB=Settings` lands on a tab; `ARBOS_SHOW=agentvoice` also
+            // opens the Voice row's picker.
+            if let t = DebugHooks.panelTab, PaneKinds.agent.contains(t) { tab = t }
+            if isMine, DebugHooks.show == "agentvoice" {
+                tab = "Settings"
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { showVoice = true }
+            }
         }
         .sheet(isPresented: $showReasoning) {
             if let project = model.project(projectId) { ReasoningPickerView(project: project).environmentObject(model).environment(\.theme, theme) }
+        }
+        .sheet(isPresented: $showVoice) {
+            if let project = model.project(projectId) { VoicePickerView(project: project).environmentObject(model).environment(\.theme, theme) }
         }
         .sheet(isPresented: $showMessageGrantPicker) {
             if let project = model.project(projectId) {
@@ -379,6 +391,13 @@ struct AgentProfileView: View {
         }
     }
 
+    /// The Voice row's value — the chosen voice's name, or "Default" (the Mac's
+    /// `voicepicker::current_label`); the raw id until the catalog arrives.
+    private func voiceLine(_ p: Project) -> String {
+        guard let id = p.voice else { return "Default" }
+        return model.voiceCatalog?.voices.first { $0.id == id }?.name ?? id.capitalized
+    }
+
     /// "working" while a turn runs, else who runs the agent (the Mac's subtitle).
     private func subtitleLine(_ p: Project) -> String {
         if model.isStreaming(project: p.id) { return "working" }
@@ -387,14 +406,15 @@ struct AgentProfileView: View {
         return "Agent"
     }
 
-    /// The selected tab's sections. Voice, Share and "Add to this chat" left the
-    /// pane on 2026-10-22 (Jacob: simple, consistent, powerful).
+    /// The selected tab's sections. Share and "Add to this chat" left the pane on
+    /// 2026-10-22 (Jacob: simple, consistent, powerful); the Voice row came back on
+    /// 2026-10-23 — it is the agent's call voice, not spoken replies in chat.
     private func sections(_ project: Project) -> [PaneSection] {
         switch tab {
         case "Settings":
-            // Identical to the Mac: Model · Reasoning. Per-agent secrets are reached
-            // like the Mac's — Settings → Secrets → the secret's Agents; camera vision
-            // is the call screen's "Let <agent> see" switch.
+            // Identical to the Mac: Model · Reasoning · Voice. Per-agent secrets are
+            // reached like the Mac's — Settings → Secrets → the secret's Agents; camera
+            // vision is the call screen's "Let <agent> see" switch.
             let rows: [AnyView] = [
                 AnyView(
                     Button { if isMine { showModel = true } } label: {
@@ -406,6 +426,13 @@ struct AgentProfileView: View {
                 AnyView(
                     Button { if isMine { showReasoning = true } } label: {
                         PaneRow(title: "Reasoning", value: project.effort.label, chevron: isMine)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!isMine)
+                ),
+                AnyView(
+                    Button { if isMine { showVoice = true } } label: {
+                        PaneRow(title: "Voice", value: voiceLine(project), chevron: isMine)
                     }
                     .buttonStyle(.plain)
                     .disabled(!isMine)
