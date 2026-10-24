@@ -470,6 +470,18 @@ extension AppModel {
         messages[chatId] = list
     }
 
+    /// Rig (`ARBOS_SHOW=code-block`): the Mac fixture's `REPLY_CODE` reply.
+    static let codeReply = """
+    The transcript is a bottom-aligned list with one row per markdown block:
+
+    ```rust
+    let list = ListState::new(0, ListAlignment::Bottom, px(320.0));
+    list(list.clone(), cx.processor(Self::render_row))
+    ```
+
+    Rows are keyed by `{msg}#{part}.{block}` and re-spliced only when their bytes change.
+    """
+
     /// The shape of Jacob's Oct 23 screenshot — a heading, bold labels and bullets over
     /// twenty-odd lines (the Mac fixture's `ARBOS_FIXTURE_REPLY=long` carries the same text).
     static let longReview = """
