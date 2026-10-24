@@ -2507,6 +2507,8 @@ fn emit_box_report(shared: &Shared) {
         .map(|(chat, _)| chat.clone())
         .collect();
     let chats = shared.chats.lock().unwrap().clone();
+    // `ARBOS_FIXTURE_WORKING=<n>`: the first n agents are mid-turn here too.
+    let working_n = fixture_working_count();
     let state = match machine.shown_state() {
         MachineState::Awake => "awake",
         MachineState::Waking => "waking",
@@ -2521,10 +2523,12 @@ fn emit_box_report(shared: &Shared) {
         .unwrap()
         .iter()
         .filter(|p| !p.is_people())
-        .map(|p| {
-            let running = streaming
-                .iter()
-                .any(|c| chats.iter().any(|ch| &ch.id == c && ch.project_id == p.id));
+        .enumerate()
+        .map(|(i, p)| {
+            let running = i < working_n
+                || streaming
+                    .iter()
+                    .any(|c| chats.iter().any(|ch| &ch.id == c && ch.project_id == p.id));
             BoxWorkspace {
                 project_id: p.id.clone(),
                 name: p.name.clone(),
