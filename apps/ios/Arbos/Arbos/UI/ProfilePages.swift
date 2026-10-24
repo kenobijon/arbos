@@ -760,6 +760,8 @@ struct GroupProfileView: View {
     /// Footer confirm: leave (member) or delete (owner) this people group.
     @State private var confirmLeave = false
     @State private var confirmDelete = false
+    /// Mute notifications for 1 hour / 8 hours / until unmuted.
+    @State private var showMuteOptions = false
 
     private var people: PeopleChat? { model.peopleChat(chatId) }
     private var project: Project? { projectId.flatMap { model.project($0) } }
@@ -819,6 +821,23 @@ struct GroupProfileView: View {
         return others.isEmpty ? people.humans : others
     }
 
+    /// Mute / Unmute above Leave — people groups only (relay `me.muted` + local duration).
+    private var muteFooter: [PaneSection] {
+        guard people?.isGroup == true, projectId == nil else { return [] }
+        let muted = model.isPeopleChatMuted(chatId)
+        let row = AnyView(Button {
+            if muted { model.unmutePeopleChat(chatId) }
+            else { showMuteOptions = true }
+        } label: {
+            PaneRow(
+                leading: .tile(muted ? "bell" : "bell.slash"),
+                title: muted ? "Unmute notifications" : "Mute notifications",
+                subtitle: model.peopleMuteSubtitle(chatId)
+            )
+        }.buttonStyle(.plain))
+        return [.card([row], separatorInset: PaneKit.separatorInset(.tile("")))]
+    }
+
     /// Footer on every tab for a people group: Leave group chat for members,
     /// Delete group chat for the owner (same rule as the chat list).
     private var leaveFooter: [PaneSection] {
@@ -852,12 +871,24 @@ struct GroupProfileView: View {
                         tabs: PaneKinds.group,
                         selected: $tab,
                         body: tab == "Members" ? membersSections : librarySections,
-                        footer: leaveFooter
+                        footer: muteFooter + leaveFooter
                     )
                     Color.clear.frame(height: 40)
                 }
             }
             ProfileTopBar { EmptyView() }
+        }
+        .confirmationDialog(
+            "Mute notifications",
+            isPresented: $showMuteOptions,
+            titleVisibility: .visible
+        ) {
+            ForEach(ChatMuteDuration.allCases) { duration in
+                Button(duration.title) { model.mutePeopleChat(chatId, for: duration) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("No banners from this group for the time you pick.")
         }
         .confirmationDialog(
             pendingRemoveName.map { "Remove \($0) from \(title)?" } ?? "Remove from chat?",
