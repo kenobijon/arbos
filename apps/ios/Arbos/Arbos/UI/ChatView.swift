@@ -472,7 +472,7 @@ struct ChatView: View {
                         safeTop: geo.safeAreaInsets.top,
                         safeBottom: geo.safeAreaInsets.bottom,
                         held: heldReactions(row),
-                        items: MessageMenu.items,
+                        items: MessageMenu.items(forMessage: true, canDelete: canDelete(row)),
                         onReact: { emoji in
                             closeActions()
                             model.toggleReaction(chatId: chatId, messageId: row.messageId, emoji: emoji)
@@ -1258,6 +1258,24 @@ struct ChatView: View {
         return Set(m.reactions.filter { $0.senders.contains(me) }.map(\.emoji))
     }
 
+    /// The relay's delete rule for this row (`MessageDeleteRule`): owners moderate; members
+    /// delete their own and their own agents'.
+    private func canDelete(_ row: Row) -> Bool {
+        guard let m = messageById[row.messageId] else { return false }
+        let meId = model.user?.id
+        let moderates: Bool
+        var agentOwners: [String: String] = [:]
+        if let people {
+            moderates = people.myRole == "owner" || people.myRole == "admin"
+            for a in people.agents { if let owner = a.ownerId { agentOwners[a.id] = owner } }
+        } else if isChannel {
+            moderates = false
+        } else {
+            moderates = !(project?.shared ?? false)
+        }
+        return MessageDeleteRule.mayDelete(sender: m.sender, meId: meId, moderates: moderates, agentOwnerIds: agentOwners)
+    }
+
     /// The long-press menu's actions (`MessageMenu`): Copy the text, Reply
     /// (in a people chat the agent that wrote it becomes the recipient),
     /// Forward to another chat, Reply in DM (open a private chat with the human
@@ -1281,7 +1299,7 @@ struct ChatView: View {
             else { return }
             Task { _ = await model.openDM(handle: handle) }
         case .delete:
-            model.deleteMessage(chatId: chatId, messageId: row.messageId)
+            model.deleteMessage(chatId: chatId, messageId: row.messageId, projectId: isPeople ? nil : projectId)
         }
     }
 

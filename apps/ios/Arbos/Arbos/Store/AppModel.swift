@@ -3471,8 +3471,10 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Delete a message for everyone via the shared chat doc. No push notification.
-    func deleteMessage(chatId: Id, messageId: Id) {
+    /// Delete a message for everyone. The relay decides (`DELETE /room/…/messages/{id}`,
+    /// 403 `not_yours` otherwise) and writes the deletion into the doc; it comes back as a
+    /// relay-signed row. No push notification.
+    func deleteMessage(chatId: Id, messageId: Id, projectId: Id? = nil) {
         guard !messageId.isEmpty else { return }
         #if DEBUG
         if isFixture {
@@ -3484,14 +3486,24 @@ final class AppModel: ObservableObject {
             return
         }
         #endif
-        guard let doc = docs[chatId] else { return }
-        do {
-            try doc.deleteMessage(messageId: messageId)
-            doc.commit()
-            clearUnacked(chatId: chatId, messageId: messageId)
-            Haptics.pick()
-        } catch {
-            notice = Notice(text: "Could not delete the message: \(error.localizedDescription)")
+        let room: String
+        if peopleChat(chatId) != nil {
+            room = "people/\(chatId)"
+        } else if let projectId, projectId != peopleSlot {
+            room = "\(projectId)/\(chatId)"
+        } else {
+            room = "people/\(chatId)"
+        }
+        Task {
+            do {
+                try await api.deleteMessage(room: room, messageId: messageId)
+                clearUnacked(chatId: chatId, messageId: messageId)
+                Haptics.pick()
+            } catch {
+                let e = error as? RelayError
+                notice = Notice(text: e?.status == 403 ? "You can only delete your own messages."
+                                 : "Could not delete the message: \(error.localizedDescription)")
+            }
         }
     }
 
