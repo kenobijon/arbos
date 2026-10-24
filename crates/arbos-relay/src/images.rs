@@ -813,14 +813,14 @@ mod avatar_generate_tests {
 
     #[tokio::test]
     async fn falls_through_to_the_next_model_and_stores_a_jpeg() {
-        let (base, seen) = stub(&["gpt-image-1"]).await;
-        std::env::set_var("ARBOS_AVATAR_GEN_MODELS", "gpt-image-1,gpt-image-1-mini");
+        // The default list is tried in order; the stub rejects the first the way OpenAI rejected
+        // gpt-image-1 (no env override: these tests run in parallel threads).
+        let (base, seen) = stub(&["gpt-image-1-mini"]).await;
         let state = state_against(&base);
         let (alice_dev, pid) = funded_agent(&state, 81);
         let (status, v) = generate(&state, &alice_dev, &pid).await;
-        std::env::remove_var("ARBOS_AVATAR_GEN_MODELS");
         assert_eq!(status, StatusCode::OK, "{v}");
-        assert_eq!(v["model"], "gpt-image-1-mini");
+        assert_eq!(v["model"], "gpt-image-2");
         let key = v["image_key"].as_str().unwrap();
         assert!(matches!(
             crate::blobs::stored_image(&state, &pid, key).await,
@@ -828,14 +828,14 @@ mod avatar_generate_tests {
         ));
         let seen = seen.lock().unwrap();
         assert_eq!(seen.len(), 2);
-        assert_eq!(seen[0]["model"], "gpt-image-1");
-        assert_eq!(seen[1]["model"], "gpt-image-1-mini");
+        assert_eq!(seen[0]["model"], "gpt-image-1-mini");
+        assert_eq!(seen[1]["model"], "gpt-image-2");
         assert_eq!(seen[1]["quality"], "low");
         // Metered under the model that answered.
         assert_eq!(
             state
                 .db
-                .usage_count_since(&pid, "openai-images", "avatar:gpt-image-1-mini", 0)
+                .usage_count_since(&pid, "openai-images", "avatar:gpt-image-2", 0)
                 .unwrap(),
             1
         );
@@ -843,12 +843,10 @@ mod avatar_generate_tests {
 
     #[tokio::test]
     async fn every_model_unknown_is_the_friendly_error_with_the_detail_kept() {
-        let (base, _) = stub(&["gpt-image-1", "gpt-image-1-mini"]).await;
-        std::env::set_var("ARBOS_AVATAR_GEN_MODELS", "gpt-image-1,gpt-image-1-mini");
+        let (base, _) = stub(&["gpt-image-1-mini", "gpt-image-2"]).await;
         let state = state_against(&base);
         let (alice_dev, pid) = funded_agent(&state, 82);
         let (status, v) = generate(&state, &alice_dev, &pid).await;
-        std::env::remove_var("ARBOS_AVATAR_GEN_MODELS");
         assert_eq!(status, StatusCode::BAD_GATEWAY);
         assert_eq!(v["error"]["type"], "avatar_unavailable");
         assert_eq!(v["error"]["message"], AVATAR_GEN_FRIENDLY);
