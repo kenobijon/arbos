@@ -2527,21 +2527,29 @@ impl Agent {
 
         // The model acknowledges a hand-off in one sentence (demo review item 2); only when it
         // wrote nothing at all does agentd fill the gap so the chat never shows a bare route.
-        if matches!(
-            turn.route,
-            Some(ValidRoute::New { .. }) | Some(ValidRoute::Wake { .. })
-        ) && turn.streamed_text.trim().is_empty()
-            && turn.ack_text.trim().is_empty()
-        {
-            let h = host.lock().await;
-            if let Some(p) = h.doc.add_text_part(&assistant_msg_id, "text") {
-                h.doc.append_text(
-                    &assistant_msg_id,
-                    &p,
-                    "Handing this to a subagent; I will post its result here.",
+        if turn.streamed_text.trim().is_empty() && turn.ack_text.trim().is_empty() {
+            // No stock line ("Handing this to a subagent…", "On it."): the model's own words
+            // from the route — the `purpose` of a new subagent, the first sentence of a wake
+            // brief — are the turn's statement. A routine turn says nothing.
+            let line = match &turn.route {
+                Some(ValidRoute::New { purpose, .. }) if !turn.routine_turn => {
+                    first_sentence(purpose, 160)
+                }
+                Some(ValidRoute::Wake { brief, .. }) if !turn.routine_turn => {
+                    first_sentence(brief, 160)
+                }
+                _ => None,
+            };
+            if let Some(line) = line {
+                let h = host.lock().await;
+                if let Some(p) = h.doc.add_text_part(&assistant_msg_id, "text") {
+                    h.doc.append_text(&assistant_msg_id, &p, &line);
+                }
+                tracing::info!(
+                    chat_id,
+                    "hand-off statement taken from the route's own words"
                 );
             }
-            tracing::info!(chat_id, "ack_fallback: model wrote no sentence after route");
         }
         // An act turn that hit a hard limit and escalated says so instead of leaving an empty
         // bubble; the subagent that continues it reports back in a later message.
@@ -3943,14 +3951,8 @@ impl Agent {
                     }
                     return Ok(false);
                 }
-                // Agent-flow §1: never start real work on a bare "Working…" row. If route
-                // omitted `ack`, or tools ran before route posted one, put "On it." up now.
-                let needs_ack = !t.ack_split
-                    && t.ack_text.trim().is_empty()
-                    && !matches!(t.route, Some(ValidRoute::Reply { .. }));
-                if needs_ack {
-                    self.write_ack(host, t, "On it.").await;
-                }
+                // The ack (when the model wrote one) is settled before the first tool runs; no
+                // synthetic "On it." — the working row's activity label below is the status.
                 self.maybe_split_ack(host, t, true).await;
                 self.set_activity(host, t, crate::activity::label(tool_name, args))
                     .await;
@@ -4165,14 +4167,19 @@ impl Agent {
         // user-facing sentence(s), with glued ".Word" spacing fixed.
         let cleaned = ProseFilter::clean_prose(t.ack_text.trim());
         let Some(bubble) = ack_bubble(&cleaned, &action, t.routine_turn) else {
-            t.ack_text.clear();
+            // `act`: the sentence is status — it goes on the working row (activity), the one
+            // row of the turn stays open and becomes the result. Else: nothing to show.
             t.ack_split = true;
-            tracing::info!(chat_id = %t.chat_id, action, routine_turn = t.routine_turn, "ack bubble dropped");
+            if action == "act" && !t.routine_turn && !cleaned.trim().is_empty() {
+                t.ack_text = cleaned.trim().to_owned();
+                self.set_activity(host, t, Some(t.ack_text.clone())).await;
+                tracing::info!(chat_id = %t.chat_id, ack_chars = t.ack_text.chars().count(), "ack on the working row");
+            } else {
+                t.ack_text.clear();
+                tracing::info!(chat_id = %t.chat_id, action, routine_turn = t.routine_turn, "ack bubble dropped");
+            }
             return;
         };
-        if bubble != cleaned.trim() {
-            tracing::info!(chat_id = %t.chat_id, action, "ack bubble fallback after thought-aloud strip");
-        }
         t.ack_text = bubble;
         if t.row_closed {
             self.open_row(host, t, "ack").await;
@@ -4461,13 +4468,14 @@ impl Agent {
                 if action != "reply" {
                     if let Some(host) = self.sync.host(&t.chat_id).await {
                         if t.ack_text.trim().is_empty() {
-                            let ack = args
+                            if let Some(ack) = args
                                 .get("ack")
                                 .and_then(Value::as_str)
                                 .map(str::trim)
                                 .filter(|s| !s.is_empty())
-                                .unwrap_or("On it.");
-                            self.write_ack(&host, t, ack).await;
+                            {
+                                self.write_ack(&host, t, ack).await;
+                            }
                         }
                         self.maybe_split_ack(&host, t, true).await;
                     }
@@ -5686,24 +5694,42 @@ fn message_from_routine(m: &arbos_core::doc::MessageView) -> bool {
         || m.rest.get("agentMessage").is_some()
 }
 
-/// The ack bubble's text for a turn, or `None` for no bubble. `act`/`new`/`wake` on a user turn
-/// always show one (a thought-aloud-only ack used to leave the chat on bare "Working…" until the
-/// result — feedback AMus6 / ALYEPIee), so an empty ack falls back to "On it.". A routine-fired
-/// turn has nobody waiting for an acknowledgement: no bubble at all, the note is the whole turn
-/// (#1391: four "On it." rows before the l1 pipeline's check-ins).
+/// Whether the ack of a turn is a bubble (`Some(text)`) or belongs on the working row (`None`).
+/// Jacob's rule (2026-10-23, async jobs): status lives in the working row, never as a chat
+/// bubble — no "On it." placeholders (TestAgent, 23:58 UTC), no "Still on it…" lines. An `act`
+/// turn answers in the same turn, so its ack is status: working row only. A `new`/`wake` turn
+/// hands off and answers later; the model's own one-sentence ack is that turn's statement and
+/// stays, but nothing is invented when the model wrote none. A routine-fired turn has nobody
+/// waiting (#1391): never a bubble. `reply` acks are the reply text itself.
 fn ack_bubble(cleaned: &str, action: &str, routine_turn: bool) -> Option<String> {
     let cleaned = cleaned.trim();
-    if action == "reply" {
-        return (!cleaned.is_empty()).then(|| cleaned.to_owned());
-    }
-    if routine_turn {
+    if cleaned.is_empty() || routine_turn || action == "act" {
         return None;
     }
-    Some(if cleaned.is_empty() {
-        "On it.".to_owned()
-    } else {
-        cleaned.to_owned()
-    })
+    Some(cleaned.to_owned())
+}
+
+/// The first sentence of `text`, capped at `max` chars, as one plain line; `None` when empty.
+fn first_sentence(text: &str, max: usize) -> Option<String> {
+    let one: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let one = one.trim();
+    if one.is_empty() {
+        return None;
+    }
+    let end = one
+        .char_indices()
+        .find(|(i, c)| {
+            matches!(c, '.' | '!' | '?') && one[i + c.len_utf8()..].starts_with([' ', '\n'])
+                || (matches!(c, '.' | '!' | '?') && *i + 1 == one.len())
+        })
+        .map(|(i, c)| i + c.len_utf8())
+        .unwrap_or(one.len());
+    let mut sent: String = one[..end].chars().take(max).collect();
+    if !sent.ends_with(['.', '!', '?']) {
+        sent = sent.trim_end_matches([',', ';', ':']).to_owned();
+        sent.push('.');
+    }
+    Some(sent)
 }
 
 fn turn_deadline_secs() -> u64 {
@@ -5887,6 +5913,13 @@ impl Agent {
     pub(crate) async fn test_open_row(&self, host: &SharedHost, t: &mut TurnState) {
         self.open_row(host, t, "result").await;
     }
+
+    /// Test seam: fold one pi event into the held turn.
+    pub(crate) async fn test_fold(self: &Arc<Self>, chat_id: &str, host: &SharedHost, ev: &Event) {
+        let _ = self
+            .fold_main_event(chat_id, host, ev, Instant::now())
+            .await;
+    }
 }
 
 #[cfg(test)]
@@ -6054,55 +6087,45 @@ mod tests {
         );
     }
 
-    /// #1391: a routine-fired turn (the agent's own check-in) writes no ack bubble — the l1
-    /// pipeline showed "On it." before every progress note. User turns keep theirs, including the
-    /// "On it." fallback when the model's ack was thought-aloud only.
+    /// Jacob's rule (2026-10-23): status lives in the working row, never as a chat bubble.
+    /// An `act` ack is status (no bubble, whatever the model wrote); a `new`/`wake` ack is the
+    /// model's own sentence or nothing — no "On it." is ever invented; routine turns (#1391)
+    /// never get one; `reply` acks are the reply text.
     #[test]
-    fn routine_turns_write_no_ack_bubble() {
-        // user turns: unchanged
+    fn acks_are_working_row_status_except_the_models_own_handoff_sentence() {
+        assert_eq!(ack_bubble("Cloning it now.", "act", false), None);
+        assert_eq!(ack_bubble("", "act", false), None);
+        assert_eq!(ack_bubble("", "new", false), None);
+        assert_eq!(ack_bubble("  ", "wake", false), None);
         assert_eq!(
-            ack_bubble("Cloning it now.", "act", false).as_deref(),
-            Some("Cloning it now.")
+            ack_bubble("Yep, doing that also.", "new", false).as_deref(),
+            Some("Yep, doing that also.")
         );
-        assert_eq!(ack_bubble("", "act", false).as_deref(), Some("On it."));
-        assert_eq!(ack_bubble("  ", "new", false).as_deref(), Some("On it."));
+        assert_eq!(
+            ack_bubble("Sure, steering that.", "wake", false).as_deref(),
+            Some("Sure, steering that.")
+        );
         assert_eq!(ack_bubble("", "reply", false), None);
         assert_eq!(
             ack_bubble("Austin.", "reply", false).as_deref(),
             Some("Austin.")
         );
-        // routine turns: no bubble for act/new/wake, whatever the model wrote
-        assert_eq!(ack_bubble("", "act", true), None);
         assert_eq!(ack_bubble("Checking the pipeline now.", "act", true), None);
         assert_eq!(ack_bubble("On it.", "wake", true), None);
         assert_eq!(ack_bubble("", "new", true), None);
-        // a `reply` on a routine turn is the note itself and stays
         assert_eq!(
-            ack_bubble("Five of 20 chunks are done.", "reply", true).as_deref(),
-            Some("Five of 20 chunks are done.")
+            first_sentence(
+                "Fetch the user's WhatsApp messages. Then summarise them.",
+                160
+            )
+            .as_deref(),
+            Some("Fetch the user's WhatsApp messages.")
         );
-
-        let routine: arbos_core::doc::MessageView = serde_json::from_value(json!({
-            "id": "m1", "role": "user", "status": "done", "parts": [],
-            "sender": "routine:01RTN", "routineName": "pipeline check", "routineRunId": "run-1"
-        }))
-        .unwrap();
-        assert!(message_from_routine(&routine));
-        let typed: arbos_core::doc::MessageView = serde_json::from_value(json!({
-            "id": "m2", "role": "user", "status": "done", "parts": [], "sender": "user"
-        }))
-        .unwrap();
-        assert!(!message_from_routine(&typed));
-        let channel: arbos_core::doc::MessageView = serde_json::from_value(json!({
-            "id": "m3", "role": "user", "status": "done", "parts": [], "sender": "channel:telegram"
-        }))
-        .unwrap();
-        assert!(
-            !message_from_routine(&channel),
-            "a person writing through a channel keeps the ack"
+        assert_eq!(first_sentence("  ", 160), None);
+        assert_eq!(
+            first_sentence("read file2.txt and report its contents,", 160).as_deref(),
+            Some("read file2.txt and report its contents.")
         );
-        // the router agrees: no ack on a routine fire
-        assert!(ROUTER_PROMPT.contains("When a routine fires, the message is your own instruction"));
     }
 
     /// The code-mode prompt names the exact script identifiers of the project tools, so the model

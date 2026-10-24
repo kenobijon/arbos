@@ -9,10 +9,12 @@
 //!
 //! - `[status]` — a question the snapshot answers: the quick reply is the answer; the main
 //!   session is told about the exchange in its next prompt and never answers it again.
-//! - `[guide]` — guidance for the running work: the sentence is the acknowledgement and the
-//!   words go into the running turn as a steer (when a user turn of this chat is running).
-//! - `[task]` — anything else: the sentence is the acknowledgement; the message queues for the
-//!   main session exactly as before and gets its full answer when the lock frees.
+//! - `[guide]` — guidance for the running work: the words go into the running turn as a steer
+//!   (when a user turn of this chat is running). No bubble; the working row shows "Steering: …".
+//! - `[task]` — anything else: the message queues for the main session exactly as before and
+//!   gets its full answer when the lock frees. No bubble; the working row shows "Queued: …".
+//!   (Jacob, 2026-10-23: status lives in the working row, never as "On it." / "Still on it…"
+//!   placeholder bubbles.)
 //!
 //! Guardrails: one call of at most `QUICK_MAX_TOKENS`, `QUICK_CALLS_PER_MINUTE` model calls per
 //! chat (then a canned line, no call), `ARBOS_QUICK_REPLY_TIMEOUT_MS` on the call (then the
@@ -246,7 +248,7 @@ Start your reply with exactly one tag on its own line:\n\
 [status] when the message asks how things are going, what is happening, or something the snapshot or the recent turns answer.\n\
 [guide] when the message corrects, redirects or adds to the work that is running.\n\
 [task] when the message asks for something new, or something you cannot answer from the snapshot.\n\
-After [guide] or [task] write one sentence that says what you understood and that you will take it up right after the current step; do not do it here and do not say it is done.{}",
+After [guide] or [task] write nothing else: the message is taken up by the part of you that works, and the user sees that on the working line, not as a reply from you.{}",
         match address_note {
             Some(n) if !n.trim().is_empty() => format!("\n{}", n.trim()),
             _ => String::new(),
@@ -525,19 +527,9 @@ impl Agent {
             return QuickOutcome::Queued;
         }
         let t0 = Instant::now();
-        // The row first: the user sees something after the grace, not in the first milliseconds.
-        let row_id = ulid();
-        {
-            let h = host.lock().await;
-            h.doc
-                .start_assistant_message(&row_id, &user_msg_id, &self.cfg.device_id);
-            h.doc.add_status_part(&row_id, "working", "Working…");
-            h.doc.set_message_fields(&row_id, &[("quick", json!(true))]);
-            if let Some(attr) = self.people_reply_fields(chat_id) {
-                h.doc.set_message_fields(&row_id, &attr.fields);
-            }
-            h.doc.set_activity(&row_id, Some("Checking on it…"));
-        }
+        // No row yet: a bubble is written only for a status answer. Acknowledgements for queued
+        // work and steers are status and live on the working row (Jacob, 2026-10-23: no "On
+        // it." / "Still on it…" placeholders in the transcript).
         let address = self.owner_address_note(chat_id, host, &user_msg_id).await;
         let (talking_model, _) = self.live_models().await;
         let model = std::env::var("ARBOS_QUICK_REPLY_MODEL")
@@ -621,55 +613,77 @@ impl Agent {
                 t0.elapsed().as_millis()
             ),
             Some(&json!({
-                "message_id": user_msg_id, "row_id": row_id, "side": kind.as_str(), "model_call": used_model,
+                "message_id": user_msg_id, "side": kind.as_str(), "model_call": used_model,
                 "model": model, "waited_ms": t_wait.elapsed().as_millis() as u64, "steerable": snap.steerable,
             })),
         );
-        {
+        self.mark_quick_noted(chat_id, turn_started);
+        if kind != SideKind::Status {
+            // Queued or steered: the working row carries it; nothing in the transcript until
+            // the real answer. The presence line names what was taken, briefly.
+            let gist: String = user_text.split_whitespace().collect::<Vec<_>>().join(" ");
+            let gist: String = gist.chars().take(40).collect();
+            self.post_activity(
+                chat_id,
+                Some(format!(
+                    "{}: {gist}…",
+                    if kind == SideKind::Guide {
+                        "Steering"
+                    } else {
+                        "Queued"
+                    }
+                )),
+            );
+            tracing::info!(
+                chat_id,
+                kind = kind.as_str(),
+                ms = t0.elapsed().as_millis() as i64,
+                model_call = used_model,
+                "quick reply: no bubble, working row only"
+            );
+        } else {
+            let row_id = ulid();
             let h = host.lock().await;
+            h.doc
+                .start_assistant_message(&row_id, &user_msg_id, &self.cfg.device_id);
+            h.doc.set_message_fields(&row_id, &[("quick", json!(true))]);
+            if let Some(attr) = self.people_reply_fields(chat_id) {
+                h.doc.set_message_fields(&row_id, &attr.fields);
+            }
             if let Some(p) = h.doc.add_text_part(&row_id, "text") {
                 h.doc.append_text(&row_id, &p, &text);
             }
-            h.doc.set_activity(&row_id, None);
             h.doc.set_message_fields(
                 &row_id,
                 &[
-                    (
-                        "turnRole",
-                        json!(if kind == SideKind::Status {
-                            "result"
-                        } else {
-                            "ack"
-                        }),
-                    ),
+                    ("turnRole", json!("result")),
                     ("decision", json!("quick")),
                     (
                         "turn",
-                        json!({ "kind": "quick", "side": kind.as_str(), "model_call": used_model }),
+                        json!({ "kind": "quick", "side": "status", "model_call": used_model }),
                     ),
                     ("model", json!(model)),
                 ],
             );
             h.doc.finish_message(&row_id, MessageStatus::Done);
+            drop(h);
+            tracing::info!(
+                chat_id,
+                ms = t0.elapsed().as_millis() as i64,
+                model_call = used_model,
+                "quick reply written"
+            );
+            self.announce_reply(&room, &row_id, &text);
+            let _ = self.store.t3_append(
+                chat_id,
+                None,
+                Some(chat_id),
+                "assistant",
+                Some("assistant"),
+                &text,
+                Some(&json!({ "message_id": row_id, "quick": true, "side": "status" })),
+            );
         }
-        self.mark_quick_noted(chat_id, turn_started);
-        tracing::info!(
-            chat_id,
-            kind = kind.as_str(),
-            ms = t0.elapsed().as_millis() as i64,
-            model_call = used_model,
-            "quick reply written"
-        );
-        self.announce_reply(&room, &row_id, &text);
-        let _ = self.store.t3_append(
-            chat_id,
-            None,
-            Some(chat_id),
-            "assistant",
-            Some("assistant"),
-            &text,
-            Some(&json!({ "message_id": row_id, "quick": true, "side": kind.as_str() })),
-        );
         match kind {
             SideKind::Status => {
                 let _ = self.store.t3_append(
@@ -688,10 +702,7 @@ impl Agent {
                 // `handle_steer` appends the user text to T3 and steers the running turn; when
                 // the turn ended meanwhile it falls back to a normal send on its own.
                 match self.handle_steer(chat_id, host, cmd).await {
-                    Ok(()) => {
-                        self.push_side_note(chat_id, &user_text, &text);
-                        QuickOutcome::Steered
-                    }
+                    Ok(()) => QuickOutcome::Steered,
                     Err(e) => {
                         tracing::warn!(chat_id, error = %e, "quick guide steer failed; queuing");
                         QuickOutcome::Queued
@@ -1054,33 +1065,36 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// Jacob's rule (2026-10-23): a new ask while busy is queued silently — status on the
+    /// working row, no acknowledgement bubble, no "Still on it…" placeholder; the real answer
+    /// is the only row the message ever gets.
     #[tokio::test]
-    async fn busy_agent_acknowledges_a_new_task_and_still_queues_it() {
+    async fn busy_agent_queues_a_new_task_without_a_placeholder_row() {
         let (agent, root) = test_agent().await;
         let chat = "01TESTCHATQUICKREPLY000001";
         let host = agent.sync.open_room(chat).await.unwrap();
         let busy = agent.test_hold_turn(chat).await;
         let (msg_id, cmd) = send_cmd(&host, "also add a plot of the results when you are done");
-        let t0 = Instant::now();
         let a2 = agent.clone();
         let chat2 = chat.to_owned();
         let waiting = tokio::spawn(async move { a2.handle_command(&chat2, cmd).await });
-        // The acknowledgement lands while the lock is still held …
-        let ack = loop {
-            let rows = reply_rows(&host, &msg_id);
-            if let Some(r) = rows.iter().find(|r| !r.text().trim().is_empty()) {
-                break r.text();
-            }
-            assert!(
-                t0.elapsed() < Duration::from_secs(FIRST_REPLY_GATE_SECS),
-                "no acknowledgement within the gate"
-            );
+        // Give the quick path its grace + model call, then look: the message is queued for the
+        // main session (one waiter) and has no assistant row at all.
+        let t0 = Instant::now();
+        while agent.sends_waiting() == 0
+            && t0.elapsed() < Duration::from_secs(FIRST_REPLY_GATE_SECS)
+        {
             tokio::time::sleep(Duration::from_millis(20)).await;
-        };
-        assert!(ack.contains("Noted"), "{ack}");
-        // … and the message itself is still queued for the main session (one waiter).
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        assert_eq!(agent.sends_waiting(), 1);
+        }
+        assert_eq!(
+            agent.sends_waiting(),
+            1,
+            "the ask queues for the main session"
+        );
+        assert!(
+            reply_rows(&host, &msg_id).is_empty(),
+            "no placeholder / ack row for a queued ask"
+        );
         assert!(!waiting.is_finished());
         assert!(
             agent.take_side_notes(chat).is_none(),
@@ -1088,6 +1102,70 @@ pub(crate) mod tests {
         );
         waiting.abort();
         drop(busy);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Jacob's screenshot (TestAgent, 2026-10-23 23:58 UTC): "On it." as a bubble above the
+    /// working line. An `act` turn's ack — the model's or none — is working-row status; the
+    /// mention gets exactly one row, the result, and no "On it." is ever written, not even when
+    /// a tool starts before any ack.
+    #[tokio::test]
+    async fn act_turn_writes_no_ack_row_only_the_result() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUICKREPLY000006";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            t.ack_text.clear();
+            t.activity = None;
+            agent.test_open_row(&host, t).await;
+        }
+        let user_msg = "m-busy";
+        // A: the model gave an ack → it becomes the working row's activity, not a bubble.
+        agent
+            .hook_route(&json!({ "action": "act", "ack": "Counting the messages in this chat.", "plan": "read the doc" }))
+            .await
+            .unwrap();
+        let rows = reply_rows(&host, user_msg);
+        assert_eq!(rows.len(), 1, "one row: the result");
+        assert_eq!(rows[0].text().trim(), "", "no ack text in the transcript");
+        assert_eq!(
+            agent
+                .turn
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .activity
+                .as_deref(),
+            Some("Counting the messages in this chat.")
+        );
+        // B: a tool starts (nothing acked before it) → still no "On it.".
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            t.ack_split = false;
+            t.ack_text.clear();
+            t.route = Some(arbos_core::route::ValidRoute::Act { plan: "x".into() });
+        }
+        agent
+            .test_fold(
+                chat,
+                &host,
+                &arbos_core::rpc::Event::ToolExecutionStart {
+                    tool_call_id: "c1".into(),
+                    tool_name: "bash".into(),
+                    args: json!({ "command": "ls" }),
+                    parent_tool_call_id: None,
+                },
+            )
+            .await;
+        let rows = reply_rows(&host, user_msg);
+        assert_eq!(rows.len(), 1);
+        let all_text: String = rows.iter().map(|r| r.text()).collect();
+        assert!(!all_text.contains("On it"), "{all_text}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1213,10 +1291,11 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// #1411 end to end: the model's answer comes back cut by the cap; the bubble gets the
-    /// canned line, marked done, never the fragment.
+    /// #1411 end to end: the model's answer comes back cut by the cap. No fragment and no
+    /// canned placeholder either (Jacob, 2026-10-23): the question queues for the main session
+    /// and gets its real answer there; the transcript shows nothing meanwhile.
     #[tokio::test]
-    async fn capped_quick_reply_lands_as_the_canned_line() {
+    async fn capped_quick_reply_queues_instead_of_a_fragment_or_placeholder() {
         let (agent, root) = test_agent().await;
         let chat = "01TESTCHATQUICKREPLY000005";
         let host = agent.sync.open_room(chat).await.unwrap();
@@ -1225,16 +1304,17 @@ pub(crate) mod tests {
         let a2 = agent.clone();
         let chat2 = chat.to_owned();
         let waiting = tokio::spawn(async move { a2.handle_command(&chat2, cmd).await });
-        let text = loop {
-            let rows = reply_rows(&host, &msg_id);
-            if let Some(r) = rows.iter().find(|r| !r.text().trim().is_empty()) {
-                break r.text();
-            }
+        let t0 = Instant::now();
+        while agent.sends_waiting() == 0
+            && t0.elapsed() < Duration::from_secs(FIRST_REPLY_GATE_SECS)
+        {
             tokio::time::sleep(Duration::from_millis(20)).await;
-        };
-        assert!(text.starts_with("Still on it:"), "{text}");
-        assert!(!text.contains("3 lines written,"));
-        assert!(text.trim_end().ends_with('.'));
+        }
+        assert_eq!(agent.sends_waiting(), 1, "queued for the main session");
+        assert!(
+            reply_rows(&host, &msg_id).is_empty(),
+            "no fragment, no canned line"
+        );
         waiting.abort();
         let _ = std::fs::remove_dir_all(&root);
     }
