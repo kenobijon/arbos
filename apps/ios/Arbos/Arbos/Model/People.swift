@@ -206,6 +206,32 @@ extension ChatMember {
     }
 }
 
+/// How long to mute a group chat's notifications (home row / group info).
+enum ChatMuteDuration: CaseIterable, Identifiable {
+    case oneHour
+    case eightHours
+    case untilTurnedOn
+
+    var id: String { title }
+
+    var title: String {
+        switch self {
+        case .oneHour: return "For 1 hour"
+        case .eightHours: return "For 8 hours"
+        case .untilTurnedOn: return "Until I turn it back on"
+        }
+    }
+
+    /// When this mute should end. `distantFuture` means until the user unmutes.
+    var endDate: Date {
+        switch self {
+        case .oneHour: return Date().addingTimeInterval(60 * 60)
+        case .eightHours: return Date().addingTimeInterval(8 * 60 * 60)
+        case .untilTurnedOn: return Date.distantFuture
+        }
+    }
+}
+
 struct PeopleChat: Identifiable, Equatable {
     var id: String
     var kind: String

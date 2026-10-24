@@ -315,6 +315,11 @@ final class AppModel: ObservableObject {
     @Published var mutedChannelIds: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "mutedChannelIds") ?? []) {
         didSet { UserDefaults.standard.set(Array(mutedChannelIds), forKey: "mutedChannelIds") }
     }
+    /// People group chats muted on this phone until the given date (`distantFuture` = until unmuted).
+    /// Timed mutes live here; the relay's `me.muted` stays true while muted so other devices match.
+    @Published var peopleMutedUntil: [String: Date] = AppModel.loadPeopleMutedUntil() {
+        didSet { AppModel.savePeopleMutedUntil(peopleMutedUntil) }
+    }
     /// The shared Matrix client (crates/arbos-matrix through ArbosFFI): the rooms' data plane.
     var matrixClient: ArbosFFI.MatrixClient?
     /// Retains the UniFFI foreign listener for the client's lifetime.
@@ -744,6 +749,7 @@ final class AppModel: ObservableObject {
             return self.visibleChatId
         }
         PushManager.shared.isHiddenChat = { [weak self] id in self?.isHiddenChat(id) ?? false }
+        PushManager.shared.isMutedChat = { [weak self] id in self?.isPeopleChatMuted(id) ?? false }
         NotificationCenter.default.addObserver(forName: PushManager.openChat, object: nil, queue: .main) { [weak self] n in
             guard let self, let cid = n.userInfo?["chat_id"] as? String else { return }
             let pid = (n.userInfo?["project_id"] as? String) ?? peopleSlot
@@ -3385,6 +3391,57 @@ final class AppModel: ObservableObject {
         Task { try? await api.chatSettings(chatId: chatId, muted: muted) }
     }
 
+    private static let peopleMutedUntilKey = "peopleMutedUntil"
+
+    private static func loadPeopleMutedUntil() -> [String: Date] {
+        let raw = UserDefaults.standard.dictionary(forKey: peopleMutedUntilKey) as? [String: Double] ?? [:]
+        return Dictionary(uniqueKeysWithValues: raw.map { ($0.key, Date(timeIntervalSince1970: $0.value)) })
+    }
+
+    private static func savePeopleMutedUntil(_ map: [String: Date]) {
+        let raw = Dictionary(uniqueKeysWithValues: map.map { ($0.key, $0.value.timeIntervalSince1970) })
+        UserDefaults.standard.set(raw, forKey: peopleMutedUntilKey)
+    }
+
+    /// True while this people chat should not show banners (timed local mute or relay `me.muted`).
+    func isPeopleChatMuted(_ chatId: String) -> Bool {
+        if let until = peopleMutedUntil[chatId] {
+            if until > Date() { return true }
+            // Timed mute ended: clear local expiry and the relay flag.
+            peopleMutedUntil.removeValue(forKey: chatId)
+            if peopleChat(chatId)?.muted == true { setMuted(chatId: chatId, muted: false) }
+            return false
+        }
+        return peopleChat(chatId)?.muted == true
+    }
+
+    /// Mute a people group for a chosen length of time (1 hour, 8 hours, or until unmuted).
+    func mutePeopleChat(_ chatId: String, for duration: ChatMuteDuration) {
+        peopleMutedUntil[chatId] = duration.endDate
+        setMuted(chatId: chatId, muted: true)
+    }
+
+    /// Clear a people-chat mute (local expiry and relay flag).
+    func unmutePeopleChat(_ chatId: String) {
+        peopleMutedUntil.removeValue(forKey: chatId)
+        setMuted(chatId: chatId, muted: false)
+    }
+
+    /// Subtitle under Mute / Unmute on the group info page.
+    func peopleMuteSubtitle(_ chatId: String) -> String {
+        guard isPeopleChatMuted(chatId) else {
+            return "No banners for a while, or until you turn them back on"
+        }
+        if let until = peopleMutedUntil[chatId], until.timeIntervalSinceNow < 60 * 60 * 24 * 365 {
+            let f = DateFormatter()
+            f.doesRelativeDateFormatting = true
+            f.dateStyle = .short
+            f.timeStyle = .short
+            return "Muted until \(f.string(from: until))"
+        }
+        return "Muted until you turn it back on"
+    }
+
     /// `GET /users/{id}` for a fresh presence line on a profile page.
     func fetchUser(_ id: String) async -> Person? {
         guard credentials != nil, !isFixture else { return nil }
@@ -3463,21 +3520,24 @@ final class AppModel: ObservableObject {
                 if !isWatching(cid) {
                     peopleUnread.insert(cid)
                     unarchiveOnActivity(chatId: cid)
-                    let sender = payload.sender
-                    let from = sender.handle.isEmpty ? (payload.from_handle.isEmpty ? "someone" : payload.from_handle) : sender.handle
-                    // §7c sender{} first; the chat's member list fills any gap.
-                    let member = peopleChat(cid)?.members.first { $0.handle == from }
-                    let agent = member?.isAgent == true ? member?.project : nil
-                    let kind = sender.kind.isEmpty ? (agent != nil ? "agent" : "user") : sender.kind
-                    let info = MessagePush.userInfo(
-                        chatId: cid, projectId: peopleSlot, title: sender.name.isEmpty ? (member?.displayName ?? "@\(from)") : sender.name,
-                        body: "New message",
-                        senderKind: kind, senderId: sender.id.isEmpty ? (member?.id ?? from) : sender.id,
-                        senderName: sender.name.isEmpty ? (member?.displayName ?? from) : sender.name, senderHandle: from,
-                        avatar: sender.avatar,
-                        avatarColor: sender.avatar_color,
-                        avatarUrl: sender.avatar_url ?? member?.avatarUrl)
-                    Task { await PushManager.shared.postMessage(id: p.id, info: info) }
+                    // Muted group: keep the unread flag, skip the local banner.
+                    if !isPeopleChatMuted(cid) {
+                        let sender = payload.sender
+                        let from = sender.handle.isEmpty ? (payload.from_handle.isEmpty ? "someone" : payload.from_handle) : sender.handle
+                        // §7c sender{} first; the chat's member list fills any gap.
+                        let member = peopleChat(cid)?.members.first { $0.handle == from }
+                        let agent = member?.isAgent == true ? member?.project : nil
+                        let kind = sender.kind.isEmpty ? (agent != nil ? "agent" : "user") : sender.kind
+                        let info = MessagePush.userInfo(
+                            chatId: cid, projectId: peopleSlot, title: sender.name.isEmpty ? (member?.displayName ?? "@\(from)") : sender.name,
+                            body: "New message",
+                            senderKind: kind, senderId: sender.id.isEmpty ? (member?.id ?? from) : sender.id,
+                            senderName: sender.name.isEmpty ? (member?.displayName ?? from) : sender.name, senderHandle: from,
+                            avatar: sender.avatar,
+                            avatarColor: sender.avatar_color,
+                            avatarUrl: sender.avatar_url ?? member?.avatarUrl)
+                        Task { await PushManager.shared.postMessage(id: p.id, info: info) }
+                    }
                     applyBadge()
                 }
             case .peopleChatCreated(let payload):

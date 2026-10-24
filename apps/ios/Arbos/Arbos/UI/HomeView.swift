@@ -233,7 +233,7 @@ struct HomeView: View {
                                 .buttonStyle(.borderless)
                                 .contextMenu {
                                     // Long-press: Pin, reorder when pinned, Archive,
-                                    // Profile/Group info, Delete.
+                                    // Mute (groups), Profile/Group info, Delete.
                                     Button {
                                         withAnimation {
                                             if pinned { model.unpinHome(peopleChatId: chat.id) }
@@ -267,6 +267,23 @@ struct HomeView: View {
                                         withAnimation { model.archive(peopleChatId: chat.id) }
                                     } label: {
                                         Label("Archive", systemImage: "archivebox")
+                                    }
+                                    if chat.isGroup {
+                                        if model.isPeopleChatMuted(chat.id) {
+                                            Button { model.unmutePeopleChat(chat.id) } label: {
+                                                Label("Unmute", systemImage: "bell")
+                                            }
+                                        } else {
+                                            Menu {
+                                                ForEach(ChatMuteDuration.allCases) { duration in
+                                                    Button(duration.title) {
+                                                        model.mutePeopleChat(chat.id, for: duration)
+                                                    }
+                                                }
+                                            } label: {
+                                                Label("Mute", systemImage: "bell.slash")
+                                            }
+                                        }
                                     }
                                     if chat.kind == "dm", let other = chat.counterpart(me: model.user?.id) {
                                         Button { model.showProfile(.user(ProfilePerson(other))) } label: { Label("Profile", systemImage: "person.crop.circle") }
