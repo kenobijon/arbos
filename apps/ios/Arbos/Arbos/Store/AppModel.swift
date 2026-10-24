@@ -40,6 +40,28 @@ enum Surface: String, CaseIterable, Identifiable {
     }
 }
 
+/// Who may add me to a people group (`PATCH /me {group_add}` / `GET /me` → `privacy`).
+enum GroupAddPolicy: String, CaseIterable, Identifiable {
+    case anyone
+    case peopleIKnow = "people_i_know"
+    case nobody
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .anyone: return "Anyone"
+        case .peopleIKnow: return "People I message"
+        case .nobody: return "Nobody"
+        }
+    }
+    var summary: String {
+        switch self {
+        case .anyone: return "Anyone"
+        case .peopleIKnow: return "People I message"
+        case .nobody: return "Nobody"
+        }
+    }
+}
+
 struct Notice: Identifiable, Equatable {
     let id = UUID()
     var text: String
@@ -104,6 +126,10 @@ final class AppModel: ObservableObject {
     @Published var surfaceSetting: String = UserDefaults.standard.string(forKey: "surface") ?? Surface.default.rawValue {
         didSet { UserDefaults.standard.set(surfaceSetting, forKey: "surface") }
     }
+
+    /// Who may add me to people groups (`anyone` | `people_i_know` | `nobody`).
+    /// Synced from `GET /me` → `privacy.group_add`; written with `PATCH /me`.
+    @Published var groupAddPolicy: String = GroupAddPolicy.anyone.rawValue
 
     @Published private(set) var credentials: DeviceCredentials?
     /// Self-serve sign-in (GitHub). `tokens` is the JWT pair; `credentials`
@@ -946,6 +972,24 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Settings → Privacy: who may add me to groups (`PATCH /me {group_add}`).
+    @discardableResult
+    func updateGroupAddPolicy(_ policy: GroupAddPolicy) async -> String? {
+        let previous = groupAddPolicy
+        groupAddPolicy = policy.rawValue
+        guard !isFixture else { return nil }
+        do {
+            _ = try await api.patchMe(groupAdd: policy.rawValue)
+            return nil
+        } catch let e as RelayError {
+            groupAddPolicy = previous
+            return AuthError.humanize(e.type ?? "", e.message.isEmpty ? "Could not update privacy" : e.message)
+        } catch {
+            groupAddPolicy = previous
+            return error.localizedDescription
+        }
+    }
+
     private func adopt(tokens toks: AuthTokens, user who: AuthUser?, persist: Bool = true) {
         tokens = toks
         if let who { user = who }
@@ -992,7 +1036,7 @@ final class AppModel: ObservableObject {
     func refreshAccount() async {
         guard credentials != nil, !isFixture else { return }
         if tokens?.isExpiringSoon == true { _ = await refreshTokens() }
-        if let (who, cr, summary, features) = try? await api.me() {
+        if let (who, cr, summary, features, privacy) = try? await api.me() {
             user = who
             credits = cr
             saveAccountCache()
@@ -1001,6 +1045,10 @@ final class AppModel: ObservableObject {
             LeafAvatarsFlag.shared.setLottie(features?.leaf_lottie ?? true)
             // Voice mode kill switch (absent on an older relay = off).
             VoiceModeFlag.shared.set(features?.voice_mode ?? false)
+            // Who may add me to groups (absent on an older relay = anyone).
+            if let policy = privacy?.group_add, GroupAddPolicy(rawValue: policy) != nil {
+                groupAddPolicy = policy
+            }
             let position = summary.waitlisted ? Int(summary.waitlist_position ?? 1) : nil
             if position != waitlistPosition { waitlistPosition = position }
             meAlwaysOn = summary.always_on
