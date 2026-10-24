@@ -14,7 +14,7 @@ use serde_json::json;
 use tokio::sync::{mpsc, Mutex};
 use tokio_tungstenite::tungstenite::Message;
 
-use arbos_core::doc::{decode_vv, encode_vv, ChatDoc, CommandView};
+use arbos_core::doc::{decode_vv, encode_vv, ChatDoc, CommandStatus, CommandView};
 use arbos_core::ids::{now_ms, ulid};
 use arbos_core::wire::{self, Frame, FrameType, PROJECT_DOC_CHAT_ID};
 use arbos_core::STREAM_COMMIT_MS;
@@ -61,6 +61,11 @@ pub struct DocHost {
     pub ignore_before_ms: i64,
     /// `agent:<project_id>` — this agent as a people-chat member, for the catch-up ordering.
     me: String,
+    /// People chats: when this agent joined (the relay's membership row). Rows issued before
+    /// that are history, never work — also for a workspace that boots after the join
+    /// (TestAgent2, 2026-10-24 00:43: created, added, and its first act was Jacob's 00:42
+    /// "File feedback" from before it existed). `0` = unknown / not a people chat.
+    pub joined_at_ms: i64,
     /// Room link state for debugging readers (`/box/state`, `inspect`): is the relay session
     /// up, since when, when it last fell, how many sessions so far.
     pub link: LinkState,
@@ -167,11 +172,11 @@ impl DocHost {
         // How long a `taken` people `send` stays claimable by other agents (shared address).
         const SHARED_SEND_OPEN_MS: i64 = 15 * 60 * 1000;
         let people = self.room.starts_with("people/");
-        let mut addressed = Vec::new();
+        let mut addressed: Vec<(CommandView, Option<String>)> = Vec::new();
         let mut rest = Vec::new();
         let mut skipped = 0usize;
         for c in self.doc.commands() {
-            if c.issued_at < self.ignore_before_ms {
+            if c.issued_at < self.ignore_before_ms || c.issued_at < self.joined_at_ms {
                 self.seen_commands.insert(c.id.clone());
                 continue;
             }
@@ -188,8 +193,8 @@ impl DocHost {
                     self.mark_interrupted(&c);
                 }
                 if people && c.kind == "send" && c.status == "pending" {
-                    if self.names_me(&c) {
-                        addressed.push(c);
+                    if let Some(sender) = self.names_me(&c) {
+                        addressed.push((c, sender));
                         continue;
                     }
                     if now.saturating_sub(c.issued_at) > BACKLOG_MAX_AGE_MS {
@@ -203,39 +208,60 @@ impl DocHost {
         if skipped > 0 {
             tracing::info!(room = %self.room, skipped, addressed = addressed.len(), live = rest.len(), "catch-up: stale unaddressed people sends skipped");
         }
-        addressed.sort_by_key(|c| std::cmp::Reverse(c.issued_at));
-        addressed.extend(rest);
-        addressed
+        addressed.sort_by_key(|(c, _)| std::cmp::Reverse(c.issued_at));
+        // A backlog of pings from one person collapses to their newest: "@testagent2 hey" /
+        // "you there?" / "you there?" got three replies with the same content (2026-10-24
+        // 00:45). The older ones are done without a reply; the newest answers for all.
+        let mut seen_sender: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut collapsed = 0usize;
+        let mut out = Vec::new();
+        for (c, sender) in addressed {
+            let duplicate = sender.is_some_and(|who| !seen_sender.insert(who));
+            if duplicate {
+                self.doc
+                    .set_command_status(&c.id, CommandStatus::Done, None);
+                collapsed += 1;
+            } else {
+                out.push(c);
+            }
+        }
+        if collapsed > 0 {
+            tracing::info!(room = %self.room, collapsed, "catch-up: older pings from the same person collapsed into their newest");
+        }
+        out.extend(rest);
+        out
     }
 
     /// Does this `send` name this agent — a resolved `agent:<me>` mention, a reply to one of its
     /// rows, or any `@` in the prose (the gate decides cheaply whether that `@` is for it)?
-    fn names_me(&self, c: &CommandView) -> bool {
-        let Some(id) = c
+    /// `Some(sender)` when it does (the sender, for the one-reply-per-person collapse).
+    fn names_me(&self, c: &CommandView) -> Option<Option<String>> {
+        let id = c
             .payload
             .get("messageId")
+            .and_then(serde_json::Value::as_str)?;
+        let m = self.doc.message(id)?;
+        let sender = m
+            .rest
+            .get("sender")
             .and_then(serde_json::Value::as_str)
-        else {
-            return false;
-        };
-        let Some(m) = self.doc.message(id) else {
-            return false;
-        };
-        if m.rest
+            .map(str::to_owned);
+        let resolved = m
+            .rest
             .get("mentions")
             .and_then(serde_json::Value::as_array)
-            .is_some_and(|a| a.iter().any(|v| v.as_str() == Some(self.me.as_str())))
+            .is_some_and(|a| a.iter().any(|v| v.as_str() == Some(self.me.as_str())));
+        if resolved
+            || m.rest
+                .get("replyTo")
+                .and_then(serde_json::Value::as_str)
+                .is_some()
+            || m.text().contains('@')
         {
-            return true;
+            Some(sender)
+        } else {
+            None
         }
-        if m.rest
-            .get("replyTo")
-            .and_then(serde_json::Value::as_str)
-            .is_some()
-        {
-            return true;
-        }
-        m.text().contains('@')
     }
 
     /// A reply that was streaming when the box died: close it as cancelled so the UI settles.
@@ -365,6 +391,7 @@ impl SyncHub {
             closed: false,
             ignore_before_ms: 0,
             me: format!("agent:{}", self.cfg.project_id),
+            joined_at_ms: 0,
             link: LinkState::default(),
         }));
         self.hosts
@@ -393,6 +420,18 @@ impl SyncHub {
             if h.ignore_before_ms == 0 {
                 h.ignore_before_ms = now_ms();
             }
+        }
+    }
+
+    /// The relay says this agent joined the people chat at `joined_at_ms`: commands issued
+    /// before that are never run here, whether the room opened at boot or on the add.
+    pub async fn mark_joined_at(&self, chat_id: &str, joined_at_ms: i64) {
+        if joined_at_ms <= 0 {
+            return;
+        }
+        if let Some(h) = self.hosts.lock().await.get(chat_id) {
+            let mut h = h.lock().await;
+            h.joined_at_ms = h.joined_at_ms.max(joined_at_ms);
         }
     }
 
@@ -834,7 +873,6 @@ impl SyncHub {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arbos_core::doc::CommandStatus;
 
     fn host_with(doc: ChatDoc) -> DocHost {
         DocHost {
@@ -852,6 +890,7 @@ mod tests {
             closed: false,
             ignore_before_ms: 0,
             me: "agent:ME".into(),
+            joined_at_ms: 0,
             link: LinkState::default(),
         }
     }
@@ -905,25 +944,32 @@ mod tests {
         let doc = ChatDoc::new(Some(7), true);
         let now = now_ms();
         let hour_ago = now - 60 * 60 * 1000;
-        let msg = |id: &str, text: &str, mentions: Vec<&str>| {
+        let msg = |id: &str, text: &str, sender: &str, mentions: Vec<&str>| {
             doc.append_user_message(
                 id,
                 text,
                 "mac",
                 &arbos_core::doc::UserMessageOpts {
                     mentions: mentions.into_iter().map(str::to_owned).collect(),
+                    sender: Some(sender.into()),
                     ..Default::default()
                 },
             )
             .unwrap();
         };
-        msg("old-chatter", "lfg", vec![]);
-        msg("old-mention", "@testagent try again", vec!["agent:ME"]);
-        msg("old-other", "@affinity hi", vec!["user:aff"]);
-        msg("recent-chatter", "bullish", vec![]);
+        msg("old-chatter", "lfg", "user:sam", vec![]);
+        msg(
+            "old-mention",
+            "@testagent try again",
+            "user:sam",
+            vec!["agent:ME"],
+        );
+        msg("old-other", "@affinity hi", "user:ken", vec!["user:aff"]);
+        msg("recent-chatter", "bullish", "user:sam", vec![]);
         msg(
             "new-mention",
             "@testagent do you have credits now?",
+            "user:sam",
             vec!["agent:ME"],
         );
         let stale_chatter = doc.push_command_at(
@@ -962,12 +1008,25 @@ mod tests {
         let ids: Vec<String> = host.new_pending().into_iter().map(|c| c.id).collect();
         assert_eq!(
             ids,
-            vec![new_mention, old_other, old_mention, recent_chatter, stale_stop],
-            "mentions newest-first (an @person line still reaches the cheap gate), then the rest in doc order"
+            vec![new_mention, old_other, recent_chatter, stale_stop],
+            "mentions newest-first (an @person line still reaches the cheap gate), sam's older ping collapsed into the newest, then the rest in doc order"
         );
         assert!(
             !ids.contains(&stale_chatter),
             "an hour-old unaddressed send is not gated at all"
+        );
+        // 2026-10-24 00:45: three replies to "@testagent2 hey" / "you there?" / "you there?".
+        // The older ping from the same person is done, not answered; the newest answers for all.
+        let statuses: std::collections::HashMap<String, String> = host
+            .doc
+            .commands()
+            .into_iter()
+            .map(|c| (c.id, c.status))
+            .collect();
+        assert_eq!(statuses[&old_mention], "done");
+        assert_eq!(
+            statuses[&stale_chatter], "pending",
+            "stale chatter is merely not gated"
         );
         assert!(host.new_pending().is_empty(), "handed over once");
 
@@ -988,6 +1047,53 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![old]
         );
+    }
+
+    /// A workspace that boots after the agent was added to a people chat (TestAgent2,
+    /// 2026-10-24 00:43) must not act on rows from before its join — `joined_at` from the
+    /// relay's membership row, whether the room opened at boot or on the add.
+    #[test]
+    fn rows_before_my_join_are_never_work() {
+        let doc = ChatDoc::new(Some(7), true);
+        let now = now_ms();
+        doc.append_user_message(
+            "pre",
+            "File feedback. the sub agent bubble is misaligned",
+            "mac",
+            &arbos_core::doc::UserMessageOpts {
+                sender: Some("user:jacob".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        doc.append_user_message(
+            "post",
+            "@testagent2 hey",
+            "mac",
+            &arbos_core::doc::UserMessageOpts {
+                sender: Some("user:jacob".into()),
+                mentions: vec!["agent:ME".into()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let pre = doc.push_command_at(
+            "send",
+            serde_json::json!({ "messageId": "pre" }),
+            "mac",
+            now - 70_000,
+        );
+        let post = doc.push_command_at(
+            "send",
+            serde_json::json!({ "messageId": "post" }),
+            "mac",
+            now - 5_000,
+        );
+        let mut host = host_with(doc);
+        host.joined_at_ms = now - 10_000;
+        let ids: Vec<String> = host.new_pending().into_iter().map(|c| c.id).collect();
+        assert_eq!(ids, vec![post]);
+        assert!(!ids.contains(&pre));
     }
 
     /// #1575: a reply written while the relay was restarting must go out on the next session.

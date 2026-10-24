@@ -171,23 +171,6 @@ pub struct BusySnapshot {
 }
 
 impl BusySnapshot {
-    /// Legacy canned acknowledgement (kept for tests). Not posted to the chat (#1479): Task
-    /// mid-turn arrivals queue silently and the UI's working indicator covers the wait.
-    #[cfg(test)]
-    pub fn canned_line(&self) -> String {
-        let what = match &self.activity {
-            Some(a) if !a.trim().is_empty() => a.trim().trim_end_matches('…').to_owned(),
-            _ if self.same_chat => "working on your last request".to_owned(),
-            _ => "finishing something in another conversation".to_owned(),
-        };
-        let since = if self.elapsed_s >= 120 {
-            format!("{} min in", self.elapsed_s / 60)
-        } else {
-            format!("{} s in", self.elapsed_s)
-        };
-        format!("Still on it: {what}, {since}. I'll pick this up right after.")
-    }
-
     /// The user-side block of the quick call.
     pub fn render(&self, user_text: &str) -> String {
         let mut out = String::new();
@@ -796,38 +779,6 @@ pub(crate) mod tests {
             Some("Still on it (about a minute in).")
         );
         assert_eq!(finish_cleanly("   ", false), None);
-    }
-
-    #[test]
-    fn canned_line_names_the_activity_or_the_other_chat() {
-        let s = BusySnapshot {
-            same_chat: true,
-            activity: Some("Running a command…".into()),
-            elapsed_s: 42,
-            ..Default::default()
-        };
-        assert_eq!(
-            s.canned_line(),
-            "Still on it: Running a command, 42 s in. I'll pick this up right after."
-        );
-        let s = BusySnapshot {
-            same_chat: false,
-            elapsed_s: 150,
-            ..Default::default()
-        };
-        assert!(s
-            .canned_line()
-            .starts_with("Still on it: finishing something in another conversation, 2 min in."));
-        let s = BusySnapshot {
-            same_chat: true,
-            activity: Some("Waiting for approval".into()),
-            elapsed_s: 600,
-            ..Default::default()
-        };
-        assert_eq!(
-            s.canned_line(),
-            "Still on it: Waiting for approval, 10 min in. I'll pick this up right after."
-        );
     }
 
     #[test]
