@@ -67,6 +67,16 @@ pub enum ChipState {
 }
 
 impl ChipState {
+    /// `hover` / `pressed` (the screenshot rig's `ARBOS_RIG_CHIP`).
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim() {
+            "rest" => Some(ChipState::Rest),
+            "hover" => Some(ChipState::Hover),
+            "pressed" => Some(ChipState::Pressed),
+            _ => None,
+        }
+    }
+
     pub fn alpha(self) -> f32 {
         match self {
             ChipState::Rest => PILL_ALPHA,
@@ -1044,6 +1054,14 @@ pub(crate) mod tests {
         assert_eq!(p.state(&2), ChipState::Hover);
         assert!(p.alpha(&1, t1 + PILL_FADE + half, false).1, "1 is cooling");
         assert!(p.alpha(&2, t1 + PILL_FADE + half, false).1, "2 is warming");
+    }
+
+    #[test]
+    fn chip_state_parses_the_rig_spec() {
+        assert_eq!(ChipState::parse("hover"), Some(ChipState::Hover));
+        assert_eq!(ChipState::parse(" pressed "), Some(ChipState::Pressed));
+        assert_eq!(ChipState::parse("rest"), Some(ChipState::Rest));
+        assert_eq!(ChipState::parse("down"), None);
     }
 
     #[test]

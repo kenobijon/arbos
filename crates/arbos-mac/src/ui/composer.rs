@@ -1951,12 +1951,23 @@ impl InputElement {
         let hits: Rc<Vec<ChipHit>> = Rc::new(std::mem::take(&mut prepaint.chip_hits));
         let hitbox = prepaint.hitbox.clone();
         let now = Instant::now();
-        self.input.update(cx, |input, _| input.chips.tidy(now));
+        let under_pointer = hitbox
+            .is_hovered(window)
+            .then(|| chip_hit_at(&hits, window.mouse_position()))
+            .flatten()
+            .map(|h| h.range.clone());
+        self.input.update(cx, |input, _| {
+            input.chips.tidy(now);
+            // The text moved under a still pointer: a hot chip that is no
+            // longer under it cools now, not at the next mouse move.
+            if under_pointer.is_none() && input.chips.hot().is_some() {
+                input.chips.hover(None, now);
+            }
+        });
         if hits.is_empty() && self.input.read(cx).chips.hot().is_none() {
             return;
         }
-        let over =
-            hitbox.is_hovered(window) && chip_hit_at(&hits, window.mouse_position()).is_some();
+        let over = under_pointer.is_some();
         if over {
             window.set_cursor_style(CursorStyle::PointingHand, &hitbox);
         }
