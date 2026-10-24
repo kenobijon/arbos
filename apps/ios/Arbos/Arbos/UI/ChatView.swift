@@ -17,6 +17,13 @@ private struct PendingForward: Identifiable, Equatable {
     let from: String
 }
 
+/// Long-press → View thread payload for the reply-chain sheet.
+private struct PendingThread: Identifiable, Equatable {
+    var id: Id { root.id }
+    let root: Message
+    let replies: [Message]
+}
+
 /// Long-press → Delete: the row waiting on "Delete message?" (feedback
 /// app-01M5MXQ90MEEWF6C8W090VCZHF). Nothing is deleted until the confirm.
 private struct PendingDelete: Identifiable, Equatable {
@@ -114,6 +121,7 @@ struct ChatView: View {
     @State private var replySwipeActive = false
     /// Long-press → Forward: the text to send and who wrote it (Forward sheet).
     @State private var pendingForward: PendingForward?
+    @State private var pendingThread: PendingThread?
     @State private var pendingDelete: PendingDelete?
 
     /// Rows after the in-chat search filter (profile "search").
@@ -519,7 +527,10 @@ struct ChatView: View {
                         safeTop: geo.safeAreaInsets.top,
                         safeBottom: geo.safeAreaInsets.bottom,
                         held: heldReactions(row),
-                        items: MessageMenu.items(forMessage: true, canEdit: canEditMessage(row), canDelete: canDelete(row)),
+                        items: MessageMenu.items(forMessage: true,
+                                                canEdit: canEditMessage(row),
+                                                canDelete: canDelete(row),
+                                                hasReplies: row.replyCount > 0),
                         onReact: { emoji in
                             closeActions()
                             model.toggleReaction(chatId: chatId, messageId: row.messageId, emoji: emoji)
@@ -602,6 +613,10 @@ struct ChatView: View {
             .environment(\.theme, theme)
             .presentationDetents([.medium, .large])
             .presentationDragIndicator(.visible)
+        }
+        .sheet(item: $pendingThread) { pending in
+            MessageThreadSheet(root: pending.root, replies: pending.replies)
+                .environment(\.theme, theme)
         }
         .task {
             guard DebugHooks.liveDemo, !model.demoStarted, DebugHooks.openChat == chatId || DebugHooks.openChat == nil, let text = DebugHooks.autoSend else { return }
@@ -1394,14 +1409,17 @@ struct ChatView: View {
 
     /// The long-press menu's actions (`MessageMenu`): Copy the text, Reply
     /// (in a people chat the agent that wrote it becomes the recipient),
-    /// Forward to another chat, Reply in DM (open a private chat with the human
-    /// who wrote it), Edit (own text), Delete for everyone.
+    /// View thread (when the message has replies), Forward to another chat,
+    /// Reply in DM (open a private chat with the human who wrote it), Edit
+    /// (own text), Delete for everyone.
     private func runMessageMenu(_ item: MessageMenuItem, row: Row) {
         switch item {
         case .copy:
             UIPasteboard.general.string = m_text(row)
         case .reply:
             beginReply(to: row)
+        case .viewThread:
+            openThread(for: row)
         case .forward:
             beginForward(row)
         case .replyInDM:
@@ -1419,6 +1437,14 @@ struct ChatView: View {
         case .delete:
             beginDelete(row)
         }
+    }
+
+    /// Long-press → View thread: open the held message and every reply in its chain.
+    private func openThread(for row: Row) {
+        guard let root = messageById[row.messageId] else { return }
+        let replies = Transcript.threadReplies(rootId: root.id, in: messages)
+        guard !replies.isEmpty else { return }
+        pendingThread = PendingThread(root: root, replies: replies)
     }
 
     /// Own user text the long-press menu may offer Edit for.
