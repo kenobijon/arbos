@@ -45,6 +45,23 @@ Points at 1×; the Mac draws at 2 px/pt.
 | Inside a server | no search (spacer); "+" only for owner/admin; collapse always |
 | Folded sidebar | the chat header shows the same round disc beside the lights (`header::sidebar_toggle`) |
 
+## Full screen (Jacob 2026-10-24, [feedback fullscreen-traffic-lights-2026-10-24])
+
+Native full screen looks like Chrome's: the window just grows to the screen.
+
+| Item | Rule |
+|---|---|
+| Traffic lights | Stay visible, top left, on the strip's line (centre 21 pt from the top, close at x 14 — the windowed position) |
+| Strip and filter | Exactly where they are in windowed mode: no band above, no layout jump |
+| Hover at the top edge | macOS still slides its own title bar in with the menu bar; that is the system's, we add nothing |
+
+macOS hides a full-screen window's real buttons and shows them only in that
+slide-in bar, so in full screen the shell paints its own three lights
+(`ui/traffic_lights.rs`, `LightsGeometry`) in the 72 pt the strip already
+keeps clear for them (`TRAFFIC_LIGHTS_INSET`), wired to close / leave full
+screen (minimise is disabled in full screen, as AppKit disables it). Pinned by
+`traffic_lights::tests` (`full_screen_adds_no_band_above_the_strip`).
+
 ## Chat-list filter (the iPhone home's `PaneTabs`)
 
 Directly under the strip: **All · Agents · People · Servers** — the iPhone
