@@ -204,9 +204,10 @@ fn run(
                 .update(cx, |s, cx| s.set_reply_to(chat_id, message_id, cx));
         }
         MessageMenuItem::Delete => {
+            // Asks first ("Delete message?", `delete_confirm`); nothing is deleted yet.
             shell
                 .state
-                .update(cx, |s, cx| s.delete_message(chat_id, message_id, cx));
+                .update(cx, |s, cx| s.open_delete_confirm(chat_id, message_id, cx));
         }
     }
 }

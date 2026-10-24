@@ -17,6 +17,14 @@ private struct PendingForward: Identifiable, Equatable {
     let from: String
 }
 
+/// Long-press → Delete: the row waiting on "Delete message?" (feedback
+/// app-01M5MXQ90MEEWF6C8W090VCZHF). Nothing is deleted until the confirm.
+private struct PendingDelete: Identifiable, Equatable {
+    var id: Id { messageId }
+    let messageId: Id
+    let title: String
+}
+
 struct ChatView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
@@ -90,6 +98,7 @@ struct ChatView: View {
     @State private var replySwipeActive = false
     /// Long-press → Forward: the text to send and who wrote it (Forward sheet).
     @State private var pendingForward: PendingForward?
+    @State private var pendingDelete: PendingDelete?
 
     /// Rows after the in-chat search filter (profile "search").
     private var visibleRows: [Row] {
@@ -520,6 +529,20 @@ struct ChatView: View {
         }
         .sheet(isPresented: $showProfile) {
             AgentEditSheet(projectId: projectId).environmentObject(model).environment(\.theme, theme)
+        }
+        .confirmationDialog(
+            pendingDelete?.title ?? "Delete message?",
+            isPresented: Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }),
+            titleVisibility: .visible,
+            presenting: pendingDelete
+        ) { pending in
+            Button("Delete", role: .destructive) {
+                pendingDelete = nil
+                model.deleteMessage(chatId: chatId, messageId: pending.messageId, projectId: isPeople ? nil : projectId)
+            }
+            Button("Cancel", role: .cancel) { pendingDelete = nil }
+        } message: { _ in
+            Text(MessageDeleteCopy.body)
         }
         .sheet(item: $pendingForward) { pending in
             ForwardSheet(fromName: pending.from) { target in
@@ -1299,8 +1322,17 @@ struct ChatView: View {
             else { return }
             Task { _ = await model.openDM(handle: handle) }
         case .delete:
-            model.deleteMessage(chatId: chatId, messageId: row.messageId, projectId: isPeople ? nil : projectId)
+            beginDelete(row)
         }
+    }
+
+    /// Long-press → Delete: ask first. The title names the sender when it is not my message
+    /// (a moderator deleting a member's or an agent's line).
+    private func beginDelete(_ row: Row) {
+        guard let m = messageById[row.messageId] else { return }
+        let mine = m.role == .user && (m.sender == "user" || m.sender == model.myUserId)
+        let sender = mine ? "" : MediaAlbum.senderName(m) { model.project($0)?.name }
+        pendingDelete = PendingDelete(messageId: row.messageId, title: MessageDeleteCopy.title(mine: mine, sender: sender))
     }
 
     /// Long-press → Forward: open the chat picker with this row's text.
