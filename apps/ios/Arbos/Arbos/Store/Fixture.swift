@@ -151,10 +151,10 @@ extension AppModel {
         }
         let group = PeopleChat(id: "fx-group-launch", kind: "group", createdBy: "fx-me", createdAt: now - 3 * 86_400_000, title: "Launch week",
                                pending: false, members: [meOwner, unconst, mira, sam] + groupAgents, headSeq: 40, readSeq: 40, unread: false,
-                               lockState: "visible_to_agents", lastActivityAt: now - 50 * 60_000, myRole: "owner", muted: false)
+                               lockState: "visible_to_agents", lastActivityAt: now - 50 * 60_000, myRole: "owner", muted: false, silenced: false)
         peopleChats = [group, PeopleChat(id: "fx-dm-unconst", kind: "dm", createdBy: "gh_32490803", createdAt: now - 40 * 60_000, title: "@unconst",
                                   pending: false, members: [unconst, meMember], headSeq: 12, readSeq: 9, unread: true,
-                                  lockState: "people_only", lastActivityAt: now - 7 * 60_000, myRole: "member", muted: false)]
+                                  lockState: "people_only", lastActivityAt: now - 7 * 60_000, myRole: "member", muted: false, silenced: false)]
         peopleUnread = ["fx-dm-unconst"]
         messages["fx-group-launch"] = [
             Message(id: "g1", chatId: "fx-group-launch", role: .user, sender: "user:fx-u3", status: .done, turn: nil, decision: nil, subagentId: nil,
@@ -343,7 +343,8 @@ extension AppModel {
 
     /// Sends in fixture mode append locally so the composer can be exercised,
     /// then a scripted reply lands as complete bubbles (ack → working → result).
-    func fixtureAppend(chatId: Id, text: String, attachments: [Attachment], replyTo: Id? = nil) {
+    func fixtureAppend(chatId: Id, text: String, attachments: [Attachment], replyTo: Id? = nil,
+                       forwardedFrom: String? = nil) {
         var list = messages[chatId] ?? []
         // Finish the fixture's stuck "working" turn so the demo reads cleanly.
         if let i = list.lastIndex(where: { $0.isStreaming }) {
@@ -352,6 +353,7 @@ extension AppModel {
         }
         var m = user(newId(), chatId, text, at: nowMs())
         m.replyTo = replyTo
+        m.forwardedFrom = forwardedFrom
         m.parts = attachments.map { .attachment(id: newId(), attachment: $0) } + (text.isEmpty ? [] : m.parts)
         list.append(m)
         messages[chatId] = list
