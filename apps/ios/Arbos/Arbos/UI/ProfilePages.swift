@@ -740,6 +740,23 @@ struct UserProfileView: View {
 
 }
 
+// MARK: - Group invite share sheet
+
+/// Identifiable wrapper so `.sheet(item:)` can present the system share sheet.
+private struct ShareGroupInviteItem: Identifiable {
+    var id: String { url.absoluteString }
+    let url: URL
+}
+
+/// System share sheet for a group invite URL (Messages, Mail, copy, other apps).
+private struct GroupInviteShareSheet: UIViewControllerRepresentable {
+    let url: URL
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: [url], applicationActivities: nil)
+    }
+    func updateUIViewController(_ vc: UIActivityViewController, context: Context) {}
+}
+
 // MARK: - Group page
 
 struct GroupProfileView: View {
@@ -768,6 +785,9 @@ struct GroupProfileView: View {
     @State private var inviteExpires = false
     @State private var inviteSingleUse = false
     @State private var inviteCopied = false
+    /// System share sheet for the group's invite link (reuses a usable link or mints one).
+    @State private var shareInviteURL: ShareGroupInviteItem?
+    @State private var sharingInvite = false
 
     private var people: PeopleChat? { model.peopleChat(chatId) }
     private var project: Project? { projectId.flatMap { model.project($0) } }
@@ -1008,6 +1028,9 @@ struct GroupProfileView: View {
         .sheet(isPresented: $showEdit) {
             GroupEditSheet(chatId: chatId).environmentObject(model).environment(\.theme, theme)
         }
+        .sheet(item: $shareInviteURL) { item in
+            GroupInviteShareSheet(url: item.url)
+        }
         .task {
             if let projectId { projectMembers = await model.projectMembers(projectId) }
             if projectId == nil, people?.kind == "group" {
@@ -1124,8 +1147,8 @@ struct GroupProfileView: View {
         }
     }
 
-    /// Members: Add members, then every person (name, @handle) and agent
-    /// ("Agent · run by …") as kit rows — the Mac group pane's list.
+    /// Members: Add members, Share invite link (people groups), then every person
+    /// (name, @handle) and agent ("Agent · run by …") as kit rows — the Mac group pane's list.
     private var membersSections: [PaneSection] {
         var list: [AnyView] = [
             AnyView(Button { showAdd = true } label: {
@@ -1133,8 +1156,45 @@ struct GroupProfileView: View {
             }
             .buttonStyle(.plain)),
         ]
+        // People groups only (not a shared project): one-tap share of the invite link.
+        if project == nil, people?.kind == "group" {
+            list.append(AnyView(Button {
+                shareGroupInvite()
+            } label: {
+                PaneRow(
+                    leading: .glyph("square.and.arrow.up"),
+                    title: sharingInvite ? "Preparing link…" : "Share invite link"
+                )
+            }
+            .buttonStyle(.plain)
+            .disabled(sharingInvite)
+            .accessibilityLabel("Share invite link")))
+        }
         list += rows.map { r in AnyView(memberRow(r)) }
         return [.card(list, separatorInset: PaneKit.separatorInset(.glyph("")))]
+    }
+
+    /// Reuse a usable invite URL, or mint one, then open the system share sheet.
+    private func shareGroupInvite() {
+        guard !sharingInvite else { return }
+        sharingInvite = true
+        Task {
+            if let existing = groupInvites.first(where: { $0.usable }),
+               let url = URL(string: existing.url) {
+                shareInviteURL = ShareGroupInviteItem(url: url)
+                sharingInvite = false
+                return
+            }
+            if let inv = await model.createGroupInvite(
+                chatId, expires: inviteExpires, singleUse: inviteSingleUse
+            ) {
+                groupInvites.insert(inv, at: 0)
+                if let url = URL(string: inv.url) {
+                    shareInviteURL = ShareGroupInviteItem(url: url)
+                }
+            }
+            sharingInvite = false
+        }
     }
 
     private func memberSubtitle(_ r: Row) -> String {
