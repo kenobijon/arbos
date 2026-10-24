@@ -205,24 +205,6 @@ impl Mentions {
                 },
             );
         }
-        // Agents sitting in people chats that are not my own projects (a
-        // guest's agent in a group): by handle, with their member id.
-        for a in s.projects.iter().flat_map(|p| p.agents.iter()) {
-            if a.handle.is_empty() {
-                continue;
-            }
-            add(
-                a.handle.clone(),
-                Mention {
-                    page: Some(ProfilePage::Agent {
-                        project_id: a.project_id.clone(),
-                    }),
-                    name: a.name.trim().to_string(),
-                    picture: agent_member_picture(s, a, theme),
-                    id: Some(format!("agent:{}", a.project_id)),
-                },
-            );
-        }
         // Agents other people shared into my chats (#1592): their `@handle` is a chip
         // too, drawn through the same identity the bubble and the presence row use.
         for space in s.projects.iter().filter(|p| p.is_people()) {
@@ -239,6 +221,7 @@ impl Mentions {
                         }),
                         name: ident.name.clone(),
                         picture: identity_picture(s, &ident, theme),
+                        id: Some(format!("agent:{}", ident.id)),
                     },
                 );
             }
@@ -528,21 +511,16 @@ fn initials(seed: &str, name: &str, index: Option<u8>, theme: &Theme) -> Picture
     }
 }
 
-/// An agent member of a people chat: its project's picture when the project is
-/// mine, else the member record's own leaf / colour.
-pub fn agent_member_picture(s: &AppState, a: &crate::model::AgentMember, theme: &Theme) -> Picture {
-    if let Some(p) = s.projects.iter().find(|p| p.id == a.project_id) {
-        return project_picture(s, p, theme);
-    }
-    if avatars::leaf_avatars_on() {
-        Picture::Leaf(avatars::leaf_pick(
-            &a.project_id,
-            a.avatar_leaf,
-            a.avatar_leaf_color,
-        ))
-    } else {
-        initials(&a.project_id, &a.name, a.avatar_color_index, theme)
-    }
+/// An agent member of a people chat (`space`), through the same identity rule
+/// its bubbles and the presence row use (#1592).
+pub fn agent_member_picture(
+    s: &AppState,
+    space: Option<&Project>,
+    a: &crate::model::AgentMember,
+    theme: &Theme,
+) -> Picture {
+    let ident = avatars::member_identity(space, &s.projects, a);
+    identity_picture(s, &ident, theme)
 }
 
 pub fn person_picture(s: &AppState, person: &crate::model::Person, theme: &Theme) -> Picture {

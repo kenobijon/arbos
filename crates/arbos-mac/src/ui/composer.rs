@@ -2452,7 +2452,7 @@ impl Composer {
                     name: a.name.trim().to_string(),
                     id: Some(format!("agent:{}", a.project_id)),
                     is_agent: true,
-                    picture: mention::agent_member_picture(state, a, &theme),
+                    picture: mention::agent_member_picture(state, Some(space), a, &theme),
                     tag: None,
                 },
                 by_handle,
@@ -2503,7 +2503,7 @@ impl Composer {
                 name: a.name.trim().to_string(),
                 id: Some(format!("agent:{}", a.project_id)),
                 is_agent: true,
-                picture: mention::agent_member_picture(state, a, &theme),
+                picture: mention::agent_member_picture(state, Some(space), a, &theme),
                 tag: Some("the agent in this chat"),
             });
         }
