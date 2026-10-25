@@ -601,6 +601,9 @@ def main():
             print(ln, [t["id"] for t in tasks if t["lane"] == ln])
         return
     rl.ensure_test_user(TEST_HANDLE, "Long-task eval")
+    # every run on its own signed-in device: a refresh token consumed by another process (a waiter,
+    # a check, a crashed run) cannot take the run down mid-way
+    print(f"preflight: device {rl.fresh_device(f'run {args.run_id}')} minted for this run", flush=True)
     m = rl.machine()
     if m.get("state") != "awake":
         print("machine not awake; starting", flush=True)

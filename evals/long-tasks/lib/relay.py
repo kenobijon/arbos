@@ -1,6 +1,7 @@
 """Relay access for the long-task eval: HTTP with the test user's token, arbosctl wrapper,
 usage, routines. Nothing here talks to a model; everything goes through the product path."""
 
+import fcntl
 import json
 import os
 import subprocess
@@ -64,15 +65,48 @@ def write_ctl_config(access_token, device_id):
     CTL_CONFIG.write_text(json.dumps({"relay_url": RELAY, "device_token": access_token, "device_id": device_id}, indent=2))
 
 
+def _save_tokens(new, prev):
+    for k in ("user", "device_id", "test"):
+        new.setdefault(k, prev.get(k))
+    new["issued_at"] = time.time()
+    tmp = TOKENS.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(new))
+    tmp.replace(TOKENS)
+    write_ctl_config(new["access_token"], new.get("device_id", ""))
+    return new
+
+
+def fresh_device(label):
+    """Mint a new signed-in device for the test user (admin) and make it the harness's token pair.
+    Refresh tokens rotate and a replay revokes the device, so every run starts on its own device
+    instead of inheriting a refresh token another process may have consumed (2026-10-25 08:40)."""
+    t = json.loads(TOKENS.read_text())
+    uid = t["user"]["id"]
+    with TOKENS.with_suffix(".lock").open("w") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        st, new = http("POST", f"{RELAY}/admin/users/{uid}/devices", token=admin_token(), body={"name": f"lt-eval {label}"})
+        if st != 201:
+            raise SystemExit(f"fresh device for the run failed: {st} {new}")
+        return _save_tokens(new, t)["device_id"]
+
+
 def user_token():
-    """Access token, refreshed when < 10 min remain (the relay issues 1 h tokens)."""
+    """Access token, refreshed when < 10 min remain (the relay issues 1 h tokens). The refresh runs
+    under a file lock and re-reads the file first, so lane threads and parallel harness processes
+    never present the same refresh token twice (a replay outside the relay's 30 s grace revokes
+    the device). If the token was still consumed elsewhere, attach a fresh device instead of dying."""
     t = json.loads(TOKENS.read_text())
     issued = t.get("issued_at", TOKENS.stat().st_mtime)
-    if time.time() > issued + t.get("expires_in", 3600) - 600:
+    if time.time() <= issued + t.get("expires_in", 3600) - 600:
+        return t["access_token"]
+    with TOKENS.with_suffix(".lock").open("w") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        t = json.loads(TOKENS.read_text())
+        issued = t.get("issued_at", TOKENS.stat().st_mtime)
+        if time.time() <= issued + t.get("expires_in", 3600) - 600:
+            return t["access_token"]  # another process refreshed while we waited
         st, new = http("POST", f"{RELAY}/auth/refresh", body={"refresh_token": t["refresh_token"]})
-        if st == 401 and t.get("test", True) and t.get("user", {}).get("id"):
-            # refresh tokens rotate; a second harness copy on the same test user (or a crashed run)
-            # consumed ours. Attach a fresh device instead of dying (admin, test users only).
+        if st == 401 and t.get("test", True) and (t.get("user") or {}).get("id"):
             st, new = http("POST", f"{RELAY}/admin/users/{t['user']['id']}/devices", token=admin_token(),
                            body={"name": f"lt-eval harness (re-minted {time.strftime('%Y-%m-%d %H:%M')} UTC)"})
             if st != 201:
@@ -80,13 +114,7 @@ def user_token():
             print(f"token refresh rejected; attached a fresh device {new.get('device_id')}", flush=True)
         elif st != 200:
             raise SystemExit(f"token refresh failed: {st} {new}")
-        for k in ("user", "device_id", "test"):
-            new.setdefault(k, t.get(k))
-        new["issued_at"] = time.time()
-        TOKENS.write_text(json.dumps(new))
-        write_ctl_config(new["access_token"], new.get("device_id", ""))
-        t = new
-    return t["access_token"]
+        return _save_tokens(new, t)["access_token"]
 
 
 def user_id():
