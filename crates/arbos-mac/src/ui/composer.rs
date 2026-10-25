@@ -2824,7 +2824,7 @@ impl Composer {
                 .cursor_pointer()
                 .when(i == selected, |el| el.bg(theme.surface_2))
                 .hover(|s| s.bg(theme.surface_2))
-                .child(mention_picture(&c.picture, MENTION_ROW_PICTURE))
+                .child(mention_picture(&c.picture, MENTION_ROW_PICTURE, &theme))
                 .child(
                     div()
                         .text_size(px(TEXT_SMALL))
@@ -2919,8 +2919,8 @@ fn mention_match(query: &str, handle: &str, name: &str) -> Option<bool> {
         .then_some(false)
 }
 
-/// A picker row's picture as an element: photo, D79 initials or D92 leaf.
-fn mention_picture(picture: &mention::Picture, size: f32) -> gpui::AnyElement {
+/// A picker row's picture as an element: photo, D79 initials, D92 leaf or the neutral disc.
+fn mention_picture(picture: &mention::Picture, size: f32, theme: &Theme) -> gpui::AnyElement {
     match picture {
         mention::Picture::Image(image) => img(image.clone())
             .size(px(size))
@@ -2947,6 +2947,9 @@ fn mention_picture(picture: &mention::Picture, size: f32) -> gpui::AnyElement {
             .into_any_element(),
         mention::Picture::Leaf(pick) => {
             crate::ui::avatars::leaf_element(*pick, size).into_any_element()
+        }
+        mention::Picture::Neutral { name } => {
+            crate::ui::avatars::neutral_element(name, size, theme).into_any_element()
         }
     }
 }

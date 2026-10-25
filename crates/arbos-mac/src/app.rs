@@ -370,6 +370,16 @@ pub struct ChatUi {
 /// Rows per history page the shared Matrix client fetches (`arbos_matrix::client::HISTORY_PAGE`).
 const CHANNEL_PAGE: usize = 50;
 
+/// What the Create group screen (step 1) hands to the member picker (step 2).
+#[derive(Clone, Debug, PartialEq)]
+pub struct GroupDraft {
+    pub title: String,
+    /// The leaf pair to store: the neutral pair since 2026-10-25 (no leaf grid on the sheet).
+    pub leaf: Option<crate::ui::avatars::LeafPick>,
+    /// The sheet's uploaded / generated picture, if any.
+    pub picture: Option<crate::sync::DraftPicture>,
+}
+
 /// The relay's answer to the avatar picker's Generate tab.
 #[derive(Clone, Debug)]
 pub struct AvatarGenerated {
@@ -391,8 +401,8 @@ pub struct AppState {
     pub new_chat_open: bool,
     /// New Message → New group: multi-select people (and optional agents).
     pub new_group_open: bool,
-    /// D93 Create group step 1 → 2: the name and leaf picked, sent with the members on Create.
-    pub new_group_draft: Option<(String, crate::ui::avatars::LeafPick)>,
+    /// D93 Create group step 1 → 2: the name and picture chosen, sent with the members on Create.
+    pub new_group_draft: Option<GroupDraft>,
     pub new_group_picked: Vec<Person>,
     pub new_group_agents: Vec<Id>,
     pub people_query: String,
@@ -1732,6 +1742,7 @@ impl AppState {
                             name: "Home".into(),
                             avatar_color_index: None,
                             leaf: None,
+                            picture: None,
                             source_project_id: None,
                             description: None,
                             color: None,
@@ -3945,6 +3956,7 @@ impl AppState {
         &mut self,
         name: String,
         leaf: Option<crate::ui::avatars::LeafPick>,
+        picture: Option<crate::sync::DraftPicture>,
         cx: &mut Context<Self>,
     ) {
         let name = name.trim().chars().take(64).collect::<String>();
@@ -3953,7 +3965,11 @@ impl AppState {
         }
         self.server_busy = true;
         self.server_error = None;
-        self.command(ClientCommand::ServerCreate { name, leaf });
+        self.command(ClientCommand::ServerCreate {
+            name,
+            leaf,
+            picture,
+        });
         cx.notify();
     }
 
@@ -7435,15 +7451,16 @@ impl AppState {
         self.people_busy = true;
         self.people_error = None;
         self.awaiting_group = Some(handles.clone());
-        let (title, leaf) = match self.new_group_draft.take() {
-            Some((t, l)) => (Some(t), Some(l)),
-            None => (None, None),
+        let (title, leaf, picture) = match self.new_group_draft.take() {
+            Some(d) => (Some(d.title), d.leaf, d.picture),
+            None => (None, None, None),
         };
         self.command(ClientCommand::CreatePeopleGroup {
             handles,
             agent_ids,
             title,
             leaf,
+            picture,
         });
         cx.notify();
     }
@@ -7734,6 +7751,7 @@ impl AppState {
         name: String,
         avatar_color_index: Option<u8>,
         leaf: Option<crate::ui::avatars::LeafPick>,
+        picture: Option<crate::sync::DraftPicture>,
         cx: &mut Context<Self>,
     ) {
         self.new_project_open = false;
@@ -7742,6 +7760,7 @@ impl AppState {
             name,
             avatar_color_index,
             leaf,
+            picture,
             source_project_id: None,
             description: None,
             color: None,
@@ -7768,13 +7787,18 @@ impl AppState {
             &src.id,
             src.avatar_color_override.or(src.avatar_color_index),
         ));
-        // D92: the fork keeps the source's leaf and colour too.
-        let leaf = Some(crate::ui::avatars::project_leaf(src));
+        // D92: the fork keeps the source's leaf and colour too — or its neutral disc.
+        let leaf = Some(if crate::ui::avatars::leaf::is_neutral(src.avatar_leaf) {
+            crate::ui::avatars::neutral_pick()
+        } else {
+            crate::ui::avatars::project_leaf(src)
+        });
         self.awaiting_new_project = true;
         self.command(ClientCommand::CreateProject {
             name,
             avatar_color_index,
             leaf,
+            picture: None,
             source_project_id: Some(project_id),
             description,
             color,
