@@ -67,10 +67,17 @@ final class LinkIconTests: XCTestCase {
         XCTAssertNotNil(LinkIcons.rounded(LinkIconTests.png(side: 32)))
     }
 
-    /// The Lima table's first column: four named links to four hosts, in the cells.
-    func testTheLimaTableCellsCarryTheirSites() {
+    /// The Lima table's first column: four named links to four hosts, in the cells — and the
+    /// fixture ships each site's icon (the shots' source), decodable into the rounded picture.
+    func testTheLimaTableCellsCarryTheirSitesAndTheFixtureHasTheirIcons() {
         let hosts = LinkIcons.hosts(in: MarkdownTableTests.lima)
         XCTAssertEqual(hosts, ["www.elvirrey.com", "www.communitas.pe", "www.tangol.com", "www.assouline.com"])
+        for host in hosts + ["nypost.com"] {
+            let data = LinkIcons.fixtureIcon(host: host)
+            XCTAssertNotNil(data, "fixture icon for \(host)")
+            XCTAssertNotNil(data.flatMap(LinkIcons.rounded), "fixture icon for \(host) decodes")
+        }
+        XCTAssertNil(LinkIcons.fixtureIcon(host: "nowhere.example"))
     }
 
     static func png(side: Int) -> Data {

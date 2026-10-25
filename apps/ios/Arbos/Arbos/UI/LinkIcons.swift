@@ -45,6 +45,12 @@ final class LinkIcons: ObservableObject {
         }
     }
 
+    /// The fixture's fetcher: the real icons of the fixture replies' sites ship in the asset
+    /// catalog as `link-icon-<host with dots as dashes>`; any other host has none.
+    static func fixtureIcon(host: String) -> Data? {
+        UIImage(named: "link-icon-" + host.replacingOccurrences(of: ".", with: "-"))?.pngData()
+    }
+
     /// Forget everything (tests).
     func reset() {
         images = [:]
