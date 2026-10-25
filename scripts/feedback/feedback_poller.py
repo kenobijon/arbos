@@ -3722,11 +3722,18 @@ class Loop:
             st["late_push_followup"] = nfid
             self.store.save_state(fid, st)
             self.store.event(fid, "late_push_followup", head=head, followup=nfid)
-            log(f"[{fid}] late push on {branch} ({head[:8]}, {len(cmp.get('commits', []))} commit(s) not on main) → following it as {nfid}")
+            # One-hour confirmation hold: the owner knows whether the tail was abandoned or re-landed elsewhere.
+            nst = self.store.state(nfid)
+            if nst:
+                nst["follow_after"] = (utcnow() + dt.timedelta(minutes=60)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                nst["gated_head"] = head
+                self.store.save_state(nfid, nst)
+            log(f"[{fid}] late push on {branch} ({head[:8]}, {len(cmp.get('commits', []))} commit(s) not on main) → following it as {nfid} after a 60-min confirmation hold")
             if st.get("issue"):
                 with contextlib.suppress(HttpError):
-                    self.gh.comment(st["issue"], f"A push landed on `{branch}` after this item merged ({head[:8]}, {len(cmp.get('commits', []))} commit(s) not on main). "
-                                    f"The loop follows it as `{nfid}` (branch `{nbranch}`): it gates and ships like any item and reports its version here. No new issue needed.")
+                    self.gh.comment(st["issue"], f"{owner}: a push landed on `{branch}` after this item merged ({head[:8]}, {len(cmp.get('commits', []))} commit(s) not on main). "
+                                    f"The loop will follow it as `{nfid}` (branch `{nbranch}`) and gate/ship it in **one hour** unless you say it was abandoned or already landed elsewhere "
+                                    f"— reply here (or ask the loop operator to `decline {nfid}`). Jacob-tier / approval rules apply by reporter as usual.")
 
     def watch_handoffs(self) -> None:
         """A handed-off item is picked up two ways: its owner pushes `feedback/<id>` (the loop gates and merges it
@@ -3737,6 +3744,14 @@ class Loop:
             st = self.store.state(fid)
             if st.get("status") != "handed_off" or st.get("commit") or not st.get("track_commit"):
                 continue
+            # A confirmation hold (auto follow-ups, 2026-10-25): the owner has until `follow_after` to decline a
+            # tail the loop found on a merged branch; until then the branch is not followed into the pool.
+            if st.get("follow_after") and iso() < st["follow_after"]:
+                continue
+            if st.get("follow_after"):
+                st.pop("follow_after", None); st.pop("gated_head", None)
+                self.store.save_state(fid, st)
+                self.store.event(fid, "confirmation_hold_over")
             head = self.gh.branch_head(f"feedback/{fid}")
             if head and head != st.get("gated_head"):
                 cmp = self.gh.compare("main", head)
