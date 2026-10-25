@@ -1333,12 +1333,39 @@ private struct ChatSession: View {
     }
 
     /// Jump to the latest row and resume stick-to-bottom.
+    ///
+    /// From deep in history — the window slid past the tail (`windowSkipEnd > 0`) —
+    /// the window is re-cut to the newest `windowInitial` rows, the slice a chat
+    /// opens on, and the scroll lands at once: rebuilding the full 360-row window
+    /// and then animating through it took ~0.75 s (Debug simulator) on a 1 700-row
+    /// group ([feedback jump-to-latest-instant-ios-2026-10-25]; the Mac's ↓ had the
+    /// same shape of bug). Within the tail window the short animated hop stays.
     private func jumpToLatest() {
         pinnedToBottom = true
         awayFromBottom = false
         newBelowCount = 0
-        resetWindowToTail()
-        withAnimation(.easeOut(duration: 0.3)) { scroller?.scrollTo("bottom", anchor: .bottom) }
+        let landing = Self.windowAfterJump(count: windowCount, skipEnd: windowSkipEnd)
+        if landing.count == windowCount, landing.skipEnd == windowSkipEnd {
+            withAnimation(.easeOut(duration: 0.3)) { scroller?.scrollTo("bottom", anchor: .bottom) }
+            return
+        }
+        var t = Transaction()
+        t.disablesAnimations = true
+        withTransaction(t) {
+            windowSkipEnd = landing.skipEnd
+            windowCount = landing.count
+        }
+        // The first scrollTo runs before layout knows the re-cut content's size.
+        scroller?.scrollTo("bottom", anchor: .bottom)
+        DispatchQueue.main.async { scroller?.scrollTo("bottom", anchor: .bottom) }
+    }
+
+    /// The window ↓ lands on. Unchanged while the window still ends at the tail
+    /// (a short animated hop over rows that are already built); once it has slid
+    /// into history, the newest `windowInitial` rows — one opening page to build,
+    /// not `windowMax` bubbles — and the reader grows it again by scrolling up.
+    static func windowAfterJump(count: Int, skipEnd: Int) -> (count: Int, skipEnd: Int) {
+        skipEnd > 0 ? (windowInitial, 0) : (min(count, windowMax), 0)
     }
 
     /// After a send: stick to the end now and again once the optimistic row has height.
