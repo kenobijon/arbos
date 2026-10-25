@@ -2398,6 +2398,16 @@ impl Agent {
             text,
             Some(&json!({ "job_id": job.id })),
         );
+        // On the worker's own thread too, so the rollout view shows the steer in place.
+        let _ = self.store.t3_append(
+            &sid,
+            Some(&sid),
+            Some(&sid),
+            "steer",
+            Some("user"),
+            text,
+            Some(&json!({ "job_id": job.id })),
+        );
         tracing::info!(chat_id, job = %job.id, "job steered");
         Ok(json!({ "job_id": job.id, "title": job.title, "state": "steered" }))
     }
@@ -3957,6 +3967,7 @@ impl Agent {
             self.budget.clear(chat_id);
         }
         let room_name;
+        let mut trimmed = "kept";
         {
             let h = host.lock().await;
             if let Some(e) = &err_text {
@@ -4006,7 +4017,30 @@ impl Agent {
                     .set_message_fields(&assistant_msg_id, &[("turnRole", json!("result"))]);
             }
             h.doc.finish_message(&assistant_msg_id, final_status);
+            // The row this turn ended on may be the fresh `result` row `send_message` opened
+            // after the last bubble — wordless, nothing but "Working…". Left finished and empty,
+            // the Mac and iPhone draw their stock "<name> didn't answer. Ask again." under the
+            // answer that did go out (Jacob, "run bubble sort", 2026-10-25 18:08 UTC). When the
+            // turn put a visible row in front of the user, that empty row goes: deleted when it
+            // holds nothing, kept hidden when it carries tool detail for the Details drawer.
+            if final_status == MessageStatus::Done
+                && (turn.ack_posted || turn.progress_texts.iter().any(|p| !p.trim().is_empty()))
+            {
+                trimmed = trim_wordless_result_row(&h.doc, &assistant_msg_id);
+            }
             room_name = h.room.clone();
+        }
+        if matches!(trimmed, "deleted" | "hidden") {
+            // Fleet-wide count of the no-answer-line trap (relay `timings`, kind
+            // `trailing_wordless_row`): each hit is a turn that would have shown the stock line.
+            tracing::info!(
+                chat_id,
+                trimmed,
+                "trailing wordless result row after a bubble"
+            );
+            let _ = self
+                .post_timing("trailing_wordless_row", 1, Some(trimmed))
+                .await;
         }
         if turn.activity.is_some() {
             self.post_activity(chat_id, None);
@@ -6859,7 +6893,7 @@ impl Agent {
                 }
                 AgentEvent::ReasoningDelta(_) => {}
                 AgentEvent::ToolCall { id, name, input } => {
-                    sub_tool_inputs.insert(id, input.clone());
+                    sub_tool_inputs.insert(id.clone(), input.clone());
                     let label = step_label(&name, &input);
                     let _ = self
                         .store
@@ -6892,7 +6926,7 @@ impl Agent {
                         "tool_call",
                         Some("assistant"),
                         &format!("{name} {input}"),
-                        None,
+                        Some(&json!({ "call_id": id })),
                     );
                 }
                 AgentEvent::ToolResult {
@@ -6909,7 +6943,7 @@ impl Agent {
                         "tool_output",
                         Some("tool"),
                         &format!("{name}: {output}"),
-                        None,
+                        Some(&json!({ "call_id": id, "is_error": is_error })),
                     );
                     let summary: String = output.chars().take(TOOL_OUTPUT_SUMMARY_MAX).collect();
                     let output_ref = if output.len() > TOOL_OUTPUT_SUMMARY_MAX {
@@ -7950,6 +7984,48 @@ fn act_ack_bubble_after() -> Duration {
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(4);
     Duration::from_secs(secs)
+}
+
+/// Is this a finished row with no words and nothing a client would draw (only empty text and
+/// status parts, plus hidden parts)? Such a row after a bubble is the no-answer-line trap.
+pub(crate) fn wordless_row(m: &arbos_core::doc::MessageView) -> (bool, bool) {
+    let mut wordless = m.text().trim().is_empty();
+    let mut only_empty = true;
+    for p in &m.parts {
+        let kind = p.get("kind").and_then(Value::as_str).unwrap_or("");
+        let hidden = p.get("hidden").and_then(Value::as_bool).unwrap_or(false);
+        match kind {
+            "text" | "status" => {}
+            _ if hidden => only_empty = false,
+            _ => {
+                // a card, question, file, approval or error: the row shows something
+                wordless = false;
+                only_empty = false;
+            }
+        }
+    }
+    (wordless, only_empty)
+}
+
+/// Remove or hide the turn's trailing wordless row (see the call site). Returns what was done.
+pub(crate) fn trim_wordless_result_row(
+    doc: &arbos_core::doc::ChatDoc,
+    msg_id: &str,
+) -> &'static str {
+    let Some(m) = doc.message(msg_id) else {
+        return "missing";
+    };
+    let (wordless, only_empty) = wordless_row(&m);
+    if !wordless {
+        return "kept";
+    }
+    if only_empty {
+        let _ = doc.delete_message(msg_id);
+        "deleted"
+    } else {
+        doc.set_message_fields(msg_id, &[("hidden", json!(true))]);
+        "hidden"
+    }
 }
 
 /// Subagents started by `start_job_for_send` are named `ask-…`; they answer directly.

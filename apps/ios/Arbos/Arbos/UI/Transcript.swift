@@ -375,7 +375,25 @@ enum Transcript {
                 // A hand-off row (a subagent brief, an agent-to-agent send) is its own line
                 // ("Messaged ◉ X"); it never gets the stock line, even with no parts (#1466).
                 let handoffRow = handoffName != nil
-                if showsNothing, finished, !streaming, !handoffRow, failed || onlyEmpty {
+                // The stock line is for a turn that said NOTHING. A turn that answered with a
+                // `send_message` bubble and ended on the fresh result row that bubble opened
+                // (wordless, "Working…") must not get "didn't answer" under its own answer
+                // (Jacob, "run bubble sort", 2026-10-25). Another visible row of the same turn
+                // = an assistant row answering the same user message with words or a card.
+                let turnAnsweredElsewhere: Bool = {
+                    guard !failed, let ask = message.inReplyTo else { return false }
+                    return messages.contains { other in
+                        other.id != message.id && other.role == .assistant && other.inReplyTo == ask
+                            && (!other.plainText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                || other.parts.contains { part in
+                                    switch part {
+                                    case .question, .attachment: return true
+                                    default: return false
+                                    }
+                                })
+                    }
+                }()
+                if showsNothing, finished, !streaming, !handoffRow, !turnAnsweredElsewhere, failed || onlyEmpty {
                     let line: String = {
                         if let first = errors.first?.text.trimmingCharacters(in: .whitespacesAndNewlines), !first.isEmpty {
                             return first
@@ -1956,12 +1974,16 @@ struct AvatarCluster: View {
     var imageUrl: String? = nil
     /// D92 amendment: the group's leaf picture from the Create screen (a custom picture wins).
     var leaf: LeafPick? = nil
+    /// Jacob, 2026-10-25: a group created with no leaf shows its title's initial on grey.
+    var neutralName: String? = nil
 
     private var shown: [ChatMember] { Array(members.prefix(maxVisible)) }
     private var hasMore: Bool { members.count > maxVisible }
 
     var body: some View {
-        if let leaf, imageUrl?.isEmpty ?? true, LeafAvatarsFlag.shared.on {
+        if let neutralName, imageUrl?.isEmpty ?? true {
+            NeutralAvatar(name: neutralName, size: size * 1.12)
+        } else if let leaf, imageUrl?.isEmpty ?? true, LeafAvatarsFlag.shared.on {
             LeafAvatar(pick: leaf, size: size * 1.12)
         } else if let imageUrl, !imageUrl.isEmpty {
             // Keep the group silhouette under the picture until it arrives so we
