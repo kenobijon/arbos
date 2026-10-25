@@ -217,13 +217,10 @@ struct GlobalSearchRow: View {
             }
         case .person(let url, let handle, let name, let id, let colorIndex):
             PersonAvatar(url: url, handle: handle, size: PaneKit.avatar, name: name, id: id, colorIndex: colorIndex)
-        case .thumbnail(let url):
+        case .thumbnail(let item):
             ZStack {
                 RoundedRectangle(cornerRadius: LibraryList.thumbRadius, style: .continuous).fill(theme.field)
-                AsyncImage(url: url) { phase in
-                    if let image = phase.image { image.resizable().scaledToFill() }
-                    else { Image(systemName: "photo").font(theme.font(15, weight: .medium)).foregroundStyle(theme.muted) }
-                }
+                BlobImage(item: item)
             }
             .clipShape(RoundedRectangle(cornerRadius: LibraryList.thumbRadius, style: .continuous))
         case .none:

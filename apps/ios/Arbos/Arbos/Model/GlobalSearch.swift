@@ -122,7 +122,7 @@ enum GlobalSearch {
         var rank: Rank
         var target: Target
         /// Picture source: a project id, a people chat id, a server id, a person's
-        /// avatar URL + handle, a blob URL for a thumbnail; nil → the kind's glyph.
+        /// avatar URL + handle, a picture's viewer item for a thumbnail; none → the kind's glyph.
         var picture: Picture = .none
         var id: String { "\(kind):\(title):\(target)" }
 
@@ -156,7 +156,7 @@ enum GlobalSearch {
         case peopleChat(Id)
         case server(Id)
         case person(url: String?, handle: String, name: String?, id: String?, colorIndex: Int?)
-        case thumbnail(URL)
+        case thumbnail(MediaItem)
     }
 
     /// Rows per section with a query (the list scrolls, but a long tail of

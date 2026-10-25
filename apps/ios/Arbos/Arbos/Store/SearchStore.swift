@@ -182,9 +182,10 @@ extension AppModel {
     private func thumbnailPicture(_ c: SearchIndex.Content) -> GlobalSearch.Picture {
         guard let m = messages(of: c.chatId).first(where: { $0.id == c.messageId }) else { return .none }
         for part in m.parts {
-            if case .attachment(let id, let a) = part, "\(m.id)#\(id)" == c.itemId, a.isImage, let ref = a.blobRef,
-               let url = blobURL(projectId: blobSlot(chatId: c.chatId, projectId: c.projectId), key: ref) {
-                return .thumbnail(url)
+            if case .attachment(let id, let a) = part, "\(m.id)#\(id)" == c.itemId, a.isImage {
+                return .thumbnail(MediaAlbum.item(id: c.itemId, message: m, attachment: a, kind: .image,
+                                                  slot: blobSlot(chatId: c.chatId, projectId: c.projectId),
+                                                  projectName: { [weak self] in self?.project($0)?.name }))
             }
         }
         return .none
