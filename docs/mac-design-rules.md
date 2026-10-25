@@ -486,6 +486,13 @@ the agent pane (Details · Library · Computer); `profiles/library.rs`.
 | Preview card | after **300 ms** on a row: **300** wide, left **20** from the pane's edge, **8** above the row (under it when it would reach the window's top 8 pt band); padding 10, radius 12, a step over the card's fill (white in light) with the strong border and shadow; picture **278 × 156** radius 8 aspect-fill (files: the extension at 22 pt on the tile; links: a globe); type line 11.5 muted ("Image" / "Video" / "PDF" / "Link"); the full name 13 semibold on 17, up to 3 lines; the sender's 18 pt picture, name, "· Yesterday 10:06 PM" (`sidebar::stamp_label`) | `HOVER_DELAY_MS`, `CARD_*`, `card_above` |
 | Click | a row opens the viewer at its place in the chat-order album (files included: the viewer's Open / Download); a link opens in the browser — as before | `open` |
 
+The iPhone has the same list since [feedback library-list-ios-2026-10-25]
+(`apps/ios/Arbos/Arbos/UI/LibraryList.swift`: `LibraryList` is the pure twin —
+`days`, `dayLabel`, `relTime`, `visibleRows`, `kindLabel`, `menuItems` — on
+the iPhone kit's 48 pt rows with a 36 pt thumbnail; the long press is the
+system context menu with the preview card on top: Open · Forward · Save /
+Open link · Copy link; `LibraryListTests` holds the twin tests).
+
 Pinned by `library::tests` (times, labels, grouping, the five-row fold, the
 card's height and flip, the menus) and the headless `library::render_tests`
 on the real shell (one list by day, Show more, ⋯ in the time's place with no
