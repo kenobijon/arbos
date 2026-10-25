@@ -116,7 +116,9 @@ private struct ChatSessionHost: View {
 /// `@EnvironmentObject`) so only `ChatSessionHost`'s filtered publishes rebuild it.
 /// Composer draft lives in `ComposerDraft` / `ComposerField` — keystrokes do not
 /// re-evaluate this view (arbonites-chat-lag + feedback app-01M5NNJ001NHHYBHXTASM5NXBZ).
-private struct ChatSession: View {
+/// Module-visible (not `private`) so `JumpToLatestWindowTests` can reach its window helpers;
+/// the test target did not compile on main while it was `private` (since 375ad50b).
+struct ChatSession: View {
     let model: AppModel
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
@@ -767,6 +769,8 @@ private struct ChatSession: View {
                     .offset(y: -24)
             }
             .background(theme.bg)
+            // A drag that starts here selects text or slides the mic — never "back".
+            .backSwipeComposerBar()
         }
         .overlayPreferenceValue(RowFrameKey.self) { anchors in
             GeometryReader { geo in
@@ -803,15 +807,9 @@ private struct ChatSession: View {
             }
             .ignoresSafeArea()
         }
-        .toolbar(.hidden, for: .navigationBar)
-        .toolbar(.hidden, for: .tabBar)
-        .navigationBarBackButtonHidden(true)
-        // Hiding the system back button also disables the edge-swipe pop; re-enable it
-        // except while the composer is focused so editing / selecting text in the bar
-        // cannot edge-swipe back to Home.
-        .background(InteractivePopGestureEnabler(enabled: !composerFocused))
-        // Full-chat swipes: right → previous agent chat (or Home), left → next (or create), up → archive + previous.
-        .simultaneousGesture(chatNavSwipe)
+        // Custom back chevron; swipe right (edge pop or anywhere outside the composer
+        // bar) goes back one level — `BackSwipe.swift`, shared by every chat screen.
+        .backSwipeToPop()
         .fullScreenCover(item: $rigViewer) { v in
             MediaViewer(album: v.items, index: v.index, onClose: { rigViewer = nil }, openForward: rigViewerForward)
                 .environmentObject(model)
@@ -989,7 +987,8 @@ private struct ChatSession: View {
             let drive = DebugHooks.perfDrive
             if !drive.isEmpty { Task { @MainActor in await runPerfDrive(drive) } }
             #endif
-            if let show = DebugHooks.show {
+            if let show = DebugHooks.show, !model.showHookDone {
+                model.showHookDone = true
                 DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(DebugHooks.showDelayMs)) {
                     switch show {
                     case "keyboard": composerFocused = true
@@ -1226,6 +1225,9 @@ private struct ChatSession: View {
                 }
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("Back")
+            // Names the open chat for the UI tests (which screen is on top after a swipe).
+            .accessibilityIdentifier("chat-back:\(chatId)")
             Spacer()
             GlassPill {
                 HStack(spacing: 6) {
@@ -1435,27 +1437,6 @@ private struct ChatSession: View {
         .accessibilityHint("Scrolls to the latest message")
         .accessibilityAddTraits(.isButton)
         .accessibilityAction { jumpToLatest() }
-    }
-
-    // MARK: Chat navigation swipes
-
-    /// Swipe right goes back to Home (#916/#925). There is no swipe between
-    /// chats: the chats sheet (bubble icon to the right of the agent pill) switches chats.
-    private var chatNavSwipe: some Gesture {
-        DragGesture(minimumDistance: 50, coordinateSpace: .local)
-            .onEnded { value in handleChatSwipe(value) }
-    }
-
-    private func handleChatSwipe(_ value: DragGesture.Value) {
-        // Selecting or dragging in the focused composer is a horizontal pan;
-        // do not treat it as swipe-right → Home.
-        guard !composerFocused else { return }
-        let dx = value.translation.width
-        let absX = abs(dx), absY = abs(value.translation.height)
-        let vx = value.velocity.width, vy = value.velocity.height
-        if dx > 0, absX > 70, absX > absY * 1.25, abs(vx) >= abs(vy) || absX > 120 {
-            dismiss()
-        }
     }
 
     /// Drag left on the transcript to peek each bubble's send time (iMessage).
@@ -2837,70 +2818,6 @@ private struct ScrollInterruptTap: UIViewRepresentable {
             for child in view.subviews {
                 stopDeceleratingScrollViews(in: child)
             }
-        }
-    }
-}
-
-/// `.navigationBarBackButtonHidden(true)` turns off the system edge-swipe
-/// back gesture; this turns it back on for the enclosing UINavigationController.
-/// Shared with `SettingsPage` (and any other custom-back screen).
-/// Pass `enabled: false` while the composer is focused so an edge swipe
-/// (or text-selection drag near the left edge) cannot leave the chat.
-struct InteractivePopGestureEnabler: UIViewControllerRepresentable {
-    var enabled: Bool = true
-
-    func makeUIViewController(context: Context) -> Controller { Controller() }
-
-    func updateUIViewController(_ uiViewController: Controller, context: Context) {
-        uiViewController.isPopEnabled = enabled
-        uiViewController.applyPopEnabled()
-    }
-
-    final class Controller: UIViewController, UIGestureRecognizerDelegate {
-        var isPopEnabled = true
-
-        override func viewDidAppear(_ animated: Bool) {
-            super.viewDidAppear(animated)
-            applyPopEnabled()
-        }
-
-        override func viewWillDisappear(_ animated: Bool) {
-            super.viewWillDisappear(animated)
-            // Leave the nav controller able to pop after this screen is gone.
-            if let pop = enclosingNavigationController()?.interactivePopGestureRecognizer {
-                pop.isEnabled = true
-            }
-        }
-
-        func applyPopEnabled() {
-            guard let nav = enclosingNavigationController(),
-                  let pop = nav.interactivePopGestureRecognizer else { return }
-            pop.isEnabled = isPopEnabled
-            pop.delegate = self
-        }
-
-        func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
-            guard isPopEnabled else { return false }
-            return (enclosingNavigationController()?.viewControllers.count ?? 0) > 1
-        }
-
-        /// Background representables sometimes have a nil `navigationController`;
-        /// walk parents / the responder chain to find the stack that pushed chat.
-        private func enclosingNavigationController() -> UINavigationController? {
-            if let nav = navigationController { return nav }
-            var parent = self.parent
-            while let current = parent {
-                if let nav = current as? UINavigationController { return nav }
-                if let nav = current.navigationController { return nav }
-                parent = current.parent
-            }
-            var responder: UIResponder? = view
-            while let current = responder {
-                if let nav = current as? UINavigationController { return nav }
-                if let vc = current as? UIViewController, let nav = vc.navigationController { return nav }
-                responder = current.next
-            }
-            return nil
         }
     }
 }
