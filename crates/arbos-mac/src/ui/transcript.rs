@@ -2839,23 +2839,12 @@ fn hover_time(time: Option<String>, opacity: f32, theme: &Theme) -> Option<Div> 
     })
 }
 
-/// My own bubble at its delivery opacity (see [`Delivery::opacity`]). One
-/// wrapper for every own bubble so the layout tests can read the state back.
-fn own_bubble(bubble: impl IntoElement, delivery: Delivery) -> Div {
-    div()
-        .max_w_full()
-        .min_w_0()
-        .debug_selector(|| {
-            match delivery {
-                Delivery::Pending => "own-bubble-pending",
-                Delivery::Failed => "own-bubble-failed",
-                Delivery::Sent => "own-bubble-sent",
-                Delivery::Seen => "own-bubble-seen",
-            }
-            .into()
-        })
-        .opacity(delivery.opacity())
-        .child(bubble)
+/// My own bubble at its delivery opacity (see [`Delivery::opacity`]). Applied
+/// to the bubble itself, never a wrapper: the bubble's cap is
+/// `relative_width(0.72)` of its parent, and a wrapper that is itself
+/// content-sized shrinks that cap (v0.6.223 wrapped own bubbles a word early).
+fn own_bubble<E: Styled>(bubble: E, delivery: Delivery) -> E {
+    bubble.opacity(delivery.opacity())
 }
 
 /// The red mark beside a bubble the relay refused: always visible, outside
@@ -5597,7 +5586,9 @@ mod layout_tests {
                             .debug_selector(|| "test-bubble-parent".into())
                             .children(time().map(|t| t.mr(px(8.0))))
                             .child(div().size(px(16.0)).mr(px(6.0)))
-                            .child(bubble)
+                            // Through the real delivery wrapper: a sent bubble must
+                            // keep the same cap as a seen one (v0.6.223 regression).
+                            .child(own_bubble(bubble, Delivery::Sent))
                     }
                 }
             };
@@ -6967,8 +6958,17 @@ mod delivery_tests {
             _: &mut gpui::Context<Self>,
         ) -> impl IntoElement {
             let theme = Theme::dark(crate::ui::theme::Surface::Matte);
-            let bubble = |text: &'static str| {
+            let bubble = |text: &'static str, d: Delivery| {
                 div()
+                    .debug_selector(move || {
+                        match d {
+                            Delivery::Pending => "own-bubble-pending",
+                            Delivery::Failed => "own-bubble-failed",
+                            Delivery::Sent => "own-bubble-sent",
+                            Delivery::Seen => "own-bubble-seen",
+                        }
+                        .into()
+                    })
                     .px(px(BUBBLE_PAD_X))
                     .py(px(BUBBLE_PAD_Y))
                     .rounded(px(BUBBLE_RADIUS))
@@ -6996,7 +6996,7 @@ mod delivery_tests {
                             .justify_end()
                             .items_center()
                             .children(failed_glyph(d, &theme).map(|g| g.mr(px(8.0))))
-                            .child(own_bubble(bubble("fish?"), d))
+                            .child(own_bubble(bubble("fish?", d), d))
                     }),
                 )
         }
