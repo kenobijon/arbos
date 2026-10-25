@@ -685,6 +685,9 @@ final class AppModel: ObservableObject {
     /// Client-minted message ids whose push the relay has not `ACK`ed (S3),
     /// keyed by chat id so one room's ACK cannot leave another chat's bubble faint.
     private var unacked: [Id: Set<Id>] = [:]
+    /// Rooms whose pushes were refused with `not_available` on the live connection.
+    /// Cleared by that room's next ACK (not by another room's ACK).
+    private var pushRefused: Set<Id> = []
     /// Rooms with a full re-read scheduled by `requestSnapshot` (one per coalesce window).
     private var snapshotPending: Set<Id> = []
     /// When each room's transcript was last re-read from its doc (`Date` seconds).
@@ -1958,6 +1961,11 @@ final class AppModel: ObservableObject {
             // Project-doc writes are not user bubbles; clearing a global set here
             // used to leave people-chat messages stuck at pending opacity.
             guard let self, !isProjectDoc else { return }
+            if self.pushRefused.remove(key) != nil {
+                if self.notice?.text == "Messages in this chat are not being delivered" {
+                    self.notice = nil
+                }
+            }
             guard self.unacked[key] != nil else { return }
             self.unacked[key] = nil
             #if DEBUG
@@ -1976,6 +1984,12 @@ final class AppModel: ObservableObject {
         }
         room.onUnavailable = { [weak self] in
             Task { @MainActor in self?.handleRoomUnavailable(key: key) }
+        }
+        room.onPushRefused = { [weak self] in
+            guard let self, !isProjectDoc else { return }
+            if self.pushRefused.insert(key).inserted {
+                self.notice = Notice(text: "Messages in this chat are not being delivered")
+            }
         }
         rooms[key] = room
         roomCreatedAt[key] = Date()
@@ -2030,6 +2044,7 @@ final class AppModel: ObservableObject {
         roomLinks[key] = nil
         roomLinkSince[key] = nil
         unacked[key] = nil
+        pushRefused.remove(key)
         roomCreatedAt[key] = nil
         roomRestoredCursors[key] = nil
         roomUnavailableFailures[key] = nil
@@ -2704,6 +2719,65 @@ final class AppModel: ObservableObject {
                 notice = Notice(text: "Voice: \(error.localizedDescription)")
                 await refreshRegistry()
             }
+        }
+    }
+
+    // MARK: Agent pane — routines and the box report ([feedback iphone-agent-pane-tabs-2026-10-25])
+
+    /// Each owned agent's routines, as last listed (the Details tab's Routines card).
+    @Published private(set) var routines: [Id: [Routine]] = [:]
+    /// The box as `GET /machine/debug` last reported it (the Computer tab, the Coding row).
+    @Published private(set) var boxReport: BoxReport?
+
+    /// `GET /projects/{id}/routines` when an owned agent's pane opens.
+    func refreshRoutines(_ projectId: Id) async {
+        if isFixture {
+            #if DEBUG
+            routines[projectId] = fixtureRoutines(projectId)
+            #endif
+            return
+        }
+        guard let list = try? await api.routines(projectId) else { return }
+        routines[projectId] = list
+    }
+
+    /// The row's switch: flip at once, PATCH, read back on failure.
+    func setRoutineEnabled(_ projectId: Id, routineId: Id, enabled: Bool) {
+        if var list = routines[projectId], let i = list.firstIndex(where: { $0.id == routineId }) {
+            list[i].enabled = enabled
+            if !enabled { list[i].nextRunAt = nil }
+            routines[projectId] = list
+        }
+        guard !isFixture else { return }
+        Task {
+            do {
+                try await api.setRoutineEnabled(projectId, routineId: routineId, enabled: enabled)
+            } catch {
+                notice = Notice(text: "Routine: \(error.localizedDescription)")
+            }
+            await refreshRoutines(projectId)
+        }
+    }
+
+    /// `GET /machine/debug` when the pane opens and when the Computer tab is picked. A relay
+    /// without the route (404) leaves the last report alone; any other failure is shown as
+    /// "The machine did not answer" with the reason.
+    func refreshBoxReport() async {
+        if isFixture {
+            #if DEBUG
+            boxReport = fixtureBoxReport()
+            #endif
+            return
+        }
+        do {
+            boxReport = try await api.machineDebug()
+        } catch let error as RelayError where error.status == 404 {
+            return
+        } catch {
+            var r = BoxReport(debug: [String: Any](), now: nowMs())
+            r.state = machine.state.rawValue
+            r.unreachableReason = error.localizedDescription
+            boxReport = r
         }
     }
 
