@@ -3444,6 +3444,7 @@ impl Agent {
                 .map(|m| m.id)
                 .collect();
             for id in stale {
+                h.doc.set_activity(&id, None);
                 h.doc.add_status_part(&id, "failed", "Failed");
                 if let (Some(line), false) = (line, told) {
                     h.doc.add_error_part(&id, "subagent_failed", line);
@@ -6580,6 +6581,9 @@ impl Agent {
                 .map(|m| m.id)
                 .collect();
             for id in stale {
+                // The step it was on ("Searching for …") must not outlive the row (sweep
+                // 2026-10-25: a cancelled row kept its activity line after a box restart).
+                h.doc.set_activity(&id, None);
                 h.doc.add_status_part(&id, "stopped", "Stopped");
                 h.doc.finish_message(&id, MessageStatus::Cancelled);
                 h.doc
