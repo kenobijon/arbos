@@ -3108,7 +3108,10 @@ pub fn build_rows(
                             _ => None,
                         })
                     });
-                    if let Some(name) = named {
+                    // A background worker's spawn row draws nothing (`worker`,
+                    // [feedback hide-worker-rows-and-tz-2026-10-24]); its activity
+                    // still feeds the working line through `Message::current_activity`.
+                    if let Some(name) = named.filter(|_| !message.worker) {
                         let count = message.handoff_messages.unwrap_or(1).max(1);
                         // Consecutive hand-offs merge into one line.
                         if let Some(Row {
@@ -6248,6 +6251,79 @@ mod system_line_tests {
             "parts": [{ "id": format!("p-{id}"), "kind": "text", "text": text }],
         }))
         .expect("agent reply")
+    }
+
+    fn spawn_row(id: &str, name: &str, worker: bool, at: u64) -> Message {
+        let mut row = serde_json::json!({
+            "id": id,
+            "chatId": "chat_testing",
+            "role": "assistant",
+            "sender": "box:1",
+            "status": "done",
+            "turn": "spawn",
+            "subagentId": format!("sub-{id}"),
+            "subagentName": name,
+            "handoffMessages": 2,
+            "activity": "Searching for surf schools Santa Teresa",
+            "createdAt": at,
+            "parts": [],
+        });
+        if worker {
+            row["worker"] = serde_json::json!(true);
+        }
+        serde_json::from_value(row).expect("spawn row")
+    }
+
+    /// Grok parity trait 15 ([feedback hide-worker-rows-and-tz-2026-10-24]): a
+    /// background worker's spawn row (`worker: true`) draws no "N messages
+    /// with ◉ X" line; an agent-to-agent send (no flag) keeps its line; the
+    /// worker row's `activity` still feeds the working line.
+    #[test]
+    fn worker_spawn_rows_are_hidden_but_their_activity_is_read() {
+        let t = 1_700_000_000_000u64;
+        let worker = spawn_row("w1", "santa-teresa-surf-schools", true, t + 1_000);
+        let teammate = spawn_row("t1", "Comms", false, t + 2_000);
+        assert!(worker.worker && !teammate.worker);
+        let messages = [
+            message("user", "user", "find me the 3 best surf schools", t),
+            worker.clone(),
+            teammate,
+        ];
+        let spoken = HashSet::new();
+        let failed = HashMap::new();
+        let speech = SpeechRows {
+            enabled: false,
+            spoken: &spoken,
+            failed: &failed,
+            voice_mode: false,
+        };
+        let rows = build_rows(
+            &messages,
+            false,
+            speech,
+            "gh_me",
+            &HashSet::new(),
+            &Mentions::empty(),
+            false,
+            None,
+            true,
+        );
+        let handoffs: Vec<&Vec<String>> = rows
+            .iter()
+            .filter_map(|r| match &r.kind {
+                RowKind::Handoff { names, .. } => Some(names),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(handoffs, [&vec!["Comms".to_string()]], "{handoffs:?}");
+        assert!(
+            rows.iter().all(|r| r.message_id != "w1"),
+            "no row at all for the worker"
+        );
+        assert_eq!(
+            worker.current_activity().as_deref(),
+            Some("Searching for surf schools Santa Teresa")
+        );
     }
 
     #[test]
