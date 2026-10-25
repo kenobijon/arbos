@@ -2365,36 +2365,18 @@ impl Agent {
         pi: &Arc<RpcChild>,
         body: &str,
     ) -> Result<()> {
-        let now = chrono_like_utc_hms();
         let (interrupt, stamp) = {
             let tl = self.turn.lock().await;
             match tl.as_ref().and_then(|t| t.running_tool.as_ref()) {
                 Some(rt) => {
-                    let secs = rt.started.elapsed().as_secs();
-                    if rt.started.elapsed() >= *STEER_INTERRUPT_AFTER {
-                        (
-                            Some(rt.clone()),
-                            format!(
-                                "{STEER_PREFIX} the user sent this at {now} UTC, {secs} s into your `{}` call, which was stopped so it could reach you at once. It is not late: act on it now, with the call's output so far below. This is the same turn, continued: do not call `route` again.]",
-                                rt.tool_name
-                            ),
-                        )
-                    } else {
-                        (
-                            None,
-                            format!(
-                                "{STEER_PREFIX} the user sent this at {now} UTC while your `{}` call was running ({secs} s in). It reaches you as that call returns. It is not late: act on it now.]",
-                                rt.tool_name
-                            ),
-                        )
-                    }
+                    let age = rt.started.elapsed();
+                    let interrupt = age >= *STEER_INTERRUPT_AFTER;
+                    (
+                        interrupt.then(|| rt.clone()),
+                        steer_stamp(Some((&rt.tool_name, age)), interrupt),
+                    )
                 }
-                None => (
-                    None,
-                    format!(
-                        "{STEER_PREFIX} the user sent this at {now} UTC, mid-turn. Act on it now.]"
-                    ),
-                ),
+                None => (None, steer_stamp(None, false)),
             }
         };
         if let Some(rt) = interrupt {
@@ -7098,6 +7080,25 @@ pub(crate) static STEER_INTERRUPT_AFTER: std::sync::LazyLock<Duration> =
 /// Every steer the model receives starts with this (the pi extension skips the route reminder
 /// for it: a steer lands inside a running turn and asks for no `route`).
 pub(crate) const STEER_PREFIX: &str = "[Arbos steer:";
+
+/// The line in front of every steer the model receives: when the user sent it and what the
+/// session was doing (`running`: the direct tool call in flight and its age; `interrupted`:
+/// that call was aborted so the steer could land now). Shared with job steers (#1692) so a
+/// steer is stamped the same way wherever it lands.
+pub(crate) fn steer_stamp(running: Option<(&str, Duration)>, interrupted: bool) -> String {
+    let now = chrono_like_utc_hms();
+    match running {
+        Some((tool, age)) if interrupted => format!(
+            "{STEER_PREFIX} the user sent this at {now} UTC, {} s into your `{tool}` call, which was stopped so it could reach you at once. It is not late: act on it now, with the call's output so far below. This is the same turn, continued: do not call `route` again.]",
+            age.as_secs()
+        ),
+        Some((tool, age)) => format!(
+            "{STEER_PREFIX} the user sent this at {now} UTC while your `{tool}` call was running ({} s in). It reaches you as that call returns. It is not late: act on it now.]",
+            age.as_secs()
+        ),
+        None => format!("{STEER_PREFIX} the user sent this at {now} UTC, mid-turn. Act on it now.]"),
+    }
+}
 
 /// `HH:MM:SS` of the current UTC time, without a chrono dependency.
 fn chrono_like_utc_hms() -> String {
