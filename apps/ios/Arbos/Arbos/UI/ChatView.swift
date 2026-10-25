@@ -340,6 +340,24 @@ private struct ChatSession: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { searchFocused = true }
     }
 
+    /// Reply in DM landed here: arm the composer with the cross-chat reply (#1836).
+    private func takePendingDMReplyIfNeeded() {
+        guard let p = model.pendingDMReply, p.chatId == chatId else { return }
+        model.pendingDMReply = nil
+        replyTo = nil
+        replyRef = p.ref
+        composerFocused = true
+    }
+
+    /// A cross-chat quote tap landed here: scroll to and highlight the original once the
+    /// rows are in (#1836).
+    private func takePendingRevealIfNeeded() {
+        guard let p = model.pendingRevealMessage, p.chatId == chatId else { return }
+        guard rows.contains(where: { $0.messageId == p.messageId }) else { return }
+        model.pendingRevealMessage = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { revealQuoted(p.messageId) }
+    }
+
     /// Tokenised blob URL for a custom group picture, if the chat has one.
     private func groupImageURL(_ people: PeopleChat) -> String? {
         guard let key = people.imageKey, !key.isEmpty else { return nil }
@@ -372,6 +390,9 @@ private struct ChatSession: View {
         }
     }
     @State private var replyTo: Message?
+    /// Reply in DM (#1836): the message in another chat the next send here answers
+    /// (its address + snapshot, written as `replyRef`). Exclusive with `replyTo`.
+    @State private var replyRef: ReplyRef?
     /// Long-press → Edit: the own message whose text is in the composer.
     @State private var editing: Message?
     /// Drives the connection pill's dot pulse while it is reconnecting / syncing.
@@ -979,6 +1000,8 @@ private struct ChatSession: View {
                 Task { await model.refreshActiveCall(chatId: chatId, projectId: isPeople ? nil : projectId) }
             }
             openPendingSearchIfNeeded()
+            takePendingDMReplyIfNeeded()
+            takePendingRevealIfNeeded()
             if let link = DebugHooks.link {
                 model.setRoomLink(chatId, link)
                 if let ms = DebugHooks.linkClearsMs {
@@ -1100,6 +1123,12 @@ private struct ChatSession: View {
                     case "actions":
                         // Rig: the long-press actions (capsule + menu) on the newest bubble.
                         if let row = rows.last(where: { isMessageRow($0) }) { actionsRow = row }
+                    case "reply-dm":
+                        // Rig (#1836): the composer armed with a cross-chat reply, as Reply in DM leaves it.
+                        replyRef = ReplyRef(chatId: "fx-group-launch", projectId: "people", messageId: "g1", chatTitle: "Launch week",
+                                            sender: "user:fx-u3", senderName: "Mira Kaplan", senderHandle: "mira-k",
+                                            text: "Launch checklist is here: https://notion.so/arbos/launch-week")
+                        composerFocused = true
                     case "replied":
                         // Rig: a sent bubble quoting the newest agent message (fixture only).
                         #if DEBUG
@@ -1125,6 +1154,9 @@ private struct ChatSession: View {
         // Profile "search" sets pendingSearchChat while this chat is already on screen
         // (sheet over us), so onAppear alone never sees it — watch the published flag.
         .onChange(of: model.pendingSearchChat) { _, _ in openPendingSearchIfNeeded() }
+        .onChange(of: model.pendingDMReply?.chatId) { _, _ in takePendingDMReplyIfNeeded() }
+        .onChange(of: model.pendingRevealMessage?.messageId) { _, _ in takePendingRevealIfNeeded() }
+        .onChange(of: rows.count) { _, _ in takePendingRevealIfNeeded() }
         // The per-chat version, not the array: comparing 1 000+ messages on every
         // body (each keystroke, presence tick, publish) was a measurable share of
         // the Arbonites lag (arbonites-chat-lag, 2026-10-24).
@@ -1813,7 +1845,17 @@ private struct ChatSession: View {
         return "you"
     }
 
-    /// Tap on a reply bubble's quote: scroll to the original and tint it for a moment.
+    /// Tap on a reply bubble's quote: scroll to the original and tint it for a moment. A
+    /// cross-chat quote (Reply in DM) opens the source chat on the original instead; the
+    /// header is not tappable when the viewer is not in that chat.
+    private func revealQuoted(_ quote: Quote) {
+        if let src = quote.source {
+            if src.chatId == chatId { revealQuoted(src.messageId) } else { model.reveal(src) }
+            return
+        }
+        revealQuoted(quote.messageId)
+    }
+
     private func revealQuoted(_ messageId: Id) {
         guard let target = rows.first(where: { $0.messageId == messageId && $0.role != .system }) else { return }
         if includeInWindow(messageId: messageId) {
@@ -1888,15 +1930,11 @@ private struct ChatSession: View {
         case .forward:
             beginForward(row)
         case .replyInDM:
-            // Same path as the group member "Send private message" (#1455): open
-            // (or create) the DM with that person's handle. Agents and your own
-            // messages have no peer to DM.
-            guard let m = messageById[row.messageId],
-                  let handle = m.senderHandle, !handle.isEmpty,
-                  m.sender.hasPrefix("user:"),
-                  m.sender != model.myUserId
-            else { return }
-            Task { _ = await model.openDM(handle: handle) }
+            // Open (or create) the DM with that person (#1455) with a cross-chat reply
+            // to this message armed there (#1836): the DM bubble quotes it and names
+            // this chat. Agents and your own messages have no peer to DM.
+            guard let m = messageById[row.messageId] else { return }
+            model.replyInDM(to: m, in: chatId, projectId: isPeople ? nil : projectId)
         case .edit:
             beginEdit(row)
         case .delete:
@@ -2183,6 +2221,29 @@ private struct ChatSession: View {
         .accessibilityElement(children: .combine)
     }
 
+    /// Reply in DM: the same bar, "Replying to Jacob in Arbonites" + the snapshot the row
+    /// will carry (#1836).
+    private func replyRefPreview(_ r: ReplyRef) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "arrowshape.turn.up.left").font(.system(size: 12)).foregroundStyle(theme.muted)
+            Text(r.label).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
+                .lineLimit(1).fixedSize()
+            Text(Quote.firstWords(Quote.oneLine(r.text), maxChars: Theme.replyPreviewChars))
+                .font(theme.font(Theme.tiny)).foregroundStyle(theme.text)
+                .lineLimit(1).truncationMode(.tail)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button { replyRef = nil } label: { Image(systemName: "xmark").font(.system(size: 11, weight: .bold)).foregroundStyle(theme.muted) }
+                .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 14)
+        .frame(maxWidth: .infinity)
+        .frame(height: Theme.replyPreviewHeight)
+        .clipped()
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(theme.bubbleAssistant))
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("composer-reply-ref")
+    }
+
     /// Same height/shape as the reply preview: glyph, "Editing", one truncated line, ×.
     private func editPreview(_ m: Message) -> some View {
         HStack(spacing: 8) {
@@ -2220,6 +2281,8 @@ private struct ChatSession: View {
             }
             if let e = editing {
                 editPreview(e)
+            } else if let r = replyRef {
+                replyRefPreview(r)
             } else if let r = replyTo {
                 replyPreview(r)
             }
@@ -2633,12 +2696,14 @@ private struct ChatSession: View {
         let typed = composerDraft.text.trimmingCharacters(in: .whitespacesAndNewlines)
         let extras = pending
         let reply = replyTo?.id
+        let crossReply = replyRef
         let address = sendAddress(for: typed)
         let chips = chipMentions(for: typed)
         let tokens = MentionDraft.tokens(composerDraft.mentions)
         pending.removeAll()
         clearDraft()
         replyTo = nil
+        replyRef = nil
         editing = nil
         mentionQuery = nil
         pinTalkTo(afterSending: address, chipMentions: chips)
@@ -2654,7 +2719,8 @@ private struct ChatSession: View {
                 if !text.isEmpty { model.sendChannel(chatId: chatId, text: text) }
             } else if isPeople {
                 model.sendPeople(chatId: chatId, text: text, replyTo: reply, address: address,
-                                 chipMentions: chips, attachments: extras, chipTokens: tokens)
+                                 chipMentions: chips, attachments: extras, chipTokens: tokens,
+                                 replyRef: crossReply)
             } else if needsAnswer && extras.isEmpty {
                 model.answer(chatId: chatId, text: text)
             } else {
@@ -2722,10 +2788,11 @@ private struct ChatSession: View {
             let chips = chipMentions(for: text)
             model.sendPeople(chatId: chatId, text: text, replyTo: replyTo?.id, address: address,
                              chipMentions: chips, attachments: pending,
-                             chipTokens: MentionDraft.tokens(composerDraft.mentions))
+                             chipTokens: MentionDraft.tokens(composerDraft.mentions), replyRef: replyRef)
             pending.removeAll()
             clearDraft()
             replyTo = nil
+            replyRef = nil
             mentionQuery = nil
             pinTalkTo(afterSending: address, chipMentions: chips)
             sentOnce = true
@@ -3058,7 +3125,7 @@ private struct TranscriptRows: View, Equatable {
     let rowsCount: Int
     let messagesCount: Int
     let canReply: (Row) -> Bool
-    let onQuoteTap: (Id) -> Void
+    let onQuoteTap: (Quote) -> Void
     let onMenu: (MessageMenuItem, Row) -> Void
     /// The bubble whose long-press actions are open (it alone reports its frame).
     let actionsRowId: String?
