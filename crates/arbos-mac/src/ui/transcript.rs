@@ -125,6 +125,22 @@ const TURN_GAP_EXTRA: f32 = 20.0 - 2.0 * ROW_GAP_HALF;
 /// carries ~4 pt of its own above and ~7 below the glyphs (measured).
 const STAMP_PAD_TOP: f32 = 20.0 - ROW_GAP_HALF - 4.0;
 const STAMP_PAD_BOTTOM: f32 = 24.0 - ROW_GAP_HALF - 7.0;
+/// Markdown rhythm inside a bubble, measured on Jacob's Grok Bot shot of
+/// 2026-10-24 (`grok-chat-1.png`, 2 px/pt; [feedback bubble-markdown-2026-10-24]):
+/// list items sit on a 26 pt pitch and blocks (paragraph → heading → list →
+/// paragraph) on a 32 pt pitch over Grok's 22 pt text line
+/// (`CHAT_LINE_HEIGHT`) — 4 pt between items, 10 between blocks (5 above
+/// and 5 below each block row). Arbos had 3 and 6 on a 20 pt line.
+const LIST_ITEM_GAP: f32 = 4.0;
+const BLOCK_GAP_HALF: f32 = 5.0;
+/// Grok's bullet is a 4.5 pt disc in the muted text colour, its centre 8.5 pt
+/// from the block's left edge, the item text starting at 20 pt (Arbos drew the
+/// font's "•" — a 3 pt dot 2 pt in — with the text at 24).
+const LIST_INDENT: f32 = 20.0;
+/// Two-digit numbered markers ("10.") need a wider gutter.
+const LIST_INDENT_WIDE: f32 = 26.0;
+const BULLET_DOT: f32 = 4.5;
+const BULLET_CENTRE: f32 = 8.5;
 /// Clearance above the composer when pinned (54 pt glyph-to-pill, minus the
 /// composer row's own 6 pt top padding and the last row's half-gap). Kept as a
 /// trailing list row — not as container padding — so scrolling bubbles reach
@@ -1772,9 +1788,9 @@ impl Transcript {
             .when(fill, |el| el.w_full())
             .px(px(BUBBLE_PAD_X))
             .when(first, |el| el.pt(px(BUBBLE_PAD_Y)).rounded_t(r))
-            .when(!first, |el| el.pt(px(3.0)))
+            .when(!first, |el| el.pt(px(BLOCK_GAP_HALF)))
             .when(last, |el| el.pb(px(BUBBLE_PAD_Y)).rounded_b(r))
-            .when(!last, |el| el.pb(px(3.0)))
+            .when(!last, |el| el.pb(px(BLOCK_GAP_HALF)))
             .bg(theme.bubble_assistant)
             .when_some(agent_accent, |el, color| {
                 el.border_l_2().border_color(Theme::with_alpha(color, 0.7))
@@ -3894,10 +3910,32 @@ fn styled_text(
     bubble: &BubbleSelectable,
     at: usize,
 ) -> AnyElement {
+    let (full, runs, links) = inline_runs(text, base_color, theme);
+    let runs = match veil {
+        Some(veil) => apply_veil(runs, &veil.spans(now), veil_offset),
+        None => runs,
+    };
+    bubble
+        .text(at, full, runs)
+        .with_links(links)
+        .into_any_element()
+}
+
+/// Grok Bot's **bold** and headings are bold (700), not semibold: on Jacob's
+/// 2026-10-24 shot the "Surf gear" heading of the surf list is a wider,
+/// heavier cut than Arbos's semibold ([feedback bubble-markdown-2026-10-24]).
+const STRONG_WEIGHT: FontWeight = FontWeight::BOLD;
+
+/// Clickable link ranges of a rendered text (element-local bytes → href).
+type Links = Vec<(std::ops::Range<usize>, String)>;
+
+/// The rendered text, its styled runs and its link ranges for inline
+/// markdown `text` (`**bold**`, `*italic*`, `` `code` ``, links).
+fn inline_runs(text: &str, base_color: gpui::Hsla, theme: &Theme) -> (String, Vec<TextRun>, Links) {
     let spans = inline_spans(text);
     let mut full = String::new();
     let mut runs: Vec<TextRun> = Vec::new();
-    let mut links: Vec<(std::ops::Range<usize>, String)> = Vec::new();
+    let mut links: Links = Vec::new();
     let sans = sans_font(theme);
     let mono = gpui::Font {
         family: theme.font_mono.into(),
@@ -3911,7 +3949,7 @@ fn styled_text(
             sans.clone()
         };
         if style.bold {
-            font.weight = FontWeight::SEMIBOLD;
+            font.weight = STRONG_WEIGHT;
         }
         if style.italic {
             font.style = gpui::FontStyle::Italic;
@@ -3942,14 +3980,7 @@ fn styled_text(
         });
         full.push_str(&span.text);
     }
-    let runs = match veil {
-        Some(veil) => apply_veil(runs, &veil.spans(now), veil_offset),
-        None => runs,
-    };
-    bubble
-        .text(at, full, runs)
-        .with_links(links)
-        .into_any_element()
+    (full, runs, links)
 }
 
 /// Split runs at chunk boundaries and multiply alpha in (zeron veil.rs).
@@ -4049,7 +4080,7 @@ fn render_block(
                 _ => 15.0,
             };
             base.text_size(px(size))
-                .font_weight(FontWeight::SEMIBOLD)
+                .font_weight(STRONG_WEIGHT)
                 .pt(px(6.0))
                 .child(styled_text(
                     text, theme.text, theme, veil, now, 0, bubble, starts[0],
@@ -4058,34 +4089,51 @@ fn render_block(
         }
         Block::Bullets(items) | Block::Numbered(items) => {
             let numbered = matches!(block, Block::Numbered(_));
-            let mut col = base.flex().flex_col().gap(px(3.0));
+            let mut col = base.flex().flex_col().gap(px(LIST_ITEM_GAP));
             let mut offset = 0usize;
-            // Two-digit markers ("10.") need a wider gutter than "•".
-            let marker_w = if numbered && items.len() >= 10 {
-                24.0
+            // Two-digit markers ("10.") need a wider gutter than a dot.
+            let indent = if numbered && items.len() >= 10 {
+                LIST_INDENT_WIDE
             } else {
-                16.0
+                LIST_INDENT
             };
             for (i, item) in items.iter().enumerate() {
+                let marker = div()
+                    .w(px(indent))
+                    .h(px(CHAT_LINE_HEIGHT))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .text_color(theme.text_muted)
+                    .debug_selector(move || format!("list-marker-{i}"));
                 let marker = if numbered {
-                    format!("{}.", i + 1)
+                    marker.child(format!("{}.", i + 1))
                 } else {
-                    "•".to_string()
+                    // Grok's bullet: a real disc, not the font's "•" glyph.
+                    marker.child(
+                        div()
+                            .ml(px(BULLET_CENTRE - BULLET_DOT / 2.0))
+                            .size(px(BULLET_DOT))
+                            .flex_shrink_0()
+                            .rounded_full()
+                            .bg(theme.text_muted)
+                            .debug_selector(move || format!("list-bullet-{i}")),
+                    )
                 };
                 col = col.child(
                     div()
                         .flex()
-                        .gap(px(8.0))
+                        .debug_selector(move || format!("list-item-{i}"))
+                        .child(marker)
                         .child(
                             div()
-                                .w(px(marker_w))
-                                .flex_shrink_0()
-                                .text_color(theme.text_muted)
-                                .child(marker),
-                        )
-                        .child(div().flex_1().min_w_0().child(styled_text(
-                            item, theme.text, theme, veil, now, offset, bubble, starts[i],
-                        ))),
+                                .flex_1()
+                                .min_w_0()
+                                .debug_selector(move || format!("list-text-{i}"))
+                                .child(styled_text(
+                                    item, theme.text, theme, veil, now, offset, bubble, starts[i],
+                                )),
+                        ),
                 );
                 offset += item.len() + 1;
             }
@@ -5788,6 +5836,139 @@ mod layout_tests {
         assert_eq!(margin, composer_margin, "one side margin");
         assert_eq!(margin, 16.0, "Grok: 16 pt from the pane");
         assert_eq!(cap, input + 2.0 * circle, "the pill at its widest");
+    }
+}
+
+#[cfg(test)]
+mod markdown_tests {
+    //! Jacob, 2026-10-24 (Grok side by side, [feedback bubble-markdown-2026-10-24]):
+    //! "Arbos list bullets are small dots with tighter heading weight; Grok
+    //! headings are bolder and bullets render more like markdown." Measured
+    //! on `grok-chat-1.png` at 2 px/pt: 22 pt text line, items 26 pt apart,
+    //! blocks 32 pt apart, a 4.5 pt disc centred 8.5 pt in, text at 20.
+    use gpui::TestAppContext;
+
+    use super::*;
+
+    /// The pitches Grok's list reads at, over our line height.
+    #[test]
+    fn the_rhythm_is_groks() {
+        let [line, item, block] =
+            std::hint::black_box([CHAT_LINE_HEIGHT, LIST_ITEM_GAP, BLOCK_GAP_HALF]);
+        assert_eq!(
+            line, 22.0,
+            "Grok's wrapped lines are 44 px apart at 2 px/pt"
+        );
+        assert_eq!(line + item, 26.0, "item pitch");
+        assert_eq!(line + 2.0 * block, 32.0, "block pitch");
+        assert_eq!(STRONG_WEIGHT, FontWeight::BOLD);
+    }
+
+    /// `**bold**` is bold (700), not semibold; the rest of the line keeps the
+    /// body weight.
+    #[test]
+    fn strong_runs_are_bold() {
+        let theme = Theme::dark(crate::ui::theme::Surface::Matte);
+        let (text, runs, _) = inline_runs("Surf **gear** list", theme.text, &theme);
+        assert_eq!(text, "Surf gear list");
+        let weights: Vec<(usize, FontWeight)> =
+            runs.iter().map(|r| (r.len, r.font.weight)).collect();
+        assert_eq!(
+            weights,
+            vec![
+                (5, FontWeight::NORMAL),
+                (4, FontWeight::BOLD),
+                (5, FontWeight::NORMAL)
+            ]
+        );
+    }
+
+    struct Bullets {
+        selection: Entity<TextSelection>,
+    }
+
+    impl gpui::Render for Bullets {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let theme = Theme::dark(crate::ui::theme::Surface::Matte);
+            let selectable = Selectable::new(&self.selection, theme.accent_soft, cx);
+            let block = Block::Bullets(vec![
+                "Leash, with a spare".into(),
+                "Wax and a wax comb".into(),
+                "Ding repair kit".into(),
+            ]);
+            let text = bubble_plain(std::slice::from_ref(&block), false);
+            let bubble = selectable.bubble("b#text", text);
+            div()
+                .w(px(500.0))
+                .h(px(300.0))
+                .pl(px(40.0))
+                .pt(px(10.0))
+                .child(
+                    div()
+                        .w(px(400.0))
+                        .debug_selector(|| "test-block".into())
+                        .child(render_block(
+                            "b",
+                            &block,
+                            0,
+                            None,
+                            Instant::now(),
+                            &theme,
+                            &bubble,
+                            &CodeCopy::default(),
+                        )),
+                )
+        }
+    }
+
+    /// Rendered: a real disc of Grok's size at Grok's place, the text at the
+    /// 20 pt indent, one item every 26 pt.
+    #[gpui::test]
+    fn bullets_are_discs_at_groks_indent_and_pitch(cx: &mut TestAppContext) {
+        let (_view, vcx) = cx.add_window_view(|_, cx| Bullets {
+            selection: cx.new(TextSelection::new),
+        });
+        vcx.run_until_parked();
+        let block = vcx.debug_bounds("test-block").expect("block drawn");
+        let left = f32::from(block.left());
+        let dot = vcx.debug_bounds("list-bullet-0").expect("bullet drawn");
+        assert_eq!(f32::from(dot.size.width), BULLET_DOT);
+        assert_eq!(f32::from(dot.size.height), BULLET_DOT);
+        let dot_centre = f32::from(dot.left() + dot.right()) / 2.0 - left;
+        assert!(
+            (dot_centre - BULLET_CENTRE).abs() <= 0.5,
+            "dot centre {dot_centre} pt from the block's left"
+        );
+        let text = vcx.debug_bounds("list-text-0").expect("item text drawn");
+        assert!(
+            (f32::from(text.left()) - left - LIST_INDENT).abs() <= 0.5,
+            "text starts {} pt in",
+            f32::from(text.left()) - left
+        );
+        let item0 = vcx.debug_bounds("list-item-0").expect("item 0 drawn");
+        let item1 = vcx.debug_bounds("list-item-1").expect("item 1 drawn");
+        let item2 = vcx.debug_bounds("list-item-2").expect("item 2 drawn");
+        let pitch = f32::from(item1.top() - item0.top());
+        assert!((pitch - 26.0).abs() <= 0.5, "item pitch {pitch}");
+        assert!((f32::from(item2.top() - item1.top()) - 26.0).abs() <= 0.5);
+        // The dot sits on the first line's centre.
+        let line_centre = f32::from(item0.top()) + CHAT_LINE_HEIGHT / 2.0;
+        let dot_mid = f32::from(dot.top() + dot.bottom()) / 2.0;
+        assert!(
+            (dot_mid - line_centre).abs() <= 0.5,
+            "dot mid {dot_mid} vs line {line_centre}"
+        );
+    }
+
+    /// The copy of a list is unchanged: "• " markers, one item per line.
+    #[test]
+    fn list_plain_text_keeps_its_markers() {
+        let block = Block::Bullets(vec!["a".into(), "b".into()]);
+        assert_eq!(block_plain(&block, false), "• a\n• b");
     }
 }
 
