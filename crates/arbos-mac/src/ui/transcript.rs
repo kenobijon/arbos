@@ -4446,7 +4446,7 @@ pub const TABLE_COLUMN_MIN: f32 = 72.0;
 pub const TABLE_COLUMN_MAX: f32 = 280.0;
 /// Average glyph advance of the 12.5 pt table text, used to size columns
 /// before layout (the exact width is not known until the text is shaped).
-const TABLE_GLYPH_ADVANCE: f32 = 6.6;
+const TABLE_GLYPH_ADVANCE: f32 = 7.0;
 
 /// One flex basis per column: wide enough for the longest cell's rendered
 /// text (markers removed) up to [`TABLE_COLUMN_MAX`], never under
@@ -4462,7 +4462,9 @@ pub fn table_column_widths(header: &[String], rows: &[Vec<String>]) -> Vec<f32> 
                 .map(|cell| inline_plain(cell).chars().count())
                 .max()
                 .unwrap_or(0);
-            (longest as f32 * TABLE_GLYPH_ADVANCE + 20.0).clamp(TABLE_COLUMN_MIN, TABLE_COLUMN_MAX)
+            // Padding on both sides plus a little slack so "10:30am–7:30pm" never breaks
+            // inside the word (the Lima shot of 2026-10-25 23:2x).
+            (longest as f32 * TABLE_GLYPH_ADVANCE + 28.0).clamp(TABLE_COLUMN_MIN, TABLE_COLUMN_MAX)
         })
         .collect()
 }
