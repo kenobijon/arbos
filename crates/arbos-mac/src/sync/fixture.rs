@@ -27,7 +27,7 @@ use crate::model::{
 };
 
 use super::doc::ChatDoc;
-use super::{ClientCommand, PictureSource, SyncEvent, SyncSource};
+use super::{ClientCommand, DraftPicture, PictureSource, SyncEvent, SyncSource};
 use crate::model::{
     new_id, now_ms, ApprovalRisk, ApprovalState, Attachment, AttachmentKind, BoxReport, BoxState,
     BoxWorkspace, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelPlatformState,
@@ -1691,11 +1691,14 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             name,
             avatar_color_index,
             leaf,
+            picture,
             source_project_id: _,
             description,
             color,
         } => {
             let id = new_id();
+            // No blob store in the demo: the Create sheet's picture becomes a seeded one.
+            let image_url = picture.as_ref().map(|p| draft_picture_url("agent", p));
             let icon = name
                 .chars()
                 .next()
@@ -1735,9 +1738,12 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 avatar_color_override: avatar_color_index,
                 avatar_leaf: leaf.map(|l| l.leaf),
                 avatar_leaf_color: leaf.map(|l| l.color),
-                image_url: None,
+                image_url: image_url.clone(),
                 message_grants: Vec::new(),
             });
+            if let Some(url) = &image_url {
+                emit_avatar(shared, url);
+            }
             let chat_id = new_id();
             shared.chats.lock().unwrap().push(Chat {
                 id: chat_id.clone(),
@@ -6593,6 +6599,20 @@ fn avatar_png(seed: &str) -> Vec<u8> {
     out.into_inner()
 }
 
+/// The Create sheet's pending picture as a seeded fixture URL (the same seed the sheet
+/// previewed for a generated one, so the new entity shows the picture it was created with).
+fn draft_picture_url(kind: &str, picture: &DraftPicture) -> String {
+    match picture {
+        DraftPicture::File(path) => format!(
+            "fixture://avatar/{kind}-{}",
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("picture")
+        ),
+        DraftPicture::Generated { key } => format!("fixture://avatar/draft-{key}"),
+    }
+}
+
 fn emit_avatar(shared: &Shared, url: &str) {
     let seed = url.rsplit('/').next().unwrap_or(url).to_string();
     let _ = shared.events.send(SyncEvent::Avatar {
@@ -6698,6 +6718,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             agent_ids,
             title: draft_title,
             leaf,
+            picture,
         } => {
             let mut members: Vec<Person> = Vec::new();
             for raw in handles {
@@ -6783,6 +6804,10 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             space.name = title.clone();
             space.avatar_leaf = leaf.as_ref().map(|l| l.leaf);
             space.avatar_leaf_color = leaf.as_ref().map(|l| l.color);
+            if let Some(url) = picture.as_ref().map(|p| draft_picture_url("group", p)) {
+                emit_avatar(shared, &url);
+                space.image_url = Some(url);
+            }
             space.people = members;
             space.pending = space.people.iter().any(|p| p.status == "invited");
             space.owner_handle = Some(ME_HANDLE.into());
@@ -7205,7 +7230,8 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
         ClientCommand::GenerateImage { target, prompt } => {
             // The demo "generates" after a short wait: a seeded picture named after the prompt.
             let key = format!("gen-{}", prompt.trim().to_lowercase().replace(' ', "-"));
-            let url = format!("fixture://avatar/{}-{key}", target.id());
+            let owner = target.id().map(String::as_str).unwrap_or("draft");
+            let url = format!("fixture://avatar/{owner}-{key}");
             let shared = shared.clone();
             let target = target.clone();
             tokio::spawn(async move {
@@ -7793,6 +7819,7 @@ mod create_group_tests {
             agent_ids: vec![PROJECT_ARBOS.into()],
             title: None,
             leaf: None,
+            picture: None,
         })
         .unwrap();
         let (after, chat_id) = until_created(&mut rx).await;
@@ -7826,6 +7853,7 @@ mod create_group_tests {
             agent_ids: vec![PROJECT_ARBOS.into(), PROJECT_COMMS.into()],
             title: None,
             leaf: None,
+            picture: None,
         })
         .unwrap();
         let (after, chat_id) = until_created(&mut rx).await;
@@ -7850,6 +7878,7 @@ mod create_group_tests {
             agent_ids: vec![],
             title: None,
             leaf: None,
+            picture: None,
         })
         .unwrap();
         let err = timeout(WAIT, async {
