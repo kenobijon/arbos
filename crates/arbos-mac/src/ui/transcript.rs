@@ -31,7 +31,7 @@ use crate::ui::markdown::{
 use crate::ui::mention::{self, Mentions};
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
-use crate::ui::select::{BubbleSelectable, Selectable, TextSelection};
+use crate::ui::select::{BubbleAt, BubbleSelectable, Selectable, Span, TextSelection};
 use crate::ui::theme::{
     Theme, BUBBLE_PAD_X, BUBBLE_PAD_Y, BUBBLE_RADIUS, CHAT_BODY, CHAT_LINE_HEIGHT, COLUMN_MARGIN,
     COMPOSER_HEIGHT, COMPOSER_WIDTH, LINE_HEIGHT, PLUS_BUTTON, TEXT_SMALL, TEXT_TINY,
@@ -170,13 +170,9 @@ const HOVER_FADE_MS: f32 = 150.0;
 pub const HEADER_FADE_BAND: f32 = crate::ui::header::metrics::FADE_BAND;
 /// How long the hover copy glyph stays a checkmark after a successful copy.
 const COPY_FEEDBACK_MS: u64 = 2_000;
-/// How far a right swipe pulls the bubble before reply arms (iPhone
-/// `replySwipeWidth` / Telegram-style).
-const REPLY_SWIPE_WIDTH: f32 = 56.0;
-/// Release past this fraction of [`REPLY_SWIPE_WIDTH`] starts a reply.
-const REPLY_SWIPE_ARM: f32 = REPLY_SWIPE_WIDTH * 0.7;
-/// Ignore pointer noise until the drag travels this far (iPhone minimumDistance).
-const REPLY_SWIPE_SLOP: f32 = 12.0;
+/// Ignore pointer noise until a click-drag travels this far before it is a
+/// scroll (iPhone minimumDistance).
+const DRAG_SCROLL_SLOP: f32 = 12.0;
 
 /// Which bubble the pointer is over, and the one it just left, with the
 /// moment each happened: the fade is computed from those at render time.
@@ -194,23 +190,12 @@ struct HoverFade {
     rows: HashMap<String, HashSet<String>>,
 }
 
-/// In-progress swipe-right-to-reply on a message row (iPhone `replySwipeGesture`).
-struct ReplySwipe {
-    /// The transcript row the press started on (visual offset + reply glyph).
-    row_id: String,
-    /// The message to reply to when the swipe arms.
-    message_id: Id,
-    /// Press origin in window coordinates.
-    start: Point<Pixels>,
-    /// How far the row has been pulled right (px).
-    drag: f32,
-    /// True once the pan is clearly horizontal-right (scroll / select stay free until then).
-    locked: bool,
-}
-
 /// Click-drag vertical pan that scrolls the list (iPhone ScrollView parity).
-/// Armed on press; locks once the pan is clearly vertical so text selection
-/// and reply-swipe stay free for horizontal / select gestures.
+/// Armed on a press that is not on bubble text (a press on text belongs to
+/// the selection, whichever way it then moves); locks once the pan is
+/// clearly vertical. There is no swipe-to-reply on the Mac: dragging a
+/// message must never turn it into a reply (Jacob, 2026-10-24, [feedback
+/// bubble-selection-2026-10-24]); the iPhone keeps its own gesture.
 struct DragScroll {
     start: Point<Pixels>,
     last: Point<Pixels>,
@@ -670,8 +655,6 @@ pub struct Transcript {
     /// `ARBOS_RIG_SELECT_AFTER_MS` (so a reply typed over VNC can land
     /// first). Cleared when applied.
     rig_select: Option<(String, Instant)>,
-    /// Swipe-right-to-reply in progress (Telegram / iPhone parity).
-    reply_swipe: Option<ReplySwipe>,
     /// Vertical click-drag scroll over bubbles / empty rows.
     drag_scroll: Option<DragScroll>,
 }
@@ -730,112 +713,39 @@ impl Transcript {
                 .detach();
                 (spec, Instant::now() + Duration::from_millis(after))
             }),
-            reply_swipe: None,
             drag_scroll: None,
         }
     }
 
-    /// Rows that can be replied to (same set as the message menu's Reply item
-    /// on the iPhone: text, media, and empty agent bubbles — not stamps,
-    /// cards, errors, or chrome).
-    fn can_reply_row(kind: &RowKind) -> bool {
-        matches!(
-            kind,
-            RowKind::User { .. }
-                | RowKind::Markdown { .. }
-                | RowKind::NoAnswer { .. }
-                | RowKind::Attachment { .. }
-        )
-    }
-
-    /// Mouse down on a replyable row: arm a possible swipe-right-to-reply.
-    /// Vertical scroll and text selection stay free until the pan locks.
-    fn begin_reply_swipe(&mut self, row_id: String, message_id: Id, start: Point<Pixels>) {
-        self.reply_swipe = Some(ReplySwipe {
-            row_id,
-            message_id,
-            start,
-            drag: 0.0,
-            locked: false,
-        });
-    }
-
-    /// Trackpad / mouse move while a reply swipe may be in progress.
-    fn on_reply_swipe_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
-        if self.reply_swipe.is_none() {
-            return;
-        }
-        if event.pressed_button != Some(MouseButton::Left) {
-            self.reply_swipe = None;
-            cx.notify();
-            return;
-        }
-        let (dx, dy, was_locked, prev_drag) = {
-            let swipe = self.reply_swipe.as_ref().expect("checked above");
-            let dx: f32 = (event.position.x - swipe.start.x).into();
-            let dy: f32 = (event.position.y - swipe.start.y).into();
-            (dx, dy, swipe.locked, swipe.drag)
-        };
-        if !was_locked {
-            if dx.abs() + dy.abs() < REPLY_SWIPE_SLOP {
-                return;
-            }
-            // Vertical scroll or leftward peek: do not steal the gesture.
-            if dx <= 0.0 || dx.abs() <= dy.abs() * 1.15 {
-                self.reply_swipe = None;
-                return;
-            }
-        }
-        let raw = dx.max(0.0);
-        let w = REPLY_SWIPE_WIDTH;
-        let reveal = if raw <= w {
-            raw
-        } else {
-            w + ((raw - w) * 0.2).min(24.0)
-        };
-        let just_locked = !was_locked;
-        let moved = (prev_drag - reveal).abs() > 0.5;
-        if let Some(swipe) = self.reply_swipe.as_mut() {
-            swipe.locked = true;
-            if moved {
-                swipe.drag = reveal;
-            }
-        }
-        if just_locked {
-            self.selection.update(cx, |s, cx| {
-                s.clear();
-                cx.notify();
-            });
-        }
-        if just_locked || moved {
-            cx.notify();
-        }
-    }
-
-    /// Mouse up: if the swipe armed far enough, start a reply (same path as
-    /// the hover reply glyph and the message-menu Reply item).
-    fn on_reply_swipe_up(&mut self, cx: &mut Context<Self>) {
-        let Some(swipe) = self.reply_swipe.take() else {
-            return;
-        };
-        let triggered = swipe.locked && swipe.drag >= REPLY_SWIPE_ARM;
-        if triggered {
-            if let Some(chat_id) = self.chat_id.clone() {
-                cx.emit(TranscriptEvent::Reply {
-                    chat_id,
-                    message_id: swipe.message_id,
-                });
-            }
-        }
-        cx.notify();
-    }
-
     /// Apply `ARBOS_RIG_SELECT` to the newest settled agent bubble, once.
+    /// `across` selects from the second word of the bubble before it to the
+    /// second-to-last word of that bubble — a drag across two messages.
     fn apply_rig_select(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some((spec, not_before)) = self.rig_select.clone() else {
             return;
         };
         if Instant::now() < not_before {
+            return;
+        }
+        if spec.trim() == "across" {
+            let bubbles = self.bubble_texts(cx);
+            let n = bubbles.len();
+            if n < 2 {
+                return;
+            }
+            let at = |(order, key, text): &(usize, String, String)| BubbleAt {
+                order: *order,
+                key: key.clone().into(),
+                text: text.clone().into(),
+            };
+            let (from, to) = (at(&bubbles[n - 2]), at(&bubbles[n - 1]));
+            self.rig_select = None;
+            let focus = self.selection.read(cx).focus_handle.clone();
+            self.selection.update(cx, |s, cx| {
+                s.rig_select_across(from, to);
+                cx.notify();
+            });
+            window.focus(&focus, cx);
             return;
         }
         let target = self.rows.iter().rev().find_map(|row| match &row.kind {
@@ -861,9 +771,74 @@ impl Transcript {
         }
     }
 
-    /// ⌘C with text selected in a bubble.
+    /// The transcript order of the bubble row `ix` belongs to: the index of
+    /// the message's first row, shared by every block row of one reply.
+    fn message_order(&self, ix: usize) -> usize {
+        let Some(row) = self.rows.get(ix) else {
+            return ix;
+        };
+        let mut first = ix;
+        while first > 0 && self.rows[first - 1].message_id == row.message_id {
+            first -= 1;
+        }
+        first
+    }
+
+    /// The selectable bubbles of the transcript in order — `(order, key,
+    /// plain text)`, the same key and text each row hands its
+    /// `Selectable::bubble` — so a selection across bubbles can be copied with
+    /// the bubbles in between, in transcript order.
+    fn bubble_texts(&self, cx: &Context<Self>) -> Vec<(usize, String, String)> {
+        let mut out: Vec<(usize, String, String)> = Vec::new();
+        for (ix, row) in self.rows.iter().enumerate() {
+            let order = self.message_order(ix);
+            let entry = match &row.kind {
+                RowKind::Markdown { bubble, .. } => {
+                    Some((format!("{}#text", row.message_id), bubble.text.to_string()))
+                }
+                RowKind::NoAnswer { seed, name, .. } => {
+                    let hint = name.as_deref().unwrap_or("Agent");
+                    let (resolved, _, _, _) = self.agent_identity(seed, hint, cx);
+                    let who = if resolved == "Agent" || resolved.trim().is_empty() {
+                        "The agent".to_owned()
+                    } else {
+                        resolved
+                    };
+                    Some((
+                        format!("{}#text", row.message_id),
+                        format!("{who} didn't answer. Ask again."),
+                    ))
+                }
+                RowKind::User { text, .. } => {
+                    Some((format!("{}.u", row.id), user_bubble_plain(text)))
+                }
+                RowKind::Stamp { label } => Some((format!("{}.s", row.id), inline_plain(label))),
+                _ => None,
+            };
+            if let Some((key, text)) = entry {
+                // Block rows of one reply share one bubble: keep it once.
+                if out.last().is_some_and(|(_, k, _)| *k == key) {
+                    continue;
+                }
+                out.push((order, key, text));
+            }
+        }
+        out
+    }
+
+    /// ⌘C with text selected: one bubble's slice, or — across bubbles — the
+    /// tail of the first, every bubble in between whole, the head of the
+    /// last, in transcript order whichever way the drag went, one blank line
+    /// between messages (what Grok's copy gives).
     fn copy_selection(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(text) = self.selection.read(cx).selected_text() {
+        let text = {
+            let selection = self.selection.read(cx);
+            match selection.span() {
+                Some(span) if !span.one_bubble() => copy_across(&span, &self.bubble_texts(cx)),
+                _ => selection.selected_text(),
+            }
+        };
+        if let Some(text) = text {
             cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
         }
     }
@@ -1031,11 +1006,6 @@ impl Transcript {
             self.drag_scroll = None;
             return;
         }
-        // Reply swipe has locked horizontal: leave it alone.
-        if self.reply_swipe.as_ref().is_some_and(|s| s.locked) {
-            self.drag_scroll = None;
-            return;
-        }
 
         let (dx, dy_from_start, locked) = {
             let drag = self.drag_scroll.as_ref().expect("checked above");
@@ -1044,16 +1014,15 @@ impl Transcript {
             (dx, dy, drag.locked)
         };
         if !locked {
-            if dx.abs() + dy_from_start.abs() < REPLY_SWIPE_SLOP {
+            if dx.abs() + dy_from_start.abs() < DRAG_SCROLL_SLOP {
                 return;
             }
-            // Horizontal-dominant: text selection / reply swipe own the gesture.
+            // Horizontal-dominant: not a scroll.
             if dx.abs() > dy_from_start.abs() * 1.15 {
                 self.drag_scroll = None;
                 return;
             }
             // Vertical: take the gesture.
-            self.reply_swipe = None;
             self.selection.update(cx, |s, cx| {
                 s.clear();
                 cx.notify();
@@ -1134,7 +1103,6 @@ impl Transcript {
         let pane_changed = pane_open != self.pane_open;
         self.pane_open = pane_open;
         if chat_changed {
-            self.reply_swipe = None;
             self.drag_scroll = None;
         }
         let messages: Vec<Message> = chat_id
@@ -1875,12 +1843,12 @@ impl Transcript {
         };
         let theme = Theme::of(cx).clone();
         let now = Instant::now();
-        // Before the match moves `row.kind`: which rows accept swipe-right-to-reply.
-        let can_reply = Self::can_reply_row(&row.kind) && !row.message_id.is_empty();
-        let swipe_row_id = row.id.clone();
-        let swipe_message_id = row.message_id.clone();
+        let row_frame_id = row.id.clone();
+        // Every block row of a message shares its bubble's transcript order,
+        // so a selection across bubbles knows which end comes first.
         let selectable = Selectable::new(&self.selection, theme.accent_soft, cx)
-            .with_mentions(self.mentions.clone(), theme.accent);
+            .with_mentions(self.mentions.clone(), theme.accent)
+            .ordered(self.message_order(ix));
         let inner: AnyElement = match row.kind {
             RowKind::User {
                 text,
@@ -2466,48 +2434,12 @@ impl Transcript {
         let highlighted =
             self.state.read(cx).highlight_message.as_deref() == Some(row.message_id.as_str());
         let turn_start = self.is_turn_start(ix);
-        let swipe_drag = self
-            .reply_swipe
-            .as_ref()
-            .filter(|s| s.row_id == swipe_row_id)
-            .map(|s| s.drag)
-            .unwrap_or(0.0);
-        let accent = theme.accent;
         div()
-            .id(SharedString::from(format!("{swipe_row_id}#swipe")))
+            .id(SharedString::from(format!("{row_frame_id}#frame")))
             .relative()
             .w_full()
-            .when(can_reply, |el| {
-                let (row_id, message_id) = (swipe_row_id.clone(), swipe_message_id.clone());
-                el.on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, event: &MouseDownEvent, _, _cx| {
-                        if event.modifiers.control || event.modifiers.shift {
-                            return;
-                        }
-                        this.begin_reply_swipe(row_id.clone(), message_id.clone(), event.position);
-                    }),
-                )
-            })
-            .when(swipe_drag > 0.5, |el| {
-                el.child(
-                    div()
-                        .absolute()
-                        .left(px(COLUMN_MARGIN + swipe_drag - REPLY_SWIPE_WIDTH))
-                        .top_0()
-                        .bottom_0()
-                        .w(px(REPLY_SWIPE_WIDTH))
-                        .flex()
-                        .items_center()
-                        .justify_start()
-                        .pl(px(4.0))
-                        .opacity((swipe_drag / (REPLY_SWIPE_WIDTH * 0.55)).min(1.0))
-                        .child(icon("reply", 16.0, accent)),
-                )
-            })
             .child(
                 column_row(inner)
-                    .when(swipe_drag > 0.0, |el| el.ml(px(swipe_drag)))
                     .when(turn_start, |el| el.pt(px(TURN_GAP_EXTRA)))
                     .when(highlighted, |el| {
                         el.bg(Theme::with_alpha(theme.accent, 0.14))
@@ -2606,32 +2538,35 @@ impl Render for Transcript {
             .track_focus(&focus)
             .on_action(cx.listener(Self::copy_selection))
             .on_scroll_wheel(cx.listener(|this, event, _, cx| this.on_wheel(event, cx)))
-            // Drag-scroll + swipe-right-to-reply: move/up live on the transcript
-            // so a drag that leaves the row still finishes (iPhone parity).
+            // Drag-scroll: move/up live on the transcript so a drag that
+            // leaves the row still finishes (iPhone parity). A press on bubble
+            // text is the selection's (its listener ran first and armed the
+            // drag), so the pointer is left to it — up, down or across
+            // bubbles — and never scrolls the list instead.
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, event: &MouseDownEvent, _, _cx| {
+                cx.listener(|this, event: &MouseDownEvent, _, cx| {
                     if event.modifiers.control || event.modifiers.shift {
+                        return;
+                    }
+                    if this.selection.read(cx).is_dragging() {
                         return;
                     }
                     this.begin_drag_scroll(event.position);
                 }),
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
-                this.on_reply_swipe_move(event, cx);
                 this.on_drag_scroll_move(event, cx);
             }))
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, _: &MouseUpEvent, _, cx| {
-                    this.on_reply_swipe_up(cx);
+                cx.listener(|this, _: &MouseUpEvent, _, _cx| {
                     this.end_drag_scroll();
                 }),
             )
             .on_mouse_up_out(
                 MouseButton::Left,
-                cx.listener(|this, _: &MouseUpEvent, _, cx| {
-                    this.on_reply_swipe_up(cx);
+                cx.listener(|this, _: &MouseUpEvent, _, _cx| {
                     this.end_drag_scroll();
                 }),
             )
@@ -3724,6 +3659,44 @@ fn block_segments(block: &Block, literal: bool) -> Vec<Segment> {
         }
         Block::Code { code, .. } => vec![seg(String::new(), code.clone())],
     }
+}
+
+/// The plain text a user bubble is selectable as — what `user_message_body`
+/// hands its `Selectable::bubble`: the text as typed, or its blocks when it
+/// carries a fenced code block.
+fn user_bubble_plain(text: &str) -> String {
+    if has_fenced_code(text) {
+        bubble_plain(&split_blocks(text), true)
+    } else {
+        text.to_string()
+    }
+}
+
+/// The clipboard text of a selection that spans bubbles: the start bubble
+/// from the pressed index, every bubble strictly between the ends (from
+/// `bubbles`, the transcript's `(order, key, text)` list), and the end
+/// bubble up to its index — in transcript order, one blank line between
+/// messages. The two ends use the texts the gesture saw.
+fn copy_across(span: &Span, bubbles: &[(usize, String, String)]) -> Option<String> {
+    let head = span.start.text.get(span.start_index..)?;
+    let tail = span.end.text.get(..span.end_index)?;
+    let start = (span.start.order, span.start.key.as_ref());
+    let end = (span.end.order, span.end.key.as_ref());
+    let mut parts = vec![head.to_string()];
+    for (order, key, text) in bubbles {
+        let rank = (*order, key.as_str());
+        if rank > start && rank < end {
+            parts.push(text.clone());
+        }
+    }
+    parts.push(tail.to_string());
+    Some(
+        parts
+            .into_iter()
+            .filter(|p| !p.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+    )
 }
 
 /// The rendered plain text of one block (what a full selection of it copies).
@@ -5836,6 +5809,104 @@ mod layout_tests {
         assert_eq!(margin, composer_margin, "one side margin");
         assert_eq!(margin, 16.0, "Grok: 16 pt from the pane");
         assert_eq!(cap, input + 2.0 * circle, "the pill at its widest");
+    }
+}
+
+#[cfg(test)]
+mod cross_bubble_copy_tests {
+    //! Jacob, 2026-10-24 ([feedback bubble-selection-2026-10-24]): a selection
+    //! across messages copies cleanly, like Grok's — the first message from
+    //! the pressed word, every message between whole, the last up to the
+    //! pointer, in transcript order whichever way the drag went.
+    use super::*;
+
+    fn at(order: usize, key: &str, text: &str) -> BubbleAt {
+        BubbleAt {
+            order,
+            key: key.to_string().into(),
+            text: text.to_string().into(),
+        }
+    }
+
+    fn transcript() -> Vec<(usize, String, String)> {
+        vec![
+            (0, "m1.u".into(), "What's the time difference?".into()),
+            (
+                1,
+                "m2#text".into(),
+                "London is 7 hours ahead of you.".into(),
+            ),
+            (2, "m3.u".into(), "Make me a packing list.".into()),
+            (
+                3,
+                "m4#text".into(),
+                "Here's a list:\n• Boards\n• Leash".into(),
+            ),
+        ]
+    }
+
+    #[test]
+    fn copy_across_is_top_to_bottom_with_the_middle_whole() {
+        let rows = transcript();
+        let span = Span {
+            start: at(0, "m1.u", "What's the time difference?"),
+            start_index: 11,
+            end: at(3, "m4#text", "Here's a list:\n• Boards\n• Leash"),
+            end_index: 14,
+        };
+        assert_eq!(
+            copy_across(&span, &rows).as_deref(),
+            Some(
+                "time difference?\n\nLondon is 7 hours ahead of you.\n\nMake me a packing list.\n\nHere's a list:"
+            )
+        );
+    }
+
+    /// The model orders the ends; a drag that started at the bottom gives
+    /// the same span and so the same copy.
+    #[test]
+    fn a_bottom_up_drag_copies_the_same_text() {
+        let rows = transcript();
+        let mut model = crate::ui::select::Model::default();
+        let (top, bottom) = (
+            at(1, "m2#text", "London is 7 hours ahead of you."),
+            at(3, "m4#text", "Here's a list:\n• Boards\n• Leash"),
+        );
+        model.begin_at(bottom.clone(), 6, 1, false);
+        model.extend_in(&top, 10);
+        let up = model.span().expect("span");
+        model.begin_at(top, 10, 1, false);
+        model.extend_in(&bottom, 6);
+        let down = model.span().expect("span");
+        assert_eq!(up, down);
+        assert_eq!(
+            copy_across(&up, &rows).as_deref(),
+            Some("7 hours ahead of you.\n\nMake me a packing list.\n\nHere's")
+        );
+    }
+
+    #[test]
+    fn two_adjacent_bubbles_have_nothing_between() {
+        let rows = transcript();
+        let span = Span {
+            start: at(2, "m3.u", "Make me a packing list."),
+            start_index: 10,
+            end: at(3, "m4#text", "Here's a list:\n• Boards\n• Leash"),
+            end_index: 6,
+        };
+        assert_eq!(
+            copy_across(&span, &rows).as_deref(),
+            Some("packing list.\n\nHere's")
+        );
+    }
+
+    #[test]
+    fn a_user_bubble_is_selectable_as_typed() {
+        assert_eq!(user_bubble_plain("# not a heading"), "# not a heading");
+        assert_eq!(
+            user_bubble_plain("see\n```rs\nlet x = 1;\n```"),
+            "see\nlet x = 1;"
+        );
     }
 }
 

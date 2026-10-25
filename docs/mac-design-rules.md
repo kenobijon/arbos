@@ -286,6 +286,41 @@ media) centre the rail on their own row as before.
 Code: `transcript.rs` `HoverFade::set(key, row, …)`, `rail_centre()`,
 `hover_rail_frame()`; pinned by `rail_tests`.
 
+## Mac bubble text selection (Jacob 2026-10-24, [feedback bubble-selection-2026-10-24])
+
+**A press on bubble text starts a selection, whichever way the pointer then
+moves — up, down, or into another message; dragging a message never turns it
+into a reply.** Grok's behaviour, as Jacob checked side by side:
+
+- Bottom-up works: the old axis lock handed a vertical pan with no range yet
+  to drag-scroll, so a drag that started at the end of a message and went up
+  selected nothing. Now the selection owns the pointer from the press
+  (`TextSelection::is_dragging`), and the transcript arms its click-drag
+  scroll only for presses that are not on text (bubble padding, empty rows).
+- Across messages: the selection is a pair of positions, each in one bubble
+  with that bubble's transcript order (`select::BubbleAt`, `Span`). The first
+  bubble is selected from the pressed index, every bubble between whole, the
+  last up to the pointer; ⌘C copies them in transcript order whichever way the
+  drag went, one blank line between messages (`transcript::copy_across`).
+  Shift-click extends into another bubble the same way. One-bubble gestures
+  (#1389: drag through paragraphs, double-click word, triple-click paragraph)
+  are unchanged.
+- No swipe-to-reply on the Mac: the Telegram / iPhone right-swipe
+  (`ReplySwipe`) is removed from the Mac transcript; Reply is the rail's ↩,
+  the message menu and the right-click menu. The iPhone keeps its own gesture
+  under its own rule (above).
+
+Rig: `ARBOS_RIG_SELECT=across` selects from the second word of the bubble
+before the newest agent bubble to that bubble's second-to-last word.
+
+Code: `select.rs` (`BubbleAt`, `Span`, `Model::begin_at` / `extend_in` /
+`propose_in`), `transcript.rs` (`message_order`, `bubble_texts`,
+`copy_across`, the root mouse-down guard). Pinned by `select::tests::
+a_drag_across_bubbles_spans_them_in_transcript_order`,
+`a_bottom_up_drag_selects_across_two_rendered_bubbles` (a simulated pointer
+drag straight up from one rendered bubble into the one above), and
+`transcript::cross_bubble_copy_tests`.
+
 ## Own-bubble delivery (Jacob 2026-10-24, [feedback sent-state-opacity-2026-10-24])
 
 **No "sent" / "seen" caption on my bubbles — the bubble's opacity is the
