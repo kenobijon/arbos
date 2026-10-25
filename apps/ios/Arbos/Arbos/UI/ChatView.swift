@@ -1681,6 +1681,18 @@ private struct ChatSession: View {
                 hops += 1
                 if windowSkipEnd >= 300 || (target == topId && windowCount + windowSkipEnd >= visibleRows.count) { break }
             }
+            if DebugHooks.perfDrive.contains("deep"), windowSkipEnd < 300 {
+                // A reader 600 rows into history after the window slid: the state
+                // `growWindow` leaves behind, set directly so a run stays short.
+                var t = Transaction()
+                t.disablesAnimations = true
+                withTransaction(t) {
+                    windowSkipEnd = min(600, max(0, visibleRows.count - Self.windowMax - 1))
+                    windowCount = Self.windowMax
+                }
+                try? await Task.sleep(for: .milliseconds(600))
+                if let first = windowedRows.first?.id { scroller?.scrollTo(first, anchor: .top) }
+            }
             try? await Task.sleep(for: .milliseconds(1500))
             _ = PerfCounters.drain()
             PerfLog.mark("jump tap skipEnd=\(windowSkipEnd) window=\(windowCount) rows=\(rows.count) away=\(awayFromBottom)", ms: 0)
