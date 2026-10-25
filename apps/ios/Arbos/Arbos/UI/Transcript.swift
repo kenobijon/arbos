@@ -2084,8 +2084,11 @@ struct ImageBubble: View {
     }
 
     var body: some View {
-        Button { viewer = MediaOpen.state(for: item, chatId: chatId, model: model) } label: {
-            VStack(alignment: .leading, spacing: 0) {
+        // Only the picture opens the viewer. The description bar sits outside
+        // that button so a long-press on the text still shows Edit / Reply
+        // ([feedback app-01M5TK984G6NY5A66K75RR5PWJ]).
+        VStack(alignment: .leading, spacing: 0) {
+            Button { viewer = MediaOpen.state(for: item, chatId: chatId, model: model) } label: {
                 ZStack {
                     fill
                     if let image {
@@ -2101,21 +2104,22 @@ struct ImageBubble: View {
                     }
                 }
                 .frame(width: size.width, height: size.height)
-                if let captionText {
-                    Text(captionText)
-                        .font(theme.font(Theme.body))
-                        .foregroundStyle(fromUser ? theme.userText : theme.text)
-                        .multilineTextAlignment(.leading)
-                        .padding(.horizontal, Theme.bubbleHPad)
-                        .padding(.vertical, Theme.bubbleVPad)
-                        .frame(width: size.width, alignment: .leading)
-                        .background(fill)
-                }
             }
-            .clipShape(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous))
+            .buttonStyle(.plain)
+            .accessibilityLabel("Image, tap to view")
+            if let captionText {
+                Text(captionText)
+                    .font(theme.font(Theme.body))
+                    .foregroundStyle(fromUser ? theme.userText : theme.text)
+                    .multilineTextAlignment(.leading)
+                    .padding(.horizontal, Theme.bubbleHPad)
+                    .padding(.vertical, Theme.bubbleVPad)
+                    .frame(width: size.width, alignment: .leading)
+                    .background(fill)
+                    .accessibilityLabel("Description")
+            }
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel(captionText == nil ? "Image, tap to view" : "Image with description, tap to view")
+        .clipShape(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous))
         .task(id: item.blobRef) { await load() }
         .fullScreenCover(item: $viewer) { v in
             MediaViewer(album: v.items, index: v.index, onClose: { viewer = nil })
@@ -2262,12 +2266,15 @@ struct FileCard: View {
     }
 
     var body: some View {
-        Button {
-            viewer = MediaOpen.state(for: item, chatId: chatId, model: model)
-        } label: {
-            // Grok's file card (web-08, measured): 61 pt tall, 20×27 icon at 15 pt,
-            // text 16 pt after the icon, 17 pt title over a 15 pt muted subtitle.
-            VStack(alignment: .leading, spacing: 0) {
+        // Only the card header opens the viewer. A video's description bar sits
+        // outside that button so long-pressing the text shows Edit / Reply
+        // instead of opening the video ([feedback app-01M5TK984G6NY5A66K75RR5PWJ]).
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                viewer = MediaOpen.state(for: item, chatId: chatId, model: model)
+            } label: {
+                // Grok's file card (web-08, measured): 61 pt tall, 20×27 icon at 15 pt,
+                // text 16 pt after the icon, 17 pt title over a 15 pt muted subtitle.
                 HStack(spacing: 14) {
                     RoundedRectangle(cornerRadius: 5, style: .continuous)
                         .fill(FileCard.kindColor(item, theme: theme))
@@ -2281,23 +2288,25 @@ struct FileCard: View {
                 .padding(.leading, 15)
                 .padding(.trailing, Theme.bubbleHPad + 4)
                 .padding(.vertical, 13)
-                if let captionText {
-                    Text(captionText)
-                        .font(theme.font(Theme.body))
-                        .foregroundStyle(fromUser ? theme.userText : theme.text)
-                        .multilineTextAlignment(.leading)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, Theme.bubbleHPad)
-                        .padding(.bottom, Theme.bubbleVPad)
-                        .padding(.top, 2)
-                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
             }
-            .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(fromUser ? theme.bubbleUser : theme.bubbleAssistant))
-            .contentShape(Rectangle())
+            .buttonStyle(.plain)
+            .disabled(item.blobRef == nil)
+            .accessibilityLabel(item.blobRef == nil ? "\(item.name), unavailable" : "\(item.name), \(subtitle), tap to open")
+            if let captionText {
+                Text(captionText)
+                    .font(theme.font(Theme.body))
+                    .foregroundStyle(fromUser ? theme.userText : theme.text)
+                    .multilineTextAlignment(.leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, Theme.bubbleHPad)
+                    .padding(.bottom, Theme.bubbleVPad)
+                    .padding(.top, 2)
+                    .accessibilityLabel("Description")
+            }
         }
-        .buttonStyle(.plain)
-        .disabled(item.blobRef == nil)
-        .accessibilityLabel(item.blobRef == nil ? "\(item.name), unavailable" : "\(item.name), \(subtitle), tap to open")
+        .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(fromUser ? theme.bubbleUser : theme.bubbleAssistant))
         .fullScreenCover(item: $viewer) { v in
             MediaViewer(album: v.items, index: v.index, onClose: { viewer = nil })
                 .environmentObject(model)
