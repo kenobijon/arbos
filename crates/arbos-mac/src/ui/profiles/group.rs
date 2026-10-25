@@ -140,6 +140,7 @@ pub(super) fn page(
         subtitle: Some(subtitle.into()),
         subtitle_color: theme.text_muted,
         subtitle_click: None,
+        subtitle_element: None,
         editor: None,
     };
 
