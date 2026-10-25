@@ -18,12 +18,16 @@ struct AgentEditSheet: View {
     @State private var showAvatarPicker = false
     @FocusState private var nameFocused: Bool
 
+    /// The owner's page pushed over this one from the "Run by …" link; its back chevron pops
+    /// ([feedback agent-pane-run-by-link-ios-2026-10-25]).
+    @State private var ownerPath: [ProfilePerson] = []
+
     private var project: Project? { model.project(projectId) }
 
     static let colorHexes = ["#1084FE", "#10B981", "#FF7A00", "#FF3B5C", "#FF2D9B", "#8B5CF6", "#8E5A3C", "#8E8E93", "#FFB000", "#14B8A6"]
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $ownerPath) {
             ScrollView {
                 if let project {
                     VStack(spacing: 0) {
@@ -78,6 +82,10 @@ struct AgentEditSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(theme.bg, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
+            .navigationDestination(for: ProfilePerson.self) { person in
+                // The owner's page, pushed; its own top-bar chevron pops back here.
+                UserProfileView(person: person).toolbar(.hidden, for: .navigationBar)
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     if editingName {
@@ -349,15 +357,35 @@ struct AgentProfileView: View {
 
     private func hero(_ project: Project) -> PaneHero {
         let hasLabel = !project.description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        let subtitle = AgentPane.subtitle(description: project.description, mine: isMine, ownerHandle: project.ownerHandle)
+        let subtitle = AgentPane.subtitle(description: project.description, mine: isMine, ownerHandle: project.ownerHandle, ownerName: project.ownerName)
+        // Someone else's agent: "Run by …" is a link to the owner's page (Jacob 2026-10-25).
+        let owner = AgentPane.ownerLink(mine: isMine, ownerHandle: project.ownerHandle, ownerName: project.ownerName)
+        let openOwner: (() -> Void)? = owner.map { link in { ownerPath.append(ownerPerson(project, handle: link.handle)) } }
         return PaneHero(
             picture: .image(AnyView(heroPicture(project))),
             name: project.name,
             nameAction: isMine ? { startRename() } : nil,
             subtitle: subtitle,
             subtitleTint: hasLabel || !isMine ? nil : theme.placeholder,
-            subtitleAction: isMine ? { startLabelEdit() } : nil,
-            subtitleEditor: editingLabel ? AnyView(labelEditor) : nil
+            subtitleAction: isMine ? { startLabelEdit() } : (hasLabel ? nil : openOwner),
+            subtitleLink: !isMine && !hasLabel && owner != nil,
+            subtitleEditor: editingLabel ? AnyView(labelEditor) : nil,
+            subtitleBelow: (hasLabel && owner != nil) ? AnyView(
+                Button(action: { openOwner?() }) { Text(owner!.label).lineLimit(1) }
+                    .buttonStyle(ChipLinkStyle())
+                    .accessibilityHint("Opens their profile")
+            ) : nil
+        )
+    }
+
+    /// The owner as the person page wants them: the relay's `owner` card when the project
+    /// carries it, else the handle resolved through the chats we share.
+    private func ownerPerson(_ project: Project, handle: String) -> ProfilePerson {
+        ProfilePerson(
+            id: project.ownerId ?? model.personId(handle: handle) ?? handle,
+            handle: handle,
+            name: project.ownerName,
+            avatarUrl: project.ownerAvatarUrl
         )
     }
 
