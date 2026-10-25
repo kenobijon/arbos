@@ -314,7 +314,21 @@ pub(super) fn editable_picture(
     picture: AnyElement,
     on_click: Option<HeroClick>,
 ) -> Stateful<Div> {
-    let editable = on_click.is_some();
+    hero_picture(id, picture, on_click, None)
+}
+
+/// The shared hero picture: `edit` (something you own) shows the crayon on hover and opens the
+/// picker; otherwise `view` (Jacob, 2026-10-25: tap a profile picture to see it full-size)
+/// makes the picture a plain click into the media viewer — no crayon; neither = just the picture
+/// (a letter / leaf avatar with nothing to view).
+pub(super) fn hero_picture(
+    id: &'static str,
+    picture: AnyElement,
+    edit: Option<HeroClick>,
+    view: Option<HeroClick>,
+) -> Stateful<Div> {
+    let editable = edit.is_some();
+    let on_click = edit.or(view);
     div()
         .id(id)
         .debug_selector(move || id.to_owned())

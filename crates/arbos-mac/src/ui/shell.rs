@@ -1981,6 +1981,15 @@ impl Shell {
         cx.notify();
     }
 
+    /// A profile picture full-size in the media viewer (Jacob, 2026-10-25): the hero of a pane I
+    /// cannot edit, or the picker's View. Closes the picker when it is up.
+    pub(crate) fn view_picture(&mut self, name: &str, url: &str, cx: &mut Context<Self>) {
+        self.avatar_picker = None;
+        self.state
+            .update(cx, |s, cx| s.open_picture_viewer(name, url, cx));
+        cx.notify();
+    }
+
     /// The crayon on my own picture: the agents' avatar picker (Generate | Upload, Reset) for
     /// my profile picture (Jacob, 2026-10-25); Set sends `PUT /me/avatar`.
     pub(crate) fn pick_my_avatar(&mut self, cx: &mut Context<Self>) {

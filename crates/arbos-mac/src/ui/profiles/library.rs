@@ -421,6 +421,7 @@ pub(super) fn sections(
                 when: f.when,
                 chat_id: f.chat_id.clone(),
                 part_id: f.part_id.clone(),
+                picture_url: None,
             })
             .collect(),
     );

@@ -35,7 +35,7 @@ use crate::ui::theme::{Theme, TEXT_SMALL};
 
 use super::kit::{self, Leading};
 use super::pane::{self, Hero, Picture, ProfilePane, Section};
-use super::{chats_of, collect, editable_name, editable_picture, HeroClick, HERO_AVATAR};
+use super::{chats_of, collect, editable_name, hero_picture, HeroClick, HERO_AVATAR};
 
 /// The agent pane's tabs — Grok Bot's ([feedback agent-pane-details-tab-2026-10-24],
 /// Jacob 2026-10-24; supersedes Profile · Settings · Library of 2026-10-22):
@@ -173,7 +173,18 @@ pub(super) fn page(
         });
         Box::new(f) as HeroClick
     });
-    let avatar = editable_picture("profile-avatar", picture, pic_click).into_any_element();
+    // Someone else's agent: its picture opens full-size in the media viewer (a leaf opens nothing).
+    let view_click = (!mine)
+        .then(|| project.image_url.clone())
+        .flatten()
+        .map(|url| {
+            let name = project.name.clone();
+            let f = cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
+                this.view_picture(&name, &url, cx);
+            });
+            Box::new(f) as HeroClick
+        });
+    let avatar = hero_picture("profile-avatar", picture, pic_click, view_click).into_any_element();
     let p_rename = pid.clone();
     let name_click = mine.then(|| {
         let f = cx.listener(move |this, _: &gpui::ClickEvent, window, cx| {

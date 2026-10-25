@@ -280,6 +280,31 @@ pub struct ViewerItem {
     pub chat_id: Id,
     /// The `parts[]` id, so a card click lands on its own picture.
     pub part_id: Id,
+    /// A profile picture (Jacob, 2026-10-25: tap the hero to view it): the bytes come from the
+    /// avatar cache for this URL, not from a chat blob — no Download / Forward, caption "Profile
+    /// picture".
+    pub picture_url: Option<String>,
+}
+
+impl ViewerItem {
+    /// `name`'s profile picture at `url`, as one viewer page.
+    pub fn picture(name: &str, url: &str) -> Self {
+        ViewerItem {
+            attachment: Attachment {
+                name: "Profile picture".into(),
+                mime: "image/jpeg".into(),
+                blob_ref: None,
+                bytes: None,
+                kind: Some(AttachmentKind::Image),
+                title: None,
+            },
+            by: name.to_owned(),
+            when: 0,
+            chat_id: String::new(),
+            part_id: String::new(),
+            picture_url: Some(url.to_owned()),
+        }
+    }
 }
 
 /// The open media viewer: an album, the page shown, where its blobs live.
@@ -2029,11 +2054,22 @@ impl AppState {
                                     self.block_user(person.handle.clone(), cx);
                                 }
                                 if rest == ":block:unblock" {
-                                    self.rig_unblock = Some(person);
+                                    self.rig_unblock = Some(person.clone());
+                                }
+                                // `user:view` — their picture full-size in the media viewer.
+                                if rest == ":view" {
+                                    let name = person.display_name();
+                                    self.open_picture_viewer(&name, &person.avatar_url, cx);
                                 }
                             }
                         } else if let Some(rest) = spec.strip_prefix("me") {
                             self.open_profile(ProfilePage::Me, cx);
+                            // `me:view` — my picture full-size in the media viewer.
+                            if rest == ":view" {
+                                if let Some(a) = self.account.clone() {
+                                    self.open_picture_viewer(&a.name, &a.avatar_url, cx);
+                                }
+                            }
                             // `me:avatar[:generate[=<prompt>]|:upload]` — the avatar picker for
                             // my own picture (Generate | Upload, Reset); with `=<prompt>` the
                             // shell types the prompt and presses Generate.
@@ -6291,6 +6327,7 @@ impl AppState {
                     when: m.created_at,
                     chat_id: chat_id.to_owned(),
                     part_id: id.clone(),
+                    picture_url: None,
                 });
             }
         }
@@ -6355,8 +6392,28 @@ impl AppState {
             when: m.created_at,
             chat_id: chat_id.to_owned(),
             part_id: part_id.to_owned(),
+            picture_url: None,
         };
         self.open_media_viewer(vec![item], 0, cx);
+    }
+
+    /// A profile picture full-size in the media viewer (Jacob, 2026-10-25: tap the hero on any
+    /// pane to view it). Same viewer, same close gestures; the bytes come from the avatar cache
+    /// (fetched now when missing). Nothing opens for an empty URL (letter / leaf avatars).
+    pub fn open_picture_viewer(&mut self, name: &str, url: &str, cx: &mut Context<Self>) {
+        if url.trim().is_empty() {
+            return;
+        }
+        self.want_avatar(url.to_owned());
+        self.media_viewer = Some(MediaViewer {
+            items: vec![ViewerItem::picture(name, url)],
+            index: 0,
+            slot: self.selected_project.clone().unwrap_or_default(),
+            forward_open: false,
+            busy: None,
+        });
+        self.media_viewer_generation += 1;
+        cx.notify();
     }
 
     /// Show `items[index]`. Fetches the picture when no thumbnail is cached yet.
