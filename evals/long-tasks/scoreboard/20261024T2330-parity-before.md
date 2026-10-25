@@ -58,7 +58,7 @@ Metrics: first reply p50 6.55 s (all turns 5.9 s), total per task p50 46.3 s, to
 | status_line | 4 / 13 |
 | stop | 1 / 1 |
 | threading | 11 / 11 |
-| worker_hidden | 28 / 39 |
+| worker_hidden | 31 / 39 |
 
 | judge trait | mean 0–5 |
 |---|---|
@@ -69,12 +69,12 @@ Metrics: first reply p50 6.55 s (all turns 5.9 s), total per task p50 46.3 s, to
 | sources | 4.22 |
 | voice | 3.42 |
 
-Worst parity tasks: `py-17-stop-one-of-two` (t1: speed: first bubble 13.88 s (limit 5 s); t1: ack_first: first bubble 223 words at 13.88 s; t1: status_line: no live ); `py-20-parallel-two` (t1: speed: first bubble 5.63 s (limit 5 s); t1: cadence: 1 bubbles (want 3–8); t1: ack_first: first bubble 10 words at 5); `py-21-parallel-three` (t1: speed: first bubble 30.39 s (limit 5 s); t1: cadence: 1 bubbles (want 3–8); t1: ack_first: first bubble 230 words at)
+Worst parity tasks: `py-17-stop-one-of-two` (t1: speed: first bubble 13.88 s (limit 5 s); t1: ack_first: first bubble 223 words at 13.88 s; t1: status_line: no live ); `py-18-follow-up` (t1: speed: first bubble 6.17 s (limit 5 s); t1: cadence: 1 bubbles (want 3–7); t1: ack_first: first bubble 16 words at 6); `py-20-parallel-two` (t1: speed: first bubble 5.63 s (limit 5 s); t1: cadence: 1 bubbles (want 3–8); t1: ack_first: first bubble 10 words at 5)
 
 ## Top weaknesses
 
 - **t1: status_line: no live status text dur** (8): pj3-surf-schools, py-04-research-compare, py-15-steer-mid-task, py-16-stop, py-17-stop-one-of-two, py-18-follow-up, py-20-parallel-two, py-22-status-while-busy
-- **t1: worker_hidden: 2 visible worker row(** (6): pj3-surf-schools, py-04-research-compare, py-15-steer-mid-task, py-18-follow-up, py-20-parallel-two, py-22-status-while-busy
+- **t1: worker_hidden: 2 visible worker row(** (7): pj3-surf-schools, py-04-research-compare, py-15-steer-mid-task, py-18-follow-up, py-20-parallel-two, py-21-parallel-three, py-22-status-while-busy
 - **t1: offer: last line offers a next step** (5): pj2-packing-list, pj3-surf-schools, py-04-research-compare, py-15-steer-mid-task, py-18-follow-up
 - **t1: formatting: no table, 0 links (need ** (5): pj3-surf-schools, py-04-research-compare, py-15-steer-mid-task, py-18-follow-up, py-20-parallel-two
 - **t1: cadence: 1 bubbles (want 3–8)** (4): py-15-steer-mid-task, py-20-parallel-two, py-21-parallel-three, py-22-status-while-busy
@@ -95,12 +95,12 @@ Worst parity tasks: `py-17-stop-one-of-two` (t1: speed: first bubble 13.88 s (li
 - `py-04-research-compare` — t1: cadence: 1 bubbles (want 3–7); t1: formatting: no table, 0 links (need 2); t1: worker_hidden: 2 visible worker row(s); t1: offer: last line offers a next step; t1: status_line: no live status text during the task; t1
 - `py-07-code-change` — t1: speed: first bubble 7.07 s (limit 5 s); t1: ack_first: first bubble 69 words at 7.07 s; t3: speed: first bubble 9.37 s (limit 8 s); t3: judge below 3 on next_step: Asks one clarifying question with a recommendation, 
 - `py-13-draft-then-send` — t2: no question asked
-- `py-15-steer-mid-task` — t1: speed: first bubble 6.93 s (limit 5 s); t1: cadence: 1 bubbles (want 3–8); t1: ack_first: first bubble 15 words at 6.93 s; t1: formatting: no table, 0 links (need 1); t1: worker_hidden: 2 visible worker row(s); t1: o
+- `py-15-steer-mid-task` — t1: speed: first bubble 6.93 s (limit 5 s); t1: cadence: 1 bubbles (want 3–8); t1: ack_first: first bubble 15 words at 6.93 s; t1: formatting: no table, 0 links (need 1); t1: offer: last line offers a next step; t1: stat
 - `py-16-stop` — t1: speed: first bubble 6.99 s (limit 5 s); t1: ack_first: first bubble 140 words at 6.99 s; t1: status_line: no live status text during the task
 - `py-17-stop-one-of-two` — t1: speed: first bubble 13.88 s (limit 5 s); t1: ack_first: first bubble 223 words at 13.88 s; t1: status_line: no live status text during the task; t2: speed: first bubble 21.4 s (limit 5 s); t2: ack_first: first bubble
 - `py-18-follow-up` — t1: speed: first bubble 6.17 s (limit 5 s); t1: cadence: 1 bubbles (want 3–7); t1: ack_first: first bubble 16 words at 6.17 s; t1: formatting: no table, 0 links (need 1); t1: worker_hidden: 2 visible worker row(s); t1: o
-- `py-20-parallel-two` — t1: speed: first bubble 5.63 s (limit 5 s); t1: cadence: 1 bubbles (want 3–8); t1: ack_first: first bubble 10 words at 5.63 s; t1: formatting: no table, 0 links (need 1); t1: worker_hidden: 2 visible worker row(s); t1: s
-- `py-21-parallel-three` — t1: speed: first bubble 30.39 s (limit 5 s); t1: cadence: 1 bubbles (want 3–8); t1: ack_first: first bubble 230 words at 30.39 s; t1: formatting: no table; t2: speed: first bubble 8.97 s (limit 5 s); t2: worker_hidden: 1
+- `py-20-parallel-two` — t1: speed: first bubble 5.63 s (limit 5 s); t1: cadence: 1 bubbles (want 3–8); t1: ack_first: first bubble 10 words at 5.63 s; t1: formatting: no table, 0 links (need 1); t1: status_line: no live status text during the t
+- `py-21-parallel-three` — t1: speed: first bubble 30.39 s (limit 5 s); t1: cadence: 1 bubbles (want 3–8); t1: ack_first: first bubble 230 words at 30.39 s; t1: formatting: no table; t2: speed: first bubble 8.97 s (limit 5 s); t2: busy_reply: answ
 - `py-22-status-while-busy` — t1: speed: first bubble 8.28 s (limit 5 s); t1: cadence: 1 bubbles (want 3–8); t1: ack_first: first bubble 16 words at 8.28 s; t1: worker_hidden: 2 visible worker row(s); t1: status_line: no live status text during the t
 - `py-23-other-chat-while-busy` — t1: speed: first bubble 13.67 s (limit 5 s); t1: ack_first: first bubble 248 words at 13.67 s
 - `py-26-long-progress` — t1: speed: first bubble None s (limit 8 s); t1: cadence: 0 bubbles (want 3–8); t1: ack_first: no bubble; t1: status_line: first live status 5.3 s after send: 'Searching the project'; t2: final note did not appear within 

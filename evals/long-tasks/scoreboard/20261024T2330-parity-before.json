@@ -211,7 +211,7 @@
      "total": 39
     },
     "worker_hidden": {
-     "pass": 28,
+     "pass": 31,
      "total": 39
     },
     "formatting": {
@@ -4124,11 +4124,10 @@
     "t1: cadence: 1 bubbles (want 3\u20138)",
     "t1: ack_first: first bubble 15 words at 6.93 s",
     "t1: formatting: no table, 0 links (need 1)",
-    "t1: worker_hidden: 2 visible worker row(s)",
     "t1: offer: last line offers a next step",
     "t1: status_line: no live status text during the task",
-    "t2: worker_hidden: 2 visible worker row(s)",
-    "t2: judge below 3 on shape, next_step, coverage: Acknowledges the correction in one short line naming the filter, which fits the task. But only one message is shown, with no conclusion, tab"
+    "t2: judge below 3 on shape, next_step, coverage: Acknowledges the correction in one short line naming the filter, which fits the task. But only one message is shown, with no conclusion, tab",
+    "t1: worker_hidden: 2 visible worker row(s)"
    ],
    "ttfr_s": 6.93,
    "first_seen_s": 6.93,
@@ -4163,9 +4162,9 @@
       "cadence: 1 bubbles (want 3\u20138)",
       "ack_first: first bubble 15 words at 6.93 s",
       "formatting: no table, 0 links (need 1)",
-      "worker_hidden: 2 visible worker row(s)",
       "offer: last line offers a next step",
-      "status_line: no live status text during the task"
+      "status_line: no live status text during the task",
+      "worker_hidden: 2 visible worker row(s)"
      ],
      "ttfr_s": 6.93,
      "bubbles": 1,
@@ -4220,8 +4219,8 @@
      "prompt": "Actually, only schools that offer group lessons under $70.",
      "ok": false,
      "reasons": [
-      "worker_hidden: 2 visible worker row(s)",
-      "judge below 3 on shape, next_step, coverage: Acknowledges the correction in one short line naming the filter, which fits the task. But only one message is shown, with no conclusion, tab"
+      "judge below 3 on shape, next_step, coverage: Acknowledges the correction in one short line naming the filter, which fits the task. But only one message is shown, with no conclusion, tab",
+      "worker_hidden: 2 visible worker row(s)"
      ],
      "ttfr_s": 4.3,
      "bubbles": 1,
@@ -4288,7 +4287,7 @@
       "total": 2
      },
      "worker_hidden": {
-      "pass": 0,
+      "pass": 1,
       "total": 2
      },
      "threading": {
@@ -5419,12 +5418,11 @@
     "t1: cadence: 1 bubbles (want 3\u20138)",
     "t1: ack_first: first bubble 10 words at 5.63 s",
     "t1: formatting: no table, 0 links (need 1)",
-    "t1: worker_hidden: 2 visible worker row(s)",
     "t1: status_line: no live status text during the task",
     "t2: speed: first bubble 12.12 s (limit 8 s)",
     "t2: formatting: no bullets",
-    "t2: worker_hidden: 1 visible worker row(s)",
-    "t2: busy_reply: answered after 12.12 s while busy (limit 8 s)"
+    "t2: busy_reply: answered after 12.12 s while busy (limit 8 s)",
+    "t1: worker_hidden: 2 visible worker row(s)"
    ],
    "ttfr_s": 5.63,
    "first_seen_s": 5.63,
@@ -5459,8 +5457,8 @@
       "cadence: 1 bubbles (want 3\u20138)",
       "ack_first: first bubble 10 words at 5.63 s",
       "formatting: no table, 0 links (need 1)",
-      "worker_hidden: 2 visible worker row(s)",
-      "status_line: no live status text during the task"
+      "status_line: no live status text during the task",
+      "worker_hidden: 2 visible worker row(s)"
      ],
      "ttfr_s": 5.63,
      "bubbles": 1,
@@ -5513,8 +5511,8 @@
      "reasons": [
       "speed: first bubble 12.12 s (limit 8 s)",
       "formatting: no bullets",
-      "worker_hidden: 1 visible worker row(s)",
-      "busy_reply: answered after 12.12 s while busy (limit 8 s)"
+      "busy_reply: answered after 12.12 s while busy (limit 8 s)",
+      "worker_hidden: 2 visible worker row(s)"
      ],
      "ttfr_s": 12.12,
      "bubbles": 1,
@@ -5537,7 +5535,7 @@
       },
       "worker_hidden": {
        "pass": false,
-       "detail": "1 visible worker row(s)"
+       "detail": "2 visible worker row(s)"
       },
       "threading": {
        "pass": true,
@@ -5580,7 +5578,7 @@
       "total": 2
      },
      "worker_hidden": {
-      "pass": 0,
+      "pass": 1,
       "total": 2
      },
      "threading": {
@@ -5793,11 +5791,10 @@
     "t1: ack_first: first bubble 230 words at 30.39 s",
     "t1: formatting: no table",
     "t2: speed: first bubble 8.97 s (limit 5 s)",
-    "t2: worker_hidden: 1 visible worker row(s)",
     "t2: busy_reply: answered after 8.97 s while busy (limit 5 s)",
     "t3: speed: first bubble 16.93 s (limit 8 s)",
-    "t3: worker_hidden: 1 visible worker row(s)",
-    "t3: busy_reply: answered after 16.93 s while busy (limit 8 s)"
+    "t3: busy_reply: answered after 16.93 s while busy (limit 8 s)",
+    "t1: worker_hidden: 2 visible worker row(s)"
    ],
    "ttfr_s": 30.39,
    "first_seen_s": 30.39,
@@ -5832,7 +5829,8 @@
       "speed: first bubble 30.39 s (limit 5 s)",
       "cadence: 1 bubbles (want 3\u20138)",
       "ack_first: first bubble 230 words at 30.39 s",
-      "formatting: no table"
+      "formatting: no table",
+      "worker_hidden: 2 visible worker row(s)"
      ],
      "ttfr_s": 30.39,
      "bubbles": 1,
@@ -5858,8 +5856,8 @@
        "detail": "none"
       },
       "worker_hidden": {
-       "pass": true,
-       "detail": "0 visible worker row(s)"
+       "pass": false,
+       "detail": "2 visible worker row(s)"
       },
       "threading": {
        "pass": true,
@@ -5884,8 +5882,8 @@
      "ok": false,
      "reasons": [
       "speed: first bubble 8.97 s (limit 5 s)",
-      "worker_hidden: 1 visible worker row(s)",
-      "busy_reply: answered after 8.97 s while busy (limit 5 s)"
+      "busy_reply: answered after 8.97 s while busy (limit 5 s)",
+      "worker_hidden: 2 visible worker row(s)"
      ],
      "ttfr_s": 8.97,
      "bubbles": 1,
@@ -5904,7 +5902,7 @@
       },
       "worker_hidden": {
        "pass": false,
-       "detail": "1 visible worker row(s)"
+       "detail": "2 visible worker row(s)"
       },
       "threading": {
        "pass": true,
@@ -5929,8 +5927,8 @@
      "ok": false,
      "reasons": [
       "speed: first bubble 16.93 s (limit 8 s)",
-      "worker_hidden: 1 visible worker row(s)",
-      "busy_reply: answered after 16.93 s while busy (limit 8 s)"
+      "busy_reply: answered after 16.93 s while busy (limit 8 s)",
+      "worker_hidden: 2 visible worker row(s)"
      ],
      "ttfr_s": 16.93,
      "bubbles": 1,
@@ -5949,7 +5947,7 @@
       },
       "worker_hidden": {
        "pass": false,
-       "detail": "1 visible worker row(s)"
+       "detail": "2 visible worker row(s)"
       },
       "threading": {
        "pass": true,
@@ -6003,7 +6001,7 @@
       "total": 3
      },
      "worker_hidden": {
-      "pass": 1,
+      "pass": 2,
       "total": 3
      },
      "threading": {

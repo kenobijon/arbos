@@ -50,8 +50,16 @@ def sentences(text):
 
 
 def is_worker_row(m):
-    # a background worker's row that a client would draw: subagent rows not flagged `worker` (#1673)
-    return bool(m.get("subagentId") or m.get("subagentName") or m.get("handoffMessages")) and not m.get("worker")
+    """A background worker's row a client would draw ("N messages with <name>"): the spawn/wake row
+    of a subagent (turn kind spawn|new|wake, or a subagent row with no words) that is not flagged
+    `worker: true` (#1673). The result bubble the main agent writes for a finished subagent also
+    carries `subagentId`, but it is the answer, not a worker row."""
+    if not (m.get("subagentId") or m.get("subagentName") or m.get("handoffMessages")):
+        return False
+    if m.get("worker"):
+        return False
+    kind = ((m.get("turn") or {}).get("kind") if isinstance(m.get("turn"), dict) else None)
+    return kind in ("spawn", "new", "wake") or not dr.text_of(m)
 
 
 def message_record(m, index, send_at_ms, first_seen_s):

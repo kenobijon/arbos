@@ -29,7 +29,7 @@ One row per run, newest last. `pass` counts tasks whose programmatic checks and 
 
 | run | image | parity pass | first bubble p50 / p95 | judge mean | traits (pass/total) |
 |---|---|---|---|---|---|
-| 20261024T2330-parity-before | arbos-agent-0.1.118 | 5/26 | 7.02 s / 16.93 s | 3.41 | ack_first 2/13, busy_reply 2/8, cadence 31/39, formatting 2/10, no_handle 39/39, offer 0/5, speed 13/39, status_line 4/13, stop 1/1, threading 11/11, worker_hidden 28/39 |
+| 20261024T2330-parity-before | arbos-agent-0.1.118 | 5/26 | 7.02 s / 16.93 s | 3.41 | ack_first 2/13, busy_reply 2/8, cadence 31/39, formatting 2/10, no_handle 39/39, offer 0/5, speed 13/39, status_line 4/13, stop 1/1, threading 11/11, worker_hidden 31/39 |
 
 ## Per category — 20261024T2330-parity-before
 
