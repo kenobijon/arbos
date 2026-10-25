@@ -1389,7 +1389,6 @@ final class AppModel: ObservableObject {
         projects = []
         chats = [:]
         messages = [:]
-        ReadReceipts.shared.clear()
         caughtUp = []
         unacked = [:]
         peopleChats = []
@@ -2024,7 +2023,6 @@ final class AppModel: ObservableObject {
             room.onPresence = { [weak self] header in
                 self?.notePresence(header)
                 self?.noteTyping(header, chatId: key)
-                ReadReceipts.shared.note(header, chatId: key)
                 if let callId = header["in_call"] as? String { self?.peerInCall(callId, chatId: key) }
             }
         }
@@ -4482,6 +4480,19 @@ final class AppModel: ObservableObject {
         var name: String
         var mime: String
         var data: Data
+    }
+
+    /// Retry on one of my bubbles the relay refused (`status == .error`): the failed row
+    /// goes and its text + reply-to go out again as a new message through the normal send
+    /// path (attachments were picked at send time and are not re-read).
+    func resendFailed(chatId: Id, messageId: Id) {
+        guard var list = messages[chatId],
+              let ix = list.firstIndex(where: { $0.id == messageId && $0.status == .error }) else { return }
+        let failed = list.remove(at: ix)
+        messages[chatId] = list
+        let text = failed.plainText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        send(chatId: chatId, text: text, replyTo: failed.replyTo)
     }
 
     /// `replyTo` = the message this send answers (reply-to); it lands on the row as `replyTo`
