@@ -120,7 +120,11 @@ for config in Release Debug; do
       # The product must link the FFI it was built against: every Swift type the generated ArbosFFI.swift
       # declares as a struct has its metadata symbol in the framework; check the newest one by name.
       newest=$(grep -oE '^public struct [A-Za-z0-9_]+' "$ROOT/$PKG_SWIFT" | grep -v FfiConverter | tail -1 | awk '{print $3}')
-      if [[ -n "$newest" ]] && ! nm -gU "$fw/ArbosFFI" 2>/dev/null | grep -q "8ArbosFFI[0-9]*${newest}VMn"; then
+      # `grep -c`, not `grep -q`: under `pipefail` a `-q` that exits on the first match kills `nm`
+      # with SIGPIPE (status 141) and the pipeline reads as "not found" — every iOS build was
+      # called stale on 2026-10-25 22:2x although the symbol was in the framework.
+      metadata_hits=$(nm -gU "$fw/ArbosFFI" 2>/dev/null | grep -c "8ArbosFFI[0-9]*${newest}VMn" || true)
+      if [[ -n "$newest" && "${metadata_hits:-0}" -eq 0 ]]; then
         echo "== $config: embedded ArbosFFI.framework is stale (no metadata for ${newest})"
         rc=1
       else
