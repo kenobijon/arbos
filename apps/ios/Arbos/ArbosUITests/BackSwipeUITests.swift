@@ -94,6 +94,19 @@ final class BackSwipeUITests: XCTestCase {
         assertHome(app)
     }
 
+    /// Jacob's 23:54 report was a server channel (#general) with the keyboard up: same gate,
+    /// same fix — the channel screen itself, not only the channel list.
+    func testServerChannelEdgeSwipeGoesBackWithTheKeyboardUp() {
+        let app = launch(["ARBOS_FIXTURE_SERVERS": "1", "ARBOS_OPEN_SERVER": "fx-server-hq:#general",
+                          "ARBOS_SHOW": "keyboard"])
+        let channelBack = chatBack(app, "fx-server-hq-general")
+        XCTAssertTrue(channelBack.waitForExistence(timeout: appear), "#general of Arbos HQ opened")
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: settle), "the channel composer is focused")
+        edgeSwipeBack(app)
+        assertGone(channelBack)
+        XCTAssertTrue(app.buttons["server-back:fx-server-hq"].waitForExistence(timeout: settle), "back from #general is the channel list")
+    }
+
     // MARK: Job tab
 
     /// A job tab (#1801) is a chat screen pushed over its agent's chat: back lands on the agent.
