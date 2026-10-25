@@ -481,7 +481,9 @@ pub(crate) enum Sender {
 }
 
 impl Sender {
-    fn of(state: &AppState, m: &Message) -> Self {
+    /// `chat_project` is the chat's own space: an assistant row that names no
+    /// agent (`box:…`, `assistant`) is that space's agent.
+    fn of(state: &AppState, m: &Message, chat_project: &str) -> Self {
         if let Some(pid) = m
             .sender
             .strip_prefix("agent:")
@@ -491,6 +493,9 @@ impl Sender {
         }
         if state.is_mine(m) {
             return Sender::Me;
+        }
+        if !m.sender.starts_with("user:") && m.role == crate::model::Role::Assistant {
+            return Sender::Agent(chat_project.to_string());
         }
         Sender::Person(crate::model::Person {
             id: m.sender.trim_start_matches("user:").to_string(),
@@ -546,7 +551,7 @@ pub(super) fn collect(state: &AppState, chats: &[&Chat]) -> Content {
     for chat in chats {
         for m in state.messages_of(&chat.id) {
             let by = sender_label(state, m);
-            let sender = Sender::of(state, m);
+            let sender = Sender::of(state, m, &chat.project_id);
             for part in &m.parts {
                 match part {
                     Part::Attachment { id, attachment } => {
