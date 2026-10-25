@@ -592,6 +592,34 @@ extension AppModel {
     Rows are keyed by `{msg}#{part}.{block}` and re-spliced only when their bytes change.
     """
 
+    /// Rig (`ARBOS_SHOW=links`): Jacob's "Read the latest from the New York post" turn — seven
+    /// linked headlines as bullets, then one line of prose — for the link icons' shots.
+    func fixtureNYPostReply(chatId: Id) {
+        var list = messages[chatId] ?? []
+        if let i = list.lastIndex(where: { $0.isStreaming }) {
+            list[i].status = .done
+            list[i].parts = [.text(id: "\(list[i].id)-t", text: "Got it.")]
+        }
+        let t = nowMs()
+        list.append(user(newId(), chatId, "Read the latest from the New York post", at: t))
+        list.append(assistant(newId(), chatId, AppModel.nyPostReply, at: t + 1_000))
+        messages[chatId] = list
+    }
+
+    /// The reply to "Read the latest from the New York post" (agent Bubble, 2026-10-25, Jacob's
+    /// screenshot), byte for byte in shape (the Mac fixture's `ARBOS_FIXTURE_REPLY=links`).
+    static let nyPostReply = """
+    - [Syringe attack: lawyer claims mistaken identity](https://nypost.com/2026/10/25/us-news/syringe-attack-lawyer-claims-mistaken-identity/)
+    - [Arrest story: a second Jewish victim minutes earlier](https://nypost.com/2026/10/25/us-news/arrest-story-second-jewish-victim-minutes-earlier/)
+    - [Ex-NYPD cop charged in a George Washington Bridge killing, free on $1M bail](https://nypost.com/2026/10/25/us-news/ex-nypd-cop-charged-in-gw-bridge-killing-free-on-1m-bail/)
+    - [Thomas Markle home search, child pornography, Philippine official’s comment](https://nypost.com/2026/10/25/world-news/thomas-markle-home-search-philippine-official-comment/)
+    - [Musk says SpaceX cut Ukraine’s Starlink access](https://nypost.com/2026/10/25/business/musk-says-spacex-cut-ukraines-starlink-access/)
+    - [Giants beat the Texans in overtime in J. J. McCarthy’s first start](https://nypost.com/2026/10/25/sports/giants-beat-texans-in-overtime-mccarthy-first-start/)
+    - [McCarthy’s wife after that win](https://nypost.com/2026/10/25/sports/mccarthys-wife-after-that-win/)
+
+    No times or bylines were on the page text I read. Want one of these opened?
+    """
+
     /// The reply to "Find me a book store in lima" (agent Bubble, 2026-10-25 21:31 UTC),
     /// one string per bubble, byte for byte (the Mac fixture's `ARBOS_FIXTURE_REPLY=table`).
     static let limaReply: [String] = [

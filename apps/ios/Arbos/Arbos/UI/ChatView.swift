@@ -1085,6 +1085,14 @@ struct ChatSession: View {
                             model.fixtureLimaReply(chatId: chatId)
                         }
                         #endif
+                    case "links":
+                        // Rig: Jacob's New York Post turn — seven linked headlines as
+                        // bullets, each with its site icon (fixture only).
+                        #if DEBUG
+                        if model.isFixture {
+                            model.fixtureNYPostReply(chatId: chatId)
+                        }
+                        #endif
                     case "agent-message", "agent-message-received":
                         // Rig: agent-to-agent messaging rows (fixture only) — the sender's
                         // hand-off + confirm + relayed reply, or the receiver's labelled row.
