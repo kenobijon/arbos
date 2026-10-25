@@ -592,6 +592,9 @@ pub struct AppState {
         crate::ui::avatar_picker::Target,
         crate::ui::avatar_picker::Tab,
     )>,
+    /// Rig: a prompt the shell types into the opened picker's Generate field and runs at once
+    /// (`ARBOS_OPEN_PROFILE=me:avatar:generate=<prompt>`), so a shot can show prompt → result.
+    pub avatar_rig_prompt: Option<String>,
     /// The Generate tab's answer, for the shell's open picker.
     pub avatar_generated: Option<AvatarGenerated>,
     /// Agent page: which settings row (model / reasoning / voice) is dropped down.
@@ -991,6 +994,7 @@ impl AppState {
             profile_stack: Vec::new(),
             profile_opened: 0,
             avatar_picker_request: None,
+            avatar_rig_prompt: None,
             avatar_generated: None,
             agent_pick: None,
             profile_editing_description: false,
@@ -2030,13 +2034,21 @@ impl AppState {
                             }
                         } else if let Some(rest) = spec.strip_prefix("me") {
                             self.open_profile(ProfilePage::Me, cx);
-                            // `me:avatar[:generate|:upload]` — the avatar picker for my own
-                            // picture (Generate | Upload, Reset).
+                            // `me:avatar[:generate[=<prompt>]|:upload]` — the avatar picker for
+                            // my own picture (Generate | Upload, Reset); with `=<prompt>` the
+                            // shell types the prompt and presses Generate.
                             if let Some(tab) = rest.strip_prefix(":avatar") {
                                 use crate::ui::avatar_picker::{Tab, Target};
                                 let tab = match tab {
                                     ":upload" => Tab::Upload,
-                                    _ => Tab::Generate,
+                                    t => {
+                                        if let Some(prompt) = t.strip_prefix(":generate=") {
+                                            if !prompt.trim().is_empty() {
+                                                self.avatar_rig_prompt = Some(prompt.to_owned());
+                                            }
+                                        }
+                                        Tab::Generate
+                                    }
                                 };
                                 let me = self
                                     .account

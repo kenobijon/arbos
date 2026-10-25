@@ -477,6 +477,12 @@ impl Shell {
                 if let Some(pk) = this.avatar_picker.as_mut() {
                     pk.tab = tab;
                 }
+                // Rig: type the prompt and press Generate so a shot shows prompt → result.
+                if let Some(prompt) = state.update(cx, |s, _| s.avatar_rig_prompt.take()) {
+                    this.avatar_prompt_input
+                        .update(cx, |input, cx| input.set_text(prompt, cx));
+                    this.generate_avatar(cx);
+                }
             }
             if let Some(done) = state.update(cx, |s, _| s.avatar_generated.take()) {
                 if let Some(pk) = this.pending_picker_mut() {
