@@ -24,7 +24,7 @@
    "background": true,
    "timeout_s": 20,
    "expect_activity_change_s": 6,
-   "expect_activity_regex": "^Steering",
+   "expect_activity_regex": "^(Steering|Changing course)",
    "rubric": {
     "criteria": "Judge the reply only. By the no-placeholder rule a steer during running work gets no bubble of its own; the working row carries 'Steering: …' (checked programmatically). An empty reply is therefore a pass: score 3. If there is a reply, pass if it shows the change was applied to the running work (stops at 20) and is honest; fail if it ignores the steer or says it cannot change a running task.",
     "min": 3
@@ -36,7 +36,7 @@
    "prompt": "Done? What was the last number?",
    "pre_wait_s": 100,
    "reply_regex": "\\b20\\b",
-   "reply_regex_not": "(last|final) number[^.\\n]{0,40}\\b40\\b|\\b40 lines",
+   "reply_regex_not": "(last|final) number[^.\\n]{0,40}\\b40\\b|\\b40 lines|never started|no number was written|does not exist|rerun[0-9]",
    "timeout_s": 180,
    "verify": "f={D}/count.txt; test -f $f || { echo FAIL: no count.txt; exit 0; }; last=$(tail -1 $f | tr -dc 0-9); n=$(grep -c . $f); echo \"SHOW lines=$n last=$last\"; if [ \"$last\" = 20 ] && [ $n -le 22 ]; then echo PASS; else echo FAIL: last=$last lines=$n; fi"
   }

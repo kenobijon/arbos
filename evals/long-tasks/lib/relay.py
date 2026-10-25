@@ -70,7 +70,15 @@ def user_token():
     issued = t.get("issued_at", TOKENS.stat().st_mtime)
     if time.time() > issued + t.get("expires_in", 3600) - 600:
         st, new = http("POST", f"{RELAY}/auth/refresh", body={"refresh_token": t["refresh_token"]})
-        if st != 200:
+        if st == 401 and t.get("test", True) and t.get("user", {}).get("id"):
+            # refresh tokens rotate; a second harness copy on the same test user (or a crashed run)
+            # consumed ours. Attach a fresh device instead of dying (admin, test users only).
+            st, new = http("POST", f"{RELAY}/admin/users/{t['user']['id']}/devices", token=admin_token(),
+                           body={"name": f"lt-eval harness (re-minted {time.strftime('%Y-%m-%d %H:%M')} UTC)"})
+            if st != 201:
+                raise SystemExit(f"token refresh failed and re-mint failed: {st} {new}")
+            print(f"token refresh rejected; attached a fresh device {new.get('device_id')}", flush=True)
+        elif st != 200:
             raise SystemExit(f"token refresh failed: {st} {new}")
         for k in ("user", "device_id", "test"):
             new.setdefault(k, t.get(k))
