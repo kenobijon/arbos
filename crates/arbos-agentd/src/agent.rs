@@ -7613,10 +7613,11 @@ pub const ROUTER_PROMPT: &str = include_str!("../prompts/router.md");
 /// Upper bound on the byte-stable prefix (core + router + code mode) so the cached prefix stays
 /// cheap: about 6k tokens (21.4 KB on 2026-10-23; 24.2 KB after agent-to-agent `to` disambiguation
 /// on 2026-10-24; 25.7 KB after the Grok-parity rules — moment, naming, research delivery —
-/// the same day). The unit test fails when a prompt edit crosses it, so growth is a decision,
-/// not drift.
+/// the same day; 28.2 KB on 2026-10-25 with the jobs section's steer/stop rule (#1692) and the
+/// steer rule — short waits, `[Arbos steer:` is never late — of #1690). The unit test fails when
+/// a prompt edit crosses it, so growth is a decision, not drift.
 #[cfg(test)]
-pub const BASE_PROMPT_MAX_BYTES: usize = 28_000;
+pub const BASE_PROMPT_MAX_BYTES: usize = 28_400;
 
 /// The byte-stable part of the main agent's system prompt: core, then routing, then code mode
 /// when it is on. Everything per project (folder, model, instructions, memory) comes after it.
