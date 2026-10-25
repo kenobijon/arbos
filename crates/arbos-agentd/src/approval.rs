@@ -959,7 +959,7 @@ mod shell_grant_tests {
         ShellGrant {
             id: format!("g-{}", class.as_str()),
             project_id: "01TESTPROJECTQUICKREPLY000".into(),
-            rule_class: "rm-recursive".into(),
+            rule_class: "file-delete".into(),
             path_class: class,
             chat_id: chat.map(str::to_owned),
             granted_by: "u-test".into(),

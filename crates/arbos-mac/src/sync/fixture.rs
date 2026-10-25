@@ -4176,12 +4176,12 @@ fn seed_shell_grants() -> HashMap<Id, Vec<crate::model::ShellGrant>> {
         PROJECT_ARBOS.to_string(),
         vec![crate::model::ShellGrant {
             id: "grant-scratch".into(),
-            rule_class: "rm-recursive".into(),
+            rule_class: "file-delete".into(),
             path_class: "scratch".into(),
             chat_id: None,
             granted_by: "dev-mac".into(),
             created_at: now_ms() - 3 * 60 * 60 * 1000,
-            label: "Destructive shell in /tmp".into(),
+            label: "File deletes in /tmp".into(),
             detail: "scratch only: /tmp and /work/tmp".into(),
         }],
     );
@@ -5444,12 +5444,12 @@ fn seed_chat_docs() -> Vec<ChatDoc> {
                     Part::Approval {
                         id: new_id(),
                         approval_id: "01J9APPROVAL0SHELL00000000".into(),
-                        title: "Run a destructive command (rm-recursive)".into(),
+                        title: "Run a destructive command (file-delete)".into(),
                         summary: command.into(),
                         risk: ApprovalRisk::Destructive,
                         payload: json!({
-                            "kind": "tool_call", "tool": "bash", "class": "rm-recursive", "path_class": "workspace",
-                            "why": "recursive or forced delete outside /work/tmp",
+                            "kind": "tool_call", "tool": "bash", "class": "file-delete", "path_class": "workspace",
+                            "why": "deletes files outside /work/tmp",
                             "input": { "command": command },
                             "grant_options": [
                                 { "path_class": "workspace", "label": "its workspace", "detail": "the agent's own /work folder, including scratch" },

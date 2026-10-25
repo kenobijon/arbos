@@ -104,9 +104,9 @@ extension AppModel {
             allMessages[c]?.append(assistant("c8", c, "On it.", at: t0 + 131_000))
             allMessages[c]?.append(shellCard("c9", c, at: t0 + 132_000))
         }
-        shellGrants["fx-comms"] = [ShellGrant(id: "grant-scratch", ruleClass: "rm-recursive", pathClass: "scratch", chatId: nil,
+        shellGrants["fx-comms"] = [ShellGrant(id: "grant-scratch", ruleClass: "file-delete", pathClass: "scratch", chatId: nil,
                                               grantedBy: "dev-iphone", createdAt: now - 3 * 3_600_000,
-                                              label: "Destructive shell in /tmp", detail: "scratch only: /tmp and /work/tmp")]
+                                              label: "File deletes in /tmp", detail: "scratch only: /tmp and /work/tmp")]
         // Affine's chat shows the card types: file, voice memo, question, stop.
         let a = "fx-affine-main"
         let a0 = now - 19 * 60_000
@@ -706,11 +706,11 @@ extension AppModel {
     private func shellCard(_ id: Id, _ chat: Id, at: Int64) -> Message {
         let pm: [String: Any] = [
             "id": "\(id)-ap", "kind": "approval", "approvalId": "\(id)-approval", "state": "pending",
-            "title": "Run a destructive command (rm-recursive)", "risk": "destructive",
+            "title": "Run a destructive command (file-delete)", "risk": "destructive",
             "summary": "cd /work/app && rm -rf node_modules && git clone --depth 1 https://github.com/unarbos/arbos arbos-src",
             "payload": [
-                "kind": "tool_call", "tool": "bash", "class": "rm-recursive", "path_class": "workspace",
-                "why": "recursive or forced delete outside /work/tmp",
+                "kind": "tool_call", "tool": "bash", "class": "file-delete", "path_class": "workspace",
+                "why": "deletes files outside /work/tmp",
                 "input": ["command": "cd /work/app && rm -rf node_modules && git clone --depth 1 https://github.com/unarbos/arbos arbos-src"],
                 "grant_options": [
                     ["path_class": "workspace", "label": "its workspace", "detail": "the agent's own /work folder, including scratch"],

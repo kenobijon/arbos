@@ -218,13 +218,9 @@ pub const RISKY_RULES: &[RiskyRule] = &[
         why: "touches the user's own computer",
     },
     // ---- destructive shell --------------------------------------------------------------------------
-    RiskyRule {
-        class: "rm-recursive",
-        risk: Risk::Destructive,
-        subject: Subject::ShellCommand,
-        pattern: r"(^|[;&|]\s*|\s)rm\s+(-\w*[rRf]\w*\s+)+",
-        why: "recursive or forced delete outside /work/tmp",
-    },
+    // File deletion is not a regex rule: `delete_targets` below reads the command (rm, find
+    // -delete, shred, truncate, git clean, rsync --delete, …) and classifies the paths it
+    // touches (#1544, #1712). Its class is `FILE_DELETE`.
     RiskyRule {
         class: "git-force-push",
         risk: Risk::Destructive,
@@ -375,8 +371,16 @@ impl ShellGrant {
     }
 }
 
+/// The deletion family's rule class: `rm`, `find … -delete` / `-exec rm`, `xargs rm`, `shred`,
+/// `unlink`, `truncate`, the bare `> file` truncation idioms, `git clean -f`, `git checkout --` /
+/// `git restore` / `git reset --hard`, `rsync --delete`, `mv … /dev/null`, Python's
+/// `os.remove` / `shutil.rmtree`. One class, so one standing grant covers the whole family
+/// (#1712: `find "$D" -type f -delete` emptied a folder with no card possible).
+pub const FILE_DELETE: &str = "file-delete";
+const FILE_DELETE_WHY: &str = "deletes files outside /work/tmp";
+
 /// Rule classes a standing grant may cover: shell rules whose risk is in filesystem paths.
-pub const GRANTABLE_CLASSES: &[&str] = &["rm-recursive"];
+pub const GRANTABLE_CLASSES: &[&str] = &[FILE_DELETE];
 
 fn regex(pattern: &str) -> Option<regex_lite::Regex> {
     regex_lite::RegexBuilder::new(pattern)
@@ -475,61 +479,342 @@ fn simple_commands(command: &str) -> Vec<Vec<String>> {
     cmds
 }
 
-fn is_recursive_flag(w: &str) -> bool {
-    w == "--recursive"
-        || (w.starts_with('-') && !w.starts_with("--") && w[1..].contains(['r', 'R']))
+/// Flags of `git clean` that make it delete (`-f`/`--force`, with `-d`/`-x`/`-X` riding along).
+fn git_clean_deletes(words: &[&str]) -> bool {
+    words.iter().any(|w| {
+        *w == "--force" || (w.starts_with('-') && !w.starts_with("--") && w[1..].contains('f'))
+    })
 }
 
-/// The widest class among the targets of every `rm` in `command` (a leading `cd` moves the
-/// working directory; the default is the workspace), and whether any of them is recursive.
-/// `None` when the command deletes nothing.
-pub fn rm_targets(command: &str) -> Option<(PathClass, bool)> {
+/// Skip wrapper words (`sudo`, `env VAR=x`, `time`, …) to the real command.
+fn unwrap_head<'a>(
+    words: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>,
+) -> Option<&'a str> {
+    let mut head = words.next()?;
+    loop {
+        match head {
+            "sudo" | "time" | "nice" | "nohup" | "command" | "builtin" => head = words.next()?,
+            "env" => {
+                head = words.next()?;
+                while head.contains('=') && !head.starts_with('-') {
+                    head = words.next()?;
+                }
+            }
+            _ if head.contains('=') && !head.starts_with('/') && !head.starts_with('.') => {
+                // `VAR=x cmd …`
+                head = words.next()?;
+            }
+            _ => return Some(head),
+        }
+    }
+}
+
+/// The paths a `find` walks: every argument before the first expression word (`-name`, `!`,
+/// `(`, …). None given means `.`.
+fn find_paths<'a>(words: &[&'a str]) -> Vec<&'a str> {
+    let mut paths = Vec::new();
+    let mut i = 0;
+    // GNU find's leading options take no path.
+    while i < words.len() && matches!(words[i], "-H" | "-L" | "-P" | "-O0" | "-O1" | "-O2" | "-O3")
+    {
+        i += 1;
+    }
+    while i < words.len() {
+        let w = words[i];
+        if w.starts_with('-') || matches!(w, "!" | "(" | ")" | ",") {
+            break;
+        }
+        paths.push(w);
+        i += 1;
+    }
+    if paths.is_empty() {
+        paths.push(".");
+    }
+    paths
+}
+
+fn find_deletes(words: &[&str]) -> bool {
+    words.iter().enumerate().any(|(i, w)| {
+        *w == "-delete"
+            || (matches!(*w, "-exec" | "-execdir" | "-ok" | "-okdir")
+                && words
+                    .get(i + 1)
+                    .is_some_and(|c| matches!(*c, "rm" | "shred" | "unlink" | "truncate")))
+    })
+}
+
+/// The words of a redirect `> path` (not `>>`, not `/dev/null`) in a simple command whose only
+/// purpose is to empty the file: `> f`, `: > f`, `true > f`, `cat /dev/null > f`,
+/// `echo -n "" > f`, `printf "" > f`. A real write (`echo text > f`) is not a delete.
+fn bare_truncate_target<'a>(words: &[&'a str]) -> Option<&'a str> {
+    let gt = words
+        .iter()
+        .position(|w| *w == ">" || w.starts_with('>') && !w.starts_with(">>") && w.len() > 1)?;
+    let target = if words[gt] == ">" {
+        *words.get(gt + 1)?
+    } else {
+        &words[gt][1..]
+    };
+    if target == "/dev/null" || target.starts_with("/dev/") {
+        return None;
+    }
+    let before: Vec<&str> = words[..gt].to_vec();
+    let bare = match before.as_slice() {
+        [] | [":"] | ["true"] => true,
+        ["cat", "/dev/null"] => true,
+        ["echo", rest @ ..] | ["printf", rest @ ..] => rest
+            .iter()
+            .all(|w| w.starts_with('-') || w.is_empty() || *w == "\"\"" || *w == "''"),
+        ["truncate", ..] => false,
+        _ => false,
+    };
+    bare.then_some(target)
+}
+
+/// The widest path class among everything `command` deletes — `rm` and the rest of the
+/// deletion family (`FILE_DELETE`), with a leading `cd`/`pushd` moving the working directory
+/// (default `/work`). `None` when the command deletes nothing. A `find … -delete` deletes
+/// under the paths it walks; `xargs rm` deletes what the earlier `find` in the pipeline found,
+/// else whatever the working directory holds; `git clean`/`checkout --`/`reset --hard` and
+/// `rsync --delete` act on the repository / destination; `mv … /dev/null` on its sources;
+/// Python `os.remove`/`shutil.rmtree` cannot be read statically and count as anywhere.
+pub fn delete_targets(command: &str) -> Option<PathClass> {
     let mut cwd = WORKSPACE_ROOT.to_owned();
     let mut widest: Option<PathClass> = None;
-    let mut recursive = false;
+    let mut pipeline_paths: Vec<String> = Vec::new();
+    let note = |widest: &mut Option<PathClass>, class: PathClass| {
+        *widest = Some(widest.map_or(class, |c| c.max(class)));
+    };
+    let plain_args = |words: &[&str]| -> Vec<String> {
+        let mut out = Vec::new();
+        let mut dashdash = false;
+        for w in words {
+            if !dashdash && *w == "--" {
+                dashdash = true;
+                continue;
+            }
+            if !dashdash && w.starts_with('-') {
+                continue;
+            }
+            out.push((*w).to_owned());
+        }
+        out
+    };
+    if command.contains("shutil.rmtree(")
+        || command.contains("os.remove(")
+        || command.contains("os.unlink(")
+        || command.contains(".unlink(")
+        || command.contains("os.rmdir(")
+    {
+        note(&mut widest, PathClass::Anywhere);
+    }
     for cmd in simple_commands(command) {
         let mut words = cmd.iter().map(String::as_str).peekable();
-        let mut head = words.next()?;
-        while matches!(head, "sudo" | "env" | "time" | "nice" | "nohup") {
-            head = words.next()?;
-        }
+        let Some(head) = unwrap_head(&mut words) else {
+            continue;
+        };
+        let rest: Vec<&str> = words.collect();
+        let classify_all = |widest: &mut Option<PathClass>, targets: &[String]| {
+            for t in targets {
+                note(widest, classify_path(&resolve_path(&cwd, t)));
+            }
+        };
         match head {
             "cd" => {
-                cwd = match words.find(|w| !w.starts_with('-')) {
+                cwd = match rest.iter().find(|w| !w.starts_with('-')) {
                     Some(dir) => resolve_path(&cwd, dir),
                     None => "~".to_owned(),
                 };
             }
             "pushd" => {
-                if let Some(dir) = words.find(|w| !w.starts_with('-')) {
+                if let Some(dir) = rest.iter().find(|w| !w.starts_with('-')) {
                     cwd = resolve_path(&cwd, dir);
                 }
             }
-            "rm" => {
-                let mut saw_dashdash = false;
-                for w in words {
-                    if !saw_dashdash && w == "--" {
-                        saw_dashdash = true;
+            "rm" | "shred" | "unlink" | "truncate" => {
+                // Flags that take a value (`truncate -s 0`, `shred -n 3`): the value is no path.
+                let valued: &[&str] = match head {
+                    "truncate" => &["-s", "--size", "-r", "--reference"],
+                    "shred" => &["-n", "--iterations", "-s", "--size", "--random-source"],
+                    _ => &[],
+                };
+                let mut targets = Vec::new();
+                let mut skip = false;
+                let mut dashdash = false;
+                for w in &rest {
+                    if skip {
+                        skip = false;
                         continue;
                     }
-                    if !saw_dashdash && w.starts_with('-') {
-                        recursive |= is_recursive_flag(w);
+                    if !dashdash && *w == "--" {
+                        dashdash = true;
                         continue;
                     }
-                    let class = classify_path(&resolve_path(&cwd, w));
-                    widest = Some(widest.map_or(class, |c| c.max(class)));
+                    if !dashdash && valued.contains(w) {
+                        skip = true;
+                        continue;
+                    }
+                    if !dashdash && w.starts_with('-') {
+                        continue;
+                    }
+                    targets.push((*w).to_owned());
+                }
+                if targets.is_empty() {
+                    // `rm` fed by a pipe / xargs / glob we cannot see.
+                    note(&mut widest, classify_path(&cwd));
+                } else {
+                    classify_all(&mut widest, &targets);
+                }
+            }
+            "find" => {
+                let paths: Vec<String> =
+                    find_paths(&rest).iter().map(|p| (*p).to_owned()).collect();
+                pipeline_paths = paths.iter().map(|p| resolve_path(&cwd, p)).collect();
+                if find_deletes(&rest) {
+                    classify_all(&mut widest, &paths);
+                }
+            }
+            "xargs" | "parallel" => {
+                let deletes = rest
+                    .iter()
+                    .any(|w| matches!(*w, "rm" | "shred" | "unlink" | "truncate"));
+                if deletes {
+                    if pipeline_paths.is_empty() {
+                        note(&mut widest, classify_path(&cwd));
+                    } else {
+                        for p in &pipeline_paths {
+                            note(&mut widest, classify_path(p));
+                        }
+                    }
+                }
+            }
+            "git" => {
+                // The subcommand: the first plain word, skipping `-C <dir>` / `-c <k=v>` values.
+                let mut sub = "";
+                let mut skip = false;
+                for w in &rest {
+                    if skip {
+                        skip = false;
+                        continue;
+                    }
+                    if *w == "-C" || *w == "-c" {
+                        skip = true;
+                        continue;
+                    }
+                    if !w.starts_with('-') {
+                        sub = w;
+                        break;
+                    }
+                }
+                let after_sub: Vec<&str> = rest
+                    .iter()
+                    .skip_while(|w| **w != sub)
+                    .skip(1)
+                    .copied()
+                    .collect();
+                let repo_dir = rest
+                    .iter()
+                    .position(|w| *w == "-C")
+                    .and_then(|i| rest.get(i + 1))
+                    .map(|d| resolve_path(&cwd, d))
+                    .unwrap_or_else(|| cwd.clone());
+                let deletes = match sub {
+                    "clean" => git_clean_deletes(&after_sub),
+                    "checkout" => after_sub
+                        .iter()
+                        .any(|w| *w == "--" || *w == "." || *w == "-f" || *w == "--force"),
+                    "restore" => {
+                        !after_sub.iter().any(|w| *w == "--staged" || *w == "-S")
+                            || after_sub.iter().any(|w| *w == "--worktree" || *w == "-W")
+                    }
+                    "reset" => after_sub.iter().any(|w| *w == "--hard" || *w == "--merge"),
+                    "stash" => after_sub.iter().any(|w| *w == "drop" || *w == "clear"),
+                    _ => false,
+                };
+                if deletes {
+                    let paths: Vec<String> = if matches!(sub, "checkout" | "restore") {
+                        plain_args(&after_sub)
+                    } else {
+                        Vec::new()
+                    };
+                    if paths.is_empty() {
+                        note(&mut widest, classify_path(&repo_dir));
+                    } else {
+                        for p in &paths {
+                            note(&mut widest, classify_path(&resolve_path(&repo_dir, p)));
+                        }
+                    }
+                }
+            }
+            "rsync" => {
+                if rest.iter().any(|w| w.starts_with("--delete")) {
+                    if let Some(dest) = plain_args(&rest).last() {
+                        if !dest.contains(':') {
+                            note(&mut widest, classify_path(&resolve_path(&cwd, dest)));
+                        } else {
+                            note(&mut widest, PathClass::Anywhere);
+                        }
+                    }
+                }
+            }
+            "mv" => {
+                let args = plain_args(&rest);
+                if args.last().is_some_and(|d| d == "/dev/null") {
+                    classify_all(&mut widest, &args[..args.len() - 1]);
+                }
+            }
+            "cp" => {
+                // `cp /dev/null f` empties f.
+                let args = plain_args(&rest);
+                if args.first().is_some_and(|s| s == "/dev/null") {
+                    classify_all(&mut widest, &args[1..]);
                 }
             }
             _ => {}
         }
+        if head != "cd" && head != "pushd" {
+            let mut all: Vec<&str> = vec![head];
+            all.extend(rest.iter().copied());
+            if let Some(t) = bare_truncate_target(&all) {
+                note(&mut widest, classify_path(&resolve_path(&cwd, t)));
+            }
+        }
+        if head != "find" {
+            pipeline_paths.clear();
+        }
     }
-    widest.map(|c| (c, recursive))
+    widest
 }
 
-/// Flag a shell command when it matches a destructive pattern. An `rm` whose targets all sit in
-/// scratch is not destructive; a non-recursive `rm -f` of files in the agent's own workspace is
-/// an edit of its working tree, not a card (#1544).
+/// Compatibility shim for callers that only ask "does it `rm`?": the class of what the command
+/// deletes, and whether an `rm` in it is recursive.
+pub fn rm_targets(command: &str) -> Option<(PathClass, bool)> {
+    let class = delete_targets(command)?;
+    let recursive = simple_commands(command).iter().any(|cmd| {
+        cmd.first().is_some_and(|h| h == "rm")
+            && cmd.iter().skip(1).any(|w| {
+                w == "--recursive"
+                    || (w.starts_with('-') && !w.starts_with("--") && w[1..].contains(['r', 'R']))
+            })
+    });
+    Some((class, recursive))
+}
+
+/// Flag a shell command when it matches a destructive pattern. Anything that deletes files
+/// (`delete_targets`) is a card unless every target sits in scratch (`/tmp`, `/work/tmp`); the
+/// card carries the path class so a standing grant can cover it (#1544, #1712). The regex
+/// rules (force-push, DROP TABLE, cloud deletes, …) follow.
 pub fn classify_shell(command: &str) -> Option<RiskMatch> {
+    if let Some(class) = delete_targets(command) {
+        if class != PathClass::Scratch {
+            return Some(RiskMatch {
+                class: FILE_DELETE,
+                risk: Risk::Destructive,
+                why: FILE_DELETE_WHY,
+                path_class: Some(class),
+            });
+        }
+    }
     for rule in RISKY_RULES {
         if rule.subject != Subject::ShellCommand {
             continue;
@@ -540,20 +825,11 @@ pub fn classify_shell(command: &str) -> Option<RiskMatch> {
         if !re.is_match(command) {
             continue;
         }
-        let mut path_class = None;
-        if rule.class == "rm-recursive" {
-            match rm_targets(command) {
-                Some((PathClass::Scratch, _)) => continue,
-                Some((PathClass::Workspace, false)) => continue,
-                Some((class, _)) => path_class = Some(class),
-                None => path_class = Some(PathClass::Anywhere),
-            }
-        }
         return Some(RiskMatch {
             class: rule.class,
             risk: rule.risk,
             why: rule.why,
-            path_class,
+            path_class: None,
         });
     }
     None
@@ -761,6 +1037,10 @@ mod tests {
             ("bash", json!({ "command": "cat README.md | head" })),
             ("bash", json!({ "command": "rm -rf /work/tmp/build" })),
             ("bash", json!({ "command": "rm -rf tmp/cache" })),
+            (
+                "bash",
+                json!({ "command": "find /tmp/cache -type f -delete" }),
+            ),
             ("bash", json!({ "command": "git push origin main" })),
             ("bash", json!({ "command": "cargo test --workspace" })),
             ("read", json!({ "path": "src/main.rs" })),
@@ -796,32 +1076,116 @@ mod tests {
         }
     }
 
-    /// #1544: a leading `cd` into scratch makes relative targets scratch; a non-recursive `rm -f`
-    /// inside the workspace is not a card; the class names where the targets are.
+    /// #1544 / #1712: every way a shell command deletes files is classified by where the
+    /// targets are — scratch (no card), the workspace, or anywhere — with a leading `cd`
+    /// moving the working directory. One table, one expected class per command.
     #[test]
-    fn rm_classes_follow_cd_and_target_paths() {
-        for cmd in [
-            "cd /tmp && rm -rf arbos-src && git clone --depth 1 https://x/y arbos-src",
-            "cd /work/tmp; rm -r build",
-            "pushd /tmp && rm -rf ./cache",
-            "rm -f out/*.png",
-            "rm -f /work/out/a.png /work/out/b.png",
-            "rm -- -weird-file",
-        ] {
-            assert_eq!(classify_shell(cmd), None, "{cmd} needs no card");
+    fn deletion_family_is_classified_by_target_path() {
+        use PathClass::*;
+        let table: &[(&str, Option<PathClass>)] = &[
+            // rm — scratch is free, the rest cards (non-recursive too: #1712's files were plain).
+            (
+                "cd /tmp && rm -rf arbos-src && git clone --depth 1 https://x/y arbos-src",
+                None,
+            ),
+            ("cd /work/tmp; rm -r build", None),
+            ("pushd /tmp && rm -rf ./cache", None),
+            ("rm -rf /work/tmp/build /tmp/x", None),
+            ("rm -- -weird-file", Some(Workspace)),
+            ("rm -f out/*.png", Some(Workspace)),
+            ("rm -rf build", Some(Workspace)),
+            ("cd /work/app && rm -rf node_modules", Some(Workspace)),
+            ("cd /tmp && rm -rf ../etc/foo", Some(Anywhere)),
+            ("rm -rf ~/Library", Some(Anywhere)),
+            ("rm -rf /tmp/a /work/b", Some(Workspace)),
+            ("rm -f /etc/hosts", Some(Anywhere)),
+            ("sudo rm -rf /var/log/old", Some(Anywhere)),
+            ("FOO=1 env BAR=2 rm -f /work/x", Some(Workspace)),
+            // find -delete / -exec rm: the paths find walks.
+            (
+                "cd /work/p && find \"$D\" -mindepth 1 -maxdepth 1 -type f -delete",
+                Some(Anywhere),
+            ),
+            (
+                "find /work/p/old -mindepth 1 -type f -name 'file*.txt' -delete",
+                Some(Workspace),
+            ),
+            ("find . -name '*.pyc' -delete", Some(Workspace)),
+            ("find /tmp/build -type f -delete", None),
+            (
+                "find /work/p -name '*.log' -exec rm {} \\;",
+                Some(Workspace),
+            ),
+            (
+                "find /work/p -name '*.log' -execdir rm -f {} +",
+                Some(Workspace),
+            ),
+            (
+                "find /work/p -name '*.log' -print0 | xargs -0 rm -f",
+                Some(Workspace),
+            ),
+            ("find /tmp/p -name '*.log' | xargs rm", None),
+            ("ls *.bak | xargs rm -f", Some(Workspace)),
+            ("find /work/p -name '*.log'", None),
+            // shred / unlink / truncate / bare truncation idioms.
+            ("shred -u /work/p/secret.key", Some(Workspace)),
+            ("shred -n 3 -z /tmp/dump.bin", None),
+            ("unlink /work/p/link", Some(Workspace)),
+            ("truncate -s 0 /work/p/app.log", Some(Workspace)),
+            ("truncate -s 0 /tmp/app.log", None),
+            ("> /work/p/app.log", Some(Workspace)),
+            (": > /work/p/app.log", Some(Workspace)),
+            ("true > /etc/motd", Some(Anywhere)),
+            ("cat /dev/null > /work/p/app.log", Some(Workspace)),
+            ("cp /dev/null /work/p/app.log", Some(Workspace)),
+            ("echo -n '' > /work/p/app.log", Some(Workspace)),
+            ("echo hello > /work/p/notes.txt", None),
+            ("cargo build > /work/tmp/build.log 2>&1", None),
+            ("ls > /dev/null", None),
+            // git: clean -f, checkout -- / ., restore, reset --hard, stash drop.
+            ("git clean -fdx", Some(Workspace)),
+            ("git clean -n", None),
+            ("git -C /opt/repo clean -f", Some(Anywhere)),
+            ("git checkout -- src/main.rs", Some(Workspace)),
+            ("git checkout .", Some(Workspace)),
+            ("git checkout feature-branch", None),
+            ("git restore src/", Some(Workspace)),
+            ("git restore --staged src/", None),
+            ("git reset --hard HEAD~1", Some(Workspace)),
+            ("git reset --soft HEAD~1", None),
+            ("git stash drop", Some(Workspace)),
+            ("cd /tmp/scratch-repo && git reset --hard", None),
+            // rsync --delete: the destination.
+            ("rsync -a --delete src/ /work/p/site/", Some(Workspace)),
+            ("rsync -a --delete-after src/ /srv/www/", Some(Anywhere)),
+            ("rsync -a --delete src/ host:/srv/www/", Some(Anywhere)),
+            ("rsync -a src/ /work/p/site/", None),
+            // mv to /dev/null: the sources.
+            ("mv /work/p/old.txt /dev/null", Some(Workspace)),
+            ("mv /work/p/a.txt /work/p/b.txt", None),
+            // Python deletes: unreadable targets count as anywhere.
+            (
+                "python3 -c \"import shutil; shutil.rmtree('old')\"",
+                Some(Anywhere),
+            ),
+            (
+                "python3 -c \"import os; os.remove('a.txt')\"",
+                Some(Anywhere),
+            ),
+            // Not deletes.
+            ("ls -la && cat README.md", None),
+            ("git push --force origin main", None),
+            ("grep -r 'rm -rf' docs/", None),
+            ("echo 'remove the old files' > /work/tmp/plan.txt", None),
+        ];
+        for (cmd, expected) in table {
+            let hit = classify_shell(cmd).filter(|h| h.class == FILE_DELETE);
+            assert_eq!(hit.as_ref().and_then(|h| h.path_class), *expected, "{cmd}");
+            if let Some(h) = hit {
+                assert_eq!(h.risk, Risk::Destructive);
+            }
         }
-        let ws = classify_shell("rm -rf build").expect("workspace recursive delete cards");
-        assert_eq!(ws.path_class, Some(PathClass::Workspace));
-        let ws2 = classify_shell("cd /work/app && rm -rf node_modules").expect("cards");
-        assert_eq!(ws2.path_class, Some(PathClass::Workspace));
-        let any = classify_shell("cd /tmp && rm -rf ../etc/foo").expect("escapes scratch");
-        assert_eq!(any.path_class, Some(PathClass::Anywhere));
-        let any2 = classify_shell("rm -rf ~/Library").expect("home cards");
-        assert_eq!(any2.path_class, Some(PathClass::Anywhere));
-        let mixed = classify_shell("rm -rf /tmp/a /work/b").expect("widest target wins");
-        assert_eq!(mixed.path_class, Some(PathClass::Workspace));
-        let plain_f = classify_shell("rm -f /etc/hosts").expect("forced delete outside /work");
-        assert_eq!(plain_f.path_class, Some(PathClass::Anywhere));
+        // Other destructive rules carry no path class.
         assert_eq!(
             classify_shell("git push --force origin main")
                 .expect("force push")
@@ -836,7 +1200,7 @@ mod tests {
         let grant = |class: PathClass, chat: Option<&str>| ShellGrant {
             id: "g".into(),
             project_id: "p".into(),
-            rule_class: "rm-recursive".into(),
+            rule_class: FILE_DELETE.into(),
             path_class: class,
             chat_id: chat.map(str::to_owned),
             granted_by: "u".into(),

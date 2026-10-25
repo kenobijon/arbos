@@ -181,7 +181,11 @@ impl ApprovalView {
                 format!("Always allow {agent} in {}", o.label)
             };
             let hint = if o.path_class == "anywhere" {
-                let class = self.field("class").unwrap_or("this");
+                let class = match self.field("class") {
+                    Some("file-delete") => "file deletes",
+                    Some(other) => other,
+                    None => "this",
+                };
                 format!("no more cards for {class} from {agent}, in {}", o.detail)
             } else {
                 o.detail.clone()
@@ -438,11 +442,11 @@ mod tests {
     ) -> ApprovalView {
         ApprovalView {
             approval_id: "ap1".into(),
-            title: "Run a destructive command (rm-recursive)".into(),
+            title: "Run a destructive command (file-delete)".into(),
             summary: "cd /tmp && rm -rf arbos-src".into(),
             risk: ApprovalRisk::Destructive,
             state,
-            payload: json!({ "kind": "tool_call", "tool": "bash", "class": "rm-recursive",
+            payload: json!({ "kind": "tool_call", "tool": "bash", "class": "file-delete",
                 "input": { "command": "cd /tmp && rm -rf arbos-src" }, "path_class": "workspace",
                 "grant_options": options }),
             decided_by: Some("dev-mac".into()),
@@ -468,7 +472,7 @@ mod tests {
         assert_eq!(rows[2].1, "Always allow Doug anywhere");
         assert!(rows[2]
             .2
-            .contains("no more cards for rm-recursive from Doug"));
+            .contains("no more cards for file deletes from Doug"));
         assert_eq!(v.picked_shell_answer(), None);
 
         let picked = shell_view(ApprovalState::Approved, Some("workspace"), opts.clone());

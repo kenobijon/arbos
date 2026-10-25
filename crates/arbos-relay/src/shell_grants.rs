@@ -145,10 +145,10 @@ fn grant_json(g: &ShellGrant) -> Value {
     v
 }
 
-/// Title of a grant in the Settings list: "Destructive shell in /tmp".
+/// Title of a grant in the Settings list: "File deletes in /tmp".
 pub fn label(g: &ShellGrant) -> String {
     let what = match g.rule_class.as_str() {
-        "rm-recursive" => "Destructive shell",
+        "file-delete" => "File deletes",
         other => other,
     };
     match g.path_class {
@@ -367,7 +367,7 @@ mod tests {
             .db
             .add_shell_grant(
                 "p1",
-                "rm-recursive",
+                "file-delete",
                 PathClass::Scratch,
                 None,
                 "u1",
@@ -378,7 +378,7 @@ mod tests {
             .db
             .add_shell_grant(
                 "p1",
-                "rm-recursive",
+                "file-delete",
                 PathClass::Scratch,
                 None,
                 "u1",
@@ -390,7 +390,7 @@ mod tests {
             .db
             .add_shell_grant(
                 "p1",
-                "rm-recursive",
+                "file-delete",
                 PathClass::Anywhere,
                 Some("chat"),
                 "u1",
@@ -398,8 +398,8 @@ mod tests {
             )
             .unwrap();
         assert_eq!(st.db.shell_grants("p1").unwrap().len(), 2);
-        assert_eq!(label(&a), "Destructive shell in /tmp");
-        assert_eq!(label(&c), "Destructive shell anywhere");
+        assert_eq!(label(&a), "File deletes in /tmp");
+        assert_eq!(label(&c), "File deletes anywhere");
         assert!(st.db.revoke_shell_grant(&a.id, "u1").unwrap());
         assert!(!st.db.revoke_shell_grant(&a.id, "u1").unwrap());
         let left = st.db.shell_grants("p1").unwrap();

@@ -9,8 +9,8 @@ final class ShellApprovalCardTests: XCTestCase {
     private func part(state: String, grant: String? = nil, options: [[String: Any]]) -> [String: Any] {
         var pm: [String: Any] = [
             "id": "p1", "kind": "approval", "approvalId": "ap1", "state": state,
-            "title": "Run a destructive command (rm-recursive)", "risk": "destructive",
-            "payload": ["kind": "tool_call", "tool": "bash", "class": "rm-recursive", "path_class": "workspace",
+            "title": "Run a destructive command (file-delete)", "risk": "destructive",
+            "payload": ["kind": "tool_call", "tool": "bash", "class": "file-delete", "path_class": "workspace",
                         "input": ["command": "rm -rf build"], "grant_options": options] as [String: Any],
         ]
         if let grant { pm["grant"] = grant }
@@ -32,7 +32,7 @@ final class ShellApprovalCardTests: XCTestCase {
         XCTAssertEqual(q.options[1].label, "Always allow {agent} in its workspace")
         XCTAssertEqual(q.options[1].hint, "the agent's own /work folder, including scratch")
         XCTAssertEqual(q.options[2].label, "Always allow {agent} anywhere")
-        XCTAssertTrue(q.options[2].hint?.contains("no more cards for rm-recursive from {agent}") == true)
+        XCTAssertTrue(q.options[2].hint?.contains("no more cards for file deletes from {agent}") == true)
         XCTAssertTrue(q.options[3].destructive)
         XCTAssertEqual(q.answer, [])
     }
@@ -59,8 +59,8 @@ final class ShellApprovalCardTests: XCTestCase {
 
     func testSummaryLine() {
         XCTAssertEqual(ShellGrant.summary([]), "Asks every time")
-        let g = ShellGrant(id: "g", ruleClass: "rm-recursive", pathClass: "scratch", chatId: nil, grantedBy: "u",
-                           createdAt: 0, label: "Destructive shell in /tmp", detail: "")
+        let g = ShellGrant(id: "g", ruleClass: "file-delete", pathClass: "scratch", chatId: nil, grantedBy: "u",
+                           createdAt: 0, label: "File deletes in /tmp", detail: "")
         XCTAssertEqual(ShellGrant.summary([g]), "Destructive · /tmp")
     }
 }

@@ -1096,7 +1096,8 @@ enum DocJSON {
             shellCard = true
             // The card fills in the agent's name when it draws ("Always allow Doug in /tmp").
             let agent = agentName ?? "{agent}"
-            let ruleClass = str(payload?["class"]) ?? "this"
+            let rawClass = str(payload?["class"]) ?? "this"
+            let ruleClass = rawClass == "file-delete" ? "file deletes" : rawClass
             options = [ChoiceOption(id: "once", label: "Allow once")]
             for o in grantOptions {
                 guard let om = o as? [String: Any], let cls = str(om["path_class"]) else { continue }

@@ -11,7 +11,7 @@ struct ShellGrant: Equatable, Identifiable {
     var chatId: String?
     var grantedBy: String
     var createdAt: Int64
-    /// "Destructive shell in /tmp" (relay-rendered).
+    /// "File deletes in /tmp" (relay-rendered).
     var label: String
     /// "scratch only: /tmp and /work/tmp" (relay-rendered).
     var detail: String

@@ -2577,7 +2577,7 @@ pub struct ShellGrant {
     pub granted_by: String,
     #[serde(default)]
     pub created_at: u64,
-    /// "Destructive shell in /tmp" (relay-rendered).
+    /// "File deletes in /tmp" (relay-rendered).
     #[serde(default)]
     pub label: String,
     /// "scratch only: /tmp and /work/tmp" (relay-rendered).
