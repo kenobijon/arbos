@@ -468,6 +468,9 @@ pub struct AppState {
     /// Blob keys whose thumbnail fetch failed: the card says "No preview" instead of loading.
     pub thumbnails_failed: HashSet<String>,
     pub notices: Vec<Notice>,
+    /// Rooms whose pushes were refused (`not_available`); the chat view can show a notice.
+    /// Cleared when that room's next ACK arrives.
+    pub push_refused: HashSet<Id>,
     pub selected_project: Option<Id>,
     /// Bytes and chats kept on this Mac by the on-device store (Settings → About).
     pub store_usage: (i64, i64),
@@ -869,6 +872,7 @@ impl AppState {
             thumbnails_requested: HashSet::new(),
             thumbnails_failed: HashSet::new(),
             notices: Vec::new(),
+            push_refused: HashSet::new(),
             selected_project: None,
             store_usage: (0, 0),
             active_tab: HashMap::new(),
@@ -1274,6 +1278,7 @@ impl AppState {
                 });
                 self.device_id = None;
                 self.room_links.clear();
+                self.push_refused.clear();
                 self.relay_link = (LinkState::Live, 0);
                 self.people_directory.clear();
                 cx.notify();
@@ -1574,6 +1579,18 @@ impl AppState {
                     self.awaiting_new_project = false;
                 }
                 self.push_notice(text);
+                cx.notify();
+            }
+            SyncEvent::PushRefused { chat_id, refused } => {
+                const DELIVERY: &str = "Messages in this chat are not being delivered";
+                if refused {
+                    self.push_refused.insert(chat_id);
+                    // Notice is also emitted from the room host; keep the flag here
+                    // so the chat view can show it until the room's next ACK.
+                } else {
+                    self.push_refused.remove(&chat_id);
+                    self.notices.retain(|n| n.text != DELIVERY);
+                }
                 cx.notify();
             }
             SyncEvent::Models(models) => {
