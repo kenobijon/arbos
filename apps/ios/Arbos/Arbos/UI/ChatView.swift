@@ -116,7 +116,7 @@ private struct ChatSessionHost: View {
 /// `@EnvironmentObject`) so only `ChatSessionHost`'s filtered publishes rebuild it.
 /// Composer draft lives in `ComposerDraft` / `ComposerField` — keystrokes do not
 /// re-evaluate this view (arbonites-chat-lag + feedback app-01M5NNJ001NHHYBHXTASM5NXBZ).
-private struct ChatSession: View {
+struct ChatSession: View {
     let model: AppModel
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
@@ -1075,6 +1075,14 @@ private struct ChatSession: View {
                         #if DEBUG
                         if model.isFixture {
                             model.fixtureAppendAssistant(chatId: chatId, text: AppModel.codeReply)
+                        }
+                        #endif
+                    case "table":
+                        // Rig: Jacob's Lima bookstore turn — a GFM table of linked stores
+                        // between two prose bubbles (fixture only).
+                        #if DEBUG
+                        if model.isFixture {
+                            model.fixtureLimaReply(chatId: chatId)
                         }
                         #endif
                     case "agent-message", "agent-message-received":
