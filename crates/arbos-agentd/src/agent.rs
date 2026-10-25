@@ -3957,6 +3957,7 @@ impl Agent {
             self.budget.clear(chat_id);
         }
         let room_name;
+        let mut trimmed = "kept";
         {
             let h = host.lock().await;
             if let Some(e) = &err_text {
@@ -4015,9 +4016,21 @@ impl Agent {
             if final_status == MessageStatus::Done
                 && (turn.ack_posted || turn.progress_texts.iter().any(|p| !p.trim().is_empty()))
             {
-                trim_wordless_result_row(&h.doc, &assistant_msg_id);
+                trimmed = trim_wordless_result_row(&h.doc, &assistant_msg_id);
             }
             room_name = h.room.clone();
+        }
+        if matches!(trimmed, "deleted" | "hidden") {
+            // Fleet-wide count of the no-answer-line trap (relay `timings`, kind
+            // `trailing_wordless_row`): each hit is a turn that would have shown the stock line.
+            tracing::info!(
+                chat_id,
+                trimmed,
+                "trailing wordless result row after a bubble"
+            );
+            let _ = self
+                .post_timing("trailing_wordless_row", 1, Some(trimmed))
+                .await;
         }
         if turn.activity.is_some() {
             self.post_activity(chat_id, None);
