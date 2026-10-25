@@ -251,6 +251,9 @@ pub struct AppState {
     pub voice_dispatched: Arc<Mutex<HashMap<String, i64>>>,
     /// What the voice worker last reported about itself (`POST /voice/worker/hello`).
     pub voice_worker: Arc<Mutex<Option<serde_json::Value>>>,
+    /// What landed in a chat while an agent call is live there (#1860): per (call, agent), the
+    /// finished bubbles and human messages the voice worker long-polls into the call's context.
+    pub voice_inbox: crate::voice::VoiceInbox,
     /// device_id → the app version it last reported (`X-Arbos-Client`), see `releases.rs`.
     pub client_seen: Arc<crate::releases::ClientSeen>,
     /// Chats on Matrix (D88): mode, homeserver tokens and the outbox wake-up.
@@ -567,6 +570,7 @@ pub(crate) mod test_support {
             restart: Arc::new(RestartSignal::default()),
             voice_dispatched: Arc::new(Mutex::new(HashMap::new())),
             voice_worker: Arc::new(Mutex::new(None)),
+            voice_inbox: crate::voice::VoiceInbox::default(),
             client_seen: Arc::new(std::sync::Mutex::new(HashMap::new())),
             matrix: crate::matrix::Matrix::new(crate::matrix::Config::off()),
         }
