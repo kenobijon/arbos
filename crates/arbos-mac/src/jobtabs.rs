@@ -154,6 +154,23 @@ pub fn messages(rollout: &JobRollout, pending: &[Message]) -> Vec<Message> {
     let chat = chat_id(&rollout.id);
     let mut out: Vec<Message> = Vec::new();
     let mut live_step: Option<String> = None;
+    if rollout.unavailable {
+        // A relay before the endpoint: say so once; the tab still steers and stops.
+        let id = format!("{chat}:unavailable");
+        let mut m = base(
+            &chat,
+            id.clone(),
+            Role::System,
+            MessageStatus::Done,
+            crate::model::now_ms(),
+        );
+        m.sender = "system".into();
+        m.parts.push(text_part(
+            &id,
+            "This task's transcript is not available on this relay yet.",
+        ));
+        out.push(m);
+    }
     for e in &rollout.entries {
         let id = format!("{chat}:{}", e.seq);
         let at = if e.at > 0 {
