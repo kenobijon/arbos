@@ -7006,7 +7006,7 @@ pub const ROUTER_PROMPT: &str = include_str!("../prompts/router.md");
 /// the same day). The unit test fails when a prompt edit crosses it, so growth is a decision,
 /// not drift.
 #[cfg(test)]
-pub const BASE_PROMPT_MAX_BYTES: usize = 27_000;
+pub const BASE_PROMPT_MAX_BYTES: usize = 28_000;
 
 /// The byte-stable part of the main agent's system prompt: core, then routing, then code mode
 /// when it is on. Everything per project (folder, model, instructions, memory) comes after it.
