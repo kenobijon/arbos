@@ -1047,6 +1047,7 @@ impl Shell {
             subtitle_color: theme.text_muted,
             subtitle_click: None,
             editor,
+            action: None,
         };
 
         let mut body: Vec<Section> = Vec::new();

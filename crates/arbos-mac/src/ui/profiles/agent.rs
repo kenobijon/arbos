@@ -229,6 +229,7 @@ pub(super) fn page(
         subtitle_color,
         subtitle_click,
         editor,
+        action: None,
     };
 
     let body: Vec<Section> = match tab {

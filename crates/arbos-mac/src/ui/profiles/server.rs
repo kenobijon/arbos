@@ -123,6 +123,7 @@ pub(super) fn page(
         subtitle_color: theme.text_muted,
         subtitle_click: None,
         editor: None,
+        action: None,
     };
 
     // ----- tabs: Channels | Members | Settings (the same set on the iPhone) ------

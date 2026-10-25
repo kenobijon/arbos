@@ -141,6 +141,7 @@ pub(super) fn page(
         subtitle_color: theme.text_muted,
         subtitle_click: None,
         editor: None,
+        action: None,
     };
 
     // No share disc on a group (Jacob 2026-10-25, [feedback
