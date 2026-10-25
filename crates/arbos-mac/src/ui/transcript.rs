@@ -8,9 +8,10 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    actions, div, list, prelude::*, px, Animation, AnimationExt, AnyElement, App, Context, Div,
-    Entity, FontWeight, ListAlignment, ListScrollEvent, ListState, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, SharedString, Stateful, TextRun, Window,
+    actions, div, list, prelude::*, px, Animation, AnimationExt, AnyElement, App, Bounds, Context,
+    Div, Entity, FontWeight, ListAlignment, ListScrollEvent, ListState, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, SharedString, Stateful,
+    TextRun, Window,
 };
 
 use crate::app::{AppEvent, AppState, DetailsTarget};
@@ -144,12 +145,20 @@ const REPLY_SWIPE_ARM: f32 = REPLY_SWIPE_WIDTH * 0.7;
 /// Ignore pointer noise until the drag travels this far (iPhone minimumDistance).
 const REPLY_SWIPE_SLOP: f32 = 12.0;
 
-/// Which bubble row the pointer is over, and the one it just left, with the
+/// Which bubble the pointer is over, and the one it just left, with the
 /// moment each happened: the fade is computed from those at render time.
+///
+/// Keyed by **bubble**, not by transcript row: an agent reply is one row per
+/// markdown block, and Grok shows the rail while the pointer is anywhere on
+/// the bubble (Jacob, 2026-10-24, [feedback bubble-hover-rail-2026-10-24]).
+/// `rows` remembers which rows of a bubble the pointer is over right now, so
+/// crossing from one block to the next — whichever order GPUI reports the
+/// leave and the enter — never fades the rail out.
 #[derive(Default)]
 struct HoverFade {
     over: Option<(String, Instant)>,
     left: Option<(String, Instant)>,
+    rows: HashMap<String, HashSet<String>>,
 }
 
 /// In-progress swipe-right-to-reply on a message row (iPhone `replySwipeGesture`).
@@ -176,9 +185,20 @@ struct DragScroll {
 }
 
 impl HoverFade {
-    /// Record a hover change for `row_id`; `true` when something changed.
-    fn set(&mut self, row_id: &str, hovered: bool, now: Instant) -> bool {
-        let is_over = self.over.as_ref().is_some_and(|(id, _)| id == row_id);
+    /// Record that the pointer entered or left `row_id`, one of the rows of
+    /// bubble `key`; `true` when the bubble's hover state changed.
+    fn set(&mut self, key: &str, row_id: &str, hovered: bool, now: Instant) -> bool {
+        let rows = self.rows.entry(key.to_string()).or_default();
+        if hovered {
+            rows.insert(row_id.to_string());
+        } else {
+            rows.remove(row_id);
+        }
+        let hovered = !rows.is_empty();
+        if !hovered {
+            self.rows.remove(key);
+        }
+        let is_over = self.over.as_ref().is_some_and(|(id, _)| id == key);
         if hovered == is_over {
             return false;
         }
@@ -188,17 +208,17 @@ impl HoverFade {
             }
             // Re-entering mid-fade starts the fade-in from the current level.
             let head_start = match &self.left {
-                Some((id, at)) if id == row_id => {
+                Some((id, at)) if id == key => {
                     let remaining = 1.0 - Self::progress(*at, now);
                     Duration::from_secs_f32(remaining * HOVER_FADE_MS / 1000.0)
                 }
                 _ => Duration::ZERO,
             };
             self.left = None;
-            self.over = Some((row_id.to_string(), now - head_start));
+            self.over = Some((key.to_string(), now - head_start));
         } else {
             self.over = None;
-            self.left = Some((row_id.to_string(), now));
+            self.left = Some((key.to_string(), now));
         }
         true
     }
@@ -818,14 +838,19 @@ impl Transcript {
     /// The row around a bubble: tracks the pointer so the time and react glyph
     /// can fade, and reports their opacity for this frame. With Reduce Motion
     /// the fade collapses to the snap it replaced.
+    ///
+    /// `key` names the bubble the row belongs to: every block row of one agent
+    /// reply shares its message's key, so the rail shows and stays while the
+    /// pointer is anywhere on the bubble; single-row bubbles use their row id.
     fn hover_row(
         &self,
         row_id: &str,
+        key: &str,
         now: Instant,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> (Stateful<Div>, f32) {
-        let (opacity, moving) = self.hover.opacity(row_id, now);
+        let (opacity, moving) = self.hover.opacity(key, now);
         let opacity = if cx.reduce_motion() {
             opacity.round()
         } else {
@@ -834,18 +859,74 @@ impl Transcript {
             }
             opacity
         };
-        let id = row_id.to_string();
+        let (id, key) = (row_id.to_string(), key.to_string());
         let row = div()
             .id(SharedString::from(format!("{row_id}#row")))
             .w_full()
             .flex()
             .items_center()
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                if this.hover.set(&id, *hovered, Instant::now()) {
+                if this.hover.set(&key, &id, *hovered, Instant::now()) {
                     cx.notify();
                 }
             }));
         (row, opacity)
+    }
+
+    /// The hover key of a multi-block agent bubble (every `RowKind::Markdown`
+    /// row of one message).
+    fn bubble_hover_key(message_id: &Id) -> String {
+        format!("{message_id}#bubble")
+    }
+
+    /// Where the hover rail of the bubble whose last block is row `ix` sits:
+    /// the vertical centre of the whole bubble, in pixels from that row's
+    /// top. `None` for a one-row bubble (its row centres the rail itself) or
+    /// before the list has laid the rows out.
+    fn bubble_rail_centre(&self, ix: usize) -> Option<Pixels> {
+        let message_id = &self.rows.get(ix)?.message_id;
+        let is_block = |i: usize| {
+            self.rows.get(i).is_some_and(|r| {
+                r.message_id == *message_id && matches!(r.kind, RowKind::Markdown { .. })
+            })
+        };
+        let mut first = ix;
+        while first > 0 && is_block(first - 1) {
+            first -= 1;
+        }
+        if first == ix {
+            return None;
+        }
+        let last = self.list.bounds_for_item(ix)?;
+        let rows: Vec<Option<Bounds<Pixels>>> =
+            (first..ix).map(|i| self.list.bounds_for_item(i)).collect();
+        let top_inset = ROW_GAP_HALF
+            + if self.is_turn_start(first) {
+                TURN_GAP_EXTRA
+            } else {
+                0.0
+            };
+        Some(rail_centre(
+            &rows,
+            last,
+            self.list.viewport_bounds(),
+            (px(top_inset), px(ROW_GAP_HALF)),
+        ))
+    }
+
+    /// The first row of a message from a new sender opens the turn gap; a
+    /// stamp between them already carries its own spacing.
+    fn is_turn_start(&self, ix: usize) -> bool {
+        let Some(row) = self.rows.get(ix) else {
+            return false;
+        };
+        ix.checked_sub(1)
+            .and_then(|i| self.rows.get(i))
+            .is_some_and(|prev| {
+                prev.message_id != row.message_id
+                    && !matches!(prev.kind, RowKind::Stamp { .. } | RowKind::BottomInset)
+                    && self.turn_starts.contains(&row.message_id)
+            })
     }
 
     /// Runs inside the list's own scroll callback while `ListState` is
@@ -1602,6 +1683,7 @@ impl Transcript {
         lane: Option<String>,
         quote: Option<Quote>,
         named: bool,
+        rail_centre: Option<Pixels>,
         now: Instant,
         theme: &Theme,
         selectable: &Selectable,
@@ -1694,25 +1776,22 @@ impl Transcript {
                     &self.code_copy(cx),
                 ),
             ));
-        let (row_el, reveal) = self.hover_row(row_id, now, window, cx);
-        // Hover: the rail (smiley · reply · ⋯) and the bubble's time on the last
-        // block of a finished reply. Nothing of it exists at rest.
+        // Every block row of the reply shares one hover key, so the rail shows
+        // while the pointer is anywhere on the bubble, not only its last block.
+        let (row_el, reveal) =
+            self.hover_row(row_id, &Self::bubble_hover_key(message_id), now, window, cx);
+        // Hover: the rail (smiley · reply · ⋯) and the bubble's time, drawn by
+        // the last block of a finished reply. Nothing of it exists at rest.
         let hover_actions =
             (last && !live).then(|| self.hover_rail(row_id, message_id, reveal, theme, cx));
         let hover_time = (last && !live)
             .then(|| hover_time(time, reveal, theme).map(|t| t.ml(px(8.0))))
             .flatten();
         // The rail hangs off the bubble's right edge, out of the flow: it
-        // lives in the column's 84 pt gap and never narrows the bubble.
+        // lives in the column's 84 pt gap and never narrows the bubble. It is
+        // centred on the whole bubble (all of its block rows), like Grok's.
         let hover_rail = (hover_actions.is_some() || hover_time.is_some()).then(|| {
-            div()
-                .absolute()
-                .left(relative_width(1.0))
-                .top_0()
-                .bottom_0()
-                .pl(px(6.0))
-                .flex()
-                .items_center()
+            hover_rail_frame(rail_centre)
                 .children(hover_actions)
                 .children(hover_time)
         });
@@ -1884,7 +1963,8 @@ impl Transcript {
                         .items_start()
                         .py(px(ROW_GAP_HALF))
                         .child({
-                            let (row_el, reveal) = self.hover_row(&row.id, now, window, cx);
+                            let (row_el, reveal) =
+                                self.hover_row(&row.id, &row.id, now, window, cx);
                             let actions =
                                 self.hover_rail(&row.id, &row.message_id, reveal, &theme, cx);
                             row_el
@@ -1943,7 +2023,8 @@ impl Transcript {
                             // hover-only time) is on the left. Its delivery state is
                             // its opacity: pending < sent < seen; failed is full with
                             // a red glyph at the outer edge (no captions).
-                            let (row_el, reveal) = self.hover_row(&row.id, now, window, cx);
+                            let (row_el, reveal) =
+                                self.hover_row(&row.id, &row.id, now, window, cx);
                             let actions =
                                 self.hover_rail(&row.id, &row.message_id, reveal, &theme, cx);
                             let delivery = delivery.unwrap_or(Delivery::Seen);
@@ -1968,25 +2049,31 @@ impl Transcript {
                 lane,
                 quote,
                 named,
-            } => self.markdown_bubble(
-                &row.id,
-                &row.message_id,
-                block,
-                bubble,
-                live,
-                first,
-                last,
-                fill,
-                time,
-                lane,
-                quote,
-                named,
-                now,
-                &theme,
-                &selectable,
-                window,
-                cx,
-            ),
+            } => {
+                let rail_centre = (last && !live)
+                    .then(|| self.bubble_rail_centre(ix))
+                    .flatten();
+                self.markdown_bubble(
+                    &row.id,
+                    &row.message_id,
+                    block,
+                    bubble,
+                    live,
+                    first,
+                    last,
+                    fill,
+                    time,
+                    lane,
+                    quote,
+                    named,
+                    rail_centre,
+                    now,
+                    &theme,
+                    &selectable,
+                    window,
+                    cx,
+                )
+            }
             RowKind::NoAnswer {
                 seed,
                 name,
@@ -2017,6 +2104,7 @@ impl Transcript {
                     lane,
                     quote,
                     named,
+                    None,
                     now,
                     &theme,
                     &selectable,
@@ -2172,7 +2260,7 @@ impl Transcript {
                         self.state.clone(),
                         &theme,
                     ));
-                let (row_el, reveal) = self.hover_row(&row.id, now, window, cx);
+                let (row_el, reveal) = self.hover_row(&row.id, &row.id, now, window, cx);
                 let actions = self.hover_rail(&row.id, &row.message_id, reveal, &theme, cx);
                 if mine {
                     // My media sits right; the rail is on its outer (left) edge.
@@ -2344,16 +2432,7 @@ impl Transcript {
         };
         let highlighted =
             self.state.read(cx).highlight_message.as_deref() == Some(row.message_id.as_str());
-        // The first row of a message from a new sender opens the turn gap; a
-        // stamp between them already carries its own spacing.
-        let turn_start = ix
-            .checked_sub(1)
-            .and_then(|i| self.rows.get(i))
-            .is_some_and(|prev| {
-                prev.message_id != row.message_id
-                    && !matches!(prev.kind, RowKind::Stamp { .. } | RowKind::BottomInset)
-                    && self.turn_starts.contains(&row.message_id)
-            });
+        let turn_start = self.is_turn_start(ix);
         let swipe_drag = self
             .reply_swipe
             .as_ref()
@@ -2693,6 +2772,73 @@ fn message_is_seen(
     messages[mix + 1..]
         .iter()
         .any(|m| matches!(m.role, Role::Assistant | Role::Project))
+}
+
+/// Grok keeps the rail inside the chat: a bubble taller than the pane gets
+/// its rail at the centre of the visible part, this far in from the list's
+/// edges (the top edge is the header's fade band, where nothing is readable).
+const RAIL_EDGE_INSET: f32 = 8.0;
+
+/// The hover rail's vertical centre for a multi-row bubble, measured from the
+/// top of its last row: the middle of the whole bubble — the rows above it
+/// (`None` for one the list has not laid out, which only happens above the
+/// viewport) plus `last` — clamped so the rail stays inside `viewport` (Grok,
+/// Jacob's grok-chat-2 ref: the ☺ ↩ ⋯ sit at the table bubble's mid-height).
+///
+/// `insets` are the row padding outside the bubble: above its first row
+/// (the half gap, plus the turn gap when the message opens a turn) and
+/// below its last.
+fn rail_centre(
+    rows_above: &[Option<Bounds<Pixels>>],
+    last: Bounds<Pixels>,
+    viewport: Bounds<Pixels>,
+    insets: (Pixels, Pixels),
+) -> Pixels {
+    let mut top = last.top();
+    let mut unknown = false;
+    for row in rows_above {
+        match row {
+            Some(b) => top = top.min(b.top()),
+            None => unknown = true,
+        }
+    }
+    top += insets.0;
+    if unknown {
+        // Rows above the scroll top are not measured: the bubble starts at
+        // least there, and only the visible part matters for the clamp below.
+        top = top.min(viewport.top());
+    }
+    let bottom = last.bottom() - insets.1;
+    let centre = (top + bottom) / 2.0;
+    let half = px(RAIL_BUTTON / 2.0 + RAIL_EDGE_INSET);
+    let low = viewport.top() + px(HEADER_FADE_BAND) + half;
+    let high = viewport.bottom() - half;
+    let centre = if high <= low {
+        centre
+    } else {
+        centre.clamp(low, high)
+    };
+    // Never outside the bubble itself (a short bubble at the very edge).
+    let centre = centre.clamp(top + px(RAIL_BUTTON / 2.0), bottom - px(RAIL_BUTTON / 2.0));
+    centre - last.top()
+}
+
+/// The frame that hangs the rail (and the hover time) off a bubble's right
+/// edge, out of the flow, in the column's [`ASSISTANT_RIGHT_GAP`]: centred on
+/// the bubble's own height, or — for a bubble drawn as several rows — at
+/// `centre` pixels from this row's top ([`rail_centre`]).
+fn hover_rail_frame(centre: Option<Pixels>) -> Div {
+    let frame = div()
+        .absolute()
+        .left(relative_width(1.0))
+        .pl(px(6.0))
+        .flex()
+        .items_center()
+        .debug_selector(|| "bubble-rail".into());
+    match centre {
+        Some(c) => frame.top(c - px(RAIL_BUTTON / 2.0)).h(px(RAIL_BUTTON)),
+        None => frame.top_0().bottom_0(),
+    }
 }
 
 /// The 11 pt muted time beside a bubble at the row's current hover opacity.
@@ -5314,14 +5460,7 @@ mod layout_tests {
                         ))
                         // The rail (glyphs · time) out of the flow, as `markdown_bubble` does.
                         .child(
-                            div()
-                                .absolute()
-                                .left(relative_width(1.0))
-                                .top_0()
-                                .bottom_0()
-                                .pl(px(6.0))
-                                .flex()
-                                .items_center()
+                            hover_rail_frame(None)
                                 .child(div().size(px(16.0)))
                                 .children(time().map(|t| t.ml(px(8.0)))),
                         );
@@ -5597,6 +5736,173 @@ mod layout_tests {
         assert_eq!(margin, composer_margin, "one side margin");
         assert_eq!(margin, 16.0, "Grok: 16 pt from the pane");
         assert_eq!(cap, input + 2.0 * circle, "the pill at its widest");
+    }
+}
+
+#[cfg(test)]
+mod rail_tests {
+    //! Jacob, 2026-10-24 (Grok side by side, [feedback bubble-hover-rail-2026-10-24]):
+    //! the ☺ ↩ ⋯ rail sits vertically centred beside the bubble, and it shows
+    //! while the pointer is anywhere on the bubble — not only on its last
+    //! block. An agent reply is one transcript row per markdown block, so both
+    //! are about the rows of one message acting as one bubble.
+    use gpui::{point, size, Bounds, TestAppContext};
+
+    use super::*;
+
+    fn b(top: f32, height: f32) -> Bounds<Pixels> {
+        Bounds::new(point(px(0.0), px(top)), size(px(800.0), px(height)))
+    }
+
+    const NO_INSET: (Pixels, Pixels) = (px(0.0), px(0.0));
+
+    /// Hovering any block row of a reply hovers the bubble; moving from one
+    /// block to the next — leave-then-enter or enter-then-leave — keeps it
+    /// hovered; leaving the last row the pointer was on fades it out.
+    #[test]
+    fn the_bubble_stays_hovered_across_its_block_rows() {
+        let mut fade = HoverFade::default();
+        let now = Instant::now();
+        let later = now + Duration::from_millis(HOVER_FADE_MS as u64 + 50);
+        assert!(fade.set("m1#bubble", "m1.0", true, now), "enter block 0");
+        assert_eq!(fade.opacity("m1#bubble", later).0, 1.0);
+        // Block 0 → block 1, leave reported first: the leave starts a fade
+        // out, the enter in the same instant resumes from full — no dip.
+        fade.set("m1#bubble", "m1.0", false, later);
+        fade.set("m1#bubble", "m1.1", true, later);
+        assert_eq!(fade.opacity("m1#bubble", later).0, 1.0, "still hovered");
+        // Block 1 → block 2, enter reported first: nothing changes at all.
+        assert!(!fade.set("m1#bubble", "m1.2", true, later));
+        assert!(!fade.set("m1#bubble", "m1.1", false, later));
+        assert_eq!(fade.opacity("m1#bubble", later).0, 1.0, "still hovered");
+        // Off the bubble: fades out.
+        assert!(fade.set("m1#bubble", "m1.2", false, later));
+        let (opacity, moving) = fade.opacity(
+            "m1#bubble",
+            later + Duration::from_millis(HOVER_FADE_MS as u64 / 2),
+        );
+        assert!(opacity < 1.0 && moving, "fading out: {opacity}");
+        assert_eq!(
+            fade.opacity("m1#bubble", later + Duration::from_secs(1)).0,
+            0.0
+        );
+    }
+
+    /// Two bubbles: entering the second's row leaves the first.
+    #[test]
+    fn hovering_another_bubble_fades_the_first() {
+        let mut fade = HoverFade::default();
+        let now = Instant::now();
+        let later = now + Duration::from_secs(1);
+        fade.set("m1#bubble", "m1.0", true, now);
+        assert!(fade.set("m2#bubble", "m2.0", true, later));
+        let settled = later + Duration::from_secs(1);
+        assert_eq!(fade.opacity("m2#bubble", settled).0, 1.0);
+        assert_eq!(fade.opacity("m1#bubble", settled).0, 0.0);
+    }
+
+    /// The rail's centre is the middle of the whole bubble — the rows above
+    /// plus the last — measured from the last row's top, less the row padding
+    /// around the bubble.
+    #[test]
+    fn the_rail_is_centred_on_the_whole_bubble() {
+        let viewport = b(0.0, 1000.0);
+        // Three block rows: 100 + 60 + 40 from y = 200; the bubble spans 200..400.
+        let rows = [Some(b(200.0, 100.0)), Some(b(300.0, 60.0))];
+        let last = b(360.0, 40.0);
+        let centre = rail_centre(&rows, last, viewport, NO_INSET);
+        assert_eq!(
+            f32::from(centre),
+            300.0 - 360.0,
+            "mid-bubble is 60 above the last row"
+        );
+        // The half gap above the first row and below the last is not bubble.
+        let centre = rail_centre(&rows, last, viewport, (px(3.0), px(3.0)));
+        assert_eq!(
+            f32::from(centre),
+            300.0 - 360.0,
+            "symmetric insets keep the middle"
+        );
+        let centre = rail_centre(&rows, last, viewport, (px(17.0), px(3.0)));
+        assert_eq!(
+            f32::from(centre),
+            307.0 - 360.0,
+            "a turn gap above shifts it down"
+        );
+    }
+
+    /// A bubble taller than the pane keeps its rail on screen: the centre is
+    /// clamped inside the viewport, under the header fade band.
+    #[test]
+    fn a_tall_bubble_keeps_its_rail_inside_the_viewport() {
+        let viewport = b(100.0, 600.0);
+        // The bubble runs from far above the viewport (unmeasured rows) to below it.
+        let rows = [None, Some(b(-900.0, 500.0)), Some(b(-400.0, 500.0))];
+        let last = b(100.0, 900.0);
+        let centre = f32::from(rail_centre(&rows, last, viewport, NO_INSET)) + 100.0;
+        let low = 100.0 + HEADER_FADE_BAND + RAIL_BUTTON / 2.0 + RAIL_EDGE_INSET;
+        let high = 700.0 - RAIL_BUTTON / 2.0 - RAIL_EDGE_INSET;
+        assert!(
+            (low..=high).contains(&centre),
+            "centre {centre} outside the pane's {low}..{high}"
+        );
+        // A bubble that ends above the viewport's bottom: clamped to the bubble, not past it.
+        let rows = [Some(b(-200.0, 100.0))];
+        let last = b(-100.0, 150.0);
+        let centre = f32::from(rail_centre(&rows, last, viewport, NO_INSET)) - 100.0;
+        assert!(
+            centre <= 50.0 - RAIL_BUTTON / 2.0 + 0.01,
+            "rail {centre} below the bubble's bottom (50)"
+        );
+    }
+
+    struct Stack;
+
+    impl gpui::Render for Stack {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            // Three stacked "block rows" of one bubble, 60 + 40 + 20 tall; the
+            // last carries the rail, centred on all three (= 60 above its own top).
+            let block = |h: f32| div().w(px(300.0)).h(px(h)).relative();
+            div()
+                .w(px(500.0))
+                .h(px(400.0))
+                .flex()
+                .flex_col()
+                .child(block(60.0).debug_selector(|| "test-first".into()))
+                .child(block(40.0))
+                .child(
+                    block(20.0).debug_selector(|| "test-last".into()).child(
+                        hover_rail_frame(Some(px(-40.0))).child(div().size(px(RAIL_BUTTON))),
+                    ),
+                )
+        }
+    }
+
+    /// Rendered: the frame puts the rail's centre at the bubble's centre and
+    /// hangs it 6 pt off the bubble's right edge.
+    #[gpui::test]
+    fn the_rail_frame_hangs_at_the_bubbles_centre(cx: &mut TestAppContext) {
+        let (_view, vcx) = cx.add_window_view(|_, _| Stack);
+        vcx.run_until_parked();
+        let first = vcx.debug_bounds("test-first").expect("first row drawn");
+        let last = vcx.debug_bounds("test-last").expect("last row drawn");
+        let rail = vcx.debug_bounds("bubble-rail").expect("rail drawn");
+        let bubble_centre = f32::from(first.top() + last.bottom()) / 2.0;
+        let rail_centre = f32::from(rail.top() + rail.bottom()) / 2.0;
+        assert!(
+            (rail_centre - bubble_centre).abs() <= 0.5,
+            "rail centre {rail_centre}, bubble centre {bubble_centre}"
+        );
+        assert!(
+            (f32::from(rail.left() - last.right()) - 0.0).abs() <= 0.5,
+            "rail frame starts at the bubble's right edge: {} vs {}",
+            f32::from(rail.left()),
+            f32::from(last.right())
+        );
     }
 }
 
