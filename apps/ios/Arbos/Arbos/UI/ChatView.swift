@@ -775,13 +775,16 @@ struct ChatSession: View {
             GeometryReader { geo in
                 if let row = actionsRow, let anchor = anchors[row.id] {
                     let frame = geo[anchor]
+                    // This reader ignores the safe area, so its own insets read 0; the
+                    // overlay needs the real status-bar / home-indicator insets to fit.
+                    let safeArea = KeyboardFrameObserver.windowSafeArea
                     MessageActionsOverlay(
                         row: row,
                         frame: frame,
                         width: geo.size.width,
                         height: geo.size.height,
-                        safeTop: geo.safeAreaInsets.top,
-                        safeBottom: geo.safeAreaInsets.bottom,
+                        safeTop: max(geo.safeAreaInsets.top, safeArea.top),
+                        safeBottom: max(geo.safeAreaInsets.bottom, safeArea.bottom),
                         held: heldReactions(row),
                         items: MessageMenu.items(forMessage: true,
                                                 canEdit: canEditMessage(row),

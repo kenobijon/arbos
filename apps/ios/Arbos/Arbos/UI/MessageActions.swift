@@ -227,6 +227,17 @@ final class KeyboardFrameObserver: ObservableObject {
         guard let frame else { return 0 }
         return max(0, overlayFrame.maxY - frame.minY)
     }
+
+    /// The window's safe area (status bar / notch, home indicator). A `GeometryReader`
+    /// under `.ignoresSafeArea()` reports zero insets, so the full-screen overlay asks
+    /// the window instead.
+    static var windowSafeArea: UIEdgeInsets {
+        let window = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap(\.windows)
+            .first { $0.isKeyWindow }
+        return window?.safeAreaInsets ?? .zero
+    }
 }
 
 /// A one-character field that raises the **emoji** keyboard (the system picker
