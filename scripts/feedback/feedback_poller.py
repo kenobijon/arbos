@@ -3832,8 +3832,14 @@ class Loop:
         cur["closed_checked"] = closed[-1]["updated_at"] if len(closed) >= 100 else iso()
         if not numbers:
             return
-        for fid in self.store.items():
-            st = self.store.state(fid)
+        # An issue the LOOP closed (its item shipped) is not a human's verdict: a late-push follow-up shares
+        # the source item's issue and must keep waiting for its gate (18:01 Oct 25: #1783's own follow-up
+        # was retired a minute after the source shipped and its second commit never reached main).
+        states = {fid: self.store.state(fid) for fid in self.store.items()}
+        loop_closed = {st.get("issue") for st in states.values() if st.get("status") in ("pushed", "shipped", "pending_deploy")}
+        for fid, st in states.items():
+            if "-followup" in fid or st.get("issue") in loop_closed:
+                continue
             if st.get("status") == "handed_off" and st.get("issue") in numbers and not st.get("commit"):
                 st.update(status="closed_externally", closed={"reason": "closed on GitHub by a human", "at": iso()})
                 self.store.save_state(fid, st)
