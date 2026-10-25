@@ -12,6 +12,8 @@ enum DebugHooks {
     static var openServer: String? { value("ARBOS_OPEN_SERVER") }
     /// Home search opened with this query (search-name-matching rig).
     static var search: String? { value("ARBOS_SEARCH").flatMap { $0.isEmpty ? nil : $0 } }
+    /// With `ARBOS_SEARCH`: open the n-th result row (1-based, list order) once the rows are up.
+    static var searchOpen: Int? { value("ARBOS_SEARCH_OPEN").flatMap { Int($0) } }
     /// Home list segment selected at launch: all | agents | people | servers (screenshot rig).
     static var homeFilter: String? { value("ARBOS_HOME_FILTER") }
     /// With `ARBOS_OPEN_SERVER=…:panel`: the server page's tab to land on (Channels | Members | Settings).
