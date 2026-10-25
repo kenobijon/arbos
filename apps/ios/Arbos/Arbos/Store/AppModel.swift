@@ -357,9 +357,6 @@ final class AppModel: ObservableObject {
             }
         }
     }
-    /// Telegram-style root tab (Contacts · Calls · Chats · Settings). Opening a
-    /// chat from Contacts/Calls switches to Chats so `path` lands on HomeView's stack.
-    @Published var mainTab: MainTab = .chats
     /// True when the Debug fixture replaced the relay (screenshots).
     var isFixture = false
     /// Debug demo tours run once per process, whichever view instance starts them.
@@ -3714,6 +3711,12 @@ final class AppModel: ObservableObject {
     @Published var profilePath: [ProfileTarget] = []
     /// A chat the next ChatView should open with its search bar up (profile "search").
     @Published var pendingSearchChat: String?
+    /// A message the next ChatView should scroll to and tint (a search result opened
+    /// from the bottom bar, [feedback iphone-bottom-search-bar-2026-10-25]).
+    @Published var pendingReveal: MessageReveal?
+    /// App-wide search: message text, attachments and links per loaded chat, kept
+    /// current lazily against `messagesVersion` (`GlobalSearch`).
+    var searchIndex = SearchIndex()
     /// Unsent composer text kept per chat while the ChatView is off-screen (Mac `Composer.drafts`).
     private var composerDrafts: [Id: String] = [:]
     /// Last presence time per user id, from room presence frames this session.
@@ -4356,6 +4359,22 @@ final class AppModel: ObservableObject {
             list = []
         }
         return list.filter { $0.role != .system && !$0.plainText.isEmpty }
+    }
+
+    /// Every loaded message of a chat for the app-wide search index — text or
+    /// attachments; system lines never count (`SearchStore`).
+    func indexableMessages(of chatId: Id) -> [Message] {
+        let list: [Message]
+        if let published = messages[chatId] {
+            list = published
+        } else if let rows = channelRows[chatId] {
+            list = rows
+        } else if let doc = docs[chatId], doc.count > 0 {
+            list = doc.readAll()
+        } else {
+            list = []
+        }
+        return list.filter { $0.role != .system }
     }
 
     /// S8: the last assistant message asked a question and nothing was sent since.

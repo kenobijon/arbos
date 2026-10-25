@@ -340,6 +340,19 @@ private struct ChatSession: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { searchFocused = true }
     }
 
+    /// A result from Home's search bar opened this chat at a message: once the rows
+    /// hold it, scroll there and tint it (the quote-tap path, `revealQuoted`). The
+    /// appear settle scrolls to the end first; the jump follows a beat later.
+    private func revealPendingIfNeeded() {
+        guard let reveal = model.pendingReveal, reveal.chatId == chatId,
+              rows.contains(where: { $0.messageId == reveal.messageId && $0.role != .system }) else { return }
+        model.pendingReveal = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+            pinnedToBottom = false
+            revealQuoted(reveal.messageId)
+        }
+    }
+
     /// Tokenised blob URL for a custom group picture, if the chat has one.
     private func groupImageURL(_ people: PeopleChat) -> String? {
         guard let key = people.imageKey, !key.isEmpty else { return nil }
@@ -979,6 +992,7 @@ private struct ChatSession: View {
                 Task { await model.refreshActiveCall(chatId: chatId, projectId: isPeople ? nil : projectId) }
             }
             openPendingSearchIfNeeded()
+            revealPendingIfNeeded()
             if let link = DebugHooks.link {
                 model.setRoomLink(chatId, link)
                 if let ms = DebugHooks.linkClearsMs {
@@ -1125,6 +1139,8 @@ private struct ChatSession: View {
         // Profile "search" sets pendingSearchChat while this chat is already on screen
         // (sheet over us), so onAppear alone never sees it — watch the published flag.
         .onChange(of: model.pendingSearchChat) { _, _ in openPendingSearchIfNeeded() }
+        // A bottom-bar search result: the rows may land after appear (room backfill).
+        .onChange(of: rows.count) { _, _ in revealPendingIfNeeded() }
         // The per-chat version, not the array: comparing 1 000+ messages on every
         // body (each keystroke, presence tick, publish) was a measurable share of
         // the Arbonites lag (arbonites-chat-lag, 2026-10-24).

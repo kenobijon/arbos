@@ -162,6 +162,30 @@ files or messages — with the ⌘ badges. Rig hooks: `ARBOS_SEARCH=<text>`,
 `ARBOS_PALETTE=1`, `ARBOS_PALETTE_SELECT=<n>`, `ARBOS_PALETTE_OPEN=1` (open
 the highlighted row once the rows are there).
 
+### iPhone: one bottom search bar, nothing else (Jacob 2026-10-25, [feedback iphone-bottom-search-bar-2026-10-25])
+
+The iPhone's bottom tab bar (Contacts · Calls · Chats · Settings, a tester item
+of 2026-10-23) is gone. Home's bottom edge is **one search capsule and no other
+control** — no grid/+ button, no tabs, no Cancel beside it (`HomeChrome.bottom
+== [.searchBar]`, pinned by `BottomSearchBarTests`). It sits in the bottom
+safe-area inset (rides the keyboard, clears the home indicator); the × inside
+the capsule clears and closes, dragging the results drops the keyboard, opening
+a row closes it. The header keeps the account circle (→ Settings sheet) and the
+`+` circle only — the search disc moved to the bar.
+
+Results are the palette's, app-wide (`GlobalSearch` = `palette.rs`, `SearchIndex` =
+`search_index.rs`, lazy against `messagesVersion`): the same five sections in the
+same order with the same headings and the 8-per-section cap, Recent on the empty
+query; a message row opens its chat scrolled to that row (`pendingReveal`), a
+file row opens the Library item in the viewer, a DM-less person starts the DM.
+The home list is no longer narrowed by typed text (as on the Mac).
+
+Where the four tabs' destinations live now: Settings → the account circle;
+Contacts → `+` (New message: people + directory) and the bar's People & agents;
+Calls → a chat's header call buttons (no call-history list existed; the tab was
+empty); the unread count → the app icon badge and each row's dot / count pill;
+new chat → `+`.
+
 ## Chat-list filter (the iPhone home's `PaneTabs`)
 
 Directly under the strip: **All · Agents · People · Servers** — the iPhone
