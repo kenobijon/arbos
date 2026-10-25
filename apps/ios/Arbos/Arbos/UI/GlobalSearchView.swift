@@ -119,6 +119,13 @@ struct GlobalSearchResults: View {
         .scrollContentBackground(.hidden)
         .background(theme.bg)
         .scrollDismissesKeyboard(.interactively)
+        .task {
+            // Rig: `ARBOS_SEARCH_OPEN=<n>` opens the n-th row once the rows are there.
+            guard let n = DebugHooks.searchOpen, n > 0 else { return }
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            let rows = GlobalSearch.flatten(self.groups)
+            if rows.indices.contains(n - 1) { open(rows[n - 1]) }
+        }
         .fullScreenCover(item: $viewer) { v in
             MediaViewer(album: v.items, index: v.index, onClose: { viewer = nil })
                 .environmentObject(model)
