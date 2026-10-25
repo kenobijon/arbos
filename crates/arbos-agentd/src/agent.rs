@@ -1228,6 +1228,12 @@ pub struct TurnState {
     /// The `reply` text of a `route reply` call, written at turn end when it never streamed
     /// (#1355; a second `route` of an act turn, or a provider sending no argument deltas).
     pub route_reply_text: Option<String>,
+    /// The direct tool call running right now: (call id, tool name, args, started), plus the
+    /// tail of its streamed output. A guide steer that arrives while one has run for a while
+    /// interrupts it (#1690: pi only delivers a steer when the call returns).
+    pub running_tool: Option<RunningTool>,
+    /// A steer that interrupted the running tool; the turn continues with it once pi settles.
+    pub steer_pending: Option<String>,
     /// pi re-prompted the model for the missing `route` call (route-first rule). The prose of
     /// the first attempt is the answer; the corrective `route reply` must add nothing (#1446:
     /// a second, contradictory answer glued on; #1648: the same answer twice after a restart).
@@ -1239,6 +1245,17 @@ pub struct TurnState {
     pub unposted_text: String,
     /// The turn ended with nothing posted and `SendTool::On` posted the leftover prose once.
     pub posted_fallback: bool,
+}
+
+/// The direct tool call a turn is inside right now.
+#[derive(Clone, Debug)]
+pub struct RunningTool {
+    pub call_id: String,
+    pub tool_name: String,
+    pub args: Value,
+    pub started: Instant,
+    /// Tail of the streamed output so far (bash streams; others may not).
+    pub partial: String,
 }
 
 /// How the model call failed, as pi reported it.
@@ -1357,6 +1374,8 @@ impl TurnState {
             relay_fallback: String::new(),
             route_reply_text: None,
             route_correcting: false,
+            running_tool: None,
+            steer_pending: None,
             send_tool: crate::config::SendTool::Off,
             unposted_text: String::new(),
             posted_fallback: false,
@@ -2321,14 +2340,107 @@ impl Agent {
             Some(&json!({ "message_id": user_msg_id, "steer": true })),
         );
         let pi = self.pi().await?;
-        let message = match reply_note {
+        let body = match reply_note {
             Some(note) => format!("{note}{user_text}"),
             None => user_text,
         };
+        self.steer_running_turn(chat_id, &pi, &body).await
+    }
+
+    /// Put the user's words into the running turn so they take effect now, not when the current
+    /// tool call happens to return (#1690: pi dequeues a steer only between tool calls, so a
+    /// 117-s `bash` loop ran to the end and the model called a +28 s change "late").
+    ///
+    /// - The message is stamped with when it was sent and what the turn was doing, so the model
+    ///   can never honestly report it as having arrived after the work.
+    /// - A direct tool call that has run for `STEER_INTERRUPT_AFTER` is interrupted: pi aborts
+    ///   the run (killing the tool's process tree), and the turn continues in the same row with
+    ///   the steer plus the tool's partial output as the next prompt (`drive_turn`).
+    /// - Otherwise pi's own steer delivers it at the next tool boundary.
+    ///
+    /// Shared by the main turn's `handle_steer` and (step 3, #1692) `steer_job`: one steer path.
+    pub(crate) async fn steer_running_turn(
+        &self,
+        chat_id: &str,
+        pi: &Arc<RpcChild>,
+        body: &str,
+    ) -> Result<()> {
+        let now = chrono_like_utc_hms();
+        let (interrupt, stamp) = {
+            let tl = self.turn.lock().await;
+            match tl.as_ref().and_then(|t| t.running_tool.as_ref()) {
+                Some(rt) => {
+                    let secs = rt.started.elapsed().as_secs();
+                    if rt.started.elapsed() >= *STEER_INTERRUPT_AFTER {
+                        (
+                            Some(rt.clone()),
+                            format!(
+                                "{STEER_PREFIX} the user sent this at {now} UTC, {secs} s into your `{}` call, which was stopped so it could reach you at once. It is not late: act on it now, with the call's output so far below. This is the same turn, continued: do not call `route` again.]",
+                                rt.tool_name
+                            ),
+                        )
+                    } else {
+                        (
+                            None,
+                            format!(
+                                "{STEER_PREFIX} the user sent this at {now} UTC while your `{}` call was running ({secs} s in). It reaches you as that call returns. It is not late: act on it now.]",
+                                rt.tool_name
+                            ),
+                        )
+                    }
+                }
+                None => (
+                    None,
+                    format!(
+                        "{STEER_PREFIX} the user sent this at {now} UTC, mid-turn. Act on it now.]"
+                    ),
+                ),
+            }
+        };
+        if let Some(rt) = interrupt {
+            let cmd_hint = rt
+                .args
+                .get("command")
+                .or_else(|| rt.args.get("code"))
+                .and_then(Value::as_str)
+                .map(|c| c.chars().take(200).collect::<String>())
+                .unwrap_or_default();
+            let partial = if rt.partial.trim().is_empty() {
+                "(nothing streamed yet)".to_owned()
+            } else {
+                rt.partial.trim().to_owned()
+            };
+            let prompt = format!(
+                "{stamp}\n{body}\n\n[Interrupted call: `{}` {cmd_hint}\nOutput so far:\n{partial}]",
+                rt.tool_name
+            );
+            {
+                let mut tl = self.turn.lock().await;
+                if let Some(t) = tl.as_mut() {
+                    t.steer_pending = Some(prompt);
+                    t.escalate = false;
+                }
+            }
+            let _ = pi
+                .call_timeout(
+                    RpcCommand::Abort {
+                        id: pi.next_id("ab"),
+                    },
+                    Duration::from_secs(5),
+                )
+                .await;
+            tracing::info!(
+                chat_id,
+                tool = %rt.tool_name,
+                after_s = rt.started.elapsed().as_secs(),
+                "steer: interrupted the running tool; the turn continues with the steer"
+            );
+            return Ok(());
+        }
         let r = pi
             .call(RpcCommand::Steer {
                 id: pi.next_id("s"),
-                message,
+                message: format!("{stamp}\n{body}"),
             })
             .await?;
         if !r.success {
@@ -3403,6 +3515,8 @@ impl Agent {
             relay_fallback: relay_fallback_line(&kind),
             route_reply_text: None,
             route_correcting: false,
+            running_tool: None,
+            steer_pending: None,
             send_tool: self.cfg.send_tool(),
             unposted_text: String::new(),
             posted_fallback: false,
@@ -3410,6 +3524,37 @@ impl Agent {
         self.turn_running.store(true, Ordering::SeqCst);
         let keepalive = self.spawn_keepalive();
         let mut result = self.run_main_turn(chat_id, host, prompt_text).await;
+        // A steer interrupted a long tool call (#1690): pi settled on the abort; carry on in the
+        // same row with the steer as the prompt, as many times as the user steers.
+        let mut steer_rounds = 0;
+        while result.is_ok() && steer_rounds < 8 {
+            let next = {
+                let mut tl = self.turn.lock().await;
+                match tl.as_mut() {
+                    Some(t) if !t.stopped => t.steer_pending.take(),
+                    _ => None,
+                }
+            };
+            let Some(prompt) = next else { break };
+            steer_rounds += 1;
+            {
+                // The route, ack and result row stay: this is the same turn, continued. The
+                // extension keeps `routed` for a `[Arbos steer:` prompt, so no second `route`.
+                let mut tl = self.turn.lock().await;
+                if let Some(t) = tl.as_mut() {
+                    t.model_error = None;
+                    t.running_tool = None;
+                    self.set_activity(host, t, Some("Changing course…".into()))
+                        .await;
+                }
+            }
+            tracing::info!(
+                chat_id,
+                round = steer_rounds,
+                "turn continues with the steer"
+            );
+            result = self.run_main_turn(chat_id, host, &prompt).await;
+        }
         // An empty turn is usually the model window, not the question: a provider refusal on a
         // bloated session (Lium, 2026-10-21: six turns, 208–242k tokens, zero output) or a settle
         // with no `route` and no prose (mr.agi group + DM, feedback app-01M5GCK…: consecutive
@@ -4254,6 +4399,15 @@ impl Agent {
                     .or_else(|| Some(crate::activity::generic_label(tool_name)));
                 self.set_activity(host, t, label).await;
                 t.tool_inputs.insert(tool_call_id.clone(), args.clone());
+                if parent_tool_call_id.is_none() {
+                    t.running_tool = Some(RunningTool {
+                        call_id: tool_call_id.clone(),
+                        tool_name: tool_name.clone(),
+                        args: args.clone(),
+                        started: Instant::now(),
+                        partial: String::new(),
+                    });
+                }
                 // A call a `codemode` script made (D86) is logged exactly like a direct call —
                 // T3, the hidden tool part, the audit line the extension writes — but counted apart.
                 let nested = parent_tool_call_id.is_some();
@@ -4295,6 +4449,36 @@ impl Agent {
                 }
                 t.text_part_dirty = true;
             }
+            Event::ToolExecutionUpdate {
+                tool_call_id,
+                partial_result,
+                ..
+            } => {
+                if let Some(rt) = t.running_tool.as_mut() {
+                    if rt.call_id == *tool_call_id {
+                        let text = partial_result
+                            .get("content")
+                            .and_then(Value::as_array)
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|c| c.get("text").and_then(Value::as_str))
+                                    .collect::<Vec<_>>()
+                                    .join("\n")
+                            })
+                            .unwrap_or_default();
+                        if !text.is_empty() {
+                            rt.partial = text
+                                .chars()
+                                .rev()
+                                .take(2000)
+                                .collect::<Vec<_>>()
+                                .into_iter()
+                                .rev()
+                                .collect();
+                        }
+                    }
+                }
+            }
             Event::ToolExecutionEnd {
                 tool_call_id,
                 tool_name,
@@ -4303,6 +4487,12 @@ impl Agent {
                 parent_tool_call_id,
                 ..
             } => {
+                if t.running_tool
+                    .as_ref()
+                    .is_some_and(|rt| rt.call_id == *tool_call_id)
+                {
+                    t.running_tool = None;
+                }
                 if tool_name == "route" {
                     if t.metrics.route_ms.is_none() {
                         t.metrics.route_ms = Some(elapsed);
@@ -4415,7 +4605,6 @@ impl Agent {
             | Event::TurnStart
             | Event::TurnEnd { .. }
             | Event::MessageStart { .. }
-            | Event::ToolExecutionUpdate { .. }
             | Event::QueueUpdate { .. }
             | Event::EntryAppended { .. }
             | Event::CompactionStart { .. }
@@ -6894,6 +7083,32 @@ pub(crate) fn job_max_per_workspace() -> usize {
         .unwrap_or(3)
 }
 
+/// A direct tool call that has run this long is interrupted by a guide steer (#1690); shorter
+/// calls get pi's own steer at their end. `ARBOS_STEER_INTERRUPT_AFTER_SECS` (default 8).
+pub(crate) static STEER_INTERRUPT_AFTER: std::sync::LazyLock<Duration> =
+    std::sync::LazyLock::new(|| {
+        Duration::from_secs(
+            std::env::var("ARBOS_STEER_INTERRUPT_AFTER_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(8),
+        )
+    });
+
+/// Every steer the model receives starts with this (the pi extension skips the route reminder
+/// for it: a steer lands inside a running turn and asks for no `route`).
+pub(crate) const STEER_PREFIX: &str = "[Arbos steer:";
+
+/// `HH:MM:SS` of the current UTC time, without a chrono dependency.
+fn chrono_like_utc_hms() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let s = secs % 86_400;
+    format!("{:02}:{:02}:{:02}", s / 3600, (s % 3600) / 60, s % 60)
+}
+
 /// Relay turns (subagent result, approval outcome) only write a few sentences: their deadline
 /// is short, and it is not an escalation point. `ARBOS_RELAY_TURN_DEADLINE_SECS` (default 120).
 pub(crate) fn relay_turn_deadline_secs() -> u64 {
@@ -7712,5 +7927,149 @@ mod tests {
         out.push_str(&f.feed("Running the tests now."));
         out.push_str(&f.flush());
         assert_eq!(out, "The service is up.\n");
+    }
+
+    /// #1690: a fake pi that answers every command with success and logs it, so the steer path
+    /// can be driven without a model. Returns the child and the command log path.
+    async fn fake_pi(root: &std::path::Path) -> (Arc<RpcChild>, std::path::PathBuf) {
+        let log = root.join("fake-pi-commands.jsonl");
+        let script = root.join("fake-pi.py");
+        std::fs::write(
+            &script,
+            "import sys, json\nlog = open(sys.argv[1], 'a')\nfor line in sys.stdin:\n    try:\n        c = json.loads(line)\n    except ValueError:\n        continue\n    log.write(line)\n    log.flush()\n    sys.stdout.write(json.dumps({'type': 'response', 'id': c.get('id'), 'command': c.get('type'), 'success': True}) + '\\n')\n    sys.stdout.flush()\n",
+        )
+        .unwrap();
+        let child = RpcChild::spawn(
+            "fake-pi",
+            "python3",
+            &[
+                script.to_string_lossy().into_owned(),
+                log.to_string_lossy().into_owned(),
+            ],
+            &[],
+            root,
+            &root.join("fake-pi.log"),
+            None,
+        )
+        .await
+        .unwrap();
+        (child, log)
+    }
+
+    fn fake_pi_commands(log: &std::path::Path) -> Vec<Value> {
+        std::fs::read_to_string(log)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect()
+    }
+
+    async fn turn_with_running_tool(agent: &Arc<Agent>, chat_id: &str, age: Duration) {
+        let mut t = TurnState::claim(chat_id, "m-steer", false);
+        t.route = Some(ValidRoute::Act {
+            plan: "count to 120".into(),
+        });
+        t.running_tool = Some(RunningTool {
+            call_id: "call-1".into(),
+            tool_name: "bash".into(),
+            args: json!({ "command": "for i in $(seq 1 120); do echo $i; sleep 1; done" }),
+            started: Instant::now().checked_sub(age).unwrap(),
+            partial: "1\n2\n3\n4\n5\n6\n7\n8\n9\n10".into(),
+        });
+        *agent.turn.lock().await = Some(t);
+    }
+
+    /// A steer sent 10 s into a 120-s `bash` loop interrupts it: pi gets `abort`, and the turn
+    /// carries the stamped steer plus the loop's output so far as its next prompt (#1690).
+    #[tokio::test]
+    async fn steer_interrupts_a_long_running_tool_call() {
+        let (agent, root) = crate::status::tests::test_agent().await;
+        let (pi, log) = fake_pi(&root).await;
+        let chat_id = "01TESTPROJECTQUICKREPLY000";
+        turn_with_running_tool(&agent, chat_id, Duration::from_secs(10)).await;
+        agent
+            .steer_running_turn(chat_id, &pi, "use 5 seconds, not 120")
+            .await
+            .unwrap();
+        let cmds = fake_pi_commands(&log);
+        assert_eq!(cmds.len(), 1, "{cmds:?}");
+        assert_eq!(cmds[0]["type"], "abort");
+        let tl = agent.turn.lock().await;
+        let t = tl.as_ref().unwrap();
+        let pending = t
+            .steer_pending
+            .as_deref()
+            .expect("steer carried into the next prompt");
+        assert!(pending.starts_with(STEER_PREFIX), "{pending}");
+        assert!(pending.contains("10 s into your `bash` call"), "{pending}");
+        assert!(pending.contains("use 5 seconds, not 120"), "{pending}");
+        assert!(pending.contains("Output so far:\n1\n2\n3"), "{pending}");
+        assert!(pending.contains("do not call `route` again"), "{pending}");
+        assert!(!t.escalate);
+        assert!(!t.stopped, "an interrupt is not a stop");
+        pi.shutdown().await;
+    }
+
+    /// A steer early in a tool call rides pi's own steer (delivered when the call returns), still
+    /// stamped with its send time so the model cannot call it late.
+    #[tokio::test]
+    async fn steer_during_a_short_tool_call_uses_pi_steer_with_a_stamp() {
+        let (agent, root) = crate::status::tests::test_agent().await;
+        let (pi, log) = fake_pi(&root).await;
+        let chat_id = "01TESTPROJECTQUICKREPLY000";
+        turn_with_running_tool(&agent, chat_id, Duration::from_secs(1)).await;
+        agent
+            .steer_running_turn(chat_id, &pi, "make it 5")
+            .await
+            .unwrap();
+        let cmds = fake_pi_commands(&log);
+        assert_eq!(cmds.len(), 1, "{cmds:?}");
+        assert_eq!(cmds[0]["type"], "steer");
+        let msg = cmds[0]["message"].as_str().unwrap();
+        assert!(msg.starts_with(STEER_PREFIX), "{msg}");
+        assert!(msg.contains("while your `bash` call was running"), "{msg}");
+        assert!(msg.contains("UTC"), "{msg}");
+        assert!(msg.ends_with("\nmake it 5"), "{msg}");
+        assert!(agent
+            .turn
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .steer_pending
+            .is_none());
+        pi.shutdown().await;
+    }
+
+    /// Between tool calls (the model is thinking or writing) there is nothing to interrupt: a
+    /// stamped pi steer.
+    #[tokio::test]
+    async fn steer_with_no_tool_running_is_a_stamped_pi_steer() {
+        let (agent, root) = crate::status::tests::test_agent().await;
+        let (pi, log) = fake_pi(&root).await;
+        let chat_id = "01TESTPROJECTQUICKREPLY000";
+        *agent.turn.lock().await = Some(TurnState::claim(chat_id, "m-steer", false));
+        agent
+            .steer_running_turn(chat_id, &pi, "stop at 50")
+            .await
+            .unwrap();
+        let cmds = fake_pi_commands(&log);
+        assert_eq!(cmds.len(), 1, "{cmds:?}");
+        assert_eq!(cmds[0]["type"], "steer");
+        let msg = cmds[0]["message"].as_str().unwrap();
+        assert!(
+            msg.contains("mid-turn. Act on it now.]\nstop at 50"),
+            "{msg}"
+        );
+        pi.shutdown().await;
+    }
+
+    #[test]
+    fn steer_prefix_matches_the_pi_extension() {
+        let ext = include_str!("../../../harness/arbos-pi-ext/index.ts");
+        assert!(
+            ext.contains(&format!("const STEER_PREFIX = \"{STEER_PREFIX}\";")),
+            "arbos-pi-ext must skip the route reminder for exactly this prefix"
+        );
     }
 }
