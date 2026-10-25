@@ -328,31 +328,34 @@ def people_send_as(peer, chat_id, text):
     return p.returncode
 
 
-def capped_user_turn(handle, cap_usd, prompt, timeout_s=240, second_prompt=None):
-    """Create (once) a scratch user with a tiny daily cap, one project, send one message as them
-    and return what the chat showed. Lets the suite see the cap behaviour without capping lt-eval."""
+def capped_user_turn(handle, cap_usd, prompt, timeout_s=240, second_prompt=None, name="Long-task eval capped", device_name="lt eval capped driver", state_dir="ctl-capped", project_name="capped-lane", chat_title="cap check"):
+    """Create (once) a scratch user — with a tiny daily cap when `cap_usd` is set — one project, send
+    one message as them and return what the chat showed. Lets the suite see the cap behaviour without
+    capping lt-eval, and (with a profile `name` that differs from the `device_name`) how the agent
+    addresses the user."""
     st, users = admin("GET", "/admin/users")
     users = users if isinstance(users, list) else (users or {}).get("users") or []
     u = next((x for x in users if x.get("login") == handle), None)
     if u is None:
-        st, v = admin("POST", "/admin/users/test", {"handle": handle, "name": "Long-task eval capped"})
+        st, v = admin("POST", "/admin/users/test", {"handle": handle, "name": name})
         if st != 201:
-            raise RuntimeError(f"create capped user: {st} {v}")
+            raise RuntimeError(f"create scratch user {handle}: {st} {v}")
         uid = v["user"]["id"]
     else:
         uid = u["id"]
-    st, tok = admin("POST", f"/admin/users/{uid}/devices", {"name": "lt eval capped driver"})
+    st, tok = admin("POST", f"/admin/users/{uid}/devices", {"name": device_name})
     if st not in (200, 201):
-        raise RuntimeError(f"capped device: {st} {tok}")
-    cfg = STATE_DIR / "ctl-capped" / "arbosctl.json"
+        raise RuntimeError(f"scratch device: {st} {tok}")
+    cfg = STATE_DIR / state_dir / "arbosctl.json"
     cfg.parent.mkdir(parents=True, exist_ok=True)
     cfg.write_text(json.dumps({"relay_url": RELAY, "device_token": tok["access_token"], "device_id": tok.get("device_id", "")}))
     env = dict(os.environ, ARBOSCTL_CONFIG=str(cfg))
-    subprocess.run([ARBOSCTL, "admin", "cap", uid, str(cap_usd)], capture_output=True, text=True, timeout=60, env=dict(os.environ, ARBOSCTL_CONFIG=str(CTL_CONFIG)))
+    if cap_usd is not None:
+        subprocess.run([ARBOSCTL, "admin", "cap", uid, str(cap_usd)], capture_output=True, text=True, timeout=60, env=dict(os.environ, ARBOSCTL_CONFIG=str(CTL_CONFIG)))
     st, projects_v = http("GET", f"{RELAY}/projects", token=tok["access_token"])
     plist = projects_v if isinstance(projects_v, list) else (projects_v or {}).get("projects") or []
     if not plist:
-        subprocess.run([ARBOSCTL, "project", "create", "--name", "capped-lane"], capture_output=True, text=True, timeout=120, env=env)
+        subprocess.run([ARBOSCTL, "project", "create", "--name", project_name], capture_output=True, text=True, timeout=120, env=env)
         st, projects_v = http("GET", f"{RELAY}/projects", token=tok["access_token"])
         plist = projects_v if isinstance(projects_v, list) else (projects_v or {}).get("projects") or []
     pid = plist[0]["id"]
@@ -363,7 +366,7 @@ def capped_user_turn(handle, cap_usd, prompt, timeout_s=240, second_prompt=None)
             break
         time.sleep(10)
     time.sleep(20)
-    p = subprocess.run([ARBOSCTL, "chat", "open", pid, "--title", "cap check"], capture_output=True, text=True, timeout=60, env=env)
+    p = subprocess.run([ARBOSCTL, "chat", "open", pid, "--title", chat_title], capture_output=True, text=True, timeout=60, env=env)
     chat_id = p.stdout.strip().splitlines()[-1].split()[-1]
     time.sleep(3)
     t0 = time.time()

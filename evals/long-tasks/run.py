@@ -151,6 +151,10 @@ class Lane(threading.Thread):
                 st.setdefault("action_findings", []).append("secrets still paused after machine start (#1664 not effective); the harness lifted the pause")
             rl.relay("PUT", "/me/secrets/settings", {"paused": False})
             time.sleep(act.get("settle_s", 60))
+        elif kind == "named_user_turn":
+            # a scratch user whose profile name differs from the sending device's name: the agent must
+            # address the person (profile), never the device
+            st["named"] = rl.capped_user_turn(act["handle"], None, act["prompt"].replace("{D}", st["D"]), act.get("timeout_s", 240), name=act["name"], device_name=act["device_name"], state_dir="ctl-named", project_name="named-lane", chat_title="address check")
         elif kind == "capped_user_turn":
             # a scratch user with a tiny daily cap; one project; a message that must trip the cap
             st["capped"] = rl.capped_user_turn(act["handle"], act["cap_usd"], act["prompt"].replace("{D}", st["D"]), act.get("timeout_s", 240), second_prompt=act.get("second_prompt"))
@@ -416,18 +420,26 @@ class Lane(threading.Thread):
         vw_rec = None
         if vw:
             deadline = time.time() + vw["wait_s"]
-            verify = vw["verify"].replace("{D}", D)
+            verify = (vw.get("verify") or "echo PASS").replace("{D}", D)
             out = ""
+            doc = {"messages": []}
             while time.time() < deadline:
                 code, out = self.box.run_as_ws(self.project, verify, env=env, timeout=120)
-                if "PASS" in out:
-                    # the files are there; give the agent's own final note time to land
+                doc = rl.chat_dump(self.project, first_chat)
+                rows = [m for m in doc.get("messages", []) if m.get("role") == "assistant"]
+                text_ok = (not vw.get("text_regex")) or bool(re.search(vw["text_regex"], dr.doc_metrics(rows).get("all_text") or "", re.I | re.S))
+                if "PASS" in out and text_ok and not any(m.get("status") == "streaming" for m in rows):
+                    # the files (and the words, when asked for) are there; let the agent's final note land
                     time.sleep(vw.get("settle_s", 0))
                     break
                 time.sleep(20)
             doc = rl.chat_dump(self.project, first_chat)
             rows = [m for m in doc.get("messages", []) if m.get("role") == "assistant"]
             dm_all = dr.doc_metrics(rows)
+            if vw.get("text_regex") and not re.search(vw["text_regex"], dm_all.get("all_text") or "", re.I | re.S):
+                reasons.append(f"no delivered bubble matches /{vw['text_regex'][:60]}/ within {vw['wait_s']} s")
+            if vw.get("text_regex_not") and re.search(vw["text_regex_not"], dm_all.get("all_text") or "", re.I):
+                reasons.append(f"a delivered bubble matches forbidden /{vw['text_regex_not'][:50]}/")
             vw_rec = {"verify_out": out[-600:], "waited_s": round(vw["wait_s"] - (deadline - time.time()), 1), "progress_rows": dm_all["progress_rows"], "all_text": (dm_all["all_text"] or "")[:4000]}
             (self.out / f"{tid}.final.doc.json").write_text(json.dumps(doc, indent=1))
             if "PASS" not in out:
