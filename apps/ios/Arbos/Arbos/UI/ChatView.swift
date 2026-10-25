@@ -975,6 +975,8 @@ private struct ChatSession: View {
                     // `avatarpicker[-generate|-upload]`: the agent pane, which opens the sheet on that tab.
                     case let s where s.hasPrefix("avatarpicker"): openHeaderProfile()
                     case "edit": showProfile = true
+                    // `tasks`: the tasks sheet over the presence row (needs `ARBOS_FIXTURE_JOBS`).
+                    case "tasks": if !model.openJobs(chatId).isEmpty { showTasks = true }
                     case "userprofile": if let c = counterpart { model.showProfile(.user(ProfilePerson(c))) }
                     // `addmembers`: the group pane opens its Add members sheet on appear.
                     case "groupprofile", "addmembers", "removemember": model.showProfile(.group(chatId: chatId, projectId: isPeople ? nil : projectId))
