@@ -96,6 +96,23 @@ pub const COLUMN_MAX_WIDTH: f32 = COMPOSER_WIDTH + 2.0 * PLUS_BUTTON;
 /// sent/seen label sits inside the bubble; the time is hover-only
 /// (docs/mac-design-rules.md).
 pub const ASSISTANT_RIGHT_GAP: f32 = 84.0;
+/// Agent bubble ceiling, measured on Jacob's Grok Bot shot of 2026-10-24
+/// (`grok-chat-1.png` / `grok-chat-2-research.png`, 2 px/pt, a 1728 pt
+/// window): every wrapped agent bubble ends at 1120 px = **560 pt** in a
+/// 960 pt composer column (58 % of it) — the list bubble is content-sized
+/// narrower, nothing is wider. Ours filled the column minus the gap (792 at
+/// the 876 pt cap, 90 %), which is what Jacob saw as "Arbos bubbles are
+/// wider" ([feedback bubble-width-2026-10-24]). The cap is the smaller of
+/// the two rules ([`assistant_cap`]): narrow panes keep Grok's fixed gap
+/// (refs 57/58: 612 in a 696 pill, 310 in 392), wide panes stop at 560.
+pub const ASSISTANT_MAX_WIDTH: f32 = 560.0;
+
+/// The widest an agent bubble (or a question / approval card in its slot) can
+/// be in a slot `slot_width` wide: the slot minus [`ASSISTANT_RIGHT_GAP`],
+/// never more than [`ASSISTANT_MAX_WIDTH`].
+pub fn assistant_cap(slot_width: f32) -> f32 {
+    (slot_width - ASSISTANT_RIGHT_GAP).min(ASSISTANT_MAX_WIDTH)
+}
 /// A new time stamp line whenever messages are this far apart.
 const STAMP_GAP_MS: u64 = 60 * 60 * 1000;
 /// Vertical rhythm measured from Grok Bot's Mac app (parity it.36, 2 px/pt):
@@ -2504,8 +2521,10 @@ pub fn column_row(inner: AnyElement) -> Div {
 }
 
 /// Where an agent bubble goes in its row: the rest of the row after the
-/// sender lane, minus Grok's fixed [`ASSISTANT_RIGHT_GAP`]. The bubble's
-/// `max_w_full` is this slot's width.
+/// sender lane, minus Grok's fixed [`ASSISTANT_RIGHT_GAP`], and never wider
+/// than [`ASSISTANT_MAX_WIDTH`] ([`assistant_cap`]). The bubble's
+/// `max_w_full` is the inner cap frame's width; the hover rail, absolute at
+/// the bubble's right edge, lands in the gap after it.
 fn assistant_slot(bubble: impl IntoElement) -> Div {
     div()
         .flex_1()
@@ -2514,7 +2533,16 @@ fn assistant_slot(bubble: impl IntoElement) -> Div {
         .flex()
         .items_center()
         .debug_selector(|| "chat-bubble-slot".into())
-        .child(bubble)
+        .child(
+            div()
+                .w_full()
+                .max_w(px(ASSISTANT_MAX_WIDTH))
+                .min_w_0()
+                .flex()
+                .items_center()
+                .debug_selector(|| "chat-bubble-cap".into())
+                .child(bubble),
+        )
 }
 
 /// A question / approval card is a transcript row like a bubble (#1374, #1440 follow-up): the
@@ -4989,7 +5017,9 @@ mod layout_tests {
                 "pane {pane}: people card left {pcx} vs people bubble left {}",
                 e.people_bubble_left
             );
-            let people_cap = e.bubble_width - SENDER_LANE;
+            // The lane's slot is the column minus the avatar lane; the same
+            // cap rule applies to it (gap, at most Grok's ceiling).
+            let people_cap = assistant_cap(e.column_width - SENDER_LANE);
             assert!(
                 pcw <= people_cap + 0.5,
                 "pane {pane}: people card width {pcw} over the lane cap {people_cap}"
@@ -5161,10 +5191,14 @@ mod layout_tests {
     }
 
     #[gpui::test]
-    fn the_agent_bubble_cap_is_the_column_minus_the_grok_gap(cx: &mut TestAppContext) {
+    fn the_agent_bubble_cap_is_the_column_minus_the_grok_gap_at_most_grok_width(
+        cx: &mut TestAppContext,
+    ) {
         // Reference window (884 pt pane): the margins bound the column, so
-        // the composer is 852 wide at 16 and the bubble 768 wide at 16 —
-        // Grok's 16 pt left inset and 100 pt right inset.
+        // the composer is 852 wide at 16; the bubble starts at 16 (Grok's
+        // left inset) and stops at Grok's 560 pt ceiling (Jacob's shot of
+        // 2026-10-24: 1120 px at 2 px/pt), not at the column − 84 = 768 it
+        // filled before [feedback bubble-width-2026-10-24].
         let e = measure(cx, REFERENCE_PANE);
         let column = REFERENCE_PANE - 2.0 * COMPOSER_MARGIN;
         assert!((e.column_width - column).abs() <= 1.0, "{}", e.column_width);
@@ -5176,22 +5210,26 @@ mod layout_tests {
         assert!((e.composer_left - 16.0).abs() <= 1.0, "{}", e.composer_left);
         assert!((e.bubble_left - 16.0).abs() <= 1.0, "{}", e.bubble_left);
         assert!(
-            (e.bubble_width - (column - ASSISTANT_RIGHT_GAP)).abs() <= 1.0,
-            "bubble width {}",
-            e.bubble_width
+            (e.bubble_width - ASSISTANT_MAX_WIDTH).abs() <= 1.0,
+            "bubble width {} (cap {})",
+            e.bubble_width,
+            assistant_cap(column)
         );
+        assert!(column - ASSISTANT_RIGHT_GAP > ASSISTANT_MAX_WIDTH);
         assert!((e.bubble_left - e.column_left).abs() <= 1.0);
-        // A wide pane: the cap holds both, centred together.
+        // A wide pane: the column caps at the composer's 876; the bubble still
+        // stops at 560 — 64 % of the column (Grok: 560 of its 960 pt composer).
         let e = measure(cx, 1400.0);
         assert_eq!(e.column_width, COLUMN_MAX_WIDTH);
         assert_eq!(e.composer_width, COLUMN_MAX_WIDTH);
         assert!(
-            (e.bubble_width - (COLUMN_MAX_WIDTH - ASSISTANT_RIGHT_GAP)).abs() <= 1.0,
+            (e.bubble_width - ASSISTANT_MAX_WIDTH).abs() <= 1.0,
             "bubble width {}",
             e.bubble_width
         );
-        // Grok's own pane (ref 57, 2 px/pt): composer 696 pt wide at 16 from
-        // the pane, bubble 612 pt wide at 16 — the measured reference.
+        // Grok's narrow pane (ref 57, 2 px/pt): composer 696 pt wide at 16
+        // from the pane; the gap rule is the smaller one there (696 − 84 = 612,
+        // above the 560 ceiling), so the bubble is 560 wide at 16.
         let e = measure(cx, GROK_REF_57_PANE);
         assert!((e.composer_left - 16.0).abs() <= 1.0, "{}", e.composer_left);
         assert!(
@@ -5200,7 +5238,21 @@ mod layout_tests {
             e.composer_width
         );
         assert!((e.bubble_left - 16.0).abs() <= 1.0, "{}", e.bubble_left);
-        assert!((e.bubble_width - 612.0).abs() <= 1.0, "{}", e.bubble_width);
+        assert!(
+            (e.bubble_width - assistant_cap(696.0)).abs() <= 1.0,
+            "{}",
+            e.bubble_width
+        );
+        // Narrower than the ceiling allows (ref 58's 424 pt pane): the fixed
+        // 84 pt gap rules, as before — 392 − 84 = 310, Grok's measured bubble.
+        let e = measure(cx, 424.0);
+        assert!((e.bubble_width - 308.0).abs() <= 2.0, "{}", e.bubble_width);
+        assert_eq!(assistant_cap(392.0), 308.0);
+        assert_eq!(
+            assistant_cap(644.0),
+            560.0,
+            "the crossover is a 644 pt slot"
+        );
     }
 
     struct NamedBubble;
@@ -5358,7 +5410,7 @@ mod layout_tests {
             let tw: f32 = text.size.width.into();
             let tx: f32 = text.origin.x.into();
             let bx: f32 = bubble.origin.x.into();
-            let cap: f32 = f32::from(slot.size.width) - ASSISTANT_RIGHT_GAP;
+            let cap: f32 = assistant_cap(slot.size.width.into());
             assert!(
                 qw < 120.0 && bw > qw + 200.0,
                 "lane={lane}: bubble {bw} pt is as narrow as its quote ({qw} pt)"
@@ -5541,7 +5593,7 @@ mod layout_tests {
         match who {
             Who::Agent => {
                 let slot = vcx.debug_bounds("chat-bubble-slot").expect("slot drawn");
-                f32::from(slot.size.width) - ASSISTANT_RIGHT_GAP
+                assistant_cap(slot.size.width.into())
             }
             Who::Mine | Who::Other => {
                 let parent = vcx
