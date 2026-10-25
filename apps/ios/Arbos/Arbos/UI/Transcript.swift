@@ -1592,6 +1592,9 @@ struct BlockView: View {
 /// than the bubble, the table keeps its columns and scrolls sideways.
 struct TableBlock: View {
     @Environment(\.theme) private var theme
+    /// The cells' link icons: the table redraws when one arrives (its inputs alone do not
+    /// change, so SwiftUI would otherwise keep the placeholders).
+    @ObservedObject private var linkIcons = LinkIcons.shared
     let header: [String]
     let rows: [[String]]
     let mentions: MentionTable
