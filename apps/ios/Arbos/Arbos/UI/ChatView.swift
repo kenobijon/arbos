@@ -341,8 +341,8 @@ private struct ChatSession: View {
         calls.isActive && !calls.isPresented && calls.call?.kind == .voice && calls.call?.chatId == chatId
     }
     private var headerExtra: CGFloat { (hasCallBar ? 52 : 0) + (hasInCallBar ? 56 : 0) + (showSearch ? 46 : 0) }
-    /// Member chips under the header: groups only. A 1:1 DM already names the peer in the pill.
-    private var showsMemberChips: Bool { people?.isGroup == true }
+    /// Member chips under the header — off on iPhone (feedback ABDgl8tFlqeUlwP4DihfYhk).
+    private var showsMemberChips: Bool { false }
 
     private func startCall(_ kind: CallKind, ring: [String]? = nil) {
         Task { await calls.start(chatId: chatId, projectId: isPeople ? nil : projectId, kind: kind, title: callTitle, ring: ring) }
@@ -2573,10 +2573,6 @@ private struct ChatSession: View {
         awayFromBottom = false
         newBelowCount = 0
         resetWindowToTail()
-        // Scroll now (and once more after the optimistic row lays out). Relying only
-        // on `onChange(of: rows.last)` raced scroll-geometry unpin and left the
-        // new bubble below the fold with a "New messages" pill.
-        scrollAfterSend()
         if let edit = editing {
             // Save the edit in place — no new bubble, no send command.
             guard !text.isEmpty else { return }
@@ -2596,6 +2592,8 @@ private struct ChatSession: View {
             clearDraft()
             replyTo = nil
             sentOnce = true
+            // After the optimistic row is in `messages` (channel path paints inline).
+            scrollAfterSend()
             return
         }
         if isPeople {
@@ -2610,6 +2608,8 @@ private struct ChatSession: View {
             mentionQuery = nil
             pinTalkTo(afterSending: address, chipMentions: chips)
             sentOnce = true
+            // After paintLocalUserMessage so scrollTo sees the new bubble.
+            scrollAfterSend()
             return
         }
         if needsAnswer && pending.isEmpty {
@@ -2621,6 +2621,8 @@ private struct ChatSession: View {
         clearDraft()
         replyTo = nil
         sentOnce = true
+        // After paintLocalUserMessage so scrollTo sees the new bubble.
+        scrollAfterSend()
     }
 
     private func stop() {
