@@ -108,6 +108,9 @@ enum PaneKit {
     /// The hero picture (a free constant: a static on the generic PaneHeader cannot be named without its type parameter).
     static let heroAvatar: CGFloat = 112
     static let radius: CGFloat = 16
+    /// Extra room over the hero's action pill: with the hero's 10 pt stack gap the
+    /// pill sits 16 under the "@handle" line (the Mac's `HERO_ACTION_GAP`).
+    static let heroActionGap: CGFloat = 6
     /// Where a row's hairline starts for a given leading element.
     static func separatorInset(_ leading: PaneLeading) -> CGFloat {
         switch leading {
@@ -358,6 +361,9 @@ struct PaneHeader<Avatar: View>: View {
     var subtitleAction: (() -> Void)? = nil
     /// Drawn instead of the subtitle while it is being edited.
     var subtitleEditor: AnyView? = nil
+    /// The hero's one action pill under the subtitle (a person's Message,
+    /// [feedback profile-message-button-ios-2026-10-25]); nil on panes without one.
+    var action: AnyView? = nil
     @ViewBuilder var avatar: () -> Avatar
 
     var body: some View {
@@ -378,6 +384,9 @@ struct PaneHeader<Avatar: View>: View {
                     .accessibilityHint("Edits the label")
             } else {
                 subtitleText
+            }
+            if let action {
+                action.padding(.top, PaneKit.heroActionGap)
             }
         }
         .frame(maxWidth: .infinity)
@@ -403,6 +412,57 @@ struct PaneHeader<Avatar: View>: View {
             .lineLimit(1)
             .padding(.horizontal, 32)
     }
+}
+
+/// The hero's action pill ("Message" on a person's pane, [feedback
+/// profile-message-button-ios-2026-10-25]): the iPhone's control family —
+/// `Theme.control` 42 tall like the top bar's back disc, a capsule on the
+/// `field` fill with its hairline rim, SF glyph + body-size semibold label in
+/// `text`; pressed = the fill lifted, as the Mac's chip rule.
+struct PanePillButton: View {
+    @Environment(\.theme) private var theme
+    let glyph: String
+    let title: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: glyph).font(theme.font(17, weight: .semibold))
+                Text(title).font(theme.font(Theme.body, weight: .semibold))
+            }
+            .foregroundStyle(theme.text)
+            .padding(.horizontal, 22)
+            .frame(height: Theme.control)
+            .contentShape(Capsule())
+        }
+        .buttonStyle(PanePillStyle())
+        .accessibilityIdentifier("profile-\(title.lowercased())")
+    }
+}
+
+private struct PanePillStyle: ButtonStyle {
+    @Environment(\.theme) private var theme
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background {
+                ZStack {
+                    if theme.isGlass { Capsule().fill(.ultraThinMaterial) }
+                    Capsule().fill(theme.field.opacity(theme.isGlass ? 0.85 : 1))
+                    if configuration.isPressed { Capsule().fill(theme.text.opacity(0.12)) }
+                    Capsule().strokeBorder(theme.fieldBorder, lineWidth: 1)
+                }
+            }
+    }
+}
+
+/// The person pane's Message pill (the Mac's `profiles::user::shows_message`):
+/// for another person I have not blocked — never my own pane, never once I
+/// blocked them. The other direction (they blocked me) is in no payload the
+/// client reads; the relay refuses the DM and `openDM` says so.
+enum MessageButton {
+    static let title = "Message"
+    static func shows(isMe: Bool, blocked: Bool) -> Bool { !isMe && !blocked }
 }
 
 /// The crayon on an editable hero picture (own profile, people groups): a
@@ -700,14 +760,16 @@ struct UserProfileView: View {
             ScrollView {
                 VStack(spacing: 18) {
                     Color.clear.frame(height: 80)
-                    // The shared pane (D93): picture, name, @handle; Links | Groups
-                    // (the Mac's set); one Block user row. No last-seen, no action
-                    // row, no username field, no Open chat / Add members.
+                    // The shared pane (D93): picture, name, @handle, the Message pill
+                    // (Jacob 2026-10-25; not on my own pane, not once I blocked them);
+                    // Links | Groups (the Mac's set); one Block user row. No last-seen,
+                    // no username field, no Add members.
                     ProfilePane(
                         hero: PaneHero(
                             picture: .image(AnyView(PersonAvatar(url: person.avatarUrl, handle: person.handle, size: PaneKit.heroAvatar, name: person.name, id: person.id, colorIndex: person.avatarColorIndex))),
                             name: person.displayName,
-                            subtitle: "@\(person.handle)"
+                            subtitle: "@\(person.handle)",
+                            action: MessageButton.shows(isMe: isMe, blocked: blockedEntry != nil) ? AnyView(messageButton) : nil
                         ),
                         tabs: PaneKinds.person,
                         selected: $tab,
@@ -743,6 +805,20 @@ struct UserProfileView: View {
                 avatarColorIndex: fresh?.avatarColorIndex ?? person.avatarColorIndex
             )
             sharedProjects = await model.sharedProjects(with: who)
+        }
+    }
+
+    /// The one primary action (Jacob 2026-10-25): open the DM we have, or start one
+    /// through the same `POST /chats/dm` path the New Message sheet uses (`openDM`
+    /// navigates and shows "You can't message this person." on a relay refusal).
+    private var messageButton: some View {
+        PanePillButton(glyph: "bubble.left", title: MessageButton.title) {
+            if let dm {
+                dismiss()
+                model.open(peopleChat: dm)
+            } else {
+                Task { if await model.openDM(handle: peerHandle) != nil { dismiss() } }
+            }
         }
     }
 
@@ -2469,6 +2545,9 @@ struct PaneHero {
     var subtitleAction: (() -> Void)? = nil
     /// Drawn instead of the subtitle while it is being edited.
     var subtitleEditor: AnyView? = nil
+    /// The hero's one action pill under the subtitle (a person's Message); nil
+    /// on panes with no primary action and on a person you cannot message.
+    var action: AnyView? = nil
 }
 
 /// One block of a tab's content, top to bottom.
@@ -2561,7 +2640,8 @@ struct ProfilePane: View {
             } header: {
                 VStack(spacing: 18) {
                     PaneHeader(name: hero.name, subtitle: hero.subtitle, badge: hero.badge, nameAction: hero.nameAction,
-                               subtitleTint: hero.subtitleTint, subtitleAction: hero.subtitleAction, subtitleEditor: hero.subtitleEditor) {
+                               subtitleTint: hero.subtitleTint, subtitleAction: hero.subtitleAction, subtitleEditor: hero.subtitleEditor,
+                               action: hero.action) {
                         switch hero.picture {
                         case .image(let v): v
                         case .glyph(let glyph):
