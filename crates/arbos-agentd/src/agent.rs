@@ -6695,7 +6695,7 @@ impl Agent {
         let chip: Vec<Value> = open
             .iter()
             .map(|j| {
-                json!({ "id": j.id, "title": j.title, "state": j.state, "step": j.last_step, "elapsed_s": j.elapsed_s() })
+                json!({ "id": j.id, "title": j.title, "state": j.state, "step": j.last_step, "elapsed_s": j.elapsed_s(), "ask_message_id": j.ask_message_id, "chat_id": j.chat_id })
             })
             .collect();
         // Several jobs: the presence row says so ("Reading tripadvisor.com · 2 tasks").
