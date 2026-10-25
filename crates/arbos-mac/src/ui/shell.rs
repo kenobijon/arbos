@@ -382,6 +382,8 @@ pub struct Shell {
     pub(crate) tab_menu_open: bool,
     /// The tasks chip's pointer state (rest / hover / pressed fade, `ui::tasks`).
     pub(crate) tasks_chip: crate::ui::mention::ChipPointer<u8>,
+    /// The status line's link state (`tasks::link`: rest / hover / pressed).
+    pub(crate) tasks_link: crate::ui::tasks::LinkState,
     /// The tab strip's scroll row, so a new or reopened tab comes into view.
     pub(crate) tabs_scroll: ScrollHandle,
     /// Per-agent call voice picker sheet ("…" menu → Voice, profile → voice).
@@ -924,8 +926,10 @@ impl Shell {
             rig_reaction_capsule: reactions::rig_anchor(),
             renaming_tab: None,
             tab_rename_input,
-            tab_menu_open: false,
+            // Rig: `ARBOS_RIG_TABMENU=1` starts with the tab dropdown open (job tab shots).
+            tab_menu_open: std::env::var("ARBOS_RIG_TABMENU").is_ok_and(|v| v == "1"),
             tasks_chip: crate::ui::mention::ChipPointer::default(),
+            tasks_link: crate::ui::tasks::LinkState::default(),
             tabs_scroll: ScrollHandle::new(),
             voice_picker_open: false,
             pip_offset: (24.0, 96.0),
@@ -3051,6 +3055,7 @@ impl Shell {
                             jobs,
                             open,
                             &self.tasks_chip,
+                            self.tasks_link,
                             &theme,
                             cx,
                         )

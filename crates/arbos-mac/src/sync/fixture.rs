@@ -32,11 +32,12 @@ use crate::model::{
     new_id, now_ms, ApprovalRisk, ApprovalState, Attachment, AttachmentKind, BoxReport, BoxState,
     BoxWorkspace, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelPlatformState,
     ChannelsView, Chat, ChatKind, ChoiceOption, Connector, ConnectorAction, ConnectorProvider,
-    ConnectorStatus, ConnectorsView, DeviceView, Effort, FieldKind, FormField, Id, Job, JobState,
-    Link, LocalDevice, LocalView, Message, MessageStatus, Part, Project, QuestionState, Role,
-    Routine, RoutineRun, RoutineRunStatus, RoutineTrigger, Secret, SecretActivity, SecretAgent,
-    SecretDirector, SecretRequest, SecretScope, SecretsView, ServerChannel, ServerInfo, Skill,
-    StatusKind, ToolCall, ToolStatus, TurnKind, Widget,
+    ConnectorStatus, ConnectorsView, DeviceView, Effort, FieldKind, FormField, Id, Job, JobRollout,
+    JobState, Link, LocalDevice, LocalView, Message, MessageStatus, Part, Project, QuestionState,
+    Role, RolloutEntry, RolloutKind, RolloutParent, Routine, RoutineRun, RoutineRunStatus,
+    RoutineTrigger, Secret, SecretActivity, SecretAgent, SecretDirector, SecretRequest,
+    SecretScope, SecretsView, ServerChannel, ServerInfo, Skill, StatusKind, ToolCall, ToolStatus,
+    TurnKind, Widget,
 };
 
 pub const STREAM_FRAME_MS: u64 = arbos_core::STREAM_COMMIT_MS;
@@ -653,6 +654,170 @@ fn emit_project_jobs(shared: &Arc<Shared>, project_id: &str) {
 
 /// A job ends (Stop in the drawer, or the Stop button for every job of the
 /// chat): its hidden row closes as agentd closes it and the list forgets it.
+/// The scripted exchange of each fixture job, as offsets (s) from its start: the brief,
+/// the ack, tool steps with their lengths, the result. `RolloutRefresh` answers the
+/// entries that have "happened" by now, the step under way as `running`, so a rollout
+/// opened on the rig streams. `ARBOS_FIXTURE_ROLLOUT_DONE=1` ends the first job's document
+/// (result delivered, `ended_at`) while the chip still lists it — the finished-state shot.
+/// One scripted step: (offset_s, kind, words, duration_ms).
+type ScriptStep = (u64, &'static str, &'static str, u64);
+
+fn fixture_rollout_script(title: &str) -> (&'static str, Vec<ScriptStep>, &'static str) {
+    // (brief, [(offset_s, kind, words, duration_ms)], result)
+    match title {
+        "Searching for surf schools" => (
+            "Find the 3 best-reviewed surf schools near Santa Teresa, compare group and private lesson prices, and say which is the best value. Return each school with its page URL and the facts you compared.",
+            vec![
+                (3, "text", "On it — pulling ratings and current prices for the top schools around Santa Teresa.", 0),
+                (6, "tool", "Searched the web for “surf schools Santa Teresa reviews 2026”", 2100),
+                (9, "tool", "Read tripadvisor.com — Santa Teresa surf schools", 4800),
+                (15, "tool", "Read bluemysticsurf.com/prices", 3000),
+                (19, "tool", "Reading delsoulsurf.com", 2600),
+                (23, "tool", "Read monkeyadventures.cr", 3400),
+                (28, "text", "Three schools have enough reviews to compare; checking the lesson pages for this month's prices.", 0),
+                (33, "tool", "Read bluemysticsurf.com/lessons", 2200),
+                (40, "tool", "Comparing prices across the three", 1800),
+            ],
+            "Blue Mystic is the best value for single lessons ($60–70 group, $90 private, 4.9 from 444 Google reviews); Del Soul is the pick if you take above five (5.0 from 593, $65–75 group); Monkey Adventures runs $75 group / $115 private. Full table with page URLs attached.",
+        ),
+        "Fixing the flaky tests" => (
+            "The relay's websocket tests fail one run in five on CI. Find the race, fix it on a branch, and run the suite three times.",
+            vec![
+                (4, "text", "Reading the failing runs first.", 0),
+                (8, "tool", "Read .github/workflows/ci.yml", 1200),
+                (12, "tool", "Ran cargo test -p arbos-relay ws:: (3×)", 48_000),
+                (70, "tool", "Read crates/arbos-relay/src/ws.rs", 2100),
+                (80, "text", "The ping timer races the close frame; adding the join before the shutdown.", 0),
+                (90, "tool", "Edited crates/arbos-relay/src/ws.rs", 900),
+                (100, "tool", "Running cargo test -p arbos-relay (1 of 3)", 45_000),
+            ],
+            "Fixed: the ping timer raced the close frame. Three green runs on the branch fix/ws-close-race.",
+        ),
+        _ => (
+            "Rename the config module to settings across the crate and keep the public re-exports.",
+            vec![],
+            "",
+        ),
+    }
+}
+
+fn emit_job_rollout(shared: &Arc<Shared>, project_id: &str, job_id: &str, after: Option<u64>) {
+    let Some(f) = shared
+        .jobs
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|f| f.job.id == job_id)
+        .cloned()
+    else {
+        return;
+    };
+    let parent = shared
+        .projects
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|p| p.id == project_id)
+        .map(|p| p.name.clone())
+        .unwrap_or_default();
+    let now = now_ms();
+    let done = std::env::var("ARBOS_FIXTURE_ROLLOUT_DONE").is_ok_and(|v| v == "1")
+        && f.job.title == "Searching for surf schools";
+    let (brief, script, result) = fixture_rollout_script(&f.job.title);
+    let start = f.started_at;
+    let mut entries = vec![RolloutEntry {
+        seq: 1,
+        at: start,
+        kind: RolloutKind::Prompt,
+        text: Some(brief.to_string()),
+        label: None,
+        name: None,
+        status: None,
+        duration_ms: None,
+    }];
+    let mut seq = 2;
+    let mut tool_calls = 0;
+    let mut running_step: Option<String> = None;
+    let horizon = if done { u64::MAX } else { now };
+    for (offset, kind, words, dur) in &script {
+        let at = start + offset * 1000;
+        if at > horizon {
+            break;
+        }
+        let is_tool = *kind == "tool";
+        let finished = done || at + dur <= now;
+        if is_tool {
+            tool_calls += 1;
+            if !finished {
+                running_step = Some(words.to_string());
+            }
+        }
+        entries.push(RolloutEntry {
+            seq,
+            at,
+            kind: if is_tool {
+                RolloutKind::Tool
+            } else {
+                RolloutKind::Text
+            },
+            text: (!is_tool).then(|| words.to_string()),
+            label: is_tool.then(|| words.to_string()),
+            name: is_tool.then(|| "tool".to_string()),
+            status: is_tool.then(|| if finished { "done" } else { "running" }.to_string()),
+            duration_ms: (is_tool && finished).then_some(*dur),
+        });
+        seq += 1;
+    }
+    let ended_at = done.then(|| start + 372_000);
+    if done {
+        entries.push(RolloutEntry {
+            seq,
+            at: start + 372_000,
+            kind: RolloutKind::Result,
+            text: Some(result.to_string()),
+            label: None,
+            name: None,
+            status: Some("done".to_string()),
+            duration_ms: Some(372_000),
+        });
+        seq += 1;
+    }
+    if let Some(a) = after {
+        entries.retain(|e| e.seq > a || e.is_live());
+    }
+    let step = running_step.unwrap_or_else(|| f.job.step.clone());
+    let rollout = JobRollout {
+        id: f.job.id.clone(),
+        title: f.job.title.clone(),
+        kind: "research".into(),
+        state: f.job.state,
+        step,
+        elapsed_s: if done {
+            372
+        } else {
+            now.saturating_sub(start) / 1000
+        },
+        started_at: Some(start),
+        ended_at,
+        chat_id: f.job.chat_id.clone(),
+        ask_message_id: f.job.ask_message_id.clone(),
+        parent: RolloutParent {
+            project_id: project_id.to_string(),
+            name: parent,
+        },
+        brief: brief.to_string(),
+        entries,
+        tool_calls,
+        next_seq: seq,
+        unavailable: false,
+    };
+    let _ = shared.events.send(SyncEvent::JobRollout {
+        project_id: project_id.to_string(),
+        job_id: job_id.to_string(),
+        rollout,
+    });
+}
+
 fn fixture_stop_jobs(shared: &Arc<Shared>, chat_id: &str, only: Option<&str>) {
     let ended: Vec<FixtureJob> = {
         let mut jobs = shared.jobs.lock().unwrap();
@@ -1164,6 +1329,11 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             fixture_stop_jobs(shared, &chat_id, Some(&job_id));
         }
         ClientCommand::JobsRefresh { project_id } => emit_project_jobs(shared, &project_id),
+        ClientCommand::RolloutRefresh {
+            project_id,
+            job_id,
+            after,
+        } => emit_job_rollout(shared, &project_id, &job_id, after),
         ClientCommand::React {
             chat_id,
             message_id,

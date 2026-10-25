@@ -304,6 +304,13 @@ pub enum SyncEvent {
         project_id: Id,
         jobs: Vec<crate::model::Job>,
     },
+    /// One job's exchange (`GET /projects/{id}/jobs/{jobId}[?after=seq]`) — the rollout
+    /// view. `rollout.unavailable` when the relay has no endpoint yet (404).
+    JobRollout {
+        project_id: Id,
+        job_id: String,
+        rollout: crate::model::JobRollout,
+    },
     /// Run history of one routine, newest first.
     RoutineRuns {
         routine_id: Id,
@@ -565,6 +572,13 @@ pub enum ClientCommand {
     /// Poll the agent's open jobs (`GET /projects/{id}` → `activity.jobs[]`).
     JobsRefresh {
         project_id: Id,
+    },
+    /// Poll one job's exchange for the open rollout view; `after` asks for the entries
+    /// past that `seq` only.
+    RolloutRefresh {
+        project_id: Id,
+        job_id: String,
+        after: Option<u64>,
     },
     /// Toggle my emoji reaction on a message (written into the chat doc).
     React {
