@@ -306,6 +306,24 @@ extension AppModel {
             }
             applyJobs(projectId: projectId, list)
         }
+        // `ARBOS_FIXTURE_READS=1`: the opened agent chat ends like Bubble's — a hidden job
+        // row that read a source file (its page as a link, the file attached) and a finished
+        // reply naming ten files and a docs page ([feedback library-chat-only-ios-2026-10-25]).
+        if DebugHooks.fixtureReads, let c = DebugHooks.openChat, peopleChat(c) == nil {
+            var job = streaming("fx-read-job", c, at: now - 40_000)
+            job.job = JobRef(["id": "fx-job-reads", "title": "Reading the repo"])
+            job.worker = true
+            job.hidden = true
+            job.parts = [.text(id: "fx-read-job-t", text: "Read https://github.com/unarbos/arbos/blob/main/crates/arbos-mac/src/app.rs"),
+                         .attachment(id: "fx-read-job-a", attachment: Attachment(name: "app.rs", mime: "text/plain", blobRef: "fixture-read-app"))]
+            messages[c, default: []].append(job)
+            let files = ["app.rs", "calls.rs", "auth.rs", "update.rs", "search.rs", "onboarding.rs", "transcript.rs", "relay.rs", "agent.rs", "people.rs"]
+            var reply = streaming("fx-read-reply", c, at: now - 20_000)
+            reply.status = .done
+            reply.completedAt = now - 19_000
+            reply.parts = [.text(id: "fx-read-reply-t", text: "I read \(files.joined(separator: ", ")) — nothing to change. Notes on the layout API: https://docs.rs/gpui")]
+            messages[c, default: []].append(reply)
+        }
         // `ARBOS_FIXTURE_TYPING=1|<handle>[,<handle>…]`: those people type in every fixture
         // people chat for the whole launch (`1` = the DM's other person / the group's first).
         if let spec = DebugHooks.fixtureTyping {
