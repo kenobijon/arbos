@@ -80,6 +80,9 @@ private struct ChatSessionHost: View {
     @State private var tick = 0
 
     var body: some View {
+        #if DEBUG
+        let _ = SendTrace.recent ? SendTrace.mark("host-body", detail: "tick=\(tick)", once: false) : ()
+        #endif
         ChatSession(model: model, chatId: chatId, projectId: projectId, tick: tick)
             .onReceive(model.$messages) { _ in tick &+= 1 }
             .onReceive(model.$messagesVersion) { _ in tick &+= 1 }
@@ -644,6 +647,7 @@ private struct ChatSession: View {
         #if DEBUG
         let _ = PerfCounters.bump("chatBody")
         let _ = DebugHooks.perfChanges ? Self._printChanges() : ()
+        let _ = SendTrace.recent ? SendTrace.mark("session-body", detail: "tick=\(tick) version=\(model.messagesVersion[chatId] ?? 0) rows=\(rows.count) msgs=\(messages.count)", once: false) : ()
         #endif
         // Header stays outside GeometryReader (same pattern as ServerChannelsView /
         // HiddenChatsView). Nesting it inside the reader let iOS 26/27 vertically
@@ -1115,7 +1119,10 @@ private struct ChatSession: View {
         // The per-chat version, not the array: comparing 1 000+ messages on every
         // body (each keystroke, presence tick, publish) was a measurable share of
         // the Arbonites lag (arbonites-chat-lag, 2026-10-24).
-        .onChange(of: model.messagesVersion[chatId] ?? 0, initial: true) { _, _ in
+        .onChange(of: model.messagesVersion[chatId] ?? 0, initial: true) { _, new in
+            #if DEBUG
+            if SendTrace.traces(chatId) { SendTrace.mark("version-onchange", detail: "version=\(new)", once: false) }
+            #endif
             let old = rowsSource
             let new = messages
             let initial = old.isEmpty && rows.isEmpty
@@ -3089,7 +3096,8 @@ private struct AwayFromBottomReporter: ViewModifier {
                 #if DEBUG
                 if SendTrace.recent {
                     SendTrace.mark("scroll-geometry", detail: "grew=\(grew) distance=\(Int(new.distance)) pinned=\(pinned)", once: false)
-                    if new.distance < 2 { SendTrace.mark("at-bottom", detail: "distance=\(Int(new.distance))") }
+                    // The "bottom" spacer and padding sit ~60 pt under the last bubble.
+                    if new.distance < 100 { SendTrace.mark("at-bottom", detail: "distance=\(Int(new.distance))") }
                 }
                 #endif
                 if grew {
