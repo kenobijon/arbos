@@ -380,6 +380,8 @@ private struct ChatSession: View {
     @State private var highlightedMessage: Id?
     /// The bubble whose long-press actions (reaction capsule + menu) are open.
     @State private var actionsRow: Row?
+    /// The composer had the keyboard up when the bubble was pressed (`openActions`).
+    @State private var actionsRestoresKeyboard = false
     @State private var mentionQuery: String?
     /// Chip-picked addressees in a people chat: `agent:…` and/or `user:…` member ids.
     /// Empty means no chip: agent-only DMs may still infer the last agent; human-peer DMs stay
@@ -789,7 +791,7 @@ private struct ChatSession: View {
                             model.toggleReaction(chatId: chatId, messageId: row.messageId, emoji: emoji)
                         },
                         onMenu: { item in
-                            closeActions()
+                            closeActions(after: item)
                             runMessageMenu(item, row: row)
                         },
                         onDismiss: { closeActions() },
@@ -1099,7 +1101,14 @@ private struct ChatSession: View {
                         #endif
                     case "actions":
                         // Rig: the long-press actions (capsule + menu) on the newest bubble.
-                        if let row = rows.last(where: { isMessageRow($0) }) { actionsRow = row }
+                        if let row = rows.last(where: { isMessageRow($0) }) { openActions(row) }
+                    case "keyboard-actions":
+                        // Rig (iphone-bubble-menu-keyboard): the composer keyboard is up, then the
+                        // newest bubble is long-pressed — the overlay must clear the keyboard.
+                        composerFocused = true
+                        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(1200)) {
+                            if let row = rows.last(where: { isMessageRow($0) }) { openActions(row) }
+                        }
                     case "replied":
                         // Rig: a sent bubble quoting the newest agent message (fixture only).
                         #if DEBUG
@@ -1571,10 +1580,7 @@ private struct ChatSession: View {
                         onQuoteTap: { revealQuoted($0) },
                         onMenu: { runMessageMenu($0, row: $1) },
                         actionsRowId: actionsRow?.id,
-                        onLongPress: { row in
-                            Haptics.pick()
-                            withAnimation(.easeOut(duration: 0.18)) { actionsRow = row }
-                        }
+                        onLongPress: { row in openActions(row) }
                     )
                     .equatable()
                     // Who is working is the presence row over the composer
@@ -1844,8 +1850,26 @@ private struct ChatSession: View {
         }
     }
 
-    private func closeActions() {
+    /// Long-press on a bubble: the actions overlay (capsule + menu). The keyboard goes
+    /// down first so nothing of the menu sits under it (iMessage / Grok Bot; feedback
+    /// iphone-bubble-menu-keyboard-2026-10-25) — the typed draft stays in `composerDraft`,
+    /// only focus moves, and `closeActions` gives it back.
+    private func openActions(_ row: Row) {
+        Haptics.pick()
+        actionsRestoresKeyboard = composerFocused
+        composerFocused = false
+        searchFocused = false
+        withAnimation(.easeOut(duration: 0.18)) { actionsRow = row }
+    }
+
+    /// Close the overlay; `item` is the menu action chosen (nil for a tap outside or a
+    /// reaction). The composer is focused again only if it was before the press and the
+    /// action leaves the chat on screen (`MessageActionsKeyboard.restoresFocus`).
+    private func closeActions(after item: MessageMenuItem? = nil) {
+        let restore = MessageActionsKeyboard.restoresFocus(wasFocused: actionsRestoresKeyboard, after: item)
+        actionsRestoresKeyboard = false
         withAnimation(.easeOut(duration: 0.15)) { actionsRow = nil }
+        if restore { composerFocused = true }
     }
 
     /// Emoji I already put on this message (tinted in the capsule).
