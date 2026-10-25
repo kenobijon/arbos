@@ -27,7 +27,7 @@ use crate::model::{
 };
 
 use super::doc::ChatDoc;
-use super::{ClientCommand, PictureSource, SyncEvent, SyncSource};
+use super::{ClientCommand, PictureSource, PictureTarget, SyncEvent, SyncSource};
 use crate::model::{
     new_id, now_ms, ApprovalRisk, ApprovalState, Attachment, AttachmentKind, BoxReport, BoxState,
     BoxWorkspace, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelPlatformState,
@@ -1404,6 +1404,23 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         }
         ClientCommand::SetMyAvatar { .. } => {
             let url = "fixture://avatar/me-picture".to_string();
+            emit_avatar(shared, &url);
+            let _ = shared
+                .events
+                .send(SyncEvent::Account(Some(crate::model::AccountView {
+                    id: ME_ID.into(),
+                    login: ME_HANDLE.into(),
+                    name: "Jacob Steeves".into(),
+                    avatar_url: url,
+                    device_name: "Fixture".into(),
+                    balance_usd: 84.5,
+                    spent_today_usd: 1.6,
+                    daily_cap_usd: Some(20.0),
+                })));
+        }
+        ClientCommand::SetMyAvatarKey { key } => {
+            // The Generate tab's preview (seeded by `GenerateImage`) becomes my picture.
+            let url = format!("fixture://avatar/me-{key}");
             emit_avatar(shared, &url);
             let _ = shared
                 .events
@@ -7035,7 +7052,11 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
         ClientCommand::GenerateImage { target, prompt } => {
             // The demo "generates" after a short wait: a seeded picture named after the prompt.
             let key = format!("gen-{}", prompt.trim().to_lowercase().replace(' ', "-"));
-            let url = format!("fixture://avatar/{}-{key}", target.id());
+            // My own picture keeps the `me-` prefix `has_custom_avatar` reads.
+            let url = match target {
+                PictureTarget::Me(_) => format!("fixture://avatar/me-{key}"),
+                _ => format!("fixture://avatar/{}-{key}", target.id()),
+            };
             let shared = shared.clone();
             let target = target.clone();
             tokio::spawn(async move {

@@ -372,12 +372,17 @@ pub enum PictureTarget {
     Agent(Id),
     Group(Id),
     Server(Id),
+    /// My own profile picture (the id is my user id; `/me/avatar…` routes).
+    Me(Id),
 }
 
 impl PictureTarget {
     pub fn id(&self) -> &Id {
         match self {
-            PictureTarget::Agent(id) | PictureTarget::Group(id) | PictureTarget::Server(id) => id,
+            PictureTarget::Agent(id)
+            | PictureTarget::Group(id)
+            | PictureTarget::Server(id)
+            | PictureTarget::Me(id) => id,
         }
     }
 }
@@ -675,6 +680,11 @@ pub enum ClientCommand {
     /// avatar everywhere the relay serves me.
     SetMyAvatar {
         path: std::path::PathBuf,
+    },
+    /// My own picture from a key the relay already holds in my `users:{id}` slot (the avatar
+    /// picker's Generate tab): `PUT /me/avatar {image_key}`.
+    SetMyAvatarKey {
+        key: String,
     },
     /// Back to the GitHub picture (`DELETE /me/avatar`).
     RemoveMyAvatar,

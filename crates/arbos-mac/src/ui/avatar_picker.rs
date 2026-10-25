@@ -66,10 +66,17 @@ pub enum Tab {
 }
 
 impl Tab {
-    /// The tabs every target gets — agents, groups and servers alike (Jacob, 2026-10-24: the
-    /// group / server picker had lost Generate); Reset sits beside them in the bar.
-    pub fn for_target(_target: &Target) -> [Tab; 3] {
-        [Tab::Bot, Tab::Generate, Tab::Upload]
+    /// The tabs per target: agents, groups and servers get all three (Jacob, 2026-10-24: the
+    /// group / server picker had lost Generate); my own profile picture has no leaf — people are
+    /// D79 coloured initials — so it gets **Generate | Upload** (Jacob, 2026-10-25). Reset sits
+    /// beside them in the bar for every target.
+    pub fn for_target(target: &Target) -> &'static [Tab] {
+        match target {
+            Target::Agent(_) | Target::Group(_) | Target::Server(_) => {
+                &[Tab::Bot, Tab::Generate, Tab::Upload]
+            }
+            Target::Me(_) => &[Tab::Generate, Tab::Upload],
+        }
     }
 
     fn label(self) -> &'static str {
@@ -104,9 +111,10 @@ pub struct Picker {
 
 impl Picker {
     pub fn new(target: Target) -> Self {
+        let tab = Tab::for_target(&target)[0];
         Picker {
             target,
-            tab: Tab::Bot,
+            tab,
             leaf: None,
             color: None,
             reset: false,
@@ -214,10 +222,36 @@ fn preview(picker: &Picker, project: &Project, state: &AppState, theme: &Theme) 
             );
         }
     }
+    if let Target::Me(_) = &picker.target {
+        // My own picture: the account's (GitHub or uploaded), or the D79 initials after Reset.
+        let person = me_person(state, picker.reset);
+        let image = state.avatar(&person.avatar_url);
+        return frame().child(crate::ui::people::avatar(image, &person, PREVIEW, theme));
+    }
     if picker.reset {
         return avatars::leaf_element(leaf::pick_for(&project.id, None, None), PREVIEW);
     }
     crate::ui::groups::picture(project, state, PREVIEW, theme)
+}
+
+/// Me as a `Person` for the people avatar (initials when `plain` or without a picture).
+fn me_person(state: &AppState, plain: bool) -> crate::model::Person {
+    let account = state.account.as_ref();
+    crate::model::Person {
+        id: account.map(|a| a.id.clone()).unwrap_or_default(),
+        handle: account.map(|a| a.login.clone()).unwrap_or_default(),
+        name: account.map(|a| a.name.clone()),
+        avatar_url: if plain {
+            String::new()
+        } else {
+            account.map(|a| a.avatar_url.clone()).unwrap_or_default()
+        },
+        status: String::new(),
+        role: String::new(),
+        last_seen_at: None,
+        online: false,
+        avatar_color_index: None,
+    }
 }
 
 pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
@@ -244,14 +278,31 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
             },
             None => return div(),
         },
+        // Me: the account dressed the same way (only the preview reads it, see `preview`).
+        Target::Me(_) => match state.account.as_ref() {
+            Some(a) => Project {
+                id: a.id.clone(),
+                name: a.name.clone(),
+                image_url: (!a.avatar_url.is_empty()).then(|| a.avatar_url.clone()),
+                ..Project::default()
+            },
+            None => return div(),
+        },
     };
     let label_muted = match theme.appearance {
         Appearance::Dark => hex(0x9A9A9A),
         Appearance::Light => theme.text_muted,
     };
-    let can_reset = project.avatar_leaf.is_some()
-        || project.avatar_leaf_color.is_some()
-        || project.image_url.is_some();
+    // Reset has something to undo: a leaf / colour / picture on an entity; for me, only an
+    // Arbos-uploaded picture (the GitHub one is already the default).
+    let can_reset = match &picker.target {
+        Target::Me(_) => state.has_custom_avatar(),
+        Target::Agent(_) | Target::Group(_) | Target::Server(_) => {
+            project.avatar_leaf.is_some()
+                || project.avatar_leaf_color.is_some()
+                || project.image_url.is_some()
+        }
+    };
 
     // ----- bar: Bot | Generate | Upload …… Reset ---------------------------------------------
     let mut tabs = div()
@@ -262,7 +313,7 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
         .flex()
         .items_center()
         .gap(px(2.0));
-    for tab in Tab::for_target(&picker.target) {
+    for &tab in Tab::for_target(&picker.target) {
         let selected = picker.tab == tab;
         tabs = tabs.child(
             div()
@@ -270,6 +321,7 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
                     "avatar-tab-{}",
                     tab.label().to_lowercase()
                 ))))
+                .debug_selector(move || format!("avatar-tab-{}", tab.label().to_lowercase()))
                 .h(px(TAB_H))
                 .px(px(11.0))
                 .rounded_full()
@@ -293,6 +345,7 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
     }
     let reset = div()
         .id("avatar-reset")
+        .debug_selector(|| "avatar-reset".into())
         .absolute()
         .right(px(BAR_INSET))
         .top(px((BAR_H - TAB_H) / 2.0))
@@ -440,6 +493,7 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
             );
             let go = div()
                 .id("avatar-generate-go")
+                .debug_selector(|| "avatar-generate-go".into())
                 .absolute()
                 .left_0()
                 .right_0()
@@ -583,6 +637,7 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
     let pill = |id: &'static str, label: &'static str, bg: Hsla, fg: Hsla| {
         div()
             .id(id)
+            .debug_selector(move || id.to_owned())
             .absolute()
             .top(px((FOOTER_H - PILL_H) / 2.0))
             .w(px(pill_w))
@@ -675,10 +730,237 @@ mod tests {
                 [Tab::Bot, Tab::Generate, Tab::Upload],
                 "{target:?}"
             );
+            assert_eq!(Picker::new(target.clone()).tab, Tab::Bot);
             // Reset is live for every target once there is something to reset.
             let mut pk = Picker::new(target);
             pk.reset = true;
             assert!(pk.dirty());
         }
+    }
+
+    /// My own picture (Jacob, 2026-10-25): the same sheet without the leaf tab — Generate is
+    /// the landing tab, Upload beside it, Reset in the bar; Set applies a generated key or a
+    /// file, Reset means back to the GitHub picture.
+    #[test]
+    fn my_profile_gets_generate_upload_and_reset_without_a_leaf_tab() {
+        let target = Target::Me("gh_1".into());
+        assert_eq!(Tab::for_target(&target), [Tab::Generate, Tab::Upload]);
+        let mut pk = Picker::new(target);
+        assert_eq!(pk.tab, Tab::Generate);
+        assert!(!pk.dirty(), "nothing to set until a picture exists");
+        pk.generated = Some(("avatar-gen-1.jpg".into(), "fixture://avatar/me-x".into()));
+        assert!(pk.dirty());
+        pk.tab = Tab::Upload;
+        assert!(!pk.dirty(), "the Upload tab applies only a chosen file");
+        pk.upload = Some(PathBuf::from("/tmp/me.jpg"));
+        assert!(pk.dirty());
+        pk.reset = true;
+        assert!(pk.dirty());
+    }
+}
+
+#[cfg(test)]
+mod me_picker_tests {
+    //! The real `Shell` headless over a real `AppState` with a signed-in account: the my-profile
+    //! pane's picture opens the avatar picker with Generate | Upload and Reset (no leaf tab);
+    //! Generate sends `GenerateImage { Me }`; the relay's answer previews; Set sends
+    //! `SetMyAvatarKey`; Reset + Set sends `RemoveMyAvatar`.
+    use futures::future::BoxFuture;
+    use gpui::{point, Bounds, Entity, Modifiers, Pixels, TestAppContext, VisualTestContext};
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::app::ProfilePage;
+    use crate::model::AccountView;
+    use crate::sync::{ClientCommand, SyncEvent, SyncSource};
+    use crate::ui::motion::PulseClock;
+
+    struct Idle;
+
+    impl SyncSource for Idle {
+        fn name(&self) -> &'static str {
+            "idle"
+        }
+
+        fn run(
+            self: Box<Self>,
+            _events: mpsc::UnboundedSender<SyncEvent>,
+            _commands: mpsc::UnboundedReceiver<ClientCommand>,
+        ) -> BoxFuture<'static, anyhow::Result<()>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    fn account(avatar_url: &str) -> AccountView {
+        AccountView {
+            id: "gh_1".into(),
+            login: "unarbos".into(),
+            name: "Arbos".into(),
+            avatar_url: avatar_url.into(),
+            device_name: "Test".into(),
+            balance_usd: 1.0,
+            spent_today_usd: 0.0,
+            daily_cap_usd: None,
+        }
+    }
+
+    fn mount<'a>(
+        cx: &'a mut TestAppContext,
+        avatar_url: &str,
+    ) -> (
+        tokio::runtime::Runtime,
+        Entity<AppState>,
+        Entity<Shell>,
+        &'a mut VisualTestContext,
+    ) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio");
+        let handle = rt.handle().clone();
+        cx.update(|cx| {
+            gpui_tokio::init_from_handle(cx, handle);
+            cx.set_global(Theme::dark(crate::ui::theme::Surface::Matte));
+            if !cx.has_global::<PulseClock>() {
+                PulseClock::init(cx);
+            }
+        });
+        let state = cx.new(|cx| AppState::new(Box::new(Idle), cx));
+        let me = account(avatar_url);
+        state.update(cx, |s, cx| {
+            s.apply(SyncEvent::Account(Some(me)), cx);
+            s.open_profile(ProfilePage::Me, cx);
+        });
+        let (shell, vcx) = cx.add_window_view(|window, cx| Shell::new(state.clone(), window, cx));
+        vcx.run_until_parked();
+        (rt, state, shell, vcx)
+    }
+
+    fn settle(shell: &Entity<Shell>, vcx: &mut VisualTestContext) {
+        for _ in 0..3 {
+            shell.update(vcx, |_, cx| cx.notify());
+            vcx.run_until_parked();
+        }
+    }
+
+    fn centre(b: Bounds<Pixels>) -> gpui::Point<Pixels> {
+        point(b.left() + b.size.width / 2.0, b.top() + b.size.height / 2.0)
+    }
+
+    fn click(vcx: &mut VisualTestContext, shell: &Entity<Shell>, id: &'static str) {
+        let b = vcx
+            .debug_bounds(id)
+            .unwrap_or_else(|| panic!("{id} is on screen"));
+        vcx.simulate_click(centre(b), Modifiers::default());
+        settle(shell, vcx);
+    }
+
+    #[gpui::test]
+    fn my_picture_opens_the_picker_and_generate_then_set_sends_the_key(cx: &mut TestAppContext) {
+        let (_rt, state, shell, vcx) = mount(cx, "");
+        let mut commands = state.update(vcx, |s, _| s.take_command_channel());
+        settle(&shell, vcx);
+        assert!(
+            vcx.debug_bounds("avatar-set").is_none(),
+            "no sheet before the click"
+        );
+
+        // The hero picture on my pane → the picker, landing on Generate, no Bot tab.
+        click(vcx, &shell, "me-avatar");
+        let picker = shell.read_with(&*vcx, |sh, _| sh.avatar_picker.clone());
+        let picker = picker.expect("the picker opened");
+        assert_eq!(picker.target, Target::Me("gh_1".into()));
+        assert_eq!(picker.tab, Tab::Generate);
+        assert!(vcx.debug_bounds("avatar-tab-generate").is_some());
+        assert!(vcx.debug_bounds("avatar-tab-upload").is_some());
+        assert!(
+            vcx.debug_bounds("avatar-tab-bot").is_none(),
+            "people have no leaf"
+        );
+        assert!(vcx.debug_bounds("avatar-reset").is_some());
+        assert!(vcx.debug_bounds("avatar-generate-go").is_some());
+        assert!(vcx.debug_bounds("avatar-cancel").is_some());
+        let sheet_w = vcx.debug_bounds("avatar-set").expect("footer").size.width;
+        assert!(f32::from(sheet_w) > 100.0);
+
+        // A prompt, Generate → `GenerateImage { Me, prompt }`; the sheet says it is painting.
+        shell.update(vcx, |sh, cx| {
+            sh.avatar_prompt_input
+                .update(cx, |input, cx| input.set_text("a fox reading".into(), cx));
+        });
+        click(vcx, &shell, "avatar-generate-go");
+        match commands.try_recv() {
+            Ok(ClientCommand::GenerateImage { target, prompt }) => {
+                assert_eq!(target, Target::Me("gh_1".into()));
+                assert_eq!(prompt, "a fox reading");
+            }
+            other => panic!("expected GenerateImage, got {other:?}"),
+        }
+        assert!(shell.read_with(&*vcx, |sh, _| sh
+            .avatar_picker
+            .as_ref()
+            .is_some_and(|pk| pk.generating)));
+
+        // The relay's answer lands in the preview; Set → `SetMyAvatarKey { key }`, sheet gone.
+        state.update(vcx, |s, cx| {
+            s.apply(
+                SyncEvent::ImageGenerated {
+                    target: Target::Me("gh_1".into()),
+                    image_key: Some("avatar-gen-01.jpg".into()),
+                    url: Some("https://relay.test/blob/users:gh_1/avatar-gen-01.jpg".into()),
+                    error: None,
+                },
+                cx,
+            )
+        });
+        settle(&shell, vcx);
+        let picker = shell.read_with(&*vcx, |sh, _| sh.avatar_picker.clone());
+        let picker = picker.expect("still open");
+        assert!(!picker.generating);
+        assert_eq!(
+            picker.generated.as_ref().map(|(k, _)| k.as_str()),
+            Some("avatar-gen-01.jpg")
+        );
+        assert!(picker.dirty());
+        click(vcx, &shell, "avatar-set");
+        // The preview's own `FetchAvatar` precedes Set on the channel.
+        let set = std::iter::from_fn(|| commands.try_recv().ok())
+            .find(|c| !matches!(c, ClientCommand::FetchAvatar { .. }));
+        match set {
+            Some(ClientCommand::SetMyAvatarKey { key }) => assert_eq!(key, "avatar-gen-01.jpg"),
+            other => panic!("expected SetMyAvatarKey, got {other:?}"),
+        }
+        assert!(
+            shell.read_with(&*vcx, |sh, _| sh.avatar_picker.is_none()),
+            "Set closes the sheet"
+        );
+        assert!(vcx.debug_bounds("avatar-set").is_none());
+    }
+
+    #[gpui::test]
+    fn reset_on_an_uploaded_picture_goes_back_to_github(cx: &mut TestAppContext) {
+        let (_rt, state, shell, vcx) = mount(cx, "https://relay.test/avatars/gh_1.jpg?v=1");
+        let mut commands = state.update(vcx, |s, _| s.take_command_channel());
+        settle(&shell, vcx);
+        click(vcx, &shell, "me-avatar");
+        assert!(shell.read_with(&*vcx, |sh, _| sh.avatar_picker.is_some()));
+        // Reset is live (an Arbos picture is set), then Set → `RemoveMyAvatar`.
+        click(vcx, &shell, "avatar-reset");
+        assert!(shell.read_with(&*vcx, |sh, _| sh
+            .avatar_picker
+            .as_ref()
+            .is_some_and(|pk| pk.reset && pk.dirty())));
+        click(vcx, &shell, "avatar-set");
+        match commands.try_recv() {
+            Ok(ClientCommand::RemoveMyAvatar) => {}
+            other => panic!("expected RemoveMyAvatar, got {other:?}"),
+        }
+        assert!(shell.read_with(&*vcx, |sh, _| sh.avatar_picker.is_none()));
+
+        // Cancel closes without a command.
+        click(vcx, &shell, "me-avatar");
+        click(vcx, &shell, "avatar-cancel");
+        assert!(shell.read_with(&*vcx, |sh, _| sh.avatar_picker.is_none()));
+        assert!(commands.try_recv().is_err(), "Cancel sends nothing");
     }
 }

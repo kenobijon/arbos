@@ -3519,12 +3519,45 @@ fn picture_url(shared: &Shared, target: &PictureTarget, key: Option<&str>) -> Op
         PictureTarget::Agent(id) => id.clone(),
         PictureTarget::Group(id) => format!("people:{id}"),
         PictureTarget::Server(id) => format!("servers:{id}"),
+        PictureTarget::Me(id) => format!("users:{id}"),
     };
     Some(format!(
         "{}/blob/{slot}/{key}?token={}",
         shared.http_url,
         shared.token()
     ))
+}
+
+/// The answer to `PUT /me/avatar` (a JPEG body or `{image_key}`): the new `user` lands in the
+/// store and `/me` is re-read so every surface shows the picture; a failure is a notice.
+async fn my_avatar_saved(shared: &Arc<Shared>, put: Result<reqwest::Response, reqwest::Error>) {
+    match put {
+        Ok(r) if r.status().is_success() => {
+            if let Ok(body) = r.json::<Value>().await {
+                if let Ok(dto) = serde_json::from_value::<MeUserResponseDto>(body) {
+                    let u: credentials::AccountUser = (&dto.user).into();
+                    shared.with_store(|s| s.put_json(store::KEY_ACCOUNT, &u));
+                    *shared.me.lock().unwrap() = Some(u);
+                }
+            }
+            refresh_me(shared).await;
+        }
+        Ok(r) => {
+            let status = r.status();
+            let detail = r
+                .json::<Value>()
+                .await
+                .ok()
+                .and_then(|v| {
+                    v.pointer("/error/message")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .unwrap_or_else(|| format!("HTTP {status}"));
+            shared.notice(format!("Picture not saved: {detail}"));
+        }
+        Err(err) => shared.notice(format!("Picture not saved: {err}")),
+    }
 }
 
 /// A server's `image_key` → `image_url` on every `ServerInfo` the relay client hands out.
@@ -5658,6 +5691,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     PictureTarget::Agent(id) => format!("/projects/{id}/avatar/generate"),
                     PictureTarget::Group(id) => format!("/chats/{id}/avatar/generate"),
                     PictureTarget::Server(id) => format!("/servers/{id}/avatar/generate"),
+                    PictureTarget::Me(_) => "/me/avatar/generate".to_owned(),
                 };
                 let result = shared.post_json(&path, json!({ "prompt": prompt })).await;
                 let event = match result {
@@ -5820,20 +5854,20 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .body(jpeg)
                     .send()
                     .await;
-                match put {
-                    Ok(r) if r.status().is_success() => {
-                        if let Ok(body) = r.json::<Value>().await {
-                            if let Ok(dto) = serde_json::from_value::<MeUserResponseDto>(body) {
-                                let u: credentials::AccountUser = (&dto.user).into();
-                                shared.with_store(|s| s.put_json(store::KEY_ACCOUNT, &u));
-                                *shared.me.lock().unwrap() = Some(u);
-                            }
-                        }
-                        refresh_me(&shared).await;
-                    }
-                    Ok(r) => shared.notice(format!("Picture not saved: HTTP {}", r.status())),
-                    Err(err) => shared.notice(format!("Picture not saved: {err}")),
-                }
+                my_avatar_saved(&shared, put).await;
+            });
+        }
+        ClientCommand::SetMyAvatarKey { key } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let put = shared
+                    .http
+                    .put(format!("{}/me/avatar", shared.http_url))
+                    .bearer_auth(shared.token())
+                    .json(&json!({ "image_key": key }))
+                    .send()
+                    .await;
+                my_avatar_saved(&shared, put).await;
             });
         }
         ClientCommand::RemoveMyAvatar => {

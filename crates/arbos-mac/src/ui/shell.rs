@@ -1525,6 +1525,27 @@ impl Shell {
                     }
                 }
             }
+            // My own picture: Reset is the GitHub picture again (`DELETE /me/avatar`); a file
+            // goes up as today's `PUT /me/avatar`; a generated preview is set by its key.
+            avatar_picker::Target::Me(_) => {
+                if pk.reset {
+                    s.remove_my_avatar(cx);
+                } else {
+                    match pk.tab {
+                        avatar_picker::Tab::Upload => {
+                            if let Some(path) = pk.upload {
+                                s.set_my_avatar(path, cx);
+                            }
+                        }
+                        avatar_picker::Tab::Generate => {
+                            if let Some((key, _)) = pk.generated {
+                                s.set_my_avatar_key(key, cx);
+                            }
+                        }
+                        avatar_picker::Tab::Bot => {}
+                    }
+                }
+            }
         });
         cx.notify();
     }
@@ -1888,20 +1909,13 @@ impl Shell {
         cx.notify();
     }
 
-    /// The crayon on my own picture: pick an image (images only in the panel),
-    /// `PUT /me/avatar`.
+    /// The crayon on my own picture: the agents' avatar picker (Generate | Upload, Reset) for
+    /// my profile picture (Jacob, 2026-10-25); Set sends `PUT /me/avatar`.
     pub(crate) fn pick_my_avatar(&mut self, cx: &mut Context<Self>) {
-        let rx = image_picker::pick_image(cx, "Choose");
-        let state = self.state.clone();
-        cx.spawn(async move |_, cx| {
-            let Ok(Some(path)) = rx.await else {
-                return;
-            };
-            cx.update(|cx| {
-                state.update(cx, |s, cx| s.set_my_avatar(path, cx));
-            });
-        })
-        .detach();
+        let Some(me) = self.state.read(cx).account.as_ref().map(|a| a.id.clone()) else {
+            return;
+        };
+        self.open_avatar_picker(avatar_picker::Target::Me(me), cx);
     }
 
     /// Close the profile page (back button, click outside); the composer takes

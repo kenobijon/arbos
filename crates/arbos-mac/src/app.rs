@@ -2003,8 +2003,23 @@ impl AppState {
                                     self.rig_unblock = Some(person);
                                 }
                             }
-                        } else if spec == "me" {
+                        } else if let Some(rest) = spec.strip_prefix("me") {
                             self.open_profile(ProfilePage::Me, cx);
+                            // `me:avatar[:generate|:upload]` — the avatar picker for my own
+                            // picture (Generate | Upload, Reset).
+                            if let Some(tab) = rest.strip_prefix(":avatar") {
+                                use crate::ui::avatar_picker::{Tab, Target};
+                                let tab = match tab {
+                                    ":upload" => Tab::Upload,
+                                    _ => Tab::Generate,
+                                };
+                                let me = self
+                                    .account
+                                    .as_ref()
+                                    .map(|a| a.id.clone())
+                                    .unwrap_or_default();
+                                self.open_avatar_picker(Target::Me(me), tab, cx);
+                            }
                         }
                     } else if std::env::var_os("ARBOS_OPEN_SETTINGS").is_some() {
                         self.open_profile(ProfilePage::Me, cx);
@@ -5626,6 +5641,12 @@ impl AppState {
     /// A picked file becomes my picture everywhere (`PUT /me/avatar`).
     pub fn set_my_avatar(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
         self.command(ClientCommand::SetMyAvatar { path });
+        cx.notify();
+    }
+
+    /// The avatar picker's generated preview becomes my picture (`PUT /me/avatar {image_key}`).
+    pub fn set_my_avatar_key(&mut self, key: String, cx: &mut Context<Self>) {
+        self.command(ClientCommand::SetMyAvatarKey { key });
         cx.notify();
     }
 
