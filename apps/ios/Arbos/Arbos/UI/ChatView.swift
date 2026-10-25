@@ -527,7 +527,12 @@ private struct ChatSession: View {
         let list = messages
         #if DEBUG
         let refreshStarted = Date()
-        defer { PerfCounters.time("rows()", ms: Date().timeIntervalSince(refreshStarted) * 1000) }
+        defer {
+            PerfCounters.time("rows()", ms: Date().timeIntervalSince(refreshStarted) * 1000)
+            if SendTrace.traces(chatId) {
+                SendTrace.markIfPresent("rows-has-row", ids: rows.map(\.messageId), detail: "rows=\(rows.count) window=\(windowCount) skipEnd=\(windowSkipEnd)")
+            }
+        }
         #endif
         let me = isChannel ? model.channelMe : model.myUserId
         // Sender names inside the bubbles: groups and channels only — never a 1:1 chat.
@@ -2567,6 +2572,9 @@ private struct ChatSession: View {
     private func send() {
         let text = composerDraft.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !pending.isEmpty else { return }
+        #if DEBUG
+        SendTrace.begin(chatId: chatId, rows: rows.count, caughtUp: model.caughtUp.contains(chatId))
+        #endif
         Haptics.send()
         // A send means follow the reply: re-pin even if the reader had scrolled up.
         pinnedToBottom = true
@@ -2980,6 +2988,11 @@ private struct TranscriptRows: View, Equatable {
                 .padding(.top, row.id == firstId ? 0 : row.gapBefore)
                 .id(row.id)
                 .onAppear {
+                    #if DEBUG
+                    if SendTrace.traces(chatId) {
+                        SendTrace.markIfPresent("row-in-tree", ids: [row.messageId], detail: "row=\(row.id)")
+                    }
+                    #endif
                     // Once per open — not on every row (group chats fire this dozens of times).
                     if row.id == firstId {
                         LaunchClock.mark("chat-first-row", detail: "shown=\(shown.count) rows=\(rowsCount) messages=\(messagesCount)")
@@ -3061,6 +3074,12 @@ private struct AwayFromBottomReporter: ViewModifier {
                 )
             } action: { old, new in
                 let grew = new.height > old.height + 0.5
+                #if DEBUG
+                if SendTrace.recent {
+                    SendTrace.mark("scroll-geometry", detail: "grew=\(grew) distance=\(Int(new.distance)) pinned=\(pinned)", once: false)
+                    if new.distance < 2 { SendTrace.mark("at-bottom", detail: "distance=\(Int(new.distance))") }
+                }
+                #endif
                 if grew {
                     if pinned {
                         away = false
