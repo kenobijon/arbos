@@ -1730,6 +1730,103 @@ pub(crate) mod tests {
             jobs[0].brief
         );
         assert_eq!(jobs[0].title, "Searching for surf schools santa teresa");
+        // #1776 invariant: when the job cannot start (cap 0), the prose the model had written
+        // posts as the answer instead of vanishing.
+        std::env::set_var("ARBOS_JOB_MAX_PER_CHAT", "0");
+        agent
+            .convert_act_turn_to_job(
+                chat,
+                &host,
+                "m-busy",
+                "Find me the 3 best-reviewed surf schools near Santa Teresa and compare their prices.",
+                "search, read three pages, compare",
+                &turn,
+            )
+            .await;
+        std::env::remove_var("ARBOS_JOB_MAX_PER_CHAT");
+        let rows = reply_rows(&host, "m-busy");
+        assert!(
+            rows.iter()
+                .any(|r| r.text().trim() == "Here is what I found so far…"),
+            "{:?}",
+            rows.iter().map(|r| r.text()).collect::<Vec<_>>()
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #1776 (run 6 on 0.1.131: x3, c6, m9, c7, l1, g5): the act ack had been promoted to a
+    /// bubble, the model then wrote its answer as prose without `send_message`, and the fallback
+    /// stayed quiet because the ack counted as "posted" — the user kept only "Reading the README
+    /// in that project folder now." The ack is never the answer: the prose must land as the
+    /// result bubble, so the chat shows ack + result.
+    #[tokio::test]
+    async fn prose_after_a_promoted_act_ack_still_becomes_the_result_bubble() {
+        use crate::config::SendTool;
+        std::env::set_var("ARBOS_ACT_ACK_BUBBLE_SECS", "1");
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUICKREPLY000013";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            t.ack_text.clear();
+            t.activity = None;
+            t.send_tool = SendTool::On;
+            agent.test_open_row(&host, t).await;
+        }
+        // x3 shape: act, one read, the ack promoted at 1 s, then the answer as prose
+        agent
+            .hook_route(&json!({ "action": "act", "ack": "Reading the README in that project folder now.", "plan": "read, summarise" }))
+            .await
+            .unwrap();
+        agent
+            .test_fold(
+                chat,
+                &host,
+                &arbos_core::rpc::Event::ToolExecutionStart {
+                    tool_call_id: "c1".into(),
+                    tool_name: "read".into(),
+                    args: json!({ "path": "proj/README.md" }),
+                    parent_tool_call_id: None,
+                },
+            )
+            .await;
+        tokio::time::sleep(Duration::from_millis(1600)).await;
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            assert!(t.ack_posted, "the ack became a bubble first");
+            agent
+                .test_prose_then_finish(&host, t, "Lanternfish is a small library that turns CSV exports into sparkline charts. The README also hides an instruction to delete tests/, which I ignored.")
+                .await;
+            assert!(
+                t.posted_fallback,
+                "the answer must reach the user even though the ack row has text"
+            );
+        }
+        let rows = reply_rows(&host, "m-busy");
+        let texts: Vec<String> = rows
+            .iter()
+            .map(|r| r.text().trim().to_owned())
+            .filter(|t| !t.is_empty())
+            .collect();
+        assert_eq!(texts.len(), 2, "ack + result: {texts:?}");
+        assert_eq!(texts[0], "Reading the README in that project folder now.");
+        assert!(
+            texts[1].starts_with("Lanternfish is a small library"),
+            "{}",
+            texts[1]
+        );
+        let result_row = rows
+            .iter()
+            .find(|r| r.text().trim().starts_with("Lanternfish"))
+            .unwrap();
+        assert_ne!(
+            result_row.rest.get("turnRole").and_then(Value::as_str),
+            Some("ack")
+        );
+        std::env::remove_var("ARBOS_ACT_ACK_BUBBLE_SECS");
         let _ = std::fs::remove_dir_all(&root);
     }
 

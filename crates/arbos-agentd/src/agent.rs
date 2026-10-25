@@ -5037,7 +5037,7 @@ impl Agent {
         if t.stopped
             || t.ack_posted
             || !matches!(t.route, Some(ValidRoute::Act { .. }))
-            || Self::posted_anything(t)
+            || Self::posted_result(t)
         {
             return false;
         }
@@ -5106,13 +5106,11 @@ impl Agent {
         if !long_work {
             return false;
         }
-        // The result must not come from this turn any more: whatever the model had staged is
-        // notes; the job delivers the answer under the ask.
+        // The job delivers the answer under the ask; whatever the model had staged stays with
+        // the turn as the safety net (#1776: prose must reach the user) — posted only if the
+        // job cannot start.
         t.act_to_job = true;
         t.escalate = false;
-        t.unposted_text.clear();
-        t.act_buffer.clear();
-        let _ = t.prose.flush();
         self.promote_act_ack(host, t).await;
         tracing::info!(
             chat_id = %t.chat_id,
@@ -5163,7 +5161,16 @@ impl Agent {
                 tracing::info!(chat_id, job = %v["job_id"], kind, %title, "converted act turn runs on as a job")
             }
             Err(e) => {
+                // No job: the user must still get words. The prose the model had written when
+                // the turn was cut is the best answer there is; else one plain line.
                 tracing::warn!(chat_id, error = %e, "act→job conversion could not start the job");
+                let kept = ProseFilter::clean_prose(turn.unposted_text.trim());
+                let line = if kept.trim().is_empty() {
+                    "I couldn't finish that one in the background. Ask me again in a moment."
+                        .to_owned()
+                } else {
+                    kept
+                };
                 let h = host.lock().await;
                 let id = ulid();
                 h.doc
@@ -5171,12 +5178,12 @@ impl Agent {
                 if let Some(attr) = self.people_reply_fields(chat_id) {
                     h.doc.set_message_fields(&id, &attr.fields);
                 }
+                if self.reply_to_wanted_for(&h.doc, chat_id, user_msg_id) {
+                    h.doc
+                        .set_message_fields(&id, &[("replyTo", json!(user_msg_id))]);
+                }
                 if let Some(p) = h.doc.add_text_part(&id, "text") {
-                    h.doc.append_text(
-                        &id,
-                        &p,
-                        "I couldn't finish that one in the background. Ask me again in a moment.",
-                    );
+                    h.doc.append_text(&id, &p, &line);
                 }
                 h.doc.finish_message(&id, MessageStatus::Done);
             }
@@ -5554,11 +5561,12 @@ impl Agent {
         tracing::info!(chat_id = %t.chat_id, chars = cleaned.chars().count(), "prose outside send_message kept out of the chat");
     }
 
-    /// Did this turn put any words in front of the user (a bubble, an ack, a progress note)?
-    fn posted_anything(t: &TurnState) -> bool {
-        !t.streamed_text.trim().is_empty()
-            || t.ack_posted
-            || t.progress_texts.iter().any(|p| !p.trim().is_empty())
+    /// Did this turn put an *answer* in front of the user — a `send_message` bubble or a posted
+    /// `route.reply`? The ack is not the answer: on 0.1.131 an act ack promoted to a bubble
+    /// counted as "posted", the fallback stayed quiet, and the user kept only "Reading the
+    /// README … now." (#1776, six eval failures; the same shape as #1355 / #1699).
+    fn posted_result(t: &TurnState) -> bool {
+        !t.streamed_text.trim().is_empty() || t.progress_texts.iter().any(|p| !p.trim().is_empty())
     }
 
     /// Turn end, send tool `On`: a turn that posted nothing, started no background work and
@@ -5569,7 +5577,7 @@ impl Agent {
         {
             return;
         }
-        if Self::posted_anything(t) || t.unposted_text.trim().is_empty() {
+        if Self::posted_result(t) || t.unposted_text.trim().is_empty() {
             return;
         }
         if matches!(
@@ -5683,8 +5691,7 @@ impl Agent {
                 // (#1373: deciding here wrote the reply twice).
                 if let Some(ValidRoute::Reply { reply: Some(text) }) = &t.route {
                     let text = text.trim().to_owned();
-                    let answered =
-                        t.route_correcting && (t.has_prose() || Self::posted_anything(t));
+                    let answered = t.route_correcting && (t.has_prose() || Self::posted_result(t));
                     if !text.is_empty() && !answered {
                         if t.send_tool == crate::config::SendTool::Off {
                             t.route_reply_text = Some(text);
