@@ -1666,6 +1666,39 @@ private struct ChatSession: View {
             try? await Task.sleep(for: .seconds(2))
             PerfLog.mark("phase scroll end", ms: 0)
         }
+        if drive.contains("jump") {
+            // Deep into history (the window has slid past its cap, or the top is
+            // reached), then the ↓ button's own action; "stable" = at the bottom
+            // and the scroll geometry quiet for 250 ms. Bubble bodies built on the
+            // way come out of the counters (`rowBody`).
+            var hops = 0
+            while hops < 80 {
+                let shown = windowedRows
+                guard let proxy = scroller, let topId = shown.first?.id else { break }
+                let target = shown[max(0, shown.count - 1 - (hops + 1) * 12)].id
+                withAnimation(.easeInOut(duration: 0.35)) { proxy.scrollTo(target, anchor: .top) }
+                try? await Task.sleep(for: .milliseconds(500))
+                hops += 1
+                if windowSkipEnd >= 300 || (target == topId && windowCount + windowSkipEnd >= visibleRows.count) { break }
+            }
+            try? await Task.sleep(for: .milliseconds(1500))
+            _ = PerfCounters.drain()
+            PerfLog.mark("jump tap skipEnd=\(windowSkipEnd) window=\(windowCount) rows=\(rows.count) away=\(awayFromBottom)", ms: 0)
+            let t0 = Date()
+            PerfDriveProbe.lastScrollGeometry = t0
+            jumpToLatest()
+            var stableAt: Date?
+            for _ in 0..<400 {
+                try? await Task.sleep(for: .milliseconds(16))
+                let last = PerfDriveProbe.lastScrollGeometry
+                if !awayFromBottom, Date().timeIntervalSince(last) >= 0.25 {
+                    stableAt = last
+                    break
+                }
+            }
+            let ms = (stableAt ?? Date()).timeIntervalSince(t0) * 1000
+            PerfLog.mark("jump stable\(stableAt == nil ? " (timeout)" : "") skipEnd=\(windowSkipEnd) window=\(windowCount) \(PerfCounters.drain())", ms: ms)
+        }
         if drive.contains("type") {
             PerfLog.mark("phase type begin", ms: 0)
             composerFocused = true
@@ -3094,6 +3127,7 @@ private struct AwayFromBottomReporter: ViewModifier {
             } action: { old, new in
                 let grew = new.height > old.height + 0.5
                 #if DEBUG
+                PerfDriveProbe.lastScrollGeometry = Date()
                 if SendTrace.recent {
                     SendTrace.mark("scroll-geometry", detail: "grew=\(grew) distance=\(Int(new.distance)) pinned=\(pinned)", once: false)
                     // The "bottom" spacer and padding sit ~60 pt under the last bubble.
