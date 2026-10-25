@@ -186,9 +186,22 @@ struct GlobalSearchRow: View {
         case .peopleChat(let id):
             if let c = model.peopleChat(id) {
                 if c.isGroup {
-                    AvatarCluster(members: [], size: PaneKit.avatar,
-                                  imageUrl: c.imageKey.flatMap { model.blobURL(projectId: "\(peopleSlot):\(c.id)", key: $0)?.absoluteString },
-                                  leaf: c.leafPick, neutralName: c.isNeutralAvatar ? c.title : nil)
+                    // The home row's group picture, at the pane's 36 pt (`PeopleRow`).
+                    if let key = c.imageKey, !key.isEmpty,
+                       let url = model.blobURL(projectId: "\(peopleSlot):\(c.id)", key: key)?.absoluteString {
+                        AvatarCluster(members: [], size: PaneKit.avatar, imageUrl: url)
+                    } else if c.isNeutralAvatar {
+                        NeutralAvatar(name: c.title, size: PaneKit.avatar)
+                    } else if let leaf = c.leafPick, LeafAvatarsFlag.shared.on {
+                        LeafAvatar(pick: leaf, size: PaneKit.avatar)
+                    } else {
+                        ZStack {
+                            Circle().fill(theme.card)
+                            Image(systemName: "person.2.fill")
+                                .font(theme.font(14, weight: .medium))
+                                .foregroundStyle(theme.accent)
+                        }
+                    }
                 } else {
                     let other = c.counterpart(me: model.user?.id)
                     PersonAvatar(url: other?.avatarUrl, handle: other?.handle ?? "?", size: PaneKit.avatar, name: other?.name, id: other?.id, colorIndex: other?.avatarColorIndex)
