@@ -2178,6 +2178,10 @@ impl Transcript {
                                     self.failed_retry(&row.id, &row.message_id, &theme, cx)
                                         .mr(px(8.0))
                                 }))
+                                .children(
+                                    (delivery == Delivery::Pending)
+                                        .then(|| pending_glyph(&theme).mr(px(8.0))),
+                                )
                                 .child(own_bubble(bubble, delivery))
                         })
                         .into_any_element()
@@ -2974,6 +2978,19 @@ fn hover_time(time: Option<String>, opacity: f32, theme: &Theme) -> Option<Div> 
 /// content-sized shrinks that cap (v0.6.223 wrapped own bubbles a word early).
 fn own_bubble<E: Styled>(bubble: E, delivery: Delivery) -> E {
     bubble.opacity(delivery.opacity())
+}
+
+/// The small clock beside a bubble the relay has not ACKed yet (with the
+/// 0.5 opacity): "on its way", never "not sent".
+fn pending_glyph(theme: &Theme) -> Div {
+    div()
+        .flex_shrink_0()
+        .size(px(RAIL_GLYPH))
+        .flex()
+        .items_center()
+        .justify_center()
+        .debug_selector(|| "own-bubble-pending-glyph".into())
+        .child(icon("hourglass", 12.0, theme.text_muted))
 }
 
 /// The mark beside a bubble the relay refused: red glyph + "Retry", always
@@ -7511,6 +7528,10 @@ mod delivery_tests {
                                     (d == Delivery::Failed)
                                         .then(|| failed_glyph(&theme).mr(px(8.0))),
                                 )
+                                .children(
+                                    (d == Delivery::Pending)
+                                        .then(|| pending_glyph(&theme).mr(px(8.0))),
+                                )
                                 .child(own_bubble(bubble("fish?", d), d))
                         }),
                 )
@@ -7542,6 +7563,16 @@ mod delivery_tests {
         assert!(
             f32::from(glyph.origin.x + glyph.size.width) <= f32::from(failed.origin.x),
             "the mark sits outside the bubble, on its outer edge"
+        );
+        let clock = vcx
+            .debug_bounds("own-bubble-pending-glyph")
+            .expect("clock beside the pending bubble");
+        let pending = vcx
+            .debug_bounds("own-bubble-pending")
+            .expect("pending bubble");
+        assert!(
+            f32::from(clock.origin.x + clock.size.width) <= f32::from(pending.origin.x),
+            "the clock sits outside the pending bubble"
         );
     }
 }

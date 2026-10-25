@@ -1056,6 +1056,12 @@ struct RowView: View, Equatable {
                     .buttonStyle(.plain)
                     .accessibilityLabel("Not sent. Retry")
                 }
+                if delivery == .pending {
+                    Image(systemName: "clock")
+                        .font(.system(size: 12))
+                        .foregroundStyle(theme.muted)
+                        .accessibilityLabel("Sending")
+                }
                 VStack(alignment: .leading, spacing: 6) {
                     if let quote {
                         quoteHeader(quote, color: theme.userText)
