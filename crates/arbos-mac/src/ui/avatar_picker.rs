@@ -585,6 +585,7 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
                 avatar_leaf: s.avatar_leaf,
                 avatar_leaf_color: s.avatar_leaf_color,
                 image_url: s.image_url.clone(),
+                avatar_version: 0,
                 ..Project::default()
             },
             None => return div(),
@@ -597,6 +598,7 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
                 id: a.id.clone(),
                 name: a.name.clone(),
                 image_url: (!a.avatar_url.is_empty()).then(|| a.avatar_url.clone()),
+                avatar_version: 0,
                 ..Project::default()
             },
             None => return div(),
