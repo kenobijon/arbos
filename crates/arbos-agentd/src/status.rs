@@ -1608,6 +1608,131 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Duplex step 4: an act turn that has run a web tool and is still going at the threshold
+    /// posts its ack and is marked for conversion; the kill switch keeps the old behaviour; a
+    /// quick local act (no web tool, few calls) is never converted; the converted turn's
+    /// remainder becomes a `research` job whose brief carries the request, plan and transcript.
+    #[tokio::test]
+    async fn long_web_act_turn_converts_to_a_job() {
+        use crate::config::SendTool;
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUICKREPLY000012";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            t.ack_text.clear();
+            t.activity = None;
+            t.send_tool = SendTool::On;
+            t.act_transcript.clear();
+            agent.test_open_row(&host, t).await;
+        }
+        agent
+            .hook_route(&json!({ "action": "act", "ack": "Looking up the top-rated surf schools around Santa Teresa now.", "plan": "search, read three pages, compare" }))
+            .await
+            .unwrap();
+        // quick local act: one read, 3 s in → not converted
+        agent
+            .test_fold(
+                chat,
+                &host,
+                &arbos_core::rpc::Event::ToolExecutionStart {
+                    tool_call_id: "c1".into(),
+                    tool_name: "read".into(),
+                    args: json!({ "path": "notes.md" }),
+                    parent_tool_call_id: None,
+                },
+            )
+            .await;
+        assert!(
+            !agent
+                .maybe_convert_act_to_job(&host, Duration::from_secs(3))
+                .await
+        );
+        assert!(
+            !agent
+                .maybe_convert_act_to_job(&host, Duration::from_secs(9))
+                .await,
+            "one read is not long work"
+        );
+        // a web tool runs → research; at 9 s the turn converts, the ack is the first bubble
+        agent
+            .test_fold(
+                chat,
+                &host,
+                &arbos_core::rpc::Event::ToolExecutionStart {
+                    tool_call_id: "c2".into(),
+                    tool_name: "mcp__arbos__web_search".into(),
+                    args: json!({ "query": "surf schools santa teresa" }),
+                    parent_tool_call_id: None,
+                },
+            )
+            .await;
+        std::env::set_var("ARBOS_ACT_TO_JOB", "off");
+        assert!(
+            !agent
+                .maybe_convert_act_to_job(&host, Duration::from_secs(9))
+                .await,
+            "kill switch"
+        );
+        std::env::remove_var("ARBOS_ACT_TO_JOB");
+        assert!(
+            !agent
+                .maybe_convert_act_to_job(&host, Duration::from_secs(5))
+                .await,
+            "not yet at the threshold"
+        );
+        assert!(
+            agent
+                .maybe_convert_act_to_job(&host, Duration::from_secs(9))
+                .await
+        );
+        assert!(
+            !agent
+                .maybe_convert_act_to_job(&host, Duration::from_secs(12))
+                .await,
+            "converts once"
+        );
+        let rows = reply_rows(&host, "m-busy");
+        let acks: Vec<_> = rows
+            .iter()
+            .filter(|r| {
+                r.text().trim() == "Looking up the top-rated surf schools around Santa Teresa now."
+            })
+            .collect();
+        assert_eq!(acks.len(), 1, "the ack is the first bubble");
+        let turn = {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            assert!(t.act_to_job && t.ack_posted && t.web_tool_used);
+            // leftover prose after the cut is notes, never a bubble
+            agent
+                .test_prose_then_finish(&host, t, "Here is what I found so far…")
+                .await;
+            assert!(!t.posted_fallback);
+            tl.take().unwrap()
+        };
+        drop(_busy);
+        agent
+            .convert_act_turn_to_job(chat, &host, "m-busy", "Find me the 3 best-reviewed surf schools near Santa Teresa and compare their prices.", "search, read three pages, compare", &turn)
+            .await;
+        let jobs = agent.store.jobs_for_chat(chat).unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].kind, "research");
+        assert_eq!(jobs[0].ask_message_id, "m-busy");
+        assert!(jobs[0]
+            .brief
+            .contains("Find me the 3 best-reviewed surf schools"));
+        assert!(
+            jobs[0].brief.contains("→ mcp__arbos__web_search"),
+            "{}",
+            jobs[0].brief
+        );
+        assert_eq!(jobs[0].title, "Searching for surf schools santa teresa");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// The send-tool switch: default on, `off` restores streamed prose, `strict` drops the fallback.
     #[test]
     fn send_tool_switch_parses() {
