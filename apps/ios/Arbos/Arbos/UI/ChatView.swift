@@ -116,7 +116,8 @@ private struct ChatSessionHost: View {
 /// `@EnvironmentObject`) so only `ChatSessionHost`'s filtered publishes rebuild it.
 /// Composer draft lives in `ComposerDraft` / `ComposerField` — keystrokes do not
 /// re-evaluate this view (arbonites-chat-lag + feedback app-01M5NNJ001NHHYBHXTASM5NXBZ).
-private struct ChatSession: View {
+/// Internal (not private) so `ArbosTests/JumpToLatestWindowTests` can reach `windowAfterJump`.
+struct ChatSession: View {
     let model: AppModel
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
