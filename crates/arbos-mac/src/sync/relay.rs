@@ -5088,6 +5088,16 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             let shared = shared.clone();
             tokio::spawn(async move { refresh_project_jobs(&shared, &project_id).await });
         }
+        ClientCommand::RolloutRefresh {
+            project_id,
+            job_id,
+            after,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(
+                async move { refresh_job_rollout(&shared, &project_id, &job_id, after).await },
+            );
+        }
         ClientCommand::React {
             chat_id,
             message_id,
@@ -7228,6 +7238,61 @@ async fn refresh_project_jobs(shared: &Arc<Shared>, project_id: &str) {
         Err(err) => {
             if !format!("{err:#}").contains("HTTP 404") {
                 shared.diagnostic("project-jobs", format!("{err:#}"));
+            }
+        }
+    }
+}
+
+/// The rollout view's poll: `GET /projects/{id}/jobs/{jobId}[?after=<seq>]`. A 404 (relay
+/// before the endpoint) answers an `unavailable` placeholder so the view can say so; a
+/// transport error keeps the last document.
+async fn refresh_job_rollout(
+    shared: &Arc<Shared>,
+    project_id: &str,
+    job_id: &str,
+    after: Option<u64>,
+) {
+    let path = match after {
+        Some(seq) => format!("/projects/{project_id}/jobs/{job_id}?after={seq}"),
+        None => format!("/projects/{project_id}/jobs/{job_id}"),
+    };
+    match shared.get_json(&path).await {
+        Ok(v) => match serde_json::from_value::<crate::model::JobRollout>(v) {
+            Ok(rollout) => {
+                let _ = shared.events.send(SyncEvent::JobRollout {
+                    project_id: project_id.to_string(),
+                    job_id: job_id.to_string(),
+                    rollout,
+                });
+            }
+            Err(err) => {
+                log::warn!(target: "arbos_mac::relay", "JobRollout {job_id}: {err}");
+            }
+        },
+        Err(err) => {
+            let text = format!("{err:#}");
+            if text.contains("HTTP 404") {
+                let _ = shared.events.send(SyncEvent::JobRollout {
+                    project_id: project_id.to_string(),
+                    job_id: job_id.to_string(),
+                    rollout: crate::model::JobRollout {
+                        unavailable: true,
+                        ..crate::model::JobRollout::placeholder(
+                            &crate::model::Job {
+                                id: job_id.to_string(),
+                                title: String::new(),
+                                state: crate::model::JobState::Running,
+                                step: String::new(),
+                                elapsed_s: 0,
+                                ask_message_id: None,
+                                chat_id: None,
+                            },
+                            "",
+                        )
+                    },
+                });
+            } else {
+                shared.diagnostic("job-rollout", text);
             }
         }
     }

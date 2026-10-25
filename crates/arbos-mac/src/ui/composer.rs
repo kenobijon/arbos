@@ -3012,6 +3012,10 @@ impl Render for Composer {
             .map(|_| "Messages in this chat are not being delivered".to_string());
         let in_livekit = state.my_call.is_some();
         let has_text = !self.input.read(cx).text().trim().is_empty();
+        // In a job tab (`jobtabs`) typing steers that job.
+        let job_tab = state
+            .active_chat_id()
+            .is_some_and(|id| crate::jobtabs::is_job_chat(&id));
 
         self.input.update(cx, |input, _| {
             input.set_placeholder(match mode {
@@ -3019,6 +3023,7 @@ impl Render for Composer {
                 ComposerMode::Approve => "Approve or reject the card above".to_string(),
                 ComposerMode::Send if transcribing => "Transcribing…".to_string(),
                 ComposerMode::Send if voice_mode => "Speak or type…".to_string(),
+                ComposerMode::Send if job_tab => "Steer this task".to_string(),
                 // Grok Mac says "Message <bot>" (the iPhone says "Ask <bot>").
                 ComposerMode::Send => format!("Message {name}"),
             });
