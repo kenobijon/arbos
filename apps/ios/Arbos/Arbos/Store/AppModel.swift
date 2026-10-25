@@ -3020,7 +3020,7 @@ final class AppModel: ObservableObject {
         // reconciles; live coalesce + async full re-reads must not gate the send.
         paintLocalUserMessage(chatId: chatId, messageId: messageId, text: text,
                               attachments: attachments, replyTo: reply, forwardedFrom: forwardedFrom,
-                              author: author, mentions: mentions)
+                              author: author, mentions: mentions, doc: doc)
         doc.commit()
         #if DEBUG
         if SendTrace.traces(chatId) { SendTrace.mark("commit") }
@@ -4639,7 +4639,7 @@ final class AppModel: ObservableObject {
         // reconciles; live coalesce + async full re-reads must not gate the send.
         paintLocalUserMessage(chatId: chatId, messageId: messageId, text: text,
                               attachments: attachments, replyTo: replyTo, forwardedFrom: forwardedFrom,
-                              author: author)
+                              author: author, doc: doc)
         doc.commit()
         #if DEBUG
         if SendTrace.traces(chatId) { SendTrace.mark("commit") }
@@ -4655,12 +4655,27 @@ final class AppModel: ObservableObject {
     /// same turn as Send — before onChange's coalesced / async snapshot lands.
     /// Without this, a send is on the wire at once but the chat stays blank until
     /// a scroll forces a layout pass (feedback app-01M5S3V2823WNP081K5FT16ANQ).
+    ///
+    /// The row is read back from the doc (`doc`, the writer that just appended it),
+    /// so it is byte-for-byte what the next snapshot will carry — same `createdAt`,
+    /// same part ids — and that snapshot changes nothing the view can see. The
+    /// hand-built row below is the fallback for a doc that cannot be read yet.
     private func paintLocalUserMessage(
         chatId: Id, messageId: Id, text: String, attachments: [Attachment],
         replyTo: Id? = nil, forwardedFrom: String? = nil,
-        author: CoreChatDoc.Author? = nil, mentions: [String] = []
+        author: CoreChatDoc.Author? = nil, mentions: [String] = [], doc: CoreChatDoc? = nil
     ) {
         if messages[chatId]?.contains(where: { $0.id == messageId }) == true { return }
+        if let doc, doc.count > 0, var row = doc.readMessage(doc.count - 1), row.id == messageId {
+            row.pending = true
+            var next = messages
+            next[chatId, default: []].append(row)
+            messages = next
+            #if DEBUG
+            if SendTrace.traces(chatId) { SendTrace.mark("messages-has-row", detail: "via=optimistic-readback rows=\(next[chatId]?.count ?? 0)") }
+            #endif
+            return
+        }
         var parts: [Part] = attachments.map { .attachment(id: newId(), attachment: $0) }
         if !text.isEmpty {
             parts.append(.text(id: "\(messageId)-t", text: text))

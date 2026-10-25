@@ -64,6 +64,15 @@ struct ChatView: View {
 
 /// Forwards only chat-scoped `AppModel` publishes into `ChatSession`. Unrelated
 /// fields (credits, devices, goals, …) no longer rebuild the open chat.
+///
+/// `tick` is handed to the session as a stored input on purpose: SwiftUI re-runs a
+/// child's body only when its inputs differ, and `model` / `chatId` / `projectId`
+/// never do. Re-rendering this host alone left `ChatSession.body` — and with it
+/// `.onChange(of: messagesVersion[chatId])`, which rebuilds the rows — unevaluated,
+/// so a sent bubble sat in `messages` until some unrelated state flipped (a scroll,
+/// the keyboard, a presence tick, the next inbound row): Jacob's 5-second own
+/// message in groups, Doug's "appears when I scroll" (#1720), measured per hop in
+/// iphone-group-send-instant-2026-10-25.
 private struct ChatSessionHost: View {
     let model: AppModel
     let chatId: Id
@@ -71,8 +80,7 @@ private struct ChatSessionHost: View {
     @State private var tick = 0
 
     var body: some View {
-        let _ = tick
-        ChatSession(model: model, chatId: chatId, projectId: projectId)
+        ChatSession(model: model, chatId: chatId, projectId: projectId, tick: tick)
             .onReceive(model.$messages) { _ in tick &+= 1 }
             .onReceive(model.$messagesVersion) { _ in tick &+= 1 }
             .onReceive(model.$channelRows) { _ in tick &+= 1 }
@@ -111,6 +119,10 @@ private struct ChatSession: View {
     @Environment(\.dismiss) private var dismiss
     let chatId: Id
     let projectId: Id
+    /// The host's publish counter. Not read in `body`; it is here so a forwarded
+    /// publish changes this view's inputs and SwiftUI evaluates the body (and its
+    /// `onChange` modifiers) again — see `ChatSessionHost`.
+    let tick: Int
 
     /// The composer text lives in its own observable so a keystroke re-renders the
     /// field, not this screen. Read it as `composerDraft.text` for actions; the
