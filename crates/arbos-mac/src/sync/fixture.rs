@@ -5457,7 +5457,7 @@ fn seed_chat_docs() -> Vec<ChatDoc> {
                             ]
                         }),
                         state: ApprovalState::Pending,
-                        expires_at: Some(s.t as u64 + APPROVAL_TTL_MS as u64),
+                        expires_at: Some(s.t + APPROVAL_TTL_MS as u64),
                         decided_at: None,
                         decided_by: None,
                         reason: None,
