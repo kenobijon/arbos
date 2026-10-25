@@ -1316,6 +1316,10 @@ pub struct TurnState {
     pub ack_row_id: Option<String>,
 }
 
+/// First line of every relay-turn prompt (mirrored by `RELAY_TURN_MARK` in arbos-pi-ext): the
+/// extension treats a `send_message` before `route` in such a turn as the `reply` route.
+pub(crate) const RELAY_TURN_MARK: &str = "[Arbos relay turn]";
+
 /// How many times a user turn's model call is retried in the same turn after a transient
 /// failure (a provider 5xx, overload, a timeout) before the user reads "the model call failed":
 /// once after 2 s on the same model, once more after 5 s on the fallback talking model
@@ -4011,6 +4015,16 @@ impl Agent {
         });
         self.turn_running.store(true, Ordering::SeqCst);
         let keepalive = self.spawn_keepalive();
+        // A relay turn is stamped so the extension lets a `send_message` that comes before
+        // `route` stand as the `reply` route instead of blocking it (the result turn then wrote
+        // "Delivering the update now." and the user read only that; sweep 2026-10-25).
+        let stamped;
+        let prompt_text = if matches!(kind, TurnKind::User | TurnKind::JobFallback { .. }) {
+            prompt_text
+        } else {
+            stamped = format!("{RELAY_TURN_MARK}\n{prompt_text}");
+            stamped.as_str()
+        };
         let mut result = self.run_main_turn(chat_id, host, prompt_text).await;
         // A steer interrupted a long tool call (#1690): pi settled on the abort; carry on in the
         // same row with the steer as the prompt, as many times as the user steers.
