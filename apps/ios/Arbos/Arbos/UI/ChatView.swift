@@ -116,7 +116,7 @@ private struct ChatSessionHost: View {
 /// `@EnvironmentObject`) so only `ChatSessionHost`'s filtered publishes rebuild it.
 /// Composer draft lives in `ComposerDraft` / `ComposerField` — keystrokes do not
 /// re-evaluate this view (arbonites-chat-lag + feedback app-01M5NNJ001NHHYBHXTASM5NXBZ).
-private struct ChatSession: View {
+struct ChatSession: View {
     let model: AppModel
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
@@ -690,8 +690,13 @@ private struct ChatSession: View {
                         .buttonStyle(.plain)
                     }
                     .padding(.horizontal, 12).frame(height: 38)
-                    .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.field))
-                    .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+                    // The header's glass, not the flat field (Jacob 2026-10-25 22:53).
+                    .background {
+                        HeaderGlassBackground(
+                            shape: RoundedRectangle(cornerRadius: 12, style: .continuous),
+                            material: ChatHeaderGlass.searchBarMaterial(surface: theme.surface),
+                            tinted: true)
+                    }
                     .padding(.horizontal, 16)
                 }
                 if hasInCallBar, let c = calls.call {
@@ -979,6 +984,8 @@ private struct ChatSession: View {
                 Task { await model.refreshActiveCall(chatId: chatId, projectId: isPeople ? nil : projectId) }
             }
             openPendingSearchIfNeeded()
+            // Rig: `ARBOS_SHOW=chatsearch` raises the Search-in-chat bar (header-glass shots).
+            if DebugHooks.show == "chatsearch" { showSearch = true }
             if let link = DebugHooks.link {
                 model.setRoomLink(chatId, link)
                 if let ms = DebugHooks.linkClearsMs {
@@ -1216,10 +1223,25 @@ private struct ChatSession: View {
         .allowsHitTesting(false)
     }
 
+    /// Which kind of chat this header fronts — the spec is the same for all four
+    /// ([feedback ios-header-glass-2026-10-25]).
+    private var headerKind: ChatHeaderKind {
+        if channel != nil { return .channel }
+        if let people { return people.isGroup ? .group : .dm }
+        return .agent
+    }
+
+    /// Liquid Glass on Glass (frost under iOS 26), solid on Matte — one material for the
+    /// back disc, the title pill, the search disc and the Search-in-chat bar.
+    private var headerMaterial: HeaderMaterial {
+        ChatHeaderGlass.materials(kind: headerKind, surface: theme.surface).first?.1
+            ?? ChatHeaderGlass.material(surface: theme.surface)
+    }
+
     private var header: some View {
         HStack {
             Button { dismiss() } label: {
-                GlassCircle {
+                GlassCircle(material: headerMaterial) {
                     Image(systemName: "chevron.left")
                         .font(theme.font(17, weight: .semibold))
                         .foregroundStyle(theme.text)
@@ -1227,7 +1249,7 @@ private struct ChatSession: View {
             }
             .buttonStyle(.plain)
             Spacer()
-            GlassPill {
+            GlassPill(material: headerMaterial) {
                 HStack(spacing: 6) {
                     if let channel {
                         // Rule 3: the unified pill — the server's disc, the `#` glyph and the
@@ -1329,7 +1351,7 @@ private struct ChatSession: View {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { searchFocused = true }
                 }
             } label: {
-                GlassCircle {
+                GlassCircle(material: headerMaterial) {
                     Image(systemName: "magnifyingglass")
                         .font(theme.font(17, weight: .medium))
                         .foregroundStyle(theme.text)
