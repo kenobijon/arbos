@@ -22,7 +22,8 @@ enum SendTrace {
     private static var seen: Set<String> = []
     private static var sends = 0
 
-    static var enabled: Bool { DebugHooks.traceSends }
+    /// Read once: the body marks ask on every pass and must not cost an environment lookup each.
+    static let enabled: Bool = DebugHooks.traceSends
 
     /// Composer tap. `rows` = transcript rows at that moment; `caughtUp` = the room is live.
     static func begin(chatId: String, rows: Int, caughtUp: Bool) {
