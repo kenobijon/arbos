@@ -150,7 +150,14 @@ struct AvatarPickerSheet: View {
         .background(sheetBg.ignoresSafeArea())
         .presentationDetents([.height(397 + 44)])
         .presentationDragIndicator(.visible)
-        .onAppear { tab = tabs.contains(initialTab) ? initialTab : (tabs.first ?? .bot) }
+        .onAppear {
+            tab = tabs.contains(initialTab) ? initialTab : (tabs.first ?? .bot)
+            // Rig: a prefilled prompt runs Generate at once.
+            if tab == .generate, let text = DebugHooks.avatarPrompt, !text.isEmpty {
+                prompt = text
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { generate() }
+            }
+        }
         .onChange(of: photoItem) { _, item in
             guard let item else { return }
             Task {
