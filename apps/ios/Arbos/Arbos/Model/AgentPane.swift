@@ -171,12 +171,11 @@ enum AgentPane {
     /// The Details tab, top to bottom — live content first, the options after it, the
     /// edit fields last and folded.
     enum DetailsBlock: Equatable {
-        /// `permissions`: Shell approvals — the standing grants from destructive-shell cards (#1544).
-        case coding, routines, settings, access, permissions, profile
+        case coding, routines, settings, access, profile
     }
 
     static func detailsOrder(mine: Bool) -> [DetailsBlock] {
-        mine ? [.coding, .routines, .settings, .access, .permissions, .profile] : [.coding, .settings, .profile]
+        mine ? [.coding, .routines, .settings, .access, .profile] : [.coding, .settings, .profile]
     }
 
     /// The Computer tab's blocks, in order.
