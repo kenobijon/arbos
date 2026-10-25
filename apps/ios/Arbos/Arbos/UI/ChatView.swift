@@ -1698,6 +1698,10 @@ private struct ChatSession: View {
             // reached), then the ↓ button's own action; "stable" = at the bottom
             // and the scroll geometry quiet for 250 ms. Bubble bodies built on the
             // way come out of the counters (`rowBody`).
+            for _ in 0..<100 where rows.isEmpty || scroller == nil {
+                try? await Task.sleep(for: .milliseconds(200))
+            }
+            try? await Task.sleep(for: .seconds(2))
             var hops = 0
             while hops < 80 {
                 let shown = windowedRows
