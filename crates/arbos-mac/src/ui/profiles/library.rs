@@ -79,7 +79,11 @@ fn rig_hover() -> Option<Hover> {
     std::env::var("ARBOS_LIBRARY_HOVER")
         .ok()
         .and_then(|v| v.trim().parse().ok())
-        .map(|ix| Hover { ix, armed: true })
+        .map(|ix| Hover {
+            ix,
+            epoch: 0,
+            armed: true,
+        })
 }
 
 /// One thing shared: an attachment (image, video, file) or a link.
@@ -265,10 +269,12 @@ pub(crate) enum Target {
     },
 }
 
-/// The pointer rests on row `ix`; `armed` once [`HOVER_DELAY_MS`] passed.
+/// The pointer rests on row `ix` of the pane opened at `epoch`
+/// (`AppState::profile_opened`); `armed` once [`HOVER_DELAY_MS`] passed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Hover {
     pub ix: usize,
+    pub epoch: u64,
     pub armed: bool,
 }
 
@@ -306,12 +312,21 @@ impl Shell {
     /// one's enter, so a leave only clears the hover it belongs to.
     pub(crate) fn library_hover(&mut self, ix: usize, hovered: bool, cx: &mut Context<Self>) {
         if hovered {
-            if self.library.hover.is_some_and(|h| h.ix == ix) {
+            let epoch = self.state.read(cx).profile_opened;
+            if self
+                .library
+                .hover
+                .is_some_and(|h| h.ix == ix && h.epoch == epoch)
+            {
                 return;
             }
             self.library.serial = self.library.serial.wrapping_add(1);
             let serial = self.library.serial;
-            self.library.hover = Some(Hover { ix, armed: false });
+            self.library.hover = Some(Hover {
+                ix,
+                epoch,
+                armed: false,
+            });
             cx.spawn(async move |this, cx| {
                 cx.background_executor()
                     .timer(Duration::from_millis(HOVER_DELAY_MS))
@@ -433,7 +448,12 @@ pub(super) fn sections(
     let cx: &Context<Shell> = cx;
     let state = shell.state.read(cx);
     let epoch = state.profile_opened;
-    let hovering = shell.library.hover.or_else(rig_hover);
+    // A hover from another pane (the pane changed under the pointer) is stale.
+    let hovering = shell
+        .library
+        .hover
+        .filter(|h| h.epoch == epoch)
+        .or_else(rig_hover);
     let mut out = Vec::new();
     let mut base = 0usize;
     for (k, (label, rows)) in days.into_iter().enumerate() {
