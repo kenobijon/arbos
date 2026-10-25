@@ -24,7 +24,7 @@ use std::collections::HashMap;
 
 use arbos_core::api::{
     PushEventDto, ServerDeletedPayloadDto, ServerMemberJoinedPayloadDto,
-    ServerMemberRemovedPayloadDto, ServerUpdatedPayloadDto,
+    ServerMemberRemovedPayloadDto, ServerUpdatedPayloadDto, SpaceArchivedPayloadDto,
 };
 use arbos_core::ids::{now_ms, ulid};
 
@@ -203,6 +203,7 @@ fn server_json(state: &AppState, s: &Server, me: &ServerMember, detail: bool) ->
         "avatar_color_index_effective": crate::avatar::effective_color_index(&s.id, None),
         "avatar_leaf": s.avatar_leaf,
         "avatar_leaf_color": s.avatar_leaf_color,
+        "archived_at": state.db.space_archived_at(&me.user_id, &s.id).ok().flatten(),
     });
     // Invite links are the owner's fallback (Jacob 2026-10-22: demoted; Add members by name is
     // the main way in). Admins no longer see them.
@@ -244,6 +245,18 @@ fn load(state: &AppState, me: &str, id: &str) -> Result<(Server, ServerMember), 
             "not in this server",
         ))),
     }
+}
+
+/// The caller as a non-banned owner / admin of the server (the avatar generate route).
+pub(crate) fn admin_of(
+    state: &AppState,
+    principal: &Principal,
+    id: &str,
+) -> Result<(String, Server), Box<Response>> {
+    let me = user_of(principal)?;
+    let (s, m) = load(state, &me, id)?;
+    admin_required(&m)?;
+    Ok((me, s))
 }
 
 fn admin_required(m: &ServerMember) -> Result<(), Box<Response>> {
@@ -403,6 +416,42 @@ pub async fn get(
 }
 
 #[derive(Deserialize)]
+pub struct SpaceArchiveBody {
+    pub archived: bool,
+}
+
+/// `PUT /servers/{id}/archive {"archived": bool}` — hide (or show again) this server's sidebar
+/// row for me on every device; membership is untouched.
+pub async fn archive(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+    Json(b): Json<SpaceArchiveBody>,
+) -> Response {
+    let me = match user_of(&principal) {
+        Ok(u) => u,
+        Err(r) => return *r,
+    };
+    if let Err(r) = load(&state, &me, &id) {
+        return *r;
+    }
+    let at = match state.db.set_space_archived(&me, &id, "server", b.archived) {
+        Ok(at) => at,
+        Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+    };
+    let _ = state.db.push_user_except_event(
+        &me,
+        &device_of(&principal).unwrap_or_default(),
+        &PushEventDto::SpaceArchived(SpaceArchivedPayloadDto {
+            space_id: id.clone(),
+            kind: "server".into(),
+            archived_at: at,
+        }),
+    );
+    Json(json!({ "id": id, "archived_at": at })).into_response()
+}
+
+#[derive(Deserialize)]
 pub struct PatchBody {
     #[serde(default)]
     pub name: Option<String>,
@@ -412,6 +461,17 @@ pub struct PatchBody {
     /// `true` = anyone on Arbos can search and join without an invite link.
     #[serde(default)]
     pub open: Option<bool>,
+    /// D92 amendment: the server's leaf picture (`null` = none); set together.
+    #[serde(
+        default,
+        deserialize_with = "crate::api::deserialize_double_option_i64"
+    )]
+    pub avatar_leaf: Option<Option<i64>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::api::deserialize_double_option_i64"
+    )]
+    pub avatar_leaf_color: Option<Option<i64>>,
 }
 
 /// `PATCH /servers/{id} {name?, image_key?, open?}` — owner/admins.
@@ -478,6 +538,27 @@ pub async fn patch(
         b.open,
     ) {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
+    }
+    if b.avatar_leaf.is_some() || b.avatar_leaf_color.is_some() {
+        let leaf = match (b.avatar_leaf, b.avatar_leaf_color) {
+            (Some(Some(l)), Some(Some(c))) => {
+                if let Err((st, msg)) = crate::avatar::check_leaf_pick(Some(l), Some(c)) {
+                    return api_error(st, "bad_leaf", msg);
+                }
+                Some((l, c))
+            }
+            (Some(Some(_)), _) | (_, Some(Some(_))) => {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "bad_leaf",
+                    "avatar_leaf and avatar_leaf_color go together",
+                )
+            }
+            _ => None,
+        };
+        if let Err(e) = state.db.update_server_leaf(&id, leaf) {
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
+        }
     }
     state.matrix.touch_server(&state, &id);
     notify_server_members(
@@ -1635,6 +1716,8 @@ mod picture_tests {
                 name: None,
                 image_key: Some(key),
                 open: None,
+                avatar_leaf: None,
+                avatar_leaf_color: None,
             }),
         )
         .await

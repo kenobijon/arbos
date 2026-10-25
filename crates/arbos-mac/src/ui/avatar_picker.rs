@@ -2,8 +2,8 @@
 //! agent's picture — a tab pill **Bot | Generate | Upload** with **Reset** at the right, a body
 //! per tab, and a footer **Cancel | Set avatar**. Nothing changes until "Set avatar".
 //!
-//! - **Bot**: the nine D92 leaves in Grok's grid (5 / 4), every leaf on a muted disc and the
-//!   selected one tinted with the chosen colour; the ten autumn swatches in two rows of five.
+//! - **Bot**: the sixteen D92 (v2) leaves as their 4 × 4 sheet, every leaf neutral and the
+//!   selected one in its hue (pastel disc, darker leaf); the ten hues in two rows of five.
 //!   The per-id automatic default stays: Reset goes back to it.
 //! - **Generate**: a short prompt → `POST /projects/{id}/avatar/generate` (the relay's OpenAI
 //!   key, one low-quality square, metered and capped) → the picture previews here; Set makes it
@@ -11,8 +11,9 @@
 //! - **Upload**: the image-only file panel (PNG, JPEG, HEIC, GIF, WebP), uploaded as a 512 px
 //!   JPEG into the project's blob slot on Set.
 //!
-//! Groups open the same sheet for their picture (Bot = the group's leaf, Upload = the group
-//! image); Generate is for agents.
+//! Groups and servers open the same sheet for their picture with the same three tabs (Bot = their
+//! leaf, Generate through `/chats/{id}` / `/servers/{id}` `/avatar/generate`, Upload into their
+//! own blob slot).
 //!
 //! Sizes are Grok's, measured on the 2x reference (612 × 794 px → 306 × 397 pt): the bar 44 pt
 //! with a hairline, 32 pt icons on a 57 pt pitch (we keep the Create sheet's 33 / 40 / 56 so the
@@ -25,7 +26,7 @@ use gpui::{
 };
 
 use crate::app::AppState;
-use crate::model::{Id, Project};
+use crate::model::Project;
 use crate::ui::avatars::{self, leaf, LeafPick};
 use crate::ui::create_entity::{hex, palette};
 use crate::ui::frost::{frosted, PANEL_BLUR};
@@ -38,14 +39,16 @@ const RADIUS: f32 = 16.0;
 const BAR_H: f32 = 44.0;
 const BAR_INSET: f32 = 12.0;
 const TAB_H: f32 = 28.0;
-const LEAF_ROWS: [f32; 2] = [92.0, 148.0];
-const LEAF_PITCH: f32 = 56.0;
-const LEAF_DISC: f32 = 33.0;
-const LEAF_RING: f32 = 40.0;
-const SWATCH_ROWS: [f32; 2] = [206.0, 246.0];
-const SWATCH_PITCH: f32 = 40.0;
-const SWATCH: f32 = 23.0;
-const SWATCH_RING: f32 = 31.0;
+/// The 4 × 4 leaf sheet (v2) on a 48 pt pitch, then the ten hues on a 36 pt pitch; the
+/// footer hairline stays at 340.5.
+const LEAF_ROWS: [f32; 4] = [84.0, 132.0, 180.0, 228.0];
+const LEAF_PITCH: f32 = 48.0;
+const LEAF_DISC: f32 = 30.0;
+const LEAF_RING: f32 = 36.0;
+const SWATCH_ROWS: [f32; 2] = [282.0, 318.0];
+const SWATCH_PITCH: f32 = 36.0;
+const SWATCH: f32 = 21.0;
+const SWATCH_RING: f32 = 29.0;
 const FOOTER_H: f32 = 56.5;
 const FOOTER_TOP: f32 = HEIGHT - FOOTER_H;
 const PILL_H: f32 = 28.0;
@@ -63,6 +66,12 @@ pub enum Tab {
 }
 
 impl Tab {
+    /// The tabs every target gets — agents, groups and servers alike (Jacob, 2026-10-24: the
+    /// group / server picker had lost Generate); Reset sits beside them in the bar.
+    pub fn for_target(_target: &Target) -> [Tab; 3] {
+        [Tab::Bot, Tab::Generate, Tab::Upload]
+    }
+
     fn label(self) -> &'static str {
         match self {
             Tab::Bot => "Bot",
@@ -72,20 +81,8 @@ impl Tab {
     }
 }
 
-/// Whose picture the sheet edits.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Target {
-    Agent(Id),
-    Group(Id),
-}
-
-impl Target {
-    pub fn id(&self) -> &Id {
-        match self {
-            Target::Agent(id) | Target::Group(id) => id,
-        }
-    }
-}
+/// Whose picture the sheet edits (the sync layer's `PictureTarget`).
+pub type Target = crate::sync::PictureTarget;
 
 /// The sheet's pending choice; applied by "Set avatar", dropped by Cancel.
 #[derive(Clone, Debug)]
@@ -144,10 +141,18 @@ impl Picker {
     }
 }
 
+/// Unselected leaves in the grid: a neutral disc and a neutral leaf (Grok tints only the pick).
 fn muted_disc(theme: &Theme) -> Hsla {
     match theme.appearance {
         Appearance::Dark => hex(0x3A3A3A),
         Appearance::Light => theme.field,
+    }
+}
+
+fn muted_ink(theme: &Theme) -> Hsla {
+    match theme.appearance {
+        Appearance::Dark => hex(0x8A8A8A),
+        Appearance::Light => theme.text_muted,
     }
 }
 
@@ -168,8 +173,8 @@ fn ring(size: f32, selected: bool, colour: Hsla) -> Div {
         .cursor_pointer()
 }
 
-/// A leaf on a disc of any colour (the Bot grid tints only the selected one).
-fn leaf_on(pick: LeafPick, size: f32, disc: Hsla) -> Div {
+/// A leaf on a disc, both in any colour (the Bot grid tints only the selected one).
+fn leaf_on(leaf_index: u8, size: f32, disc: Hsla, ink: Hsla) -> Div {
     div()
         .size(px(size))
         .flex_shrink_0()
@@ -178,7 +183,7 @@ fn leaf_on(pick: LeafPick, size: f32, disc: Hsla) -> Div {
         .justify_center()
         .rounded_full()
         .bg(disc)
-        .child(avatars::leaf_glyph(pick, size, 0.0))
+        .child(avatars::leaf_glyph_inked(leaf_index, size, 0.0, ink))
 }
 
 /// The round picture the Generate / Upload tabs preview: the pending choice, else the entity's
@@ -219,15 +224,31 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
     let theme = Theme::of(cx).clone();
     let p = palette(&theme);
     let state = shell.state.read(cx);
-    let Some(project) = state.projects.iter().find(|x| &x.id == picker.target.id()) else {
-        return div();
+    // Agents and groups are `Project`s; a server is a `ServerInfo` dressed as one for the preview
+    // (id, name, leaf pick and picture URL are all the sheet reads).
+    let project: Project = match &picker.target {
+        Target::Agent(id) | Target::Group(id) => {
+            match state.projects.iter().find(|x| &x.id == id) {
+                Some(p) => p.clone(),
+                None => return div(),
+            }
+        }
+        Target::Server(id) => match state.servers.iter().find(|s| &s.id == id) {
+            Some(s) => Project {
+                id: s.id.clone(),
+                name: s.name.clone(),
+                avatar_leaf: s.avatar_leaf,
+                avatar_leaf_color: s.avatar_leaf_color,
+                image_url: s.image_url.clone(),
+                ..Project::default()
+            },
+            None => return div(),
+        },
     };
-    let project = project.clone();
     let label_muted = match theme.appearance {
         Appearance::Dark => hex(0x9A9A9A),
         Appearance::Light => theme.text_muted,
     };
-    let is_agent = matches!(picker.target, Target::Agent(_));
     let can_reset = project.avatar_leaf.is_some()
         || project.avatar_leaf_color.is_some()
         || project.image_url.is_some();
@@ -241,12 +262,7 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
         .flex()
         .items_center()
         .gap(px(2.0));
-    let shown: &[Tab] = if is_agent {
-        &[Tab::Bot, Tab::Generate, Tab::Upload]
-    } else {
-        &[Tab::Bot, Tab::Upload]
-    };
-    for &tab in shown {
+    for tab in Tab::for_target(&picker.target) {
         let selected = picker.tab == tab;
         tabs = tabs.child(
             div()
@@ -326,11 +342,7 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
         Tab::Bot => {
             let pick = picker.pick(&project);
             for (r, top) in LEAF_ROWS.iter().enumerate() {
-                let leaves: Vec<u8> = if r == 0 {
-                    (0..5).collect()
-                } else {
-                    (5..9).collect()
-                };
+                let leaves: Vec<u8> = (r as u8 * 4..r as u8 * 4 + 4).collect();
                 let mut row = div()
                     .absolute()
                     .left_0()
@@ -340,14 +352,13 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
                     .justify_center();
                 for index in leaves {
                     let selected = pick.leaf == index;
-                    let cell = LeafPick {
-                        leaf: index,
-                        color: pick.color,
-                    };
-                    let disc = if selected {
-                        avatars::leaf_disc(pick.color)
+                    let (disc, ink) = if selected {
+                        (
+                            avatars::leaf_disc(pick.color),
+                            avatars::leaf_ink(pick.color),
+                        )
                     } else {
-                        muted_disc(&theme)
+                        (muted_disc(&theme), muted_ink(&theme))
                     };
                     row = row.child(
                         ring(LEAF_RING, selected, p.ring)
@@ -355,7 +366,7 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
                                 "avatar-leaf-{index}"
                             ))))
                             .mx(px((LEAF_PITCH - LEAF_RING) / 2.0))
-                            .child(leaf_on(cell, LEAF_DISC, disc))
+                            .child(leaf_on(index, LEAF_DISC, disc, ink))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if let Some(pk) = this.avatar_picker.as_mut() {
                                     pk.leaf = Some(index);
@@ -646,4 +657,28 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
             MouseButton::Left,
             cx.listener(|this, _, _, cx| this.close_avatar_picker(cx)),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_target_gets_bot_generate_upload_and_reset() {
+        for target in [
+            Target::Agent("a".into()),
+            Target::Group("g".into()),
+            Target::Server("s".into()),
+        ] {
+            assert_eq!(
+                Tab::for_target(&target),
+                [Tab::Bot, Tab::Generate, Tab::Upload],
+                "{target:?}"
+            );
+            // Reset is live for every target once there is something to reset.
+            let mut pk = Picker::new(target);
+            pk.reset = true;
+            assert!(pk.dirty());
+        }
+    }
 }

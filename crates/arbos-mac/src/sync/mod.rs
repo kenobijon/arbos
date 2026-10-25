@@ -15,7 +15,7 @@ pub mod fixture;
 pub mod relay;
 pub mod store;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -28,9 +28,9 @@ use crate::model::{
     Voice,
 };
 use crate::model::{
-    Attachment, BoxState, ChannelsView, Chat, ConnectorsView, Effort, Id, Link, LinkState,
-    LocalView, Machine, Message, NewSecret, Project, ProjectDocView, ProjectSecrets, Routine,
-    RoutineRun, RoutineTrigger, SecretsView, Skill,
+    Attachment, BoxReport, BoxState, ChannelsView, Chat, ConnectorsView, DeviceView, Effort, Id,
+    Link, LinkState, LocalView, Machine, Message, NewSecret, Project, ProjectDocView,
+    ProjectSecrets, Routine, RoutineRun, RoutineTrigger, SecretsView, Skill,
 };
 
 /// Something the source learned; the UI applies it to its mirror.
@@ -55,9 +55,12 @@ pub enum SyncEvent {
     },
     /// Someone in a people chat started/stopped typing (room presence).
     /// Someone's device sent a presence frame in a room we share (API §7c
-    /// frames carry `handle`): they are online right now.
+    /// frames carry `handle`): they are online right now. Optional `seen` is
+    /// the message id they last looked at (read receipts).
     Presence {
         handle: String,
+        chat_id: Option<Id>,
+        seen: Option<Id>,
     },
     Typing {
         chat_id: Id,
@@ -71,14 +74,17 @@ pub enum SyncEvent {
     },
     /// The avatar picker's generated picture is ready to preview (`url` fetches it; `image_key`
     /// is what "Set avatar" sends), or the generation failed (`error`).
-    ProjectImageGenerated {
-        project_id: Id,
+    ImageGenerated {
+        target: PictureTarget,
         image_key: Option<String>,
         url: Option<String>,
         error: Option<String>,
     },
     /// Error from a people-chat action (search, DM, members), shown inline.
     PeopleError(String),
+    /// The people I block (`GET /blocks`), sent on every registry refresh and after each
+    /// block / unblock. The person pane derives its Block user / Unblock row from this list.
+    Blocked(Vec<Person>),
     /// `CreatePeopleGroup` succeeded: the new group's id, sent after the
     /// registry refresh that lists it. The sheet closes and the group opens.
     PeopleGroupCreated {
@@ -129,6 +135,12 @@ pub enum SyncEvent {
     /// push) — `None` = unarchived.
     ChatArchived {
         chat_id: Id,
+        archived_at: Option<u64>,
+    },
+    /// `space_archived` push: another device archived / unarchived a sidebar
+    /// space (an agent or a server) for me.
+    SpaceArchived {
+        space_id: Id,
         archived_at: Option<u64>,
     },
     /// `feedback_capture` push: the user's agent is filing feedback and wants a picture of the
@@ -251,6 +263,12 @@ pub enum SyncEvent {
     RelayLink(LinkState),
     /// Short user-facing notice (errors from HTTP calls, etc.).
     Notice(String),
+    /// A room's pushes were refused (`not_available`) or an ACK cleared that refusal.
+    /// `refused: true` → show one notice and keep a per-room flag; `false` → clear both.
+    PushRefused {
+        chat_id: Id,
+        refused: bool,
+    },
     /// Settings → Connectors: catalog + connected accounts (F1).
     Connectors(ConnectorsView),
     /// An OAuth flow started: open this URL in the browser; the relay finishes the callback.
@@ -260,6 +278,8 @@ pub enum SyncEvent {
     },
     /// Settings → Secrets: secrets, accesses, requests, activity (never values; D83).
     Secrets(SecretsView),
+    /// Settings → Devices: this account's signed-in devices, or why they could not be read.
+    Devices(Result<Vec<DeviceView>, String>),
     /// One agent's secrets page (`GET /projects/{id}/secrets`).
     ProjectSecrets {
         project_id: Id,
@@ -274,6 +294,15 @@ pub enum SyncEvent {
     Routines {
         project_id: Id,
         routines: Vec<Routine>,
+    },
+    /// The box as `GET /machine/debug` reports it (the agent pane's Computer tab).
+    BoxReport(BoxReport),
+    /// The agent's open background jobs as the relay's activity record lists them
+    /// (`GET /projects/{id}` → `activity.jobs[]`, duplex §2.4) — the tasks chip and
+    /// drawer. Empty when nothing runs or the relay predates the field.
+    ProjectJobs {
+        project_id: Id,
+        jobs: Vec<crate::model::Job>,
     },
     /// Run history of one routine, newest first.
     RoutineRuns {
@@ -335,6 +364,22 @@ pub enum SyncEvent {
         message_id: Id,
         error: String,
     },
+}
+
+/// Whose picture the avatar picker edits.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PictureTarget {
+    Agent(Id),
+    Group(Id),
+    Server(Id),
+}
+
+impl PictureTarget {
+    pub fn id(&self) -> &Id {
+        match self {
+            PictureTarget::Agent(id) | PictureTarget::Group(id) | PictureTarget::Server(id) => id,
+        }
+    }
 }
 
 /// Where an agent's new picture comes from (`ClientCommand::SetProjectImage`).
@@ -411,6 +456,11 @@ pub enum ClientCommand {
     BlockUser {
         handle: String,
     },
+    /// `DELETE /blocks/{user_id}`; `handle` only names the person in the notice.
+    UnblockUser {
+        user_id: String,
+        handle: String,
+    },
     /// `POST /projects/{id}/members {handle}` (D72 step 3).
     InviteToProject {
         project_id: Id,
@@ -478,6 +528,9 @@ pub enum ClientCommand {
         attachments: Vec<PathBuf>,
         /// People-chat / hover-reply: the message this send answers (`replyTo`).
         reply_to: Option<String>,
+        /// Member ids of the composer's committed mention chips (#1596); the
+        /// source unions them with the `@handle`s the text names.
+        mentions: Vec<String>,
     },
     /// Guide: inject `text` into the agent's currently running turn (`steer` command).
     /// Same message shape as `Send`; the box calls pi/Prime `Steer` instead of queuing.
@@ -499,6 +552,19 @@ pub enum ClientCommand {
     },
     Stop {
         chat_id: Id,
+    },
+    /// The tasks drawer's per-job Stop (duplex D7): `stop { jobId, messageId }` halts
+    /// that job only; the running turn and the other jobs go on.
+    StopJob {
+        chat_id: Id,
+        job_id: String,
+        /// The newest user message of the chat, or empty — what the box binds the
+        /// command to, as the Stop button's `stop` does.
+        message_id: String,
+    },
+    /// Poll the agent's open jobs (`GET /projects/{id}` → `activity.jobs[]`).
+    JobsRefresh {
+        project_id: Id,
     },
     /// Toggle my emoji reaction on a message (written into the chat doc).
     React {
@@ -582,11 +648,28 @@ pub enum ClientCommand {
         project_id: Id,
         source: PictureSource,
     },
-    /// The avatar picker's Generate tab: `POST /projects/{id}/avatar/generate {prompt}`; the
-    /// answer arrives as `SyncEvent::ProjectImageGenerated` (not set until "Set avatar").
-    GenerateProjectImage {
-        project_id: Id,
+    /// The avatar picker's Generate tab: `POST /{projects|chats|servers}/{id}/avatar/generate
+    /// {prompt}`; the answer arrives as `SyncEvent::ImageGenerated` (not set until "Set avatar").
+    GenerateImage {
+        target: PictureTarget,
         prompt: String,
+    },
+    /// A people group's picture from a key the relay already holds (the Generate tab's answer):
+    /// `PATCH /chats/{id} {image_key}`.
+    SetGroupImageKey {
+        chat_id: Id,
+        key: String,
+    },
+    /// A server's picture from the avatar picker (owner / admins): a file uploaded into
+    /// `servers:{id}`, or a key the relay already holds; then `PATCH /servers/{id} {image_key}`.
+    SetServerImage {
+        server_id: Id,
+        source: PictureSource,
+    },
+    /// A server's leaf picture (`None` = initials; clears the uploaded picture too).
+    SetServerLeaf {
+        server_id: Id,
+        pick: Option<crate::ui::avatars::LeafPick>,
     },
     /// My own picture (`PUT /me/avatar`, JPEG ≤ 2 MB): overrides the GitHub
     /// avatar everywhere the relay serves me.
@@ -674,6 +757,22 @@ pub enum ClientCommand {
         space_id: Id,
         muted: bool,
     },
+    /// Sidebar archive (2026-10-23): `PUT /projects/{id}/archive` or
+    /// `PUT /servers/{id}/archive` `{archived}` — hides the row for me on every
+    /// device; nothing is deleted. People chats use `ArchiveChat`.
+    ArchiveSpace {
+        space_id: Id,
+        server: bool,
+        archived: bool,
+    },
+    /// Settings → Notifications: send and show Presence `{seen}` read receipts
+    /// in people chats (default on). Local preference; presence frames omit
+    /// `seen` when off. When `persist` is true (the Settings toggle), also
+    /// `PUT /chats/{id}/settings {read_receipts}` for every people chat.
+    SetReadReceipts {
+        enabled: bool,
+        persist: bool,
+    },
     /// Leaf picker (D92): `PATCH /projects/{id} {avatar_leaf: 0–8|null, avatar_leaf_color: 0–9|null}`;
     /// `None` = automatic (derived from the project id).
     SetAvatarLeaf {
@@ -715,6 +814,15 @@ pub enum ClientCommand {
         attachment: Attachment,
         text: String,
     },
+    /// Bubble menu → Forward: write `text` as a new user row in `chat_id`
+    /// carrying `forwardedFrom: <name>` (the bubble's "Forwarded from" header).
+    /// `message_id` is the optimistic row's id.
+    ForwardText {
+        chat_id: Id,
+        message_id: Id,
+        text: String,
+        forwarded_from: String,
+    },
     /// Settings → Connectors opened or asked for a refresh.
     RefreshConnectors,
     /// Connect a provider: OAuth when `token` is `None`, else store the pasted token.
@@ -727,6 +835,12 @@ pub enum ClientCommand {
     },
     /// Settings → Secrets opened or asked for a refresh.
     SecretsRefresh,
+    /// Settings → Devices opened or asked for a refresh (`GET /auth/devices`).
+    DevicesRefresh,
+    /// Settings → Devices: sign another device out (`DELETE /auth/devices/{id}`).
+    DeviceRevoke {
+        id: Id,
+    },
     /// An agent's Secrets page opened.
     ProjectSecretsRefresh {
         project_id: Id,
@@ -869,6 +983,8 @@ pub enum ClientCommand {
     },
     /// Settings → This Mac opened or needs a refresh.
     LocalRefresh,
+    /// The agent pane opened (or its Computer tab was picked): fetch `GET /machine/debug`.
+    MachineDebugRefresh,
     /// Per-device "Allow reads without asking".
     LocalSetAllowReads {
         device_id: Id,
@@ -1003,6 +1119,94 @@ pub enum ClientCommand {
     },
 }
 
+/// Collective mentions (Jacob, 2026-10-24, after #1596): `@here` is everyone
+/// in the chat — its people (not the sender) and its agents — and `@agents`
+/// every agent. Any member may use them in a group or a people chat. The sent
+/// row carries the expansion as member ids, which is what every agent's gate
+/// reads (`people_gate` rule 3, a resolved `agent:<me>` mention; two or more
+/// agent ids make it a shared reply), so the agents wake.
+pub const COLLECTIVE_HERE: &str = "here";
+pub const COLLECTIVE_AGENTS: &str = "agents";
+
+/// `here` / `agents` — a collective handle (the composer's token id for its
+/// chip is the handle itself, a marker the sources expand).
+pub fn is_collective(handle: &str) -> bool {
+    handle.eq_ignore_ascii_case(COLLECTIVE_HERE) || handle.eq_ignore_ascii_case(COLLECTIVE_AGENTS)
+}
+
+/// `@token` as a whole word in `lower` (lower-case text).
+pub fn text_has_at_token(lower: &str, token: &str) -> bool {
+    let needle = format!("@{token}");
+    lower.match_indices(&needle).any(|(i, _)| {
+        let before = lower[..i].chars().last();
+        let after = lower[i + needle.len()..].chars().next();
+        before.is_none_or(|c| !c.is_alphanumeric() && c != '@')
+            && after.is_none_or(|c| !(c.is_alphanumeric() || c == '_' || c == '-' || c == '.'))
+    })
+}
+
+/// The member ids a send starts from: the composer's chips (`tokens`: member
+/// ids and collective markers) and the `@here` / `@agents` the text names,
+/// collectives expanded into the chat's members; markers never reach the row.
+pub fn expand_collectives(
+    space: &Project,
+    text_lower: &str,
+    tokens: &[String],
+    me_id: &str,
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |id: String| {
+        if !out.contains(&id) {
+            out.push(id);
+        }
+    };
+    let here = tokens.iter().any(|t| t == COLLECTIVE_HERE)
+        || text_has_at_token(text_lower, COLLECTIVE_HERE);
+    let agents = tokens.iter().any(|t| t == COLLECTIVE_AGENTS)
+        || text_has_at_token(text_lower, COLLECTIVE_AGENTS);
+    for t in tokens {
+        if !is_collective(t) {
+            push(t.clone());
+        }
+    }
+    if here {
+        for p in &space.people {
+            if p.id != me_id {
+                push(format!("user:{}", p.id));
+            }
+        }
+    }
+    if here || agents {
+        for a in &space.agents {
+            push(format!("agent:{}", a.project_id));
+        }
+    }
+    out
+}
+
+/// The handles (and name slugs) the composer's mention chips already account
+/// for (#1596): the text scan skips these so a chip for one of two entities
+/// sharing a handle (#1538) is the one and only answer for that handle.
+pub fn claimed_handles(space: &Project, tokens: &[String]) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for t in tokens {
+        if let Some(pid) = t.strip_prefix("agent:") {
+            for a in space.agents.iter().filter(|a| a.project_id == pid) {
+                out.insert(a.handle.to_lowercase());
+                let slug = Project::mention_slug(&a.name);
+                if !slug.is_empty() {
+                    out.insert(slug);
+                }
+            }
+        } else if let Some(uid) = t.strip_prefix("user:") {
+            for p in space.people.iter().filter(|p| p.id == uid) {
+                out.insert(p.handle.to_lowercase());
+            }
+        }
+    }
+    out
+}
+
 pub trait SyncSource: Send + 'static {
     /// Short name shown in the settings popover ("fixture", "relay").
     fn name(&self) -> &'static str;
@@ -1054,4 +1258,101 @@ fn relay_url_from_defaults() -> Option<String> {
     }
     let url = String::from_utf8(out.stdout).ok()?.trim().to_string();
     (!url.is_empty()).then_some(url)
+}
+
+#[cfg(test)]
+mod collective_tests {
+    use super::*;
+    use crate::model::{AgentMember, Person};
+
+    fn space() -> Project {
+        Project {
+            id: "g-launch".into(),
+            name: "Launch week".into(),
+            people: vec![
+                Person {
+                    id: "gh_me".into(),
+                    handle: "jacob".into(),
+                    ..Default::default()
+                },
+                Person {
+                    id: "gh_sam".into(),
+                    handle: "sam".into(),
+                    ..Default::default()
+                },
+                Person {
+                    id: "gh_mira".into(),
+                    handle: "mira-k".into(),
+                    ..Default::default()
+                },
+            ],
+            agents: vec![
+                AgentMember {
+                    project_id: "p-comms".into(),
+                    name: "Comms".into(),
+                    handle: "comms".into(),
+                    ..Default::default()
+                },
+                AgentMember {
+                    project_id: "p-test".into(),
+                    name: "TestAgent2".into(),
+                    handle: "testagent2".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn here_is_everyone_but_me_and_agents_is_every_agent() {
+        let s = space();
+        // A chip (marker) — the row carries the members, never the marker.
+        let ids = expand_collectives(
+            &s,
+            "how is the iphone now @here",
+            &["here".to_string()],
+            "gh_me",
+        );
+        assert_eq!(
+            ids,
+            vec![
+                "user:gh_sam",
+                "user:gh_mira",
+                "agent:p-comms",
+                "agent:p-test"
+            ]
+        );
+        assert!(!ids.iter().any(|i| i == "here"));
+        // Plain text (no chip) expands the same way.
+        assert_eq!(
+            expand_collectives(&s, "@agents status?", &[], "gh_me"),
+            vec!["agent:p-comms", "agent:p-test"]
+        );
+        // Member chips stay in front, deduplicated against the expansion.
+        assert_eq!(
+            expand_collectives(
+                &s,
+                "@comms and @agents",
+                &["agent:p-comms".to_string(), "agents".to_string()],
+                "gh_me"
+            ),
+            vec!["agent:p-comms", "agent:p-test"]
+        );
+        // Nothing collective → nothing added.
+        assert_eq!(
+            expand_collectives(&s, "hello there", &[], "gh_me"),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn at_token_is_a_whole_word() {
+        assert!(text_has_at_token("ping @here now", "here"));
+        assert!(text_has_at_token("@agents?", "agents"));
+        assert!(!text_has_at_token("@heresy", "here"));
+        assert!(!text_has_at_token("mail a@here.com", "here"));
+        assert!(!text_has_at_token("@agents-2", "agents"));
+        assert!(is_collective("Here") && is_collective("agents") && !is_collective("sam"));
+    }
 }

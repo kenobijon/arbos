@@ -59,7 +59,7 @@ fn tools() -> Value {
           "inputSchema": { "type": "object", "properties": { "name": { "type": "string" }, "value": { "type": ["string","null"] } }, "required": ["name"] } },
         { "name": "recall", "description": "Read a note saved with remember.", "inputSchema": { "type": "object", "properties": { "name": { "type": "string" } }, "required": ["name"] } },
         { "name": "projects_list", "description": "List the user's other Projects (name, state).", "inputSchema": { "type": "object", "properties": {} } },
-        { "name": "send_message", "description": "Message another agent. `to` = its name, @handle or id (your owner's agents; another owner's only when they allowed it). The text lands in that agent's own chat and its reply comes back to you here. Inside a group chat, omit `to` to speak to the other agents in the group.",
+        { "name": "send_message", "description": "Message another agent. `to` = its name, @handle or id (your owner's agents; another owner's only when they allowed it). The text lands in that agent's own chat and its reply comes back to you here — never write `@name …` as a bubble in this chat to reach them. Inside a group chat, omit `to` to speak to the other agents in the group. Without `to`, the progress-note `send_message(text)` is for the user in this chat only.",
           "inputSchema": { "type": "object", "properties": { "to": { "type": "string", "description": "Agent name, @handle or id" }, "text": { "type": "string" } }, "required": ["text"] } },
         { "name": "ask_user", "description": "Ask the user one question and wait; the answer arrives as the next message. Pass `widget` for a typed answer (choice, multi_select, text, date, form).",
           "inputSchema": { "type": "object", "properties": { "question": { "type": "string" }, "widget": widget_schema() }, "required": ["question"] } },
@@ -83,6 +83,7 @@ fn tools() -> Value {
         a.extend(crate::goals::tool_specs());
         a.extend(crate::web::tool_specs());
         a.extend(crate::feedback::tool_specs());
+        a.extend(crate::disk::tool_specs());
     }
     list
 }
@@ -669,6 +670,7 @@ async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
         "web_search" => crate::web::web_search(a, args, &chat_for_scratch).await,
         "web_fetch" => crate::web::web_fetch(a, args, &chat_for_scratch).await,
         "submit_feedback" => crate::feedback::submit_feedback(a, args, &chat_for_scratch).await,
+        "free_space" => crate::disk::free_space_tool(a, args).await,
         "browser_fill" => crate::vault::browser_fill(a, args, &chat_for_scratch).await,
         "routines_list" | "routines_create" | "routines_update" | "routines_delete" => {
             crate::routines::call_tool(a, name, args, &chat_for_scratch).await

@@ -199,8 +199,11 @@ final class RelayAPI {
                 continue
             }
             let id: String
+            // The per-user archive flag rides on the list only; the detail is shared.
+            var listArchivedAt: Int64? = nil
             if let dto = try? decoder.decode(ProjectDto.self, from: itemData) {
                 id = dto.id
+                listArchivedAt = dto.archived_at.flatMap { $0 }
             } else if let bare = try? decoder.decode(ProjectListId.self, from: itemData) {
                 id = bare.id
             } else {
@@ -230,6 +233,7 @@ final class RelayAPI {
                 continue
             }
             var project = Arbos.Project(dto: detail.project)
+            project.archivedAt = listArchivedAt
             if let key = project.imageKey {
                 project.imageURL = "\(endpoint.httpUrl)/blob/\(id)/\(key)?token=\(token())"
             }
@@ -305,6 +309,16 @@ final class RelayAPI {
         _ = try await request("DELETE", "/projects/\(projectId)")
     }
 
+    /// `PUT /projects/{id}/archive {archived}` — this user's sidebar archive, synced across devices.
+    func setProjectArchived(_ projectId: Id, archived: Bool) async throws {
+        _ = try await request("PUT", "/projects/\(projectId)/archive", body: ["archived": archived])
+    }
+
+    /// `PUT /servers/{id}/archive {archived}` — same flag for a server row.
+    func setServerArchived(_ serverId: String, archived: Bool) async throws {
+        _ = try await request("PUT", "/servers/\(serverId)/archive", body: ["archived": archived])
+    }
+
     func setModel(projectId: Id, model: String, effort: Effort) async throws {
         let body: [String: Any] = ["models": ["talking_model": ["id": model, "effort": effort.rawValue]]]
         _ = try await request("PATCH", "/projects/\(projectId)", body: body)
@@ -312,6 +326,14 @@ final class RelayAPI {
 
     func wake(projectId: Id) async throws {
         _ = try await json("POST", "/projects/\(projectId)/wake", body: [String: Any]())
+    }
+
+    /// The tasks chip's poll (duplex §2.4): `GET /projects/{id}` → `activity.jobs[]`. A relay
+    /// without the field or a `null` activity reads as no open jobs.
+    func projectJobs(projectId: Id) async throws -> [Job] {
+        let raw = try await json("GET", "/projects/\(projectId)")
+        guard let detail = raw as? [String: Any] else { return [] }
+        return Job.list(fromActivity: detail["activity"])
     }
 
     // MARK: Machine (D70: one box per user, projects are workspaces on it)
@@ -536,11 +558,15 @@ final class RelayAPI {
 
     // MARK: Calls v1
 
-    /// `POST /chats/{id}/calls` (or the projects form) `{kind}` → 201 new call / 200 join;
-    /// both carry a fresh LiveKit token. Returns the call and whether we started it.
-    func startCall(chatId: String, projectId: String?, kind: CallKind) async throws -> (Call, started: Bool) {
+    /// `POST /chats/{id}/calls` (or the projects form) `{kind, ring?}` → 201 new call / 200 join;
+    /// both carry a fresh LiveKit token. `ring` is an optional list of member ids to notify
+    /// (bare user ids and agent project ids); omit or empty = the whole group. Returns the
+    /// call and whether we started it.
+    func startCall(chatId: String, projectId: String?, kind: CallKind, ring: [String]? = nil) async throws -> (Call, started: Bool) {
         let path = (projectId == nil || projectId == peopleSlot) ? "/chats/\(chatId)/calls" : "/projects/\(projectId!)/chats/\(chatId)/calls"
-        let (data, http) = try await request("POST", path, body: ["kind": kind.rawValue], headers: ["X-Arbos-Client": RelayAPI.clientHeader])
+        var body: [String: Any] = ["kind": kind.rawValue]
+        if let ring, !ring.isEmpty { body["ring"] = ring }
+        let (data, http) = try await request("POST", path, body: body, headers: ["X-Arbos-Client": RelayAPI.clientHeader])
         let resp: StartCallResponseDto
         do {
             resp = try JSONDecoder().decode(StartCallResponseDto.self, from: data)
@@ -750,6 +776,17 @@ final class RelayAPI {
         _ = try await request("PATCH", "/servers/\(id)", body: body)
     }
 
+    /// D92 amendment: a server's leaf picture — `PATCH /servers/{id} {avatar_leaf,
+    /// avatar_leaf_color, image_key: null}` (nil = back to initials; the picture goes with it).
+    func setServerLeaf(_ id: String, pick: LeafPick?) async throws {
+        let body: [String: Any] = [
+            "avatar_leaf": pick.map { Int($0.leaf) as Any } ?? NSNull(),
+            "avatar_leaf_color": pick.map { Int($0.color) as Any } ?? NSNull(),
+            "image_key": NSNull(),
+        ]
+        _ = try await request("PATCH", "/servers/\(id)", body: body)
+    }
+
     /// `GET /servers/search?q=` → open servers by name (join without an invite).
     func searchOpenServers(_ q: String) async throws -> [Server] {
         let enc = q.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? q
@@ -888,7 +925,21 @@ final class RelayAPI {
     /// D92 amendment: `POST /projects/{id}/avatar/generate {prompt}` → the stored picture's key
     /// (not yet set; "Set avatar" sends it through `setProjectImageKey`).
     func generateProjectAvatar(_ projectId: Id, prompt: String) async throws -> String {
-        let v = try await json("POST", "/projects/\(projectId)/avatar/generate", body: ["prompt": prompt])
+        try await generateAvatar(path: "/projects/\(projectId)/avatar/generate", prompt: prompt)
+    }
+
+    /// The same for a people group (`POST /chats/{id}/avatar/generate`) and a server
+    /// (`POST /servers/{id}/avatar/generate`); the key lands in their own blob slot.
+    func generateGroupAvatar(_ chatId: String, prompt: String) async throws -> String {
+        try await generateAvatar(path: "/chats/\(chatId)/avatar/generate", prompt: prompt)
+    }
+
+    func generateServerAvatar(_ serverId: String, prompt: String) async throws -> String {
+        try await generateAvatar(path: "/servers/\(serverId)/avatar/generate", prompt: prompt)
+    }
+
+    private func generateAvatar(path: String, prompt: String) async throws -> String {
+        let v = try await json("POST", path, body: ["prompt": prompt])
         guard let d = v as? [String: Any], let key = d["image_key"] as? String, !key.isEmpty else {
             throw RelayError(status: 0, message: "The relay sent no picture")
         }
@@ -999,15 +1050,86 @@ final class RelayAPI {
         return try await peopleChat(chatId)
     }
 
-    func removeMember(chatId: String, userId: String) async throws {
-        _ = try await request("DELETE", "/chats/\(chatId)/members/\(userId)")
+    /// `DELETE /chats/{id}/members/{userId}[?ban=1]` — owner/admin remove or ban.
+    func removeMember(chatId: String, userId: String, ban: Bool = false) async throws {
+        _ = try await request("DELETE", "/chats/\(chatId)/members/\(userId)\(ban ? "?ban=1" : "")")
     }
 
-    /// `PUT /chats/{id}/settings {read_receipts?, muted?}` per member.
-    func chatSettings(chatId: String, muted: Bool? = nil, readReceipts: Bool? = nil) async throws {
+    /// `POST /chats/{id}/members/{userId}/unban` — clear a ban so they can be added again.
+    func unbanMember(chatId: String, userId: String) async throws -> PeopleChat {
+        let v = try await json("POST", "/chats/\(chatId)/members/\(userId)/unban")
+        if let chat = PeopleChat.parse(v) { return chat }
+        return try await peopleChat(chatId)
+    }
+
+    /// `PUT /chats/{id}/members/{userId}` — mute/unmute from posting (optional duration).
+    func setMemberSilenced(
+        chatId: String,
+        userId: String,
+        silenced: Bool,
+        silencedUntilMs: Int64? = nil
+    ) async throws -> PeopleChat {
+        var body: [String: Any] = ["silenced": silenced]
+        if silenced, let until = silencedUntilMs {
+            body["silenced_until"] = until
+        }
+        let v = try await json("PUT", "/chats/\(chatId)/members/\(userId)", body: body)
+        if let chat = PeopleChat.parse(v) { return chat }
+        return try await peopleChat(chatId)
+    }
+
+    /// Owner: set a member's role to `admin` or `member`.
+    func setMemberRole(chatId: String, userId: String, role: String) async throws -> PeopleChat {
+        let v = try await json("PUT", "/chats/\(chatId)/members/\(userId)", body: ["role": role])
+        if let chat = PeopleChat.parse(v) { return chat }
+        return try await peopleChat(chatId)
+    }
+
+    /// Owner: whether this admin may mute and ban members.
+    func setMemberCanMuteBan(chatId: String, userId: String, canMuteBan: Bool) async throws -> PeopleChat {
+        let v = try await json("PUT", "/chats/\(chatId)/members/\(userId)", body: ["can_mute_ban": canMuteBan])
+        if let chat = PeopleChat.parse(v) { return chat }
+        return try await peopleChat(chatId)
+    }
+
+    /// `GET /chats/{id}/invites` — group invite links (same shape as server invites).
+    func groupInvites(_ chatId: String) async throws -> [ServerInviteLink] {
+        let v = try await json("GET", "/chats/\(chatId)/invites")
+        let list = ((v as? [String: Any])?["invites"] as? [Any]) ?? []
+        return list.compactMap(ServerInviteLink.parse)
+    }
+
+    /// `POST /chats/{id}/invites {expires, max_uses}` → the new group invite link.
+    func createGroupInvite(_ chatId: String, expires: Bool, maxUses: Int?) async throws -> ServerInviteLink? {
+        var body: [String: Any] = ["expires": expires]
+        if let maxUses { body["max_uses"] = maxUses }
+        return ServerInviteLink.parse(try await json("POST", "/chats/\(chatId)/invites", body: body))
+    }
+
+    /// `DELETE /chats/{id}/invites/{iid}` — the link stops working at once.
+    func revokeGroupInvite(_ chatId: String, inviteId: String) async throws {
+        _ = try await request("DELETE", "/chats/\(chatId)/invites/\(inviteId)")
+    }
+
+    /// `POST /chats/join {code}` (the code or the whole link) → the people group chat.
+    func joinGroup(code: String) async throws -> PeopleChat {
+        let v = try await json("POST", "/chats/join", body: ["code": code.trimmingCharacters(in: .whitespacesAndNewlines)])
+        guard let chat = PeopleChat.parse(v) else { throw RelayError(status: 0, message: "The relay returned no chat") }
+        return chat
+    }
+
+    /// Delete a message for everyone: the relay checks who may (403 `not_yours`) and writes
+    /// the deletion into the doc itself. `room` is `people/<chat>` or `<project>/<chat>`.
+    func deleteMessage(room: String, messageId: String) async throws {
+        _ = try await request("DELETE", "/room/\(room)/messages/\(messageId)")
+    }
+
+    /// `PUT /chats/{id}/settings {read_receipts?, muted?, archived?}` per member.
+    func chatSettings(chatId: String, muted: Bool? = nil, readReceipts: Bool? = nil, archived: Bool? = nil) async throws {
         var body: [String: Any] = [:]
         if let muted { body["muted"] = muted }
         if let readReceipts { body["read_receipts"] = readReceipts }
+        if let archived { body["archived"] = archived }
         _ = try await request("PUT", "/chats/\(chatId)/settings", body: body)
     }
 
@@ -1025,11 +1147,12 @@ final class RelayAPI {
         return chat
     }
 
-    /// `PATCH /chats/{id} {title?, image_key?}` — custom group name and optional picture key.
-    func patchPeopleChat(_ chatId: String, title: String? = nil, imageKey: String? = nil) async throws -> PeopleChat {
+    /// `PATCH /chats/{id} {title?, image_key?, description?}` — custom group name, picture key, about text.
+    func patchPeopleChat(_ chatId: String, title: String? = nil, imageKey: String? = nil, description: String? = nil) async throws -> PeopleChat {
         var body: [String: Any] = [:]
         if let title { body["title"] = title }
         if let imageKey { body["image_key"] = imageKey }
+        if let description { body["description"] = description }
         let v = try await json("PATCH", "/chats/\(chatId)", body: body)
         guard let chat = PeopleChat.parse(v) else { throw RelayError(status: 0, message: "The relay returned no chat") }
         return chat

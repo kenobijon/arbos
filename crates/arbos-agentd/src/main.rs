@@ -3,9 +3,11 @@ mod agent;
 mod agent_messages;
 mod approval;
 mod attachments;
+mod budget;
 mod channels;
 mod config;
 mod connectors;
+mod disk;
 mod eval;
 mod feedback;
 mod goals;
@@ -335,6 +337,9 @@ async fn boot() -> Result<()> {
     std::env::set_var("ARBOS_RELAY_URL", &relay_url);
     let cfg = BoxConfig::from_env()?;
     std::fs::create_dir_all(cfg.box_state_dir().join("logs"))?;
+    // Disk headroom (#1641): arm the ballast and keep it armed while there is room.
+    disk::boot(&cfg.work_root)?;
+    disk::spawn_ballast_keeper(cfg.work_root.clone());
     let sup = Supervisor::new(cfg.clone());
 
     // Box HTTP (health, per-workspace history/metrics, browser stream) first: the relay's preview
@@ -359,6 +364,12 @@ async fn boot() -> Result<()> {
                 // box runs, so the relay admin can tell what is shipped.
                 "sha": std::env::var("ARBOS_AGENTD_SHA").ok().filter(|v| !v.is_empty() && v != "unknown"),
                 "image": std::env::var("ARBOS_IMAGE_VERSION").ok().filter(|v| !v.is_empty() && v != "unknown"),
+                // The pi-ext seed this box actually copies into its projects (#1708): on a host
+                // sandbox /etc is persisted, so it can lag behind the image.
+                "seed_sha": std::fs::read_to_string("/etc/arbos/pi-seed/extensions/arbos-pi-ext/.source-sha")
+                    .ok()
+                    .map(|s| s.trim().to_owned())
+                    .filter(|s| !s.is_empty()),
             }))
             .send()
             .await;

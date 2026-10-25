@@ -34,16 +34,19 @@ use crate::ui::local::{LocalEvent, LocalPanel};
 use crate::ui::media_viewer;
 use crate::ui::member_menu;
 use crate::ui::message_menu;
+use crate::ui::modal;
 use crate::ui::motion::{ease_out_cubic, PulseClock, COMPOSER_DROP_MS, SHAKE_MS};
 use crate::ui::onboarding;
+use crate::ui::palette;
 use crate::ui::people;
 use crate::ui::profiles;
-use crate::ui::react_menu;
+use crate::ui::reactions;
 use crate::ui::routines::{RoutinesEvent, RoutinesPanel};
 use crate::ui::secrets::{SecretsEvent, SecretsPanel};
 use crate::ui::servers;
 use crate::ui::sidebar;
 use crate::ui::skills::{self, SkillsPanel};
+use crate::ui::slide::{self, ChatSlide, PaneSlides};
 use crate::ui::theme::{
     reapply_window_background, AppearancePref, GlassOpacity, Surface, Theme, COLUMN_MARGIN,
     COMPOSER_BOTTOM, COMPOSER_WIDTH, DRAWER_WIDTH, GLASS_OPACITY_MAX, GLASS_OPACITY_MIN,
@@ -55,7 +58,16 @@ use crate::ui::voicepicker;
 
 actions!(
     shell,
-    [CloseTab, NewTab, PrevTab, NextTab, ToggleRail, Escape, Quit]
+    [
+        CloseTab,
+        NewTab,
+        PrevTab,
+        NextTab,
+        ToggleRail,
+        OpenPalette,
+        Escape,
+        Quit
+    ]
 );
 
 /// Left inset for the conversation header while the sidebar is hidden: the window's traffic lights.
@@ -110,6 +122,8 @@ pub(crate) enum SettingsPage {
     Skills,
     ThisMac,
     Secrets,
+    /// Signed-in devices of my account: list + sign out another (Oct 23).
+    Devices,
 }
 
 impl SettingsPage {
@@ -128,6 +142,7 @@ impl SettingsPage {
             SettingsPage::Skills => "Skills",
             SettingsPage::ThisMac => "This Mac",
             SettingsPage::Secrets => "Secrets",
+            SettingsPage::Devices => "Devices",
         }
     }
 
@@ -141,6 +156,7 @@ impl SettingsPage {
                 | SettingsPage::Notifications
                 | SettingsPage::Updates
                 | SettingsPage::About
+                | SettingsPage::Devices
         )
     }
 
@@ -157,11 +173,28 @@ impl SettingsPage {
             | SettingsPage::Connectors
             | SettingsPage::Channels
             | SettingsPage::ThisMac
-            | SettingsPage::Secrets => SETTINGS_WIDTH,
+            | SettingsPage::Secrets
+            | SettingsPage::Devices => SETTINGS_WIDTH,
             SettingsPage::Routines => crate::ui::routines::PANEL_WIDTH + 32.0,
             SettingsPage::Skills => skills::CARD_WIDTH + 32.0,
         }
     }
+}
+
+/// What the chat column needs to know about its neighbours this frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CenterGeometry {
+    /// Left padding on the header bar: the traffic lights' band
+    /// (`TRAFFIC_LIGHTS_INSET`) while the sidebar is hidden, the part of it
+    /// the sidebar no longer covers while it slides, 0 while it is docked.
+    header_inset: f32,
+    /// Show the folded-sidebar expand disc in the header. During the collapse
+    /// slide it appears once the inset puts it at its resting spot (72 + 12
+    /// from the window edge), after the sidebar's own disc has left the frame.
+    show_sidebar_toggle: bool,
+    /// A slide is running: the transcript keeps `ChatSlide::start_width`
+    /// inside the live slot width (`ui::slide`).
+    chat_slide: Option<(ChatSlide, f32)>,
 }
 
 pub struct Shell {
@@ -184,12 +217,20 @@ pub struct Shell {
     pub(crate) avatar_picker: Option<avatar_picker::Picker>,
     /// The Generate tab's prompt.
     pub(crate) avatar_prompt_input: Entity<ComposerInput>,
-    /// Sidebar search field.
+    /// The command palette's search field (⌘⇧F / ⌘K / the sidebar's Search
+    /// disc; [feedback search-palette-2026-10-24]).
     pub(crate) search_input: Entity<ComposerInput>,
+    /// The palette: open/closed, highlighted row, rows drawn last frame.
+    pub(crate) palette: palette::PaletteState,
+    /// The palette's result list scroll (keeps the highlight in view).
+    palette_scroll: ScrollHandle,
     /// The media viewer's Forward picker search field (feedback media-viewer-2026-10-23).
     pub(crate) viewer_search: Entity<ComposerInput>,
     /// Keyboard focus while the media viewer is up (← → page, Esc closes).
     viewer_focus: FocusHandle,
+    /// The bubble whose "Forward to" picker last took the search field's focus
+    /// (`AppState::forward_message`), so it is cleared and focused once per opening.
+    forward_message_focused_for: Option<crate::model::Id>,
     /// `AppState::media_viewer_generation` the viewer was last focused for.
     viewer_focused_generation: u64,
     pub(crate) connectors: Entity<ConnectorsPanel>,
@@ -205,15 +246,24 @@ pub struct Shell {
         crate::model::Id,
         gpui::Point<gpui::Pixels>,
     )>,
-    /// The quick-react emoji bar (`react_menu`): (chat, message, the click).
-    pub(crate) react_menu: Option<(
+    /// `ARBOS_RIG_MESSAGE_MENU=x,y` (screenshot rig): opens the menu once the
+    /// open chat has a message; cleared when it has.
+    rig_message_menu: Option<gpui::Point<gpui::Pixels>>,
+    /// `ARBOS_RIG_FORWARD_MESSAGE=1` (screenshot rig): opens the "Forward to"
+    /// picker for the newest message of the open chat; cleared once it has.
+    rig_forward_message: bool,
+    /// The reaction capsule over a bubble (`reactions`): (chat, message, the smiley's click).
+    pub(crate) reaction_capsule: Option<(
         crate::model::Id,
         crate::model::Id,
         gpui::Point<gpui::Pixels>,
     )>,
-    /// `ARBOS_RIG_MESSAGE_MENU=x,y` (screenshot rig): opens the menu once the
-    /// open chat has a message; cleared when it has.
-    rig_message_menu: Option<gpui::Point<gpui::Pixels>>,
+    /// The capsule's "pick any emoji" field is showing (system picker open).
+    pub(crate) reaction_pick_open: bool,
+    pub(crate) reaction_pick: Entity<ComposerInput>,
+    /// `ARBOS_RIG_REACTION_CAPSULE=x,y` (screenshot rig): opens the capsule for
+    /// the newest message of the open chat at that window position.
+    rig_reaction_capsule: Option<gpui::Point<gpui::Pixels>>,
     pub(crate) settings_scroll: ScrollHandle,
     pub(crate) routines: Entity<RoutinesPanel>,
     pub(crate) routines_open: bool,
@@ -229,10 +279,21 @@ pub struct Shell {
     fixture_drag_over: bool,
     /// True while the sign-in screen is up; its clearing focuses the composer.
     signing_in: bool,
+    /// The window is in native full screen (read at each render). The layout
+    /// is the same as windowed (`sidebar::top_strip`); the traffic lights are
+    /// macOS's own and follow its full-screen rules — the app paints none
+    /// (Jacob 2026-10-24, [feedback topbar-grok-parity-2026-10-24]).
+    pub(crate) fullscreen: bool,
     /// Flag of the header's former "…" menu (removed, feedback
     /// app-01M5ATBWSY9E1HHBKH2QQVDEZX). Nothing renders it; escapes and
     /// click-outside still clear it so leftover true never sticks.
     pub(crate) menu_open: bool,
+    /// Which segment of the chat list's All · Agents · People · Servers
+    /// filter is selected ([feedback sidebar-strip-filter-2026-10-24]).
+    pub(crate) list_filter: sidebar::ListFilter,
+    /// Sidebar: the "Hidden chats" list is showing instead of the chat list
+    /// (Jacob 2026-10-23; the footer opens it, ‹ back returns).
+    pub(crate) hidden_open: bool,
     /// D88: the name/invite/channel field of the server sheets and the inline channel rename
     /// on the server page; `channel_rename` is the channel being renamed there.
     pub(crate) server_input: Entity<ComposerInput>,
@@ -259,15 +320,14 @@ pub struct Shell {
     )>,
     /// The channel menu's Delete was clicked once: it shows "Delete #name?" with Cancel / Delete.
     pub(crate) channel_delete_armed: bool,
-    /// The row menu's Delete was clicked once: it now shows "Delete …?" with
-    /// Cancel / Delete instead of the action list (iPhone confirmationDialog).
-    pub(crate) row_delete_armed: bool,
-    /// The agent pane's "Delete agent" was clicked once: the footer row asks
-    /// to confirm (D93 footer, #1318).
-    pub(crate) agent_delete_armed: bool,
+    /// Agent pane › Details › "Edit profile" unfolded the Name · Handle ·
+    /// Description rows ([feedback agent-pane-details-tab-2026-10-24]).
+    pub(crate) agent_edit_open: bool,
     /// Group pane › Members: the row whose ✕ was clicked (`user:<id>` or
     /// `agent:<project>`); it shows "Remove … ?" with Cancel / Remove.
     pub(crate) member_remove_armed: Option<String>,
+    /// Settings → Devices: the device whose Sign out is asking (Oct 23).
+    pub(crate) device_revoke_armed: Option<String>,
     /// A member row's menu on the group pane (Shift-click / right-click): View
     /// profile, Remove from group → arms `member_remove_armed`.
     pub(crate) member_menu: Option<member_menu::MemberMenu>,
@@ -296,6 +356,12 @@ pub struct Shell {
     /// `profile_scroll_epoch` mirrors `AppState::profile_opened`.
     pub(crate) profile_scroll: ScrollHandle,
     profile_scroll_epoch: u64,
+    /// The pane slides ([feedback right-pane-slide-2026-10-24], [feedback
+    /// sidebar-slide-2026-10-24]): derived each frame from `profile` and
+    /// `rail_collapsed`; `pane_page_drawn` is the page the right pane showed
+    /// last, so a closing pane can keep drawing it while it slides out.
+    slides: PaneSlides,
+    pane_page_drawn: Option<ProfilePage>,
     pub(crate) agent_pick_reveal: bool,
     /// Rig: `ARBOS_OPEN_SETTINGS=bottom` — my pane opens scrolled to its end
     /// (Sign out) each time it fills the pane.
@@ -311,6 +377,8 @@ pub struct Shell {
     pub(crate) tab_rename_input: Entity<ComposerInput>,
     /// The tab strip's "+" dropdown: New chat + the agent's previous chats.
     pub(crate) tab_menu_open: bool,
+    /// The tasks chip's pointer state (rest / hover / pressed fade, `ui::tasks`).
+    pub(crate) tasks_chip: crate::ui::mention::ChipPointer<u8>,
     /// The tab strip's scroll row, so a new or reopened tab comes into view.
     pub(crate) tabs_scroll: ScrollHandle,
     /// Per-agent call voice picker sheet ("…" menu → Voice, profile → voice).
@@ -320,7 +388,7 @@ pub struct Shell {
     /// (mouse start, offset start, moved past the click threshold).
     pub(crate) pip_offset: (f32, f32),
     pub(crate) pip_drag: Option<(gpui::Point<gpui::Pixels>, (f32, f32), bool)>,
-    /// ⌘⇧F "Send feedback" sheet (self-contained in `ui::feedback`).
+    /// ⌘⌥F "Send feedback" sheet (self-contained in `ui::feedback`).
     feedback: Entity<FeedbackSheet>,
 }
 
@@ -336,10 +404,12 @@ impl Shell {
                 || v == "about"
                 || v == "appearance"
                 || v == "credits"
+                || v == "devices"
                 || v.starts_with("secrets")
         });
         let settings_scroll = ScrollHandle::new();
         let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+        let reaction_pick = reactions::new_pick_input(cx);
         cx.subscribe(
             &transcript,
             |this, _, event: &TranscriptEvent, cx| match event {
@@ -352,14 +422,12 @@ impl Shell {
                     this.message_menu = Some((chat_id.clone(), message_id.clone(), *position));
                     cx.notify();
                 }
-                TranscriptEvent::ReactMenu {
+                TranscriptEvent::ReactionCapsule {
                     chat_id,
                     message_id,
                     position,
                 } => {
-                    this.close_popovers(cx);
-                    this.react_menu = Some((chat_id.clone(), message_id.clone(), *position));
-                    cx.notify();
+                    this.open_reaction_capsule(chat_id.clone(), message_id.clone(), *position, cx);
                 }
                 TranscriptEvent::Reply {
                     chat_id,
@@ -407,7 +475,7 @@ impl Shell {
             }
             if let Some(done) = state.update(cx, |s, _| s.avatar_generated.take()) {
                 if let Some(pk) = this.avatar_picker.as_mut() {
-                    if pk.target.id() == &done.project_id {
+                    if pk.target == done.target {
                         pk.generating = false;
                         match (done.image_key, done.url) {
                             (Some(key), Some(url)) => {
@@ -452,17 +520,26 @@ impl Shell {
                     text,
                     attachments,
                     reply_to,
+                    mentions,
                 } => {
                     let text = text.clone();
                     let attachments = attachments.clone();
                     let reply_to = reply_to.clone();
-                    this.state
-                        .update(cx, |s, cx| s.send(text, attachments, reply_to, cx));
+                    let mentions = mentions.clone();
+                    this.state.update(cx, |s, cx| {
+                        s.send(text, attachments, reply_to, mentions, cx)
+                    });
                 }
-                ComposerEvent::Guide { text, reply_to } => {
+                ComposerEvent::Guide {
+                    text,
+                    reply_to,
+                    mentions,
+                } => {
                     let text = text.clone();
                     let reply_to = reply_to.clone();
-                    this.state.update(cx, |s, cx| s.guide(text, reply_to, cx));
+                    let mentions = mentions.clone();
+                    this.state
+                        .update(cx, |s, cx| s.guide(text, reply_to, mentions, cx));
                 }
                 ComposerEvent::Stop => this.state.update(cx, |s, cx| s.stop(cx)),
             },
@@ -486,8 +563,17 @@ impl Shell {
             project_input.update(cx, |input, _| {
                 input.set_placeholder("Name your agent");
                 input.set_text_center(true);
+                // Shared by Create agent and Create group (D93). Enter must match
+                // the sheet's action button: agent → create, group → Next (picker).
                 input.on_submit = Some(Rc::new(move |window, cx| {
-                    let _ = weak.update(cx, |this, cx| this.submit_project(window, cx));
+                    let _ = weak.update(cx, |this, cx| {
+                        let kind = if this.create_group_open {
+                            CreateKind::Group
+                        } else {
+                            CreateKind::Agent
+                        };
+                        this.submit_create(kind, window, cx);
+                    });
                 }));
             });
         }
@@ -504,9 +590,26 @@ impl Shell {
         cx.observe(&avatar_prompt_input, |_, _, cx| cx.notify())
             .detach();
         let search_input = cx.new(ComposerInput::new);
-        search_input.update(cx, |input, _| input.set_placeholder("Search"));
+        {
+            let weak = cx.weak_entity();
+            let weak_arrow = cx.weak_entity();
+            search_input.update(cx, |input, _| {
+                input.set_placeholder("Search");
+                input.set_font_size(palette::FIELD_FONT);
+                // Return opens the highlighted row; ↑ ↓ move the highlight.
+                input.on_submit = Some(Rc::new(move |window, cx| {
+                    let _ = weak.update(cx, |this, cx| this.palette_open_selected(window, cx));
+                }));
+                input.on_arrow = Some(Rc::new(move |delta, cx| {
+                    let _ = weak_arrow.update(cx, |this, cx| this.palette_step(delta, cx));
+                }));
+            });
+        }
         let viewer_search = cx.new(ComposerInput::new);
-        viewer_search.update(cx, |input, _| input.set_placeholder("Search"));
+        viewer_search.update(cx, |input, _| {
+            input.set_placeholder("Search");
+            input.set_font_size(media_viewer::PICKER_FIELD_FONT);
+        });
         cx.observe(&viewer_search, |_, _, cx| cx.notify()).detach();
         cx.observe(&pairing_input, |_, _, cx| cx.notify()).detach();
         cx.observe(&project_input, |_, _, cx| cx.notify()).detach();
@@ -625,14 +728,28 @@ impl Shell {
         if std::env::var("ARBOS_OPEN_NEW_CHAT").is_ok_and(|v| v == "1") {
             state.update(cx, |s, cx| s.open_new_chat(cx));
         }
-        // Rig: `ARBOS_SEARCH=<text>` opens the sidebar search with that query
-        // (synthetic key events do not reach the GPUI field on the shared display).
+        // Rig: `ARBOS_SEARCH=<text>` opens the command palette with that query
+        // (synthetic key events do not reach the GPUI field on the shared
+        // display); `ARBOS_PALETTE=1` opens it empty (recents);
+        // `ARBOS_PALETTE_SELECT=<n>` highlights row n; `ARBOS_PALETTE_OPEN=1`
+        // opens that row once the rows are there (the jump-to-message shot).
         let search_query = std::env::var("ARBOS_SEARCH")
             .ok()
             .filter(|q| !q.trim().is_empty());
         if let Some(q) = &search_query {
             search_input.update(cx, |input, cx| input.set_text(q.clone(), cx));
         }
+        let palette = palette::PaletteState {
+            open: search_query.is_some() || std::env::var("ARBOS_PALETTE").is_ok_and(|v| v == "1"),
+            cursor: crate::palette::Cursor {
+                selected: std::env::var("ARBOS_PALETTE_SELECT")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0),
+            },
+            open_on_rows: std::env::var("ARBOS_PALETTE_OPEN").is_ok_and(|v| v == "1"),
+            ..Default::default()
+        };
         if std::env::var("ARBOS_OPEN_NEW_AGENT").is_ok_and(|v| v == "1") {
             state.update(cx, |s, cx| {
                 s.open_new_chat(cx);
@@ -758,9 +875,12 @@ impl Shell {
             avatar_picker: None,
             avatar_prompt_input,
             search_input,
+            palette,
+            palette_scroll: ScrollHandle::new(),
             viewer_search,
             viewer_focus: cx.focus_handle(),
             viewer_focused_generation: 0,
+            forward_message_focused_for: None,
             connectors,
             skills,
             local,
@@ -778,6 +898,7 @@ impl Shell {
                 Some("about") => SettingsPage::About,
                 Some("appearance") => SettingsPage::Appearance,
                 Some("credits") => SettingsPage::Credits,
+                Some("devices") => SettingsPage::Devices,
                 Some(v) if v.starts_with("secrets") => SettingsPage::Secrets,
                 _ => SettingsPage::Root,
             },
@@ -785,18 +906,23 @@ impl Shell {
             row_menu: None,
             channel_menu: None,
             channel_delete_armed: false,
-            row_delete_armed: false,
-            agent_delete_armed: false,
+            agent_edit_open: false,
             member_remove_armed: None,
+            device_revoke_armed: None,
             member_menu: None,
             chat_menu: None,
             chat_delete_armed: false,
             message_menu: None,
-            react_menu: None,
             rig_message_menu: message_menu::rig_anchor(),
+            rig_forward_message: std::env::var_os("ARBOS_RIG_FORWARD_MESSAGE").is_some(),
+            reaction_capsule: None,
+            reaction_pick_open: false,
+            reaction_pick,
+            rig_reaction_capsule: reactions::rig_anchor(),
             renaming_tab: None,
             tab_rename_input,
             tab_menu_open: false,
+            tasks_chip: crate::ui::mention::ChipPointer::default(),
             tabs_scroll: ScrollHandle::new(),
             voice_picker_open: false,
             pip_offset: (24.0, 96.0),
@@ -809,7 +935,14 @@ impl Shell {
             file_drop_over: false,
             fixture_drag_over: std::env::var("ARBOS_FIXTURE_DRAG_OVER").is_ok_and(|v| v == "1"),
             signing_in: false,
+            fullscreen: false,
             menu_open: false,
+            // Rig: `ARBOS_SIDEBAR_FILTER=all|agents|people|servers` selects a segment at launch.
+            list_filter: std::env::var("ARBOS_SIDEBAR_FILTER")
+                .ok()
+                .and_then(|v| sidebar::ListFilter::parse(&v))
+                .unwrap_or_default(),
+            hidden_open: false,
             server_input,
             channel_rename: None,
             invite_expires: false,
@@ -825,6 +958,8 @@ impl Shell {
             model_search_input,
             profile_scroll: ScrollHandle::new(),
             profile_scroll_epoch: 0,
+            slides: PaneSlides::default(),
+            pane_page_drawn: None,
             agent_pick_reveal: false,
             // `ARBOS_OPEN_SETTINGS_BOTTOM=1` does the same for any Settings page (a Secret
             // page's People / Activity cards sit below the fold on the rig).
@@ -842,6 +977,9 @@ impl Shell {
                 s.open_profile(ProfilePage::Me, cx);
                 s.set_profile_tab(1, cx);
             });
+            if shell.settings_page == SettingsPage::Devices {
+                shell.state.update(cx, |s, cx| s.devices_refresh(cx));
+            }
         }
         shell
     }
@@ -935,6 +1073,37 @@ impl Shell {
             || (self.routines_open && self.routines.read(cx).has_focus(window, cx))
     }
 
+    /// The focus handle a modal sheet owns while it is up (`ui::modal`): the
+    /// Forward picker's search field (from a bubble or the media viewer), the
+    /// viewer itself, the "Delete message?" card. Keys go there and nowhere
+    /// else — `render` moves focus back every frame, so the composer behind a
+    /// sheet never types (Jacob, feedback forward-sheet-focus-2026-10-24).
+    pub(crate) fn modal_focus(&self, cx: &App) -> Option<FocusHandle> {
+        if self.palette.open {
+            return Some(self.search_input.read(cx).focus_handle(cx));
+        }
+        let state = self.state.read(cx);
+        if state.forward_message.is_some() {
+            return Some(self.viewer_search.read(cx).focus_handle(cx));
+        }
+        if let Some(viewer) = state.media_viewer.as_ref() {
+            return Some(if viewer.forward_open {
+                self.viewer_search.read(cx).focus_handle(cx)
+            } else {
+                self.viewer_focus.clone()
+            });
+        }
+        None
+    }
+
+    /// Keep the keyboard inside the open sheet: whatever else took focus
+    /// (the composer, a click, a stale handle) hands it back to the owner.
+    fn enforce_modal_focus(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(owner) = self.modal_focus(cx) {
+            modal::keep_focus(&owner, window, cx);
+        }
+    }
+
     pub(crate) fn open_feedback(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.menu_open = false;
         self.close_settings(cx);
@@ -959,6 +1128,7 @@ impl Shell {
             | SettingsPage::Notifications
             | SettingsPage::Updates
             | SettingsPage::About => {}
+            SettingsPage::Devices => self.state.update(cx, |s, cx| s.devices_refresh(cx)),
             SettingsPage::Connectors => self.connectors.update(cx, |p, cx| {
                 p.show(cx);
                 p.embedded = true;
@@ -1006,7 +1176,8 @@ impl Shell {
             | SettingsPage::Appearance
             | SettingsPage::Notifications
             | SettingsPage::Updates
-            | SettingsPage::About => {}
+            | SettingsPage::About
+            | SettingsPage::Devices => {}
             SettingsPage::Connectors => self.connectors.update(cx, |p, cx| p.hide(cx)),
             SettingsPage::Routines => {
                 self.routines_open = false;
@@ -1058,7 +1229,8 @@ impl Shell {
             | SettingsPage::Appearance
             | SettingsPage::Notifications
             | SettingsPage::Updates
-            | SettingsPage::About => true,
+            | SettingsPage::About
+            | SettingsPage::Devices => true,
             SettingsPage::Connectors => self.connectors.read(cx).is_open(),
             SettingsPage::Routines => self.routines_open,
             SettingsPage::Channels => self.channels.read(cx).is_open(),
@@ -1089,6 +1261,11 @@ impl Shell {
     }
 
     pub(crate) fn submit_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Create group reuses this field; never create an agent from a group sheet.
+        if self.create_group_open {
+            self.submit_create(CreateKind::Group, window, cx);
+            return;
+        }
         let name = self.project_input.read(cx).text().trim().to_string();
         if name.is_empty() {
             return;
@@ -1113,6 +1290,9 @@ impl Shell {
         self.create_group_open = true;
         self.create_leaf = None;
         self.create_leaf_color = None;
+        // Agent create wins the sheet if both flags are set; clear it so New
+        // group never opens as Create New Agent.
+        self.state.update(cx, |s, _| s.new_project_open = false);
         self.project_input.update(cx, |input, cx| {
             input.set_placeholder(CreateKind::Group.placeholder());
             input.clear(cx);
@@ -1203,14 +1383,12 @@ impl Shell {
         if prompt.is_empty() || pk.generating {
             return;
         }
-        let avatar_picker::Target::Agent(project_id) = pk.target.clone() else {
-            return;
-        };
+        let target = pk.target.clone();
         pk.generating = true;
         pk.error = None;
         pk.reset = false;
         self.state.update(cx, |s, cx| {
-            s.generate_project_image(project_id, prompt, cx);
+            s.generate_image(target, prompt, cx);
         });
         cx.notify();
     }
@@ -1299,7 +1477,50 @@ impl Shell {
                                 s.set_group_image(id, path, cx);
                             }
                         }
-                        avatar_picker::Tab::Generate => {}
+                        avatar_picker::Tab::Generate => {
+                            if let Some((key, _)) = pk.generated {
+                                s.set_group_image_key(id, key, cx);
+                            }
+                        }
+                    }
+                }
+            }
+            avatar_picker::Target::Server(_) => {
+                if pk.reset {
+                    s.set_server_leaf(id, None, cx);
+                } else {
+                    match pk.tab {
+                        avatar_picker::Tab::Bot => {
+                            let current = s
+                                .servers
+                                .iter()
+                                .find(|x| x.id == id)
+                                .and_then(|x| {
+                                    Some(LeafPick {
+                                        leaf: x.avatar_leaf?,
+                                        color: x.avatar_leaf_color?,
+                                    })
+                                })
+                                .unwrap_or_else(|| leaf::pick_for(&id, None, None));
+                            s.set_server_leaf(
+                                id,
+                                Some(LeafPick {
+                                    leaf: pk.leaf.unwrap_or(current.leaf),
+                                    color: pk.color.unwrap_or(current.color),
+                                }),
+                                cx,
+                            );
+                        }
+                        avatar_picker::Tab::Upload => {
+                            if let Some(path) = pk.upload {
+                                s.set_server_image(id, PictureSource::File(path), cx);
+                            }
+                        }
+                        avatar_picker::Tab::Generate => {
+                            if let Some((key, _)) = pk.generated {
+                                s.set_server_image(id, PictureSource::Key(key), cx);
+                            }
+                        }
                     }
                 }
             }
@@ -1616,19 +1837,23 @@ impl Shell {
             input.set_text_center(true);
             input.set_text(name, cx);
         });
+        // The label ("Add a label") edits alone, in the hero; the name edits
+        // alone too ([feedback agent-pane-details-tab-2026-10-24]).
         if description {
             self.description_input
                 .update(cx, |input, cx| input.set_text(about, cx));
+            self.state
+                .update(cx, |s, cx| s.set_profile_editing_description(true, cx));
+            let handle = self.description_input.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+        } else {
+            self.state.update(cx, |s, cx| {
+                s.profile_editing_name = true;
+                cx.notify();
+            });
+            let handle = self.agent_name_input.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
         }
-        self.state.update(cx, |s, cx| {
-            s.profile_editing_name = true;
-            if description {
-                s.set_profile_editing_description(true, cx);
-            }
-            cx.notify();
-        });
-        let handle = self.agent_name_input.read(cx).focus_handle(cx);
-        window.focus(&handle, cx);
         cx.notify();
     }
 
@@ -1680,11 +1905,20 @@ impl Shell {
 
     /// Close the profile page (back button, click outside); the composer takes
     /// the keyboard back.
+    /// The right pane's width for `page`: `profiles::SHEET_WIDTH`, wider for
+    /// the two settings pages laid out past the card list (`sheet_width`).
+    fn pane_width(&self, page: &ProfilePage) -> f32 {
+        match page {
+            ProfilePage::Me => profiles::SHEET_WIDTH.max(self.settings_page.sheet_width()),
+            _ => profiles::SHEET_WIDTH,
+        }
+    }
+
     pub(crate) fn close_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.hide_settings_page(cx);
         self.profile_edit_open = false;
+        self.agent_edit_open = false;
         self.member_remove_armed = None;
-        self.agent_delete_armed = false;
         self.server_member_armed = None;
         self.server_leave_armed = false;
         self.channel_rename = None;
@@ -1867,9 +2101,112 @@ impl Shell {
         });
     }
 
+    /// ⌘⇧F / ⌘K, or the sidebar's Search disc: the command palette opens
+    /// centred over the window ([feedback search-palette-2026-10-24]). ⌘F is
+    /// not bound here — Jacob keeps it for in-chat search, which does not
+    /// exist yet.
+    fn open_palette_action(
+        &mut self,
+        _: &OpenPalette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_palette(window, cx);
+    }
+
+    pub(crate) fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.menu_open = false;
+        self.close_popovers(cx);
+        if !self.palette.open {
+            self.search_input.update(cx, |i, cx| i.clear(cx));
+            self.palette = palette::PaletteState {
+                open: true,
+                ..Default::default()
+            };
+            self.palette_scroll.set_offset(gpui::Point::default());
+        }
+        let handle = self.search_input.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
+    /// Esc, a click outside, or an opened row: the palette goes away, its
+    /// query is dropped and the composer takes the keyboard again.
+    pub(crate) fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.palette.open {
+            return;
+        }
+        self.palette = palette::PaletteState::default();
+        self.search_input.update(cx, |i, cx| i.clear(cx));
+        Composer::focus(&self.composer, window, cx);
+        cx.notify();
+    }
+
+    /// ↑ / ↓ in the palette field (`ComposerInput::on_arrow`).
+    pub(crate) fn palette_step(&mut self, delta: i32, cx: &mut Context<Self>) {
+        if !self.palette.open {
+            return;
+        }
+        let len = self.palette.len;
+        self.palette.cursor.step(delta, len);
+        // The list scrolls the highlight into view on the next frame.
+        self.palette.reveal = 2;
+        cx.notify();
+    }
+
+    /// Return in the palette field: open the highlighted row.
+    pub(crate) fn palette_open_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.palette.open {
+            return;
+        }
+        let typed = self.search_input.read(cx).text().to_string();
+        let rows = palette::rows_for(self, &typed, cx);
+        if let Some(row) = rows.get(self.palette.cursor.selected) {
+            self.palette_open_target(row.target.clone(), window, cx);
+        }
+    }
+
+    /// ⌘1–⌘9 while the palette is up: open that row.
+    pub(crate) fn palette_pick_action(
+        &mut self,
+        action: &dyn gpui::Action,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = palette::pick_index(action) else {
+            return;
+        };
+        let typed = self.search_input.read(cx).text().to_string();
+        let rows = palette::rows_for(self, &typed, cx);
+        if let Some(row) = rows.get(index) {
+            self.palette_open_target(row.target.clone(), window, cx);
+        }
+    }
+
+    pub(crate) fn palette_open_target(
+        &mut self,
+        target: crate::palette::Target,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_palette(window, cx);
+        self.hidden_open = false;
+        self.state
+            .update(cx, |s, cx| s.open_palette_target(target, cx));
+    }
+
     /// Escape stops a recording memo (keeping its transcript), then closes
     /// whatever floats: menus, then sheets.
     fn escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.open {
+            self.close_palette(window, cx);
+            return;
+        }
+        if self.state.read(cx).forward_message.is_some() {
+            self.state.update(cx, |s, cx| s.close_forward_message(cx));
+            Composer::focus(&self.composer, window, cx);
+            return;
+        }
         if let Some(viewer) = self.state.read(cx).media_viewer.as_ref() {
             // Esc closes the Forward picker first, then the viewer.
             if viewer.forward_open {
@@ -1910,18 +2247,6 @@ impl Shell {
             cx.notify();
             return;
         }
-        if self
-            .search_input
-            .read(cx)
-            .focus_handle(cx)
-            .is_focused(window)
-        {
-            // Escape in the Search field clears it and returns to the composer.
-            self.search_input.update(cx, |i, cx| i.clear(cx));
-            Composer::focus(&self.composer, window, cx);
-            cx.notify();
-            return;
-        }
         let editing_agent = {
             let s = self.state.read(cx);
             s.renaming_project.is_some()
@@ -1955,7 +2280,8 @@ impl Shell {
             || self.row_menu.is_some()
             || self.chat_menu.is_some()
             || self.message_menu.is_some()
-            || self.react_menu.is_some();
+            || self.reaction_capsule.is_some()
+            || self.state.read(cx).tasks_open.is_some();
         self.close_popovers(cx);
         if floating {
             return;
@@ -2074,7 +2400,6 @@ impl Shell {
         self.menu_open = false;
         self.row_menu = None;
         self.channel_menu = None;
-        self.row_delete_armed = false;
         self.tab_menu_open = true;
         self.chat_menu = Some(chat_id);
         self.chat_delete_armed = false;
@@ -2091,7 +2416,6 @@ impl Shell {
     ) {
         self.menu_open = false;
         self.row_menu = None;
-        self.row_delete_armed = false;
         self.chat_menu = None;
         self.channel_menu = Some((server_id, channel_id, at));
         self.channel_delete_armed = false;
@@ -2111,7 +2435,7 @@ impl Shell {
         self.channel_menu = None;
         self.chat_menu = None;
         self.message_menu = None;
-        self.react_menu = None;
+        self.close_reaction_capsule(cx);
         self.member_remove_armed = None;
         self.member_menu = Some(member_menu::MemberMenu { space_id, key, at });
         cx.notify();
@@ -2120,6 +2444,7 @@ impl Shell {
     /// Everything that floats closes on a click elsewhere.
     pub(crate) fn close_popovers(&mut self, cx: &mut Context<Self>) {
         self.close_agent_pick(None, cx);
+        self.state.update(cx, |s, cx| s.close_tasks(cx));
         if self.menu_open
             || self.members_open
             || self.add_agent_open
@@ -2128,8 +2453,8 @@ impl Shell {
             || self.channel_menu.is_some()
             || self.chat_menu.is_some()
             || self.message_menu.is_some()
-            || self.react_menu.is_some()
             || self.member_menu.is_some()
+            || self.reaction_capsule.is_some()
         {
             self.menu_open = false;
             self.member_menu = None;
@@ -2138,65 +2463,67 @@ impl Shell {
             self.tab_menu_open = false;
             self.row_menu = None;
             self.channel_menu = None;
-            self.row_delete_armed = false;
-            self.agent_delete_armed = false;
-            self.channel_menu = None;
             self.channel_delete_armed = false;
             self.chat_menu = None;
             self.chat_delete_armed = false;
             self.message_menu = None;
-            self.react_menu = None;
+            self.close_reaction_capsule(cx);
             cx.notify();
         }
     }
 
-    // ----- update pill (sidebar bottom) ------------------------------------------
+    // ----- update disc (sidebar footer, right end) --------------------------------
 
-    /// The Update button (D42): absent while up to date; appears the moment
-    /// the feed has a newer build; one click downloads, verifies, swaps the
-    /// bundle, and relaunches. It sits at the bottom of the chat list.
-    pub(crate) fn render_update_button(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+    /// Grok Bot's update button ([feedback footer-update-button-grok-2026-10-24]):
+    /// a solid blue disc with the white cloud-download glyph at the footer's
+    /// right end, the button family's size, drawn only when the update is
+    /// ready for a click (`UpdateState::disc_action`). One click downloads,
+    /// verifies, swaps the bundle and relaunches — or restarts now when the
+    /// automatic path already installed it. Brighter under the pointer,
+    /// brighter still while pressed (the chip rule, [feedback mention-chips]);
+    /// pulsing and inert while it works. Replaces the "Update" pill (D42).
+    pub(crate) fn render_update_disc(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
         let theme = Theme::of(cx).clone();
         let update = self.state.read(cx).update.clone();
-        if !update.button_visible() {
+        let action = update.disc_action();
+        if action == crate::update::DiscAction::Hidden {
             return None;
         }
-        let busy = update.busy();
-        let failed = matches!(update.phase, crate::update::UpdatePhase::Failed { .. });
+        let busy = action == crate::update::DiscAction::Busy;
         if busy {
             PulseClock::request(cx);
         }
-        let phase = if busy {
-            PulseClock::phase(cx, 1400)
+        let fill = if busy {
+            Theme::with_alpha(
+                theme.update_disc,
+                sidebar::DISC_BUSY_ALPHA_MIN
+                    + (1.0 - sidebar::DISC_BUSY_ALPHA_MIN) * PulseClock::phase(cx, 1400),
+            )
         } else {
-            1.0
+            theme.update_disc
         };
-        let bg = if failed {
-            theme.danger_soft
-        } else {
-            Theme::with_alpha(theme.primary, 0.75 + 0.25 * phase)
-        };
-        let fg = if failed { theme.text } else { theme.on_primary };
-        let label = update.button_label();
+        let glyph = theme.on_update_disc;
         Some(
-            div()
-                .id("rail-update")
-                .w_full()
-                .h(px(38.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .gap(px(6.0))
-                .rounded_full()
-                .bg(bg)
-                .text_color(fg)
-                .text_size(px(TEXT_SMALL))
-                .font_weight(FontWeight::SEMIBOLD)
-                .when(!busy, |el| el.cursor_pointer().hover(|s| s.opacity(0.88)))
-                .child(icon(if failed { "xmark" } else { "arrow-down" }, 14.0, fg))
-                .child(label)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.state.update(cx, |s, cx| s.install_update(cx));
+            sidebar::footer_disc_frame("sidebar-update")
+                .bg(fill)
+                .when(!busy, |el| {
+                    el.cursor_pointer()
+                        .hover(|s| {
+                            s.bg(Theme::lighter(theme.update_disc, sidebar::DISC_HOVER_LIFT))
+                        })
+                        .active(|s| {
+                            s.bg(Theme::lighter(
+                                theme.update_disc,
+                                sidebar::DISC_PRESSED_LIFT,
+                            ))
+                        })
+                })
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(icon("cloud-download", sidebar::FOOTER_DISC_GLYPH, glyph))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if !busy {
+                        this.state.update(cx, |s, cx| s.install_update(cx));
+                    }
                 })),
         )
     }
@@ -2365,11 +2692,19 @@ impl Shell {
         pre: Vec<AnyElement>,
         transcript: AnyElement,
         bottom: Vec<AnyElement>,
+        chat_slide: Option<(ChatSlide, f32)>,
     ) -> Stateful<Div> {
         let has_pre = !pre.is_empty();
         if has_pre {
             column = column.child(div().pt(px(header::metrics::HEIGHT)).children(pre));
         }
+        // While a neighbouring pane slides, the transcript keeps the width it
+        // had and is clipped/offset instead of re-measured per frame
+        // (`ui::slide`); the header and composer follow the live width.
+        let transcript = match chat_slide {
+            Some((slide, live_width)) => slide::transcript_clip(slide, live_width, transcript),
+            None => transcript,
+        };
         let body = div().flex_1().min_h_0().relative().child(transcript).child(
             div()
                 .absolute()
@@ -2383,6 +2718,10 @@ impl Shell {
                 .h(px(header::metrics::DRAG_OVERHANG))
                 .window_drag(),
         );
+        // Cap height and clip: a stretched overlay over a long transcript would
+        // otherwise centre the pill mid-pane ([feedback
+        // local-relay-unarbos-20261024065516774-20261024065609]; iPhone twin
+        // APuu1qHpbKmmpqZeUusEi0Q).
         column.child(body).children(bottom).child(
             div()
                 .absolute()
@@ -2390,11 +2729,18 @@ impl Shell {
                 .left_0()
                 .right_0()
                 .h(px(header::metrics::HEIGHT))
+                .max_h(px(header::metrics::HEIGHT))
+                .overflow_hidden()
                 .child(header_bar),
         )
     }
 
-    fn render_center(&self, sidebar_hidden: bool, cx: &mut Context<Self>) -> Stateful<Div> {
+    fn render_center(&self, geometry: CenterGeometry, cx: &mut Context<Self>) -> Stateful<Div> {
+        let CenterGeometry {
+            header_inset,
+            show_sidebar_toggle,
+            chat_slide,
+        } = geometry;
         let theme = Theme::of(cx).clone();
         let state = self.state.read(cx);
         let project = state.selected().cloned();
@@ -2452,10 +2798,16 @@ impl Shell {
         // 876, which put the bubble 21–28 pt right of the pill's edge
         // ([feedback agent-bubble-inset-2026-10-22]). The pill itself has
         // not moved.
+        // Wheel over the input (sibling of the list) still scrolls the chat —
+        // same as dragging over a bubble ([feedback app-01M5PDB3QYAPBPA4FJXZE1FFD0]).
         let composer_block = column_row(
             div()
                 .w_full()
                 .debug_selector(|| "chat-composer-block".into())
+                .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _, cx| {
+                    this.transcript
+                        .update(cx, |t, cx| t.scroll_from_wheel(event, cx));
+                }))
                 .child(self.composer.clone())
                 .into_any_element(),
         );
@@ -2476,12 +2828,12 @@ impl Shell {
             // floating header, fade band and drag catchment (`chat_frame`).
             let header_bar = div()
                 .relative()
-                .when(sidebar_hidden, |el| el.pl(px(TRAFFIC_LIGHTS_INSET)))
+                .when(header_inset > 0.0, |el| el.pl(px(header_inset)))
                 .child(header::render_channel(
                     self,
                     &server,
                     &ch,
-                    sidebar_hidden,
+                    show_sidebar_toggle,
                     cx,
                 ));
             let pre: Vec<AnyElement> = self
@@ -2512,6 +2864,7 @@ impl Shell {
                 pre,
                 self.transcript.clone().into_any_element(),
                 vec![bottom.into_any_element()],
+                chat_slide,
             );
             return self.file_drop_target(column, &theme, cx);
         }
@@ -2564,9 +2917,11 @@ impl Shell {
             .relative()
             .left(px(shake_offset))
             // Without the sidebar the traffic lights sit over this header:
-            // clear them (14 pt in, three 12 pt lights, 8 pt gaps).
-            .when(sidebar_hidden, |el| el.pl(px(TRAFFIC_LIGHTS_INSET)))
-            .child(header::render(self, &space, sidebar_hidden, cx));
+            // clear them (14 pt in, three 12 pt lights, 8 pt gaps). While the
+            // sidebar slides the inset is whatever of the lights' band the
+            // sidebar no longer covers (`CenterGeometry`).
+            .when(header_inset > 0.0, |el| el.pl(px(header_inset)))
+            .child(header::render(self, &space, show_sidebar_toggle, cx));
         let floating_header = dropped;
         let mut pre: Vec<AnyElement> = Vec::new();
         let mut header_bar = Some(header_bar);
@@ -2630,7 +2985,9 @@ impl Shell {
                 hero_data.unwrap_or((avatars::AvatarState::Idle, None));
             let _ = avatar_state;
             if !is_people {
-                hero = hero.child(avatars::project(&space, 88.0, &theme));
+                // D92 amendment: an agent's uploaded / generated picture wins over the leaf.
+                let state = self.state.read(cx);
+                hero = hero.child(crate::ui::groups::picture(&space, state, 88.0, &theme));
             } else if let Some(person) = space.person() {
                 hero = hero.child(people::avatar(person_image, person, 88.0, &theme));
             } else {
@@ -2675,8 +3032,26 @@ impl Shell {
             // Transcript above, composer pinned at the bottom. On the first
             // send the composer slides down from the centre over 220 ms using
             // a relative `top` inset (GPUI has no transform).
-            let presence_row = presence
-                .map(|p| column_row(crate::ui::presence::row(p, &theme, cx).into_any_element()));
+            // The tasks chip and drawer ride on the row while the agent has
+            // background jobs open in this chat (`ui::tasks`, duplex §2.4).
+            let presence_row = presence.map(|p| {
+                let row = match chat_id.clone() {
+                    Some(id) => {
+                        let (jobs, open) = crate::ui::tasks::for_chat(self.state.read(cx), &id);
+                        crate::ui::tasks::presence_row(
+                            p,
+                            id,
+                            jobs,
+                            open,
+                            &self.tasks_chip,
+                            &theme,
+                            cx,
+                        )
+                    }
+                    None => crate::ui::presence::row(p, &theme, cx),
+                };
+                column_row(row.into_any_element())
+            });
             let composer_row = div()
                 .w_full()
                 .flex()
@@ -2708,6 +3083,7 @@ impl Shell {
                 pre,
                 self.transcript.clone().into_any_element(),
                 vec![self.voice.clone().into_any_element(), composer_row],
+                chat_slide,
             );
         }
         self.file_drop_target(column, &theme, cx)
@@ -3506,13 +3882,17 @@ impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
         let width: f32 = window.viewport_size().width.into();
+        self.fullscreen = window.is_fullscreen();
         let state = self.state.read(cx);
-        let sidebar_hidden = state.rail_collapsed || state.window_is_narrow(width);
+        let narrow = state.window_is_narrow(width);
+        let sidebar_hidden = state.rail_collapsed || narrow;
         let sidebar_overlay = sidebar_hidden && state.sidebar_overlay;
+        let sidebar_width = state.sidebar_width;
         let details = state.details_open.clone();
         let viewer_open = state.media_viewer.is_some();
         let viewer_forward_open = state.media_viewer.as_ref().is_some_and(|v| v.forward_open);
         let viewer_generation = state.media_viewer_generation;
+        let forward_message_open = state.forward_message.as_ref().map(|f| f.message_id.clone());
         let pairing = state.pairing.clone();
         let new_chat_open = state.new_chat_open;
         let people_space = state.selected().filter(|p| p.is_people()).cloned();
@@ -3528,6 +3908,7 @@ impl Render for Shell {
             .on_action(cx.listener(Self::prev_tab))
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::toggle_rail))
+            .on_action(cx.listener(Self::open_palette_action))
             .on_action(cx.listener(Self::escape))
             .on_action(cx.listener(Self::send_feedback))
             .on_action(cx.listener(Self::paste_into_chat))
@@ -3608,14 +3989,58 @@ impl Render for Shell {
             Composer::focus(&self.composer, window, cx);
         }
 
-        if !sidebar_hidden {
-            root = root.child(frosted(0.0, PANEL_BLUR, sidebar::render(self, cx)));
-            if self.state.read(cx).sidebar_overlay {
-                // Widened back past the band with the overlay up: it has docked.
-                self.state.update(cx, |s, _| s.sidebar_overlay = false);
-            }
+        // The pane slides ([feedback right-pane-slide-2026-10-24], [feedback
+        // sidebar-slide-2026-10-24]): the tracker turns this frame's logical
+        // state into visible widths; while one runs, every frame is redrawn.
+        let (profile, opened) = {
+            let state = self.state.read(cx);
+            (state.profile.clone(), state.profile_opened)
+        };
+        let pane_width = profile
+            .as_ref()
+            .or(self.pane_page_drawn.as_ref())
+            .map_or(profiles::SHEET_WIDTH, |page| self.pane_width(page));
+        let frame = self.slides.step(
+            slide::Want {
+                viewport_width: width,
+                sidebar_shown: !sidebar_hidden,
+                sidebar_width,
+                narrow,
+                pane_shown: profile.is_some(),
+                pane_width,
+                reduce_motion: cx.reduce_motion(),
+            },
+            std::time::Instant::now(),
+        );
+        if frame.animating() {
+            window.request_animation_frame();
         }
-        root = root.child(self.render_center(sidebar_hidden, cx));
+        let live_center = width - frame.sidebar_visible - frame.pane_visible;
+        // The header clears whatever of the traffic lights' band the sidebar
+        // does not cover, and shows the expand disc while that band is free:
+        // at rest that is 72 + the disc with the sidebar hidden, nothing with
+        // it docked; mid-slide the disc holds its spot (72 + 12) from the
+        // moment the sidebar's own disc has left until the sidebar is back.
+        let geometry = CenterGeometry {
+            header_inset: (TRAFFIC_LIGHTS_INSET - frame.sidebar_visible).max(0.0),
+            show_sidebar_toggle: frame.sidebar_visible <= TRAFFIC_LIGHTS_INSET,
+            chat_slide: frame.chat.map(|c| (c, live_center)),
+        };
+
+        if frame.sidebar_sliding {
+            root = root.child(slide::sidebar_clip(
+                frame.sidebar_visible,
+                sidebar_width,
+                frosted(0.0, PANEL_BLUR, sidebar::render(self, cx)),
+            ));
+        } else if !sidebar_hidden {
+            root = root.child(frosted(0.0, PANEL_BLUR, sidebar::render(self, cx)));
+        }
+        if !sidebar_hidden && self.state.read(cx).sidebar_overlay {
+            // Widened back past the band with the overlay up: it has docked.
+            self.state.update(cx, |s, _| s.sidebar_overlay = false);
+        }
+        root = root.child(self.render_center(geometry, cx));
         if sidebar_overlay {
             root = root.child(self.render_sidebar_overlay(&theme, cx));
         }
@@ -3623,12 +4048,23 @@ impl Render for Shell {
             root = root.child(self.render_details(&target, cx));
         }
         // The right pane (three-pane rule): a flex sibling beside the chat, so
-        // it never covers it; the floating menus below paint over both.
-        let (profile, opened) = {
-            let state = self.state.read(cx);
-            (state.profile.clone(), state.profile_opened)
-        };
-        if let Some(page) = profile {
+        // it never covers it; the floating menus below paint over both. A
+        // pane on its way out keeps drawing the page it showed.
+        let page_to_draw = profile.clone().or_else(|| {
+            frame
+                .pane_sliding
+                .then(|| self.pane_page_drawn.clone())
+                .flatten()
+        });
+        if profile.is_some() {
+            self.pane_page_drawn = profile.clone();
+        }
+        if let Some(page) = page_to_draw {
+            let opened = if profile.is_some() {
+                opened
+            } else {
+                self.profile_scroll_epoch
+            };
             // A page that just filled the pane starts at the top; a popped
             // one already carries its restored offset (see `back_profile`).
             if self.profile_scroll_epoch != opened {
@@ -3637,12 +4073,35 @@ impl Render for Shell {
                 if page == ProfilePage::Me && self.settings_open_at_bottom {
                     self.profile_scroll.scroll_to_bottom();
                 }
+            } else if page == ProfilePage::Me
+                && self.settings_open_at_bottom
+                && std::env::var("ARBOS_OPEN_SETTINGS_BOTTOM").is_ok_and(|v| v == "1")
+            {
+                // Rig only: a Settings subpage whose rows arrive after the pane opened (the
+                // Secret page waits for the secrets list) keeps its end in view.
+                self.profile_scroll.scroll_to_bottom();
             }
             if page == ProfilePage::Me && !self.settings_page_alive(cx) {
                 self.settings_page = SettingsPage::Root;
             }
-            if let Some(pane) = profiles::pane(&page, self, cx) {
-                root = root.child(pane);
+            let pane_width = self.pane_width(&page);
+            match (profiles::pane(&page, self, cx), frame.pane_sliding) {
+                (Some(pane), true) => {
+                    root = root.child(slide::pane_clip(frame.pane_visible, pane));
+                }
+                (Some(pane), false) => root = root.child(pane),
+                (None, true) => {
+                    // The page's subject is gone mid-slide: an empty pane of
+                    // the same width finishes the motion.
+                    let blank = div()
+                        .id("profile-pane")
+                        .w(px(pane_width))
+                        .flex_shrink_0()
+                        .h_full()
+                        .bg(theme.pane());
+                    root = root.child(slide::pane_clip(frame.pane_visible, blank));
+                }
+                (None, false) => {}
             }
         }
         if let Some(menu) = sidebar::row_menu(self, cx) {
@@ -3673,8 +4132,49 @@ impl Render for Shell {
         if let Some(menu) = message_menu::render(self, window, cx) {
             root = root.child(menu);
         }
-        if let Some(menu) = react_menu::render(self, window, cx) {
-            root = root.child(menu);
+        if self.rig_forward_message {
+            let target = self.state.read(cx).active_chat_id().and_then(|chat| {
+                let state = self.state.read(cx);
+                let last = state.messages.get(&chat)?.last()?.id.clone();
+                Some((chat, last))
+            });
+            if let Some((chat, message)) = target {
+                self.rig_forward_message = false;
+                self.state
+                    .update(cx, |s, cx| s.open_forward_message(chat, message, cx));
+            }
+        }
+        if let Some(picker) = media_viewer::message_forward_overlay(self, cx) {
+            // The picker's search field takes the keyboard while it is up (same
+            // field as the viewer's picker; cleared on each opening).
+            if self.forward_message_focused_for != forward_message_open {
+                self.forward_message_focused_for = forward_message_open;
+                self.viewer_search.update(cx, |input, cx| input.clear(cx));
+            }
+            let search = self.viewer_search.read(cx).focus_handle(cx);
+            if !search.is_focused(window) {
+                window.focus(&search, cx);
+            }
+            root = root.child(picker);
+        } else if self.forward_message_focused_for.is_some() {
+            self.forward_message_focused_for = None;
+            if !viewer_open {
+                Composer::focus(&self.composer, window, cx);
+            }
+        }
+        if let Some(at) = self.rig_reaction_capsule {
+            let target = self.state.read(cx).active_chat_id().and_then(|chat| {
+                let state = self.state.read(cx);
+                let last = state.messages.get(&chat)?.last()?.id.clone();
+                Some((chat, last))
+            });
+            if let Some((chat, message)) = target {
+                self.rig_reaction_capsule = None;
+                self.reaction_capsule = Some((chat, message, at));
+            }
+        }
+        if let Some(capsule) = reactions::render(self, window, cx) {
+            root = root.child(capsule);
         }
         // Rig: the hook asked for the first other member's row menu on the group pane.
         if let Some(armed) = self.state.update(cx, |s, _| s.rig_member_menu.take()) {
@@ -3797,16 +4297,24 @@ impl Render for Shell {
                 window.focus(&self.viewer_focus, cx);
             }
             root = root.child(media_viewer::overlay(self, &self.viewer_focus, cx));
-        } else if self.viewer_focus.is_focused(window)
-            || self
-                .viewer_search
-                .read(cx)
-                .focus_handle(cx)
-                .is_focused(window)
+        } else if self.state.read(cx).forward_message.is_none()
+            && (self.viewer_focus.is_focused(window)
+                || self
+                    .viewer_search
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window))
         {
-            // Closed by × / the backdrop / Forward: typing goes back to the composer.
+            // Closed by × / the backdrop / Forward: typing goes back to the
+            // composer (unless the bubble menu's picker owns the field now).
             Composer::focus(&self.composer, window, cx);
         }
+        // The command palette: the topmost modal (over sheets and the viewer).
+        let palette_scroll = self.palette_scroll.clone();
+        if let Some(overlay) = palette::overlay(self, &palette_scroll, window, cx) {
+            root = root.child(overlay);
+        }
+        self.enforce_modal_focus(window, cx);
         // Collapsed video call: the camera keeps showing in a draggable tile.
         let collapsed_video = self
             .state

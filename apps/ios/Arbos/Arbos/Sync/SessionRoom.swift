@@ -45,7 +45,12 @@ final class SessionRoom {
     var onPresence: (([String: Any]) -> Void)?
     /// Relay rejected this room (HTTP 403/404); caller should refresh membership.
     var onUnavailable: (() -> Void)?
+    /// A push was refused with `not_available` on this connection; stay connected.
+    var onPushRefused: (() -> Void)?
     var presenceUser: () -> (id: String, handle: String)? = { nil }
+    /// Read receipt (Mac `presence_header` `seen`): the newest message id of this people chat,
+    /// sent while it is focused so peers can lift their own bubbles to full opacity.
+    var newestMessageId: () -> String? = { nil }
     var inCall: String? {
         didSet {
             guard inCall != oldValue else { return }
@@ -371,7 +376,15 @@ final class SessionRoom {
             applyFetchCheckpoint(room: room, frontier: frontier)
         case .applyBytes(let bytes):
             do {
-                try doc.importUpdate(bytes)
+                // Parked (dependencies missing): the session keeps the persisted cursor
+                // below this row so a relaunch re-requests it (#1540 follow-up).
+                #if DEBUG
+                let t0 = Date()
+                defer { PerfCounters.time("import.room", ms: Date().timeIntervalSince(t0) * 1000) }
+                #endif
+                if try doc.importUpdateReportingPending(bytes) {
+                    session.applyPending()
+                }
             } catch {
                 NSLog("relay room \(roomChat): import failed: \(error.localizedDescription)")
                 // Skip the Cursor that follows in this drain; reconnect from the
@@ -393,22 +406,35 @@ final class SessionRoom {
         case .healCheck(let relayVv):
             // The relay told us what it holds; if this replica has more (a lost checkpoint,
             // #1518), push the difference back once so the room heals from this device.
+            // Always answer (even empty) so the session can release the held pending resend.
             let missing = doc.updatesBeyond(relayVv)
             if !missing.isEmpty {
                 NSLog("relay room \(roomChat): history heal, pushing \(missing.count) bytes the relay lacked")
-                session.onHeal(bytes: missing)
             }
+            session.onHeal(bytes: missing)
         case .scheduleReconnect(let afterMs):
             applyScheduleReconnect(afterMs: afterMs)
         case .sessionError(let code, let message):
             if code == "state_timeout" { stateTimeouts += 1 }
             // The relay restarts in a few seconds (#1340): the pill says so; the clean close that follows redials.
             if code == "restart_soon" { onLinkState?(.restartSoon); return }
+            // Push refused for this connection — stay connected; `pushRefused` carries the notice.
+            if code == "not_available" {
+                lastError = "\(roomChat): not_available"
+                NSLog("relay room \(roomChat): error \(code): \(message)")
+                return
+            }
             NSLog("relay room \(roomChat): error \(code): \(message)")
-        case .presence(_, _, _, _, let mine, let headerJson):
+        case .pushRefused(_):
+            lastError = "\(roomChat): not_available"
+            onPushRefused?()
+        case .presence(_, _, let typing, _, let mine, let headerJson):
             guard !mine else { return }
             if let data = headerJson.data(using: .utf8),
-               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+               var obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                // RoomAction carries a real Bool; JSONSerialization would leave
+                // `typing` as NSNumber and `as? Bool` in noteTyping would miss it.
+                if let typing { obj["typing"] = typing }
                 onPresence?(obj)
             }
         case .droppedOversize(let bytes):
@@ -505,15 +531,32 @@ final class SessionRoom {
         }
     }
 
-    private func sendPresence() {
+    /// Presence header JSON shared by the 15 s tick and typing pings (Mac `presence_header`).
+    private func presenceHeaderJSON() -> String? {
         var header: [String: Any] = ["device": deviceId(), "at": nowMs()]
         if let u = presenceUser() { header["user"] = u.id; header["handle"] = u.handle }
-        if focused { header["focused_chat"] = roomChat }
-        if let inCall { header["in_call"] = inCall }
-        if let data = try? JSONSerialization.data(withJSONObject: header),
-           let json = String(data: data, encoding: .utf8) {
-            session.presence(presenceHeader: json)
+        if focused {
+            header["focused_chat"] = roomChat
+            if let seen = newestMessageId(), !seen.isEmpty { header["seen"] = seen }
         }
+        if let inCall { header["in_call"] = inCall }
+        guard let data = try? JSONSerialization.data(withJSONObject: header),
+              let json = String(data: data, encoding: .utf8) else { return nil }
+        return json
+    }
+
+    private func sendPresence() {
+        guard let json = presenceHeaderJSON() else { return }
+        session.presence(presenceHeader: json)
+        drain()
+    }
+
+    /// Composer keystroke in a people chat: set / clear the `typing` field on a
+    /// presence frame so peers show "<name> is typing…" ([feedback
+    /// app-01M5N7WSA1VCYHE9BE3CX4V0R6], Mac `RoomCmd::Typing`).
+    func setTyping(_ active: Bool) {
+        guard let json = presenceHeaderJSON() else { return }
+        session.typing(presenceHeader: json, active: active)
         drain()
     }
 

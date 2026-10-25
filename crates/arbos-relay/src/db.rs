@@ -18,6 +18,8 @@ pub struct BoxAgentd {
     pub sha: Option<String>,
     pub version: Option<String>,
     pub image: Option<String>,
+    /// `.source-sha` of the pi-ext seed inside the box (#1708).
+    pub seed_sha: Option<String>,
     pub reported_at: i64,
 }
 
@@ -504,6 +506,7 @@ impl Db {
             [],
         );
         let _ = c.execute("ALTER TABLE chats ADD COLUMN closed_at INTEGER", []);
+        let _ = c.execute("ALTER TABLE box_agentd ADD COLUMN seed_sha TEXT", []);
         let _ = c.execute("ALTER TABLE projects ADD COLUMN avatar TEXT", []);
         let _ = c.execute("ALTER TABLE projects ADD COLUMN deleted_at INTEGER", []);
         let _ = c.execute("ALTER TABLE projects ADD COLUMN avatar_color TEXT", []);
@@ -1519,6 +1522,19 @@ impl Db {
         })
     }
 
+    /// Seq of a stored batch id, if any — used to ACK a resent push as `dup` before the people
+    /// gates (so a reconnect storm does not burn the message rate limit).
+    pub fn row_seq_for_batch(&self, room: &str, batch_id: &str) -> Result<Option<i64>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT seq FROM rows WHERE room = ?1 AND batch_id = ?2",
+                params![room, batch_id],
+                |r| r.get(0),
+            )
+            .optional()
+        })
+    }
+
     /// Append a row. Returns `(seq, dup)`; a duplicate batch id returns the existing seq (idempotent push).
     pub fn append_row(
         &self,
@@ -1852,12 +1868,14 @@ impl Db {
         sha: Option<&str>,
         version: Option<&str>,
         image: Option<&str>,
+        seed_sha: Option<&str>,
     ) -> Result<()> {
         self.with(|c| {
             c.execute(
-                "INSERT INTO box_agentd(user_id, sha, version, image, reported_at) VALUES (?1,?2,?3,?4,?5)
-                 ON CONFLICT(user_id) DO UPDATE SET sha=excluded.sha, version=excluded.version, image=excluded.image, reported_at=excluded.reported_at",
-                params![user_id, sha, version, image, now_ms()],
+                "INSERT INTO box_agentd(user_id, sha, version, image, seed_sha, reported_at) VALUES (?1,?2,?3,?4,?5,?6)
+                 ON CONFLICT(user_id) DO UPDATE SET sha=excluded.sha, version=excluded.version, image=excluded.image,
+                    seed_sha=excluded.seed_sha, reported_at=excluded.reported_at",
+                params![user_id, sha, version, image, seed_sha, now_ms()],
             )
             .map(|_| ())
         })
@@ -1867,9 +1885,9 @@ impl Db {
     pub fn box_agentd(&self, user_id: &str) -> Result<Option<BoxAgentd>> {
         self.with(|c| {
             c.query_row(
-                "SELECT user_id, sha, version, image, reported_at FROM box_agentd WHERE user_id = ?1",
+                "SELECT user_id, sha, version, image, seed_sha, reported_at FROM box_agentd WHERE user_id = ?1",
                 params![user_id],
-                |r| Ok(BoxAgentd { user_id: r.get(0)?, sha: r.get(1)?, version: r.get(2)?, image: r.get(3)?, reported_at: r.get(4)? }),
+                |r| Ok(BoxAgentd { user_id: r.get(0)?, sha: r.get(1)?, version: r.get(2)?, image: r.get(3)?, seed_sha: r.get(4)?, reported_at: r.get(5)? }),
             )
             .optional()
         })
@@ -1877,8 +1895,8 @@ impl Db {
 
     pub fn all_box_agentd(&self) -> Result<Vec<BoxAgentd>> {
         self.with(|c| {
-            let mut st = c.prepare("SELECT user_id, sha, version, image, reported_at FROM box_agentd ORDER BY reported_at")?;
-            let rows = st.query_map([], |r| Ok(BoxAgentd { user_id: r.get(0)?, sha: r.get(1)?, version: r.get(2)?, image: r.get(3)?, reported_at: r.get(4)? }))?;
+            let mut st = c.prepare("SELECT user_id, sha, version, image, seed_sha, reported_at FROM box_agentd ORDER BY reported_at")?;
+            let rows = st.query_map([], |r| Ok(BoxAgentd { user_id: r.get(0)?, sha: r.get(1)?, version: r.get(2)?, image: r.get(3)?, seed_sha: r.get(4)?, reported_at: r.get(5)? }))?;
             rows.collect()
         })
     }

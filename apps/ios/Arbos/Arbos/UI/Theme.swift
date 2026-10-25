@@ -48,7 +48,24 @@ enum TextScale {
     }
 }
 
-struct Theme {
+/// Equatable on purpose: the app root re-applies `.environment(\.theme, …)` on every
+/// AppModel publish; SwiftUI only propagates an environment value when it differs,
+/// and only for Equatable values — without this every `@Environment(\.theme)` reader
+/// (every bubble) was re-evaluated on each publish, bypassing the rows' Equatable
+/// guards (arbonites-chat-lag, 2026-10-24).
+struct Theme: Equatable {
+    static func == (a: Theme, b: Theme) -> Bool {
+        let same = a.isDark == b.isDark && a.surface == b.surface && a.textScale == b.textScale
+            && a.bg == b.bg && a.bubbleAssistant == b.bubbleAssistant && a.bubbleUser == b.bubbleUser
+            && a.field == b.field && a.fieldBorder == b.fieldBorder && a.text == b.text && a.muted == b.muted
+            && a.placeholder == b.placeholder && a.icon == b.icon && a.accent == b.accent && a.unread == b.unread
+            && a.online == b.online && a.warn == b.warn && a.danger == b.danger && a.dangerSoft == b.dangerSoft
+            && a.card == b.card && a.separator == b.separator && a.codeChip == b.codeChip && a.userCodeChip == b.userCodeChip
+        #if DEBUG
+        PerfCounters.bump(same ? "themeEq.true" : "themeEq.false")
+        #endif
+        return same
+    }
     let isDark: Bool
     var surface: Surface
     /// Q6 text size: one factor over every point size that goes through `font(_:)`
@@ -104,18 +121,25 @@ struct Theme {
     static let voiceButton: CGFloat = 36
     static let plusButton: CGFloat = 42
     static let avatar: CGFloat = 28
-    /// The avatar column (typing-indicator-left-2026-10-23, Jacob 15:15 / 15:20): the
-    /// sender's picture beside a people-chat bubble and the presence row's pictures over
-    /// the composer are one size at one x — Grok Bot's working-row avatar (iPhone ref 01:
-    /// 26–54 pt on 420, centred on the `+` with the keyboard up: 19 + 42 / 2 = 40), text
-    /// at 67. `avatarColumnInset` is from the transcript's 16 pt edge (16 + 10 = 26);
-    /// the bubble body follows after `memberAvatarGap` (26 + 28 + 13 = 67). Shared with
-    /// feedback/sender-name-in-bubble-2026-10-23. Agent chats keep #1374's no-avatar rule.
-    static let memberAvatar: CGFloat = 28
-    static let avatarColumnInset: CGFloat = 10
+    /// The avatar column (Mac `SENDER_DISC = PLUS_BUTTON`, Jacob [feedback
+    /// AAvkkHYz3TOlou0Hu7u71Sc]): every round picture in a people chat — the sender's
+    /// disc beside a bubble, the presence row over the composer — is the composer's `+`
+    /// disc: the same size, centred on it. The `+` moves with the keyboard (31 → 19 pt
+    /// inset), so the column follows it via `avatarColumnInset(composerInset:)` (keyboard
+    /// up: inset 3 → avatar 19–61, centre 40 = 19 + 42 / 2; down: inset 15 → 31–73,
+    /// centre 52). The bubble body follows after `memberAvatarGap` (up: 74 from the
+    /// pane). Shared with feedback/sender-name-in-bubble-2026-10-23. Agent chats keep
+    /// #1374's no-avatar rule.
+    static let memberAvatar: CGFloat = plusButton
     static let memberAvatarGap: CGFloat = 13
-    /// Transcript edge → bubble body in a people-chat row.
-    static let memberLane: CGFloat = avatarColumnInset + memberAvatar + memberAvatarGap
+    /// Transcript edge → the avatar's left edge, for the composer's current side inset.
+    static func avatarColumnInset(composerInset: CGFloat) -> CGFloat {
+        composerInset + plusButton / 2 - memberAvatar / 2 - 16
+    }
+    /// Transcript edge → bubble body in a people-chat row, for the composer's current side inset.
+    static func memberLane(composerInset: CGFloat) -> CGFloat {
+        avatarColumnInset(composerInset: composerInset) + memberAvatar + memberAvatarGap
+    }
     /// Picture → name in the chat header pill: Grok Bot's title measures 5 pt ink to ink
     /// (Mac ref 57); the Mac's `identity::HEADER_GAP` + side bearing.
     static let headerPillGap: CGFloat = 5
@@ -259,6 +283,20 @@ extension Color {
             green: Double((v >> 8) & 0xff) / 255,
             blue: Double(v & 0xff) / 255
         )
+    }
+}
+
+/// The composer's current side inset (`Theme.composerInset` / `composerInsetKeyboard`),
+/// published by ChatView so the transcript rows and the presence row can keep their
+/// avatar column centred on the `+` as it moves with the keyboard.
+private struct ComposerInsetKey: EnvironmentKey {
+    static let defaultValue: CGFloat = Theme.composerInset
+}
+
+extension EnvironmentValues {
+    var composerInset: CGFloat {
+        get { self[ComposerInsetKey.self] }
+        set { self[ComposerInsetKey.self] = newValue }
     }
 }
 

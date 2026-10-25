@@ -1,10 +1,10 @@
-//! The message bubble's menu — right-click on the Mac, the iPhone's
-//! long-press (`MessageMenu.swift`): **Copy, Reply, Delete** and nothing else
-//! (Jacob, #1370). Emoji reactions live on the hover face-smile glyph
-//! (`react_menu`), not in this menu. One builder for every bubble, and one
-//! placement rule: the menu always sits fully inside the window — flipped to
-//! the other side of the click near the right or bottom edge, clamped to the
-//! edge margin when neither side fits.
+//! The message bubble's menu — right-click or the hover rail's ⋯ on the Mac,
+//! under the capsule on the iPhone's long-press (`MessageMenu.swift`):
+//! **Copy, Reply, Delete** and nothing else (Jacob, #1370). Reactions live in
+//! the capsule (`reactions.rs`), never in this menu. One builder for every
+//! bubble, and one placement rule: the menu always sits fully inside the
+//! window — flipped to the other side of the click near the right or bottom
+//! edge, clamped to the edge margin when neither side fits.
 
 use gpui::{div, point, prelude::*, px, size, Div, Pixels, Point, Size, Window};
 
@@ -23,6 +23,7 @@ pub const MENU_EDGE_MARGIN: f32 = 8.0;
 pub enum MessageMenuItem {
     Copy,
     Reply,
+    Forward,
     Delete,
 }
 
@@ -31,6 +32,7 @@ impl MessageMenuItem {
         match self {
             MessageMenuItem::Copy => "Copy",
             MessageMenuItem::Reply => "Reply",
+            MessageMenuItem::Forward => "Forward",
             MessageMenuItem::Delete => "Delete",
         }
     }
@@ -39,6 +41,7 @@ impl MessageMenuItem {
         match self {
             MessageMenuItem::Copy => "copy",
             MessageMenuItem::Reply => "reply",
+            MessageMenuItem::Forward => "forward",
             MessageMenuItem::Delete => "trash",
         }
     }
@@ -50,11 +53,22 @@ impl MessageMenuItem {
 
 /// The menu's items, in order. One list for every bubble: the set is the
 /// contract, not a per-row choice.
-pub const ITEMS: [MessageMenuItem; 3] = [
+pub const ITEMS: [MessageMenuItem; 4] = [
     MessageMenuItem::Copy,
     MessageMenuItem::Reply,
+    MessageMenuItem::Forward,
     MessageMenuItem::Delete,
 ];
+
+/// The items for one bubble: Copy and Reply always; Delete only when the
+/// relay would let this user delete it (`model::may_delete_message`) — a
+/// member sees Copy / Reply on someone else's message, the owner sees all.
+pub fn items_for(can_delete: bool) -> Vec<MessageMenuItem> {
+    ITEMS
+        .into_iter()
+        .filter(|i| can_delete || !i.danger())
+        .collect()
+}
 
 /// Divider before the destructive item.
 const DIVIDERS: usize = 1;
@@ -127,9 +141,25 @@ pub fn rig_anchor() -> Option<Point<Pixels>> {
 pub fn render(shell: &Shell, window: &Window, cx: &mut Context<Shell>) -> Option<Div> {
     let (chat_id, message_id, at) = shell.message_menu.clone()?;
     let theme = Theme::of(cx).clone();
+    let can_delete = {
+        let state = shell.state.read(cx);
+        let space_id = state.space_of_chat(&chat_id);
+        match (
+            state.project(&space_id),
+            state
+                .messages_of(&chat_id)
+                .iter()
+                .find(|m| m.id == message_id),
+        ) {
+            (Some(space), Some(message)) => {
+                crate::model::may_delete_message(space, &state.me_id(), &state.me_handle(), message)
+            }
+            _ => false,
+        }
+    };
     let (origin, _) = placed_rect(at, window.viewport_size());
     let mut body = div().flex().flex_col().gap(px(MENU_GAP));
-    for item in ITEMS {
+    for item in items_for(can_delete) {
         if item.danger() {
             body = body.child(glass::menu_divider(&theme));
         }
@@ -177,7 +207,15 @@ fn run(
                 .state
                 .update(cx, |s, cx| s.set_reply_to(chat_id, message_id, cx));
         }
+        MessageMenuItem::Forward => {
+            shell
+                .state
+                .update(cx, |s, cx| s.open_forward_message(chat_id, message_id, cx));
+        }
         MessageMenuItem::Delete => {
+            // Deletes at once, for everyone (Jacob, feedback
+            // remove-delete-confirms-2026-10-24: no "Delete message?" card). The
+            // menu only offers Delete where #1526's rule holds.
             shell
                 .state
                 .update(cx, |s, cx| s.delete_message(chat_id, message_id, cx));
@@ -199,11 +237,23 @@ mod tests {
     }
 
     #[test]
-    fn items_are_exactly_copy_reply_delete() {
+    fn items_are_exactly_copy_reply_forward_delete() {
         let labels: Vec<&str> = ITEMS.iter().map(|i| i.label()).collect();
-        assert_eq!(labels, ["Copy", "Reply", "Delete"]);
+        assert_eq!(labels, ["Copy", "Reply", "Forward", "Delete"]);
+        // Forward sits above the divider, with the plain actions; Delete alone is red.
+        assert!(!MessageMenuItem::Forward.danger());
         // No emoji row: every label is plain ASCII text.
         assert!(ITEMS.iter().all(|i| i.label().is_ascii()));
+    }
+
+    #[test]
+    fn delete_is_offered_only_when_allowed() {
+        let labels = |v: Vec<MessageMenuItem>| v.iter().map(|i| i.label()).collect::<Vec<_>>();
+        assert_eq!(
+            labels(items_for(true)),
+            ["Copy", "Reply", "Forward", "Delete"]
+        );
+        assert_eq!(labels(items_for(false)), ["Copy", "Reply", "Forward"]);
     }
 
     #[test]

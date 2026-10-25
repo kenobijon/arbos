@@ -21,6 +21,15 @@ use super::{
 
 pub(super) const TABS: [&str; 2] = ["Links", "Groups"];
 
+/// The footer row's label for the relay's current block state (#1545).
+pub(crate) fn block_row_label(blocked: bool) -> &'static str {
+    if blocked {
+        "Unblock"
+    } else {
+        "Block user"
+    }
+}
+
 pub(super) fn page(
     handle: &str,
     _space_id: Option<&str>,
@@ -29,13 +38,14 @@ pub(super) fn page(
 ) -> Option<Stateful<Div>> {
     let theme = Theme::of(cx).clone();
     // Own everything we need from state so link_list can request favicons after.
-    let (person, me, image, tab, links, groups, group_pictures) = {
+    let (person, me, blocked, image, tab, links, groups, group_pictures) = {
         let state = shell.state.read(cx);
         let person: Person = state.person_by_handle(handle).unwrap_or_else(|| Person {
             handle: handle.to_string(),
             ..Default::default()
         });
         let me = state.me_handle() == person.handle;
+        let blocked = state.is_blocked(&person);
         let image = state.avatar(&person.avatar_url);
         let tab = state.profile_tab;
 
@@ -68,7 +78,16 @@ pub(super) fn page(
                 }
             })
             .collect();
-        (person, me, image, tab, links, groups, group_pictures)
+        (
+            person,
+            me,
+            blocked,
+            image,
+            tab,
+            links,
+            groups,
+            group_pictures,
+        )
     };
 
     // ----- hero: picture and name read-only, @handle as the subtitle --------------
@@ -89,6 +108,7 @@ pub(super) fn page(
         badge: None,
         subtitle: Some(format!("@{}", person.handle).into()),
         subtitle_color: theme.text_muted,
+        subtitle_click: None,
         editor: None,
     };
 
@@ -138,22 +158,30 @@ pub(super) fn page(
         }
     };
 
-    // ----- the one action: Block user --------------------------------------------
-    let h_block = person.handle.clone();
+    // ----- the one action: Block user / Unblock ------------------------------------
+    // The label comes from the relay's block list (#1545), so it is right on
+    // re-open and relaunch; the pane stays open so the flip is visible.
     let footer = if me {
         Vec::new()
     } else {
-        vec![Section::Card(vec![kit::danger_row(
-            "profile-block",
-            "Block user",
-            &theme,
-        )
-        .on_click(cx.listener(move |this, _, window, cx| {
-            let h = h_block.clone();
-            this.state.update(cx, |s, cx| s.block_user(h, cx));
-            this.close_profile(window, cx);
-        }))
-        .into_any_element()])]
+        let row = if blocked {
+            kit::action_row("profile-block", block_row_label(true), theme.accent, &theme)
+        } else {
+            kit::danger_row("profile-block", block_row_label(false), &theme)
+        };
+        let target = person.clone();
+        vec![Section::Card(vec![row
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let target = target.clone();
+                this.state.update(cx, |s, cx| {
+                    if s.is_blocked(&target) {
+                        s.unblock_user(&target, cx);
+                    } else {
+                        s.block_user(target.handle.clone(), cx);
+                    }
+                });
+            }))
+            .into_any_element()])]
     };
 
     Some(pane::render(
@@ -168,6 +196,7 @@ pub(super) fn page(
             body,
             footer,
             done: None,
+            share: None,
         },
         shell,
         cx,

@@ -2,12 +2,12 @@
 // agent's picture — a tab pill Bot | Generate | Upload with Reset at the right, a body per tab,
 // and a footer Cancel | Set avatar. Nothing changes until "Set avatar".
 //
-// Bot: the nine D92 leaves in Grok's grid (5 / 4), every leaf on a muted disc and the selected
-// one tinted with the chosen colour; the ten autumn swatches in two rows of five. The per-id
+// Bot: the sixteen D92 (v2) leaves as their 4 × 4 sheet, every leaf neutral and the selected one
+// in its hue (pastel disc, darker leaf); the ten hues in two rows of five. The per-id
 // automatic default stays: Reset goes back to it. Generate: a short prompt → the relay paints one
 // picture (`POST /projects/{id}/avatar/generate`) → previewed here; Set keeps it. Upload: Photos
-// (images only), uploaded as a 512 px JPEG on Set. Groups open the same sheet for their picture
-// (Bot = the group's leaf, Upload = the group image); Generate is for agents.
+// (images only), uploaded as a 512 px JPEG on Set. Groups and servers open the same sheet with
+// the same three tabs (their own `/avatar/generate` route and blob slot).
 //
 // Grok's sizes from the 2x reference (612 × 794 px → 306 × 397 pt), inside the shipped
 // bottom-sheet frame: a 44 pt bar with a hairline, the Create sheet's 33 / 40 / 56 leaf grid,
@@ -23,6 +23,7 @@ import UIKit
 enum AvatarTarget: Equatable {
     case agent(Id)
     case group(String)
+    case server(String)
 }
 
 /// Which body is up.
@@ -62,15 +63,31 @@ struct AvatarPickerSheet: View {
     private let labelMuted = Color(red: 0x9A / 255, green: 0x9A / 255, blue: 0x9A / 255)
     private let pillBg = Color(red: 0x27 / 255, green: 0x27 / 255, blue: 0x27 / 255)
     private let mutedDisc = Color(red: 0x3A / 255, green: 0x3A / 255, blue: 0x3A / 255)
+    private let mutedInk = Color(red: 0x8A / 255, green: 0x8A / 255, blue: 0x8A / 255)
     private let disabledBg = Color(red: 0x3B / 255, green: 0x3B / 255, blue: 0x3B / 255)
     private let disabledText = Color(red: 0x73 / 255, green: 0x73 / 255, blue: 0x73 / 255)
     private let setBg = Color(white: 0xE5 / 255)
     private let title = Color(white: 0xF5 / 255)
 
-    private var isAgent: Bool { if case .agent = target { return true } else { return false } }
-    private var tabs: [AvatarPickerTab] { isAgent ? AvatarPickerTab.allCases : [.bot, .upload] }
+    /// The tabs every target gets — agents, groups and servers alike (Jacob, 2026-10-24: the
+    /// group / server picker had lost Generate); Reset sits beside them in the bar.
+    static func tabs(for target: AvatarTarget) -> [AvatarPickerTab] {
+        switch target {
+        case .agent, .group, .server: return [.bot, .generate, .upload]
+        }
+    }
+    private var tabs: [AvatarPickerTab] { Self.tabs(for: target) }
     private var project: Project? { if case .agent(let id) = target { return model.project(id) } else { return nil } }
     private var people: PeopleChat? { if case .group(let id) = target { return model.peopleChats.first { $0.id == id } } else { return nil } }
+    private var server: Server? { if case .server(let id) = target { return model.servers.first { $0.id == id } } else { return nil } }
+    /// The blob slot a generated picture lands in (where the preview fetches it from).
+    private var slot: String {
+        switch target {
+        case .agent(let id): return id
+        case .group(let id): return "\(peopleSlot):\(id)"
+        case .server(let id): return "servers:\(id)"
+        }
+    }
 
     /// The entity's leaf + colour as it is now; the automatic pair under Reset.
     private var currentPick: LeafPick {
@@ -81,6 +98,9 @@ struct AvatarPickerSheet: View {
         case .group(let id):
             if reset { return LeafArt.pick(seed: id) }
             return people?.leafPick ?? LeafArt.pick(seed: id)
+        case .server(let id):
+            if reset { return LeafArt.pick(seed: id) }
+            return server?.leafPick ?? LeafArt.pick(seed: id)
         }
     }
     private var pick: LeafPick {
@@ -90,6 +110,7 @@ struct AvatarPickerSheet: View {
         switch target {
         case .agent: return project.map { $0.avatarLeaf != nil || $0.avatarLeafColor != nil || $0.imageKey != nil } ?? false
         case .group: return people.map { $0.leafPick != nil || $0.imageKey != nil } ?? false
+        case .server: return server.map { $0.leafPick != nil || $0.imageKey != nil } ?? false
         }
     }
     private var dirty: Bool {
@@ -182,12 +203,14 @@ struct AvatarPickerSheet: View {
 
     /// Nine leaves, 5 / 4, on a 56 pt pitch: 33 pt discs, only the selected one tinted; then the
     /// ten colours in two rows of five on a 40 pt pitch (23 pt discs, a 31 pt ring on the pick).
+    /// The 4 × 4 leaf sheet (v2) on a 48 pt pitch — 30 pt discs, every leaf neutral and the
+    /// selected one in its hue — then the ten hues on a 36 pt pitch (21 pt discs, 29 pt ring).
     private var botBody: some View {
         VStack(spacing: 0) {
-            VStack(spacing: 56 - 40) {
-                ForEach([Array(0..<5), Array(5..<9)], id: \.self) { row in
-                    HStack(spacing: 56 - 40) {
-                        ForEach(row, id: \.self) { i in
+            VStack(spacing: 48 - 36) {
+                ForEach(0..<4, id: \.self) { r in
+                    HStack(spacing: 48 - 36) {
+                        ForEach(r * 4..<r * 4 + 4, id: \.self) { i in
                             let selected = Int(pick.leaf) == i
                             Button {
                                 pickedLeaf = i
@@ -196,11 +219,11 @@ struct AvatarPickerSheet: View {
                                 ZStack {
                                     Circle().fill(selected ? LeafArt.colors[Int(pick.color)] : mutedDisc)
                                     LeafShape(index: i)
-                                        .fill(LeafArt.ink, style: FillStyle(eoFill: true))
-                                        .frame(width: 33 * LeafArt.scale, height: 33 * LeafArt.scale)
+                                        .fill(selected ? LeafArt.ink(pick.color) : mutedInk, style: FillStyle(eoFill: true))
+                                        .frame(width: 30 * LeafArt.scale, height: 30 * LeafArt.scale)
                                 }
-                                .frame(width: 33, height: 33)
-                                .frame(width: 40, height: 40)
+                                .frame(width: 30, height: 30)
+                                .frame(width: 36, height: 36)
                                 .overlay(Circle().strokeBorder(selected ? ring : .clear, lineWidth: 1))
                                 .contentShape(Circle())
                             }
@@ -210,18 +233,18 @@ struct AvatarPickerSheet: View {
                     }
                 }
             }
-            .padding(.top, 92 - 44 - 20)
-            VStack(spacing: 40 - 31) {
+            .padding(.top, 84 - 44 - 18)
+            VStack(spacing: 36 - 29) {
                 ForEach([Array(0..<5), Array(5..<10)], id: \.self) { row in
-                    HStack(spacing: 40 - 31) {
+                    HStack(spacing: 36 - 29) {
                         ForEach(row, id: \.self) { i in
                             let selected = Int(pick.color) == i
                             Button {
                                 pickedColor = i
                                 reset = false
                             } label: {
-                                Circle().fill(LeafArt.colors[i]).frame(width: 23, height: 23)
-                                    .frame(width: 31, height: 31)
+                                Circle().fill(LeafArt.colors[i]).frame(width: 21, height: 21)
+                                    .frame(width: 29, height: 29)
                                     .overlay(Circle().strokeBorder(selected ? ring : .clear, lineWidth: 1))
                                     .contentShape(Circle())
                             }
@@ -231,7 +254,7 @@ struct AvatarPickerSheet: View {
                     }
                 }
             }
-            .padding(.top, 206 - 148 - 20 - 15.5)
+            .padding(.top, 282 - 228 - 18 - 14.5)
         }
         .frame(maxWidth: .infinity)
         .padding(.bottom, 24)
@@ -276,7 +299,7 @@ struct AvatarPickerSheet: View {
         .padding(.bottom, 24)
     }
 
-    private var canGenerate: Bool { !prompt.trimmingCharacters(in: .whitespaces).isEmpty && !generating && isAgent }
+    private var canGenerate: Bool { !prompt.trimmingCharacters(in: .whitespaces).isEmpty && !generating }
     private var statusLine: String {
         if let errorText { return errorText }
         if generating { return "Painting a picture — a few seconds." }
@@ -285,7 +308,7 @@ struct AvatarPickerSheet: View {
     }
 
     private func generate() {
-        guard canGenerate, case .agent(let id) = target else { return }
+        guard canGenerate else { return }
         let text = prompt.trimmingCharacters(in: .whitespaces)
         generating = true
         errorText = nil
@@ -293,7 +316,11 @@ struct AvatarPickerSheet: View {
         promptFocused = false
         Task {
             do {
-                generatedKey = try await model.generateProjectAvatar(projectId: id, prompt: text)
+                switch target {
+                case .agent(let id): generatedKey = try await model.generateProjectAvatar(projectId: id, prompt: text)
+                case .group(let id): generatedKey = try await model.generateGroupAvatar(chatId: id, prompt: text)
+                case .server(let id): generatedKey = try await model.generateServerAvatar(id, prompt: text)
+                }
             } catch {
                 errorText = error.localizedDescription
             }
@@ -333,8 +360,8 @@ struct AvatarPickerSheet: View {
         if let uploadPreview, tab == .upload {
             Image(uiImage: uploadPreview).resizable().scaledToFill()
                 .frame(width: 114, height: 114).clipShape(Circle())
-        } else if tab == .generate, let generatedKey, case .agent(let id) = target,
-                  let url = model.blobURL(projectId: id, key: generatedKey) {
+        } else if tab == .generate, let generatedKey,
+                  let url = model.blobURL(projectId: slot, key: generatedKey) {
             AsyncImage(url: url) { phase in
                 if let image = phase.image {
                     image.resizable().scaledToFill()
@@ -370,6 +397,12 @@ struct AvatarPickerSheet: View {
                     .frame(width: 114, height: 114).clipShape(Circle())
                 } else if let leaf = people?.leafPick {
                     LeafAvatar(pick: leaf, size: 114)
+                } else {
+                    LeafAvatar(pick: currentPick, size: 114).opacity(0.55)
+                }
+            case .server:
+                if let server {
+                    ServerAvatar(server: server, size: 114)
                 } else {
                     LeafAvatar(pick: currentPick, size: 114).opacity(0.55)
                 }
@@ -424,7 +457,17 @@ struct AvatarPickerSheet: View {
                     switch tab {
                     case .bot: ok = await model.setGroupLeaf(chatId: id, pick: pick)
                     case .upload: if let uploadJpeg { ok = await model.setGroupImage(chatId: id, jpeg: uploadJpeg) }
-                    case .generate: break
+                    case .generate: if let generatedKey { ok = await model.setGroupImageKey(chatId: id, key: generatedKey) }
+                    }
+                }
+            case .server(let id):
+                if reset {
+                    ok = await model.setServerLeaf(id, pick: nil)
+                } else {
+                    switch tab {
+                    case .bot: ok = await model.setServerLeaf(id, pick: pick)
+                    case .upload: if let uploadJpeg { ok = await model.setServerImage(id, jpeg: uploadJpeg) }
+                    case .generate: if let generatedKey { ok = await model.setServerImageKey(id, key: generatedKey) }
                     }
                 }
             }

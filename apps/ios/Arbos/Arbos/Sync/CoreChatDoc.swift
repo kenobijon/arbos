@@ -26,6 +26,12 @@ final class CoreChatDoc {
         self.doc = ArbosFFI.ChatDoc.open()
     }
 
+    /// A replica loaded from a full snapshot (the perf rig's exported chat).
+    init(key: Id, snapshot: Data) throws {
+        self.key = key
+        self.doc = try ArbosFFI.ChatDoc.openFromSnapshot(snapshot: snapshot)
+    }
+
     var count: Int { Int(doc.messageCount()) }
 
     /// Nothing imported or written yet (a fresh replica is not worth saving).
@@ -38,6 +44,11 @@ final class CoreChatDoc {
 
     func importUpdate(_ bytes: Data) throws {
         try doc.apply(bytes: bytes)
+    }
+
+    /// Import an update; `true` when Loro parked it as pending (dependencies missing).
+    func importUpdateReportingPending(_ bytes: Data) throws -> Bool {
+        try doc.applyUpdate(bytes: bytes)
     }
 
     /// Does the replica already contain this checkpoint frontier?
@@ -95,9 +106,12 @@ final class CoreChatDoc {
         var avatar: String?
     }
 
+    /// `forwardedFrom` = the original sender's name on a forwarded message (the bubble's
+    /// "Forwarded from <name>" header; written as `forwardedFrom` on the row).
     func insertUserMessage(
         id: Id, text: String, deviceId: String, attachments: [Attachment] = [],
-        author: Author? = nil, mentions: [String] = [], replyTo: String? = nil
+        author: Author? = nil, mentions: [String] = [], replyTo: String? = nil,
+        forwardedFrom: String? = nil
     ) throws {
         let opts = UserMessageOptsRecord(
             attachments: attachments.map {
@@ -108,7 +122,8 @@ final class CoreChatDoc {
             sender: author?.sender,
             senderHandle: author?.handle,
             senderName: author?.name,
-            senderAvatar: author?.avatar
+            senderAvatar: author?.avatar,
+            forwardedFrom: forwardedFrom
         )
         try doc.insertUserMessage(id: id, text: text, deviceId: deviceId, opts: opts)
     }
@@ -133,6 +148,11 @@ final class CoreChatDoc {
     /// Remove a message for everyone. Does not commit. Do not announce.
     func deleteMessage(messageId: Id) throws {
         try doc.deleteMessage(messageId: messageId)
+    }
+
+    /// Replace a message's text (edit). Does not commit. Sets `editedAt`.
+    func editMessage(messageId: Id, text: String) throws {
+        try doc.editMessage(messageId: messageId, text: text)
     }
 
     /// Append a `commands` row (`send`, `stop`, `answer`, `retry`, `retitle`). Does not commit.

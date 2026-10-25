@@ -31,6 +31,27 @@ extension AppModel {
         let tints = ["fx-comms": 5, "fx-affine": 3, "fx-hyper": 1, "fx-expense": 6, "fx-invoices": 4, "fx-scout": 2]
         for i in list.indices { list[i].avatarColorIndexEffective = tints[list[i].id] }
         setFixture(projects: list, now: now)
+        if DebugHooks.fixtureServers { setFixtureServers(now: now) }
+    }
+
+    /// Three servers for the home list's Servers segment (D88 servers otherwise come from the
+    /// relay only). No Matrix rows: the preview falls back to the server's own line.
+    private func setFixtureServers(now: Int64) {
+        let seeds: [(String, String, Int, String)] = [
+            ("fx-server-hq", "Arbos HQ", 1, "owner"),
+            ("fx-server-affine", "Affine", 2, "member"),
+            ("fx-server-hyper", "Hyper", 3, "member"),
+        ]
+        servers = seeds.enumerated().map { i, seed in
+            let (id, name, tint, role) = seed
+            let created = now - Int64(i + 1) * 2_700_000
+            let general = ServerChannel(id: "\(id)-general", serverId: id, name: "general", topic: nil,
+                                        restricted: false, position: 0, roomId: nil, createdAt: created)
+            return Server(id: id, name: name, imageKey: nil, ownerUserId: role == "owner" ? "fx-me" : "fx-other",
+                          spaceRoomId: nil, createdAt: created, myRole: role, memberCount: 4 + i, channels: [general],
+                          generalChannelId: general.id, avatarColorIndex: tint, isOpen: false, invite: nil, members: [])
+        }
+        serversAvailable = true
     }
 
     private func setFixture(projects list: [Project], now: Int64) {
@@ -135,16 +156,28 @@ extension AppModel {
         // `ARBOS_FIXTURE_WORKING=<n>` (presence-row rig): the group holds n agents so the
         // row over the composer can show several working at once.
         var groupAgents = [commsAgent]
+        // `ARBOS_FIXTURE_FOREIGN_AGENT=1` (#1592): someone else's agent, first so
+        // `ARBOS_FIXTURE_WORKING=1` shows it working. Roster record only — not in `projects`.
+        if DebugHooks.fixtureForeignAgent {
+            var testAgent = Project(id: "fx-foreign-testagent", name: "TestAgent", icon: "T", color: "#8b7cf6", state: .awake, stateSince: nil,
+                                    stateDetail: nil, model: "", effort: .low, spendTodayUsd: 0, spendCapUsd: 0, avatar: nil, avatarColor: nil)
+            testAgent.avatarLeaf = 3
+            testAgent.avatarLeafColor = 7
+            testAgent.avatarColorIndexEffective = 3
+            groupAgents.insert(ChatMember(id: testAgent.id, kind: .agent, member: "agent:\(testAgent.id)", role: "agent", handle: "testagent", avatarUrl: nil,
+                                          name: "TestAgent", status: "member", joinedAt: now - 86_400_000, project: testAgent, ownerId: "gh_459",
+                                          ownerHandle: "sami", replyPolicy: "mention"), at: 0)
+        }
         for p in list.dropFirst().prefix(max(0, DebugHooks.fixtureWorking - 1)) {
             groupAgents.append(ChatMember(id: p.id, kind: .agent, member: "agent:\(p.id)", role: "agent", handle: mentionSlug(p.name), avatarUrl: nil,
                                           name: p.name, status: "member", joinedAt: now - 86_400_000, project: p, ownerId: "fx-me", ownerHandle: "jacob", replyPolicy: "mention"))
         }
         let group = PeopleChat(id: "fx-group-launch", kind: "group", createdBy: "fx-me", createdAt: now - 3 * 86_400_000, title: "Launch week",
                                pending: false, members: [meOwner, unconst, mira, sam] + groupAgents, headSeq: 40, readSeq: 40, unread: false,
-                               lockState: "visible_to_agents", lastActivityAt: now - 50 * 60_000, myRole: "owner", muted: false)
+                               lockState: "visible_to_agents", lastActivityAt: now - 50 * 60_000, myRole: "owner", muted: false, silenced: false)
         peopleChats = [group, PeopleChat(id: "fx-dm-unconst", kind: "dm", createdBy: "gh_32490803", createdAt: now - 40 * 60_000, title: "@unconst",
                                   pending: false, members: [unconst, meMember], headSeq: 12, readSeq: 9, unread: true,
-                                  lockState: "people_only", lastActivityAt: now - 7 * 60_000, myRole: "member", muted: false)]
+                                  lockState: "people_only", lastActivityAt: now - 7 * 60_000, myRole: "member", muted: false, silenced: false)]
         peopleUnread = ["fx-dm-unconst"]
         messages["fx-group-launch"] = [
             Message(id: "g1", chatId: "fx-group-launch", role: .user, sender: "user:fx-u3", status: .done, turn: nil, decision: nil, subagentId: nil,
@@ -178,9 +211,59 @@ extension AppModel {
         ]
         // Mira's second line replies to her first (quote header on another person's bubble).
         messages["fx-group-launch"]?[2].replyTo = "g1"
+        // #1592 rig: a question to someone else's agent and its first bubble — the shape of
+        // Jacob's Arbonites screenshot ("@testagent how many messages …" / "On it.").
+        if DebugHooks.fixtureForeignAgent {
+            messages["fx-group-launch", default: []].append(
+                Message(id: "g5", chatId: "fx-group-launch", role: .user, sender: "user:fx-u4", status: .done, turn: nil, decision: nil, subagentId: nil,
+                        subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 30 * 60_000, completedAt: nil, pending: false,
+                        parts: [.text(id: "g5t", text: "@testagent how many messages are there in this chat?")], hiddenCount: 0,
+                        senderHandle: "sam", senderName: "Sam Okafor"))
+            var reply = assistant("g6", "fx-group-launch", "On it.", at: now - 29 * 60_000)
+            reply.sender = "agent:fx-foreign-testagent"
+            reply.senderHandle = "testagent"
+            reply.senderName = "TestAgent"
+            reply.inReplyTo = "g5"
+            messages["fx-group-launch", default: []].append(reply)
+        }
         if let rows = DebugHooks.fixtureLongRows, rows > 0 {
             messages["fx-group-launch"] = Self.longGroupTranscript(rows: rows, before: now - 4 * 3_600_000)
                 + (messages["fx-group-launch"] ?? [])
+        }
+        // `ARBOS_FIXTURE_DOC=<path>`: the fixture group becomes a real chat doc (a Loro
+        // snapshot exported from the relay), so the transcript has the true shape —
+        // members, avatars, mentions, replies, media, system rows (long-chat perf rig).
+        if let path = DebugHooks.fixtureDoc, let data = FileManager.default.contents(atPath: path) {
+            let started = Date()
+            if let doc = try? CoreChatDoc(key: "fx-group-launch", snapshot: data) {
+                let list = doc.readAll()
+                LaunchClock.mark("fixture-doc", detail: "messages=\(list.count) bytes=\(data.count) in \(Int(Date().timeIntervalSince(started) * 1000)) ms")
+                var seen = Set<String>()
+                var members: [ChatMember] = [meOwner]
+                for m in list where m.sender.hasPrefix("user:") && m.sender != "user:fx-me" {
+                    let id = String(m.sender.dropFirst(5))
+                    guard seen.insert(id).inserted, let handle = m.senderHandle else { continue }
+                    members.append(ChatMember(id: id, kind: .user, member: m.sender, role: "member", handle: handle, avatarUrl: m.senderAvatar,
+                                              name: m.senderName, status: "member", joinedAt: now - 3 * 86_400_000, project: nil, ownerId: nil,
+                                              ownerHandle: nil, replyPolicy: nil, lastSeenAt: now - 30_000, online: true))
+                }
+                for m in list where m.sender.hasPrefix("agent:") {
+                    let id = String(m.sender.dropFirst(6))
+                    guard seen.insert(id).inserted, let handle = m.senderHandle else { continue }
+                    members.append(ChatMember(id: id, kind: .agent, member: m.sender, role: "agent", handle: handle, avatarUrl: m.senderAvatar,
+                                              name: m.senderName, status: "member", joinedAt: now - 86_400_000, project: nil, ownerId: nil,
+                                              ownerHandle: nil, replyPolicy: "mention"))
+                }
+                if let i = peopleChats.firstIndex(where: { $0.id == "fx-group-launch" }) {
+                    peopleChats[i].members = members
+                    peopleChats[i].title = "Arbonites (export)"
+                }
+                messages["fx-group-launch"] = list
+            }
+        }
+        if let replay = DebugHooks.perfReplay {
+            perfReplay(checkpointPath: replay.checkpoint, rowsPath: replay.rows, rooms: DebugHooks.perfReplayRooms,
+                       gapMs: DebugHooks.perfReplayGapMs, afterMs: DebugHooks.perfReplayAfterMs)
         }
         // `ARBOS_FIXTURE_WORKING=<n>`: the first n agents of the group (and the opened
         // agent chat's one agent) stream a row with no words yet — "<name> is working".
@@ -195,6 +278,33 @@ extension AppModel {
             if let c = DebugHooks.openChat, c != "fx-group-launch", c != "fx-dm-unconst" {
                 messages[c, default: []].append(streaming("fx-working-agent", c, at: now - 5_000))
             }
+        }
+        // `ARBOS_FIXTURE_JOBS=<n>`: background jobs open in the opened agent chat — each with
+        // its hidden `job` row (what agentd writes) and its entry in the relay's
+        // `activity.jobs[]` (what the poll would answer): the tasks chip and sheet.
+        if DebugHooks.fixtureJobs > 0, let c = DebugHooks.openChat, let projectId = chat(c)?.projectId,
+           peopleChat(c) == nil {
+            let ask = messages[c]?.last { $0.role == .user }?.id
+            let seeds: [(id: String, title: String, state: JobState, step: String, elapsed: Int)] = [
+                ("fx-job-surf", "Searching for surf schools", .running, "Reading tripadvisor.com", 41),
+                ("fx-job-tests", "Fixing the flaky tests", .running, "", 125),
+                ("fx-job-rename", "Renaming the config module", .queued, "Waiting for Fixing the flaky tests", 12),
+            ]
+            let n = DebugHooks.fixtureJobs
+            var list: [Job] = []
+            for (i, seed) in seeds.prefix(n).enumerated() {
+                let activity = seed.step.isEmpty ? seed.title : seed.step
+                var row = streaming("fx-job-row-\(i)", c, at: now - Int64(seed.elapsed) * 1000)
+                row.job = JobRef(["id": seed.id, "title": seed.title])
+                row.worker = true
+                row.hidden = true
+                row.inReplyTo = ask
+                row.activity = n > 1 ? "\(activity) · \(n) tasks" : activity
+                messages[c, default: []].append(row)
+                list.append(Job(id: seed.id, title: seed.title, state: seed.state, step: seed.step, elapsedS: seed.elapsed,
+                                askMessageId: ask, chatId: c))
+            }
+            jobs[projectId] = list
         }
         // `ARBOS_FIXTURE_TYPING=1|<handle>[,<handle>…]`: those people type in every fixture
         // people chat for the whole launch (`1` = the DM's other person / the group's first).
@@ -223,8 +333,22 @@ extension AppModel {
                     subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 7 * 60_000, completedAt: nil, pending: false,
                     parts: [.text(id: "d3t", text: "Sending in a sec. Also: can we add your Arbos agent here so it can pull the numbers while we talk?")], hiddenCount: 0,
                     senderHandle: "unconst", senderName: "Unconst"),
+            // A second line of mine after unconst's last one: with `ARBOS_FIXTURE_SEEN=unconst:d2`
+            // (rig, sent-state-opacity-2026-10-24) d2 is seen (full) and this one is still only sent (lighter).
+            Message(id: "d4", chatId: "fx-dm-unconst", role: .user, sender: "user:fx-me", status: .done, turn: nil, decision: nil, subagentId: nil,
+                    subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 6 * 60_000, completedAt: nil, pending: false,
+                    parts: [.text(id: "d4t", text: "Sure — add it, and send the copy whenever you're ready.")], hiddenCount: 0, senderHandle: "jacob", senderName: "Jacob Steeves"),
         ]
         caughtUp.insert("fx-dm-unconst")
+        // `ARBOS_FIXTURE_SEEN=<handle>:<messageId>[,…]` seeds peers' read watermarks for the DM
+        // (what a presence frame with `seen` would do), so a rig can show seen next to sent.
+        if let seeds = DebugHooks.fixtureSeen {
+            for pair in seeds.split(separator: ",") {
+                let bits = pair.split(separator: ":", maxSplits: 1).map(String.init)
+                guard bits.count == 2 else { continue }
+                ReadReceipts.shared.note(["handle": bits[0], "seen": bits[1]], chatId: "fx-dm-unconst")
+            }
+        }
         directory = [
             Person(id: "fx-u1", handle: "alex-rivera", avatarUrl: nil, name: "Alex Rivera", status: "member"),
             Person(id: "fx-u2", handle: "jen", avatarUrl: nil, name: "Jen Park", status: "member"),
@@ -310,6 +434,47 @@ extension AppModel {
                                                             "requests": [request], "activity": activity])
     }
 
+    /// The agent pane's Routines card (the Mac fixture's three: a weekday stand-up, a paused
+    /// digest, a webhook that last fired 40 min ago). Comms owns them; other agents have none.
+    func fixtureRoutines(_ projectId: Id) -> [Routine] {
+        guard projectId == "fx-comms" else { return [] }
+        let now = nowMs()
+        return [
+            Routine(id: "fx-rt-standup", projectId: projectId, name: "Morning stand-up",
+                    trigger: .cron(expr: "0 9 * * 1-5", tz: "Europe/Berlin"), enabled: true,
+                    lastRunAt: now - 20 * 3_600_000, nextRunAt: now + 4 * 3_600_000),
+            Routine(id: "fx-rt-digest", projectId: projectId, name: "Open PR digest",
+                    trigger: .cron(expr: "0 * * * *", tz: "UTC"), enabled: false, lastRunAt: nil, nextRunAt: nil),
+            Routine(id: "fx-rt-deploy", projectId: projectId, name: "Deploy finished",
+                    trigger: .webhook, enabled: true, lastRunAt: now - 40 * 60_000, nextRunAt: nil),
+        ]
+    }
+
+    /// `GET /machine/debug` as the rig answers it: an awake 4-core box up 5 h 12 m, one
+    /// workspace per agent, Comms mid-turn (42 s, 7 tool calls) and — with
+    /// `ARBOS_FIXTURE_WORKING=n` — the next agents too. Goes through the real parser.
+    func fixtureBoxReport() -> BoxReport {
+        let working = Set(["fx-comms"] + projects.dropFirst().prefix(max(0, DebugHooks.fixtureWorking - 1)).map(\.id))
+        let workspaces: [[String: Any]] = projects.filter { $0.id != peopleSlot }.map { p in
+            var turn: [String: Any] = ["running": working.contains(p.id)]
+            if working.contains(p.id) {
+                turn["current"] = ["elapsed_ms": p.id == "fx-comms" ? 42_000 : 128_000, "tool_calls": p.id == "fx-comms" ? 7 : 3]
+            }
+            return ["project_id": p.id, "name": p.name, "healthy": true, "turn": turn]
+        }
+        let debug: [String: Any] = [
+            "relay": ["state": "awake", "awake_for_s": 5 * 3600 + 12 * 60, "provider": "gvisor",
+                      "agentd": ["image": "arbos-agent-0.1.7"]],
+            "box": ["reachable": true, "state": [
+                "uptime_s": 5 * 3600 + 12 * 60, "load": [0.42, 0.38, 0.35],
+                "memory_mb": ["total": 8192, "available": 5325],
+                "disk": ["total_mb": 10240, "available_mb": 6861],
+                "workspaces": workspaces,
+            ]],
+        ]
+        return BoxReport(debug: debug, now: nowMs())
+    }
+
     /// Two sample message notifications (an agent, a person) for screenshots.
     func postSampleNotifications() {
         let affine = projects.first { $0.id == "fx-affine" }
@@ -333,7 +498,8 @@ extension AppModel {
 
     /// Sends in fixture mode append locally so the composer can be exercised,
     /// then a scripted reply lands as complete bubbles (ack → working → result).
-    func fixtureAppend(chatId: Id, text: String, attachments: [Attachment], replyTo: Id? = nil) {
+    func fixtureAppend(chatId: Id, text: String, attachments: [Attachment], replyTo: Id? = nil,
+                       forwardedFrom: String? = nil) {
         var list = messages[chatId] ?? []
         // Finish the fixture's stuck "working" turn so the demo reads cleanly.
         if let i = list.lastIndex(where: { $0.isStreaming }) {
@@ -342,6 +508,7 @@ extension AppModel {
         }
         var m = user(newId(), chatId, text, at: nowMs())
         m.replyTo = replyTo
+        m.forwardedFrom = forwardedFrom
         m.parts = attachments.map { .attachment(id: newId(), attachment: $0) } + (text.isEmpty ? [] : m.parts)
         list.append(m)
         messages[chatId] = list
@@ -395,6 +562,18 @@ extension AppModel {
         }
         messages[chatId] = list
     }
+
+    /// Rig (`ARBOS_SHOW=code-block`): the Mac fixture's `REPLY_CODE` reply.
+    static let codeReply = """
+    The transcript is a bottom-aligned list with one row per markdown block:
+
+    ```rust
+    let list = ListState::new(0, ListAlignment::Bottom, px(320.0));
+    list(list.clone(), cx.processor(Self::render_row))
+    ```
+
+    Rows are keyed by `{msg}#{part}.{block}` and re-spliced only when their bytes change.
+    """
 
     /// The shape of Jacob's Oct 23 screenshot — a heading, bold labels and bullets over
     /// twenty-odd lines (the Mac fixture's `ARBOS_FIXTURE_REPLY=long` carries the same text).
@@ -622,6 +801,31 @@ extension AppModel {
             out.append(m)
         }
         return out
+    }
+}
+
+extension Data {
+    /// Bytes from a hex string (the relay's `rows.hex` export).
+    init?(hexString: String) {
+        let chars = Array(hexString.utf8)
+        guard chars.count % 2 == 0 else { return nil }
+        var out = Data(capacity: chars.count / 2)
+        var i = 0
+        while i < chars.count {
+            guard let hi = Self.nibble(chars[i]), let lo = Self.nibble(chars[i + 1]) else { return nil }
+            out.append(hi << 4 | lo)
+            i += 2
+        }
+        self = out
+    }
+
+    private static func nibble(_ c: UInt8) -> UInt8? {
+        switch c {
+        case 48...57: return c - 48
+        case 65...70: return c - 55
+        case 97...102: return c - 87
+        default: return nil
+        }
     }
 }
 #endif

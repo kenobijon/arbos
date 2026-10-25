@@ -23,8 +23,16 @@ struct MentionEntry {
 }
 
 /// Everyone the app knows right now, keyed by handle (lower-case).
+///
+/// Build once per directory sync (Mac: `Mentions::from_state` in transcript
+/// sync) and pass the same instance into every bubble. Rebuilding inside each
+/// `RowView` / `BlockView` body was the main iPhone group-chat lag: every
+/// evaluation walked projects, people chats, the directory and servers.
 @MainActor
 final class MentionTable {
+    /// Identity of the table's inputs (the cache's hash); views compare this, not
+    /// the instance, so a rebuilt-but-equal table does not redraw every bubble.
+    var stamp = 0
     private var byHandle: [String: MentionEntry] = [:]
     /// Display names, longest first, so `@Launch week` beats `@Launch`.
     private var names: [(String, MentionEntry)] = []
@@ -32,9 +40,12 @@ final class MentionTable {
     /// The chip's geometry (Grok Bot's mention chip): picture `picture` pt in a
     /// cap `capWidth` wide; the pill rises `padY` over the glyph box.
     static let picture: CGFloat = 16
-    static let capWidth: CGFloat = 22
+    static let capWidth: CGFloat = 23
     static let padY: CGFloat = 2
     static let radius: CGFloat = 7
+
+    /// Empty table (no chips) — placeholder until the chat has synced one.
+    init() {}
 
     init(model: AppModel, theme: Theme) {
         for p in model.projects {
@@ -52,6 +63,18 @@ final class MentionTable {
                     name: m.name?.isEmpty == false ? m.name! : m.handle,
                     target: .user(ProfilePerson(m)),
                     picture: AnyView(PersonAvatar(url: m.avatarUrl, handle: m.handle, size: Self.picture, name: m.name, id: m.id, colorIndex: m.avatarColorIndex))
+                ))
+            }
+            // Agents other people shared into my chats (#1592): their `@handle` is a chip
+            // too, drawn through the same identity the bubble and the presence row use.
+            for m in chat.agents {
+                let p = model.agent(member: m, chatId: chat.id)
+                let slug = mentionSlug(p.name)
+                guard !slug.isEmpty else { continue }
+                add(slug, MentionEntry(
+                    name: p.name,
+                    target: .agent(projectId: p.id),
+                    picture: AnyView(AgentAvatar(project: p, theme: theme, size: Self.picture, still: true))
                 ))
             }
             if chat.isGroup {
@@ -84,6 +107,66 @@ final class MentionTable {
         }
         names = byHandle.values.map { ($0.name, $0) }
             .sorted { a, b in a.0.count != b.0.count ? a.0.count > b.0.count : a.0 < b.0 }
+    }
+
+    /// One shared table for the open chat — rebuilt only when the mention
+    /// sources change (projects, people, directory, servers, appearance).
+    @MainActor
+    final class Cache {
+        static let shared = Cache()
+        private var table = MentionTable()
+        private var stamp = 0
+
+        func table(model: AppModel, theme: Theme) -> MentionTable {
+            let next = Self.stamp(model)
+            if next != stamp {
+                stamp = next
+                table = MentionTable(model: model, theme: theme)
+                table.stamp = next
+            }
+            return table
+        }
+
+        private static func stamp(_ model: AppModel) -> Int {
+            var h = Hasher()
+            // Appearance / surface drive Theme; chips embed AgentAvatar with that theme.
+            h.combine(model.appearanceSetting)
+            h.combine(model.surfaceSetting)
+            for p in model.projects {
+                h.combine(p.id)
+                h.combine(p.name)
+                h.combine(p.avatarColorIndex)
+            }
+            // Sorted: a chat moving to the top on activity must not change the table.
+            for chat in model.peopleChats.sorted(by: { $0.id < $1.id }) {
+                h.combine(chat.id)
+                h.combine(chat.title)
+                h.combine(chat.avatarLeaf)
+                h.combine(chat.avatarLeafColor)
+                for m in chat.members {
+                    h.combine(m.id)
+                    h.combine(m.handle)
+                    h.combine(m.name)
+                    h.combine(m.avatarUrl)
+                    h.combine(m.project?.name)
+                    h.combine(m.project?.avatarLeaf)
+                    h.combine(m.project?.avatarLeafColor)
+                    h.combine(m.project?.imageKey)
+                    h.combine(m.isAgent)
+                }
+            }
+            for person in model.directory {
+                h.combine(person.id)
+                h.combine(person.handle)
+                h.combine(person.name)
+                h.combine(person.avatarUrl)
+            }
+            for server in model.servers {
+                h.combine(server.id)
+                h.combine(server.name)
+            }
+            return h.finalize()
+        }
     }
 
     private func add(_ handle: String, _ entry: MentionEntry) {

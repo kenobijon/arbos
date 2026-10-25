@@ -1,8 +1,25 @@
-//! The chat list: the iPhone home screen as a Mac sidebar. A top bar with an
-//! oval Search field on the left, "+" and the collapse control on the right,
-//! then every agent and person as one row — avatar, name, time, last line.
-//! The account circle (its dot is the machine state) and gear sit at the
-//! bottom; the Update pill only while a newer build exists.
+//! The chat list: the iPhone home screen as a Mac sidebar. The top strip holds
+//! three round buttons on the right — search (opens the command palette,
+//! `ui::palette`; ⌘⇧F / ⌘K do the same), "+", and the collapse toggle — then
+//! the iPhone home's All · Agents · People · Servers filter, then every agent,
+//! person and server as one row — avatar, name, time, last line. The footer
+//! is Grok Bot's: my avatar (its dot is the machine state) and name at the
+//! left, and — only while an update is ready for a click — the blue
+//! cloud-download disc at the right end.
+//!
+//! # Three-pane rule (app-wide, Jacob 2026-10-20; `docs/mac-design-rules.md`)
+//!
+//! Exactly three panes. **Left** always lists chats, groups and servers, and
+//! its top strip holds only three controls: **+**, **search**, **minimize**
+//! (collapse). Entering a server slides this pane over to that server's
+//! channel list. **Centre** is always a chat. **Right** shows every
+//! details / members / settings screen and closes with an X. The strip's
+//! composition is pinned by [`strip_controls`] and its tests; #1491 replaced
+//! the buttons with an always-open Search pill, and Jacob asked for the
+//! compact round buttons back ([feedback sidebar-strip-filter-2026-10-24]).
+//! The buttons are Grok Bot's size — `theme::CONTROL` 36, glyph 19, 8 apart —
+//! and Search opens the centred palette instead of an inline field
+//! ([feedback search-palette-2026-10-24]).
 
 use std::sync::Arc;
 
@@ -25,8 +42,8 @@ use crate::ui::motion::PulseClock;
 use crate::ui::people;
 use crate::ui::shell::{Shell, TRAFFIC_LIGHTS_INSET};
 use crate::ui::theme::{
-    Theme, AVATAR_ROW, HEADER_HEIGHT, PANEL_RADIUS, SIDEBAR_RESIZE_HANDLE, TEXT_BODY, TEXT_SMALL,
-    TEXT_TINY,
+    Theme, AVATAR_ROW, CONTROL, CONTROL_GAP, CONTROL_GLYPH, CONTROL_GLYPH_WIDE, HEADER_HEIGHT,
+    PANEL_RADIUS, SIDEBAR_RESIZE_HANDLE, TEXT_BODY, TEXT_SMALL, TEXT_TINY,
 };
 
 /// Drag payload for the chat-list column's right-edge resize handle.
@@ -41,18 +58,261 @@ impl Render for SidebarResizeDragGhost {
     }
 }
 
-/// The drag strip beside the traffic lights: Grok Mac's 44 pt top band, the
-/// same height as the chat header ([feedback mac-header-height-grok]). An oval
-/// Search field sits left of the lights' gap; "+" and the collapse control
-/// sit on the right end of the strip so folding the pane is intuitive
-/// ([feedback app-01M5MWZ5T20MS6KA35CFZY8CTG]). Controls are centred on the
-/// lights' line: macOS draws them at 20.75 pt in this window, so the 44 band
-/// is centred 1 pt high (Grok: 21.75 / 21.75).
-fn top_strip() -> f32 {
+/// The drag strip beside the traffic lights: Grok Bot's top band, the same
+/// height as the chat header (`HEADER_HEIGHT`). Its three round buttons
+/// (search · + · collapse, [`STRIP_BUTTON`] discs, [`STRIP_GAP`] apart,
+/// [`STRIP_INSET`] from the right edge) are centred in it, on the family's
+/// line `CONTROL_LINE` = 30 — Grok's discs span 12–48 pt while its lights are
+/// centred at 22 ([feedback topbar-grok-parity-2026-10-24]; the 44 band with
+/// the discs on the lights' line read "too high" to Jacob). The collapse
+/// toggle keeps the right end so folding the pane stays intuitive (#1491).
+///
+/// Native full screen keeps this exact band: nothing is added above the
+/// strip and nothing moves; the lights are macOS's own and follow its
+/// full-screen rules ([feedback fullscreen-traffic-lights-2026-10-24], then
+/// Jacob 2026-10-24 18:3x: real buttons only; pinned by
+/// `strip_tests::full_screen_adds_no_band_above_the_strip`).
+pub(crate) fn top_strip(_fullscreen: bool) -> f32 {
     if cfg!(target_os = "macos") {
         HEADER_HEIGHT
     } else {
         40.0
+    }
+}
+
+/// Disc size of the strip's three round buttons: the button family's
+/// [`CONTROL`] — Grok Bot's 36 pt ([feedback search-palette-2026-10-24]; the
+/// #1134 mock's 32 before).
+pub(crate) const STRIP_BUTTON: f32 = CONTROL;
+/// Space between two strip buttons (Grok: 8).
+pub(crate) const STRIP_GAP: f32 = CONTROL_GAP;
+/// The strip's right inset: the discs end 4 pt past the rows' card edge, as
+/// Grok's do (rows are inset 8; 12 − 8).
+pub(crate) const STRIP_INSET: f32 = 12.0;
+/// The filter capsules under the strip: the iPhone `PaneTabs` geometry (32 pt
+/// capsule, 4 pt gap) with 10 pt side padding instead of the iPhone's 16 —
+/// four segments at 16 would be wider than the 296 pt default sidebar.
+pub(crate) const FILTER_HEIGHT: f32 = 32.0;
+pub(crate) const FILTER_GAP: f32 = 4.0;
+pub(crate) const FILTER_PAD_X: f32 = 10.0;
+/// Space between the strip's bottom edge and the capsules: Grok Bot's first
+/// chat card starts 64 pt under the window top, 16 under its discs (bottom
+/// 48). The filter is the first thing under our strip, so its capsules start
+/// there: 60 + 4 ([feedback topbar-grok-parity-2026-10-24]; was 44 + 6 = 50).
+pub(crate) const FILTER_TOP: f32 = 4.0;
+pub(crate) const FILTER_BOTTOM: f32 = 8.0;
+/// Server rows draw their picture as a rounded square (corner = this fraction
+/// of the size) so they read apart from the agent and people discs.
+pub(crate) const SERVER_PICTURE_CORNER: f32 = 11.0 / 36.0;
+
+/// The footer — my avatar with the machine dot, my name — is Grok Bot's: the
+/// top strip mirrored at the bottom edge. Measured on Jacob's Oct-2026 Grok
+/// Mac refs (`media/group-chat-redesign/refs/1-agent-chat-topbutton-sidebar.png`
+/// in the project store, 2 px/pt, window bottom at the image's last row): the
+/// avatar is 72 px at x 26, rows 1574–1645 of 1670 → **36 pt** (`CONTROL`,
+/// the button family), **13 pt** from the sidebar's left edge, **12 pt**
+/// above the window's bottom edge, centre **30** from the bottom (`CONTROL_LINE`,
+/// the strip's discs' line) — so the footer is a 60 pt band like the strip
+/// ([feedback footer-avatar-grok-size-2026-10-24]). Before: 28 pt at x 18,
+/// 16 above the bottom (centre already at 30).
+pub(crate) const FOOTER_HEIGHT: f32 = HEADER_HEIGHT;
+pub(crate) const FOOTER_AVATAR: f32 = CONTROL;
+pub(crate) const FOOTER_INSET: f32 = 13.0;
+pub(crate) const FOOTER_BOTTOM: f32 = (FOOTER_HEIGHT - FOOTER_AVATAR) / 2.0;
+/// The hover card behind avatar + name: the rows' 8 pt side inset, so its
+/// left pad is what puts the avatar at [`FOOTER_INSET`].
+pub(crate) const FOOTER_ROW_INSET: f32 = 8.0;
+pub(crate) const FOOTER_ROW_PAD_X: f32 = FOOTER_INSET - FOOTER_ROW_INSET;
+/// The hover card's height; it is centred in the band: 60 = 8 + 44 + 8, and
+/// the card itself is 4 + 36 + 4, which is what puts the avatar 12 above the
+/// bottom edge.
+pub(crate) const FOOTER_ROW_HEIGHT: f32 = 44.0;
+pub(crate) const FOOTER_ROW_PAD_Y: f32 = FOOTER_BOTTOM - (FOOTER_ROW_HEIGHT - FOOTER_AVATAR) / 2.0;
+/// The machine dot scales with the avatar (28 → 36 carried 7 / 11 to 9 / 13):
+/// a 9 pt dot in a 13 pt ring of the sidebar colour, 2 pt past the avatar's
+/// bottom-right edge.
+pub(crate) const FOOTER_DOT: f32 = 9.0;
+pub(crate) const FOOTER_DOT_RING: f32 = 13.0;
+pub(crate) const FOOTER_DOT_OVERHANG: f32 = 2.0;
+
+/// Grok Bot's update button at the footer's right end
+/// ([feedback footer-update-button-grok-2026-10-24]): on the same ref rows
+/// as the avatar, a solid blue disc at x 449–520 px — 72 px = **36** (the
+/// button family), exactly under the strip's rightmost disc ("+" in Grok,
+/// our collapse), so it keeps the strip's right inset; fill `#326CCB`, glyph
+/// `#F5F5F5` boxed 26 × 28 px → 13 × 14 pt (`cloud-download` at 20). Grok's
+/// pill sits 8 before it (`STRIP_GAP`); our hover card does the same.
+pub(crate) const FOOTER_DISC: f32 = CONTROL;
+pub(crate) const FOOTER_DISC_INSET: f32 = STRIP_INSET;
+pub(crate) const FOOTER_DISC_GLYPH: f32 = 20.0;
+/// Hover / pressed: the solid fill lifted in lightness — brighter under the
+/// pointer, brighter still while down (the chip rule, [feedback mention-chips]).
+pub(crate) const DISC_HOVER_LIFT: f32 = 0.06;
+pub(crate) const DISC_PRESSED_LIFT: f32 = 0.12;
+/// While the disc works (download / install / relaunch) its fill pulses
+/// between this alpha and 1.
+pub(crate) const DISC_BUSY_ALPHA_MIN: f32 = 0.55;
+
+/// The disc's frame: a [`FOOTER_DISC`] circle, [`STRIP_GAP`] after the hover
+/// card, ending at the strip's right inset. Fill, glyph and handlers are the
+/// caller's (`Shell::render_update_disc`).
+pub(crate) fn footer_disc_frame(id: &'static str) -> gpui::Stateful<Div> {
+    div()
+        .id(id)
+        .size(px(FOOTER_DISC))
+        .flex_shrink_0()
+        .ml(px(STRIP_GAP))
+        .mr(px(FOOTER_DISC_INSET - FOOTER_ROW_INSET))
+        .rounded_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .debug_selector(move || id.into())
+}
+
+/// The footer band as `render` draws it: the hover card (avatar + name) fills
+/// the width inside the rows' inset, centred in the 60 pt band; `disc` is the
+/// update button when one is due.
+pub(crate) fn footer_frame(row: impl IntoElement, disc: Option<impl IntoElement>) -> Div {
+    div()
+        .h(px(FOOTER_HEIGHT))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .px(px(FOOTER_ROW_INSET))
+        .py(px(FOOTER_ROW_PAD_Y))
+        .debug_selector(|| "sidebar-footer".into())
+        .child(row)
+        .children(disc)
+}
+
+/// The hover card's frame: [`FOOTER_ROW_HEIGHT`] tall, [`FOOTER_ROW_PAD_X`]
+/// inside, avatar then name 10 apart.
+pub(crate) fn footer_row_frame() -> gpui::Stateful<Div> {
+    div()
+        .id("sidebar-account")
+        .flex_1()
+        .min_w_0()
+        .h(px(FOOTER_ROW_HEIGHT))
+        .px(px(FOOTER_ROW_PAD_X))
+        .flex()
+        .items_center()
+        .gap(px(10.0))
+        .rounded(px(PANEL_RADIUS - 4.0))
+        .debug_selector(|| "sidebar-account".into())
+}
+
+/// One control of the top strip, left to right.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StripControl {
+    /// The round search button: opens the command palette.
+    Search,
+    /// The round "+" (new chat / new channel inside a server).
+    New,
+    /// The round collapse toggle: folds the pane.
+    Collapse,
+}
+
+impl StripControl {
+    /// Every control is one [`STRIP_BUTTON`] disc — the button family's size.
+    pub(crate) fn size(self) -> f32 {
+        STRIP_BUTTON
+    }
+
+    /// The glyph inside the disc: the plus and the magnifier draw Grok's
+    /// 13–14 pt marks at [`CONTROL_GLYPH`]; the collapse rect is a wider
+    /// icon and takes [`CONTROL_GLYPH_WIDE`] for the same visible box.
+    pub(crate) fn glyph(self) -> (&'static str, f32) {
+        match self {
+            StripControl::Search => ("search", CONTROL_GLYPH),
+            StripControl::New => ("plus", CONTROL_GLYPH),
+            StripControl::Collapse => ("sidebar-left", CONTROL_GLYPH_WIDE),
+        }
+    }
+}
+
+/// What the strip holds, left to right (three-pane rule: exactly +, search,
+/// minimize — nothing else). `show_plus` is false for a server member who
+/// cannot add channels; the search is a spacer inside a server.
+pub(crate) fn strip_controls(in_server: bool, show_plus: bool) -> Vec<StripControl> {
+    let mut controls = Vec::with_capacity(3);
+    if !in_server {
+        controls.push(StripControl::Search);
+    }
+    if show_plus {
+        controls.push(StripControl::New);
+    }
+    controls.push(StripControl::Collapse);
+    controls
+}
+
+/// The filter row is drawn under the strip whenever the chat list is, and
+/// never inside a server (the channel list has nothing to scope).
+pub(crate) fn filter_shown(in_server: bool) -> bool {
+    !in_server
+}
+
+/// The segment under the strip — the iPhone home's `HomeListFilter`
+/// (`HomeView.swift`) with the same four labels; both apps scope the same list.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ListFilter {
+    #[default]
+    All,
+    /// My agents only — not people, not agents shared in by someone else.
+    Agents,
+    /// People chats: DMs and groups.
+    People,
+    /// Servers only.
+    Servers,
+}
+
+impl ListFilter {
+    pub(crate) const ALL: [ListFilter; 4] = [
+        ListFilter::All,
+        ListFilter::Agents,
+        ListFilter::People,
+        ListFilter::Servers,
+    ];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            ListFilter::All => "All",
+            ListFilter::Agents => "Agents",
+            ListFilter::People => "People",
+            ListFilter::Servers => "Servers",
+        }
+    }
+
+    /// `ARBOS_SIDEBAR_FILTER=…` (rig) and the labels, case-insensitively.
+    pub(crate) fn parse(s: &str) -> Option<Self> {
+        ListFilter::ALL
+            .into_iter()
+            .find(|f| f.label().eq_ignore_ascii_case(s.trim()))
+    }
+
+    /// Whether a chat row (agent, DM, group) is in this segment.
+    pub(crate) fn admits_space(self, space: &Project) -> bool {
+        match self {
+            ListFilter::All => true,
+            ListFilter::Agents => !space.is_people() && !space.is_guest(),
+            ListFilter::People => space.is_people(),
+            ListFilter::Servers => false,
+        }
+    }
+
+    /// Whether server rows are in this segment.
+    pub(crate) fn admits_servers(self) -> bool {
+        matches!(self, ListFilter::All | ListFilter::Servers)
+    }
+
+    /// Copy for an empty list under this segment (no query typed).
+    pub(crate) fn empty_copy(self) -> &'static str {
+        match self {
+            ListFilter::All => "No conversations yet",
+            ListFilter::Agents => "No agents yet",
+            ListFilter::People => "No people chats yet",
+            ListFilter::Servers => "No servers yet",
+        }
     }
 }
 
@@ -251,17 +511,37 @@ fn channel_last_line(row: &arbos_matrix::ChannelRow) -> String {
     }
 }
 
-/// Sort key of a search result: the kind of hit first (people, titles,
-/// members, messages — `search::HitKind` order), newest activity inside a kind.
-/// Without a query every row is a `Title` hit, so the list is by activity.
+/// Sort key of a row: the kind of hit (always `Title` now that the list is
+/// not text-filtered), newest activity first.
 type RowKey = (search::HitKind, std::cmp::Reverse<u64>);
+
+/// The chats list's top and bottom fade (Jacob likes it, Oct 23). The band
+/// sits under the strip's bottom edge: the scroll box is pulled up by the band
+/// and the list pads by the same amount, so at rest the first row starts where
+/// the fade ends and only rows that scroll under the strip cross it (the pane
+/// rule from #1365 / #1424). The bottom band stays over the list's end.
+pub const LIST_FADE_BAND: f32 = 14.0;
+
+/// The wrapper is a flex column: the list inside keeps `flex_1 / min_h_0`, so
+/// it stays bounded and scrolls. (#1497's first try used a block div here —
+/// the list took its content height and painted through the account row,
+/// #1528; `row_bounds_tests` pins this.)
+pub(crate) fn faded_list(list: impl IntoElement) -> gpui::AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h_0()
+        .mt(px(-LIST_FADE_BAND))
+        .debug_selector(|| "sidebar-list-frame".into())
+        .child(edge_faded(LIST_FADE_BAND, true, true, list))
+        .into_any_element()
+}
 
 pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
     let theme = Theme::of(cx).clone();
     let state = shell.state.read(cx);
     let selected = state.selected_project.clone();
-    let typed = shell.search_input.read(cx).text().trim().to_string();
-    let query = search::normalize_query(&typed);
     let machine = state.machine.shown_state();
     let sidebar_width = state.sidebar_width;
     // Inside a server the left pane shows its channels (D88 rule 2).
@@ -269,11 +549,28 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
     let open_server_admin = open_server.as_ref().is_some_and(ServerInfo::can_admin);
     let waitlist_position = state.machine.waitlist_position;
 
+    // Sidebar archive (Jacob 2026-10-23): archived spaces leave the list and
+    // sit behind the "Hidden chats · N" footer; the command palette still
+    // finds them. The list itself is never filtered by text any more
+    // ([feedback search-palette-2026-10-24]): every row is a plain `Title`
+    // hit, ordered by activity.
+    let hidden_mode = shell.hidden_open;
+    let hidden_count = state.archived_space_count();
+    let shows = |archived: bool| hidden_mode == archived;
+    // The All · Agents · People · Servers segment scopes the list, like the
+    // iPhone home ([feedback sidebar-strip-filter-2026-10-24]).
+    let filter = shell.list_filter;
     let mut rows: Vec<(RowKey, ListEntry)> = Vec::new();
     for s in state.servers.iter() {
-        let Some(hit) = search::server_hit(s, &query) else {
+        if !filter.admits_servers() {
+            break;
+        }
+        let Some(hit) = search::server_hit(s, "") else {
             continue;
         };
+        if !shows(s.archived_at.is_some()) {
+            continue;
+        }
         let selected = state.open_server.as_deref() == Some(s.id.as_str())
             || state
                 .selected_channel
@@ -292,12 +589,15 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         ));
     }
     for p in state.projects.iter() {
-        // Display name / @handle, title, a member, a chat title, or a loaded
-        // message — ranked in that order; a hit beyond the row's own name is
-        // explained on the second line.
-        let Some(hit) = state.space_search_hit(p, &query) else {
+        if !filter.admits_space(p) {
+            continue;
+        }
+        let Some(hit) = state.space_search_hit(p, "") else {
             continue;
         };
+        if !shows(p.archived_at.is_some()) {
+            continue;
+        }
         let streaming = state.project_is_streaming(&p.id);
         // Shared projects badge the disc with the other side; a group is one
         // plain disc (redesign 2026-10-20).
@@ -338,134 +638,130 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         PulseClock::request(cx);
     }
 
-    // ----- top: oval Search left, "+" and collapse on the right ---------------
-    // Collapse lives here (not the chat header). When the rail is hidden the
-    // header still shows an expand control so the list can come back.
-    // ([feedback app-01M5MWZ5T20MS6KA35CFZY8CTG])
-    let collapse = div()
-        .id("sidebar-collapse")
-        .size(px(28.0))
-        .flex_shrink_0()
-        .rounded(px(7.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .cursor_pointer()
-        .bg(theme.surface_2)
-        .hover(|s| s.bg(theme.surface_2))
-        .child(icon("sidebar-left", 17.0, theme.text))
-        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .on_click(cx.listener(|this, _, window, cx| {
-            this.menu_open = false;
-            let width: f32 = window.viewport_size().width.into();
-            this.state.update(cx, |s, cx| {
-                let narrow = s.window_is_narrow(width);
-                s.toggle_rail(narrow, cx)
-            });
-        }));
-    let plus = div()
-        .id("sidebar-new")
-        .size(px(28.0))
-        .flex_shrink_0()
-        .rounded(px(7.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .cursor_pointer()
-        .hover(|s| s.bg(theme.surface_2))
-        .child(icon("plus", 17.0, theme.text_muted))
-        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .on_click({
-            let in_server = open_server.as_ref().map(|s| s.id.clone());
-            cx.listener(move |this, _, window, cx| {
-                this.menu_open = false;
-                // Inside a server the "+" makes a channel (D88 rule 7; owner/admin only —
-                // the button is not drawn for members).
-                if let Some(server_id) = in_server.clone() {
-                    this.open_server_sheet(
-                        crate::app::ServerSheet::NewChannel { server_id },
-                        window,
-                        cx,
-                    );
-                    return;
-                }
-                this.people_input.update(cx, |i, cx| {
-                    i.clear(cx);
-                    i.set_placeholder("Search people");
-                });
-                this.state.update(cx, |s, cx| s.open_new_chat(cx));
-                let handle = this.people_input.read(cx).focus_handle(cx);
-                window.focus(&handle, cx);
-            })
-        });
+    // ----- top: three round buttons on the right — search · + · collapse ------
+    // Three-pane rule: the strip holds exactly +, search, minimize. Collapse
+    // lives here (not the chat header) and keeps the right end so folding the
+    // pane is intuitive (#1491). When the rail is hidden the header still shows
+    // an expand control so the list can come back.
     let show_plus = open_server.is_none() || open_server_admin;
-    // Oval Search field in the top strip (magnifier + "Search" placeholder).
-    // Escape or the clear dot empty it; the field stays in the strip.
-    let search = div()
-        .id("sidebar-search")
-        .flex_1()
-        .min_w_0()
-        .h(px(28.0))
-        .pl(px(9.0))
-        .pr(px(8.0))
+    let controls = strip_controls(open_server.is_some(), show_plus);
+    let round = |id: &'static str, control: StripControl, theme: &Theme| {
+        let (glyph, size) = control.glyph();
+        debug_assert_eq!(control.size(), crate::ui::theme::CONTROL);
+        glass::control_disc(id, glyph, size, theme)
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+    };
+    let collapse = |cx: &mut Context<Shell>| {
+        round("sidebar-collapse", StripControl::Collapse, &theme)
+            .debug_selector(|| "sidebar-collapse".into())
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.menu_open = false;
+                let width: f32 = window.viewport_size().width.into();
+                this.state.update(cx, |s, cx| {
+                    let narrow = s.window_is_narrow(width);
+                    s.toggle_rail(narrow, cx)
+                });
+            }))
+    };
+    let plus = |cx: &mut Context<Shell>| {
+        round("sidebar-new", StripControl::New, &theme)
+            .debug_selector(|| "sidebar-new".into())
+            .on_click({
+                let in_server = open_server.as_ref().map(|s| s.id.clone());
+                cx.listener(move |this, _, window, cx| {
+                    this.menu_open = false;
+                    // Inside a server the "+" makes a channel (D88 rule 7; owner/admin only —
+                    // the button is not drawn for members).
+                    if let Some(server_id) = in_server.clone() {
+                        this.open_server_sheet(
+                            crate::app::ServerSheet::NewChannel { server_id },
+                            window,
+                            cx,
+                        );
+                        return;
+                    }
+                    this.people_input.update(cx, |i, cx| {
+                        i.clear(cx);
+                        i.set_placeholder("Search people");
+                    });
+                    this.state.update(cx, |s, cx| s.open_new_chat(cx));
+                    let handle = this.people_input.read(cx).focus_handle(cx);
+                    window.focus(&handle, cx);
+                })
+            })
+    };
+    // The search disc opens the command palette (⌘⇧F / ⌘K do the same).
+    let search_button = |cx: &mut Context<Shell>| {
+        round("sidebar-search-toggle", StripControl::Search, &theme)
+            .debug_selector(|| "sidebar-search".into())
+            .on_click(cx.listener(|this, _, window, cx| this.open_palette(window, cx)))
+    };
+    let mut strip = div()
+        .h(px(top_strip(shell.fullscreen)))
+        .flex_shrink_0()
         .flex()
         .items_center()
-        .gap(px(6.0))
-        .rounded_full()
-        .bg(theme.surface_2)
-        .cursor_text()
-        .child(icon("search", 13.0, theme.text_muted))
-        .child(
+        .justify_end()
+        .gap(px(STRIP_GAP))
+        .pl(px(TRAFFIC_LIGHTS_INSET + STRIP_INSET))
+        .pr(px(STRIP_INSET))
+        .when(open_server.is_some(), |el| el.child(div().flex_1()));
+    for control in controls {
+        strip = match control {
+            StripControl::Search => strip.child(search_button(cx)),
+            StripControl::New => strip.child(plus(cx)),
+            StripControl::Collapse => strip.child(collapse(cx)),
+        };
+    }
+    let strip = strip.window_drag();
+    // ----- filter: All · Agents · People · Servers (the iPhone home's PaneTabs) --
+    // Bare labels, the selected one on a capsule, centred; no track, no border.
+    let filter_bar = div()
+        .id("sidebar-filter")
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap(px(FILTER_GAP))
+        .pt(px(FILTER_TOP))
+        .pb(px(FILTER_BOTTOM))
+        .px(px(8.0))
+        .children(ListFilter::ALL.into_iter().map(|f| {
+            let on = f == filter;
             div()
-                .flex_1()
-                .min_w_0()
-                .h_full()
+                .id(ElementId::Name(SharedString::from(format!(
+                    "sidebar-filter-{}",
+                    f.label().to_ascii_lowercase()
+                ))))
+                .h(px(FILTER_HEIGHT))
+                .px(px(FILTER_PAD_X))
                 .flex()
                 .items_center()
-                .child(shell.search_input.clone()),
-        )
-        .when(!query.is_empty(), |el| {
-            el.child(
-                div()
-                    .id("sidebar-search-clear")
-                    .size(px(16.0))
-                    .rounded_full()
-                    .bg(theme.text_faint)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .cursor_pointer()
-                    .child(icon("xmark", 8.0, theme.bg))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.search_input.update(cx, |i, cx| i.clear(cx));
-                        Composer::focus(&this.composer, window, cx);
-                        cx.notify();
-                    })),
-            )
-        })
-        .on_mouse_down(
-            gpui::MouseButton::Left,
-            cx.listener(|this, _, window, cx| {
-                this.menu_open = false;
-                let handle = this.search_input.read(cx).focus_handle(cx);
-                window.focus(&handle, cx);
-                cx.stop_propagation();
-            }),
-        );
-    let strip = div()
-        .h(px(top_strip()))
-        .flex_shrink_0()
-        .flex()
-        .items_center()
-        .gap(px(4.0))
-        .pl(px(TRAFFIC_LIGHTS_INSET + 12.0))
-        .pr(px(12.0))
-        .pb(px(2.0))
-        .when(open_server.is_none(), |el| el.child(search))
-        .when(open_server.is_some(), |el| el.child(div().flex_1()))
-        .when(show_plus, |el| el.child(plus))
-        .child(collapse)
-        .window_drag();
+                .justify_center()
+                .rounded_full()
+                .cursor_pointer()
+                .bg(if on {
+                    theme.bubble_assistant
+                } else {
+                    gpui::transparent_black()
+                })
+                .hover(move |s| if on { s } else { s.text_color(theme.text) })
+                .text_size(px(TEXT_BODY))
+                .font_weight(if on {
+                    FontWeight::SEMIBOLD
+                } else {
+                    FontWeight::NORMAL
+                })
+                .text_color(if on { theme.text } else { theme.text_muted })
+                .child(f.label())
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.menu_open = false;
+                    this.row_menu = None;
+                    this.list_filter = f;
+                    cx.notify();
+                }))
+        }));
     // ----- rows -------------------------------------------------------------
     let mut list = div()
         .id("chat-list")
@@ -474,7 +770,7 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         .flex_1()
         .min_h_0()
         .px(px(8.0))
-        .pt(px(6.0))
+        .pt(px(LIST_FADE_BAND + 6.0))
         .pb(px(12.0))
         .overflow_y_scroll();
     // D89: the host that runs everyone's computer is full; this account is in line. Chats and
@@ -555,24 +851,91 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
                         .child(line),
                 ),
         );
-    } else if rows.is_empty() {
+    } else if rows.is_empty() && !hidden_mode {
+        // Nothing under this segment — the iPhone's copy.
         list = list.child(
             div()
+                .id("sidebar-filter-empty")
                 .pt(px(40.0))
                 .text_center()
                 .text_size(px(TEXT_SMALL))
                 .text_color(theme.text_muted)
-                .child(format!("Nothing matches “{typed}”.")),
+                .child(filter.empty_copy()),
         );
+    }
+    if hidden_mode {
+        // "Hidden chats ‹ back": the hidden rows stand in for the list.
+        list = list.child(
+            div()
+                .id("sidebar-hidden-head")
+                .flex()
+                .items_center()
+                .justify_between()
+                .h(px(28.0))
+                .px(px(12.0))
+                .mb(px(4.0))
+                .text_size(px(TEXT_TINY))
+                .text_color(theme.text_muted)
+                .child("Hidden chats")
+                .child(
+                    div()
+                        .id("sidebar-hidden-back")
+                        .cursor_pointer()
+                        .hover(|s| s.text_color(theme.text))
+                        .child("‹ back")
+                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.hidden_open = false;
+                            cx.notify();
+                        })),
+                ),
+        );
+        if rows.is_empty() {
+            list = list.child(
+                div()
+                    .pt(px(40.0))
+                    .text_center()
+                    .text_size(px(TEXT_SMALL))
+                    .text_color(theme.text_muted)
+                    .child("Nothing hidden."),
+            );
+        }
     }
     for (_, entry) in rows {
         list = match entry {
             ListEntry::Chat(row) => list.child(render_row(*row, shell, &theme, cx)),
-            ListEntry::Server(row) => list.child(render_server_row(*row, &theme, cx)),
+            ListEntry::Server(row) => list.child(render_server_row(*row, shell, &theme, cx)),
         };
     }
+    if !hidden_mode && hidden_count > 0 {
+        // Grok Bot's footer: muted "Hidden chats · N ›" under the list.
+        list = list.child(
+            div()
+                .id("sidebar-hidden-footer")
+                .flex()
+                .items_center()
+                .justify_between()
+                .mt(px(8.0))
+                .h(px(32.0))
+                .px(px(12.0))
+                .rounded(px(PANEL_RADIUS - 4.0))
+                .text_size(px(TEXT_SMALL))
+                .text_color(theme.text_muted)
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.surface_2))
+                .child(format!("Hidden chats · {hidden_count}"))
+                .child(icon("chevron-right", 12.0, theme.text_faint))
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.hidden_open = true;
+                    this.menu_open = false;
+                    this.row_menu = None;
+                    cx.notify();
+                })),
+        );
+    }
 
-    // ----- bottom: Update pill (only when a newer build exists) and the account row --
+    // ----- bottom: the footer — my avatar + name, and the update disc when one is due --
     let (who, person_for_avatar, account_image) = {
         let s = shell.state.read(cx);
         match s.account.clone() {
@@ -607,83 +970,80 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
             None => ("Settings".to_string(), None, None),
         }
     };
-    let account_row = div()
-        .id("sidebar-account")
-        .mx(px(8.0))
-        .mb(px(8.0))
-        .h(px(44.0))
-        .px(px(10.0))
-        .flex()
-        .items_center()
-        .gap(px(10.0))
-        .rounded(px(PANEL_RADIUS - 4.0))
-        .cursor_pointer()
-        .hover(|s| s.bg(theme.surface_2))
-        .child(
-            div()
-                .relative()
-                .size(px(28.0))
-                .flex_shrink_0()
-                .child(match &person_for_avatar {
-                    Some(p) => people::avatar(account_image, p, 28.0, &theme),
-                    None => div()
-                        .size(px(28.0))
-                        .rounded_full()
-                        .bg(theme.surface_2)
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(icon("person", 14.0, theme.text)),
-                })
-                .child(
-                    div()
-                        .absolute()
-                        .right(px(-2.0))
-                        .bottom(px(-2.0))
-                        .size(px(11.0))
-                        .rounded_full()
-                        .bg(theme.sidebar)
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(div().size(px(7.0)).rounded_full().bg(Theme::with_alpha(
-                            machine_dot(machine, &theme),
-                            if machine == MachineState::Waking {
-                                0.4 + 0.6 * PulseClock::phase(cx, 1100)
-                            } else {
-                                1.0
-                            },
-                        ))),
-                ),
-        )
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .truncate()
-                .text_size(px(TEXT_SMALL + 1.0))
-                .text_color(theme.text)
-                .child(who),
-        )
-        // My avatar opens my profile and every setting in the right pane
-        // (three-pane rule, mockup g); a second click folds it away.
-        .on_mouse_down(
-            gpui::MouseButton::Left,
-            cx.listener(|this, _, window, cx| {
-                cx.stop_propagation();
-                this.menu_open = false;
-                let open = this.state.read(cx).profile == Some(crate::app::ProfilePage::Me);
-                if open {
-                    this.close_profile(window, cx);
-                } else {
-                    this.state.update(cx, |s, cx| {
-                        s.open_profile(crate::app::ProfilePage::Me, cx);
-                        s.set_profile_tab(1, cx);
-                    });
-                }
-                cx.notify();
-            }),
-        );
+    // Grok Bot's footer avatar: 36 pt at x 13, 12 above the bottom edge
+    // ([feedback footer-avatar-grok-size-2026-10-24]; the constants above).
+    let account_row =
+        footer_row_frame()
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.surface_2))
+            .child(
+                div()
+                    .relative()
+                    .size(px(FOOTER_AVATAR))
+                    .flex_shrink_0()
+                    .debug_selector(|| "sidebar-account-avatar".into())
+                    .child(match &person_for_avatar {
+                        Some(p) => people::avatar(account_image, p, FOOTER_AVATAR, &theme),
+                        None => div()
+                            .size(px(FOOTER_AVATAR))
+                            .rounded_full()
+                            .bg(theme.surface_2)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(icon("person", FOOTER_AVATAR / 2.0, theme.text)),
+                    })
+                    .child(
+                        div()
+                            .absolute()
+                            .right(px(-FOOTER_DOT_OVERHANG))
+                            .bottom(px(-FOOTER_DOT_OVERHANG))
+                            .size(px(FOOTER_DOT_RING))
+                            .rounded_full()
+                            .bg(theme.sidebar)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(div().size(px(FOOTER_DOT)).rounded_full().bg(
+                                Theme::with_alpha(
+                                    machine_dot(machine, &theme),
+                                    if machine == MachineState::Waking {
+                                        0.4 + 0.6 * PulseClock::phase(cx, 1100)
+                                    } else {
+                                        1.0
+                                    },
+                                ),
+                            )),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(TEXT_SMALL + 1.0))
+                    .text_color(theme.text)
+                    .child(who),
+            )
+            // My avatar opens my profile and every setting in the right pane
+            // (three-pane rule, mockup g); a second click folds it away.
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.menu_open = false;
+                    let open = this.state.read(cx).profile == Some(crate::app::ProfilePage::Me);
+                    if open {
+                        this.close_profile(window, cx);
+                    } else {
+                        this.state.update(cx, |s, cx| {
+                            s.open_profile(crate::app::ProfilePage::Me, cx);
+                            s.set_profile_tab(1, cx);
+                        });
+                    }
+                    cx.notify();
+                }),
+            );
 
     // Drag handle on the right edge: a slim hit target (col-resize cursor) that
     // lets the user make the chat list slimmer or wider
@@ -710,7 +1070,7 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
             }),
         );
 
-    let mut column = div()
+    let column = div()
         .relative()
         .h_full()
         .w(px(sidebar_width))
@@ -721,22 +1081,44 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         .border_r_1()
         .border_color(theme.border)
         .child(strip)
+        // The filter belongs to the chat list, not to a server's channel list.
+        .when(filter_shown(open_server.is_some()), |el| {
+            el.child(filter_bar)
+        })
         .child(match open_server.as_ref() {
             // Inside a server the left pane shows its channels (mockup h).
-            Some(server) => {
-                edge_faded(14.0, true, true, server_channels(server, shell, &theme, cx))
-            }
-            None => edge_faded(14.0, true, true, list),
+            Some(server) => faded_list(server_channels(server, shell, &theme, cx)),
+            None => faded_list(list),
         });
-    if let Some(update) = shell.render_update_button(cx) {
-        column = column.child(div().px(px(12.0)).pb(px(8.0)).child(update));
-    }
-    column.child(account_row).child(resize)
+    // Grok Bot's update disc at the footer's right end, only when an update is
+    // ready for a click ([feedback footer-update-button-grok-2026-10-24]).
+    let update_disc = shell.render_update_disc(cx);
+    column
+        .child(footer_frame(account_row, update_disc))
+        .child(resize)
 }
 
 /// A server's picture: the leaf picked on its Create screen (D92 amendment),
 /// else the D79 disc — initials from its name, the relay's gradient index.
-pub fn server_picture(server: &ServerInfo, size: f32, theme: &Theme) -> Div {
+pub fn server_picture(server: &ServerInfo, state: &AppState, size: f32, theme: &Theme) -> Div {
+    // D92 amendment: an uploaded / generated picture wins over the leaf.
+    if let Some(image) = server
+        .image_url
+        .as_deref()
+        .and_then(|url| state.avatar(url))
+    {
+        return div()
+            .size(px(size))
+            .flex_shrink_0()
+            .rounded_full()
+            .overflow_hidden()
+            .child(
+                gpui::img(image)
+                    .size(px(size))
+                    .rounded_full()
+                    .object_fit(gpui::ObjectFit::Cover),
+            );
+    }
     if let (true, Some(leaf), Some(color)) = (
         avatars::leaf_avatars_on(),
         server.avatar_leaf,
@@ -757,10 +1139,18 @@ pub fn server_picture(server: &ServerInfo, size: f32, theme: &Theme) -> Div {
     )
 }
 
-/// A server row (D88 rule 1): drawn exactly like a group row — disc, name, time, last line,
-/// unread dot. No badge, no count, no disclosure.
+/// A server row's picture: [`server_picture`] on a rounded square instead of
+/// the disc, so servers read apart from agents and people in the one list
+/// (approved mock, [feedback sidebar-strip-filter-2026-10-24]).
+pub fn server_row_picture(server: &ServerInfo, state: &AppState, size: f32, theme: &Theme) -> Div {
+    server_picture(server, state, size, theme).rounded(px(size * SERVER_PICTURE_CORNER))
+}
+
+/// A server row (D88 rule 1): drawn like a group row — picture, name, time, last line,
+/// unread dot. No badge, no count, no disclosure. The picture is a rounded square.
 fn render_server_row(
     row: ServerRowView,
+    shell: &Shell,
     theme: &Theme,
     cx: &mut Context<Shell>,
 ) -> gpui::Stateful<Div> {
@@ -771,7 +1161,10 @@ fn render_server_row(
         preview,
         time,
     } = row;
+    let picture = server_row_picture(&server, shell.state.read(cx), AVATAR_ROW, theme);
     let id: Id = server.id.clone();
+    let menu_id: Id = server.id.clone();
+    let ctrl_menu_id: Id = server.id.clone();
     div()
         .id(ElementId::Name(SharedString::from(format!(
             "row-server-{}",
@@ -796,20 +1189,50 @@ fn render_server_row(
             })
         })
         .cursor_pointer()
-        .on_click(cx.listener(move |this, _, window, cx| {
-            this.menu_open = false;
-            this.row_menu = None;
-            this.chat_menu = None;
-            this.state
-                .update(cx, |s, cx| s.enter_server(id.clone(), cx));
-            Composer::focus(&this.composer, window, cx);
-        }))
+        .on_click(
+            cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                if is_control_click(event) {
+                    return;
+                }
+                this.menu_open = false;
+                this.row_menu = None;
+                this.chat_menu = None;
+                this.state
+                    .update(cx, |s, cx| s.enter_server(id.clone(), cx));
+                Composer::focus(&this.composer, window, cx);
+            }),
+        )
+        // Right-click / control-click: Archive (2026-10-23) — the server's own
+        // page holds Leave and Delete.
+        .on_mouse_down(
+            gpui::MouseButton::Right,
+            cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                this.menu_open = false;
+                this.chat_menu = None;
+                this.row_menu = Some((menu_id.clone(), event.position));
+                cx.notify();
+            }),
+        )
+        .on_mouse_down(
+            gpui::MouseButton::Left,
+            cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                if !event.modifiers.control {
+                    return;
+                }
+                cx.stop_propagation();
+                this.menu_open = false;
+                this.chat_menu = None;
+                this.row_menu = Some((ctrl_menu_id.clone(), event.position));
+                cx.notify();
+            }),
+        )
         .child(
             div()
                 .relative()
                 .size(px(AVATAR_ROW))
                 .flex_shrink_0()
-                .child(server_picture(&server, AVATAR_ROW, theme)),
+                .child(picture),
         )
         .child(
             div()
@@ -917,7 +1340,7 @@ fn server_channels(
                 .min_w_0()
                 .flex_1()
                 .cursor_pointer()
-                .child(server_picture(server, 26.0, theme))
+                .child(server_picture(server, state, 26.0, theme))
                 .child(
                     div()
                         .min_w_0()
@@ -940,7 +1363,7 @@ fn server_channels(
         .flex_1()
         .min_h_0()
         .px(px(8.0))
-        .pt(px(6.0))
+        .pt(px(LIST_FADE_BAND + 6.0))
         .pb(px(12.0))
         .overflow_y_scroll()
         .child(back);
@@ -1259,6 +1682,11 @@ fn render_row(
             .flex_shrink_0()
             .child(people::avatar(person_image, person, AVATAR_ROW, theme));
         if let Some(agent) = space.agents.first() {
+            // The agent's picture through the shared identity (#1592): the one its bubbles,
+            // the presence row and the member list show — uploaded picture included.
+            let state = shell.state.read(cx);
+            let a = avatars::member_identity(Some(&space), &state.projects, agent);
+            let image = a.image_key.as_deref().and_then(|url| state.avatar(url));
             pic = pic.child(
                 div()
                     .absolute()
@@ -1267,7 +1695,7 @@ fn render_row(
                     .p(px(2.0))
                     .rounded_full()
                     .bg(theme.bg)
-                    .child(people::agent_glyph(agent, 18.0, theme)),
+                    .child(avatars::agent_picture(&a, image, 18.0, theme)),
             );
         }
         pic
@@ -1380,7 +1808,6 @@ fn render_row(
                 this.menu_open = false;
                 this.chat_menu = None;
                 this.row_menu = Some((menu_id.clone(), event.position));
-                this.row_delete_armed = false;
                 cx.notify();
             }),
         )
@@ -1394,7 +1821,6 @@ fn render_row(
                 this.menu_open = false;
                 this.chat_menu = None;
                 this.row_menu = Some((ctrl_menu_id.clone(), event.position));
-                this.row_delete_armed = false;
                 cx.notify();
             }),
         )
@@ -1499,10 +1925,79 @@ fn render_row(
 /// row (Jacob, #1258): Mute, Fork, a divider, Delete — nothing else; its
 /// settings live on the agent pane. A people row: Profile, Mute, Delete; a
 /// group row: Delete group.
+/// What the chat-list row menu's Delete does — at once, with no "Delete …?"
+/// step (Jacob, feedback remove-delete-confirms-2026-10-24; the guard is who
+/// sees the item, not a second click).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowDelete {
+    /// An agent and its chats leave your list.
+    Agent,
+    /// A DM leaves your list; a group you own is deleted for everyone.
+    PeopleChat,
+    /// A group you do not own: you leave it, it stays for the others.
+    LeaveGroup,
+}
+
+pub fn row_delete(space: &crate::model::Project, me_handle: &str) -> RowDelete {
+    if space.is_people_group() && !space.owner_handle.as_deref().is_none_or(|o| o == me_handle) {
+        RowDelete::LeaveGroup
+    } else if space.is_people() {
+        RowDelete::PeopleChat
+    } else {
+        RowDelete::Agent
+    }
+}
+
+fn run_row_delete(
+    state: &mut crate::app::AppState,
+    action: RowDelete,
+    id: crate::model::Id,
+    cx: &mut Context<crate::app::AppState>,
+) {
+    match action {
+        RowDelete::Agent => state.delete_project(id, cx),
+        RowDelete::PeopleChat => state.delete_people_chat(id, cx),
+        RowDelete::LeaveGroup => state.leave_group(id, cx),
+    }
+}
+
 pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
     let (space_id, at) = shell.row_menu.clone()?;
     let theme = Theme::of(cx).clone();
     let state = shell.state.read(cx);
+    let archived = state.is_space_archived(&space_id);
+    let archive_row = |theme: &Theme, cx: &mut Context<Shell>| {
+        let id = space_id.clone();
+        glass::menu_row(
+            "row-menu-archive",
+            if archived { "tray-up" } else { "archive" },
+            if archived { "Unarchive" } else { "Archive" },
+            false,
+            theme,
+        )
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.row_menu = None;
+            let id = id.clone();
+            this.state
+                .update(cx, |s, cx| s.set_space_archived(id, !archived, cx));
+        }))
+    };
+    // A server row (D88): Archive / Unarchive only — Leave and Delete live on its page.
+    if state.servers.iter().any(|s| s.id == space_id) {
+        let body = div()
+            .flex()
+            .flex_col()
+            .gap(px(1.0))
+            .child(archive_row(&theme, cx));
+        return Some(
+            div()
+                .absolute()
+                .left(at.x)
+                .top(at.y)
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(glass::frosted_menu(200.0, &theme, body)),
+        );
+    }
     let space = state.projects.iter().find(|p| p.id == space_id)?.clone();
     let muted = state.is_muted(&space.id);
     let is_people = space.is_people();
@@ -1533,104 +2028,28 @@ pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
     let mute_id = space.id.clone();
     let fork_id = space.id.clone();
     let delete_id = space.id.clone();
-    let delete_people = is_people;
     // A group (redesign 2026-10-20): one item, "Delete group". The owner
     // deletes it for everyone; a member leaves and the group stays.
     let is_group = space.is_people_group();
-    let me_handle = state.me_handle();
-    let owns_group = is_group && space.owner_handle.as_deref().is_none_or(|o| o == me_handle);
-    let leave_instead = is_group && !owns_group;
-
-    // Delete is destructive: the first click swaps the menu for an iPhone-style
-    // "Delete “Name”?" with Cancel / Delete; Esc or a click elsewhere cancels.
-    if shell.row_delete_armed && can_delete {
-        let title = if is_people {
-            space
-                .person()
-                .filter(|_| !space.is_people_group())
-                .map(|p| p.display_name())
-                .unwrap_or_else(|| space.name.clone())
-        } else {
-            space.name.clone()
-        };
-        let note = if leave_instead {
-            "You leave the group. It stays for everyone else."
-        } else if is_group {
-            "Deletes the group for everyone in it."
-        } else if is_people {
-            "Removes this chat from your list."
-        } else {
-            "Removes this agent and its chats from your list."
-        };
-        let body = div()
-            .flex()
-            .flex_col()
-            .gap(px(10.0))
-            .p(px(8.0))
-            .child(
-                div()
-                    .text_size(px(TEXT_SMALL))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.text)
-                    .child(format!("Delete “{title}”?")),
-            )
-            .child(
-                div()
-                    .text_size(px(TEXT_TINY))
-                    .text_color(theme.text_muted)
-                    .child(note),
-            )
-            .child(
-                div()
-                    .flex()
-                    .justify_end()
-                    .gap(px(6.0))
-                    .child(
-                        confirm_button("row-menu-delete-cancel", "Cancel", false, &theme).on_click(
-                            cx.listener(|this, _, _, cx| {
-                                this.row_menu = None;
-                                this.row_delete_armed = false;
-                                cx.notify();
-                            }),
-                        ),
-                    )
-                    .child(
-                        confirm_button("row-menu-delete-go", "Delete", true, &theme).on_click(
-                            cx.listener(move |this, _, _, cx| {
-                                this.row_menu = None;
-                                this.row_delete_armed = false;
-                                let id = delete_id.clone();
-                                this.state.update(cx, |s, cx| {
-                                    if leave_instead {
-                                        s.leave_group(id, cx);
-                                    } else if delete_people {
-                                        s.delete_people_chat(id, cx);
-                                    } else {
-                                        s.delete_project(id, cx);
-                                    }
-                                });
-                            }),
-                        ),
-                    ),
-            );
-        return Some(
-            div()
-                .absolute()
-                .left(at.x)
-                .top(at.y)
-                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .child(glass::frosted_menu(240.0, &theme, body)),
-        );
-    }
+    let delete_action = row_delete(&space, &state.me_handle());
 
     let mut body = div().flex().flex_col().gap(px(1.0));
     if is_group {
-        // Mockup f: the group row's menu is "Delete group" and nothing else.
+        // Mockup f: the group row's menu is "Delete group" — plus Archive (2026-10-23).
+        body = body
+            .child(archive_row(&theme, cx))
+            .child(glass::menu_divider(&theme));
+        // Jacob (feedback remove-delete-confirms-2026-10-24): no "Delete …?"
+        // step — the owner deletes the group for everyone at once, a member
+        // leaves it at once.
+        let group_id = delete_id.clone();
         body = body.child(
             glass::menu_row("row-menu-delete", "trash", "Delete group", true, &theme).on_click(
-                cx.listener(|this, _, _, cx| {
-                    this.row_delete_armed = true;
-                    cx.notify();
+                cx.listener(move |this, _, _, cx| {
+                    this.row_menu = None;
+                    let id = group_id.clone();
+                    this.state
+                        .update(cx, |s, cx| run_row_delete(s, delete_action, id, cx));
                 }),
             ),
         );
@@ -1686,13 +2105,18 @@ pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
             ),
         );
     }
+    body = body.child(archive_row(&theme, cx));
     if can_delete {
         body = body.child(glass::menu_divider(&theme));
+        // Deletes at once (Jacob, feedback remove-delete-confirms-2026-10-24):
+        // a DM leaves the list, an agent goes with its chats; no "Delete …?" step.
         body = body.child(
             glass::menu_row("row-menu-delete", "trash", "Delete", true, &theme).on_click(
-                cx.listener(|this, _, _, cx| {
-                    this.row_delete_armed = true;
-                    cx.notify();
+                cx.listener(move |this, _, _, cx| {
+                    this.row_menu = None;
+                    let id = delete_id.clone();
+                    this.state
+                        .update(cx, |s, cx| run_row_delete(s, delete_action, id, cx));
                 }),
             ),
         );
@@ -1885,11 +2309,626 @@ pub fn chat_menu(
 }
 
 #[cfg(test)]
+mod row_menu_tests {
+    use super::{row_delete, RowDelete};
+    use crate::model::{Project, SpaceKind};
+
+    fn space(kind: SpaceKind, owner: Option<&str>) -> Project {
+        Project {
+            id: "s1".into(),
+            name: "Agrippa".into(),
+            kind,
+            owner_handle: owner.map(str::to_owned),
+            ..Default::default()
+        }
+    }
+
+    /// Jacob (feedback remove-delete-confirms-2026-10-24): the row menu's
+    /// Delete maps straight to one action — there is no armed / confirm state
+    /// between the click and the delete.
+    #[test]
+    fn delete_fires_at_once() {
+        assert_eq!(
+            row_delete(&space(SpaceKind::Project, None), "me"),
+            RowDelete::Agent
+        );
+        assert_eq!(
+            row_delete(&space(SpaceKind::Dm, None), "me"),
+            RowDelete::PeopleChat
+        );
+        assert_eq!(
+            row_delete(&space(SpaceKind::Group, Some("me")), "me"),
+            RowDelete::PeopleChat,
+            "the owner deletes the group for everyone"
+        );
+        assert_eq!(
+            row_delete(&space(SpaceKind::Group, Some("sam")), "me"),
+            RowDelete::LeaveGroup,
+            "a member leaves instead"
+        );
+    }
+}
+
+#[cfg(test)]
+mod strip_tests {
+    use gpui::{div, prelude::*, px, TestAppContext};
+
+    use super::{
+        strip_controls, top_strip, ListFilter, StripControl, FILTER_HEIGHT, FILTER_TOP,
+        STRIP_BUTTON, STRIP_GAP, STRIP_INSET,
+    };
+    use crate::model::{Project, SpaceKind};
+    use crate::ui::shell::TRAFFIC_LIGHTS_INSET;
+    use crate::ui::theme::{
+        CONTROL, CONTROL_GAP, CONTROL_GLYPH, CONTROL_GLYPH_WIDE, CONTROL_LINE, HEADER_HEIGHT,
+        TRAFFIC_LIGHT_POSITION,
+    };
+
+    /// The real lights' centre line: macOS 26 draws a 14 pt disc in the frame
+    /// GPUI places at `TRAFFIC_LIGHT_POSITION` (measured on the v0.6.213
+    /// build: position 14 → centre 21).
+    const TRAFFIC_LIGHT_LINE: f32 = TRAFFIC_LIGHT_POSITION + 7.0;
+
+    /// Grok Bot's strip, measured on `ref-grok-round-search-plus.png` (project
+    /// store, 2 px/pt, window top at image row 2) — Jacob 2026-10-24: "the
+    /// top bar on mac is now too high. Make it identical to the size and
+    /// positioning on grokbot" ([feedback topbar-grok-parity-2026-10-24]).
+    /// Points from the window's top edge.
+    mod grok {
+        /// Red light: x 30–57, y 32–59 px → 14 pt disc, left edge 15, centre 22.
+        pub const LIGHT_LEFT: f32 = 15.0;
+        pub const LIGHT_LINE: f32 = 22.0;
+        /// Yellow centre x 90 px, green 136 px → 23 pt pitch.
+        pub const LIGHT_PITCH: f32 = 23.0;
+        /// Discs: rows 24–96 px → 36 pt, top 12, centre 30, bottom 48.
+        pub const DISC_TOP: f32 = 12.0;
+        pub const DISC_LINE: f32 = 30.0;
+        /// First chat card at row 130 px → 64 pt: 16 under the discs.
+        pub const NEXT_CONTENT_TOP: f32 = 64.0;
+    }
+
+    /// The lights sit where Grok's do, the discs are centred on Grok's line
+    /// (8 pt under the lights' — they are not one line in Grok either), and
+    /// the first thing under the strip starts at Grok's 64. (`HEADER_HEIGHT`
+    /// is the Mac strip; `top_strip` returns it on macOS and 40 elsewhere.)
+    #[test]
+    fn the_strip_is_groks_height_and_the_discs_sit_on_groks_line() {
+        assert_eq!(
+            TRAFFIC_LIGHT_POSITION,
+            grok::LIGHT_LEFT,
+            "close frame x = y"
+        );
+        assert_eq!(TRAFFIC_LIGHT_LINE, grok::LIGHT_LINE, "lights' centre line");
+        assert_eq!(CONTROL_LINE, grok::DISC_LINE, "discs' centre line");
+        assert_eq!(
+            CONTROL_LINE - TRAFFIC_LIGHT_LINE,
+            8.0,
+            "discs 8 under the lights"
+        );
+        if cfg!(target_os = "macos") {
+            assert_eq!(top_strip(false), HEADER_HEIGHT, "the strip is the top band");
+        }
+        assert_eq!(
+            HEADER_HEIGHT,
+            2.0 * CONTROL_LINE,
+            "discs centred in the band"
+        );
+        let disc_top = (HEADER_HEIGHT - STRIP_BUTTON) / 2.0;
+        assert_eq!(disc_top, grok::DISC_TOP);
+        assert_eq!(disc_top + STRIP_BUTTON, 48.0, "disc bottom");
+        assert_eq!(
+            HEADER_HEIGHT + FILTER_TOP,
+            grok::NEXT_CONTENT_TOP,
+            "filter capsules start where Grok's first card does"
+        );
+        assert_eq!(
+            HEADER_HEIGHT + FILTER_TOP - (disc_top + STRIP_BUTTON),
+            16.0,
+            "gap from the discs down to the filter: Grok's 16"
+        );
+        // The three lights (frame right edge 15 + 2 × 23 + 14 = 75) end inside
+        // the band the strip keeps clear for them.
+        let lights_right = TRAFFIC_LIGHT_POSITION + 2.0 * grok::LIGHT_PITCH + 14.0;
+        assert!(lights_right <= TRAFFIC_LIGHTS_INSET + STRIP_INSET);
+    }
+
+    /// Native full screen: the strip is laid out exactly as in windowed mode —
+    /// no band above it, nothing pushed down. The traffic lights are macOS's
+    /// own, so they follow macOS's full-screen rules (hidden until the pointer
+    /// reaches the top edge); the app paints none of its own (Jacob
+    /// 2026-10-24: "this should be real mac os feature not custom buttons").
+    #[test]
+    fn full_screen_adds_no_band_above_the_strip() {
+        assert_eq!(top_strip(true), top_strip(false));
+    }
+
+    /// The strip and filter rows as `render` composes them (same div shape),
+    /// laid out for real: a disc's box lands at 12–48 and the first capsule
+    /// at 64, Grok's numbers.
+    struct StripAndFilter;
+
+    impl gpui::Render for StripAndFilter {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let strip = div()
+                .h(px(HEADER_HEIGHT))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_end()
+                .gap(px(STRIP_GAP))
+                .pl(px(TRAFFIC_LIGHTS_INSET + STRIP_INSET))
+                .pr(px(STRIP_INSET))
+                .debug_selector(|| "strip".into())
+                .children(strip_controls(false, true).into_iter().map(|c| {
+                    let sel: &'static str = match c {
+                        StripControl::Search => "disc-search",
+                        StripControl::New => "disc-new",
+                        StripControl::Collapse => "disc-collapse",
+                    };
+                    div()
+                        .size(px(c.size()))
+                        .flex_shrink_0()
+                        .debug_selector(move || sel.into())
+                }));
+            let filter = div()
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .gap(px(super::FILTER_GAP))
+                .pt(px(FILTER_TOP))
+                .pb(px(super::FILTER_BOTTOM))
+                .px(px(8.0))
+                .children(ListFilter::ALL.into_iter().map(|f| {
+                    let sel: &'static str =
+                        Box::leak(format!("capsule-{}", f.label()).into_boxed_str());
+                    div()
+                        .h(px(FILTER_HEIGHT))
+                        .px(px(super::FILTER_PAD_X))
+                        .debug_selector(move || sel.into())
+                        .child(f.label())
+                }));
+            div()
+                .w(px(296.0))
+                .h(px(400.0))
+                .flex()
+                .flex_col()
+                .child(strip)
+                .child(filter)
+        }
+    }
+
+    #[gpui::test]
+    fn the_discs_and_the_filter_land_on_groks_pixels(cx: &mut TestAppContext) {
+        let (_view, vcx) = cx.add_window_view(|_, _| StripAndFilter);
+        vcx.run_until_parked();
+        let strip = vcx.debug_bounds("strip").expect("strip drawn");
+        assert_eq!(f32::from(strip.size.height), HEADER_HEIGHT);
+        let mut right_edges = Vec::new();
+        for sel in ["disc-search", "disc-new", "disc-collapse"] {
+            let disc = vcx.debug_bounds(sel).expect(sel);
+            let top: f32 = disc.origin.y.into();
+            let h: f32 = disc.size.height.into();
+            assert_eq!(top, grok::DISC_TOP, "{sel} top");
+            assert_eq!(top + h / 2.0, grok::DISC_LINE, "{sel} centre");
+            assert_eq!(h, STRIP_BUTTON, "{sel} size");
+            right_edges.push(f32::from(disc.right()));
+        }
+        assert_eq!(
+            right_edges[2],
+            296.0 - STRIP_INSET,
+            "collapse at the right inset"
+        );
+        assert_eq!(
+            right_edges[1] + STRIP_GAP + STRIP_BUTTON,
+            right_edges[2],
+            "discs 8 apart"
+        );
+        let capsule = vcx.debug_bounds("capsule-All").expect("first capsule");
+        let cap_top: f32 = capsule.origin.y.into();
+        assert_eq!(cap_top, grok::NEXT_CONTENT_TOP, "capsule row at Grok's 64");
+        assert_eq!(f32::from(capsule.size.height), FILTER_HEIGHT);
+    }
+
+    /// Three-pane rule: the chat list's strip holds exactly three controls —
+    /// search, +, collapse, in that order — and nothing else (#1134; the
+    /// always-open pill of #1491 is gone, and so is the #1606 inline field:
+    /// search opens the palette, [feedback search-palette-2026-10-24]).
+    #[test]
+    fn the_strip_holds_exactly_search_plus_collapse() {
+        let controls = strip_controls(false, true);
+        assert_eq!(
+            controls,
+            vec![
+                StripControl::Search,
+                StripControl::New,
+                StripControl::Collapse
+            ]
+        );
+        assert_eq!(controls.len(), 3, "exactly three controls");
+    }
+
+    /// Jacob (2026-10-24): the three discs are EXACTLY Grok Bot's size, one
+    /// family. Measured on `ref-grok-round-search-plus.png` at 2 px/pt: disc
+    /// 72 px, glyph boxes 28 / 26 px at a 3 px stroke, 16 px between discs.
+    #[test]
+    fn the_three_discs_are_groks_size() {
+        for control in strip_controls(false, true) {
+            assert_eq!(control.size(), CONTROL, "{control:?} disc");
+            assert_eq!(control.size(), 36.0, "{control:?}: Grok's 72 px / 2");
+        }
+        assert_eq!(STRIP_BUTTON, CONTROL);
+        assert_eq!(STRIP_GAP, CONTROL_GAP);
+        assert_eq!(STRIP_GAP, 8.0, "Grok's 16 px / 2 between discs");
+        assert_eq!(STRIP_INSET, 12.0);
+        // The 24-grid icons: search and plus at CONTROL_GLYPH draw Grok's
+        // 14 / 13 pt marks within 1 px (0.75 × 19 = 14.25, 0.667 × 19 = 12.7);
+        // the collapse rect (20/24 of the grid) takes the narrower size for
+        // the same 14 pt box (0.833 × 17 = 14.2).
+        assert_eq!(StripControl::Search.glyph(), ("search", CONTROL_GLYPH));
+        assert_eq!(StripControl::New.glyph(), ("plus", CONTROL_GLYPH));
+        assert_eq!(
+            StripControl::Collapse.glyph(),
+            ("sidebar-left", CONTROL_GLYPH_WIDE)
+        );
+        let magnifier = 0.75 * CONTROL_GLYPH;
+        let plus = (16.0 / 24.0) * CONTROL_GLYPH;
+        let collapse = (20.0 / 24.0) * CONTROL_GLYPH_WIDE;
+        assert!((magnifier - 14.0).abs() <= 0.5, "magnifier box {magnifier}");
+        assert!((plus - 13.0).abs() <= 0.5, "plus box {plus}");
+        assert!((collapse - 14.0).abs() <= 0.5, "collapse box {collapse}");
+        let stroke = 2.0 / 24.0 * CONTROL_GLYPH;
+        assert!((stroke - 1.5).abs() <= 0.25, "stroke {stroke} (Grok 1.5)");
+    }
+
+    /// Inside a server there is no search; a member without admin rights has
+    /// no "+" either — the collapse toggle always stays.
+    #[test]
+    fn a_server_drops_the_search_and_members_drop_the_plus() {
+        assert_eq!(
+            strip_controls(true, true),
+            vec![StripControl::New, StripControl::Collapse]
+        );
+        assert_eq!(strip_controls(true, false), vec![StripControl::Collapse]);
+    }
+
+    fn agent(shared: bool) -> Project {
+        Project {
+            kind: SpaceKind::Project,
+            shared,
+            ..Project::default()
+        }
+    }
+
+    fn people(kind: SpaceKind) -> Project {
+        Project {
+            kind,
+            ..Project::default()
+        }
+    }
+
+    /// The four segments scope the list like the iPhone home: All shows
+    /// everything; Agents my agents only; People DMs and groups; Servers only
+    /// servers (the new fourth segment).
+    #[test]
+    fn the_filter_scopes_agents_people_and_servers() {
+        let mine = agent(false);
+        let shared_in = agent(true);
+        let dm = people(SpaceKind::Dm);
+        let group = people(SpaceKind::Group);
+        for f in [ListFilter::All, ListFilter::Servers] {
+            assert!(f.admits_servers(), "{f:?} shows servers");
+        }
+        for f in [ListFilter::Agents, ListFilter::People] {
+            assert!(!f.admits_servers(), "{f:?} hides servers");
+        }
+        assert!(ListFilter::All.admits_space(&mine));
+        assert!(ListFilter::All.admits_space(&shared_in));
+        assert!(ListFilter::All.admits_space(&dm));
+        assert!(ListFilter::All.admits_space(&group));
+        assert!(ListFilter::Agents.admits_space(&mine));
+        assert!(!ListFilter::Agents.admits_space(&shared_in));
+        assert!(!ListFilter::Agents.admits_space(&dm));
+        assert!(ListFilter::People.admits_space(&dm));
+        assert!(ListFilter::People.admits_space(&group));
+        assert!(!ListFilter::People.admits_space(&mine));
+        for p in [&mine, &shared_in, &dm, &group] {
+            assert!(
+                !ListFilter::Servers.admits_space(p),
+                "Servers shows only servers"
+            );
+        }
+    }
+
+    /// The labels are the iPhone's (`HomeListFilter` in HomeView.swift), in
+    /// the same order, with "Servers" fourth; the rig parses them.
+    #[test]
+    fn the_segments_match_the_iphone_home() {
+        let labels: Vec<_> = ListFilter::ALL.iter().map(|f| f.label()).collect();
+        assert_eq!(labels, ["All", "Agents", "People", "Servers"]);
+        assert_eq!(ListFilter::parse("servers"), Some(ListFilter::Servers));
+        assert_eq!(ListFilter::parse("nope"), None);
+        assert_eq!(ListFilter::default(), ListFilter::All);
+    }
+
+    /// The filter stays in the sidebar unchanged (Jacob, search-palette item
+    /// point 4): drawn whenever the chat list is, never inside a server.
+    #[test]
+    fn the_filter_stays_under_the_strip() {
+        assert!(
+            super::filter_shown(false),
+            "filter drawn with the chat list"
+        );
+        assert!(!super::filter_shown(true), "no filter inside a server");
+    }
+}
+
+#[cfg(test)]
+mod footer_tests {
+    use gpui::{div, prelude::*, px, TestAppContext};
+
+    use super::{
+        footer_disc_frame, footer_frame, footer_row_frame, DISC_HOVER_LIFT, DISC_PRESSED_LIFT,
+        FOOTER_AVATAR, FOOTER_BOTTOM, FOOTER_DISC, FOOTER_DISC_GLYPH, FOOTER_DISC_INSET,
+        FOOTER_DOT, FOOTER_DOT_OVERHANG, FOOTER_DOT_RING, FOOTER_HEIGHT, FOOTER_INSET,
+        FOOTER_ROW_HEIGHT, FOOTER_ROW_INSET, FOOTER_ROW_PAD_X, FOOTER_ROW_PAD_Y, STRIP_BUTTON,
+        STRIP_GAP, STRIP_INSET,
+    };
+    use crate::ui::theme::{Theme, CONTROL, CONTROL_LINE, HEADER_HEIGHT};
+
+    /// Grok Bot's footer, measured on Jacob's Oct-2026 refs
+    /// (`media/group-chat-redesign/refs/1-agent-chat-topbutton-sidebar.png`,
+    /// 2520 × 1670 px = 2 px/pt, window bottom at the last row) — Jacob
+    /// 2026-10-24: "Make the profile picture at the bottom here the same size
+    /// as it is on grok" ([feedback footer-avatar-grok-size-2026-10-24]).
+    /// Points from the sidebar's left edge and the window's bottom edge.
+    mod grok {
+        /// Avatar: x 26–97, rows 1574–1645 px → 72 px disc.
+        pub const AVATAR: f32 = 36.0;
+        pub const AVATAR_LEFT: f32 = 13.0;
+        /// 1670 − 1646 = 24 px under the disc.
+        pub const AVATAR_BOTTOM: f32 = 12.0;
+        /// Centre row 1609.5 → 60.5 px ≈ 30 pt from the bottom: the strip's
+        /// discs' line, mirrored. (Grok's "Connect apps" pill and its update
+        /// disc share the same 72 px rows.)
+        pub const AVATAR_LINE: f32 = 30.0;
+    }
+
+    /// The footer avatar is Grok's: the button family's 36, 13 from the left,
+    /// 12 above the bottom, centred on the discs' line — a 60 band like the
+    /// strip. The dot scales with it (2 pt ring, 2 pt overhang).
+    #[test]
+    fn the_footer_avatar_is_groks_size_inset_and_line() {
+        assert_eq!(FOOTER_AVATAR, grok::AVATAR);
+        assert_eq!(FOOTER_AVATAR, CONTROL, "one button family");
+        assert_eq!(FOOTER_INSET, grok::AVATAR_LEFT);
+        assert_eq!(FOOTER_BOTTOM, grok::AVATAR_BOTTOM);
+        assert_eq!(
+            FOOTER_HEIGHT - FOOTER_AVATAR - 2.0 * FOOTER_BOTTOM,
+            0.0,
+            "centred: 12 above and below"
+        );
+        assert_eq!(
+            FOOTER_HEIGHT / 2.0,
+            grok::AVATAR_LINE,
+            "centre 30 from the bottom"
+        );
+        assert_eq!(
+            FOOTER_HEIGHT / 2.0,
+            CONTROL_LINE,
+            "the strip's line, mirrored"
+        );
+        assert_eq!(FOOTER_HEIGHT, HEADER_HEIGHT, "the strip's band, mirrored");
+        assert_eq!(FOOTER_ROW_INSET + FOOTER_ROW_PAD_X, FOOTER_INSET);
+        assert_eq!(
+            2.0 * FOOTER_ROW_PAD_Y + FOOTER_ROW_HEIGHT,
+            FOOTER_HEIGHT,
+            "band = pad + card + pad"
+        );
+        assert_eq!(FOOTER_DOT_RING - FOOTER_DOT, 4.0, "2 pt ring");
+        assert_eq!(FOOTER_DOT_OVERHANG, 2.0);
+        // 28 → 36 scaled the 7 / 11 dot to 9 / 14; the ring stays 2 pt.
+        assert_eq!(FOOTER_DOT, (7.0f32 * 36.0 / 28.0).round());
+    }
+
+    /// The footer as `render` frames it, laid out for real at the bottom of a
+    /// sidebar column: the avatar's box lands at Grok's pixels, and so does
+    /// the update disc when one is due.
+    struct Column {
+        with_disc: bool,
+    }
+
+    impl gpui::Render for Column {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let avatar = div()
+                .relative()
+                .size(px(FOOTER_AVATAR))
+                .flex_shrink_0()
+                .debug_selector(|| "avatar".into())
+                .child(
+                    div()
+                        .absolute()
+                        .right(px(-FOOTER_DOT_OVERHANG))
+                        .bottom(px(-FOOTER_DOT_OVERHANG))
+                        .size(px(FOOTER_DOT_RING))
+                        .debug_selector(|| "dot-ring".into()),
+                );
+            let row = footer_row_frame()
+                .child(avatar)
+                .child(div().flex_1().min_w_0().child("Jacob Steeves"));
+            let disc = self.with_disc.then(|| footer_disc_frame("disc"));
+            div()
+                .w(px(296.0))
+                .h(px(520.0))
+                .flex()
+                .flex_col()
+                .child(div().h(px(HEADER_HEIGHT)).flex_shrink_0())
+                .child(div().flex_1().min_h_0())
+                .child(footer_frame(row, disc).debug_selector(|| "footer".into()))
+        }
+    }
+
+    #[gpui::test]
+    fn the_footer_avatar_lands_on_groks_pixels(cx: &mut TestAppContext) {
+        let (_view, vcx) = cx.add_window_view(|_, _| Column { with_disc: false });
+        vcx.run_until_parked();
+        let footer = vcx.debug_bounds("footer").expect("footer drawn");
+        let bottom: f32 = footer.bottom().into();
+        assert_eq!(bottom, 520.0, "the footer is the column's last band");
+        assert_eq!(f32::from(footer.size.height), FOOTER_HEIGHT);
+        let avatar = vcx.debug_bounds("avatar").expect("avatar drawn");
+        let left: f32 = avatar.origin.x.into();
+        let top: f32 = avatar.origin.y.into();
+        let h: f32 = avatar.size.height.into();
+        assert_eq!(h, grok::AVATAR, "avatar size");
+        assert_eq!(left, grok::AVATAR_LEFT, "avatar left inset");
+        assert_eq!(
+            bottom - (top + h),
+            grok::AVATAR_BOTTOM,
+            "avatar above the bottom"
+        );
+        assert_eq!(
+            bottom - (top + h / 2.0),
+            grok::AVATAR_LINE,
+            "avatar centre line"
+        );
+        let ring = vcx.debug_bounds("dot-ring").expect("dot ring drawn");
+        let ring_right: f32 = ring.right().into();
+        let ring_bottom: f32 = ring.bottom().into();
+        assert_eq!(
+            ring_right,
+            left + h + FOOTER_DOT_OVERHANG,
+            "dot overhangs right"
+        );
+        assert_eq!(
+            ring_bottom,
+            top + h + FOOTER_DOT_OVERHANG,
+            "dot overhangs bottom"
+        );
+        let card = vcx
+            .debug_bounds("sidebar-account")
+            .expect("hover card drawn");
+        let card_left: f32 = card.origin.x.into();
+        assert_eq!(card_left, FOOTER_ROW_INSET, "card at the rows' inset");
+        assert_eq!(f32::from(card.size.height), FOOTER_ROW_HEIGHT);
+        let card_right: f32 = card.right().into();
+        assert_eq!(
+            card_right,
+            296.0 - FOOTER_ROW_INSET,
+            "no disc: the card runs to the inset"
+        );
+    }
+
+    /// Grok Bot's update disc, same refs: a 72 px blue circle at x 449–520 on
+    /// the avatar's rows — under the strip's rightmost disc ("+" in Grok at x
+    /// 449–520 too), 8 after the pill; fill `#326CCB`, glyph box 26 × 28 px.
+    mod grok_disc {
+        pub const DISC: f32 = 36.0;
+        pub const DISC_LINE: f32 = 30.0;
+        /// The glyph: 26 × 28 px → 13 × 14 pt.
+        pub const GLYPH_W: f32 = 13.0;
+        pub const GLYPH_H: f32 = 14.0;
+        pub const GAP_BEFORE: f32 = 8.0;
+        pub const FILL: u32 = 0x326ccb;
+        pub const GLYPH_FILL: u32 = 0xf5f5f5;
+    }
+
+    /// Jacob (2026-10-24): "Give us the same update button as grok also." The
+    /// disc is the button family's 36 at the strip's right inset, on the
+    /// footer's line; its cloud-download glyph draws Grok's 13 × 14 mark; the
+    /// fills are Grok's; hover and pressed lift the fill (chip rule).
+    #[test]
+    fn the_update_disc_is_groks_size_colour_and_placement() {
+        assert_eq!(FOOTER_DISC, grok_disc::DISC);
+        assert_eq!(FOOTER_DISC, CONTROL, "one button family");
+        assert_eq!(FOOTER_DISC, STRIP_BUTTON, "the strip's discs, mirrored");
+        assert_eq!(
+            FOOTER_DISC_INSET, STRIP_INSET,
+            "under the strip's last disc"
+        );
+        assert_eq!(FOOTER_HEIGHT / 2.0, grok_disc::DISC_LINE);
+        assert_eq!(
+            STRIP_GAP,
+            grok_disc::GAP_BEFORE,
+            "8 after the card, as after Grok's pill"
+        );
+        // The glyph is drawn 15.6 × 16.2 on the 24 grid (stroke included).
+        let w = (15.6 / 24.0) * FOOTER_DISC_GLYPH;
+        let h = (16.2 / 24.0) * FOOTER_DISC_GLYPH;
+        assert!((w - grok_disc::GLYPH_W).abs() <= 0.5, "glyph width {w}");
+        assert!((h - grok_disc::GLYPH_H).abs() <= 0.5, "glyph height {h}");
+        for theme in [
+            Theme::dark(crate::ui::theme::Surface::DEFAULT),
+            Theme::light(crate::ui::theme::Surface::DEFAULT),
+        ] {
+            let fill: gpui::Rgba = theme.update_disc.into();
+            let glyph: gpui::Rgba = theme.on_update_disc.into();
+            assert_eq!(rgb_u32(fill), grok_disc::FILL, "disc fill");
+            assert_eq!(rgb_u32(glyph), grok_disc::GLYPH_FILL, "glyph fill");
+            let hover = Theme::lighter(theme.update_disc, DISC_HOVER_LIFT);
+            let pressed = Theme::lighter(theme.update_disc, DISC_PRESSED_LIFT);
+            assert!(hover.l > theme.update_disc.l, "brighter under the pointer");
+            assert!(pressed.l > hover.l, "brighter still while pressed");
+            assert_eq!(hover.h, theme.update_disc.h, "same hue");
+        }
+    }
+
+    fn rgb_u32(c: gpui::Rgba) -> u32 {
+        let ch = |v: f32| (v * 255.0).round() as u32;
+        (ch(c.r) << 16) | (ch(c.g) << 8) | ch(c.b)
+    }
+
+    #[gpui::test]
+    fn the_update_disc_lands_on_groks_pixels(cx: &mut TestAppContext) {
+        let (_view, vcx) = cx.add_window_view(|_, _| Column { with_disc: true });
+        vcx.run_until_parked();
+        let footer = vcx.debug_bounds("footer").expect("footer drawn");
+        let bottom: f32 = footer.bottom().into();
+        let disc = vcx.debug_bounds("disc").expect("disc drawn");
+        let top: f32 = disc.origin.y.into();
+        let h: f32 = disc.size.height.into();
+        let w: f32 = disc.size.width.into();
+        let right: f32 = disc.right().into();
+        assert_eq!(h, grok_disc::DISC, "disc size");
+        assert_eq!(w, h, "a circle");
+        assert_eq!(right, 296.0 - STRIP_INSET, "at the strip's right inset");
+        assert_eq!(
+            bottom - (top + h / 2.0),
+            grok_disc::DISC_LINE,
+            "on the footer's line"
+        );
+        // Same rows as the avatar: Grok's pill, avatar and disc share them.
+        let avatar = vcx.debug_bounds("avatar").expect("avatar drawn");
+        assert_eq!(
+            avatar.origin.y, disc.origin.y,
+            "avatar and disc on one line"
+        );
+        let card = vcx
+            .debug_bounds("sidebar-account")
+            .expect("hover card drawn");
+        let card_right: f32 = card.right().into();
+        let disc_left: f32 = disc.origin.x.into();
+        assert_eq!(
+            disc_left - card_right,
+            grok_disc::GAP_BEFORE,
+            "8 between card and disc"
+        );
+    }
+}
+
+#[cfg(test)]
 mod row_bounds_tests {
     use gpui::{div, prelude::*, px, ScrollHandle, TestAppContext};
 
-    use super::top_strip;
-    use crate::ui::frost::edge_faded;
+    use super::{faded_list, top_strip, LIST_FADE_BAND};
 
     const ROWS: usize = 12;
     const ROW_H: f32 = 58.0;
@@ -1907,7 +2946,10 @@ mod row_bounds_tests {
             _: &mut gpui::Window,
             _: &mut gpui::Context<Self>,
         ) -> impl IntoElement {
-            let strip = div().h(px(top_strip())).flex_shrink_0();
+            let strip = div()
+                .h(px(top_strip(false)))
+                .flex_shrink_0()
+                .debug_selector(|| "sidebar-strip".into());
             let mut list = div()
                 .id("chat-list")
                 .flex()
@@ -1915,7 +2957,7 @@ mod row_bounds_tests {
                 .flex_1()
                 .min_h_0()
                 .px(px(8.0))
-                .pt(px(6.0))
+                .pt(px(LIST_FADE_BAND + 6.0))
                 .pb(px(12.0))
                 .overflow_y_scroll()
                 .track_scroll(&self.scroll)
@@ -1930,9 +2972,8 @@ mod row_bounds_tests {
                         .child(format!("Chat {i}")),
                 );
             }
-            let account = div()
-                .h(px(44.0))
-                .flex_shrink_0()
+            // The footer exactly as `render` frames it (band + hover card).
+            let account = super::footer_frame(super::footer_row_frame(), None::<gpui::Empty>)
                 .debug_selector(|| "account-row".into());
             div()
                 .w(px(280.0))
@@ -1940,7 +2981,7 @@ mod row_bounds_tests {
                 .flex()
                 .flex_col()
                 .child(strip)
-                .child(edge_faded(14.0, true, true, list))
+                .child(faded_list(list))
                 .child(account)
         }
     }
@@ -1969,6 +3010,25 @@ mod row_bounds_tests {
                 list_bottom <= account_top + 0.5,
                 "{pass}: list bottom {list_bottom} runs into the account row at {account_top}"
             );
+            if pass == "top" {
+                // #1497: the fade band ends at the strip's bottom edge and the
+                // first row starts its 6 pt under it, clear of the fade.
+                let frame = vcx.debug_bounds("sidebar-list-frame").expect("frame");
+                let strip = vcx.debug_bounds("sidebar-strip").expect("strip");
+                let first = vcx.debug_bounds("row-0").expect("first row");
+                let fade_bottom: f32 = f32::from(frame.origin.y) + LIST_FADE_BAND;
+                let strip_bottom: f32 = strip.bottom().into();
+                let row_top: f32 = first.origin.y.into();
+                assert!(
+                    (fade_bottom - strip_bottom).abs() <= 0.5,
+                    "fade band ends at {fade_bottom}, strip at {strip_bottom}"
+                );
+                assert!(
+                    (row_top - (strip_bottom + 6.0)).abs() <= 0.5,
+                    "first row at {row_top}, strip + 6 = {}",
+                    strip_bottom + 6.0
+                );
+            }
             let mut spans: Vec<(f32, f32)> = Vec::new();
             for i in 0..ROWS {
                 let sel: &'static str = Box::leak(format!("row-{i}").into_boxed_str());

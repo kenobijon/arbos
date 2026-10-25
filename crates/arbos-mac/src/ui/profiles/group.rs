@@ -19,11 +19,12 @@ use crate::ui::groups;
 use crate::ui::icons::icon;
 use crate::ui::people;
 use crate::ui::shell::Shell;
-use crate::ui::theme::Theme;
+use crate::ui::theme::{Theme, TEXT_BODY};
 
 use super::pane::{self, Hero, Picture, ProfilePane, Section};
 use super::{
-    chats_of, collect, editable_name, editable_picture, kit, list_row, HeroClick, HERO_AVATAR,
+    chats_of, collect, editable_name, editable_picture, kit, link_list, list_row, HeroClick,
+    HERO_AVATAR,
 };
 
 pub(super) const TABS: [&str; 2] = ["Members", "Library"];
@@ -78,6 +79,17 @@ pub(super) fn page(
     let people = members(state, &space);
     let images: Vec<Option<Arc<RenderImage>>> =
         people.iter().map(|p| state.avatar(&p.avatar_url)).collect();
+    // Agents through the shared identity (#1592): the picture their bubbles, the presence
+    // row and the sidebar show — uploaded picture included.
+    let agent_pictures: Vec<(avatars::AgentIdentity, Option<Arc<RenderImage>>)> = space
+        .agents
+        .iter()
+        .map(|a| {
+            let ident = avatars::member_identity(Some(&space), &state.projects, a);
+            let image = ident.image_key.as_deref().and_then(|url| state.avatar(url));
+            (ident, image)
+        })
+        .collect();
     let is_people = space.is_people();
     let renaming = state.profile_editing_name && is_people;
     // A people group: any member names it or gives it a picture (relay
@@ -128,8 +140,26 @@ pub(super) fn page(
         badge: None,
         subtitle: Some(subtitle.into()),
         subtitle_color: theme.text_muted,
+        subtitle_click: None,
         editor: None,
     };
+
+    // Grok's share disc beside the ×: the same picker as the "Add members"
+    // card ([feedback info-pane-chrome-2026-10-24]).
+    let share = (is_people || !space.is_guest()).then(|| {
+        let sid = space.id.clone();
+        let f = cx.listener(move |this, _: &gpui::ClickEvent, window, cx| {
+            let id = sid.clone();
+            if is_people {
+                this.state.update(cx, |s, cx| s.open_add_members(id, cx));
+            } else {
+                this.state.update(cx, |s, cx| s.open_invite(id, cx));
+            }
+            let handle = this.people_input.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+        });
+        Box::new(f) as HeroClick
+    });
 
     let body: Vec<Section> = match tab {
         0 => {
@@ -242,7 +272,7 @@ pub(super) fn page(
             }
             // Agents in the chat (people groups) — or the project's own agent.
             if is_people {
-                for a in space.agents.iter() {
+                for (ai, a) in space.agents.iter().enumerate() {
                     let pid = a.project_id.clone();
                     let mine = a.owner_handle == me_handle;
                     let sub = if mine {
@@ -273,7 +303,11 @@ pub(super) fn page(
                                 "profile-agent-{}",
                                 a.project_id
                             ))),
-                            avatars::agent_member(a, kit::AVATAR, &theme).into_any_element(),
+                            {
+                                let (ident, image) = &agent_pictures[ai];
+                                avatars::agent_picture(ident, image.clone(), kit::AVATAR, &theme)
+                                    .into_any_element()
+                            },
                             a.name.clone(),
                             sub,
                             theme.text_muted,
@@ -340,6 +374,22 @@ pub(super) fn page(
                 );
             }
             let mut out = Vec::new();
+            if is_people {
+                if let Some(desc) = space
+                    .description
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                {
+                    out.push(Section::Card(vec![div()
+                        .px(px(kit::INSET))
+                        .py(px(12.0))
+                        .text_size(px(TEXT_BODY))
+                        .text_color(theme.text)
+                        .child(desc.to_owned())
+                        .into_any_element()]));
+                }
+            }
             if let Some(row) = add {
                 out.push(Section::Card(vec![row.into_any_element()]));
             }
@@ -347,9 +397,11 @@ pub(super) fn page(
             out
         }
         _ => {
-            // Library: images first, then files — one place for everything shared.
+            // Library: images, then files, then links — one place for everything
+            // shared (links as in the agent pane; DaWizzaa's ask,
+            // [feedback group-library-links-2026-10-23]).
             let mut out = Vec::new();
-            if content.media.is_empty() && content.files.is_empty() {
+            if content.media.is_empty() && content.files.is_empty() && content.links.is_empty() {
                 out.push(Section::Empty("Nothing shared here yet".into()));
             } else {
                 if !content.media.is_empty() {
@@ -363,6 +415,14 @@ pub(super) fn page(
                         format!("Files · {}", content.files.len()).into(),
                     ));
                     out.push(Section::Files(content.files));
+                }
+                if !content.links.is_empty() {
+                    out.push(Section::Title(
+                        format!("Links · {}", content.links.len()).into(),
+                    ));
+                    out.push(Section::Custom(
+                        link_list(&content.links, shell, &theme, cx).into_any_element(),
+                    ));
                 }
             }
             out
@@ -380,6 +440,7 @@ pub(super) fn page(
             body,
             footer: Vec::new(),
             done: None,
+            share,
         },
         shell,
         cx,

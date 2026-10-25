@@ -69,13 +69,13 @@ pub fn leaf_pick(seed: &str, leaf_override: Option<u8>, color_override: Option<u
     leaf::pick_for(seed, leaf_override, color_override)
 }
 
-/// The cream leaf ink.
-pub fn leaf_ink() -> Hsla {
-    let Rgb(r, g, b) = leaf::LEAF_INK;
+/// The leaf ink on disc colour `index`: the darker same hue (v2 rule).
+pub fn leaf_ink(index: u8) -> Hsla {
+    let Rgb(r, g, b) = leaf::COLORS[(index % leaf::COLOR_COUNT) as usize].ink;
     rgb([r, g, b])
 }
 
-/// Disc colour `index` of the autumn palette.
+/// Disc colour `index`: the pastel of that hue.
 pub fn leaf_disc(index: u8) -> Hsla {
     let Rgb(r, g, b) = leaf::COLORS[(index % leaf::COLOR_COUNT) as usize].rgb;
     rgb([r, g, b])
@@ -98,16 +98,21 @@ pub fn leaf_asset_bytes(path: &str) -> Option<&'static [u8]> {
         .map(|l| l.svg.as_bytes())
 }
 
-/// The leaf glyph alone (cream, `LEAF_SCALE` of `size`), optionally swayed:
+/// The leaf glyph alone (the hue's ink, `LEAF_SCALE` of `size`), optionally swayed:
 /// `angle` in radians about the stem, i.e. the bottom centre of the glyph.
 pub fn leaf_glyph(pick: LeafPick, size: f32, angle: f32) -> Svg {
+    leaf_glyph_inked(pick.leaf, size, angle, leaf_ink(pick.color))
+}
+
+/// The leaf glyph in any ink (the picker draws unselected leaves in a neutral grey).
+pub fn leaf_glyph_inked(leaf_index: u8, size: f32, angle: f32, ink: Hsla) -> Svg {
     let side = size * leaf::LEAF_SCALE;
     svg()
-        .path(leaf_asset(pick.leaf))
+        .path(leaf_asset(leaf_index))
         .size(px(side))
         .flex_shrink_0()
-        .text_color(leaf_ink())
-        .with_transformation(sway(pick.leaf, side, angle))
+        .text_color(ink)
+        .with_transformation(sway(leaf_index, side, angle))
 }
 
 /// Reduce Motion (macOS Accessibility), read once: no sway, no ruffle.
@@ -208,11 +213,10 @@ pub fn leaf_element(pick: LeafPick, size: f32) -> Div {
 /// One-shot hover gust: the leaf's committed gust Lottie while the flag is
 /// on (one play, settles on the rest pose), else the native spring (≈9° peak,
 /// settled in 1 s).
-fn ruffle_glyph(pick: LeafPick, size: f32, tick: u64) -> AnyElement {
+fn ruffle_glyph(pick: LeafPick, size: f32, tick: u64, ink: Hsla) -> AnyElement {
     if leaf_lottie_on() {
         if let Some(comp) = lottie::composition(pick.leaf, lottie::Clip::Gust) {
             let secs = lottie::duration_secs(&comp);
-            let ink = leaf_ink();
             return div()
                 .size(px(size * leaf::LEAF_SCALE))
                 .flex_shrink_0()
@@ -235,7 +239,7 @@ fn ruffle_glyph(pick: LeafPick, size: f32, tick: u64) -> AnyElement {
         }
     }
     let side = size * leaf::LEAF_SCALE;
-    leaf_glyph(pick, size, 0.0)
+    leaf_glyph_inked(pick.leaf, size, 0.0, ink)
         .with_animation(
             ElementId::NamedInteger(
                 SharedString::from(format!("leaf-gust-{}-{}", pick.leaf, pick.color)),
@@ -252,11 +256,10 @@ fn ruffle_glyph(pick: LeafPick, size: f32, tick: u64) -> AnyElement {
 /// Idle sway, profile hero only: the leaf's committed idle Lottie, looping
 /// (each leaf its own 2.3–2.8 s length), while the flag is on; else the
 /// native sway of a few degrees about the stem.
-fn sway_glyph(pick: LeafPick, size: f32) -> AnyElement {
+fn sway_glyph(pick: LeafPick, size: f32, ink: Hsla) -> AnyElement {
     if leaf_lottie_on() {
         if let Some(comp) = lottie::composition(pick.leaf, lottie::Clip::Idle) {
             let secs = lottie::duration_secs(&comp);
-            let ink = leaf_ink();
             return div()
                 .size(px(size * leaf::LEAF_SCALE))
                 .flex_shrink_0()
@@ -280,7 +283,7 @@ fn sway_glyph(pick: LeafPick, size: f32) -> AnyElement {
     }
     let side = size * leaf::LEAF_SCALE;
     let period = leaf::LEAVES[(pick.leaf % leaf::LEAF_COUNT) as usize].idle_secs;
-    leaf_glyph(pick, size, 0.0)
+    leaf_glyph_inked(pick.leaf, size, 0.0, ink)
         .with_animation(
             ElementId::Name(SharedString::from(format!(
                 "leaf-sway-{}-{}",
@@ -307,7 +310,7 @@ pub fn leaf_hover(pick: LeafPick, size: f32, key: u64) -> Div {
     }
     let (hovered, tick) = hover_state(key);
     let glyph = if hovered {
-        ruffle_glyph(pick, size, tick)
+        ruffle_glyph(pick, size, tick, leaf_ink(pick.color))
     } else {
         leaf_glyph(pick, size, 0.0).into_any_element()
     };
@@ -329,16 +332,40 @@ pub fn leaf_hover(pick: LeafPick, size: f32, key: u64) -> Div {
 /// The profile hero: idle sway, and the ruffle when the pointer is over it.
 /// Still under Reduce Motion.
 pub fn leaf_hero(pick: LeafPick, size: f32, key: u64) -> Div {
+    leaf_hero_in(disc(pick, size), pick, size, key, leaf_ink(pick.color))
+}
+
+/// The profile hero with no disc behind the leaf (Jacob, [feedback
+/// info-pane-chrome-2026-10-24]: "drop the pale disc behind the leaf", as
+/// Grok Bot's plain bot mark): the leaf alone, the same sway and ruffle. The
+/// ink is the hue's pastel on a dark pane and its darker ink on a light one,
+/// so the bare leaf reads on either (the dark ink on the dark pane did not).
+pub fn leaf_hero_bare(pick: LeafPick, size: f32, key: u64, theme: &Theme) -> Div {
+    let ink = if theme.is_light() {
+        leaf_ink(pick.color)
+    } else {
+        leaf_disc(pick.color)
+    };
+    let slot = div()
+        .size(px(size))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center();
+    leaf_hero_in(slot, pick, size, key, ink)
+}
+
+fn leaf_hero_in(container: Div, pick: LeafPick, size: f32, key: u64, ink: Hsla) -> Div {
     if reduce_motion() {
-        return leaf_element(pick, size);
+        return container.child(leaf_glyph_inked(pick.leaf, size, 0.0, ink));
     }
     let (hovered, tick) = hover_state(key);
     let glyph = if hovered {
-        ruffle_glyph(pick, size, tick)
+        ruffle_glyph(pick, size, tick, ink)
     } else {
-        sway_glyph(pick, size)
+        sway_glyph(pick, size, ink)
     };
-    disc(pick, size).child(
+    container.child(
         div()
             .id(ElementId::NamedInteger("leaf-hero".into(), key))
             .size_full()
@@ -376,10 +403,12 @@ pub fn agent(
     }
 }
 
-/// The agent's profile hero (D92: swaying leaf; D79 disc when the flag is off).
-pub fn project_hero(p: &Project, size: f32, theme: &Theme) -> Div {
+/// The agent pane's hero (Grok Bot's plain mark, [feedback
+/// info-pane-chrome-2026-10-24]): the swaying leaf with no disc behind it;
+/// the D79 initials disc stays when the leaf flag is off (initials need a fill).
+pub fn project_hero_bare(p: &Project, size: f32, theme: &Theme) -> Div {
     if leaf_avatars_on() && !p.is_people() {
-        leaf_hero(project_leaf(p), size, hover_key(&p.id, size))
+        leaf_hero_bare(project_leaf(p), size, hover_key(&p.id, size), theme)
     } else {
         element(&p.id, &p.name, p.avatar_color_index, size, theme)
     }
@@ -532,6 +561,122 @@ pub fn agent_member(a: &AgentMember, size: f32, theme: &Theme) -> Div {
         a.avatar_color_index,
         a.avatar_leaf,
         a.avatar_leaf_color,
+        size,
+        theme,
+    )
+}
+
+// ----- One identity for every surface (#1592) --------------------------------------
+
+pub use arbos_core::avatar::identity::{AgentCard, AgentIdentity, AgentQuery};
+
+/// A roster row as a card. On the Mac the card's `image_key` slot carries the picture's
+/// fetch URL (the relay client already resolved the key), so the identity hands back what
+/// `AppState::avatar` wants.
+fn member_card(a: &AgentMember) -> AgentCard {
+    AgentCard {
+        id: a.project_id.clone(),
+        name: a.name.clone(),
+        handle: a.handle.clone(),
+        leaf: a.avatar_leaf,
+        leaf_color: a.avatar_leaf_color,
+        color_index: a.avatar_color_index,
+        image_key: a.image_url.clone(),
+    }
+}
+
+fn project_card(p: &Project) -> AgentCard {
+    AgentCard {
+        id: p.id.clone(),
+        name: p.name.clone(),
+        handle: Project::mention_slug(&p.name),
+        leaf: p.avatar_leaf,
+        leaf_color: p.avatar_leaf_color,
+        color_index: p.avatar_color_index,
+        image_key: p.image_url.clone(),
+    }
+}
+
+/// The cards an agent row is resolved against, in the rule's order: the open chat's
+/// roster (the relay's current truth for that chat), my projects, every other roster.
+pub fn agent_cards(chat: Option<&Project>, projects: &[Project]) -> Vec<AgentCard> {
+    let mut cards: Vec<AgentCard> = Vec::new();
+    if let Some(chat) = chat {
+        cards.extend(chat.agents.iter().map(member_card));
+    }
+    cards.extend(projects.iter().filter(|p| !p.is_people()).map(project_card));
+    cards.extend(
+        projects
+            .iter()
+            .filter(|p| p.is_people() && chat.map(|c| c.id != p.id).unwrap_or(true))
+            .flat_map(|p| p.agents.iter().map(member_card)),
+    );
+    cards
+}
+
+/// One agent, one answer: the bubble disc and caption, the presence row, the member
+/// lists, the chips and the call tiles all ask here with the row's `sender`,
+/// `senderHandle` and `senderName` (`arbos_core::avatar::identity::resolve`).
+pub fn agent_identity(
+    chat: Option<&Project>,
+    projects: &[Project],
+    sender: &str,
+    handle: Option<&str>,
+    name: Option<&str>,
+) -> AgentIdentity {
+    arbos_core::avatar::identity::resolve(
+        &AgentQuery {
+            sender,
+            handle,
+            name,
+        },
+        &agent_cards(chat, projects),
+    )
+}
+
+/// The identity of a roster member, drawn from the same rule (so its picture is the
+/// one its bubbles get, uploaded picture included).
+pub fn member_identity(
+    chat: Option<&Project>,
+    projects: &[Project],
+    a: &AgentMember,
+) -> AgentIdentity {
+    agent_identity(
+        chat,
+        projects,
+        &a.project_id,
+        Some(&a.handle),
+        Some(&a.name),
+    )
+}
+
+/// The picture for an identity: the uploaded / generated image when the loader has it,
+/// else the leaf (D92) or the initials disc (D79) from the identity's own picks.
+pub fn agent_picture(
+    a: &AgentIdentity,
+    image: Option<std::sync::Arc<gpui::RenderImage>>,
+    size: f32,
+    theme: &Theme,
+) -> Div {
+    if let Some(image) = image {
+        return div()
+            .size(px(size))
+            .flex_shrink_0()
+            .rounded_full()
+            .overflow_hidden()
+            .child(
+                gpui::img(image)
+                    .size(px(size))
+                    .rounded_full()
+                    .object_fit(gpui::ObjectFit::Cover),
+            );
+    }
+    agent(
+        &a.id,
+        &a.name,
+        Some(a.color_index),
+        Some(a.leaf.leaf),
+        Some(a.leaf.color),
         size,
         theme,
     )

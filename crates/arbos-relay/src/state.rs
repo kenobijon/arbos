@@ -138,16 +138,22 @@ pub struct RoomBroadcast {
 /// changes the stored doc without moving the head, so both are part of the key.
 pub type HeadCache<T> = std::sync::Mutex<Option<((i64, i64), T)>>;
 
+/// Cached rebuild of a room's stored doc (checkpoint ∪ rows) at one `(head, floor)`. When the
+/// head advances, only the new rows are imported; the first build runs off the socket task.
+pub struct RoomDocCache {
+    pub key: (i64, i64),
+    pub doc: arbos_core::doc::ChatDoc,
+}
+
 pub struct Room {
     pub tx: broadcast::Sender<RoomBroadcast>,
     /// What each replica last told this relay about the room (room_health, #1470).
     pub replicas: crate::room_health::Replicas,
     /// `(head, rebuilt-doc verdict)` cache for `GET /chats/{id}/health`.
     pub health_cache: HeadCache<crate::room_health::DocHealth>,
-    /// `(head, encoded version vector)` of the stored doc (checkpoint ∪ rows) at that head —
-    /// what ROWS_DONE hands a device so it can push back history the relay lacks (#1518
-    /// follow-up). Rebuilt only when the head moved.
-    pub vv_cache: HeadCache<Vec<u8>>,
+    /// Rebuilt chat doc for covered-push checks and ROWS_DONE's version vector. Dropped when the
+    /// room has no sockets left.
+    pub doc_cache: std::sync::Mutex<Option<RoomDocCache>>,
 }
 
 /// How the relay tells its room sockets that it is about to go down on purpose (a deploy, an
@@ -273,6 +279,10 @@ pub struct ProjectActivity {
     pub chat_id: String,
     pub text: String,
     pub at: i64,
+    /// Background jobs in flight for the chip ("N tasks running"; duplex design §2.4):
+    /// `{ id, title, state, step, elapsed_s }` each. Absent when none run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jobs: Option<serde_json::Value>,
 }
 
 /// An activity older than this is stale (the box died mid-turn) and is not shown.
@@ -300,7 +310,7 @@ impl AppState {
                     tx,
                     replicas: Default::default(),
                     health_cache: std::sync::Mutex::new(None),
-                    vv_cache: std::sync::Mutex::new(None),
+                    doc_cache: std::sync::Mutex::new(None),
                 })
             })
             .clone()
@@ -319,6 +329,21 @@ impl AppState {
     pub fn allows(&self, principal: &crate::auth::Principal, project_id: &str) -> bool {
         if let Some(chat_id) = project_id.strip_prefix(crate::people::PEOPLE_ACL_PREFIX) {
             return crate::people::room_access(self, principal, chat_id);
+        }
+        // A server's picture slot (`servers:{id}`): its non-banned members read it and may
+        // upload into it; `PATCH /servers/{id} {image_key}` (admins) is what sets the picture.
+        if let Some(server_id) = project_id.strip_prefix(crate::matrix::servers::SERVER_BLOB_PREFIX)
+        {
+            return match principal {
+                crate::auth::Principal::Device { user_id, .. } => self
+                    .db
+                    .server_member(server_id, user_id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|m| m.banned_at.is_none()),
+                crate::auth::Principal::Admin => true,
+                crate::auth::Principal::Box { .. } => false,
+            };
         }
         match self.user_of(project_id) {
             Some(u) if principal.can_access_project(&u) => true,

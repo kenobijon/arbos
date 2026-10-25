@@ -382,12 +382,18 @@ public struct ChatMeDto: Codable {
 	/// People chats always send this (null when the viewer is not a member). Project chats omit it.
 	public let role: String??
 	public let muted: Bool?
+	/// People group: an admin muted this member from posting (not notification mute).
+	public let silenced: Bool?
+	/// When my admin mute ends (ms). Absent or null while muted = until unmuted.
+	public let silenced_until: Int64?
 	public let archived_at: Int64?
 	public let read_receipts: Bool?
 
-	public init(role: String??, muted: Bool?, archived_at: Int64?, read_receipts: Bool?) {
+	public init(role: String??, muted: Bool?, silenced: Bool?, silenced_until: Int64?, archived_at: Int64?, read_receipts: Bool?) {
 		self.role = role
 		self.muted = muted
+		self.silenced = silenced
+		self.silenced_until = silenced_until
 		self.archived_at = archived_at
 		self.read_receipts = read_receipts
 	}
@@ -513,6 +519,12 @@ public struct ChatMemberDto: Codable {
 	public let last_seen_at: Int64??
 	public let online: Bool?
 	public let read_receipts: Bool?
+	/// Human in a people group: admin muted them from posting. Agent: omitted.
+	public let silenced: Bool?
+	/// When the admin mute ends (ms). Absent or null while muted = until unmuted.
+	public let silenced_until: Int64?
+	/// Human admin: owner granted mute/ban rights (default true). Agent / member: omitted.
+	public let can_mute_ban: Bool?
 	public let avatar: String?
 	public let avatar_color: String?
 	public let avatar_color_index: Int64??
@@ -528,7 +540,7 @@ public struct ChatMemberDto: Codable {
 	public let owner: String?
 	public let owner_handle: String??
 
-	public init(member: String, role: String, added_by: String, joined_at: Int64, handle: String?, avatar_url: String??, name: String??, status: String?, user_id: String?, last_seen_at: Int64??, online: Bool?, read_receipts: Bool?, avatar: String?, avatar_color: String?, avatar_color_index: Int64??, avatar_color_index_effective: Int64?, avatar_leaf: Int64??, avatar_leaf_color: Int64??, avatar_leaf_effective: Int64?, avatar_leaf_color_effective: Int64?, project: ChatMemberProjectDto?, description: String?, owner: String?, owner_handle: String??) {
+	public init(member: String, role: String, added_by: String, joined_at: Int64, handle: String?, avatar_url: String??, name: String??, status: String?, user_id: String?, last_seen_at: Int64??, online: Bool?, read_receipts: Bool?, silenced: Bool?, silenced_until: Int64?, can_mute_ban: Bool?, avatar: String?, avatar_color: String?, avatar_color_index: Int64??, avatar_color_index_effective: Int64?, avatar_leaf: Int64??, avatar_leaf_color: Int64??, avatar_leaf_effective: Int64?, avatar_leaf_color_effective: Int64?, project: ChatMemberProjectDto?, description: String?, owner: String?, owner_handle: String??) {
 		self.member = member
 		self.role = role
 		self.added_by = added_by
@@ -541,6 +553,9 @@ public struct ChatMemberDto: Codable {
 		self.last_seen_at = last_seen_at
 		self.online = online
 		self.read_receipts = read_receipts
+		self.silenced = silenced
+		self.silenced_until = silenced_until
+		self.can_mute_ban = can_mute_ban
 		self.avatar = avatar
 		self.avatar_color = avatar_color
 		self.avatar_color_index = avatar_color_index
@@ -761,11 +776,14 @@ public struct ProjectDto: Codable {
 	public let my_role: String?
 	/// `list_projects` shared rows only; `None` omits, `Some(None)` is JSON null.
 	public let owner_handle: String??
+	/// `list_projects` for a signed-in device only: archived for this user (sidebar row hidden on
+	/// every device; the agent keeps running). `None` omits, `Some(None)` is JSON null.
+	public let archived_at: Int64??
 	/// "Who may message X" (agent-to-agent messaging): other owners' people / agents the
 	/// owner allowed; empty for everyone but the owner's own clients.
 	public let message_grants: [MessageGrantDto]?
 
-	public init(id: String, name: String, icon: String, color: String, instructions: String, avatar: String, avatar_color: String, state: String, box: String, box_since: Int64, spend_today_usd: Double, spend_cap_usd: Double, created_at: Int64, last_active_at: Int64, description: String, voice: String?, vision_enabled: Bool, avatar_color_index: Int64?, avatar_color_index_effective: Int64, avatar_leaf: Int64?, avatar_leaf_color: Int64?, avatar_leaf_effective: Int64?, avatar_leaf_color_effective: Int64?, image_key: String?, primary_chat_id: String?, owner: ProjectOwnerDto, model: String?, machine: MachineDto, shared: Bool?, my_role: String?, owner_handle: String??, message_grants: [MessageGrantDto]?) {
+	public init(id: String, name: String, icon: String, color: String, instructions: String, avatar: String, avatar_color: String, state: String, box: String, box_since: Int64, spend_today_usd: Double, spend_cap_usd: Double, created_at: Int64, last_active_at: Int64, description: String, voice: String?, vision_enabled: Bool, avatar_color_index: Int64?, avatar_color_index_effective: Int64, avatar_leaf: Int64?, avatar_leaf_color: Int64?, avatar_leaf_effective: Int64?, avatar_leaf_color_effective: Int64?, image_key: String?, primary_chat_id: String?, owner: ProjectOwnerDto, model: String?, machine: MachineDto, shared: Bool?, my_role: String?, owner_handle: String??, archived_at: Int64??, message_grants: [MessageGrantDto]?) {
 		self.id = id
 		self.name = name
 		self.icon = icon
@@ -797,6 +815,7 @@ public struct ProjectDto: Codable {
 		self.shared = shared
 		self.my_role = my_role
 		self.owner_handle = owner_handle
+		self.archived_at = archived_at
 		self.message_grants = message_grants
 	}
 }
@@ -1410,6 +1429,17 @@ public struct MeMachineDto: Codable {
 	}
 }
 
+/// Privacy choices on `GET /me` / `PATCH /me`. Absent on an older relay → open defaults.
+/// Key names are a contract with shipped apps: only add, never rename.
+public struct MePrivacyDto: Codable {
+	/// Who may add me to a people group: `anyone` | `people_i_know` | `nobody`.
+	public let group_add: String
+
+	public init(group_add: String) {
+		self.group_add = group_add
+	}
+}
+
 /// `GET /me` success body.
 public struct MeResponseDto: Codable {
 	public let user: AccountUserDto
@@ -1418,14 +1448,16 @@ public struct MeResponseDto: Codable {
 	public let limits: MeLimitsDto
 	public let features: MeFeaturesDto?
 	public let machine: MeMachineDto
+	public let privacy: MePrivacyDto?
 
-	public init(user: AccountUserDto, device: MeDeviceDto?, credits: CreditsDto, limits: MeLimitsDto, features: MeFeaturesDto?, machine: MeMachineDto) {
+	public init(user: AccountUserDto, device: MeDeviceDto?, credits: CreditsDto, limits: MeLimitsDto, features: MeFeaturesDto?, machine: MeMachineDto, privacy: MePrivacyDto?) {
 		self.user = user
 		self.device = device
 		self.credits = credits
 		self.limits = limits
 		self.features = features
 		self.machine = machine
+		self.privacy = privacy
 	}
 }
 
@@ -1543,8 +1575,13 @@ public struct PeopleChatDto: Codable {
 	/// D92 amendment: the group's leaf picture, when one was picked (`image_key` wins).
 	public let avatar_leaf: Int64?
 	public let avatar_leaf_color: Int64?
+	/// Optional about text for a people group (≤200 chars). Absent or empty = none.
+	public let description: String?
 	public let pending: Bool
 	public let members: [ChatMemberDto]
+	/// Banned people (owner/admin with mute-ban rights); empty for everyone else.
+	/// Unban from the member list.
+	public let banned: [ChatMemberDto]?
 	public let room: String
 	public let head_seq: Int64
 	public let last_activity_at: Int64
@@ -1553,7 +1590,7 @@ public struct PeopleChatDto: Codable {
 	public let lock_state: String
 	public let me: ChatMeDto
 
-	public init(id: String, archived_at: Int64?, kind: String, created_by: String, created_at: Int64, title: String, image_key: String?, avatar_leaf: Int64?, avatar_leaf_color: Int64?, pending: Bool, members: [ChatMemberDto], room: String, head_seq: Int64, last_activity_at: Int64, read_seq: Int64, unread: Bool, lock_state: String, me: ChatMeDto) {
+	public init(id: String, archived_at: Int64?, kind: String, created_by: String, created_at: Int64, title: String, image_key: String?, avatar_leaf: Int64?, avatar_leaf_color: Int64?, description: String?, pending: Bool, members: [ChatMemberDto], banned: [ChatMemberDto]?, room: String, head_seq: Int64, last_activity_at: Int64, read_seq: Int64, unread: Bool, lock_state: String, me: ChatMeDto) {
 		self.id = id
 		self.archived_at = archived_at
 		self.kind = kind
@@ -1563,8 +1600,10 @@ public struct PeopleChatDto: Codable {
 		self.image_key = image_key
 		self.avatar_leaf = avatar_leaf
 		self.avatar_leaf_color = avatar_leaf_color
+		self.description = description
 		self.pending = pending
 		self.members = members
+		self.banned = banned
 		self.room = room
 		self.head_seq = head_seq
 		self.last_activity_at = last_activity_at
@@ -1622,12 +1661,15 @@ public struct PeopleMemberRemovedPayloadDto: Codable {
 	public let user_id: String
 	public let handle: String
 	public let by_handle: String
+	/// True when an admin banned them (they cannot rejoin). Omit / null on leave or plain remove.
+	public let banned: Bool?
 
-	public init(chat_id: String, user_id: String, handle: String, by_handle: String) {
+	public init(chat_id: String, user_id: String, handle: String, by_handle: String, banned: Bool?) {
 		self.chat_id = chat_id
 		self.user_id = user_id
 		self.handle = handle
 		self.by_handle = by_handle
+		self.banned = banned
 	}
 }
 
@@ -2336,6 +2378,21 @@ public struct SkillDto: Codable {
 	}
 }
 
+/// `space_archived` payload: a sidebar space (agent `project` or `server`) archived for this
+/// user on another device (`archived_at` is null when un-archiving).
+public struct SpaceArchivedPayloadDto: Codable {
+	public let space_id: String
+	/// `project` or `server`.
+	public let kind: String
+	public let archived_at: Int64?
+
+	public init(space_id: String, kind: String, archived_at: Int64?) {
+		self.space_id = space_id
+		self.kind = kind
+		self.archived_at = archived_at
+	}
+}
+
 /// `POST …/calls` success: new call (201) or join the live one (200).
 public struct StartCallResponseDto: Codable {
 	public let call: CallDto
@@ -2532,6 +2589,7 @@ public enum PushEventDto: Codable {
 	case peopleProjectShared(PeopleProjectSharedPayloadDto)
 	case projectMemberRemoved(ProjectMemberRemovedPayloadDto)
 	case chatArchived(ChatArchivedPayloadDto)
+	case spaceArchived(SpaceArchivedPayloadDto)
 	case peopleInviteAccepted(PeopleInviteAcceptedPayloadDto)
 	case feedbackCapture(FeedbackCapturePayloadDto)
 	case serverMemberRemoved(ServerMemberRemovedPayloadDto)
@@ -2559,6 +2617,7 @@ public enum PushEventDto: Codable {
 			peopleProjectShared = "people_project_shared",
 			projectMemberRemoved = "project_member_removed",
 			chatArchived = "chat_archived",
+			spaceArchived = "space_archived",
 			peopleInviteAccepted = "people_invite_accepted",
 			feedbackCapture = "feedback_capture",
 			serverMemberRemoved = "server_member_removed",
@@ -2636,6 +2695,11 @@ public enum PushEventDto: Codable {
 			case .chatArchived:
 				if let content = try? container.decode(ChatArchivedPayloadDto.self, forKey: .payload) {
 					self = .chatArchived(content)
+					return
+				}
+			case .spaceArchived:
+				if let content = try? container.decode(SpaceArchivedPayloadDto.self, forKey: .payload) {
+					self = .spaceArchived(content)
 					return
 				}
 			case .peopleInviteAccepted:
@@ -2748,6 +2812,9 @@ public enum PushEventDto: Codable {
 			try container.encode(content, forKey: .payload)
 		case .chatArchived(let content):
 			try container.encode(CodingKeys.chatArchived, forKey: .kind)
+			try container.encode(content, forKey: .payload)
+		case .spaceArchived(let content):
+			try container.encode(CodingKeys.spaceArchived, forKey: .kind)
 			try container.encode(content, forKey: .payload)
 		case .peopleInviteAccepted(let content):
 			try container.encode(CodingKeys.peopleInviteAccepted, forKey: .kind)

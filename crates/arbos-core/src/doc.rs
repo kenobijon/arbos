@@ -7,9 +7,9 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashMap};
 
 use loro::event::DiffEvent;
+pub use loro::VersionVector;
 use loro::{
-    Container, ExportMode, Index, LoroDoc, LoroList, LoroMap, LoroText, LoroValue,
-    ValueOrContainer, VersionVector,
+    Container, ExportMode, Index, LoroDoc, LoroList, LoroMap, LoroText, LoroValue, ValueOrContainer,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -289,6 +289,20 @@ pub struct UserMessageOpts {
     pub sender_name: Option<String>,
     pub sender_avatar: Option<String>,
     pub answers_question_id: Option<String>,
+    /// The sender's IANA time zone (`"Europe/London"`), written as `tz` so the
+    /// agent can answer for the user's moment ("4:28 PM where you are") —
+    /// Grok parity trait 1 (agentd reads `tz` / `timeZone` / `timezone`).
+    /// Clients pass [`device_time_zone`]; fixtures and tests leave it unset.
+    pub tz: Option<String>,
+}
+
+/// The device's IANA time zone, if the platform names one (macOS and iOS via
+/// CoreFoundation, Linux via /etc/localtime).
+pub fn device_time_zone() -> Option<String> {
+    iana_time_zone::get_timezone()
+        .ok()
+        .map(|z| z.trim().to_string())
+        .filter(|z| !z.is_empty())
 }
 
 /// One attachment part on a client user message (`name` / `mime` / optional `kind` / `ref`).
@@ -511,6 +525,16 @@ impl ChatDoc {
         self.export_updates_since(theirs)
     }
 
+    /// True when every op in `update` is already covered by `vv` (e.g. the room's stored doc).
+    /// Uses Loro's import-blob metadata so the relay can ACK a resent push without storing or
+    /// gating it. Undecodable bytes are not covered.
+    pub fn update_covered_by(update: &[u8], vv: &VersionVector) -> bool {
+        match LoroDoc::decode_import_blob_meta(update, true) {
+            Ok(meta) => vv.includes_vv(&meta.partial_end_vv),
+            Err(_) => false,
+        }
+    }
+
     /// True when every op in `vv` is already in this doc (checkpoint containment check, crdt-sync §7.3).
     pub fn contains_vv(&self, vv: &VersionVector) -> bool {
         self.doc.oplog_vv().includes_vv(vv)
@@ -622,6 +646,9 @@ impl ChatDoc {
         }
         if let Some(q) = opts.answers_question_id.as_deref() {
             loro_err(m.insert("answersQuestionId", q))?;
+        }
+        if let Some(tz) = opts.tz.as_deref().map(str::trim).filter(|z| !z.is_empty()) {
+            loro_err(m.insert("tz", tz))?;
         }
         loro_err(m.insert("status", MessageStatus::Done.as_str()))?;
         loro_err(m.insert("deviceId", device_id))?;
@@ -797,9 +824,64 @@ impl ChatDoc {
         Ok(())
     }
 
+    /// Client write: replace the body of a message's last `text` part and set
+    /// `editedAt`. Does not commit. No-op when the id is missing or there is no
+    /// text part (attachment-only rows). User rows keep one text part after any
+    /// attachments; that is the part this updates.
+    pub fn edit_message_text(&self, msg_id: &str, text: &str) -> CoreResult<()> {
+        if msg_id.is_empty() {
+            return Ok(());
+        }
+        let Some(map) = self.find_message(msg_id) else {
+            return Ok(());
+        };
+        let Some(parts) = self.parts_of(msg_id) else {
+            return Ok(());
+        };
+        let mut text_part: Option<(String, LoroMap)> = None;
+        for i in 0..parts.len() {
+            let Some(ValueOrContainer::Container(Container::Map(p))) = parts.get(i) else {
+                continue;
+            };
+            let kind = match p.get("kind") {
+                Some(ValueOrContainer::Value(LoroValue::String(s))) => s.to_string(),
+                _ => continue,
+            };
+            if kind != "text" {
+                continue;
+            }
+            let id = match p.get("id") {
+                Some(ValueOrContainer::Value(LoroValue::String(s))) => s.to_string(),
+                _ => continue,
+            };
+            text_part = Some((id, p));
+        }
+        let Some((part_id, part)) = text_part else {
+            return Ok(());
+        };
+        let t = loro_err(part.insert_container("text", LoroText::new()))?;
+        loro_err(t.insert(0, text))?;
+        self.live_text
+            .borrow_mut()
+            .insert((msg_id.to_owned(), part_id), t);
+        loro_err(map.insert("editedAt", now_ms()))?;
+        Ok(())
+    }
+
     /// Client write: append a `commands` row. Does not commit. Returns the command id.
     /// Object payloads become a nested `LoroMap` (arrays → `LoroList`).
     pub fn push_command(&self, kind: &str, payload: Value, device_id: &str) -> String {
+        self.push_command_at(kind, payload, device_id, now_ms())
+    }
+
+    /// `push_command` with an explicit `issuedAt` (replaying history, tests of catch-up order).
+    pub fn push_command_at(
+        &self,
+        kind: &str,
+        payload: Value,
+        device_id: &str,
+        issued_at: i64,
+    ) -> String {
         let cmds = self.commands_list();
         let c = cmds.push_container(LoroMap::new()).expect("push command");
         let id = ulid();
@@ -807,7 +889,7 @@ impl ChatDoc {
         c.insert("kind", kind).ok();
         insert_json_map(&c, "payload", payload).expect("payload");
         c.insert("issuedBy", device_id).ok();
-        c.insert("issuedAt", now_ms()).ok();
+        c.insert("issuedAt", issued_at).ok();
         c.insert("status", CommandStatus::Pending.as_str()).ok();
         id
     }
@@ -1724,9 +1806,50 @@ pub fn decode_vv(bytes: &[u8]) -> Option<VersionVector> {
     VersionVector::decode(bytes).ok()
 }
 
+/// True when every op in `update` is already covered by `vv`. See [`ChatDoc::update_covered_by`].
+pub fn update_covered_by(update: &[u8], vv: &VersionVector) -> bool {
+    ChatDoc::update_covered_by(update, vv)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_covered_by_when_vv_includes_the_blob() {
+        let doc = ChatDoc::new(Some(1), false);
+        let base = doc.oplog_vv();
+        doc.append_user_message("m1", "hi", "dev", &UserMessageOpts::default())
+            .unwrap();
+        let update = doc.export_updates_since(&base);
+        let vv = doc.oplog_vv();
+        assert!(
+            ChatDoc::update_covered_by(&update, &vv),
+            "the doc's own vv covers the update it just exported"
+        );
+    }
+
+    #[test]
+    fn update_covered_by_false_when_vv_lacks_ops() {
+        let doc = ChatDoc::new(Some(2), false);
+        let empty = doc.oplog_vv();
+        doc.append_user_message("m1", "hi", "dev", &UserMessageOpts::default())
+            .unwrap();
+        let update = doc.export_updates_since(&empty);
+        assert!(
+            !ChatDoc::update_covered_by(&update, &empty),
+            "an empty vv does not cover new ops"
+        );
+    }
+
+    #[test]
+    fn update_covered_by_false_when_undecodable() {
+        let vv = ChatDoc::new(Some(3), false).oplog_vv();
+        assert!(
+            !ChatDoc::update_covered_by(b"not-a-loro-blob", &vv),
+            "garbage bytes are not covered"
+        );
+    }
 
     /// Two replicas behind ONE device id (the busy-reply smoke, 2026-10-23): the second replica
     /// never receives the first one's rows (own-device rows are excluded on the way back), so the
@@ -1851,6 +1974,47 @@ mod tests {
         assert!(!msgs[0].text().contains("sk-live-"));
         assert!(msgs[1].text().contains("[REDACTED:vault]"));
         assert!(!msgs[1].text().contains("sk-live-"));
+    }
+
+    /// Grok parity trait 1 ([feedback hide-worker-rows-and-tz-2026-10-24]): a
+    /// client writes the device's IANA zone as `tz` on its user rows so the
+    /// agent can answer for the user's moment; nothing is written when the
+    /// client has none (fixtures, tests), and a blank zone is not a zone.
+    #[test]
+    fn user_rows_carry_the_senders_time_zone_when_known() {
+        let doc = ChatDoc::new(None, false);
+        doc.transact(|d| {
+            d.append_user_message(
+                "m1",
+                "what time is it there?",
+                "dev:mac",
+                &UserMessageOpts {
+                    tz: Some("Europe/London".into()),
+                    ..UserMessageOpts::default()
+                },
+            )
+            .unwrap();
+            d.append_user_message("m2", "and now?", "dev:fixture", &UserMessageOpts::default())
+                .unwrap();
+            d.append_user_message(
+                "m3",
+                "blank",
+                "dev:odd",
+                &UserMessageOpts {
+                    tz: Some("  ".into()),
+                    ..UserMessageOpts::default()
+                },
+            )
+            .unwrap();
+        });
+        let rows = &doc.to_json()["messages"];
+        assert_eq!(rows[0]["tz"], "Europe/London");
+        assert!(rows[1].get("tz").is_none(), "no zone, no field");
+        assert!(rows[2].get("tz").is_none(), "a blank zone is not written");
+        // The helper answers something IANA-shaped or nothing — never a blank.
+        if let Some(zone) = device_time_zone() {
+            assert!(!zone.trim().is_empty() && !zone.contains(' '), "{zone}");
+        }
     }
 
     #[test]
@@ -2081,6 +2245,29 @@ mod tests {
         b.import(&a.export_updates_since(&base)).unwrap();
         assert_eq!(b.messages_list().len(), 1);
         assert_eq!(b.messages()[0].id, "keep");
+    }
+
+    #[test]
+    fn edit_message_text_replaces_body_and_syncs() {
+        let a = ChatDoc::new(None, false);
+        let mut b = ChatDoc::new(None, false);
+        a.transact(|d| {
+            d.append_user_message("m1", "hello", "dev:a", &UserMessageOpts::default())
+                .unwrap();
+        });
+        b.import(&a.snapshot()).unwrap();
+        assert_eq!(message_text(&a.to_json()["messages"][0]), "hello");
+
+        let base = a.oplog_vv();
+        a.transact(|d| d.edit_message_text("m1", "hello edited").unwrap());
+        let row = &a.to_json()["messages"][0];
+        assert_eq!(message_text(row), "hello edited");
+        assert!(row.get("editedAt").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
+        a.edit_message_text("missing", "x").unwrap(); // missing id is a no-op
+        a.edit_message_text("", "x").unwrap();
+
+        b.import(&a.export_updates_since(&base)).unwrap();
+        assert_eq!(message_text(&b.to_json()["messages"][0]), "hello edited");
     }
 
     #[test]

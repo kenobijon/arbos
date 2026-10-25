@@ -112,7 +112,7 @@ DEPLOY_HOOK = "/usr/local/bin/arbos-deploy-hook"  # CD worker's hook: `<relay|ag
 DEPLOY_QUEUE = os.environ.get("ARBOS_DEPLOY_QUEUE", "/var/lib/arbos-feedback/deploy-requests")  # the hook's queue: one file per kind
 USER_AGENT = "arbos-feedback-poller/1 (+https://github.com/unarbos/arbos)"
 
-TERMINAL = {"shipped", "failed", "ignored", "rejected", "duplicate", "no_change", "handed_off", "deferred"}
+TERMINAL = {"shipped", "failed", "ignored", "rejected", "duplicate", "no_change", "handed_off", "deferred", "declined"}
 
 # Fixes in these areas only count as shipped with device-level evidence (a real phone, the
 # tester's confirmation, or Jacob's OK): the simulator cannot show a silent ringback, a missing
@@ -176,6 +176,9 @@ class Config:
     github_repo: str
     priority: set[str]
     blocklist: set[str]
+    # Priority testers who nevertheless keep the malicious-intent screen (owner decision 2026-10-23 23:47 for
+    # @dawizzaa: first in line and no daily cap, screen unchanged).
+    screen_always: set[str]
     relay_url: str
     relay_admin_token: str
     openrouter_key: str
@@ -218,6 +221,7 @@ class Config:
         priority = listed("FEEDBACK_PRIORITY", "FEEDBACK_PRIORITY_FILE", "/etc/arbos/feedback-priority.txt")
         priority |= listed("FEEDBACK_ALLOWLIST", "FEEDBACK_ALLOWLIST_FILE", "/etc/arbos/feedback-allowlist.txt")
         blocklist = listed("FEEDBACK_BLOCKLIST", "FEEDBACK_BLOCKLIST_FILE", "/etc/arbos/feedback-blocklist.txt")
+        screen_always = listed("FEEDBACK_SCREEN_ALWAYS", "FEEDBACK_SCREEN_ALWAYS_FILE", "/etc/arbos/feedback-screen-always.txt")
         # Internal testers (owner decision 2026-10-21: Jacob, Ken, Robert, Etienne) get a higher daily launch cap.
         internal = listed("FEEDBACK_INTERNAL", "FEEDBACK_INTERNAL_FILE", "/etc/arbos/feedback-internal.txt")
         # Deferred product areas: "<regex> :: <comment>" per line; matching feedback gets its issue,
@@ -261,6 +265,7 @@ class Config:
             github_repo=env.get("GITHUB_REPO", "unarbos/arbos"),
             priority=priority,
             blocklist=blocklist,
+            screen_always=screen_always,
             relay_url=env.get("ARBOS_RELAY_URL", "").rstrip("/"),
             relay_admin_token=env.get("ARBOS_RELAY_ADMIN_TOKEN", ""),
             openrouter_key=env.get("OPENROUTER_API_KEY", ""),
@@ -1236,8 +1241,238 @@ class Loop:
             except Exception as e:  # noqa: BLE001
                 log(f"[{fid}] step failed: {e}")
 
+    # ---- feedback freeze (owner switch, 2026-10-24 00:23) -------------------------------------------
+    # `arbos-feedback freeze --allow unarbos,arbos,const` / `unfreeze`. While frozen, only items whose reporter is
+    # on the allow list (or Jacob's own) move: everyone else's queued items are not launched, gating items are
+    # pulled from batching, finished agent runs are parked instead of gated — all as `parked` with the previous
+    # status kept, so `unfreeze` restores them in their original order. Merged items keep shipping. Gate, kill
+    # switch and intent screen are untouched.
+    FREEZE_FILE = "freeze.json"
+
+    def freeze_state(self) -> dict | None:
+        p = self.cfg.state_dir / self.FREEZE_FILE
+        if not p.is_file():
+            return None
+        with contextlib.suppress(Exception):
+            return json.loads(p.read_text())
+        return None
+
+    # ---- release-approval gate (owner rule, 2026-10-24 00:38) --------------------------------------
+    # `arbos-feedback approval-gate on --allow unarbos,arbos,const` / `approval-gate off`. While on, a fix whose
+    # reporter is not on the allow list and that is not coordinator-owned is NOT merged when its gate goes green:
+    # it waits as `awaiting_jacob` (label awaiting-jacob), kept current with main (main is merged into the branch
+    # when main moves; re-gated when main's new commits touch its files), listed in awaiting-jacob.md, until
+    # `approve <item>` (merges + ships as usual) or `decline <item> "<note>"` (closes the issue, keeps the branch).
+    APPROVAL_FILE = "approval-gate.json"
+    APPROVAL_LIFTED_FILE = "approval-gate-lifted.json"
+    AWAITING_DOC = "awaiting-jacob.md"
+    # Standing rule (Jacob, 2026-10-24 13:55 UTC, permanent): outside feedback never merges without his per-item
+    # approval. The gate is ON by default with this allow list; approval-gate.json may only widen the list. The
+    # only way off is `approval-gate lift --i-am-jacob --reason "<why>"`, which is logged and shown in status.
+    APPROVAL_DEFAULT_ALLOW = ["unarbos", "arbos", "const"]
+
+    def approval_state(self) -> dict | None:
+        lifted = self.cfg.state_dir / self.APPROVAL_LIFTED_FILE
+        if lifted.is_file():
+            return None
+        p = self.cfg.state_dir / self.APPROVAL_FILE
+        state = {"allow": list(self.APPROVAL_DEFAULT_ALLOW), "since": "2026-10-24T13:55:00Z", "by": "Jacob (standing rule)"}
+        if p.is_file():
+            with contextlib.suppress(Exception):
+                extra = json.loads(p.read_text())
+                state["allow"] = sorted(set(state["allow"]) | {a for a in extra.get("allow", []) if a})
+                state["since"] = extra.get("since") or state["since"]
+                state["by"] = extra.get("by") or state["by"]
+        return state
+
+    def needs_approval(self, fid: str, st: dict) -> bool:
+        gate = self.approval_state()
+        if not gate or st.get("approved_by_jacob"):
+            return False
+        return not self.freeze_allows(fid, st, gate)
+
+    @staticmethod
+    def image_links(text: str) -> list[str]:
+        return re.findall(r"https?://\S+?\.(?:png|jpe?g|gif|webp|mp4|mov)(?=[\s)\]>\"']|$)", text or "", flags=re.I)
+
+    def hold_for_approval(self, fid: str, st: dict) -> None:
+        main_head = self.gh.branch_head("main") or ""
+        # The hold attaches to the ITEM, not to one green head: a re-gate after main moved returns here with
+        # `awaiting` already set — same listing, same ready_since, no second "held" comment (#1551 was
+        # announced three times on 2026-10-24 while nothing about it had changed for Jacob).
+        first = not st.get("awaiting")
+        aw = st.get("awaiting") or {}
+        aw.update(ready=True, ready_head=st.get("branch_head"), main_head=main_head, ready_since=aw.get("ready_since") or iso(), conflict=False)
+        aw.setdefault("since", iso())
+        st.update(status="awaiting_jacob", awaiting=aw)
+        self.store.save_state(fid, st)
+        self.store.event(fid, "awaiting_jacob", head=st.get("branch_head"), main=main_head[:8], first=first)
+        log(f"[{fid}] green; held for Jacob's approval (awaiting-jacob) at {str(st.get('branch_head'))[:8]} on main {main_head[:8]}")
+        if st.get("issue") and first:
+            with contextlib.suppress(HttpError):
+                self.gh.ensure_label("awaiting-jacob", "0E8A16", "Gate green; merges and ships when Jacob approves (release-approval gate)")
+                self.gh.set_labels(st["issue"], ["awaiting-jacob"], ["in-progress", "frozen"])
+                self.gh.comment(st["issue"], f"Gate green at `{str(st.get('branch_head'))[:8]}` — **held for Jacob's approval** (release-approval gate, owner rule 2026-10-24). "
+                                "The branch is kept current with main meanwhile. `arbos-feedback approve <item>` merges and ships it; `decline` closes it with a note.")
+
+    def keep_current(self, fid: str, st: dict) -> None:
+        """An `awaiting_jacob` item: when main moved, merge main into the branch (a merge, never a rebase); if main's
+        new commits touch the branch's files, re-gate (status gating; the pool batches it and a green run holds it
+        again). A conflict goes to the agent / owner as a merge-main follow-up."""
+        aw = st.get("awaiting") or {}
+        main_head = self.gh.branch_head("main") or ""
+        if not main_head or main_head == aw.get("main_head"):
+            return
+        cmp = self.gh.compare(aw.get("main_head") or main_head, main_head)
+        moved_files = {f["filename"] for f in cmp.get("files", [])}
+        res = self.gh.merge_into(st["branch"], main_head, f"merge main into {st['branch']} (kept current while awaiting approval) [feedback {fid}]")
+        if res is None:
+            aw.update(ready=False, conflict=True, main_head=main_head)
+            st["awaiting"] = aw
+            self.store.save_state(fid, st)
+            self.store.event(fid, "awaiting_conflict", main=main_head[:8])
+            self.conflict_followup(fid, st, "main moved while the fix was awaiting approval; merge origin/main into the branch")
+            return
+        if res:
+            st["branch_head"] = res.get("sha") or self.gh.branch_head(st["branch"]) or st["branch_head"]
+        aw.update(main_head=main_head, conflict=False)
+        touched = moved_files & set(st.get("files") or [])
+        if touched:
+            aw["ready"] = False
+            st.update(status="gating", awaiting=aw)
+            self.store.save_state(fid, st)
+            self.store.event(fid, "awaiting_regate", main=main_head[:8], touched=sorted(touched)[:20])
+            log(f"[{fid}] main moved onto {len(touched)} of its files; re-gating before it is 'ready' again")
+        else:
+            aw["ready"] = True
+            aw["ready_head"] = st["branch_head"]
+            st["awaiting"] = aw
+            self.store.save_state(fid, st)
+
+    def write_awaiting_doc(self) -> None:
+        gate = self.approval_state()
+        rows = []
+        for fid in self.store.items():
+            st = self.store.state(fid)
+            if st.get("status") not in ("awaiting_jacob",) and not (st.get("awaiting") and st.get("status") == "gating" and not st.get("approved_by_jacob")):
+                continue
+            aw = st.get("awaiting") or {}
+            info: dict = {}
+            with contextlib.suppress(Exception):
+                info = self.store.submission(fid)
+            what = re.sub(r"\s+", " ", (st.get("agent_summary") or info.get("comment") or "")).strip()[:140]
+            before = st.get("screenshot_urls") or []
+            after = self.image_links(st.get("agent_summary") or "") + self.image_links(st.get("agent_report") or "")
+            state = "conflict — owner merging main" if aw.get("conflict") else ("re-gating after main moved" if st.get("status") == "gating" else "ready: current with main + green")
+            rows.append((aw.get("ready_since") or aw.get("since") or "", fid, st, what, before, after, state))
+        rows.sort()
+        lines = ["---", "cursor:", '  subagentId: "bc-7eefe9bf-713a-5b12-b1f3-e23bd1fdfe11"', "---", "",
+                 "# Awaiting Jacob — tester fixes that are green and held for release approval", "",
+                 f"Regenerated by the feedback poller at {iso()} (release-approval gate "
+                 + (f"ON — standing rule, allow: {', '.join(gate.get('allow', []))}" if gate else "LIFTED WHOLESALE by an operator; see the loop log") + "). "
+                 "`sudo arbos-feedback approve <item>` merges + ships; `sudo arbos-feedback decline <item> \"<note>\"` closes the issue and keeps the branch.", "",
+                 f"{len(rows)} item(s).", "",
+                 "| Issue | Reporter | What / why | Platform | Before | After | Ready since | State | Item |",
+                 "|---|---|---|---|---|---|---|---|---|"]
+        for since, fid, st, what, before, after, state in rows:
+            issue = f"[#{st['issue']}]({st['issue_url']})" if st.get("issue") else "—"
+            b = " ".join(f"[{i+1}]({u})" for i, u in enumerate(before)) or "—"
+            a = " ".join(f"[{i+1}]({u})" for i, u in enumerate(after)) or f"see the agent's report on #{st.get('issue')}"
+            lines.append(f"| {issue} | {st.get('tester') or st.get('tester_key') or '?'} | {what.replace('|', '/')} | {st.get('target') or '?'} | {b} | {a} | {since[:16]} | {state} | `{fid}` |")
+        (self.cfg.state_dir / self.AWAITING_DOC).write_text("\n".join(lines) + "\n")
+
+    def freeze_allows(self, fid: str, st: dict, fz: dict) -> bool:
+        allow = {a.lower().lstrip("@") for a in fz.get("allow", []) if a}
+        # Structural exemptions (owner scope, 2026-10-24 00:35): the freeze is for tester-filed reports whose
+        # reporter is not on the allow list. Anything owned by a coordinator worker (`handed_off_to` bc-…; loop
+        # agents are `agent_id`, not owners), anything tracked/registered by the coordinator (`track_commit`,
+        # inbox / track submissions) and anything labelled "Jacob (owner)" is Jacob's and keeps moving.
+        # `freeze_exempt` is the by-hand switch for an item the owner adopted during a freeze (#1510).
+        if st.get("freeze_exempt") or (st.get("tester") or "") == "Jacob (owner)":
+            return True
+        if str(st.get("handed_off_to") or "").startswith("bc-") or st.get("track_commit"):
+            return True
+        with contextlib.suppress(Exception):
+            if self.store.submission(fid).get("source") in ("inbox", "track"):
+                return True
+        keys = {(st.get("tester_key") or "").lower().lstrip("@")}
+        info: dict = {}
+        with contextlib.suppress(Exception):
+            info = self.store.submission(fid)
+        for k in ("handle", "login", "github_login", "user", "reporter", "submitted_by_handle"):
+            if info.get(k):
+                keys.add(str(info[k]).lower().lstrip("@"))
+        if info.get("email"):
+            keys.add(info["email"].lower())
+        keys.discard("")
+        return bool(keys & allow) or "jake@bittensor.com" in keys
+
+    def freeze_park(self, fid: str, st: dict, fz: dict) -> None:
+        st["parked_from"] = st["status"]
+        st["parked_at"] = iso()
+        st["status"] = "parked"
+        self.store.save_state(fid, st)
+        self.store.event(fid, "parked", was=st["parked_from"], freeze_since=fz.get("since"))
+        log(f"[{fid}] parked by the feedback freeze (was {st['parked_from']}; reporter {st.get('tester') or st.get('tester_key') or '?'})")
+        if st.get("issue"):
+            with contextlib.suppress(HttpError):
+                self.gh.ensure_label("frozen", "BFD4F2", "Held by the feedback freeze (owner decision); resumes when the freeze is lifted")
+                self.gh.set_labels(st["issue"], ["frozen"], [])
+
+    def apply_freeze(self) -> int:
+        """Park every queued / gating item of a non-allowed reporter. Runs after the agent checks (a run that
+        just finished and became `gating` is parked here before the batcher sees it) and before the batcher."""
+        fz = self.freeze_state()
+        if not fz:
+            return 0
+        n = 0
+        for fid in self.store.items():
+            st = self.store.state(fid)
+            allowed = self.freeze_allows(fid, st, fz)
+            if st.get("status") in ("queued", "gating") and not allowed:
+                self.freeze_park(fid, st, fz)
+                n += 1
+            elif st.get("status") == "parked" and allowed:
+                # The scope changed (allow list edited, item adopted, owner rule): back to where it was.
+                st["status"] = st.pop("parked_from", "queued")
+                st.pop("parked_at", None)
+                self.store.save_state(fid, st)
+                self.store.event(fid, "unparked", to=st["status"], why="now within the freeze's allow scope")
+                log(f"[{fid}] unparked: within the freeze's allow scope now ({st['status']})")
+                if st.get("issue"):
+                    with contextlib.suppress(HttpError):
+                        self.gh.set_labels(st["issue"], [], ["frozen"])
+        return n
+
+    def lift_freeze(self) -> int:
+        n = 0
+        for fid in self.store.items():
+            st = self.store.state(fid)
+            if st.get("status") != "parked":
+                continue
+            st["status"] = st.pop("parked_from", "queued")
+            st.pop("parked_at", None)
+            self.store.save_state(fid, st)
+            self.store.event(fid, "unparked", to=st["status"])
+            if st.get("issue"):
+                with contextlib.suppress(HttpError):
+                    self.gh.set_labels(st["issue"], [], ["frozen"])
+            n += 1
+        (self.cfg.state_dir / self.FREEZE_FILE).unlink(missing_ok=True)
+        return n
+
     def advance(self, fid: str, st: dict) -> None:
         status = st["status"]
+        if status == "parked":
+            return
+        if status == "awaiting_jacob":
+            self.keep_current(fid, st)
+            return
+        if status in ("queued", "gating"):
+            fz = self.freeze_state()
+            if fz and not self.freeze_allows(fid, st, fz):
+                self.freeze_park(fid, st, fz)
+                return
         if status == "queued":
             self.launch(fid, st)
         elif status == "running":
@@ -1268,7 +1503,12 @@ class Loop:
         2026-10-22 07:18 CR after the word filter had caught three of Ken's long technical reports (#1175,
         #1178, #1300), each costing a resubmission; their intent is not in question. Everyone else: the
         pattern check, then the model."""
-        if tier == "priority":
+        keys = {self.tester_key(info)}
+        if info.get("handle"):
+            keys.add("@" + info["handle"].lower())
+        if info.get("email"):
+            keys.add(info["email"].lower())
+        if tier == "priority" and not keys & self.cfg.screen_always:
             return "ok", "priority tester — intent screen exempt (owner decision 2026-10-22)"
         text = (info.get("comment") or "").strip()
         # The submit_feedback tool appends "— filed by the user's agent <name> …": boilerplate, not the user's
@@ -1784,11 +2024,15 @@ class Loop:
         head = st["branch_head"]
         st["gated_head"] = head
         retries = st.get("gate_retries", 0)
+        st["main_conflicts"] = st.get("main_conflicts", 0) + 1
+        self.arm_solo_slot(fid, st)
         if st.get("handed_off_to"):
             st["status"] = "handed_off"
             self.store.save_state(fid, st)
+            solo = (" Your next push runs ALONE in the slot right after the current gate run (ahead of the pool), and this issue "
+                    "gets a note each time main moves so the merge can land right after a settle." if st.get("solo_next") else "")
             self.gh.comment(st["issue"], f"`{st['branch']}`@{head[:8]} conflicts with `main` — not merged. {st['handed_off_to']}: "
-                            "merge `origin/main` into the branch (a merge, never a rebase), resolve, push; the loop re-gates."
+                            "merge `origin/main` into the branch (a merge, never a rebase), resolve, push; the loop re-gates." + solo
                             + (f"\n\n```\n{detail[-2000:]}\n```" if detail else ""))
             return
         if retries >= 2:
@@ -1936,22 +2180,29 @@ class Loop:
             bounced = self.release_bounced_pins()
             if bounced:
                 log(f"Gate: pinned item(s) {', '.join(bounced)} are back with their owner; pin released, the pool runs on")
-        while plan and not members:
-            half = plan.pop(0)
-            # Match by item, gate at its CURRENT head: a bisected item whose owner pushed a repair meanwhile keeps
-            # its place in the queue instead of dropping to the back.
-            members = self.compatible_batch([(f, st) for f, st in ready if f in half])
+        if not members:
+            solo = sorted(((f, st) for f, st in ready if st.get("solo_next")), key=lambda fs: fs[1].get("created") or "")
+            if solo:
+                fid, st = solo[0]
+                members = {fid: st["branch_head"]}
+                log(f"Gate: solo slot for {fid} (bumped {st.get('sibling_conflicts') or 0}× / {st.get('main_conflicts') or 0} main conflicts; runs alone)")
         if not members:
             # Fairness (2026-10-23 22:2x): a branch bumped twice for sibling conflicts gets a batch of the
-            # deferred items only, ahead of the pool — oldest-deferred first, so inside that batch the older
-            # one merges and the newer one is bumped. Without it #1532/#1534/#1543 sat behind older siblings
-            # that touch the same files (sidebar.rs, HomeView.swift) for three rounds while the pool kept
-            # re-merging the same conflicts.
+            # deferred items only, right after the current run — ahead of bisect / plan halves AND the pool
+            # (23:10: a leftover bisect half of 15 went first and the 14 deferred items waited another round).
+            # Oldest-deferred first, so inside that batch the older one merges and the newer one is bumped.
+            # Without it #1532/#1534/#1543 sat behind older siblings that touch the same files (sidebar.rs,
+            # HomeView.swift) for three rounds while the pool kept re-merging the same conflicts.
             deferred = sorted(((f, st) for f, st in ready if (st.get("sibling_conflicts") or 0) >= self.DEFER_AFTER),
                               key=lambda fs: (-(fs[1].get("sibling_conflicts") or 0), fs[1].get("created") or ""))
             if deferred:
                 members = self.compatible_batch(deferred)
                 log(f"Gate: deferred-fairness batch of {len(members)} (bumped ≥ {self.DEFER_AFTER}× for sibling conflicts): " + ", ".join(members))
+        while plan and not members:
+            half = plan.pop(0)
+            # Match by item, gate at its CURRENT head: a bisected item whose owner pushed a repair meanwhile keeps
+            # its place in the queue instead of dropping to the back.
+            members = self.compatible_batch([(f, st) for f, st in ready if f in half])
         if not members:
             members = self.compatible_batch(list(ready))
         cur["rust_gate_plan"] = plan
@@ -1993,6 +2244,45 @@ class Loop:
             log(f"Rust gate Mac unreachable: {str(e)[-200:]}")
             return None
 
+    def merge_revert_probe(self, fid: str, head: str) -> list[str]:
+        """Cheap pre-integration check (2026-10-23 23:3x, #1532's be8ab46): the branch's diff against main must
+        only touch files its own non-merge commits touch. A file that differs from main although no commit of
+        the branch edited it was changed by a MERGE commit — i.e. the merge resolution reverted main's version
+        (12 agentd files came back stale that way; the gate would have carried them into main). Such a branch
+        goes back to its owner with the file list instead of into the integration tree."""
+        st = self.store.state(fid)
+        if st.get("merge_revert_checked") == head:
+            return []
+        try:
+            cmp = self.gh.compare("main", head)
+        except HttpError:
+            return []
+        files = {f["filename"] for f in cmp.get("files", [])}
+        commits = cmp.get("commits", [])
+        if not files or not commits or not any(len(c.get("parents") or []) > 1 for c in commits):
+            return []  # no merge commit on the branch: nothing a merge could have reverted
+        own: set[str] = set()
+        for c in commits:
+            if len(c.get("parents") or []) > 1:
+                continue
+            try:
+                own |= {f["filename"] for f in self.gh.commit(c["sha"]).get("files", [])}
+            except HttpError:
+                return []
+        stray = sorted(files - own)
+        st["merge_revert_checked"] = head
+        self.store.save_state(fid, st)
+        if not stray:
+            return []
+        log(f"[{fid}] merge-revert probe: {len(stray)} file(s) differ from main that no commit of the branch edited; not integrated")
+        self.store.event(fid, "merge_revert", head=head, files=stray[:50])
+        self.gate_followup(fid, st, "rust",
+                           "Pre-integration probe: these files differ from `main` on your branch although no commit of the branch edits them — "
+                           "a merge commit on the branch resolved them to a stale copy, i.e. it reverts main's changes. Redo the merge of "
+                           "`origin/main` taking main's side for them (or `git checkout origin/main -- <files>` and commit), then push.\n\n"
+                           + "\n".join(stray[:60]) + ("\n…" if len(stray) > 60 else ""))
+        return stray
+
     def rust_gate_start(self, members: dict[str, str]) -> None:
         """Build the integration branch gate/<run> on GitHub (main + every member, in order); CI starts on the
         push; the Mac release build starts if the Mac answers (else it is started on a later tick)."""
@@ -2003,6 +2293,10 @@ class Loop:
         merged: list[str] = []
         conflicts: dict[str, str] = {}
         for n, (fid, head) in enumerate(members.items()):
+            stray = self.merge_revert_probe(fid, head)
+            if stray:
+                conflicts[fid] = "merge-revert"
+                continue
             res = self.gh.merge_into(branch, head, f"gate: merge feedback/{fid} [gate {run_id}]")
             if res is None:
                 # A conflict after a sibling merged may still be a conflict with MAIN (the branch is stale): probe
@@ -2037,6 +2331,8 @@ class Loop:
                             "ios": "pending" if ios else "skipped", "mac_started": None}
         self.store.save_cursor(cur)
         for fid, kind in conflicts.items():
+            if kind == "merge-revert":
+                continue  # already sent back by merge_revert_probe
             self.rust_gate_conflict(fid, members[fid], kind, run_id)
         if not merged:
             self.gh.delete_branch(branch)
@@ -2048,6 +2344,28 @@ class Loop:
             + ("; arbos-mac release build on the Mac" if mac else "") + ("; Xcode build of the tree on the Mac" if ios else "") + f"; conflicts: {len(conflicts)})")
         if mac:
             self.rust_gate_mac_start(cur)
+
+    def note_main_tests_broken(self, active: dict, body: str) -> None:
+        """The iOS half compiles the unit-test target too (#1621); when it fails the same way on main the half is
+        green ('reported, not blamed') — but a report nobody reads is no report (16:4x Oct 24: MentionDraftTests
+        broke main at 15:15 and was found by a worker by hand). Surface it: loop log, `status` (cursor field) and
+        one note per main head in the journal; the operator routes the fix to the test's owner."""
+        m = re.search(r"== tests: the same failure exists on main \(([0-9a-f]+)\)", body)
+        cur = self.store.cursor()
+        if not m:
+            if cur.get("main_ios_tests_broken") and "== tests: compile" in body:
+                cur.pop("main_ios_tests_broken", None)
+                self.store.save_cursor(cur)
+                log(f"Gate {active['id']}: main's iOS unit-test target compiles again")
+            return
+        errors = [l.strip() for l in body.splitlines() if "error:" in l][:12]
+        rec = cur.get("main_ios_tests_broken") or {}
+        if rec.get("main") != m.group(1):
+            rec = {"main": m.group(1), "since": iso(), "run": active["id"], "errors": errors}
+            cur["main_ios_tests_broken"] = rec
+            self.store.save_cursor(cur)
+            log(f"ALERT main's iOS unit-test target does not compile at {m.group(1)} (seen by gate {active['id']}); branches are not blamed — "
+                f"route the fix to the test's owner: " + " | ".join(errors[:3]))
 
     def rust_gate_mac_start(self, cur: dict) -> None:
         active = cur["rust_gate"]
@@ -2146,6 +2464,7 @@ class Loop:
                         active["ios_tail"] = body[-5000:]
                         self.store.save_cursor(cur)
                         log(f"Gate {active['id']}: iOS half {active['ios']}")
+                        self.note_main_tests_broken(active, body)
         if active["linux"] == "pending" or active["mac"] == "pending" or active.get("ios", "skipped") == "pending":
             if active["linux"] == "fail" or active["mac"] == "fail" or active.get("ios") == "fail":
                 # One half is already red: settle now; a Mac build still running is for a dead tree.
@@ -2228,6 +2547,35 @@ class Loop:
     # first); bumped SIBLING_LIMIT times (so at least two rounds among deferred items) → treated as a main conflict.
     DEFER_AFTER = 2
     SIBLING_LIMIT = 4
+    # Solo slot (operator rule, 2026-10-23 23:34): an item bumped 3× by siblings, or sent to its owner twice for a
+    # main conflict caused by pool landings, runs ALONE in the slot right after the current run once its owner
+    # pushes again — ahead of the deferred batch and the pool. While it waits with its owner, every landing on
+    # main is announced on its issue so the merge-main can follow a settle immediately.
+    SOLO_AFTER_SIBLING = 3
+    SOLO_AFTER_MAIN = 2
+
+    def arm_solo_slot(self, fid: str, st: dict) -> None:
+        if st.get("solo_next"):
+            return
+        if (st.get("sibling_conflicts") or 0) >= self.SOLO_AFTER_SIBLING or (st.get("main_conflicts") or 0) >= self.SOLO_AFTER_MAIN:
+            st["solo_next"] = True
+            self.store.event(fid, "solo_slot_armed", sibling=st.get("sibling_conflicts") or 0, main=st.get("main_conflicts") or 0)
+            log(f"[{fid}] solo slot armed (sibling bumps {st.get('sibling_conflicts') or 0}, main conflicts {st.get('main_conflicts') or 0}); runs alone after its next push")
+
+    def announce_main_moved(self, landed: str) -> None:
+        """A gate run landed on main: tell every owner holding a solo-slot item (conflict → with owner) once per
+        landing, so the merge-main lands right after this settle and the branch runs alone next."""
+        for fid in self.store.items():
+            st = self.store.state(fid)
+            if not (st.get("solo_next") and st.get("status") == "handed_off" and st.get("handed_off_to") and st.get("issue")):
+                continue
+            if st.get("main_moved_noted") == landed:
+                continue
+            st["main_moved_noted"] = landed
+            self.store.save_state(fid, st)
+            with contextlib.suppress(HttpError):
+                self.gh.comment(st["issue"], f"{st['handed_off_to']}: main just moved (gate run landed as `{landed[:8]}`). Merge `origin/main` into "
+                                f"`{st.get('branch') or 'feedback/' + fid}` now and push — your branch runs ALONE in the next gate slot, ahead of the pool.")
 
     def rust_gate_conflict(self, fid: str, head: str, kind: str, run_id: str) -> None:
         st = self.store.state(fid)
@@ -2236,6 +2584,7 @@ class Loop:
         if kind == "conflict-sibling":
             st["sibling_conflicts"] = st.get("sibling_conflicts", 0) + 1
             if st["sibling_conflicts"] < self.SIBLING_LIMIT:
+                self.arm_solo_slot(fid, st)
                 self.store.save_state(fid, st)
                 log(f"[{fid}] conflicts with a sibling branch in gate {run_id}; retried in the next batch"
                     + (" (deferred-fairness batch next)" if st["sibling_conflicts"] >= self.DEFER_AFTER else ""))
@@ -2319,6 +2668,8 @@ class Loop:
             cur["rust_gate_warm"] = active["tree"] if active["mac"] == "ok" else None
             self.store.save_cursor(cur)
             self.note_green_half(active)
+            with contextlib.suppress(Exception):
+                self.announce_main_moved(self.gh.branch_head("main") or active["tree"])
             return
         diagnostics = ""
         if active["linux"] == "fail":
@@ -2369,6 +2720,9 @@ class Loop:
         return r.returncode == 0, out
 
     def merge_branch(self, fid: str, st: dict) -> None:
+        if self.needs_approval(fid, st):
+            self.hold_for_approval(fid, st)
+            return
         head = st["branch_head"]
         summary = re.sub(r"\s+", " ", st.get("agent_summary") or "").strip()[:80]
         merged = self.gh.merge_into_main(head, f"Merge {st['branch']}: {summary or 'feedback fix'} [feedback {fid}]")
@@ -3020,6 +3374,10 @@ class Loop:
         self.intake()
         self.advance_all()
         try:
+            self.apply_freeze()
+        except Exception as e:  # noqa: BLE001
+            log(f"freeze sweep failed: {e}")
+        try:
             self.rust_gate_tick()
         except Exception as e:  # noqa: BLE001
             log(f"Rust gate scheduler failed: {e}")
@@ -3042,6 +3400,7 @@ class Loop:
             log(f"main-red watch failed: {e}")
         try:
             self.watch_deploys()
+            self.note_canary_failure()
         except Exception as e:  # noqa: BLE001
             log(f"deploy watch failed: {e}")
         try:
@@ -3052,6 +3411,8 @@ class Loop:
             self.watch_handoffs()
         except Exception as e:  # noqa: BLE001
             log(f"handoff watch failed: {e}")
+        with contextlib.suppress(Exception):
+            self.write_awaiting_doc()
         with contextlib.suppress(Exception):
             self.gh.save_etags()
         log(self.gh.ledger_line())
@@ -3347,6 +3708,77 @@ class Loop:
 
     # ---- landed-not-shipped: code that is on main but runs somewhere no build carries ------------
 
+    DEPLOY_STATE = Path("/var/lib/arbos-deploy")
+
+    def deploy_lane(self) -> dict:
+        """What the CD lane says about agentd image rolls: hold file, last smoke failure (image, reason, log
+        excerpt), items landed on main but not in any rolled image (pending_deploy agentd)."""
+        out: dict = {"held": None, "last_fail": None, "waiting": []}
+        hold = self.DEPLOY_STATE / "agentd.hold"
+        if hold.is_file():
+            with contextlib.suppress(Exception):
+                out["held"] = dict(l.split("=", 1) for l in hold.read_text().splitlines() if "=" in l)
+        fails = []
+        with contextlib.suppress(Exception):
+            for f in (self.DEPLOY_STATE / "failed").glob("agentd-*"):
+                rec = dict(l.split("=", 1) for l in f.read_text().splitlines() if "=" in l)
+                rec["sha"] = f.name.split("-", 1)[1]
+                fails.append(rec)
+        if fails:
+            last = max(fails, key=lambda r: int(r.get("at") or 0))
+            m = re.search(r"image (\d+\.\d+\.\d+)", last.get("reason") or "")
+            version = m.group(1) if m else None
+            excerpt = ""
+            if version:
+                logf = self.DEPLOY_STATE / "runs" / f"agentd-{version}-smoke.log"
+                with contextlib.suppress(Exception):
+                    excerpt = "\n".join(logf.read_text().splitlines()[-25:])
+            out["last_fail"] = {**last, "image": version, "excerpt": excerpt}
+        for fid in self.store.items():
+            st = self.store.state(fid)
+            if st.get("status") in ("pushed", "shipped") and "agentd" in (st.get("pending_deploy") or []):
+                out["waiting"].append(fid)
+        return out
+
+    def print_deploy_lane(self) -> None:
+        lane = self.deploy_lane()
+        if not (lane["held"] or lane["last_fail"] or lane["waiting"]):
+            return
+        print("deploy lane (agentd image):")
+        if lane["held"]:
+            h = lane["held"]
+            print(f"  HELD since {h.get('at')} — {h.get('reason')} (sha {str(h.get('sha'))[:8]}, image {h.get('image')}); lifts on a [canary-fix] commit or `arbos-deploy-worker hold-agentd off`")
+        if lane["last_fail"]:
+            f = lane["last_fail"]
+            print(f"  last failure: image {f.get('image')} @ {f['sha'][:8]} attempt {f.get('attempts')} — {f.get('reason')}")
+        if lane["waiting"]:
+            print(f"  landed on main, not in a rolled image ({len(lane['waiting'])}): "
+                  + ", ".join(f"{fid} #{self.store.state(fid).get('issue')}" for fid in lane["waiting"]))
+
+    def note_canary_failure(self) -> None:
+        """Once per failed image: post the canary log excerpt on every issue whose fix is landed-not-shipped
+        because of it, so owners see why their fix is not live."""
+        lane = self.deploy_lane()
+        f = lane.get("last_fail")
+        if not f or not f.get("image") or not lane["waiting"]:
+            return
+        cur = self.store.cursor()
+        noted = cur.setdefault("canary_noted", [])
+        if f["image"] in noted:
+            return
+        body = (f"Not live yet: the sandbox image **{f['image']}** (agentd @ `{f['sha'][:8]}`) failed the busy-reply canary — "
+                f"{f.get('reason')}. Boxes stay on the previous image; agentd rolls are held until a `[canary-fix]` commit lands "
+                f"(bisect in progress).\n\nCanary log tail:\n```\n{(f.get('excerpt') or '(no log excerpt)')[-2500:]}\n```")
+        for fid in lane["waiting"]:
+            st = self.store.state(fid)
+            if st.get("issue"):
+                with contextlib.suppress(HttpError):
+                    self.gh.comment(st["issue"], body)
+                self.store.event(fid, "canary_failure_noted", image=f["image"])
+        noted.append(f["image"])
+        self.store.save_cursor(cur)
+        log(f"deploy lane: canary failure of image {f['image']} noted on {len(lane['waiting'])} issue(s)")
+
     def watch_deploys(self) -> None:
         """Items whose fix runs on the voice pod (`voice/**`) or in the sandbox image (`crates/arbos-agentd`)
         are live only after that service is redeployed. The audit marks them `pending_deploy`; this clears
@@ -3497,16 +3929,23 @@ class Loop:
             if members:
                 print(f"  pinned batch {i}: " + ", ".join(tag(f) for f in members))
                 queued |= set(members)
+        solo = [fid for fid, st in ready if fid not in queued and st.get("solo_next")]
+        if solo:
+            print(f"  solo slots (one per run, right after the current run, {len(solo)}): " + ", ".join(tag(f) for f in solo))
+            queued |= set(solo)
+        solo_waiting = [fid for fid in self.store.items() if self.store.state(fid).get("solo_next") and self.store.state(fid).get("status") == "handed_off"]
+        if solo_waiting:
+            print(f"  solo slot reserved, waiting for the owner's push ({len(solo_waiting)}): " + ", ".join(tag(f) for f in solo_waiting))
+        deferred = [fid for fid, st in ready if fid not in queued and (st.get("sibling_conflicts") or 0) >= self.DEFER_AFTER]
+        if deferred:
+            print(f"  deferred-fairness batch (bumped ≥{self.DEFER_AFTER}× by sibling conflicts; next after the pins, {len(deferred)}): " + ", ".join(tag(f) for f in deferred))
+            queued |= set(deferred)
         planned = [b for b in (cur.get("rust_gate_plan") or []) if b not in pinned_batches]
         for b in planned:
             members = [f for f in b if f in gating and f not in queued]
             if members:
                 print("  planned batch (bisect half / operator plan): " + ", ".join(tag(f) for f in members))
                 queued |= set(members)
-        deferred = [fid for fid, st in ready if fid not in queued and (st.get("sibling_conflicts") or 0) >= self.DEFER_AFTER]
-        if deferred:
-            print(f"  deferred-fairness batch (bumped ≥{self.DEFER_AFTER}× by sibling conflicts; runs before the pool, {len(deferred)}): " + ", ".join(tag(f) for f in deferred))
-            queued |= set(deferred)
         pool = [fid for fid, _ in ready if fid not in queued]
         if pool:
             print(f"  pool (next batch after the pins, oldest first, {len(pool)}): " + ", ".join(tag(f) for f in pool))
@@ -3519,7 +3958,33 @@ class Loop:
         print(f"cursor since={cur.get('since')} checked={cur.get('checked')} seen={len(cur.get('seen', []))}")
         print(f"launches today={self.store.launches_today()}/{self.cfg.max_per_day} last={self.store.last_launch()}")
         print(f"kill file: {'PRESENT' if self.cfg.kill_file.exists() else 'absent'} ({self.cfg.kill_file})")
+        gate = self.approval_state()
+        held = [self.store.state(f) for f in self.store.items()]
+        held = [h for h in held if h.get("status") == "awaiting_jacob" or (h.get("awaiting") and h.get("status") == "gating" and not h.get("approved_by_jacob"))]
+        n = len(held)
+        regating = sum(1 for h in held if h.get("status") == "gating")
+        if gate:
+            print(f"RELEASE-APPROVAL GATE on (standing rule; allow: {', '.join(gate.get('allow', []))}); awaiting Jacob: {n}"
+                  + (f" ({regating} re-gating after main moved — still awaiting, approve/decline any time)" if regating else "") + " — "
+                  f"list: {self.cfg.state_dir / self.AWAITING_DOC}; `arbos-feedback approve <item>` / `decline <item> \"<note>\"`")
+        else:
+            print(f"RELEASE-APPROVAL GATE *** LIFTED WHOLESALE *** {(self.cfg.state_dir / self.APPROVAL_LIFTED_FILE).read_text().strip()} — "
+                  f"awaiting Jacob: {n}; `arbos-feedback approval-gate restore` re-arms it")
+        fz = self.freeze_state()
+        if fz:
+            parked = [self.store.state(f) for f in self.store.items()]
+            parked = [p for p in parked if p.get("status") == "parked"]
+            by = {}
+            for p in parked:
+                by[p.get("parked_from", "?")] = by.get(p.get("parked_from", "?"), 0) + 1
+            print(f"FEEDBACK FREEZE since {fz.get('since')} (allow: {', '.join(fz.get('allow', []))}); parked {len(parked)}: "
+                  + ", ".join(f"{k} {v}" for k, v in sorted(by.items())) + " — `arbos-feedback unfreeze` lifts it")
         self.print_gate_queue(cur)
+        self.print_deploy_lane()
+        broken = cur.get("main_ios_tests_broken")
+        if broken:
+            print(f"MAIN iOS UNIT TESTS BROKEN at {broken.get('main')} since {broken.get('since')} (gate {broken.get('run')}); branches are not blamed — route the fix: "
+                  + " | ".join((broken.get("errors") or [])[:2]))
         for fid in self.store.items():
             st = self.store.state(fid)
             bits = [st.get("status", "?"), st.get("target", ""), st.get("tier", ""), st.get("tester", "")]
@@ -4009,6 +4474,110 @@ def main(argv: list[str]) -> int:
                     loop.gh.comment(st["issue"], f"Not a failure after all: the fix `{st['commit'][:8]}` is on `main`; the build that carries it was still in the runner queue ({why.rstrip('.')}). Back to tracking the builds.")
                     loop.gh.set_labels(st["issue"], [], ["needs-human"])
             print(f"{fid}: back to pushed")
+        return 0
+    if cmd == "approval-gate":
+        # Standing rule: the gate is always on. `approval-gate on [--allow a,b]` widens the allow list;
+        # `approval-gate lift --i-am-jacob --reason "<why>"` is the only way off (logged, shown in status);
+        # `approval-gate restore` puts it back; `approval-gate` prints the state.
+        args = argv[2:]
+        if args[:1] == ["off"]:
+            print("refused: the release-approval gate is a standing rule (Jacob, 2026-10-24 13:55 UTC). Per-item: `approve <item>` / "
+                  "`decline <item> \"<note>\"`. A wholesale lift needs `approval-gate lift --i-am-jacob --reason \"<why>\"`.")
+            return 2
+        if args[:1] == ["lift"]:
+            if "--i-am-jacob" not in args or "--reason" not in args:
+                print("refused: `approval-gate lift` needs --i-am-jacob and --reason \"<why>\" (logged)"); return 2
+            reason = args[args.index("--reason") + 1] if args.index("--reason") + 1 < len(args) else ""
+            if len(reason.strip()) < 10:
+                print("refused: give a real reason (10+ characters)"); return 2
+            rec = {"at": iso(), "reason": reason.strip()[:300], "by": "operator asserting Jacob's authority (--i-am-jacob)"}
+            (cfg.state_dir / Loop.APPROVAL_LIFTED_FILE).write_text(json.dumps(rec))
+            log(f"RELEASE-APPROVAL GATE LIFTED WHOLESALE by operator: {rec['reason']}")
+            with (cfg.state_dir / "log.jsonl").open("a") as f:
+                f.write(json.dumps({"time": iso(), "id": "-", "event": "approval_gate_lifted", **rec}) + "\n")
+            print(f"release-approval gate LIFTED (logged): {rec['reason']} — awaiting items still need `approve` to merge; `approval-gate restore` re-arms it")
+            return 0
+        if args[:1] == ["restore"]:
+            (cfg.state_dir / Loop.APPROVAL_LIFTED_FILE).unlink(missing_ok=True)
+            with (cfg.state_dir / "log.jsonl").open("a") as f:
+                f.write(json.dumps({"time": iso(), "id": "-", "event": "approval_gate_restored"}) + "\n")
+            print("release-approval gate restored (standing rule)"); return 0
+        if args[:1] == ["on"]:
+            allow = [a.strip() for a in (args[args.index("--allow") + 1] if "--allow" in args else "").split(",") if a.strip()]
+            by = args[args.index("--by") + 1] if "--by" in args else "operator"
+            (cfg.state_dir / Loop.APPROVAL_FILE).write_text(json.dumps({"allow": allow, "since": iso(), "by": by}))
+            (cfg.state_dir / Loop.APPROVAL_LIFTED_FILE).unlink(missing_ok=True)
+        gate = loop.approval_state()
+        print("release-approval gate: " + (f"ON (allow: {', '.join(gate['allow'])}; since {gate['since']}, {gate['by']})" if gate else
+              f"LIFTED — {(cfg.state_dir / Loop.APPROVAL_LIFTED_FILE).read_text()}"))
+        return 0
+    if cmd == "approve":
+        fid = argv[2] if len(argv) > 2 else ""
+        st = loop.store.state(fid)
+        if not st:
+            print(f"{fid}: unknown"); return 2
+        with (cfg.state_dir / ".lock").open("w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            st = loop.store.state(fid)
+            st["approved_by_jacob"] = iso()
+            if st.get("status") == "awaiting_jacob":
+                st["status"] = "gating"
+            loop.store.save_state(fid, st)
+            loop.store.event(fid, "approved", by="Jacob")
+            if st.get("issue"):
+                with contextlib.suppress(HttpError):
+                    loop.gh.set_labels(st["issue"], ["in-progress"], ["awaiting-jacob"])
+                    loop.gh.comment(st["issue"], "Approved by Jacob — merging and shipping through the normal release.")
+            if st.get("status") == "gating":
+                loop.gate(fid, st)  # fresh verdict at this head → merges now; else the next batch gates and merges it
+            st = loop.store.state(fid)
+        print(f"{fid}: approved → {st.get('status')}")
+        return 0
+    if cmd == "decline":
+        fid = argv[2] if len(argv) > 2 else ""
+        note = " ".join(argv[3:]).strip() or "declined by Jacob"
+        st = loop.store.state(fid)
+        if not st:
+            print(f"{fid}: unknown"); return 2
+        with (cfg.state_dir / ".lock").open("w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            st = loop.store.state(fid)
+            st.update(status="declined", declined={"at": iso(), "note": note[:300]})
+            loop.store.save_state(fid, st)
+            loop.store.event(fid, "declined", note=note[:300])
+            if st.get("issue"):
+                with contextlib.suppress(HttpError):
+                    loop.gh.set_labels(st["issue"], ["declined"], ["awaiting-jacob", "in-progress"])
+                    loop.gh.close_issue(st["issue"], "not_planned", f"Declined by Jacob: {note.rstrip('.')}. The branch `{st.get('branch') or 'feedback/' + fid}` is kept.")
+        print(f"{fid}: declined ({note[:80]}); branch kept")
+        return 0
+    if cmd == "awaiting":
+        p = cfg.state_dir / Loop.AWAITING_DOC
+        print(p.read_text() if p.is_file() else "no awaiting-jacob list yet (the next tick writes it)")
+        return 0
+    if cmd == "freeze":
+        # `freeze --allow unarbos,arbos,const [--by <who>]`: owner switch — only the listed reporters' items move;
+        # everything else is parked (see apply_freeze). Idempotent; re-running updates the allow list.
+        args = argv[2:]
+        allow = [a.strip() for a in (args[args.index("--allow") + 1] if "--allow" in args else "").split(",") if a.strip()]
+        if not allow:
+            print("freeze needs --allow <reporter,...>"); return 2
+        by = args[args.index("--by") + 1] if "--by" in args else "operator"
+        fz = {"allow": allow, "since": iso(), "by": by}
+        (cfg.state_dir / Loop.FREEZE_FILE).write_text(json.dumps(fz))
+        with (cfg.state_dir / ".lock").open("w") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                print(f"freeze on (allow: {', '.join(allow)}); a tick is in flight — it parks the rest at its next step"); return 0
+            n = loop.apply_freeze()
+        print(f"freeze on (allow: {', '.join(allow)}); parked {n} item(s) now; new reports from other reporters park on intake")
+        return 0
+    if cmd == "unfreeze":
+        with (cfg.state_dir / ".lock").open("w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            n = loop.lift_freeze()
+        print(f"freeze lifted; {n} item(s) restored to their previous state and order")
         return 0
     if cmd == "gate-note":
         # `gate-note <text>` / `gate-note --clear`: one operator line shown on top of `status`'s gate queue

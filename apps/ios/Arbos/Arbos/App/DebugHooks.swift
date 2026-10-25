@@ -12,24 +12,40 @@ enum DebugHooks {
     static var openServer: String? { value("ARBOS_OPEN_SERVER") }
     /// Home search opened with this query (search-name-matching rig).
     static var search: String? { value("ARBOS_SEARCH").flatMap { $0.isEmpty ? nil : $0 } }
+    /// Home list segment selected at launch: all | agents | people | servers (screenshot rig).
+    static var homeFilter: String? { value("ARBOS_HOME_FILTER") }
     /// With `ARBOS_OPEN_SERVER=…:panel`: the server page's tab to land on (Channels | Members | Settings).
     static var panelTab: String? { value("ARBOS_PANEL_TAB") }
     static var autoSend: String? { value("ARBOS_AUTO_SEND") }
+    /// Rig (#1596): text put in the composer of the opened chat at appear, caret at the end —
+    /// `@s` leaves the mention picker open, `@sam deck ready?` shows the resolved chip.
+    static var composerDraft: String? { value("ARBOS_COMPOSER_DRAFT").flatMap { $0.isEmpty ? nil : $0 } }
+    /// Rig (#1596): print each people-chat send's text and `mentions` ids to the console.
+    static var traceSends: Bool { value("ARBOS_TRACE_SENDS") == "1" }
     static var pairCode: String? { value("ARBOS_PAIR_CODE") }
     static var fixture: Bool { value("ARBOS_FIXTURE") == "1" }
     /// D89 waitlist card and Machine rows: the fixture account's place in line.
     static var fixtureWaitlist: Int? { value("ARBOS_FIXTURE_WAITLIST").flatMap { Int($0) } }
+    /// `ARBOS_FIXTURE_SERVERS=1`: the fixture lists three servers (the home list's Servers segment).
+    static var fixtureServers: Bool { value("ARBOS_FIXTURE_SERVERS") == "1" }
     /// Seed the connected 1Password vault and the connect flow (`features.vault_connect` on).
     /// Default off, like the shipped relay flag.
     static var fixtureVault: Bool { value("ARBOS_FIXTURE_VAULT") == "1" }
-    /// With `ARBOS_SHOW=profile`: the agent pane's tab to land on (`Settings`, `Library`).
-    static var profileTab: String? { value("ARBOS_PROFILE_TAB") }
     /// #1544 rig: the Comms chat ends with a destructive-shell card (four standing rows).
     static var fixtureShellCard: Bool { value("ARBOS_FIXTURE_SHELL_CARD") == "1" }
     /// With `ARBOS_OPEN_CHAT`: that chat ends with a several-block agent reply (#1389 rigs).
     static var fixtureLongReply: Bool { value("ARBOS_FIXTURE_LONG_REPLY") == "1" }
     /// Presence-row rig (typing-indicator-left-2026-10-23): n agents working in the fixture group.
     static var fixtureWorking: Int { value("ARBOS_FIXTURE_WORKING").flatMap { Int($0) } ?? 0 }
+    /// Tasks-chip rig (duplex §2.4): the first n of three background jobs open in the opened
+    /// agent chat — 1 running with a step, 2 running with no step yet, 3 queued behind a lock.
+    static var fixtureJobs: Int { min(3, value("ARBOS_FIXTURE_JOBS").flatMap { Int($0) } ?? 0) }
+    /// #1592 rig: the fixture group holds someone else's agent ("TestAgent", run by @sami —
+    /// in the roster, not in my projects) with one bubble; with `ARBOS_FIXTURE_WORKING` it works.
+    static var fixtureForeignAgent: Bool { value("ARBOS_FIXTURE_FOREIGN_AGENT") == "1" }
+    /// `ARBOS_FIXTURE_SEEN=<handle>:<messageId>[,…]`: peers' read watermarks in the fixture DM
+    /// (sent-state-opacity rig: a seen bubble at full opacity next to a sent one).
+    static var fixtureSeen: String? { value("ARBOS_FIXTURE_SEEN").flatMap { $0.isEmpty ? nil : $0 } }
     /// Presence-row rig: `1` (the chat's other person) or comma-separated handles typing.
     static var fixtureTyping: String? { value("ARBOS_FIXTURE_TYPING").flatMap { $0.isEmpty || $0 == "0" ? nil : $0 } }
     /// Join a call seen via presence automatically (two-simulator relay tests).
@@ -97,7 +113,33 @@ enum DebugHooks {
     static var fixtureLongRows: Int? { value("ARBOS_FIXTURE_LONG_ROWS").flatMap { Int($0) } }
     /// Log frame pacing (dropped frames, worst frame, time over budget) and memory every
     /// 2 s to `com.unarbos.arbos.ios` / `perf` for the duration of the launch.
-    static var perfLog: Bool { value("ARBOS_PERF_LOG") == "1" }
+    static let perfLog: Bool = value("ARBOS_PERF_LOG") == "1"
+    /// Seed the fixture group from a Loro snapshot file (a relay export of a real chat).
+    static var fixtureDoc: String? { value("ARBOS_FIXTURE_DOC") }
+    /// Live-path replay (iphone-open-scroll-block): `<checkpoint path>|<rows.hex path>`. The
+    /// fixture group gets a real room (`ensureRoom`, store-restore shape) from the checkpoint,
+    /// then the rows are imported one by one on the main actor the way the relay socket
+    /// delivers them — the production doc → messages → rows path, without a network.
+    static var perfReplay: (checkpoint: String, rows: String)? {
+        guard let v = value("ARBOS_PERF_REPLAY"), let bar = v.firstIndex(of: "|") else { return nil }
+        return (String(v[..<bar]), String(v[v.index(after: bar)...]))
+    }
+    /// How many rooms replay at once (the same doc under different chat ids): a launch
+    /// with many busy chats catching up together.
+    static var perfReplayRooms: Int { Int(value("ARBOS_PERF_REPLAY_ROOMS") ?? "") ?? 1 }
+    /// Milliseconds between replayed rows (0 = as fast as the run loop allows).
+    static var perfReplayGapMs: Int { Int(value("ARBOS_PERF_REPLAY_GAP_MS") ?? "") ?? 5 }
+    /// Replay as live rows (room caught up) rather than as a catch-up.
+    static var perfReplayLive: Bool { value("ARBOS_PERF_REPLAY_LIVE") == "1" }
+    /// Delay before the replay starts, after the chat screen appears (ms).
+    static var perfReplayAfterMs: Int { Int(value("ARBOS_PERF_REPLAY_AFTER_MS") ?? "") ?? 1500 }
+    /// Print SwiftUI's change reasons (`_printChanges`) for the chat screen, the row
+    /// list and each bubble (stdout; launch with `--stdout`).
+    static let perfChanges: Bool = value("ARBOS_PERF_CHANGES") == "1"
+    /// Perf rig drivers, run a few seconds after the chat opens: `scroll` pages the
+    /// transcript to its top and back, `type` appends 40 keystrokes to the composer,
+    /// `typing` fakes a member's typing presence every second. Comma-separated.
+    static var perfDrive: Set<String> { Set((value("ARBOS_PERF_DRIVE") ?? "").split(separator: ",").map(String.init)) }
     /// Scripted tour for the screen recording (fixture only).
     static var demo: Bool { value("ARBOS_DEMO") == "1" }
     /// Scripted tour against the live relay: sends ARBOS_AUTO_SEND, waits for the reply, tours the sheets.

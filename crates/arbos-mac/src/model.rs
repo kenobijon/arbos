@@ -82,6 +82,10 @@ pub struct Project {
     /// People chats: my `me.muted` on the relay (synced across devices).
     #[serde(default)]
     pub muted: bool,
+    /// Sidebar archive (2026-10-23): hidden from the list for me, on every
+    /// device (the relay's per-user flag); the agent keeps running.
+    #[serde(default)]
+    pub archived_at: Option<u64>,
     /// The agent's one chat, §9b `primary_chat_id` (stored on the relay, never
     /// flips); older relays and the fixture send none and the client picks:
     /// most messages, ties → earliest created.
@@ -231,6 +235,45 @@ impl Project {
     pub fn has_agent(&self, project_id: &str) -> bool {
         self.agents.iter().any(|a| a.project_id == project_id)
     }
+}
+
+/// May I delete `message` for everyone in `space`? The relay's rule
+/// (`arbos-relay/src/moderation.rs`), mirrored so the menu never offers a
+/// Delete the relay would refuse: my own messages always; in a people group
+/// the owner (and admins) delete anyone's; an agent's message is its owner's
+/// to delete; in a project chat the owner deletes anything, a guest their own.
+/// System lines are a moderator's only.
+pub fn may_delete_message(
+    space: &Project,
+    me_id: &str,
+    me_handle: &str,
+    message: &Message,
+) -> bool {
+    let sender = message.sender.as_str();
+    // A bare `user` row is the project owner's (a guest's rows carry `user:<id>`).
+    let mine = sender == format!("user:{me_id}")
+        || (sender == "user" && !space.is_people() && !space.is_guest());
+    let moderates = if space.is_people() {
+        space.owner_handle.as_deref().is_none_or(|o| o == me_handle)
+    } else {
+        !space.is_guest()
+    };
+    if moderates {
+        return true;
+    }
+    if mine {
+        return true;
+    }
+    if let Some(pid) = sender.strip_prefix("agent:") {
+        return space
+            .agents
+            .iter()
+            .find(|a| a.project_id == pid)
+            .is_some_and(|a| a.owner_handle == me_handle || a.owner_id == me_id);
+    }
+    // Bare `agent` / `assistant` in a project chat is the project's own agent:
+    // the owner's (handled above); a guest leaves it.
+    false
 }
 
 /// After "Create": the people group that just appeared (`after` but not
@@ -999,6 +1042,11 @@ pub struct Chat {
     /// S15 system tab "Projects ⇄".
     pub is_system: bool,
     pub unread: bool,
+    /// Unread message count from `GET /me/unread` (Dock badge). `0` when read or unknown.
+    /// Live arrivals may set [`Self::unread`] with this still `0` until the next refresh;
+    /// the badge treats that as one missed message.
+    #[serde(default)]
+    pub unread_count: u32,
     pub last_message_at: u64,
     /// §9c: archived for me (per user, synced by the relay); `None` = not archived.
     #[serde(default)]
@@ -1013,6 +1061,17 @@ pub struct Chat {
 impl Chat {
     pub fn is_group(&self) -> bool {
         self.kind == ChatKind::Group
+    }
+
+    /// Missed messages for the Dock badge: the relay count, or 1 when only the unread flag is lit.
+    pub fn missed_count(&self) -> usize {
+        if self.unread_count > 0 {
+            self.unread_count as usize
+        } else if self.unread {
+            1
+        } else {
+            0
+        }
     }
 }
 
@@ -1477,6 +1536,126 @@ pub enum StatusKind {
     Other,
 }
 
+/// The `job` map on a background job's hidden row (duplex §2.3). Only the id and
+/// the title are read; `kind` / `touches` are the box's business.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobRef {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub title: String,
+}
+
+/// Where an open job is in its life — the two states the relay lists
+/// (`activity.jobs[].state`, duplex §2.4). Finished, failed, cancelled and
+/// interrupted jobs are not listed: their outcome is a bubble in the chat.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobState {
+    /// Waiting for a slot or a resource lock; not steerable yet.
+    Queued,
+    Running,
+}
+
+/// One open background job as the relay's activity record lists it
+/// (`GET /projects/{id}` → `activity.jobs[]`): the rows of the tasks drawer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Job {
+    pub id: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default = "Job::default_state")]
+    pub state: JobState,
+    /// The job's newest step in plain words ("Reading tripadvisor.com"); empty
+    /// while it starts; "Waiting for <title>" while it queues behind a lock.
+    #[serde(default)]
+    pub step: String,
+    #[serde(default)]
+    pub elapsed_s: u64,
+    /// The user message that asked for it: Steer prefills a reply to it.
+    #[serde(default)]
+    pub ask_message_id: Option<String>,
+    #[serde(default)]
+    pub chat_id: Option<String>,
+}
+
+impl Job {
+    fn default_state() -> JobState {
+        JobState::Running
+    }
+
+    /// `activity.jobs` as the relay sends it — `null`, missing or not a list all
+    /// read as "no open jobs"; a row that does not parse is skipped, never fatal
+    /// (the drawer must degrade to nothing on an older relay).
+    pub fn list_from_activity(activity: Option<&serde_json::Value>) -> Vec<Job> {
+        activity
+            .and_then(|a| a.get("jobs"))
+            .and_then(serde_json::Value::as_array)
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|r| serde_json::from_value::<Job>(r.clone()).ok())
+                    .filter(|j| !j.id.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Only a running job has a session to steer; a queued one has not started.
+    pub fn can_steer(&self) -> bool {
+        self.state == JobState::Running && self.ask_message_id.is_some()
+    }
+
+    /// The drawer row's second line (contract, "Drawer, per state"): the live
+    /// step, "Working" for a running job with no step yet, "Starting" for a
+    /// queued job with no step, the "Waiting for <title>" step as the box wrote it.
+    pub fn status_line(&self) -> String {
+        let step = self.step.trim();
+        if !step.is_empty() {
+            return step.to_string();
+        }
+        match self.state {
+            JobState::Queued => "Starting".to_string(),
+            JobState::Running => "Working".to_string(),
+        }
+    }
+
+    /// `elapsed_s` as m:ss (an hour and more as h:mm:ss).
+    pub fn elapsed_label(&self) -> String {
+        let s = self.elapsed_s;
+        if s >= 3600 {
+            format!("{}:{:02}:{:02}", s / 3600, (s / 60) % 60, s % 60)
+        } else {
+            format!("{}:{:02}", s / 60, s % 60)
+        }
+    }
+
+    /// "1 task" / "N tasks": the chip's words and the presence suffix.
+    pub fn count_label(n: usize) -> String {
+        if n == 1 {
+            "1 task".to_string()
+        } else {
+            format!("{n} tasks")
+        }
+    }
+
+    /// The presence text without the box's "· N tasks" suffix — the chip
+    /// carries the count, so the words are not said twice on one line.
+    pub fn strip_count_suffix(text: &str) -> &str {
+        let Some((head, tail)) = text.rsplit_once(" · ") else {
+            return text;
+        };
+        let is_count = tail
+            .strip_suffix(" tasks")
+            .or_else(|| tail.strip_suffix(" task"))
+            .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
+        if is_count {
+            head
+        } else {
+            text
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Message {
@@ -1499,6 +1678,20 @@ pub struct Message {
     /// Messages exchanged with the subagent on a hand-off row (1 = brief sent, 2 = result back).
     #[serde(default)]
     pub handoff_messages: Option<u32>,
+    /// A background worker the user never named (agentd, Grok parity trait 15): the
+    /// transcript hides this spawn row — Grok shows no "N messages with …" line for its own
+    /// workers — while the working line still reads its `activity`. An agent-to-agent
+    /// `send_message(to)` row carries no flag and keeps its "Messaged ◉ X" line.
+    #[serde(default)]
+    pub worker: bool,
+    /// Duplex design §2.3: the background job this row belongs to (`job: { id, title,
+    /// kind, touches }`). The row is wordless and `hidden`; it exists so the presence
+    /// line can read its `activity` and so the client knows a job is live in this chat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job: Option<JobRef>,
+    /// The box asks the transcript to draw nothing for this row (job rows).
+    #[serde(default)]
+    pub hidden: bool,
     /// Agent-to-agent messaging: this reply answered a message another agent sent into the
     /// chat; the name drawn in the "Replied to ◉ X" line under the bubble.
     #[serde(default)]
@@ -1529,6 +1722,10 @@ pub struct Message {
     pub mentions: Vec<String>,
     #[serde(default)]
     pub reply_to: Option<String>,
+    /// Bubble menu → Forward: the original sender's display name; the bubble
+    /// shows "Forwarded from <name>" above the text (`forwardedFrom`).
+    #[serde(default)]
+    pub forwarded_from: Option<String>,
     /// On an agent's reply in a people chat: who asked and whose machine answered.
     #[serde(default)]
     pub asked_by_handle: Option<String>,
@@ -1573,8 +1770,9 @@ pub struct Message {
     pub greeting: bool,
 }
 
-/// The quick-react set, in display order (the iPhone's `MessageReaction.palette`).
-pub const REACTION_PALETTE: [&str; 6] = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
+/// The reaction capsule's set, in Grok Bot's order (the iPhone's
+/// `MessageReaction.palette`); any other emoji comes from the system picker.
+pub const REACTION_PALETTE: [&str; 5] = ["😂", "👍", "👎", "❤️", "🎉"];
 
 impl Message {
     /// Reactions as `(emoji, senders)`, palette order first, then the rest
@@ -1670,10 +1868,28 @@ impl Message {
         })
     }
 
-    /// Working line should show: an active stream, or a brief open hand-off.
+    /// A background job's row that still runs (duplex §2.3): jobs are
+    /// independent of the turn, so a newer user line does not end one — only
+    /// the box finishing the row does, or the freshness window (a dead box).
+    pub fn is_live_job_row(&self, now: u64) -> bool {
+        self.role == Role::Assistant
+            && self.job.is_some()
+            && self.is_streaming()
+            && self.created_at >= now.saturating_sub(Self::STREAM_FRESH_MS)
+    }
+
+    /// At least one job row of this chat is still live: the presence row stays
+    /// up and the tasks drawer has something to poll for.
+    pub fn chat_has_live_job(messages: &[Message], now: u64) -> bool {
+        messages.iter().any(|m| m.is_live_job_row(now))
+    }
+
+    /// Working line should show: an active stream, a brief open hand-off, or
+    /// a background job still running.
     pub fn chat_is_actively_working(messages: &[Message], now: u64) -> bool {
         Self::chat_is_actively_streaming(messages, now)
             || Self::chat_has_open_subagent(messages, now)
+            || Self::chat_has_live_job(messages, now)
     }
 
     /// The working line's text while this turn streams: the `activity` field,
@@ -2275,6 +2491,31 @@ pub struct NewSecret {
     pub inject_env: bool,
 }
 
+/// One signed-in device of my account (`GET /auth/devices`, Oct 23).
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+pub struct DeviceView {
+    pub id: String,
+    pub name: String,
+    /// `github` (a GitHub sign-in), `paircode`, `reader` (read-only, Grok Bot) …
+    #[serde(default)]
+    pub kind: String,
+    pub created_at: i64,
+    #[serde(default)]
+    pub last_seen_at: Option<i64>,
+    /// The device that made the request — this Mac.
+    #[serde(default)]
+    pub current: bool,
+}
+
+/// Settings → Devices state.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DevicesView {
+    pub items: Vec<DeviceView>,
+    pub loaded: bool,
+    /// Why the list could not be read, when it could not.
+    pub error: Option<String>,
+}
+
 /// Settings → Secrets state (`GET /secrets` + `GET /secrets/requests`).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SecretsView {
@@ -2758,6 +2999,129 @@ impl Machine {
     }
 }
 
+/// The box as `GET /machine/debug` reports it — the relay's view plus the
+/// box's own `GET /box/state` (image, uptime, load, memory, disk, every
+/// workspace with its turn lock). The agent pane's **Computer** tab
+/// ([feedback agent-pane-details-tab-2026-10-24]) reads this; nothing else.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BoxReport {
+    pub fetched_at: u64,
+    /// `relay.state`: awake / waking / asleep / stopped / error.
+    pub state: String,
+    pub awake_for_s: Option<u64>,
+    /// `relay.agentd.image` → the image the box booted (e.g. `arbos-agent-0.1.114`).
+    pub image: Option<String>,
+    /// `box.reachable`: the box answered `/box/state`; the rest is `None` when it did not.
+    pub reachable: bool,
+    pub unreachable_reason: Option<String>,
+    pub uptime_s: Option<u64>,
+    /// 1-minute load average.
+    pub load_1m: Option<f64>,
+    pub mem_total_mb: Option<u64>,
+    pub mem_available_mb: Option<u64>,
+    pub disk_total_mb: Option<u64>,
+    pub disk_available_mb: Option<u64>,
+    pub workspaces: Vec<BoxWorkspace>,
+}
+
+/// One agent's workspace on the box.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BoxWorkspace {
+    pub project_id: Id,
+    pub name: String,
+    pub healthy: bool,
+    /// A turn is running right now (`turn.running`).
+    pub running: bool,
+    /// How long the current turn has run (`turn.current.elapsed_ms`).
+    pub elapsed_ms: Option<u64>,
+    pub tool_calls: Option<u64>,
+}
+
+impl BoxReport {
+    /// `GET /machine/debug` → the report. Lenient: every field is optional on
+    /// the wire (older relays, an unreachable box), nothing here fails.
+    pub fn from_debug(v: &serde_json::Value, now: u64) -> BoxReport {
+        let relay = &v["relay"];
+        let on_box = &v["box"];
+        let st = &on_box["state"];
+        let mut out = BoxReport {
+            fetched_at: now,
+            state: relay["state"].as_str().unwrap_or("unknown").to_owned(),
+            awake_for_s: relay["awake_for_s"].as_u64(),
+            image: relay["agentd"]["image"]
+                .as_str()
+                .map(str::to_owned)
+                .or_else(|| st["image_version"].as_str().map(str::to_owned)),
+            reachable: on_box["reachable"].as_bool().unwrap_or(false),
+            unreachable_reason: on_box["error"].as_str().map(str::to_owned),
+            ..Default::default()
+        };
+        if !out.reachable {
+            return out;
+        }
+        out.uptime_s = st["uptime_s"].as_u64();
+        out.load_1m = st["load"].get(0).and_then(|l| l.as_f64());
+        out.mem_total_mb = st["memory_mb"]["total"].as_u64();
+        out.mem_available_mb = st["memory_mb"]["available"].as_u64();
+        out.disk_total_mb = st["disk"]["total_mb"].as_u64();
+        out.disk_available_mb = st["disk"]["available_mb"].as_u64();
+        out.workspaces = st["workspaces"]
+            .as_array()
+            .map(|ws| {
+                ws.iter()
+                    .map(|w| BoxWorkspace {
+                        project_id: w["project_id"].as_str().unwrap_or_default().to_owned(),
+                        name: w["name"].as_str().unwrap_or_default().to_owned(),
+                        healthy: w["healthy"].as_bool().unwrap_or(false),
+                        running: w["turn"]["running"].as_bool().unwrap_or(false),
+                        elapsed_ms: w["turn"]["current"]["elapsed_ms"].as_u64(),
+                        tool_calls: w["turn"]["current"]["tool_calls"].as_u64(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        out
+    }
+
+    /// The workspace of one agent, if the box lists it.
+    pub fn workspace(&self, project_id: &str) -> Option<&BoxWorkspace> {
+        self.workspaces.iter().find(|w| w.project_id == project_id)
+    }
+
+    /// Workspaces with a turn running right now — the box's running jobs.
+    pub fn running(&self) -> impl Iterator<Item = &BoxWorkspace> {
+        self.workspaces.iter().filter(|w| w.running)
+    }
+}
+
+/// "12.4 GB" / "840 MB" from megabytes.
+pub fn size_mb(mb: u64) -> String {
+    if mb >= 1024 {
+        let gb = mb as f64 / 1024.0;
+        if gb >= 10.0 {
+            format!("{gb:.0} GB")
+        } else {
+            format!("{gb:.1} GB")
+        }
+    } else {
+        format!("{mb} MB")
+    }
+}
+
+/// "3 d 4 h" / "2 h 10 m" / "45 s" from seconds.
+pub fn duration_s(s: u64) -> String {
+    let (d, h, m) = (s / 86_400, (s % 86_400) / 3600, (s % 3600) / 60);
+    if d > 0 {
+        format!("{d} d {h} h")
+    } else if h > 0 {
+        format!("{h} h {m} m")
+    } else if m > 0 {
+        format!("{m} m")
+    } else {
+        format!("{s} s")
+    }
+}
+
 /// Settings → Account: who is signed in and what is left (`GET /me`).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AccountView {
@@ -2913,6 +3277,10 @@ pub struct ServerInfo {
     pub name: String,
     #[serde(default)]
     pub image_key: Option<String>,
+    /// `image_key` as the avatar loader fetches it (`/blob/servers:{id}/{key}?token=…`), filled in
+    /// by the relay client; not on the wire.
+    #[serde(skip)]
+    pub image_url: Option<String>,
     /// D92 amendment: the leaf picture from the Create screen; `None` = initials.
     #[serde(default)]
     pub avatar_leaf: Option<u8>,
@@ -2931,6 +3299,9 @@ pub struct ServerInfo {
     pub member_count: u64,
     #[serde(default)]
     pub channels: Vec<ServerChannel>,
+    /// Sidebar archive (2026-10-23): hidden from the list for me, on every device.
+    #[serde(default)]
+    pub archived_at: Option<u64>,
     #[serde(default)]
     pub general_channel_id: Option<String>,
     #[serde(default)]
@@ -3110,6 +3481,133 @@ mod add_members_tests {
         let plan = add_members_plan(&g, "unarbos", &[person("gh_1", "allan")], &[]);
         assert_eq!(plan.chat_id, "chat_testing");
         assert!(plan.handles.is_empty() && plan.agent_ids.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod delete_permission_tests {
+    use super::*;
+
+    fn msg(sender: &str, role: Role) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": "m", "chatId": "c", "role": match role { Role::User => "user", Role::Assistant => "assistant", _ => "system" },
+            "sender": sender, "status": "done", "parts": []
+        }))
+        .unwrap()
+    }
+
+    fn group(owner: &str) -> Project {
+        Project {
+            id: "g".into(),
+            kind: SpaceKind::Group,
+            owner_handle: Some(owner.into()),
+            agents: vec![AgentMember {
+                project_id: "p_bob".into(),
+                owner_id: "u_bob".into(),
+                owner_handle: "bob".into(),
+                ..AgentMember::default()
+            }],
+            ..Project::default()
+        }
+    }
+
+    #[test]
+    fn member_deletes_own_only_owner_deletes_all() {
+        let g = group("alice");
+        // Bob, a member: his own yes, Alice's no, system no, his agent's yes.
+        assert!(may_delete_message(
+            &g,
+            "u_bob",
+            "bob",
+            &msg("user:u_bob", Role::User)
+        ));
+        assert!(!may_delete_message(
+            &g,
+            "u_bob",
+            "bob",
+            &msg("user:u_alice", Role::User)
+        ));
+        assert!(!may_delete_message(
+            &g,
+            "u_bob",
+            "bob",
+            &msg("system", Role::System)
+        ));
+        assert!(may_delete_message(
+            &g,
+            "u_bob",
+            "bob",
+            &msg("agent:p_bob", Role::Assistant)
+        ));
+        // Carol: not even Bob's agent.
+        assert!(!may_delete_message(
+            &g,
+            "u_carol",
+            "carol",
+            &msg("agent:p_bob", Role::Assistant)
+        ));
+        // Alice owns the group: everything.
+        assert!(may_delete_message(
+            &g,
+            "u_alice",
+            "alice",
+            &msg("user:u_bob", Role::User)
+        ));
+        assert!(may_delete_message(
+            &g,
+            "u_alice",
+            "alice",
+            &msg("agent:p_bob", Role::Assistant)
+        ));
+        assert!(may_delete_message(
+            &g,
+            "u_alice",
+            "alice",
+            &msg("system", Role::System)
+        ));
+    }
+
+    #[test]
+    fn project_owner_deletes_all_guest_own_only() {
+        let mine = Project {
+            id: "p".into(),
+            ..Project::default()
+        };
+        assert!(may_delete_message(
+            &mine,
+            "u_me",
+            "me",
+            &msg("agent", Role::Assistant)
+        ));
+        assert!(may_delete_message(
+            &mine,
+            "u_me",
+            "me",
+            &msg("user:u_guest", Role::User)
+        ));
+        let shared = Project {
+            id: "p".into(),
+            shared: true,
+            ..Project::default()
+        };
+        assert!(may_delete_message(
+            &shared,
+            "u_guest",
+            "guest",
+            &msg("user:u_guest", Role::User)
+        ));
+        assert!(!may_delete_message(
+            &shared,
+            "u_guest",
+            "guest",
+            &msg("agent", Role::Assistant)
+        ));
+        assert!(!may_delete_message(
+            &shared,
+            "u_guest",
+            "guest",
+            &msg("user", Role::User)
+        ));
     }
 }
 

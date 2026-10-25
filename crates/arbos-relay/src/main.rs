@@ -40,6 +40,7 @@ mod livekit;
 mod local;
 mod matrix;
 mod migrate;
+mod moderation;
 mod notices;
 mod notify;
 mod people;
@@ -338,6 +339,7 @@ async fn main() -> anyhow::Result<()> {
         matrix: matrix::Matrix::new(matrix::Config::from_env()?),
     };
     tracing::info!(auth_mode = auth_mode.as_str(), public_url = %state.cfg.public_url, "sign-in");
+    people::rename_agents_that_shadow_people(&state);
     if state.cfg.connectors_mock {
         tracing::info!("ARBOS_CONNECTORS_MOCK=1: connectors return canned data; sends land in connector_outbox");
     }
@@ -463,6 +465,7 @@ async fn main() -> anyhow::Result<()> {
             get(matrix::servers::list).post(matrix::servers::create),
         )
         .route("/servers/join", post(matrix::servers::join))
+        .route("/servers/{id}/archive", put(matrix::servers::archive))
         .route("/servers/search", get(matrix::servers::search))
         .route(
             "/servers/{id}",
@@ -553,12 +556,22 @@ async fn main() -> anyhow::Result<()> {
             get(people::chats_list).post(people::chats_create_group),
         )
         .route("/chats/dm", post(people::dm_create))
+        .route("/chats/join", post(people::group_join))
         .route(
             "/chats/{id}",
             get(people::chat_get)
                 .patch(people::chat_patch)
                 .delete(people::chat_delete),
         )
+        .route(
+            "/chats/{id}/invites",
+            get(people::group_invites_list).post(people::group_invites_create),
+        )
+        .route(
+            "/chats/{id}/invites/{iid}",
+            delete(people::group_invites_revoke),
+        )
+        .route("/g/{code}", get(people::group_invite_landing))
         .route("/chats/{id}/read", axum::routing::put(people::chat_read))
         .route(
             "/chats/{id}/settings",
@@ -581,7 +594,11 @@ async fn main() -> anyhow::Result<()> {
         )
         .route(
             "/chats/{id}/members/{user_id}",
-            delete(people::member_remove),
+            put(people::member_patch).delete(people::member_remove),
+        )
+        .route(
+            "/chats/{id}/members/{user_id}/unban",
+            post(people::member_unban),
         )
         .route("/box/people/{id}", get(people::box_people_chat))
         .route(
@@ -640,6 +657,7 @@ async fn main() -> anyhow::Result<()> {
             get(browser::browser_stream),
         )
         .route("/projects/{id}/history/{chat}", get(api::chat_history))
+        .route("/projects/{id}/archive", put(api::archive_project))
         .route("/projects/{id}/status", get(api::project_status))
         .route("/projects/{id}/inspect", get(inspect::project_inspect))
         // Read-only debugging for an account's own devices (debug_api.rs).
@@ -763,6 +781,10 @@ async fn main() -> anyhow::Result<()> {
             get(rooms::get_checkpoint).post(rooms::post_checkpoint),
         )
         .route("/room/{project}/{chat}/stats", get(rooms::room_stats))
+        .route(
+            "/room/{project}/{chat}/messages/{message_id}",
+            delete(moderation::delete_message),
+        )
         .route("/blob/{project}/{key}", get(blobs::get).put(blobs::put))
         .route("/feedback", post(feedback::submit))
         .route("/feedback/capture/{id}", post(feedback::device_capture))
@@ -783,6 +805,14 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/projects/{id}/avatar/generate",
             post(images::avatar_generate),
+        )
+        .route(
+            "/chats/{id}/avatar/generate",
+            post(images::chat_avatar_generate),
+        )
+        .route(
+            "/servers/{id}/avatar/generate",
+            post(images::server_avatar_generate),
         )
         .route(
             "/proxy/v1/audio/transcriptions",

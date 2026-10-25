@@ -376,30 +376,37 @@ private struct ZoomableImagePage: View {
     private let maxScale: CGFloat = 5
 
     var body: some View {
-        ZStack {
-            if let image {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFit()
-                    .scaleEffect(scale)
-                    .offset(offset)
-                    .gesture(magnify)
-                    .simultaneousGesture(pan)
-                    .onTapGesture(count: 2, perform: toggleZoom)
-                    .modifier(DismissDrag(progress: $dismissProgress, onClose: onClose, enabled: scale <= minScale + 0.01))
-                    .accessibilityLabel("Image")
-                    .accessibilityHint("Pinch to zoom, double tap to zoom in or out, swipe down to close")
-            } else if failed {
-                VStack(spacing: 12) {
-                    Image(systemName: "photo").font(.system(size: 44)).foregroundStyle(.white.opacity(0.35))
-                    Text("No preview").font(theme.font(13)).foregroundStyle(.white.opacity(0.67))
+        // Fit the whole picture in the viewport at 1× (aspect-fit). Without an
+        // explicit size, a large photo can lay out at its pixel size inside the
+        // paged TabView and look like a zoomed-in crop.
+        GeometryReader { geo in
+            ZStack {
+                if let image {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: geo.size.width, height: geo.size.height)
+                        .scaleEffect(scale)
+                        .offset(offset)
+                        .gesture(magnify)
+                        .simultaneousGesture(pan)
+                        .onTapGesture(count: 2, perform: toggleZoom)
+                        .modifier(DismissDrag(progress: $dismissProgress, onClose: onClose, enabled: scale <= minScale + 0.01))
+                        .accessibilityLabel("Image")
+                        .accessibilityHint("Pinch to zoom, double tap to zoom in or out, swipe down to close")
+                } else if failed {
+                    VStack(spacing: 12) {
+                        Image(systemName: "photo").font(.system(size: 44)).foregroundStyle(.white.opacity(0.35))
+                        Text("No preview").font(theme.font(13)).foregroundStyle(.white.opacity(0.67))
+                    }
+                    .frame(width: geo.size.width, height: geo.size.height)
+                    .modifier(DismissDrag(progress: $dismissProgress, onClose: onClose))
+                } else {
+                    ProgressView().tint(.white)
+                        .frame(width: geo.size.width, height: geo.size.height)
                 }
-                .modifier(DismissDrag(progress: $dismissProgress, onClose: onClose))
-            } else {
-                ProgressView().tint(.white)
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task(id: item.blobRef) {
             if let (data, _) = await MediaFetch.bytes(for: item, model: model), let img = UIImage(data: data) {
                 image = img
@@ -885,16 +892,20 @@ extension AppModel {
     }
 
     /// Bubble long-press → Forward: send the message's text to `target` as a
-    /// new message (no reply quote — it is a fresh send in that chat).
-    func forwardText(_ text: String, to target: ForwardTarget) {
+    /// new message (no reply quote — it is a fresh send in that chat) carrying
+    /// `forwardedFrom: by`, so every client draws "Forwarded from <by>" on it
+    /// (feedback app-01M5MXRZ7609S70P9S9P2RZDDF).
+    func forwardText(_ text: String, from by: String, to target: ForwardTarget) {
         let body = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !body.isEmpty else { return }
+        let name = by.trimmingCharacters(in: .whitespacesAndNewlines)
+        let forwardedFrom = name.isEmpty ? nil : name
         switch target.kind {
         case .people(let c):
-            sendPeople(chatId: c.id, text: body, replyTo: nil)
+            sendPeople(chatId: c.id, text: body, replyTo: nil, forwardedFrom: forwardedFrom)
         case .agent(let p):
             guard let chat = primaryChat(of: p.id) else { return }
-            send(chatId: chat.id, text: body)
+            send(chatId: chat.id, text: body, forwardedFrom: forwardedFrom)
         }
     }
 }

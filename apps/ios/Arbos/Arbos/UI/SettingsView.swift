@@ -44,7 +44,9 @@ struct SettingsView: View {
     @State private var showMachinePage = DebugHooks.settingsPage == "machine"
     @State private var showCreditsPage = DebugHooks.settingsPage == "credits"
     @State private var showNotificationsPage = DebugHooks.settingsPage == "notifications"
+    @State private var showPrivacyPage = DebugHooks.settingsPage == "privacy"
     @State private var showAboutPage = DebugHooks.settingsPage == "about"
+    @State private var showDevicesPage = DebugHooks.settingsPage == "devices"
     @State private var showRelayPage = DebugHooks.settingsPage == "relay"
     @State private var showSecretsPage = ["secrets", "vault", "connect", "new-secret"].contains(DebugHooks.settingsPage ?? "") || DebugHooks.settingsPage?.hasPrefix("secret:") == true
 
@@ -72,6 +74,7 @@ struct SettingsView: View {
                         Color.clear.frame(height: 40)
                     }
                 }
+                .scrollIndicators(.visible)
                 ProfileTopBar { EmptyView() }
             }
             .toolbar(.hidden, for: .navigationBar)
@@ -88,6 +91,7 @@ struct SettingsView: View {
                 model.refreshConnectors()
                 Task { await push.refreshStatus() }
                 Task { await model.refreshSecrets() }
+                Task { await model.refreshDevices() }
                 Task { await model.refreshGoals() }
             }
             // After Google OAuth in Safari, refresh so "Needs sign-in" flips to Connected.
@@ -141,7 +145,9 @@ struct SettingsView: View {
             .navigationDestination(isPresented: $showMachinePage) { MachinePage() }
             .navigationDestination(isPresented: $showCreditsPage) { CreditsPage() }
             .navigationDestination(isPresented: $showNotificationsPage) { NotificationsPage() }
+            .navigationDestination(isPresented: $showPrivacyPage) { PrivacyPage() }
             .navigationDestination(isPresented: $showAboutPage) { AboutPage() }
+            .navigationDestination(isPresented: $showDevicesPage) { DevicesPage() }
             .navigationDestination(isPresented: $showRelayPage) {
                 // RelayPage only exists in Debug; the Release (TestFlight) build has no such type.
                 #if DEBUG
@@ -192,6 +198,12 @@ struct SettingsView: View {
                             valueTint: model.secrets?.paused == true ? theme.danger : nil)
             }))
         }
+        if model.credentials != nil || model.isFixture {
+            // Devices (Oct 23): every GitHub sign-in is one; sign another out here.
+            account.append(AnyView(NavigationLink { DevicesPage() } label: {
+                SettingsRow(icon: "laptopcomputer", title: "Devices", value: devicesSummary)
+            }))
+        }
         if !model.isFixture {
             account.append(AnyView(SettingsRow(icon: "iphone", title: "On this iPhone", value: storageLine, chevron: false)))
         }
@@ -207,6 +219,9 @@ struct SettingsView: View {
         out.append(.card([
             AnyView(NavigationLink { NotificationsPage() } label: {
                 SettingsRow(icon: "bell.badge.fill", title: "Notifications", value: notificationsSummary)
+            }),
+            AnyView(NavigationLink { PrivacyPage() } label: {
+                SettingsRow(icon: "hand.raised.fill", title: "Privacy", value: privacySummary)
             }),
             AnyView(NavigationLink { AppearancePage() } label: {
                 SettingsRow(icon: "circle.lefthalf.filled", title: "Appearance", value: appearanceSummary)
@@ -308,6 +323,14 @@ struct SettingsView: View {
 
     // MARK: Row summaries
 
+    private var devicesSummary: String? {
+        switch model.devices.count {
+        case 0: return nil
+        case 1: return "1 device"
+        case let n: return "\(n) devices"
+        }
+    }
+
     private var creditsSummary: String? {
         guard let c = model.credits else { return nil }
         return String(format: "$%.0f left", c.balanceUsd)
@@ -335,6 +358,10 @@ struct SettingsView: View {
 
     private var appearanceSummary: String {
         return "\(model.appearance.label) · \(model.surface.label)"
+    }
+
+    private var privacySummary: String {
+        (GroupAddPolicy(rawValue: model.groupAddPolicy) ?? .anyone).summary
     }
 
     /// "12.4 MB · 23 chats" from the on-device store (#929).
@@ -533,6 +560,7 @@ struct SettingsPage<Content: View>: View {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { proxy.scrollTo(anchor, anchor: .top) }
                 }
             }
+            .scrollIndicators(.visible)
             // Apple Account pull-down: frosted fade under the title so the
             // avatar softens as it scrolls / rubber-bands into the header.
             headerBlur
@@ -1043,6 +1071,86 @@ struct ConnectorsPage: View {
     }
 }
 
+/// Settings → Devices (Oct 23): one card, a row per signed-in device — glyph,
+/// name, kind tag, "Active now · added Oct 11" — this iPhone first and marked;
+/// every other row has Sign out, which asks first and then revokes on the relay.
+/// The current device signs out from the Settings tab, so you are never stranded.
+struct DevicesPage: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.theme) private var theme
+    @State private var pending: AuthDevice?
+
+    private var rows: [AuthDevice] {
+        model.devices.sorted { a, b in a.current && !b.current }
+    }
+
+    var body: some View {
+        SettingsPage(title: "Devices") {
+            if let why = model.devicesError, model.devices.isEmpty {
+                SettingsGroup(footer: "\(why). Reopen Devices to try again.") {
+                    SettingsValueRow("Devices", value: "Could not load")
+                }
+            } else if !model.devicesLoaded && model.devices.isEmpty {
+                Text("Loading…").font(theme.font(Theme.small)).foregroundStyle(theme.muted)
+                    .frame(maxWidth: .infinity).padding(.top, 36)
+            } else if model.devices.isEmpty {
+                Text("No devices yet").font(theme.font(Theme.small)).foregroundStyle(theme.muted)
+                    .frame(maxWidth: .infinity).padding(.top, 36)
+            } else {
+                SettingsGroup(footer: "Every GitHub sign-in is a device. Signing one out ends its session at once; it can sign in again. This iPhone signs out from the Settings tab.") {
+                    ForEach(rows) { d in
+                        PaneRow(
+                            leading: .tile(d.glyph),
+                            title: d.displayName,
+                            subtitle: d.subtitle(),
+                            trailing: AnyView(trailing(d))
+                        )
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel(d.current ? "\(d.displayName), this iPhone" : d.displayName)
+                    }
+                }
+            }
+        }
+        .task { await model.refreshDevices() }
+        .confirmationDialog(
+            AuthDevice.confirmQuestion(pending?.displayName ?? ""),
+            isPresented: Binding(get: { pending != nil }, set: { if !$0 { pending = nil } }),
+            titleVisibility: .visible
+        ) {
+            Button("Sign out", role: .destructive) {
+                if let d = pending { model.revokeDevice(d.id) }
+                pending = nil
+            }
+            Button("Cancel", role: .cancel) { pending = nil }
+        }
+    }
+
+    @ViewBuilder private func trailing(_ d: AuthDevice) -> some View {
+        // Tag and control on one line, never wrapping (the gate build broke
+        // "Sign out" over two lines next to the "read-only" tag).
+        HStack(spacing: 8) {
+            if let tag = d.kindTag {
+                Text(tag)
+                    .font(theme.font(Theme.tiny))
+                    .foregroundStyle(theme.muted)
+                    .lineLimit(1).fixedSize()
+                    .padding(.horizontal, 6).padding(.vertical, 2)
+                    .background(Capsule().fill(theme.field))
+            }
+            if d.current {
+                Text("This iPhone").font(theme.font(Theme.small)).foregroundStyle(theme.muted).lineLimit(1).fixedSize()
+            } else {
+                Button { pending = d } label: {
+                    Text("Sign out").font(theme.font(Theme.small)).foregroundStyle(theme.danger).lineLimit(1).fixedSize()
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel("Sign out \(d.displayName)")
+            }
+        }
+        .fixedSize()
+    }
+}
+
 struct NotificationsPage: View {
     @Environment(\.theme) private var theme
     @ObservedObject private var push = PushManager.shared
@@ -1071,6 +1179,42 @@ struct NotificationsPage: View {
         case .denied: return "No"
         case .notDetermined: return "Not asked yet"
         @unknown default: return ""
+        }
+    }
+}
+
+/// Who may add me to people groups — stops random spam-group adds.
+struct PrivacyPage: View {
+    @EnvironmentObject private var model: AppModel
+    @State private var error: String?
+
+    var body: some View {
+        SettingsPage(title: "Privacy") {
+            SettingsGroup(
+                header: "Groups",
+                footer: "Controls who can put you in a group without asking. “People I message” means anyone you already have a direct chat with."
+            ) {
+                ForEach(GroupAddPolicy.allCases) { policy in
+                    SettingsChoiceRow(
+                        title: policy.label,
+                        selected: model.groupAddPolicy == policy.rawValue
+                    ) {
+                        Task {
+                            if let err = await model.updateGroupAddPolicy(policy) {
+                                error = err
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .alert("Arbos", isPresented: Binding(
+            get: { error != nil },
+            set: { if !$0 { error = nil } }
+        )) {
+            Button("OK", role: .cancel) { error = nil }
+        } message: {
+            Text(error ?? "")
         }
     }
 }

@@ -62,6 +62,8 @@ pub fn migrate_accounts(c: &Connection) {
         "ALTER TABLE boxes ADD COLUMN held_stopped INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE box_history ADD COLUMN row_json TEXT",
         "ALTER TABLE box_history ADD COLUMN archived_at INTEGER",
+        // Who may add this person to a people group: anyone | people_i_know | nobody.
+        "ALTER TABLE users ADD COLUMN group_add TEXT NOT NULL DEFAULT 'anyone'",
     ] {
         let _ = c.execute(stmt, []);
     }
@@ -404,6 +406,34 @@ impl Db {
         Ok(())
     }
 
+    /// Who may add this person to a people group (`anyone` | `people_i_know` | `nobody`).
+    /// Missing column / missing row → `anyone` (today's open default).
+    pub fn group_add_policy(&self, user_id: &str) -> Result<String> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT COALESCE(group_add, 'anyone') FROM users WHERE id = ?1",
+                params![user_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map(|v| v.unwrap_or_else(|| "anyone".into()))
+        })
+    }
+
+    /// `PATCH /me {group_add}` — store the group-add privacy choice.
+    pub fn set_group_add_policy(&self, user_id: &str, policy: &str) -> Result<()> {
+        let n = self.with(|c| {
+            c.execute(
+                "UPDATE users SET group_add = ?2 WHERE id = ?1",
+                params![user_id, policy],
+            )
+        })?;
+        if n == 0 {
+            return Err(anyhow!("no such user"));
+        }
+        Ok(())
+    }
+
     /// Display name and/or handle (`PATCH /me`). `login` must already be validated and unique.
     /// `None` for a field leaves it unchanged; empty `name` stores NULL (clients show `@handle`).
     pub fn set_user_profile(
@@ -593,6 +623,19 @@ impl Db {
         })
     }
 
+    /// Device ids of a user, most recently seen first — revoked ones included, since a row they
+    /// wrote keeps its `deviceId` for good. Capped so a roster stays small.
+    pub fn device_ids_of_user(&self, user_id: &str, limit: usize) -> Result<Vec<String>> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT id FROM devices WHERE user_id = ?1
+                 ORDER BY COALESCE(last_seen_at, created_at) DESC LIMIT ?2",
+            )?;
+            let rows = st.query_map(params![user_id, limit as i64], |r| r.get(0))?;
+            rows.collect()
+        })
+    }
+
     pub fn insert_auth_grant(
         &self,
         code_hash: &str,
@@ -672,13 +715,18 @@ impl Db {
         })
     }
 
-    pub fn mark_refresh_rotated(&self, token_hash: &str) -> Result<()> {
+    /// Atomically claim a refresh-token row for rotation.
+    ///
+    /// Returns `true` when this call set `rotated_at` (the claimer must issue the new pair).
+    /// Returns `false` when the row was already rotated — another refresh claimed it, or this
+    /// token is being re-presented after a restart.
+    pub fn mark_refresh_rotated(&self, token_hash: &str) -> Result<bool> {
         self.with(|c| {
             c.execute(
-                "UPDATE refresh_tokens SET rotated_at = ?2 WHERE token_hash = ?1",
+                "UPDATE refresh_tokens SET rotated_at = ?2 WHERE token_hash = ?1 AND rotated_at IS NULL",
                 params![token_hash, now_ms()],
             )
-            .map(|_| ())
+            .map(|n| n > 0)
         })
     }
 

@@ -40,6 +40,28 @@ enum Surface: String, CaseIterable, Identifiable {
     }
 }
 
+/// Who may add me to a people group (`PATCH /me {group_add}` / `GET /me` → `privacy`).
+enum GroupAddPolicy: String, CaseIterable, Identifiable {
+    case anyone
+    case peopleIKnow = "people_i_know"
+    case nobody
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .anyone: return "Anyone"
+        case .peopleIKnow: return "People I message"
+        case .nobody: return "Nobody"
+        }
+    }
+    var summary: String {
+        switch self {
+        case .anyone: return "Anyone"
+        case .peopleIKnow: return "People I message"
+        case .nobody: return "Nobody"
+        }
+    }
+}
+
 struct Notice: Identifiable, Equatable {
     let id = UUID()
     var text: String
@@ -105,6 +127,10 @@ final class AppModel: ObservableObject {
         didSet { UserDefaults.standard.set(surfaceSetting, forKey: "surface") }
     }
 
+    /// Who may add me to people groups (`anyone` | `people_i_know` | `nobody`).
+    /// Synced from `GET /me` → `privacy.group_add`; written with `PATCH /me`.
+    @Published var groupAddPolicy: String = GroupAddPolicy.anyone.rawValue
+
     @Published private(set) var credentials: DeviceCredentials?
     /// Self-serve sign-in (GitHub). `tokens` is the JWT pair; `credentials`
     /// mirrors its access token so every existing call path keeps working.
@@ -122,7 +148,13 @@ final class AppModel: ObservableObject {
     /// `machine.waitlisted` / `machine.waitlist_position`). nil = not waitlisted.
     @Published var waitlistPosition: Int?
     /// People chats (D72): DMs I am a member of, newest activity first.
-    @Published var peopleChats: [PeopleChat] = []
+    @Published var peopleChats: [PeopleChat] = [] {
+        didSet {
+            #if DEBUG
+            PerfCounters.bump("pub.peopleChats")
+            #endif
+        }
+    }
     /// Chat ids with unread rows: the relay's per-user `unread` flag plus live rows from
     /// others that landed while the chat was off screen (never `head_seq > read_seq`, #1438).
     @Published var peopleUnread: Set<String> = []
@@ -219,9 +251,61 @@ final class AppModel: ObservableObject {
         didSet {
         }
     }
-    @Published var chats: [Id: [Chat]] = [:]
-    @Published var messages: [Id: [Message]] = [:]
-    @Published var caughtUp: Set<Id> = []
+    @Published var chats: [Id: [Chat]] = [:] {
+        didSet {
+            #if DEBUG
+            PerfCounters.bump("pub.chats")
+            #endif
+        }
+    }
+    @Published var messages: [Id: [Message]] = [:] {
+        didSet { bumpVersions(from: oldValue, to: messages) }
+    }
+    /// Bumped whenever a chat's list (`messages` or `channelRows`) is replaced; views
+    /// watch this instead of comparing the whole message array on every body.
+    @Published private(set) var messagesVersion: [Id: Int] = [:]
+    /// One pass over a chat's list, kept until that list changes.
+    private var activityCache: [Id: ChatActivity] = [:]
+
+    /// A chat's scan results (streaming / open hand-off / awaiting) and the view's
+    /// change detection must not cost a pass over the list per screen body: both key
+    /// off the version. Arrays are COW, so unchanged chats share storage with the old
+    /// dictionary and keep their version (arbonites-chat-lag, 2026-10-24).
+    private func bumpVersions(from old: [Id: [Message]], to new: [Id: [Message]]) {
+        #if DEBUG
+        PerfCounters.bump("pub.messages")
+        #endif
+        for (id, list) in new where !Self.sameStorage(list, old[id]) {
+            messagesVersion[id, default: 0] &+= 1
+            activityCache[id] = nil
+        }
+        for id in old.keys where new[id] == nil {
+            messagesVersion[id, default: 0] &+= 1
+            activityCache[id] = nil
+        }
+    }
+
+    /// Same array buffer (an unchanged value carried over by copy-on-write).
+    private static func sameStorage(_ a: [Message], _ b: [Message]?) -> Bool {
+        guard let b, a.count == b.count else { return false }
+        if a.isEmpty { return true }
+        return a.withUnsafeBufferPointer { pa in b.withUnsafeBufferPointer { pb in pa.baseAddress == pb.baseAddress } }
+    }
+    /// The agent's open background jobs per project, as the relay's activity record last
+    /// listed them (duplex §2.4) — the tasks chip and sheet. No entry = no open job.
+    @Published var jobs: [Id: [Job]] = [:]
+    private var jobsPolledAt: [Id: Int64] = [:]
+    private var jobsPolling: Set<Id> = []
+    /// How often the open chat's jobs are polled while one is live (the design's "chip
+    /// updates on the next poll"; stop ≤ 3 s).
+    static let jobsPollMs: Int64 = 1_500
+    @Published var caughtUp: Set<Id> = [] {
+        didSet {
+            #if DEBUG
+            PerfCounters.bump("pub.caughtUp")
+            #endif
+        }
+    }
     @Published var link: Link = .connecting
     /// Per-room link, for the chat header's connection pill. The pill must not
     /// use the global `link`: any other room's brief reconnect was painting
@@ -262,6 +346,9 @@ final class AppModel: ObservableObject {
             }
         }
     }
+    /// Telegram-style root tab (Contacts · Calls · Chats · Settings). Opening a
+    /// chat from Contacts/Calls switches to Chats so `path` lands on HomeView's stack.
+    @Published var mainTab: MainTab = .chats
     /// True when the Debug fixture replaced the relay (screenshots).
     var isFixture = false
     /// Debug demo tours run once per process, whichever view instance starts them.
@@ -286,6 +373,11 @@ final class AppModel: ObservableObject {
     @Published var mutedChannelIds: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "mutedChannelIds") ?? []) {
         didSet { UserDefaults.standard.set(Array(mutedChannelIds), forKey: "mutedChannelIds") }
     }
+    /// People group chats muted on this phone until the given date (`distantFuture` = until unmuted).
+    /// Timed mutes live here; the relay's `me.muted` stays true while muted so other devices match.
+    @Published var peopleMutedUntil: [String: Date] = AppModel.loadPeopleMutedUntil() {
+        didSet { AppModel.savePeopleMutedUntil(peopleMutedUntil) }
+    }
     /// The shared Matrix client (crates/arbos-matrix through ArbosFFI): the rooms' data plane.
     var matrixClient: ArbosFFI.MatrixClient?
     /// Retains the UniFFI foreign listener for the client's lifetime.
@@ -297,7 +389,9 @@ final class AppModel: ObservableObject {
     @Published var matrixConnected = true
     var matrixDisconnectedSince: Date?
     /// Decoded channel timelines by relay channel id — the rows ChatView renders for a channel.
-    @Published var channelRows: [Id: [Message]] = [:]
+    @Published var channelRows: [Id: [Message]] = [:] {
+        didSet { bumpVersions(from: oldValue, to: channelRows) }
+    }
     /// Channels whose room reached the beginning of its history (`loadOlder` → nil).
     var channelAtStart: Set<Id> = []
     /// Channels with an `openRoom` / `loadOlder` in flight.
@@ -307,7 +401,8 @@ final class AppModel: ObservableObject {
 
     /// Who the call screen shows before anyone joins: the DM peer, or (for a
     /// people group) every other human plus the agents in that chat; for a
-    /// project chat the project's agent (Calls Phase 2).
+    /// project chat the project's agent (Calls Phase 2). A selective group
+    /// start (`CallManager.ringIds`) narrows the group list to the people we named.
     func expectedCallPeople(_ c: Call) -> [CallPerson] {
         guard let chat = peopleChat(c.chatId) else {
             if !c.agents.isEmpty { return c.agents }
@@ -317,7 +412,11 @@ final class AppModel: ObservableObject {
         }
         let me = user?.id
         if chat.isGroup {
-            return chat.members.filter { $0.id != me }.map(CallPerson.from(member:))
+            let others = chat.members.filter { $0.id != me }
+            if let ring = CallManager.shared.ringIds, c.callId == CallManager.shared.call?.callId {
+                return others.filter { ring.contains($0.id) }.map(CallPerson.from(member:))
+            }
+            return others.map(CallPerson.from(member:))
         }
         guard let other = chat.counterpart(me: me) else { return [] }
         return [CallPerson.from(member: other)]
@@ -345,47 +444,142 @@ final class AppModel: ObservableObject {
         }
     }
 
-    // MARK: Home archive (device-local)
+    // MARK: Home archive (per user on the relay; UserDefaults keeps the offline copy)
 
-    /// Agents hidden from the home list until found in search (or opened).
+    /// Agents hidden from the home list (Hidden chats) until unarchived or new activity.
     @Published private(set) var archivedProjectIds: Set<Id> = {
         Set(UserDefaults.standard.stringArray(forKey: "archivedProjects") ?? [])
     }()
 
-    /// People DMs/groups hidden from home until found in search (or opened).
+    /// People DMs/groups hidden from home until unarchived or new activity.
     @Published private(set) var archivedPeopleChatIds: Set<Id> = {
         Set(UserDefaults.standard.stringArray(forKey: "archivedPeopleChats") ?? [])
     }()
+
+    /// Servers hidden from home until unarchived.
+    @Published private(set) var archivedServerIds: Set<Id> = {
+        Set(UserDefaults.standard.stringArray(forKey: "archivedServers") ?? [])
+    }()
+
+    /// Rows this device just (un)archived: the relay list may still say the old state for
+    /// a poll or two, so the reconcile skips them until the deadline.
+    private var archiveLocalUntil: [String: Date] = [:]
+    private static let archiveLocalGraceSeconds: TimeInterval = 20
 
     func isArchived(_ projectId: Id) -> Bool { archivedProjectIds.contains(projectId) }
 
     func isArchived(peopleChatId: Id) -> Bool { archivedPeopleChatIds.contains(peopleChatId) }
 
-    func archive(_ projectId: Id) {
-        guard !archivedProjectIds.contains(projectId) else { return }
-        archivedProjectIds.insert(projectId)
+    func isArchived(serverId: Id) -> Bool { archivedServerIds.contains(serverId) }
+
+    func archive(_ projectId: Id) { setArchived(projectId: projectId, true) }
+    func unarchive(_ projectId: Id) { setArchived(projectId: projectId, false) }
+    func archive(peopleChatId: Id) { setArchived(peopleChatId: peopleChatId, true) }
+    func unarchive(peopleChatId: Id) { setArchived(peopleChatId: peopleChatId, false) }
+    func archive(serverId: Id) { setArchived(serverId: serverId, true) }
+    func unarchive(serverId: Id) { setArchived(serverId: serverId, false) }
+
+    private func setArchived(projectId: Id, _ archived: Bool) {
+        guard archivedProjectIds.contains(projectId) != archived else { return }
+        if archived { archivedProjectIds.insert(projectId) } else { archivedProjectIds.remove(projectId) }
         UserDefaults.standard.set(Array(archivedProjectIds), forKey: "archivedProjects")
-        // Archive clears a home pin — the row is hidden until search/open.
-        unpinHome(projectId: projectId)
+        // Archive clears a home pin — the row is hidden until unarchived.
+        if archived { unpinHome(projectId: projectId) }
+        archiveLocalUntil["p:" + projectId] = Date().addingTimeInterval(Self.archiveLocalGraceSeconds)
+        guard credentials != nil, !isFixture else { return }
+        Task {
+            do { try await api.setProjectArchived(projectId, archived: archived) } catch let e as RelayError where e.status == 404 {
+                // Older relay: the archive stays on this device.
+            } catch { notice = Notice(text: "\(archived ? "Archive" : "Unarchive") failed: \(error.localizedDescription)") }
+        }
     }
 
-    func archive(peopleChatId: Id) {
-        guard !archivedPeopleChatIds.contains(peopleChatId) else { return }
-        archivedPeopleChatIds.insert(peopleChatId)
+    private func setArchived(peopleChatId: Id, _ archived: Bool) {
+        guard archivedPeopleChatIds.contains(peopleChatId) != archived else { return }
+        if archived { archivedPeopleChatIds.insert(peopleChatId) } else { archivedPeopleChatIds.remove(peopleChatId) }
         UserDefaults.standard.set(Array(archivedPeopleChatIds), forKey: "archivedPeopleChats")
-        unpinHome(peopleChatId: peopleChatId)
+        if archived { unpinHome(peopleChatId: peopleChatId) }
+        if let i = peopleChats.firstIndex(where: { $0.id == peopleChatId }) {
+            peopleChats[i].archivedAt = archived ? nowMs() : nil
+        }
+        archiveLocalUntil["c:" + peopleChatId] = Date().addingTimeInterval(Self.archiveLocalGraceSeconds)
+        guard credentials != nil, !isFixture else { return }
+        Task {
+            do { try await api.chatSettings(chatId: peopleChatId, archived: archived) } catch let e as RelayError where e.status == 404 {
+                // Older relay: the archive stays on this device.
+            } catch { notice = Notice(text: "\(archived ? "Archive" : "Unarchive") failed: \(error.localizedDescription)") }
+        }
     }
 
-    func unarchive(_ projectId: Id) {
-        guard archivedProjectIds.contains(projectId) else { return }
-        archivedProjectIds.remove(projectId)
-        UserDefaults.standard.set(Array(archivedProjectIds), forKey: "archivedProjects")
+    private func setArchived(serverId: Id, _ archived: Bool) {
+        guard archivedServerIds.contains(serverId) != archived else { return }
+        if archived { archivedServerIds.insert(serverId) } else { archivedServerIds.remove(serverId) }
+        UserDefaults.standard.set(Array(archivedServerIds), forKey: "archivedServers")
+        archiveLocalUntil["s:" + serverId] = Date().addingTimeInterval(Self.archiveLocalGraceSeconds)
+        guard credentials != nil, !isFixture else { return }
+        Task {
+            do { try await api.setServerArchived(serverId, archived: archived) } catch let e as RelayError where e.status == 404 {
+                // Older relay: the archive stays on this device.
+            } catch { notice = Notice(text: "\(archived ? "Archive" : "Unarchive") failed: \(error.localizedDescription)") }
+        }
     }
 
-    func unarchive(peopleChatId: Id) {
-        guard archivedPeopleChatIds.contains(peopleChatId) else { return }
-        archivedPeopleChatIds.remove(peopleChatId)
-        UserDefaults.standard.set(Array(archivedPeopleChatIds), forKey: "archivedPeopleChats")
+    /// The relay's per-user flags win over the offline copy, except for rows this device
+    /// changed in the last few seconds (`archiveLocalUntil`).
+    private func reconcileArchive(key prefix: String, relay: [(Id, Bool)], into set: inout Set<Id>, defaultsKey: String) {
+        let now = Date()
+        var next = set
+        for (id, archived) in relay {
+            if let until = archiveLocalUntil[prefix + id], until > now { continue }
+            if archived { next.insert(id) } else { next.remove(id) }
+        }
+        guard next != set else { return }
+        set = next
+        UserDefaults.standard.set(Array(set), forKey: defaultsKey)
+    }
+
+    func reconcileArchivedProjects(_ list: [Project]) {
+        guard !isFixture else { return }
+        reconcileArchive(key: "p:", relay: list.map { ($0.id, $0.archivedAt != nil) }, into: &archivedProjectIds, defaultsKey: "archivedProjects")
+    }
+
+    func reconcileArchivedPeople(_ list: [PeopleChat]) {
+        guard !isFixture else { return }
+        reconcileArchive(key: "c:", relay: list.map { ($0.id, $0.archivedAt != nil) }, into: &archivedPeopleChatIds, defaultsKey: "archivedPeopleChats")
+    }
+
+    func reconcileArchivedServers(_ list: [Server]) {
+        guard !isFixture else { return }
+        reconcileArchive(key: "s:", relay: list.map { ($0.id, $0.archivedAt != nil) }, into: &archivedServerIds, defaultsKey: "archivedServers")
+    }
+
+    /// Another device of mine flipped a row (`space_archived` / `chat_archived` push).
+    func applyRemoteArchive(spaceId: Id, kind: String, archived: Bool) {
+        archiveLocalUntil.removeValue(forKey: (kind == "server" ? "s:" : "p:") + spaceId)
+        if kind == "server" {
+            reconcileArchive(key: "s:", relay: [(spaceId, archived)], into: &archivedServerIds, defaultsKey: "archivedServers")
+        } else {
+            reconcileArchive(key: "p:", relay: [(spaceId, archived)], into: &archivedProjectIds, defaultsKey: "archivedProjects")
+            if archived { unpinHome(projectId: spaceId) }
+        }
+    }
+
+    func applyRemoteArchive(peopleChatId: Id, archived: Bool) {
+        archiveLocalUntil.removeValue(forKey: "c:" + peopleChatId)
+        reconcileArchive(key: "c:", relay: [(peopleChatId, archived)], into: &archivedPeopleChatIds, defaultsKey: "archivedPeopleChats")
+        if archived { unpinHome(peopleChatId: peopleChatId) }
+    }
+
+    /// An archived chat got a new inbound message: the row comes back to the list.
+    func unarchiveOnActivity(chatId: Id) {
+        if peopleChat(chatId) != nil {
+            if archivedPeopleChatIds.contains(chatId) { unarchive(peopleChatId: chatId) }
+            return
+        }
+        for (pid, list) in chats where list.contains(where: { $0.id == chatId }) {
+            if archivedProjectIds.contains(pid) { unarchive(pid) }
+            return
+        }
     }
 
     // MARK: Home pins (device-local)
@@ -394,12 +588,19 @@ final class AppModel: ObservableObject {
     static let maxHomePins = 5
 
     /// Home-list keys (`p:<projectId>` / `c:<peopleChatId>`) kept at the top.
-    @Published private(set) var pinnedHomeIds: Set<String> = {
-        Set(UserDefaults.standard.stringArray(forKey: "pinnedHome") ?? [])
+    /// Order is the pin strip: index 0 is the topmost row.
+    @Published private(set) var pinnedHomeIds: [String] = {
+        var seen = Set<String>()
+        return (UserDefaults.standard.stringArray(forKey: "pinnedHome") ?? [])
+            .filter { seen.insert($0).inserted }
     }()
 
     func isHomePinned(projectId: Id) -> Bool { pinnedHomeIds.contains("p:" + projectId) }
     func isHomePinned(peopleChatId: Id) -> Bool { pinnedHomeIds.contains("c:" + peopleChatId) }
+
+    /// Position in the pin strip (0 = top), or `nil` when not pinned.
+    func homePinIndex(projectId: Id) -> Int? { pinnedHomeIds.firstIndex(of: "p:" + projectId) }
+    func homePinIndex(peopleChatId: Id) -> Int? { pinnedHomeIds.firstIndex(of: "c:" + peopleChatId) }
 
     func pinHome(projectId: Id) {
         unarchive(projectId)
@@ -414,6 +615,18 @@ final class AppModel: ObservableObject {
     }
     func unpinHome(peopleChatId: Id) { setHomePinned("c:" + peopleChatId, false) }
 
+    /// Put a pinned home row first in the pin strip (long-press → Move to top).
+    func moveHomePinToTop(projectId: Id) { moveHomePinToTop(key: "p:" + projectId) }
+    func moveHomePinToTop(peopleChatId: Id) { moveHomePinToTop(key: "c:" + peopleChatId) }
+
+    /// Move a pinned home row one step toward the top of the strip.
+    func moveHomePinUp(projectId: Id) { moveHomePin(key: "p:" + projectId, delta: -1) }
+    func moveHomePinUp(peopleChatId: Id) { moveHomePin(key: "c:" + peopleChatId, delta: -1) }
+
+    /// Move a pinned home row one step toward the bottom of the strip.
+    func moveHomePinDown(projectId: Id) { moveHomePin(key: "p:" + projectId, delta: 1) }
+    func moveHomePinDown(peopleChatId: Id) { moveHomePin(key: "c:" + peopleChatId, delta: 1) }
+
     private func setHomePinned(_ key: String, _ pinned: Bool) {
         if pinned {
             guard !pinnedHomeIds.contains(key) else { return }
@@ -422,12 +635,28 @@ final class AppModel: ObservableObject {
                 notice = Notice(text: "You can pin up to five chats.")
                 return
             }
-            pinnedHomeIds.insert(key)
+            // New pins land at the top; later Move to top / up / down adjusts order.
+            pinnedHomeIds.insert(key, at: 0)
         } else {
-            guard pinnedHomeIds.contains(key) else { return }
-            pinnedHomeIds.remove(key)
+            guard let i = pinnedHomeIds.firstIndex(of: key) else { return }
+            pinnedHomeIds.remove(at: i)
         }
-        UserDefaults.standard.set(Array(pinnedHomeIds), forKey: "pinnedHome")
+        UserDefaults.standard.set(pinnedHomeIds, forKey: "pinnedHome")
+    }
+
+    private func moveHomePinToTop(key: String) {
+        guard let i = pinnedHomeIds.firstIndex(of: key), i > 0 else { return }
+        pinnedHomeIds.remove(at: i)
+        pinnedHomeIds.insert(key, at: 0)
+        UserDefaults.standard.set(pinnedHomeIds, forKey: "pinnedHome")
+    }
+
+    private func moveHomePin(key: String, delta: Int) {
+        guard let i = pinnedHomeIds.firstIndex(of: key) else { return }
+        let j = i + delta
+        guard pinnedHomeIds.indices.contains(j) else { return }
+        pinnedHomeIds.swapAt(i, j)
+        UserDefaults.standard.set(pinnedHomeIds, forKey: "pinnedHome")
     }
 
     @Published private(set) var machineError: String?
@@ -440,6 +669,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var connectorsBusy = false
     /// Settings → Secrets (D83). `nil` until the first `GET /secrets`.
     @Published var secrets: SecretsOverview?
+    /// Settings → Devices (`GET /auth/devices`, Oct 23).
+    @Published var devices: [AuthDevice] = []
+    @Published var devicesLoaded = false
+    @Published var devicesError: String?
     /// Agent profile → Secrets, per project.
     @Published var projectSecrets: [Id: ProjectSecrets] = [:]
     /// Standing shell approvals per agent (#1544), loaded when the agent pane opens.
@@ -462,6 +695,9 @@ final class AppModel: ObservableObject {
     /// Client-minted message ids whose push the relay has not `ACK`ed (S3),
     /// keyed by chat id so one room's ACK cannot leave another chat's bubble faint.
     private var unacked: [Id: Set<Id>] = [:]
+    /// Rooms whose pushes were refused with `not_available` on the live connection.
+    /// Cleared by that room's next ACK (not by another room's ACK).
+    private var pushRefused: Set<Id> = []
     /// Rooms with a full re-read scheduled by `requestSnapshot` (one per coalesce window).
     private var snapshotPending: Set<Id> = []
     /// When each room's transcript was last re-read from its doc (`Date` seconds).
@@ -470,6 +706,20 @@ final class AppModel: ObservableObject {
     /// Re-reading the transcript at most this often keeps the paint moving and the
     /// decode cost linear in the backfill, not quadratic.
     static let snapshotCoalesceMs = 80
+    /// While a room catches up (not yet `caughtUp`) every doc change — list or message
+    /// touch — folds into one re-read per this window, and the home list's activity bump
+    /// happens with that re-read, not per row. 72 rows replayed per row cost 11 s of
+    /// blocked main thread on a 1 500-message group (iphone-open-scroll-block, 2026-10-24).
+    static let catchUpCoalesceMs = 600
+    /// Live rows: the first lands at once, the rest of a burst fold into one read per window.
+    static let liveCoalesceMs = 150
+    /// Lists at or above this size are decoded off the main actor (`emitSnapshot`).
+    static let asyncSnapshotMinRows = 300
+    /// Per-chat generation of the last requested snapshot; a slower background decode
+    /// that finishes after a newer one is dropped.
+    private var snapshotGeneration: [Id: Int] = [:]
+    /// Rooms whose home-list activity bump waits for the next snapshot (catch-up).
+    private var activityPending: Set<Id> = []
     private var registryTask: Task<Void, Never>?
 
     // MARK: On-device store (#929)
@@ -578,6 +828,7 @@ final class AppModel: ObservableObject {
             return self.visibleChatId
         }
         PushManager.shared.isHiddenChat = { [weak self] id in self?.isHiddenChat(id) ?? false }
+        PushManager.shared.isMutedChat = { [weak self] id in self?.isPeopleChatMuted(id) ?? false }
         NotificationCenter.default.addObserver(forName: PushManager.openChat, object: nil, queue: .main) { [weak self] n in
             guard let self, let cid = n.userInfo?["chat_id"] as? String else { return }
             let pid = (n.userInfo?["project_id"] as? String) ?? peopleSlot
@@ -945,6 +1196,24 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Settings → Privacy: who may add me to groups (`PATCH /me {group_add}`).
+    @discardableResult
+    func updateGroupAddPolicy(_ policy: GroupAddPolicy) async -> String? {
+        let previous = groupAddPolicy
+        groupAddPolicy = policy.rawValue
+        guard !isFixture else { return nil }
+        do {
+            _ = try await api.patchMe(groupAdd: policy.rawValue)
+            return nil
+        } catch let e as RelayError {
+            groupAddPolicy = previous
+            return AuthError.humanize(e.type ?? "", e.message.isEmpty ? "Could not update privacy" : e.message)
+        } catch {
+            groupAddPolicy = previous
+            return error.localizedDescription
+        }
+    }
+
     private func adopt(tokens toks: AuthTokens, user who: AuthUser?, persist: Bool = true) {
         tokens = toks
         if let who { user = who }
@@ -991,7 +1260,7 @@ final class AppModel: ObservableObject {
     func refreshAccount() async {
         guard credentials != nil, !isFixture else { return }
         if tokens?.isExpiringSoon == true { _ = await refreshTokens() }
-        if let (who, cr, summary, features) = try? await api.me() {
+        if let (who, cr, summary, features, privacy) = try? await api.me() {
             user = who
             credits = cr
             saveAccountCache()
@@ -1000,6 +1269,10 @@ final class AppModel: ObservableObject {
             LeafAvatarsFlag.shared.setLottie(features?.leaf_lottie ?? true)
             // Voice mode kill switch (absent on an older relay = off).
             VoiceModeFlag.shared.set(features?.voice_mode ?? false)
+            // Who may add me to groups (absent on an older relay = anyone).
+            if let policy = privacy?.group_add, GroupAddPolicy(rawValue: policy) != nil {
+                groupAddPolicy = policy
+            }
             let position = summary.waitlisted ? Int(summary.waitlist_position ?? 1) : nil
             if position != waitlistPosition { waitlistPosition = position }
             meAlwaysOn = summary.always_on
@@ -1105,6 +1378,7 @@ final class AppModel: ObservableObject {
         projects = []
         chats = [:]
         messages = [:]
+        ReadReceipts.shared.clear()
         caughtUp = []
         unacked = [:]
         peopleChats = []
@@ -1242,6 +1516,7 @@ final class AppModel: ObservableObject {
             }
             projects = newProjects.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
             chats = newChats
+            reconcileArchivedProjects(newProjects)
             saveRegistryCache()
             setRelayLink(.live)
             await refreshMachine()
@@ -1527,6 +1802,70 @@ final class AppModel: ObservableObject {
 
     /// `restored`: a doc imported from the on-device store with the relay
     /// cursor it was saved at and the pushes the relay never ACKed.
+    #if DEBUG
+    /// Perf rig (iphone-open-scroll-block): the fixture group as a real room restored from
+    /// an exported checkpoint, then the exported rows imported on the main actor one by
+    /// one — the same `onChange` → `requestSnapshot` → `emitSnapshot` path a live socket
+    /// drives. `rooms` > 1 adds clones under other ids so several chats catch up at once.
+    func perfReplay(checkpointPath: String, rowsPath: String, rooms: Int, gapMs: Int, afterMs: Int) {
+        guard let ckpt = FileManager.default.contents(atPath: checkpointPath),
+              let rowsText = try? String(contentsOfFile: rowsPath, encoding: .utf8) else {
+            NSLog("perf replay: missing files")
+            return
+        }
+        let rowBytes: [Data] = rowsText.split(separator: "\n").compactMap { line in
+            guard let bar = line.firstIndex(of: "|") else { return nil }
+            return Data(hexString: String(line[line.index(after: bar)...]))
+        }
+        var keys: [Id] = ["fx-group-launch"]
+        for i in 1..<max(1, rooms) { keys.append("fx-replay-\(i)") }
+        var docs: [(Id, CoreChatDoc)] = []
+        for key in keys {
+            guard let doc = try? CoreChatDoc(key: key, snapshot: ckpt) else { continue }
+            if key != "fx-group-launch", let group = peopleChats.first(where: { $0.id == "fx-group-launch" }) {
+                var clone = group
+                clone.id = key
+                clone.title = "Replay \(key)"
+                peopleChats.append(clone)
+            }
+            // Store-restore shape: the doc and its decoded list land before the room starts.
+            ensureRoom(projectId: peopleSlot, key: key, roomChat: key, restored: (doc, 0, [], doc.readAll()))
+            // No relay in the rig: the socket would redial forever and flap the link
+            // (each flap publishes `caughtUp`). The doc's change handler stays.
+            self.rooms[key]?.stop()
+            caughtUp.remove(key)
+            docs.append((key, doc))
+        }
+        LaunchClock.mark("replay-restored", detail: "rooms=\(docs.count) rows=\(rowBytes.count) ckpt=\(ckpt.count)B")
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(afterMs))
+            // `ARBOS_PERF_REPLAY_LIVE=1`: the rooms count as live (rows arriving while the
+            // reader scrolls) instead of catching up.
+            for (key, _) in docs { if DebugHooks.perfReplayLive { caughtUp.insert(key) } else { caughtUp.remove(key) } }
+            PerfLog.mark("phase replay begin", ms: 0)
+            let started = Date()
+            for (ix, bytes) in rowBytes.enumerated() {
+                for (_, doc) in docs {
+                    let t0 = Date()
+                    _ = try? doc.importUpdateReportingPending(bytes)
+                    PerfCounters.time("import", ms: Date().timeIntervalSince(t0) * 1000)
+                }
+                if gapMs > 0 { try? await Task.sleep(for: .milliseconds(gapMs)) } else { await Task.yield() }
+                if ix == rowBytes.count - 1 {
+                    for (key, _) in docs {
+                        caughtUp.insert(key)
+                        #if DEBUG
+                        PerfCounters.bump("emit.L1838")
+                        #endif
+                        emitSnapshot(key)
+                    }
+                }
+            }
+            PerfLog.mark("phase replay end", ms: Date().timeIntervalSince(started) * 1000)
+        }
+    }
+    #endif
+
     private func ensureRoom(projectId: Id, key: Id, roomChat: String,
                             restored: (doc: CoreChatDoc, cursor: Int64, pending: [(String, Data)], messages: [Message]?)? = nil) {
         guard rooms[key] == nil else { return }
@@ -1556,19 +1895,18 @@ final class AppModel: ObservableObject {
                 self.markDirty(key)
                 if isProjectDoc {
                     self.applyProjectDoc(projectId)
+                } else if !self.caughtUp.contains(key), touched.listChanged || !touched.messages.isEmpty {
+                    // Catching up: the relay streams one row per frame. One re-read per
+                    // window for all of them (list or message touches alike), and the
+                    // home-list bump rides along instead of re-sorting per row.
+                    self.activityPending.insert(key)
+                    self.requestSnapshot(key, windowMs: Self.catchUpCoalesceMs, deferAlways: true)
                 } else if touched.listChanged {
-                    if self.caughtUp.contains(key) {
-                        self.emitSnapshot(key)
-                        self.markActivity(chatId: key)
-                        // Loro is live; /me/pushes and /me/unread can lag — light the
-                        // blue circle and drain the push queue as soon as a new row lands.
-                        self.noteLiveUnread(chatId: key)
-                    } else {
-                        // Catching up: the relay sends one row per frame; re-read the
-                        // transcript once per window, not once per row.
-                        self.requestSnapshot(key)
-                        self.markActivity(chatId: key)
-                    }
+                    // Live: a burst of rows (agents answering each other) folds into one
+                    // re-read per short window too; the home-list bump and the unread
+                    // light ride with that read (`applySnapshot`) instead of per row.
+                    self.activityPending.insert(key)
+                    self.requestSnapshot(key, windowMs: Self.liveCoalesceMs)
                 } else if !touched.messages.isEmpty {
                     self.emitMessages(key, indexes: touched.messages)
                     // Same kick project chats get via `chats` in markActivity — people
@@ -1578,6 +1916,9 @@ final class AppModel: ObservableObject {
                 } else if self.messages[key] == nil, let doc = self.docs[key], doc.count > 0 {
                     // Checkpoint / bulk import sometimes reports no list path —
                     // still paint so home search can see the transcript.
+                    #if DEBUG
+                    PerfCounters.bump("emit.L1897")
+                    #endif
                     self.emitSnapshot(key)
                 }
             }
@@ -1607,6 +1948,9 @@ final class AppModel: ObservableObject {
         }
         room.onDocPaint = { [weak self] in
             guard let self, !isProjectDoc else { return }
+            #if DEBUG
+            PerfCounters.bump("emit.L1926")
+            #endif
             self.emitSnapshot(key)
         }
         room.onCaughtUp = { [weak self] in
@@ -1614,8 +1958,12 @@ final class AppModel: ObservableObject {
             if isProjectDoc {
                 self.applyProjectDoc(projectId)
             } else {
-                self.emitSnapshot(key)
+                // Live before the final read, so that read also bumps the home list.
                 self.caughtUp.insert(key)
+                #if DEBUG
+                PerfCounters.bump("emit.L1935")
+                #endif
+                self.emitSnapshot(key)
                 self.firstLoginChatSynced(key)
             }
         }
@@ -1623,19 +1971,35 @@ final class AppModel: ObservableObject {
             // Project-doc writes are not user bubbles; clearing a global set here
             // used to leave people-chat messages stuck at pending opacity.
             guard let self, !isProjectDoc else { return }
+            if self.pushRefused.remove(key) != nil {
+                if self.notice?.text == "Messages in this chat are not being delivered" {
+                    self.notice = nil
+                }
+            }
             guard self.unacked[key] != nil else { return }
             self.unacked[key] = nil
+            #if DEBUG
+            PerfCounters.bump("emit.L1945")
+            #endif
             self.emitSnapshot(key)
         }
         if !isProjectDoc {
+            room.newestMessageId = { [weak self] in self?.messages[key]?.last?.id }
             room.onPresence = { [weak self] header in
                 self?.notePresence(header)
                 self?.noteTyping(header, chatId: key)
+                ReadReceipts.shared.note(header, chatId: key)
                 if let callId = header["in_call"] as? String { self?.peerInCall(callId, chatId: key) }
             }
         }
         room.onUnavailable = { [weak self] in
             Task { @MainActor in self?.handleRoomUnavailable(key: key) }
+        }
+        room.onPushRefused = { [weak self] in
+            guard let self, !isProjectDoc else { return }
+            if self.pushRefused.insert(key).inserted {
+                self.notice = Notice(text: "Messages in this chat are not being delivered")
+            }
         }
         rooms[key] = room
         roomCreatedAt[key] = Date()
@@ -1646,6 +2010,9 @@ final class AppModel: ObservableObject {
             } else if let list = effective.messages {
                 messages[key] = list
             } else {
+                #if DEBUG
+                PerfCounters.bump("emit.L1966")
+                #endif
                 emitSnapshot(key)
             }
         }
@@ -1687,6 +2054,7 @@ final class AppModel: ObservableObject {
         roomLinks[key] = nil
         roomLinkSince[key] = nil
         unacked[key] = nil
+        pushRefused.remove(key)
         roomCreatedAt[key] = nil
         roomRestoredCursors[key] = nil
         roomUnavailableFailures[key] = nil
@@ -1712,19 +2080,28 @@ final class AppModel: ObservableObject {
     /// A list change from the doc: re-read now when the room was quiet, else once
     /// at the end of the coalesce window. Direct `emitSnapshot` callers (catch-up,
     /// checkpoint paint, ACK) still read at once and clear a pending request.
-    private func requestSnapshot(_ chatId: Id) {
+    /// `deferAlways`: never read at once (a catch-up's first row must not cost a
+    /// full re-read when the next 70 arrive within the window); the paint the
+    /// reader sees meanwhile is the store / checkpoint one.
+    private func requestSnapshot(_ chatId: Id, windowMs: Int = AppModel.snapshotCoalesceMs, deferAlways: Bool = false) {
         guard !snapshotPending.contains(chatId) else { return }
-        let window = Double(Self.snapshotCoalesceMs) / 1000
+        let window = Double(windowMs) / 1000
         let since = Date().timeIntervalSince1970 - (snapshotLastAt[chatId] ?? 0)
-        guard since < window else {
+        guard since < window || deferAlways else {
+            #if DEBUG
+            PerfCounters.bump("emit.L2040")
+            #endif
             emitSnapshot(chatId)
             return
         }
         snapshotPending.insert(chatId)
-        let delayMs = max(1, Int((window - since) * 1000))
+        let delayMs = deferAlways ? windowMs : max(1, Int((window - since) * 1000))
         Task { @MainActor [weak self] in
             try? await Task.sleep(for: .milliseconds(delayMs))
             guard let self, self.snapshotPending.contains(chatId) else { return }
+            #if DEBUG
+            PerfCounters.bump("emit.L2048")
+            #endif
             self.emitSnapshot(chatId)
         }
     }
@@ -1733,7 +2110,36 @@ final class AppModel: ObservableObject {
         snapshotPending.remove(chatId)
         snapshotLastAt[chatId] = Date().timeIntervalSince1970
         guard let doc = docs[chatId] else { return }
-        var list = doc.readAll()
+        let gen = (snapshotGeneration[chatId] ?? 0) &+ 1
+        snapshotGeneration[chatId] = gen
+        // Short lists decode inline (tests and the fixture read `messages` right after);
+        // a long group's 1 MB of rows is read and parsed off the main actor — the FFI doc
+        // is thread-safe — and applied when it is back, unless a newer read superseded it.
+        if doc.count < Self.asyncSnapshotMinRows {
+            applySnapshot(chatId, list: doc.readAll())
+            return
+        }
+        Task.detached(priority: .userInitiated) { [weak self] in
+            #if DEBUG
+            let t0 = Date()
+            #endif
+            let list = doc.readAll()
+            #if DEBUG
+            PerfCounters.time("readAll.bg", ms: Date().timeIntervalSince(t0) * 1000)
+            #endif
+            await MainActor.run {
+                guard let self, self.snapshotGeneration[chatId] == gen else { return }
+                self.applySnapshot(chatId, list: list)
+            }
+        }
+    }
+
+    private func applySnapshot(_ chatId: Id, list: [Message]) {
+        #if DEBUG
+        let t0 = Date()
+        defer { PerfCounters.time("applySnapshot", ms: Date().timeIntervalSince(t0) * 1000) }
+        #endif
+        var list = list
         let pendingIds = unacked[chatId] ?? []
         for i in list.indices where list[i].role == .user {
             list[i].pending = pendingIds.contains(list[i].id)
@@ -1744,6 +2150,13 @@ final class AppModel: ObservableObject {
         var next = messages
         next[chatId] = list
         messages = next
+        // The home list re-sorts once the room is live, not per catch-up snapshot.
+        if caughtUp.contains(chatId), activityPending.remove(chatId) != nil {
+            markActivity(chatId: chatId)
+            // Loro is live; /me/pushes and /me/unread can lag — light the
+            // blue circle and drain the push queue as soon as a new row lands.
+            noteLiveUnread(chatId: chatId)
+        }
     }
 
     private func emitMessages(_ chatId: Id, indexes: Set<Int>) {
@@ -1763,6 +2176,9 @@ final class AppModel: ObservableObject {
             }
         }
         if needSnapshot {
+            #if DEBUG
+            PerfCounters.bump("emit.L2119")
+            #endif
             emitSnapshot(chatId)
         } else {
             var next = messages
@@ -1846,7 +2262,11 @@ final class AppModel: ObservableObject {
                 }
             }
         }
-        if changed { applyBadge() }
+        if changed {
+            applyBadge()
+            // An archived row comes back when someone writes in it.
+            unarchiveOnActivity(chatId: chatId)
+        }
         Task { await drainPushes() }
     }
 
@@ -2111,6 +2531,7 @@ final class AppModel: ObservableObject {
             let raw = try await api.peopleChatsJSON()
             let list = raw.compactMap(PeopleChat.parse)
             peopleChats = list
+            reconcileArchivedPeople(list)
             for c in list where c.unread { peopleUnread.insert(c.id) }
             for c in list where !c.unread && visibleChatId != c.id {
                 // Loro can mark unread before the people list's head_seq catches up;
@@ -2271,10 +2692,30 @@ final class AppModel: ObservableObject {
 
     /// `GET /voices` once per launch (the relay caches it for an hour anyway). Nothing is
     /// fetched while voice mode is switched off on the relay (no picker to feed).
+    /// The call-voice catalog for the agent's Voice row and `VoicePickerView`. It is
+    /// independent of the voice-mode kill switch (spoken replies): the row picks the
+    /// voice used in calls, so the list must load while voice mode is off.
     func loadVoices() async {
-        guard voiceCatalog == nil, !isFixture, VoiceModeFlag.shared.on else { return }
+        guard voiceCatalog == nil else { return }
+        if isFixture {
+            voiceCatalog = AppModel.fixtureVoiceCatalog
+            return
+        }
         voiceCatalog = try? await api.voices()
     }
+
+    /// The Mac fixture's five voices (`fixture_voices` in arbos-mac), so the rig's picker
+    /// shows rows instead of the relay error.
+    static let fixtureVoiceCatalog = VoiceCatalog(
+        defaultId: "ara",
+        voices: [
+            Voice(id: "ara", name: "Ara", description: "Warm and clear, a touch of gravel. The current default."),
+            Voice(id: "rex", name: "Rex", description: "Low, steady, unhurried."),
+            Voice(id: "sol", name: "Sol", description: "Bright and quick; good for short answers."),
+            Voice(id: "ivy", name: "Ivy", description: "Soft, close to the mic."),
+            Voice(id: "ode", name: "Ode", description: "Even and neutral, reads long text well."),
+        ]
+    )
 
     /// Save on tap: show it at once, PATCH, then read back what the relay kept.
     func setVoice(_ projectId: Id, _ voice: String?) {
@@ -2288,6 +2729,65 @@ final class AppModel: ObservableObject {
                 notice = Notice(text: "Voice: \(error.localizedDescription)")
                 await refreshRegistry()
             }
+        }
+    }
+
+    // MARK: Agent pane — routines and the box report ([feedback iphone-agent-pane-tabs-2026-10-25])
+
+    /// Each owned agent's routines, as last listed (the Details tab's Routines card).
+    @Published private(set) var routines: [Id: [Routine]] = [:]
+    /// The box as `GET /machine/debug` last reported it (the Computer tab, the Coding row).
+    @Published private(set) var boxReport: BoxReport?
+
+    /// `GET /projects/{id}/routines` when an owned agent's pane opens.
+    func refreshRoutines(_ projectId: Id) async {
+        if isFixture {
+            #if DEBUG
+            routines[projectId] = fixtureRoutines(projectId)
+            #endif
+            return
+        }
+        guard let list = try? await api.routines(projectId) else { return }
+        routines[projectId] = list
+    }
+
+    /// The row's switch: flip at once, PATCH, read back on failure.
+    func setRoutineEnabled(_ projectId: Id, routineId: Id, enabled: Bool) {
+        if var list = routines[projectId], let i = list.firstIndex(where: { $0.id == routineId }) {
+            list[i].enabled = enabled
+            if !enabled { list[i].nextRunAt = nil }
+            routines[projectId] = list
+        }
+        guard !isFixture else { return }
+        Task {
+            do {
+                try await api.setRoutineEnabled(projectId, routineId: routineId, enabled: enabled)
+            } catch {
+                notice = Notice(text: "Routine: \(error.localizedDescription)")
+            }
+            await refreshRoutines(projectId)
+        }
+    }
+
+    /// `GET /machine/debug` when the pane opens and when the Computer tab is picked. A relay
+    /// without the route (404) leaves the last report alone; any other failure is shown as
+    /// "The machine did not answer" with the reason.
+    func refreshBoxReport() async {
+        if isFixture {
+            #if DEBUG
+            boxReport = fixtureBoxReport()
+            #endif
+            return
+        }
+        do {
+            boxReport = try await api.machineDebug()
+        } catch let error as RelayError where error.status == 404 {
+            return
+        } catch {
+            var r = BoxReport(debug: [String: Any](), now: nowMs())
+            r.state = machine.state.rawValue
+            r.unreachableReason = error.localizedDescription
+            boxReport = r
         }
     }
 
@@ -2353,10 +2853,13 @@ final class AppModel: ObservableObject {
     /// "hey everyone" can reach every agent, without typing `@`.
     /// `chipMentions` are extra agent member ids from a multi-select on the conversation
     /// selector (any combination of agents that should all reply).
+    /// `chipTokens` (#1596) are the composer's committed mention chips, lower-case handle →
+    /// member id: an `@handle` in the text that has a chip means exactly that member.
     func sendPeople(chatId: String, text: String, replyTo: String?, address: String? = nil,
-                    chipMentions: [String] = [], attachments: [PendingAttachment] = []) {
+                    chipMentions: [String] = [], attachments: [PendingAttachment] = [],
+                    forwardedFrom: String? = nil, chipTokens: [String: String] = [:]) {
         guard let doc = docs[chatId], let chat = peopleChat(chatId), let me = user else { return }
-        var mentions = AppModel.mentions(in: text, members: chat.members)
+        var mentions = AppModel.mentions(in: text, members: chat.members, senderHandle: me.login, chipTokens: chipTokens)
         // Leading bare agent names ("Bob?", "hey Bob …", "Arbos what is your name") count as
         // addressing that agent — same as typing @bob — so the box wakes without `@`.
         // Resolve agents before people so a human display-name collision (e.g. @unarbos
@@ -2424,7 +2927,7 @@ final class AppModel: ObservableObject {
         // the room ACK raced a still-queued commit.
         if attachments.isEmpty {
             commitPeople(chatId: chatId, doc: doc, messageId: messageId, text: text, author: author,
-                         mentions: mentions, reply: reply, attachments: [])
+                         mentions: mentions, reply: reply, attachments: [], forwardedFrom: forwardedFrom)
             return
         }
         markUnacked(chatId: chatId, messageId: messageId)
@@ -2448,11 +2951,16 @@ final class AppModel: ObservableObject {
     /// reserved the id before an attachment upload.
     private func commitPeople(chatId: String, doc: CoreChatDoc, messageId: Id, text: String,
                               author: CoreChatDoc.Author, mentions: [String], reply: String?,
-                              attachments: [Attachment], alreadyUnacked: Bool = false) {
+                              attachments: [Attachment], alreadyUnacked: Bool = false,
+                              forwardedFrom: String? = nil) {
         if !alreadyUnacked { markUnacked(chatId: chatId, messageId: messageId) }
+        // Rig (#1596): `ARBOS_TRACE_SENDS=1` prints what the row carries.
+        if DebugHooks.traceSends {
+            print("[arbos send] text=\(text.debugDescription) mentions=\(mentions)")
+        }
         do {
             try doc.insertUserMessage(id: messageId, text: text, deviceId: deviceId, attachments: attachments,
-                                      author: author, mentions: mentions, replyTo: reply)
+                                      author: author, mentions: mentions, replyTo: reply, forwardedFrom: forwardedFrom)
             try doc.pushCommand("send", payload: ["messageId": messageId], device: deviceId)
         } catch {
             clearUnacked(chatId: chatId, messageId: messageId)
@@ -2468,27 +2976,49 @@ final class AppModel: ObservableObject {
     /// `@slug` tokens that name a member: agents by their mention slug, people by handle.
     /// `@everyone` / `@all` and a leading "hey everyone" (etc.) address every agent in the chat.
     /// Soft-deleted agents (no nested `project`) are skipped — they cannot wake or reply.
-    static func mentions(in text: String, members: [ChatMember]) -> [String] {
+    /// `@slug` → member. Typed resolution (#1538): when a person and an agent share a slug, the
+    /// slug means the AGENT if it is the sender's own handle (nobody @-mentions themselves) and
+    /// the person otherwise; the autocomplete labels both so the typist can pick.
+    static func mentions(in text: String, members: [ChatMember], senderHandle: String? = nil,
+                         chipTokens: [String: String] = [:]) -> [String] {
         var out: [String] = []
         let agents = members.filter { $0.isAgent && $0.project != nil }
+        let mine = senderHandle?.lowercased()
         func appendAgents() {
             for a in agents where !out.contains(a.member) { out.append(a.member) }
         }
-        let tokens = text.split(whereSeparator: { $0.isWhitespace })
-        for t in tokens where t.hasPrefix("@") {
+        let words = text.split(whereSeparator: { $0.isWhitespace })
+        for t in words where t.hasPrefix("@") {
             let slug = t.dropFirst().trimmingCharacters(in: CharacterSet(charactersIn: ".,!?:;")).lowercased()
-            if slug == "everyone" || slug == "all" {
+            if slug == "everyone" || slug == "all" || slug == "agents" {
                 appendAgents()
+                continue
+            }
+            // `@here` (Jacob, 2026-10-24): everyone in this chat — its people but me, and its
+            // agents — as member ids, which is what every agent's gate reads (rule 3), so they wake.
+            if slug == "here" {
+                for m in members where !out.contains(m.member) {
+                    if !m.isAgent, let mine, m.handle.lowercased() == mine { continue }
+                    if m.isAgent, m.project == nil { continue }
+                    out.append(m.member)
+                }
+                continue
+            }
+            // A committed chip says who this is (#1596) — no tie rule needed.
+            if let member = chipTokens[slug] {
+                if !out.contains(member) { out.append(member) }
                 continue
             }
             if slug == "arbos", agents.count == 1, let a = agents.first {
                 if !out.contains(a.member) { out.append(a.member) }
                 continue
             }
-            if let m = members.first(where: {
+            let hits = members.filter {
                 $0.handle.lowercased() == slug
                     || ($0.isAgent && $0.project != nil && mentionSlug($0.project?.name ?? "") == slug)
-            }) {
+            }
+            let preferAgent = slug == mine
+            if let m = hits.first(where: { $0.isAgent == preferAgent }) ?? hits.first {
                 if !out.contains(m.member) { out.append(m.member) }
             }
         }
@@ -2504,6 +3034,13 @@ final class AppModel: ObservableObject {
     /// addresses every agent in the chat.
     static func addressesEveryone(_ text: String) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        // `@here` / `@agents` chips (collective mentions, 2026-10-24) address every agent.
+        if trimmed.split(whereSeparator: { $0.isWhitespace }).contains(where: {
+            let t = $0.trimmingCharacters(in: CharacterSet(charactersIn: ".,!?:;"))
+            return t == "@here" || t == "@agents"
+        }) {
+            return true
+        }
         for g in [
             "hey everyone", "hi everyone", "hello everyone", "yo everyone", "ok everyone", "okay everyone",
             "hey agents", "hi agents", "hello agents", "yo agents", "ok agents", "okay agents",
@@ -2659,6 +3196,53 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Group profile › Invite links › New link (any member).
+    func createGroupInvite(_ chatId: Id, expires: Bool, singleUse: Bool) async -> ServerInviteLink? {
+        do {
+            return try await api.createGroupInvite(chatId, expires: expires, maxUses: singleUse ? 1 : nil)
+        } catch {
+            notice = Notice(text: "Could not make an invite link: \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    /// Group profile › Invite links › list.
+    func groupInvites(_ chatId: Id) async -> [ServerInviteLink] {
+        (try? await api.groupInvites(chatId)) ?? []
+    }
+
+    /// Group profile › Invite links › revoke.
+    func revokeGroupInvite(_ chatId: Id, inviteId: String) async -> Bool {
+        do {
+            try await api.revokeGroupInvite(chatId, inviteId: inviteId)
+            return true
+        } catch {
+            notice = Notice(text: "Could not revoke the link: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    /// `arbos://join-group/<code>` (the site's group invite page): join and open the chat.
+    func joinGroupFromLink(code: String) async {
+        let code = code.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
+        guard !code.isEmpty else { return }
+        do {
+            let chat = try await api.joinGroup(code: code)
+            if let i = peopleChats.firstIndex(where: { $0.id == chat.id }) {
+                peopleChats[i] = chat
+            } else {
+                peopleChats.insert(chat, at: 0)
+            }
+            ensureRoom(projectId: peopleSlot, key: chat.id, roomChat: chat.id)
+            open(peopleChat: chat)
+        } catch {
+            let type = (error as? RelayError)?.type
+            notice = Notice(text: type == "not_available" ? "You can't join this group."
+                            : type == "not_found" || (error as? RelayError)?.status == 404 ? "That invite link is not valid."
+                            : "Could not join the group: \(error.localizedDescription)")
+        }
+    }
+
     /// The group pane's Add members: every pick goes to THIS chat — people by
     /// `POST /chats/{id}/members`, agents by `POST /chats/{id}/agents`. All are
     /// tried; the first failure is reported once and the call returns false.
@@ -2701,20 +3285,102 @@ final class AppModel: ObservableObject {
         return true
     }
 
-    /// Owner/admin removes a person from a people chat (`DELETE /chats/{id}/members/{userId}`);
-    /// the relay writes the "<me> removed @handle" line (#1349).
-    func removeMember(chatId: String, userId: String) {
+    /// Owner/admin removes (or bans) a person from a people chat
+    /// (`DELETE /chats/{id}/members/{userId}[?ban=1]`); the relay writes the
+    /// "<me> removed @handle" line (#1349). Ban keeps them from rejoining.
+    func removeMember(chatId: String, userId: String, ban: Bool = false) {
         Task {
             do {
-                try await api.removeMember(chatId: chatId, userId: userId)
+                try await api.removeMember(chatId: chatId, userId: userId, ban: ban)
                 if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
-                    peopleChats[i].members.removeAll { !$0.isAgent && $0.id == userId }
+                    if ban, let chat = try? await api.peopleChat(chatId) {
+                        peopleChats[i] = chat
+                    } else {
+                        peopleChats[i].members.removeAll { !$0.isAgent && $0.id == userId }
+                    }
                 }
                 // The relay writes "<me> removed @handle" into the chat (#1349).
             } catch {
                 let e = error as? RelayError
-                notice = Notice(text: e?.type == "owner_only" ? "Only an owner can remove people."
-                                 : "Remove failed: \(error.localizedDescription)")
+                notice = Notice(text: e?.type == "owner_only" ? "Only an owner or admin can manage members."
+                                 : (ban ? "Ban failed: \(error.localizedDescription)"
+                                    : "Remove failed: \(error.localizedDescription)"))
+            }
+        }
+    }
+
+    /// Owner/admin clears a ban (`POST …/members/{userId}/unban`) so the person can be added again.
+    func unbanMember(chatId: String, userId: String) {
+        Task {
+            do {
+                let chat = try await api.unbanMember(chatId: chatId, userId: userId)
+                if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
+                    peopleChats[i] = chat
+                }
+            } catch {
+                let e = error as? RelayError
+                notice = Notice(text: e?.type == "owner_only"
+                                 ? "Only an owner or an admin with mute and ban rights can unban."
+                                 : "Unban failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Owner/admin mutes (or unmutes) a member from posting in a people group.
+    /// Pass `duration` when muting to choose how long the mute lasts.
+    func setMemberSilenced(
+        chatId: String,
+        userId: String,
+        silenced: Bool,
+        duration: MemberMuteDuration? = nil
+    ) {
+        Task {
+            do {
+                let until = silenced ? duration?.silencedUntilMs : nil
+                let chat = try await api.setMemberSilenced(
+                    chatId: chatId, userId: userId, silenced: silenced, silencedUntilMs: until
+                )
+                if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
+                    peopleChats[i] = chat
+                }
+            } catch {
+                let e = error as? RelayError
+                notice = Notice(text: e?.type == "owner_only" ? "Only an owner or an admin with mute rights can mute members."
+                                 : "Mute failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Owner promotes or demotes a group member (`admin` / `member`).
+    func setMemberRole(chatId: String, userId: String, role: String) {
+        Task {
+            do {
+                let chat = try await api.setMemberRole(chatId: chatId, userId: userId, role: role)
+                if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
+                    peopleChats[i] = chat
+                }
+            } catch {
+                let e = error as? RelayError
+                notice = Notice(text: e?.type == "owner_only" ? "Only the owner can change admin roles."
+                                 : "Role change failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Owner sets whether an admin may mute and ban members.
+    func setMemberCanMuteBan(chatId: String, userId: String, canMuteBan: Bool) {
+        Task {
+            do {
+                let chat = try await api.setMemberCanMuteBan(
+                    chatId: chatId, userId: userId, canMuteBan: canMuteBan
+                )
+                if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
+                    peopleChats[i] = chat
+                }
+            } catch {
+                let e = error as? RelayError
+                notice = Notice(text: e?.type == "owner_only" ? "Only the owner can set mute and ban rights."
+                                 : "Could not update mute and ban rights: \(error.localizedDescription)")
             }
         }
     }
@@ -2748,10 +3414,10 @@ final class AppModel: ObservableObject {
         Task { try? await api.leaveChat(chatId) }
     }
 
-    /// Rename a people group and/or set its picture blob key (`PATCH /chats/{id}`).
-    func patchPeopleChat(_ chatId: String, title: String? = nil, imageKey: String? = nil) async -> Bool {
+    /// Rename a people group and/or set its picture blob key or description (`PATCH /chats/{id}`).
+    func patchPeopleChat(_ chatId: String, title: String? = nil, imageKey: String? = nil, description: String? = nil) async -> Bool {
         do {
-            let chat = try await api.patchPeopleChat(chatId, title: title, imageKey: imageKey)
+            let chat = try await api.patchPeopleChat(chatId, title: title, imageKey: imageKey, description: description)
             if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
                 peopleChats[i] = chat
             } else {
@@ -2807,6 +3473,24 @@ final class AppModel: ObservableObject {
             return "fixture-gen-\(prompt.lowercased().replacingOccurrences(of: " ", with: "-"))"
         }
         return try await api.generateProjectAvatar(projectId, prompt: prompt)
+    }
+
+    /// The same for a people group's picture (any member) — the key lands in `people:{chat}`.
+    func generateGroupAvatar(chatId: String, prompt: String) async throws -> String {
+        if isFixture {
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            return "fixture-gen-\(prompt.lowercased().replacingOccurrences(of: " ", with: "-"))"
+        }
+        return try await api.generateGroupAvatar(chatId, prompt: prompt)
+    }
+
+    /// Set a group picture from a key the relay already holds (the Generate tab's answer).
+    func setGroupImageKey(chatId: String, key: String) async -> Bool {
+        if isFixture {
+            if let i = peopleChats.firstIndex(where: { $0.id == chatId }) { peopleChats[i].imageKey = key }
+            return true
+        }
+        return await patchPeopleChat(chatId, imageKey: key)
     }
 
     /// D92 amendment: a group's leaf picture (nil = initials); drops the uploaded picture.
@@ -2929,6 +3613,8 @@ final class AppModel: ObservableObject {
     /// with `typing`; the presence row over the composer reads it
     /// ([feedback typing-indicator-left-2026-10-23], Mac `AppState.typing`).
     @Published var typing: [Id: [String: Int64]] = [:]
+    /// Last time we told the room we are typing, per chat (Mac `typing_sent_at`).
+    private var typingSentAt: [Id: Int64] = [:]
 
     /// Draft text for a chat, or `""` when none.
     func composerDraft(for chatId: Id) -> String {
@@ -2993,11 +3679,10 @@ final class AppModel: ObservableObject {
     /// people-chat member row (someone else's agent in a DM).
     func foreignAgent(_ projectId: Id) -> Project? {
         for c in peopleChats {
-            if let a = c.agents.first(where: { $0.id == projectId }), var p = a.project {
-                if p.ownerHandle == nil { p.ownerHandle = a.ownerHandle }
-                p.shared = true
-                if p.description.isEmpty, let d = a.description { p.description = d }
-                return p
+            if let a = c.agents.first(where: { $0.id == projectId }) {
+                // Through the shared identity (#1592): the same name, leaf and picture every
+                // other surface draws for this agent.
+                return agent(member: a, chatId: c.id)
             }
         }
         return nil
@@ -3013,7 +3698,9 @@ final class AppModel: ObservableObject {
     /// 6 s (the sender refreshes every 3 s), off → gone at once.
     func noteTyping(_ header: [String: Any], chatId: Id) {
         guard let handle = header["handle"] as? String, !handle.isEmpty,
-              let active = header["typing"] as? Bool else { return }
+              header["typing"] != nil else { return }
+        // `DocJSON.bool` accepts Bool and NSNumber; a bare `as? Bool` missed live frames.
+        let active = DocJSON.bool(header["typing"])
         if handle == user?.login { return }
         var chat = typing[chatId] ?? [:]
         if active {
@@ -3022,6 +3709,18 @@ final class AppModel: ObservableObject {
             chat[handle] = nil
         }
         typing[chatId] = chat.isEmpty ? nil : chat
+    }
+
+    /// Composer keystroke in a people chat (DM or group): at most one presence
+    /// typing ping per 3 s so peers see who is typing ([feedback
+    /// app-01M5N7WSA1VCYHE9BE3CX4V0R6], Mac `AppState::typed_in`).
+    func typedIn(chatId: Id) {
+        guard peopleChat(chatId) != nil else { return }
+        let now = nowMs()
+        let last = typingSentAt[chatId] ?? 0
+        guard now - last > 3_000 else { return }
+        typingSentAt[chatId] = now
+        rooms[chatId]?.setTyping(true)
     }
 
     /// Handles typing in `chatId` right now, the most recently seen first.
@@ -3038,6 +3737,57 @@ final class AppModel: ObservableObject {
         if let i = peopleChats.firstIndex(where: { $0.id == chatId }) { peopleChats[i].muted = muted }
         guard !isFixture else { return }
         Task { try? await api.chatSettings(chatId: chatId, muted: muted) }
+    }
+
+    private static let peopleMutedUntilKey = "peopleMutedUntil"
+
+    private static func loadPeopleMutedUntil() -> [String: Date] {
+        let raw = UserDefaults.standard.dictionary(forKey: peopleMutedUntilKey) as? [String: Double] ?? [:]
+        return Dictionary(uniqueKeysWithValues: raw.map { ($0.key, Date(timeIntervalSince1970: $0.value)) })
+    }
+
+    private static func savePeopleMutedUntil(_ map: [String: Date]) {
+        let raw = Dictionary(uniqueKeysWithValues: map.map { ($0.key, $0.value.timeIntervalSince1970) })
+        UserDefaults.standard.set(raw, forKey: peopleMutedUntilKey)
+    }
+
+    /// True while this people chat should not show banners (timed local mute or relay `me.muted`).
+    func isPeopleChatMuted(_ chatId: String) -> Bool {
+        if let until = peopleMutedUntil[chatId] {
+            if until > Date() { return true }
+            // Timed mute ended: clear local expiry and the relay flag.
+            peopleMutedUntil.removeValue(forKey: chatId)
+            if peopleChat(chatId)?.muted == true { setMuted(chatId: chatId, muted: false) }
+            return false
+        }
+        return peopleChat(chatId)?.muted == true
+    }
+
+    /// Mute a people group for a chosen length of time (1 hour, 8 hours, or until unmuted).
+    func mutePeopleChat(_ chatId: String, for duration: ChatMuteDuration) {
+        peopleMutedUntil[chatId] = duration.endDate
+        setMuted(chatId: chatId, muted: true)
+    }
+
+    /// Clear a people-chat mute (local expiry and relay flag).
+    func unmutePeopleChat(_ chatId: String) {
+        peopleMutedUntil.removeValue(forKey: chatId)
+        setMuted(chatId: chatId, muted: false)
+    }
+
+    /// Subtitle under Mute / Unmute on the group info page.
+    func peopleMuteSubtitle(_ chatId: String) -> String {
+        guard isPeopleChatMuted(chatId) else {
+            return "No banners for a while, or until you turn them back on"
+        }
+        if let until = peopleMutedUntil[chatId], until.timeIntervalSinceNow < 60 * 60 * 24 * 365 {
+            let f = DateFormatter()
+            f.doesRelativeDateFormatting = true
+            f.dateStyle = .short
+            f.timeStyle = .short
+            return "Muted until \(f.string(from: until))"
+        }
+        return "Muted until you turn it back on"
     }
 
     /// `GET /users/{id}` for a fresh presence line on a profile page.
@@ -3069,8 +3819,14 @@ final class AppModel: ObservableObject {
     }
 
     func unblock(_ person: Person) {
-        blocked.removeAll { $0.id == person.id }
-        Task { try? await api.unblock(userId: person.id) }
+        Task {
+            do { try await api.unblock(userId: person.id) }
+            catch let e as RelayError where e.status == 404 {
+                // Already not blocked on the relay; the list below says so.
+            }
+            catch { notice = Notice(text: "Unblock failed: \(error.localizedDescription)") }
+            await refreshBlocks()
+        }
     }
 
     func refreshBlocks() async {
@@ -3111,21 +3867,25 @@ final class AppModel: ObservableObject {
                 if peopleChat(cid) == nil { needChats = true }
                 if !isWatching(cid) {
                     peopleUnread.insert(cid)
-                    let sender = payload.sender
-                    let from = sender.handle.isEmpty ? (payload.from_handle.isEmpty ? "someone" : payload.from_handle) : sender.handle
-                    // §7c sender{} first; the chat's member list fills any gap.
-                    let member = peopleChat(cid)?.members.first { $0.handle == from }
-                    let agent = member?.isAgent == true ? member?.project : nil
-                    let kind = sender.kind.isEmpty ? (agent != nil ? "agent" : "user") : sender.kind
-                    let info = MessagePush.userInfo(
-                        chatId: cid, projectId: peopleSlot, title: sender.name.isEmpty ? (member?.displayName ?? "@\(from)") : sender.name,
-                        body: "New message",
-                        senderKind: kind, senderId: sender.id.isEmpty ? (member?.id ?? from) : sender.id,
-                        senderName: sender.name.isEmpty ? (member?.displayName ?? from) : sender.name, senderHandle: from,
-                        avatar: sender.avatar,
-                        avatarColor: sender.avatar_color,
-                        avatarUrl: sender.avatar_url ?? member?.avatarUrl)
-                    Task { await PushManager.shared.postMessage(id: p.id, info: info) }
+                    unarchiveOnActivity(chatId: cid)
+                    // Muted group: keep the unread flag, skip the local banner.
+                    if !isPeopleChatMuted(cid) {
+                        let sender = payload.sender
+                        let from = sender.handle.isEmpty ? (payload.from_handle.isEmpty ? "someone" : payload.from_handle) : sender.handle
+                        // §7c sender{} first; the chat's member list fills any gap.
+                        let member = peopleChat(cid)?.members.first { $0.handle == from }
+                        let agent = member?.isAgent == true ? member?.project : nil
+                        let kind = sender.kind.isEmpty ? (agent != nil ? "agent" : "user") : sender.kind
+                        let info = MessagePush.userInfo(
+                            chatId: cid, projectId: peopleSlot, title: sender.name.isEmpty ? (member?.displayName ?? "@\(from)") : sender.name,
+                            body: "New message",
+                            senderKind: kind, senderId: sender.id.isEmpty ? (member?.id ?? from) : sender.id,
+                            senderName: sender.name.isEmpty ? (member?.displayName ?? from) : sender.name, senderHandle: from,
+                            avatar: sender.avatar,
+                            avatarColor: sender.avatar_color,
+                            avatarUrl: sender.avatar_url ?? member?.avatarUrl)
+                        Task { await PushManager.shared.postMessage(id: p.id, info: info) }
+                    }
                     applyBadge()
                 }
             case .peopleChatCreated(let payload):
@@ -3184,7 +3944,14 @@ final class AppModel: ObservableObject {
             case .serverUpdated, .serverMemberJoined, .serverMemberRemoved, .serverDeleted:
                 // D88: the relay is the control plane for servers — re-read the list.
                 needServers = true
-            case .peopleChatDeleted, .chatArchived, .peopleInviteAccepted, .machineReady:
+            case .chatArchived(let payload):
+                // Another device of mine archived / unarchived a people chat.
+                if peopleChat(payload.chat_id) != nil {
+                    applyRemoteArchive(peopleChatId: payload.chat_id, archived: payload.archived_at != nil)
+                }
+            case .spaceArchived(let payload):
+                applyRemoteArchive(spaceId: payload.space_id, kind: payload.kind, archived: payload.archived_at != nil)
+            case .peopleChatDeleted, .peopleInviteAccepted, .machineReady:
                 break
             }
         }
@@ -3345,28 +4112,105 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Delete a message for everyone via the shared chat doc. No push notification.
-    func deleteMessage(chatId: Id, messageId: Id) {
+    /// Delete a message for everyone. The relay decides (`DELETE /room/…/messages/{id}`,
+    /// 403 `not_yours` otherwise) and writes the deletion into the doc; it comes back as a
+    /// relay-signed row. No push notification. In a people group, this device also writes a
+    /// hidden admin audit line for the Activity screen before asking the relay.
+    func deleteMessage(chatId: Id, messageId: Id, projectId: Id? = nil) {
         guard !messageId.isEmpty else { return }
+        let audit = groupDeletionAuditLine(chatId: chatId)
         #if DEBUG
         if isFixture {
             guard var list = messages[chatId] else { return }
             list.removeAll { $0.id == messageId }
+            if let audit {
+                let m = Message(id: newId(), chatId: chatId, role: .system, sender: "system", status: .done, turn: nil, decision: nil,
+                                subagentId: nil, subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: nowMs(),
+                                completedAt: nowMs(), pending: false, parts: [.text(id: newId(), text: audit)], hiddenCount: 0)
+                list.append(m)
+            }
             messages[chatId] = list
             clearUnacked(chatId: chatId, messageId: messageId)
             Haptics.pick()
             return
         }
         #endif
+        if let audit, let doc = docs[chatId] {
+            do {
+                try doc.insertSystemLine(id: newId(), text: audit, deviceId: deviceId)
+                doc.commit()
+            } catch {
+                // Activity can miss this delete; the relay delete still runs.
+            }
+        }
+        let room: String
+        if peopleChat(chatId) != nil {
+            room = "people/\(chatId)"
+        } else if let projectId, projectId != peopleSlot {
+            room = "\(projectId)/\(chatId)"
+        } else {
+            room = "people/\(chatId)"
+        }
+        Task {
+            do {
+                try await api.deleteMessage(room: room, messageId: messageId)
+                clearUnacked(chatId: chatId, messageId: messageId)
+                Haptics.pick()
+            } catch {
+                let e = error as? RelayError
+                notice = Notice(text: e?.status == 403 ? "You can only delete your own messages."
+                                 : "Could not delete the message: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Edit a message's text in the shared chat doc (own messages). No new send
+    /// command — peers see the updated body via room sync only.
+    func editMessage(chatId: Id, messageId: Id, text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !messageId.isEmpty, !trimmed.isEmpty else { return }
+        #if DEBUG
+        if isFixture {
+            guard var list = messages[chatId],
+                  let idx = list.firstIndex(where: { $0.id == messageId })
+            else { return }
+            var parts = list[idx].parts
+            if let t = parts.lastIndex(where: {
+                if case .text = $0 { return true } else { return false }
+            }) {
+                if case .text(let id, _) = parts[t] {
+                    parts[t] = .text(id: id, text: trimmed)
+                }
+            } else {
+                parts.append(.text(id: "\(messageId)-t", text: trimmed))
+            }
+            list[idx].parts = parts
+            messages[chatId] = list
+            Haptics.pick()
+            return
+        }
+        #endif
         guard let doc = docs[chatId] else { return }
         do {
-            try doc.deleteMessage(messageId: messageId)
+            try doc.editMessage(messageId: messageId, text: trimmed)
             doc.commit()
-            clearUnacked(chatId: chatId, messageId: messageId)
             Haptics.pick()
         } catch {
-            notice = Notice(text: "Could not delete the message: \(error.localizedDescription)")
+            notice = Notice(text: "Could not edit the message: \(error.localizedDescription)")
         }
+    }
+
+    /// Text for a people-group deletion audit, or nil when this chat is not a group.
+    private func groupDeletionAuditLine(chatId: Id) -> String? {
+        guard let people = peopleChat(chatId), people.isGroup else { return nil }
+        let who: String = {
+            if let name = user?.name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
+                return name
+            }
+            if let login = user?.login, !login.isEmpty { return "@\(login)" }
+            return "Someone"
+        }()
+        return GroupActivity.deletionNotice(who: who)
     }
 
     /// Paint any room doc that already has rows but no published transcript yet
@@ -3376,6 +4220,9 @@ final class AppModel: ObservableObject {
         for (key, doc) in docs {
             guard rooms[key]?.roomChat != projectDocChatId else { continue }
             if messages[key] == nil, doc.count > 0 {
+                #if DEBUG
+                PerfCounters.bump("emit.L4066")
+                #endif
                 emitSnapshot(key)
             }
         }
@@ -3408,7 +4255,15 @@ final class AppModel: ObservableObject {
     /// message's `activity`, else the latest working/step status part with a
     /// real message; nil → "<name> is working".
     func currentActivity(_ chatId: Id) -> String? {
-        guard let m = messages(of: chatId).last(where: { $0.role == .assistant && $0.isStreaming }) else { return nil }
+        // The newest live row that has words: a short main turn streaming with no activity
+        // yet must not blank a job's "Reading … · 2 tasks" under it (duplex §2.4).
+        for m in messages(of: chatId).reversed() where m.role == .assistant && m.isStreaming {
+            if let words = Self.activityWords(m) { return words }
+        }
+        return nil
+    }
+
+    private static func activityWords(_ m: Message) -> String? {
         if let a = m.activity?.trimmingCharacters(in: .whitespacesAndNewlines), !a.isEmpty { return a }
         for part in m.parts.reversed() {
             if case .status(_, let code, let text) = part, code == .working || code == .step {
@@ -3426,14 +4281,47 @@ final class AppModel: ObservableObject {
     /// by a box that died (or a leftover stream under a later user message)
     /// must not pin the indicator forever — every streaming row uses the
     /// same 15-minute freshness window (including the last assistant message).
-    func isStreaming(_ chatId: Id) -> Bool {
+    /// What the working-state checks need from a chat's list, gathered in one pass
+    /// and cached until the list changes. The time windows are applied at read time.
+    struct ChatActivity {
+        /// `createdAt` of the newest assistant row still streaming with no user line after it.
+        var liveStreamAt: Int64?
+        /// `createdAt` of the newest job row (`job` set) still streaming, user lines or not.
+        var liveJobAt: Int64?
+        /// Open hand-off rows: (streaming, createdAt, completedAt ?? createdAt).
+        var openHandoffs: [(streaming: Bool, createdAt: Int64, finishedAt: Int64)] = []
+        /// `createdAt` of the last row when it is the user's.
+        var lastUserAt: Int64?
+    }
+
+    private func activity(_ chatId: Id) -> ChatActivity {
+        if let hit = activityCache[chatId] { return hit }
         let list = messages(of: chatId)
+        var out = ChatActivity()
+        var userAfter = false
+        for m in list.reversed() {
+            if out.liveStreamAt == nil {
+                if m.role == .user { userAfter = true }
+                if m.role == .assistant, m.isStreaming, !userAfter { out.liveStreamAt = m.createdAt }
+            }
+            if out.liveJobAt == nil, m.role == .assistant, m.job != nil, m.isStreaming { out.liveJobAt = m.createdAt }
+            if m.role == .assistant, m.subagentId != nil || m.subagentName != nil,
+               m.turn == .new || m.turn == .spawn || m.turn == .wake,
+               (m.handoffMessages ?? 1) < 2 {
+                out.openHandoffs.append((m.isStreaming, m.createdAt, m.completedAt ?? m.createdAt))
+            }
+        }
+        if let last = list.last, last.role == .user { out.lastUserAt = last.createdAt }
+        activityCache[chatId] = out
+        return out
+    }
+
+    func isStreaming(_ chatId: Id) -> Bool {
         let recent = nowMs() - 15 * 60 * 1000
-        guard let idx = list.lastIndex(where: {
-            $0.role == .assistant && $0.isStreaming && $0.createdAt >= recent
-        }) else { return false }
-        // A later user line means this stream is leftover from a prior turn.
-        return !list.suffix(from: idx + 1).contains { $0.role == .user }
+        if let at = activity(chatId).liveStreamAt, at >= recent { return true }
+        // A background job's row streams until the box finishes it, whatever the user
+        // typed since (duplex §2.3).
+        return activity(chatId).liveJobAt.map { $0 >= recent } ?? false
     }
 
     func isStreaming(project projectId: Id) -> Bool {
@@ -3445,18 +4333,14 @@ final class AppModel: ObservableObject {
     /// `done` while the child still runs, so `isStreaming` alone misses it —
     /// show the faded working line until the hand-off closes.
     func hasOpenSubagent(_ chatId: Id) -> Bool {
-        let recent = nowMs() - 15 * 60 * 1000
-        return messages(of: chatId).contains { m in
-            guard m.role == .assistant else { return false }
-            guard m.subagentId != nil || m.subagentName != nil else { return false }
-            guard m.turn == .new || m.turn == .spawn || m.turn == .wake else { return false }
-            guard (m.handoffMessages ?? 1) < 2 else { return false }
+        let now = nowMs()
+        let recent = now - 15 * 60 * 1000
+        return activity(chatId).openHandoffs.contains { h in
             // Streaming hand-off rows (the normal case while the child runs).
             // Same freshness window as `isStreaming` so a dead box cannot pin forever.
-            if m.isStreaming { return m.createdAt >= recent }
+            if h.streaming { return h.createdAt >= recent }
             // Brief race after `finish_message` before `handoffMessages` flips to 2.
-            let t = m.completedAt ?? m.createdAt
-            return nowMs() - t < 60_000
+            return now - h.finishedAt < 60_000
         }
     }
 
@@ -3469,11 +4353,10 @@ final class AppModel: ObservableObject {
         if peopleChat(chatId) != nil { return false }
         // Nobody "works" in a server channel; a sent line is just a line.
         if channel(chatId) != nil { return false }
-        let list = messages(of: chatId)
-        guard let last = list.last, last.role == .user else { return false }
+        guard let at = activity(chatId).lastUserAt else { return false }
         // Short bridge until the agent opens a streaming row (cold wake).
         // ChatView ticks this once a second so it can expire cleanly.
-        return nowMs() - last.createdAt < 15_000
+        return nowMs() - at < 15_000
     }
 
     // MARK: Commands (crdt-sync §6.2: the client writes rows and commands)
@@ -3488,9 +4371,11 @@ final class AppModel: ObservableObject {
 
     /// `replyTo` = the message this send answers (reply-to); it lands on the row as `replyTo`
     /// so every client draws the quote header and agentd puts the quoted message in the turn.
-    func send(chatId: Id, text: String, attachments: [PendingAttachment] = [], replyTo: Id? = nil) {
+    func send(chatId: Id, text: String, attachments: [PendingAttachment] = [], replyTo: Id? = nil,
+              forwardedFrom: String? = nil) {
         if attachments.isEmpty {
-            write(chatId: chatId, text: text, command: "send", attachments: [], replyTo: replyTo)
+            write(chatId: chatId, text: text, command: "send", attachments: [], replyTo: replyTo,
+                  forwardedFrom: forwardedFrom)
             return
         }
         guard let chat = chat(chatId) else { return }
@@ -3656,7 +4541,8 @@ final class AppModel: ObservableObject {
     }
 
     private func write(chatId: Id, text: String, command: String, attachments: [Attachment],
-                       extra: [String: Any] = [:], messageId presetId: Id? = nil, replyTo: Id? = nil) {
+                       extra: [String: Any] = [:], messageId presetId: Id? = nil, replyTo: Id? = nil,
+                       forwardedFrom: String? = nil) {
         guard let chat = chat(chatId) else {
             #if DEBUG
             if isFixture { fixtureAppend(chatId: chatId, text: text, attachments: attachments, replyTo: replyTo) }
@@ -3667,14 +4553,16 @@ final class AppModel: ObservableObject {
         // Echo the bubble now and flush once `finalizeNewChat` swaps the id.
         guard let doc = docs[chatId] else {
             enqueueOptimisticSend(chatId: chatId, chat: chat, text: text, command: command,
-                                  attachments: attachments, extra: extra, replyTo: replyTo)
+                                  attachments: attachments, extra: extra, replyTo: replyTo,
+                                  forwardedFrom: forwardedFrom)
             return
         }
         let messageId = presetId ?? newId()
         markUnacked(chatId: chatId, messageId: messageId)
         do {
             try doc.insertUserMessage(id: messageId, text: text, deviceId: deviceId, attachments: attachments,
-                                      replyTo: replyTo)
+                                      author: projectAuthor(projectId: chat.projectId), replyTo: replyTo,
+                                      forwardedFrom: forwardedFrom)
             try doc.pushCommand(command, payload: extra.merging(["messageId": messageId]) { _, new in new }, device: deviceId)
             if !chat.isPinned && chat.title == "New chat" {
                 let title = AppModel.title(from: text)
@@ -3694,6 +4582,16 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Author fields for a row in a project chat (API §3/§7, same as the Mac): always the
+    /// handle and display name, so the agent addresses the writer by name; `sender: user:<id>`
+    /// in a project someone shared with me, so a guest's words are never read as the owner's
+    /// (#1580). A solo project keeps the plain `user` the box expects.
+    private func projectAuthor(projectId: Id) -> CoreChatDoc.Author? {
+        guard let me = user else { return nil }
+        let shared = project(projectId)?.shared == true
+        return CoreChatDoc.Author(sender: shared ? "user:\(me.id)" : "user", handle: me.login, name: me.name, avatar: nil)
+    }
+
     /// A send typed before the optimistic new-chat's relay id landed.
     private struct OptimisticSend {
         var messageId: Id
@@ -3702,6 +4600,7 @@ final class AppModel: ObservableObject {
         var attachments: [Attachment]
         var extra: [String: Any]
         var replyTo: Id?
+        var forwardedFrom: String?
     }
     private var optimisticSends: [Id: [OptimisticSend]] = [:]
     /// Local chat ids still waiting on `POST /projects/{id}/chats`.
@@ -3716,7 +4615,8 @@ final class AppModel: ObservableObject {
     }
 
     private func enqueueOptimisticSend(chatId: Id, chat: Chat, text: String, command: String,
-                                       attachments: [Attachment], extra: [String: Any], replyTo: Id? = nil) {
+                                       attachments: [Attachment], extra: [String: Any], replyTo: Id? = nil,
+                                       forwardedFrom: String? = nil) {
         guard optimisticChatIds.contains(chatId) else {
             notice = Notice(text: "Could not write the message: chat is not ready yet")
             return
@@ -3730,6 +4630,7 @@ final class AppModel: ObservableObject {
                             + (text.isEmpty ? [] : [.text(id: "\(messageId)-t", text: text)]),
                         hiddenCount: 0)
         m.replyTo = replyTo
+        m.forwardedFrom = forwardedFrom
         // Keep attachment-only rows valid when text is empty.
         if m.parts.isEmpty { m.parts = [.text(id: "\(messageId)-t", text: text)] }
         messages[chatId, default: []].append(m)
@@ -3738,7 +4639,7 @@ final class AppModel: ObservableObject {
         }
         optimisticSends[chatId, default: []].append(
             OptimisticSend(messageId: messageId, text: text, command: command,
-                           attachments: attachments, extra: extra, replyTo: replyTo)
+                           attachments: attachments, extra: extra, replyTo: replyTo, forwardedFrom: forwardedFrom)
         )
         markActivity(chatId: chatId)
         if let p = project(chat.projectId), p.state.isAsleep || p.state == .error {
@@ -3755,9 +4656,74 @@ final class AppModel: ObservableObject {
     }
 
     func stop(chatId: Id) {
+        forgetJobs(chatId: chatId)
         guard let doc = docs[chatId] else { return }
         try? doc.pushCommand("stop", payload: [:], device: deviceId)
         doc.commit()
+    }
+
+    // MARK: Tasks chip and sheet (duplex §2.4, D7)
+
+    /// The open background jobs of `chatId`, newest step first as the relay lists them.
+    /// Empty when the relay predates `activity.jobs[]` or nothing runs.
+    func openJobs(_ chatId: Id) -> [Job] {
+        guard let chat = chat(chatId), let list = jobs[chat.projectId] else { return [] }
+        return list.filter { $0.chatId == nil || $0.chatId == chatId }
+    }
+
+    /// A background job's row still runs (duplex §2.3): jobs are independent of the turn,
+    /// so a newer user line does not end one — only the box finishing the row does, or
+    /// the freshness window (a dead box).
+    func hasLiveJob(_ chatId: Id) -> Bool {
+        let recent = nowMs() - 15 * 60 * 1000
+        return messages(of: chatId).contains { $0.role == .assistant && $0.job != nil && $0.isStreaming && $0.createdAt >= recent }
+    }
+
+    /// Poll `GET /projects/{id}` for the open chat's jobs while a job row is live or the relay
+    /// listed one last time; called from the chat view's one-second tick. Transport errors keep
+    /// the last answer rather than blinking the list away.
+    func pollJobsIfNeeded(chatId: Id) {
+        guard !isFixture, let chat = chat(chatId), peopleChat(chatId) == nil else { return }
+        let projectId = chat.projectId
+        let listed = !(jobs[projectId] ?? []).isEmpty
+        guard listed || hasLiveJob(chatId) else { return }
+        let now = nowMs()
+        guard now - (jobsPolledAt[projectId] ?? 0) >= AppModel.jobsPollMs, !jobsPolling.contains(projectId) else { return }
+        jobsPolledAt[projectId] = now
+        jobsPolling.insert(projectId)
+        let api = self.api
+        Task { @MainActor [weak self] in
+            defer { self?.jobsPolling.remove(projectId) }
+            guard let fresh = try? await api.projectJobs(projectId: projectId) else { return }
+            self?.applyJobs(projectId: projectId, fresh)
+        }
+    }
+
+    func applyJobs(projectId: Id, _ fresh: [Job]) {
+        if fresh.isEmpty {
+            if jobs[projectId] != nil { jobs.removeValue(forKey: projectId) }
+        } else if jobs[projectId] != fresh {
+            jobs[projectId] = fresh
+        }
+    }
+
+    /// `stop { jobId }`: that job only. The row leaves the sheet at once; the next poll is
+    /// the box's word.
+    func stopJob(chatId: Id, jobId: String) {
+        if let chat = chat(chatId), var list = jobs[chat.projectId] {
+            list.removeAll { $0.id == jobId }
+            applyJobs(projectId: chat.projectId, list)
+        }
+        guard let doc = docs[chatId] else { return }
+        let messageId = messages(of: chatId).last { $0.role == .user }?.id ?? ""
+        try? doc.pushCommand("stop", payload: ["jobId": jobId, "messageId": messageId], device: deviceId)
+        doc.commit()
+    }
+
+    /// The Stop button / Stop all halts every job of the chat (D7): forget them at once.
+    private func forgetJobs(chatId: Id) {
+        guard let chat = chat(chatId), let list = jobs[chat.projectId] else { return }
+        applyJobs(projectId: chat.projectId, list.filter { $0.chatId != nil && $0.chatId != chatId })
     }
 
     func retry(chatId: Id, messageId: Id) {
@@ -3888,7 +4854,8 @@ final class AppModel: ObservableObject {
         // the same ids so emitSnapshot replaces them in place (no flicker).
         for item in queued {
             write(chatId: real.id, text: item.text, command: item.command,
-                  attachments: item.attachments, extra: item.extra, messageId: item.messageId, replyTo: item.replyTo)
+                  attachments: item.attachments, extra: item.extra, messageId: item.messageId, replyTo: item.replyTo,
+                  forwardedFrom: item.forwardedFrom)
         }
 
         // Swap the navigation id for the real one, then drop the local mirrors.
