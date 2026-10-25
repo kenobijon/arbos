@@ -2994,7 +2994,7 @@ final class AppModel: ObservableObject {
         // before we return. Deferring every send into a Task left bubbles faint when
         // the room ACK raced a still-queued commit.
         // A cross-chat reply never carries an in-chat `replyTo` as well.
-        let reply = replyRef == nil ? reply : nil
+        if replyRef != nil { reply = nil }
         if attachments.isEmpty {
             commitPeople(chatId: chatId, doc: doc, messageId: messageId, text: text, author: author,
                          mentions: mentions, reply: reply, attachments: [], forwardedFrom: forwardedFrom,
