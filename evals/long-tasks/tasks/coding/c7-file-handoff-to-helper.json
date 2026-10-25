@@ -20,5 +20,6 @@
   "no_truncated_reply": true,
   "no_repeated_sentence": true,
   "max_handoffs": 1
- }
+ },
+ "regression": "#1776 (empty result row)"
 }

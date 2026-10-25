@@ -21,5 +21,6 @@
    "timeout_s": 120,
    "reply_regex": "(?i)renew passport"
   }
- ]
+ ],
+ "regression": "#1776 (prose dropped after the ack row)"
 }
