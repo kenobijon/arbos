@@ -60,7 +60,8 @@ final class AgentAvatarFlipTests: XCTestCase {
         XCTAssertEqual(s.presence.imageKey, "avatar-1700000000000.jpg")
 
         // The owner sets a new picture on this device: every surface shows it at once.
-        XCTAssertTrue(await model.setProjectImageKey(projectId: "01HEZ", key: "avatar-1700000099000.jpg"))
+        let set = await model.setProjectImageKey(projectId: "01HEZ", key: "avatar-1700000099000.jpg")
+        XCTAssertTrue(set)
         s = surfaces(model, id: "01HEZ")
         for (name, p) in [("header", s.header), ("bubble", s.bubble), ("presence", s.presence)] {
             XCTAssertEqual(p.imageKey, "avatar-1700000099000.jpg", name)
