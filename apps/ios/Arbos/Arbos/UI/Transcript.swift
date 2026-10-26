@@ -149,7 +149,9 @@ enum RowKind: Equatable {
     case voiceMemo(name: String, projectId: Id, ref: String?, fromUser: Bool)
     /// A picture; tap opens the media viewer at its place in the chat's album.
     /// `caption` is the description bar under the picture when the send carried text.
-    case image(item: MediaItem, fromUser: Bool, caption: String?)
+    /// `lane`: in a people chat someone else's (person or agent) picture sits after the
+    /// sender's avatar lane, like their bubble (Mac `RowKind::Attachment.lane`).
+    case image(item: MediaItem, fromUser: Bool, caption: String?, lane: Bool)
     /// "Forwarded from <name>" under a forwarded attachment (media-viewer-2026-10-23).
     case forwardHint(text: String, fromUser: Bool)
     case error(code: String, message: String)
@@ -256,10 +258,11 @@ enum Transcript {
                 }()
                 for (i, part) in mediaParts.enumerated() {
                     let cap = (i == lastCaptionable) ? mediaCaption : nil
-                    // Another person's picture / file sits left like their bubble.
+                    // Another person's picture / file sits left like their bubble —
+                    // after the avatar lane in a people chat (Mac Attachment.lane).
                     chunk.append(attachmentRow(id: "\(message.id)#\(part.id)", message: message, a: part.a,
                                                projectId: projectId, fromUser: mine, agentNames: agentNames,
-                                               caption: cap))
+                                               caption: cap, lane: !mine))
                 }
                 if let forwarded {
                     chunk.append(Row(id: "\(message.id)#forwarded", messageId: message.id, role: mine ? .user : .project,
@@ -372,7 +375,11 @@ enum Transcript {
                         chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .system,
                                          kind: .system(icon: "stop.circle", text: "Stopped", avatarProject: nil)))
                     case .attachment(let id, let a):
-                        chunk.append(attachmentRow(id: "\(message.id)#\(id)", message: message, a: a, projectId: projectId, fromUser: false, agentNames: agentNames))
+                        // People-chat agent media keeps the sender lane free, like the bubble
+                        // and the question card (Mac Attachment.lane / #1509).
+                        chunk.append(attachmentRow(id: "\(message.id)#\(id)", message: message, a: a,
+                                                   projectId: projectId, fromUser: false, agentNames: agentNames,
+                                                   lane: people && message.senderHandle != nil))
                     case .error(let id, let code, let text):
                         errors.append((id: id, code: code, text: text))
                     case .status, .tool, .subagentResult, .reasoning, .unknown:
@@ -625,7 +632,8 @@ enum Transcript {
     }
 
     private static func attachmentRow(id: String, message: Message, a: Attachment, projectId: Id, fromUser: Bool,
-                                      agentNames: [String: String], caption: String? = nil) -> Row {
+                                      agentNames: [String: String], caption: String? = nil,
+                                      lane: Bool = false) -> Row {
         guard let kind = MediaAlbum.kind(of: a) else {
             return Row(id: id, messageId: message.id, role: fromUser ? .user : .assistant,
                        kind: .voiceMemo(name: a.name, projectId: projectId, ref: a.blobRef, fromUser: fromUser))
@@ -634,7 +642,7 @@ enum Transcript {
                                    projectName: { agentNames[$0] })
         if kind == .image {
             return Row(id: id, messageId: message.id, role: fromUser ? .user : .assistant,
-                       kind: .image(item: item, fromUser: fromUser, caption: caption))
+                       kind: .image(item: item, fromUser: fromUser, caption: caption, lane: lane))
         }
         // Video shows as a file card in the bubble (poster + Play live in the viewer).
         // A typed description rides the card as a caption bar (pictures/videos only).
@@ -1297,11 +1305,15 @@ struct RowView: View, Equatable {
                     .frame(maxWidth: maxBubble, alignment: fromUser ? .trailing : .leading)
                 if !fromUser { Spacer(minLength: 0) }
             }
-        case .image(let item, let fromUser, let caption):
-            HStack {
+        case .image(let item, let fromUser, let caption, let lane):
+            // Same left edge and cap as an incoming bubble: after the avatar lane in a
+            // people chat ([feedback ADUIX9xlGQxCSzeXke7JVBw], Mac Attachment.lane).
+            HStack(spacing: 0) {
                 if fromUser { Spacer(minLength: 0) }
-                ImageBubble(item: item, chatId: chatId, fromUser: fromUser, maxWidth: maxBubble, caption: caption,
-                            mentions: mentions)
+                if lane { Color.clear.frame(width: Theme.memberLane(composerInset: composerInset), height: 1) }
+                ImageBubble(item: item, chatId: chatId, fromUser: fromUser,
+                            maxWidth: lane ? maxBubble - Theme.memberLane(composerInset: composerInset) : maxBubble,
+                            caption: caption, mentions: mentions)
                     .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: fromUser) }
                 if !fromUser { Spacer(minLength: 0) }
             }
@@ -1422,6 +1434,7 @@ struct RowView: View, Equatable {
         switch row.kind {
         case .other, .member: return Theme.memberLane(composerInset: composerInset)
         case .question(_, _, _, _, _, _, let lane, _): return lane ? Theme.memberLane(composerInset: composerInset) : 0
+        case .image(_, _, _, let lane): return lane ? Theme.memberLane(composerInset: composerInset) : 0
         default: return 0
         }
     }
