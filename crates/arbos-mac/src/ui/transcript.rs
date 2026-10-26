@@ -1374,6 +1374,14 @@ impl Transcript {
         let old_len = self.rows.len();
         self.rows = new_rows;
         self.list.splice(prefix..old_len, self.rows.len() - prefix);
+        if crate::model::trace_rows() {
+            eprintln!(
+                "rows: transcript chat={} rows={} changed_from={prefix} at={}",
+                self.chat_id.as_deref().unwrap_or(""),
+                self.rows.len(),
+                crate::model::now_ms()
+            );
+        }
         // Reading history: a stale pin (scrollbar / list scroll that never
         // cleared it) must not spring to the new end when rows land below.
         let max = f32::from(self.list.max_offset_for_scrollbar().y);
