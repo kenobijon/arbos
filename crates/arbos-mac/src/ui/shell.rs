@@ -520,14 +520,19 @@ impl Shell {
                 if let Some(pk) = this.pending_picker_mut() {
                     if pk.target == done.target {
                         pk.generating = false;
+                        pk.started_at = None;
                         match (done.image_key, done.url) {
                             (Some(key), Some(url)) => {
                                 pk.generated = Some((key, url));
                                 pk.error = None;
+                                pk.error_detail = None;
                             }
                             _ => {
-                                pk.error =
-                                    done.error.or_else(|| Some("No picture came back".into()))
+                                pk.error = done
+                                    .error
+                                    .or_else(|| Some("Couldn't generate the image.".into()));
+                                pk.error_detail = done.detail;
+                                pk.details_open = false;
                             }
                         }
                     }
@@ -1481,7 +1486,10 @@ impl Shell {
         }
         let target = pk.target.clone();
         pk.generating = true;
+        pk.started_at = Some(std::time::Instant::now());
         pk.error = None;
+        pk.error_detail = None;
+        pk.details_open = false;
         pk.reset = false;
         self.state.update(cx, |s, cx| {
             s.generate_image(target, prompt, cx);
