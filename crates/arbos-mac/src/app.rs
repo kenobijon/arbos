@@ -1629,6 +1629,12 @@ impl AppState {
                 self.avatars.insert(url, image);
                 cx.notify();
             }
+            SyncEvent::AvatarMissing { url } => {
+                // Not "no picture" for good: a later `want_avatar` (the next registry event,
+                // a reconnect) requests it again instead of drawing the placeholder forever.
+                self.avatars.remove(&url);
+                cx.notify();
+            }
             SyncEvent::PairingFailed(err) => {
                 if let Some(p) = &mut self.pairing {
                     p.busy = false;
