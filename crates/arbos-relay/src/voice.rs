@@ -1661,6 +1661,7 @@ mod inbox_tests {
         serde_json::from_slice(&bytes).unwrap_or(Value::Null)
     }
 
+    /// A box's announcement: never a cross-chat reply (`reply_ref` is a person's, #1834).
     fn notify(
         message_id: &str,
         text: &str,
