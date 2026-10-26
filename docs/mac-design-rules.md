@@ -423,6 +423,7 @@ changed its composer between the 2026-10-15 refs and this shot; this shot wins.
 | Status picture | **25⅓ (76 px)**, left edge **6 inside the `+` disc's left edge** (24 from the screen keyboard up, 37 down) — no longer the bubble's 42 pt disc, no longer centred on the `+` | `Theme.presenceAvatar`, `presenceAvatarOffset`, `presenceInset(composerInset:)` |
 | Status words | **17 pt body**, muted, shimmer unchanged; **14** after the picture (words at 190 px keyboard up) | `PresenceRow.textSize`, `Theme.presenceGap` |
 | Picture bottom → composer top | **22⅔ (68 px)**; the row is the picture tall, ChatView pads below it | `Theme.presenceBottomGap` |
+| Last bubble → picture top | **14 (42 px)** — the row rises 22 pt into the transcript's 28 pt tail instead of starting under the tail and the bar's 8 pt pad (was 36); bubble → composer with the row = Grok's 62⅓; the bar grows 26 pt (was 48) when the row appears ([feedback status-row-gap-ios-2026-10-26]) | `Theme.presenceTopGap`, `presenceLift`, `transcriptTail`, `chatBarTopPad` |
 | Tasks chip (#1696) and job-tab words (#1801) | ride the same row unchanged (20 pt chip inside the 25⅓ row) | `PresenceRow.tasksChip`, `onWords` |
 
 Not moved, on purpose: the people-chat **bubble picture stays 42 pt centred on
