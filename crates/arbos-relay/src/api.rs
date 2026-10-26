@@ -133,6 +133,9 @@ pub async fn pair(State(state): State<AppState>, Json(b): Json<PairBody>) -> Api
     .into_response())
 }
 
+/// `GET /devices` — the caller's own devices (the admin token sees every account's). Until
+/// 2026-10-26 this listed every device of every user to any signed-in device, and
+/// `DELETE /devices/{id}` revoked any of them: one test account could log every other user out.
 pub async fn list_devices(State(state): State<AppState>, principal: Principal) -> ApiResult {
     if principal.is_box() {
         return Err((
@@ -140,9 +143,14 @@ pub async fn list_devices(State(state): State<AppState>, principal: Principal) -
             "box tokens cannot list devices".into(),
         ));
     }
-    Ok(Json(state.db.list_devices().map_err(internal)?).into_response())
+    let devices = match principal.user_id() {
+        Some(uid) => state.db.devices_of_user(uid).map_err(internal)?,
+        None => state.db.list_devices().map_err(internal)?,
+    };
+    Ok(Json(devices).into_response())
 }
 
+/// `DELETE /devices/{id}` — revoke one of the caller's own devices (the admin token: any device).
 pub async fn revoke_device(
     State(state): State<AppState>,
     principal: Principal,
@@ -154,7 +162,20 @@ pub async fn revoke_device(
             "box tokens cannot revoke devices".into(),
         ));
     }
-    let ok = state.db.revoke_device(&id).map_err(internal)?;
+    if let Some(uid) = principal.user_id() {
+        let owner = state.db.device_user(&id).map_err(internal)?;
+        if owner.as_deref() != Some(uid) {
+            // Another user's device looks like no device at all: no enumeration oracle either.
+            return Ok(StatusCode::NOT_FOUND.into_response());
+        }
+    }
+    // Same revocation as `DELETE /auth/devices/{id}`: the legacy path only flagged the device row
+    // and left its refresh tokens live (14 such devices since Oct 14), so a "revoked" device could
+    // still mint access tokens.
+    let ok = state.db.revoke_device_fully(&id).map_err(internal)?;
+    if ok {
+        crate::matrix::servers::revoke_device(&state, &id).await;
+    }
     Ok(if ok {
         StatusCode::NO_CONTENT
     } else {
