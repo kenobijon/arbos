@@ -133,9 +133,8 @@ enum CodeHighlight {
     /// The width the code needs unwrapped: the longest line in glyph advances.
     /// Wider than the card → the body scrolls sideways.
     static func contentWidth(_ code: String, advance: CGFloat) -> CGFloat {
-        let longest = code.split(separator: "\n", omittingEmptySubsequences: false)
-            .map { $0.count }
-            .max() ?? 0
+        let lines: [Substring] = code.split(omittingEmptySubsequences: false, whereSeparator: { $0 == "\n" })
+        let longest = lines.map(\.count).max() ?? 0
         return CGFloat(longest) * advance
     }
 
@@ -145,7 +144,7 @@ enum CodeHighlight {
     /// is the block's smallest indent (tabs count 4), at least 2. The Mac's
     /// `indent_guides`.
     static func indentGuides(_ code: String, advance: CGFloat) -> [(line: Int, x: CGFloat)] {
-        let lines = code.split(separator: "\n", omittingEmptySubsequences: false)
+        let lines: [Substring] = code.split(omittingEmptySubsequences: false, whereSeparator: { $0 == "\n" })
         func indent(_ line: Substring) -> Int {
             line.prefix { $0 == " " || $0 == "\t" }.reduce(0) { $0 + ($1 == "\t" ? 4 : 1) }
         }
