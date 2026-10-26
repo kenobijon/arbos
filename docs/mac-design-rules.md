@@ -961,4 +961,5 @@ landmarks in all 15 languages, aliases and fallbacks), the Mac's
 `the_code_card_paints_grok_colours_and_indent_guides`,
 `a_code_card_with_long_lines_scrolls_sideways` and the copy-button tests, and the
 iPhone's `CodeHighlightTests`. Rig: `ARBOS_FIXTURE_REPLY=math` (Mac) /
-`ARBOS_SHOW=math` (iPhone) is Jacob's bubble-sort turn.
+`ARBOS_SHOW=math` (iPhone) is Jacob's bubble-sort turn; `ARBOS_RIG_CODE_COPY=hover|pressed|copied`
+paints the copy square in that state for a capture (the check needs `copied`).
