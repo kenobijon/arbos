@@ -16,6 +16,11 @@ enum BlockedState {
 
     static func confirmTitle(handle: String) -> String { "Unblock @\(handle)?" }
 
+    /// "N messages hidden because you blocked @x" for the transcript's folded line.
+    static func hiddenLine(count: Int, who: String) -> String {
+        "\(count == 1 ? "1 message" : "\(count) messages") hidden because you blocked \(who)"
+    }
+
     /// "You blocked X" for the composer bar.
     static func composerLine(name: String) -> String { "You blocked \(name)" }
 

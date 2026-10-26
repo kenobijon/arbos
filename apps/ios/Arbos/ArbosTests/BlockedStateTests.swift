@@ -114,3 +114,113 @@ final class BlockedStateTests: XCTestCase {
         XCTAssertFalse(model.contains("self.notice = Notice(text: \"Messages in this chat are not being delivered\")"), "no fixed sentence left")
     }
 }
+
+/// A group block hides the blocked person's rows from the blocker alone (Jacob 2026-10-26;
+/// the Mac's `blocked::hidden_tests` twin): runs fold into `.hidden` rows, nothing folds for
+/// everyone else, the preview skips them, and the structure wires the hint / dot / fold.
+final class BlockedHiddenRowsTests: XCTestCase {
+    private let chat = "fx-group-launch"
+    private let t0: Int64 = 1_700_000_000_000
+
+    private func person(_ i: Int, sender: String, handle: String, name: String, _ text: String) -> Message {
+        Message(id: "m\(i)", chatId: chat, role: .user, sender: sender, status: .done, turn: nil, decision: nil, subagentId: nil,
+                subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: t0 + Int64(i) * 1_000, completedAt: nil,
+                pending: false, parts: [.text(id: "m\(i)-t", text: text)], hiddenCount: 0, senderHandle: handle, senderName: name)
+    }
+
+    private var messages: [Message] {
+        [
+            person(1, sender: "user:gh_3", handle: "priya", name: "Priya Natarajan", "morning all"),
+            person(2, sender: "user:gh_2", handle: "sam", name: "Sam Rivera", "hey"),
+            person(3, sender: "user:gh_2", handle: "sam", name: "Sam Rivera", "anyone around?"),
+            person(4, sender: "user:gh_3", handle: "priya", name: "Priya Natarajan", "here"),
+            person(5, sender: "user:gh_2", handle: "sam", name: "Sam Rivera", "cool"),
+        ]
+    }
+
+    private func shape(_ rows: [Row]) -> [String] {
+        rows.compactMap { row in
+            switch row.kind {
+            case .other: return "user:\(row.messageId)"
+            case .hidden(let count, _, let handle, _): return "hidden:\(handle)x\(count)"
+            default: return nil
+            }
+        }
+    }
+
+    func testABlockedSendersRunsFoldIntoHiddenRows() {
+        let blocker = Transcript.rows(messages, projectId: "people:\(chat)", me: "user:fx-me", people: true, multiParty: true,
+                                      hiddenSenders: ["user:gh_2"])
+        XCTAssertEqual(shape(blocker), ["user:m1", "hidden:samx2", "user:m4", "hidden:samx1"])
+        XCTAssertFalse(blocker.contains { $0.id == "m2#date" || $0.id == "m3#date" || $0.id == "m5#date" }, "no date line for a hidden row")
+        // A third member (nothing hidden): every row is a bubble.
+        let third = Transcript.rows(messages, projectId: "people:\(chat)", me: "user:fx-me", people: true, multiParty: true)
+        XCTAssertEqual(shape(third).filter { $0.hasPrefix("user:") }.count, 5)
+        XCTAssertFalse(third.contains { if case .hidden = $0.kind { return true } else { return false } })
+    }
+
+    func testTheHiddenLine() {
+        XCTAssertEqual(BlockedState.hiddenLine(count: 1, who: "@sam"), "1 message hidden because you blocked @sam")
+        XCTAssertEqual(BlockedState.hiddenLine(count: 3, who: "Sam Rivera"), "3 messages hidden because you blocked Sam Rivera")
+    }
+
+    @MainActor
+    func testTheModelHidesForTheBlockerAndRevealsOnUnblock() {
+        let model = AppModel()
+        var chatDto = PeopleChat.parse([
+            "id": chat, "kind": "group", "created_by": "gh_1", "created_at": t0, "title": "Launch week",
+            "pending": false, "head_seq": 5, "read_seq": 0, "unread": false, "lock_state": "people_only",
+            "room": "/room/people/\(chat)", "last_activity_at": t0,
+            "members": [
+                ["member": "user:gh_2", "role": "member", "added_by": "gh_1", "joined_at": t0, "handle": "sam", "name": "Sam Rivera"],
+                ["member": "user:gh_3", "role": "member", "added_by": "gh_1", "joined_at": t0, "handle": "priya", "name": "Priya Natarajan"],
+            ],
+            "me": ["role": "owner"],
+            "blocked_senders": ["user:gh_2"],
+        ])
+        XCTAssertNotNil(chatDto, "the hint parses")
+        XCTAssertEqual(chatDto?.blockedSenders, ["user:gh_2"])
+        XCTAssertEqual(chatDto.map { model.hiddenSenders(in: $0) }, ["user:gh_2"], "from the relay's hint")
+        // Without the hint, my block list decides (a block taken a moment ago).
+        chatDto?.blockedSenders = []
+        XCTAssertEqual(chatDto.map { model.hiddenSenders(in: $0) }, [])
+        model.setBlockedForTests([Person(id: "gh_2", handle: "sam", avatarUrl: nil, name: "Sam Rivera", status: "member")])
+        XCTAssertEqual(chatDto.map { model.hiddenSenders(in: $0) }, ["user:gh_2"], "from my block list")
+        model.setBlockedForTests([])
+        XCTAssertEqual(chatDto.map { model.hiddenSenders(in: $0) }, [], "unblocked: nothing hidden")
+        // A DM never hides (its composer bar says Blocked instead).
+        var dm = chatDto!
+        dm.kind = "dm"
+        dm.members = [dm.members[0]]
+        dm.blockedSenders = ["user:gh_2"]
+        XCTAssertEqual(model.hiddenSenders(in: dm), [])
+    }
+
+    private var sourceRoot: URL {
+        URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Arbos")
+    }
+
+    private func source(_ rel: String) throws -> String? {
+        let url = sourceRoot.appendingPathComponent(rel)
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        return try String(contentsOf: url, encoding: .utf8)
+    }
+
+    /// The chat passes the hint to every rows() call, the fold draws the shared line with
+    /// Unblock, the home preview and the unread dot skip hidden rows.
+    func testTheSurfacesSkipHiddenRows() throws {
+        guard let chat = try source("UI/ChatView.swift"),
+              let transcript = try source("UI/Transcript.swift"),
+              let home = try source("UI/HomeView.swift"),
+              let model = try source("Store/AppModel.swift") else {
+            throw XCTSkip("sources not beside the test bundle (CI without the tree)")
+        }
+        XCTAssertEqual(chat.components(separatedBy: "hiddenSenders: hiddenSenders)").count - 1, 3, "every rows() call carries the hint")
+        XCTAssertTrue(chat.contains("let hiddenSenders = people.map { model.hiddenSenders(in: $0) } ?? []"))
+        XCTAssertTrue(transcript.contains("case .hidden(let count, _, let handle, let name):"), "the fold is drawn")
+        XCTAssertTrue(transcript.contains("Text(BlockedState.hiddenLine(count: count, who: who))"))
+        XCTAssertTrue(transcript.contains(".accessibilityIdentifier(\"hidden-row-unblock\")"), "with Unblock")
+        XCTAssertTrue(home.contains("!model.hidesMessage($0, chatId: c.id)"), "the preview skips hidden rows")
+        XCTAssertTrue(model.contains("if hidesMessage(last, chatId: chatId) { return }"), "a hidden arrival lights no dot")
+    }
+}

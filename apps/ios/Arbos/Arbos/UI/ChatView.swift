@@ -593,6 +593,9 @@ struct ChatSession: View {
         // Sender names inside the bubbles: groups and channels only — never a 1:1 chat.
         let multiParty = isChannel || (people?.isGroup ?? false)
         let peopleFlag = isPeople || isChannel
+        // People I blocked: their rows fold into one line for me (groups only; a DM with
+        // them has the composer bar) — [feedback blocked-state-ios-2026-10-26].
+        let hiddenSenders = people.map { model.hiddenSenders(in: $0) } ?? []
 
         // Incremental: same ids and only the last message's content changed (streaming
         // token) — rebuild only the tail. A middle edit (reaction, etc.) falls through.
@@ -611,7 +614,7 @@ struct ChatSession: View {
                 let prev = list.count >= 2 ? list[list.count - 2] : nil
                 let slice = prev.map { [$0, last] } ?? [last]
                 let rebuilt = Transcript.rows(slice, byId: byId, projectId: slot, me: me,
-                                              people: peopleFlag, agentNames: agentNames, multiParty: multiParty)
+                                              people: peopleFlag, agentNames: agentNames, multiParty: multiParty, hiddenSenders: hiddenSenders)
                 let newTail: [Row]
                 if let prev {
                     let start = rebuilt.firstIndex(where: { $0.messageId == last.id }).map { ix -> Int in
@@ -638,7 +641,7 @@ struct ChatSession: View {
             let prev = list.count >= 2 ? list[list.count - 2] : nil
             let slice = prev.map { [$0, last] } ?? [last]
             let rebuilt = Transcript.rows(slice, byId: byId, projectId: slot, me: me,
-                                          people: peopleFlag, agentNames: agentNames, multiParty: multiParty)
+                                          people: peopleFlag, agentNames: agentNames, multiParty: multiParty, hiddenSenders: hiddenSenders)
             let newTail: [Row]
             if let prev {
                 let start = rebuilt.firstIndex(where: { $0.messageId == last.id }).map { ix -> Int in
@@ -663,7 +666,7 @@ struct ChatSession: View {
 
         let byId = Transcript.index(list)
         let next = Transcript.rows(list, byId: byId, projectId: slot, me: me,
-                                   people: peopleFlag, agentNames: agentNames, multiParty: multiParty)
+                                   people: peopleFlag, agentNames: agentNames, multiParty: multiParty, hiddenSenders: hiddenSenders)
         // Rows appended after the last one we had (new messages) join the window, so the
         // oldest row on screen does not fall out of the view tree when a new one lands.
         // History that arrives above it — the first snapshot, a backfill, an older

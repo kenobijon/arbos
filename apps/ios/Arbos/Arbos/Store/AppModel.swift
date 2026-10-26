@@ -2310,6 +2310,8 @@ final class AppModel: ObservableObject {
             if last.pending { return }
             if last.role == .system { return }
             if let me = myUserId, last.sender == me { return }
+            // Hidden for me (someone I blocked): no dot, no banner.
+            if hidesMessage(last, chatId: chatId) { return }
             // Project-chat echoes from this device use sender "user".
             if peopleChat(chatId) == nil, last.role == .user, last.sender == "user" || last.sender.isEmpty {
                 return
@@ -3878,6 +3880,28 @@ final class AppModel: ObservableObject {
             if let m = c.members.first(where: { !$0.isAgent && $0.handle.caseInsensitiveCompare(handle) == .orderedSame }) { return m.name }
         }
         return directory.first { $0.handle.caseInsensitiveCompare(handle) == .orderedSame }?.name
+    }
+
+    /// The senders whose rows `chat` hides for me ([feedback blocked-state-ios-2026-10-26],
+    /// Jacob 2026-10-26: a group block hides the blocked person's messages from the blocker
+    /// alone): the relay's `blockedSenders` hint plus every member on my block list, as
+    /// `user:<id>`. Empty for a DM (its composer bar says Blocked instead).
+    func hiddenSenders(in chat: PeopleChat) -> Set<String> {
+        guard chat.isGroup else { return [] }
+        var out = Set(chat.blockedSenders)
+        for m in chat.humans where BlockedState.isBlocked(id: m.id, handle: m.handle, in: blocked) {
+            out.insert(m.id.hasPrefix("user:") ? m.id : "user:\(m.id)")
+        }
+        return out
+    }
+
+    /// Tests: the relay's block list as `GET /blocks` would hand it over.
+    func setBlockedForTests(_ list: [Person]) { blocked = list }
+
+    /// Is this message hidden for me — from someone I blocked, in a people group?
+    func hidesMessage(_ m: Message, chatId: Id) -> Bool {
+        guard m.role == .user, let chat = peopleChat(chatId) else { return false }
+        return hiddenSenders(in: chat).contains(m.sender)
     }
 
     func openPersonProfile(handle: String, avatarUrl: String?, chatId: String) {
