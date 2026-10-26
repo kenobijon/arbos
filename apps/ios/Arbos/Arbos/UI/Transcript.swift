@@ -397,7 +397,7 @@ enum Transcript {
                         let block: Block = .chart(partId: id, spec: spec, table: table)
                         if let last = chunk.indices.last, chunk[last].messageId == message.id,
                            let joined = Self.appending(block, to: chunk[last].kind) {
-                            chunk[last] = Row(id: chunk[last].id, messageId: message.id, role: .assistant, kind: joined)
+                            chunk[last].kind = joined
                         } else if people, let h = message.senderHandle {
                             chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
                                              kind: .member(blocks: [block], live: false, handle: h, name: message.senderName,

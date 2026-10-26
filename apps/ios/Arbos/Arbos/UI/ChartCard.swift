@@ -176,7 +176,7 @@ enum ChartCardMetrics {
     static let piePlotHeight: CGFloat = 210
     static let copiedFor: Duration = .seconds(1.5)
 
-    static func plotHeight(kind: String) -> CGFloat {
+    static func height(kind: String) -> CGFloat {
         switch kind {
         case "bar": return barPlotHeight
         case "pie": return piePlotHeight
@@ -240,7 +240,7 @@ struct ChartCard: View {
                     .padding(.bottom, 2)
             }
             ChartPlot(model: model, font: 12, lineWidth: 2.2)
-                .frame(height: ChartCardMetrics.plotHeight(kind: model.kind))
+                .frame(height: ChartCardMetrics.height(kind: model.kind))
                 .accessibilityIdentifier("chart-plot")
             if let saved {
                 Text(saved)
@@ -529,17 +529,12 @@ struct ChartPlot: View {
                     .gesture(
                         DragGesture(minimumDistance: 0)
                             .onChanged { g in
-                                let origin = geo[proxy.plotFrame!].origin
-                                let xPos = g.location.x - origin.x
-                                if let x: Double = proxy.value(atX: xPos) {
-                                    let near = model.columnNear(x)
-                                    if near != selected { Haptics.pick() }
-                                    selected = near
-                                }
-                            }
-                            .onEnded { _ in
-                                // The readout stays until the next touch starts elsewhere
-                                // (a lift must not hide what the thumb just revealed).
+                                guard let frame = proxy.plotFrame else { return }
+                                let xPos = g.location.x - geo[frame].origin.x
+                                guard let x: Double = proxy.value(atX: xPos) else { return }
+                                let near = model.columnNear(x)
+                                if near != selected { Haptics.pick() }
+                                selected = near
                             }
                     )
                     .onTapGesture { selected = nil }

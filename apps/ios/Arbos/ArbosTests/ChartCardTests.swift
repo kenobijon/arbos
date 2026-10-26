@@ -127,7 +127,7 @@ final class ChartCardTests: XCTestCase {
         var own = model
         own.series[0].color = "#FF0000"
         XCTAssertEqual(ChartPalette.series(own, 0, dark: true), ChartPalette.series(own, 0, dark: false))
-        XCTAssertEqual(ChartCardMetrics.plotHeight(kind: "bar"), ChartCardMetrics.barPlotHeight)
+        XCTAssertEqual(ChartCardMetrics.height(kind: "bar"), ChartCardMetrics.barPlotHeight)
         XCTAssertEqual(ChartCardMetrics.iconSquare, 24)
     }
 
