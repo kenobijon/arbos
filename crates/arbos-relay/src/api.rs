@@ -1812,8 +1812,8 @@ pub struct BoxHelloBody {
 /// `address_name` — the name the user set themselves, the only one agents use to address them.
 fn owner_json(state: &AppState, user_id: &str) -> Value {
     match state.db.user_address(user_id) {
-        Ok(Some((login, name, address_name))) => {
-            json!({ "id": user_id, "login": login, "name": name, "address_name": address_name })
+        Ok(Some((login, name, address_name, former_names))) => {
+            json!({ "id": user_id, "login": login, "name": name, "address_name": address_name, "former_names": former_names })
         }
         _ => json!({ "id": user_id }),
     }
