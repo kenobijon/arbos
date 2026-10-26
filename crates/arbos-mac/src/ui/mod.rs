@@ -1,3 +1,4 @@
+pub mod agent_picker;
 pub mod approve;
 pub mod attachments;
 pub mod avatar_picker;

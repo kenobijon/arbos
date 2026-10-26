@@ -683,3 +683,35 @@ Code: `message_menu::run` (Delete → `AppState::delete_message`),
 `sidebar::row_menu` (Delete → `delete_project` / `delete_people_chat` /
 `leave_group`); pinned by `message_menu::tests::delete_is_offered_only_when_allowed`
 and `sidebar::row_menu_tests::delete_fires_at_once`.
+
+## Secrets agent picker: chips + "Add agent" (Jacob 2026-10-26, [feedback secrets-agent-picker-mac-2026-10-26], iPhone [feedback secrets-agent-picker-ios-2026-10-26])
+
+**Wherever Secrets picks agents, the agents already granted are chips (picture ·
+name · ×) and one "Add agent" button opens a searchable list of the rest; an
+agent is never a toggle chip.** Jacob's shot (Mac v0.6.268, 09:14 CR): the New
+secret form drew his 16 agents as a wall of chips. Approved as mocked 09:48 CR
+(`media/feedback/secrets-agent-picker/` in the project store). One component per
+platform, used by all four pickers — New secret, Connect 1Password, "Give another
+agent access…" on a secret, the same on a vault: Mac `ui::agent_picker` (state
+`SecretsPanel::agent_picker`), iPhone `AgentPickerField` + `AddAgentSheet`
+(`UI/AgentPicker.swift`). A new agent picker in Secrets uses it or does not ship.
+
+| Item | Mac | iPhone |
+|---|---|---|
+| Chip | **30** tall capsule, `field` fill + `field_border` rim, picture **20** (`avatars::project_with`, the shared resolver's newest copy — never `project()` alone), name 13 medium, × 9 pt in `text_muted` (hover `text` on a `surface_2` disc); × removes the grant at once | 34 tall, `field` + `fieldBorder`, picture 20 (`AgentAvatar` of the resolver's project), name 15 medium, × 11 muted |
+| Add agent | the same 30 capsule on `surface_2` with `plus` 13 + "Add agent" 13 semibold — the chip hover/pressed lifts (`DISC_HOVER_LIFT` / `DISC_PRESSED_LIFT`); lifted while open | 34 capsule on `bubbleAssistant`, `plus` + "Add agent" 15 semibold |
+| Empty | the button alone + "No agent can use it yet." (`TEXT_TINY` muted) | the same |
+| Picking | a dropdown **6** under the chips row, left-aligned, **308** wide (the pane's content width), `hoverpick`'s frame (`card()` fill, `border`, radius 10, shadow; flips above the row when the window has no room below): search row 34 (magnifier 13, `ComposerInput` at 13 pt, "Search agents"), rows 36 (picture 20, name 13, `@handle` 12.5 muted), the highlighted row on `surface_2` with ↩, a 22 pt footer "↑↓ move · ↩ add · esc close"; ≤ 6 rows before it scrolls | a stacked sheet "Add agent" (Cancel): a search field at the control family's **48** (`Theme.composerHeight`, the iPhone control-size token — not the secrets forms' 42) focused with the keyboard up, "YOUR AGENTS" `PaneCard` of 48 pt `PaneRow`s (36 pt picture, name, `@handle`, a + disc) |
+| Keys | typing filters; ↑ / ↓ move the highlight (`ComposerInput::on_arrow`); ↩ adds the highlighted agent (`on_submit`); esc or a click elsewhere folds the list (`Shell::escape` / `close_popovers` → `SecretsPanel::close_agent_picker`); the chips stay | ↩ on the keyboard adds the first match; a tap adds that row |
+| One per visit | ↩ / a click adds one agent and folds the list (the button reopens it) | a tap adds one agent and dismisses the sheet |
+| Matcher | **no filter of its own**: `agent_picker::candidates` → `people::agent_picker_rows` → `arbos_core::search` ([feedback shared-search-matcher-mac-2026-10-26]): name, `@slug` and description; exact, prefix, word-start; case, diacritics and a leading `@` folded; best first, registry order in a tie. The site is listed in `search::picker_sites_tests::SITES` | `PeoplePicker.agents` (the same core matcher through the FFI, [feedback shared-search-matcher-ios-2026-10-26]) |
+| Hidden from the list | guests' agents, people spaces, agents already chips, agents with access on the page (`exclude` = the enabled rows of the secret / vault) | the same (`exclude`; the Give sheets prefill `picked` with the enabled rows, so × there removes access on Save) |
+
+Pinned by `agent_picker::tests` (candidates through the shared matcher) and the headless
+`secrets::picker_tests` (the real Shell on the four pages: Add agent → dropdown →
+"ar" narrows to three → ↓ ↩ adds a chip → × removes it; esc folds; a picked agent
+leaves the list; the agents with access on a secret's / a vault's page are not
+offered). iPhone: `AgentPickerTests` (candidates through `PeoplePicker.agents`, chip order, pick / ×,
+and a source check that the four sheets draw `AgentPickerField` and `AgentChips`
+is gone). Rig: `ARBOS_OPEN_SETTINGS=secrets-add` (the New secret form),
+`secrets-connect`, `secrets:<env>` / `secrets-vault` with the Give row.

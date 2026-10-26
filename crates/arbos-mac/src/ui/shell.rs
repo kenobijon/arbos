@@ -2382,6 +2382,10 @@ impl Shell {
         if self.close_agent_pick(Some(window), cx) {
             return;
         }
+        // The Secrets forms' "Add agent" dropdown folds first; the form stays.
+        if self.secrets.update(cx, |p, cx| p.close_agent_picker(cx)) {
+            return;
+        }
         // A session row's context menu closes alone; the dropdown under it
         // stays (standard menu behaviour).
         if self.chat_menu.is_some() {
@@ -2561,6 +2565,9 @@ impl Shell {
     /// Everything that floats closes on a click elsewhere.
     pub(crate) fn close_popovers(&mut self, cx: &mut Context<Self>) {
         self.close_agent_pick(None, cx);
+        self.secrets.update(cx, |p, cx| {
+            p.close_agent_picker(cx);
+        });
         self.state.update(cx, |s, cx| s.close_tasks(cx));
         if self.menu_open
             || self.members_open
