@@ -232,7 +232,7 @@ struct UserError: Equatable, Hashable {
     /// The words alone (no typed cause).
     static func classForWords(_ raw: String) -> Class {
         let d = raw.lowercased()
-        if let (code, _) = statusIn(raw) { return classForStatus(code, kind: "", sentence: nil) }
+        if let hit = statusIn(raw) { return classForStatus(hit.0, kind: "", sentence: nil) }
         if d.contains("timed out") || d.contains("timeout") || d.contains("took too long") || d.contains("did not answer in time") {
             return .timeout
         }
