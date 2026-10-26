@@ -2701,8 +2701,8 @@ final class AppModel: ObservableObject {
                 chat = try await createGroupViaDm(handles: cleaned)
             }
             if let picture, let jpeg = await draftJpeg(picture) {
-                let key = "group-avatar-\(Int(Date().timeIntervalSince1970 * 1000)).jpg"
-                if (try? await api.putBlob(projectId: "\(peopleSlot):\(chat.id)", key: key, mime: "image/jpeg", data: jpeg)) != nil,
+                let key = "group-avatar-\(Int(Date().timeIntervalSince1970 * 1000)).\(PictureMaster.ext(jpeg))"
+                if (try? await api.putBlob(projectId: "\(peopleSlot):\(chat.id)", key: key, mime: PictureMaster.mime(jpeg), data: jpeg)) != nil,
                    let patched = try? await api.patchPeopleChat(chat.id, imageKey: key) {
                     chat = patched
                 }
@@ -3528,12 +3528,12 @@ final class AppModel: ObservableObject {
 
     /// D92 amendment: upload an agent picture into the project's own blob slot and set it.
     func setProjectImage(projectId: Id, jpeg: Data) async -> Bool {
-        let key = "avatar-\(Int(Date().timeIntervalSince1970 * 1000)).jpg"
+        let key = "avatar-\(Int(Date().timeIntervalSince1970 * 1000)).\(PictureMaster.ext(jpeg))"
         if isFixture {
             return await setProjectImageKey(projectId: projectId, key: key)
         }
         do {
-            _ = try await api.putBlob(projectId: projectId, key: key, mime: "image/jpeg", data: jpeg)
+            _ = try await api.putBlob(projectId: projectId, key: key, mime: PictureMaster.mime(jpeg), data: jpeg)
             return await setProjectImageKey(projectId: projectId, key: key)
         } catch {
             notice = Notice(text: "Could not upload the picture: \(error.localizedDescription)")
@@ -3610,9 +3610,9 @@ final class AppModel: ObservableObject {
 
     /// Upload a group picture to `people:{chatId}` and patch `image_key`.
     func setGroupImage(chatId: String, jpeg: Data) async -> Bool {
-        let key = "group-avatar-\(Int(Date().timeIntervalSince1970 * 1000)).jpg"
+        let key = "group-avatar-\(Int(Date().timeIntervalSince1970 * 1000)).\(PictureMaster.ext(jpeg))"
         do {
-            _ = try await api.putBlob(projectId: "\(peopleSlot):\(chatId)", key: key, mime: "image/jpeg", data: jpeg)
+            _ = try await api.putBlob(projectId: "\(peopleSlot):\(chatId)", key: key, mime: PictureMaster.mime(jpeg), data: jpeg)
             return await patchPeopleChat(chatId, imageKey: key)
         } catch {
             notice = Notice(text: "Could not upload group image: \(error.localizedDescription)")
@@ -3620,7 +3620,7 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Settings profile picture: `PUT /me/avatar` JPEG, then update the local user.
+    /// Settings profile picture: `PUT /me/avatar` with the master (PNG or JPEG), then update the local user.
     func setUserAvatar(jpeg: Data) async -> Bool {
         do {
             let url = try await api.putMeAvatar(jpeg: jpeg)
@@ -5558,8 +5558,8 @@ final class AppModel: ObservableObject {
                 // The Create sheet's picture goes into the new agent's own slot first, so the
                 // list refresh already shows it.
                 if let picture, let id, let jpeg = await draftJpeg(picture) {
-                    let key = "avatar-\(Int(Date().timeIntervalSince1970 * 1000)).jpg"
-                    if (try? await api.putBlob(projectId: id, key: key, mime: "image/jpeg", data: jpeg)) != nil {
+                    let key = "avatar-\(Int(Date().timeIntervalSince1970 * 1000)).\(PictureMaster.ext(jpeg))"
+                    if (try? await api.putBlob(projectId: id, key: key, mime: PictureMaster.mime(jpeg), data: jpeg)) != nil {
                         _ = try? await api.setProjectImageKey(id, key: key)
                     }
                 }
