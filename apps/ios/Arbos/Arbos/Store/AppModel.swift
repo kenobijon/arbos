@@ -4065,23 +4065,31 @@ final class AppModel: ObservableObject {
             switch p.event {
             case .peopleMessage(let payload):
                 let cid = payload.chat_id
-                // Agent (or person) reached out in a chat we have not listed yet —
+                // Since 2026-10-26 the relay queues this for an agent's reply too (people chats
+                // and, with `project_id`, the agent's own project chats); before, only a
+                // person's row did, so an @agent answer never showed a banner here.
+                let projectId = payload.project_id ?? peopleSlot
+                let inPeople = payload.project_id == nil
+                // Agent (or person) reached out in a people chat we have not listed yet —
                 // refresh so open-from-notification can dial the room.
-                if peopleChat(cid) == nil { needChats = true }
+                if inPeople, peopleChat(cid) == nil { needChats = true }
                 if !isWatching(cid) {
-                    peopleUnread.insert(cid)
-                    unarchiveOnActivity(chatId: cid)
+                    if inPeople {
+                        peopleUnread.insert(cid)
+                        unarchiveOnActivity(chatId: cid)
+                    }
                     // Muted group: keep the unread flag, skip the local banner.
-                    if !isPeopleChatMuted(cid) {
+                    if !inPeople || !isPeopleChatMuted(cid) {
                         let sender = payload.sender
                         let from = sender.handle.isEmpty ? (payload.from_handle.isEmpty ? "someone" : payload.from_handle) : sender.handle
                         // §7c sender{} first; the chat's member list fills any gap.
                         let member = peopleChat(cid)?.members.first { $0.handle == from }
                         let agent = member?.isAgent == true ? member?.project : nil
                         let kind = sender.kind.isEmpty ? (agent != nil ? "agent" : "user") : sender.kind
+                        let body = (payload.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                         let info = MessagePush.userInfo(
-                            chatId: cid, projectId: peopleSlot, title: sender.name.isEmpty ? (member?.displayName ?? "@\(from)") : sender.name,
-                            body: "New message",
+                            chatId: cid, projectId: projectId, title: sender.name.isEmpty ? (member?.displayName ?? "@\(from)") : sender.name,
+                            body: body.isEmpty ? "New message" : body,
                             senderKind: kind, senderId: sender.id.isEmpty ? (member?.id ?? from) : sender.id,
                             senderName: sender.name.isEmpty ? (member?.displayName ?? from) : sender.name, senderHandle: from,
                             avatar: sender.avatar,
