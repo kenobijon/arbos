@@ -262,11 +262,16 @@ mod tests {
 
     #[test]
     fn key_like_tokens_are_found_with_a_suggested_name() {
-        let text = concat!("here is the stripe key sk_", "live_51HxQ9mT3vK2pLnR8wZ4eYc7bD1fG6hJ0kM9nP5qS2tU8vW3xA1 save this");
+        let text = concat!(
+            "here is the stripe key sk_",
+            "live_51HxQ9mT3vK2pLnR8wZ4eYc7bD1fG6hJ0kM9nP5qS2tU8vW3xA1 save this"
+        );
         let found = find_key_like(text);
         assert_eq!(found.len(), 1, "{found:?}");
         assert_eq!(found[0].suggested_name, "STRIPE_KEY");
-        assert!(found[0].value(text).starts_with(concat!("sk_", "live_51Hx")));
+        assert!(found[0]
+            .value(text)
+            .starts_with(concat!("sk_", "live_51Hx")));
         assert!(found[0].value(text).ends_with("W3xA1"));
         assert!(asks_to_save(text));
 
@@ -302,7 +307,10 @@ mod tests {
 
     #[test]
     fn hints_pick_one_token_without_the_value() {
-        let v = concat!("sk_", "live_51HxQ9mT3vK2pLnR8wZ4eYc7bD1fG6hJ0kM9nP5qS2tU8vW3xA1");
+        let v = concat!(
+            "sk_",
+            "live_51HxQ9mT3vK2pLnR8wZ4eYc7bD1fG6hJ0kM9nP5qS2tU8vW3xA1"
+        );
         let h = key_hint(v);
         assert_eq!(h, "sk_l…W3xA1".replace("W3xA1", "3xA1"));
         assert!(matches_hint(v, &h));
