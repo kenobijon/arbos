@@ -713,5 +713,7 @@ Pinned by `agent_picker::tests` (candidates through the shared matcher) and the 
 leaves the list; the agents with access on a secret's / a vault's page are not
 offered). iPhone: `AgentPickerTests` (candidates through `PeoplePicker.agents`, chip order, pick / ×,
 and a source check that the four sheets draw `AgentPickerField` and `AgentChips`
-is gone). Rig: `ARBOS_OPEN_SETTINGS=secrets-add` (the New secret form),
-`secrets-connect`, `secrets:<env>` / `secrets-vault` with the Give row.
+is gone). Rig: `ARBOS_OPEN_SETTINGS=secrets-add` (the New secret form) or
+`secrets-connect`, with `ARBOS_RIG_AGENT_PICKED=<name>,<name>` (these agents start
+as chips) and `ARBOS_RIG_AGENT_PICKER=<query>` (the dropdown starts open with that
+query typed; empty = open).

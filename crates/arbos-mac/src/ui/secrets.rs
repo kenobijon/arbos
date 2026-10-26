@@ -93,6 +93,12 @@ pub struct SecretsPanel {
     pending_people: bool,
     /// Rig: open the first vault as soon as the list arrives.
     pending_vault: bool,
+    /// Rig: `ARBOS_RIG_AGENT_PICKED=<name>,<name>` — these agents start as chips of the
+    /// open form (applied once the registry lists them).
+    rig_picked: Option<String>,
+    /// Rig: `ARBOS_RIG_AGENT_PICKER=<query>` — the "Add agent" dropdown starts open with
+    /// that query typed (empty = open, nothing typed).
+    rig_query: Option<String>,
     /// Shown as a page inside the Settings sheet (#1086) rather than as the
     /// bottom-left popover; the sheet's header carries the back button.
     pub(crate) embedded: bool,
@@ -151,6 +157,8 @@ impl SecretsPanel {
             pending_env: None,
             pending_people: false,
             pending_vault: false,
+            rig_picked: std::env::var("ARBOS_RIG_AGENT_PICKED").ok(),
+            rig_query: std::env::var("ARBOS_RIG_AGENT_PICKER").ok(),
             embedded: false,
             focus_handle: cx.focus_handle(),
         }
@@ -342,6 +350,46 @@ impl SecretsPanel {
             self.agent_picker.highlight = (cur + delta).clamp(0, n as i32 - 1) as usize;
         }
         cx.notify();
+    }
+
+    /// Rig hooks for the agent picker shots, applied once the registry is known and a
+    /// form that carries the picker is open.
+    fn apply_picker_rig(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let on_form = matches!(self.page, Page::Add | Page::Connect)
+            || (matches!(self.page, Page::Secret(_) | Page::Vault(_)) && self.giving);
+        if !on_form || self.state.read(cx).projects.is_empty() {
+            return;
+        }
+        if let Some(names) = self.rig_picked.take() {
+            let ids: Vec<Id> = {
+                let state = self.state.read(cx);
+                names
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|n| !n.is_empty())
+                    .filter_map(|n| {
+                        state
+                            .projects
+                            .iter()
+                            .find(|p| p.name.eq_ignore_ascii_case(n))
+                            .map(|p| p.id.clone())
+                    })
+                    .collect()
+            };
+            for id in ids {
+                if !self.agent_picker.picked.contains(&id) {
+                    self.agent_picker.picked.push(id);
+                }
+            }
+        }
+        if let Some(q) = self.rig_query.take() {
+            self.agent_picker.open(window, cx);
+            if !q.is_empty() {
+                self.agent_picker
+                    .search
+                    .update(cx, |i, cx| i.set_text(q, cx));
+            }
+        }
     }
 
     /// Esc / a click elsewhere: fold the "Add agent" dropdown. `true` when one was open.
@@ -2477,9 +2525,10 @@ impl Focusable for SecretsPanel {
 }
 
 impl Render for SecretsPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
         let view = self.state.read(cx).secrets.clone();
+        self.apply_picker_rig(window, cx);
         if let Some(env) = self.pending_env.clone() {
             if let Some(s) = view.secrets.iter().find(|s| s.env == env) {
                 self.pending_env = None;
