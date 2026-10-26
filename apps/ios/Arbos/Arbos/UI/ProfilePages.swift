@@ -564,10 +564,40 @@ struct ChatItem: Identifiable, Equatable {
 enum ChatMedia {
     private static let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
 
+    /// Only what was exchanged in the chat feeds the Library (Jacob, 2026-10-25,
+    /// [feedback library-chat-only-ios-2026-10-25]): a hidden job row or an unnamed
+    /// worker's spawn row is the agent's own machinery — the files it read, the
+    /// pages it fetched — and never counts. The Mac's `shared_in_chat`.
+    static func sharedInChat(_ m: Message) -> Bool { !m.hidden && !m.worker }
+
+    /// The links a text shares: `http(s)://` typed out. The data detector also
+    /// reads a bare "app.rs" or "calls.rs" as a Serbian site — a file name is not
+    /// a link (the flood Jacob saw). The Mac's `urls_in`.
+    static func links(in text: String) -> [URL] {
+        guard let detector else { return [] }
+        let ns = text as NSString
+        return detector.matches(in: text, range: NSRange(location: 0, length: ns.length)).compactMap { match in
+            guard let url = match.url, url.scheme?.hasPrefix("http") == true else { return nil }
+            let typed = ns.substring(with: match.range).lowercased()
+            return typed.hasPrefix("http://") || typed.hasPrefix("https://") ? url : nil
+        }
+    }
+
+    /// Links in the Library are the ones **people** sent (Jacob's rule names links
+    /// people sent and files the agent made — an agent's prose link, "source:
+    /// https://…", is its research, not something it shared). The Mac's `library_links`.
+    static func libraryLinks(_ m: Message) -> [URL] {
+        guard sharedInChat(m), m.role == .user else { return [] }
+        return m.parts.flatMap { part -> [URL] in
+            if case .text(_, let text) = part { return links(in: text) }
+            return []
+        }
+    }
+
     @MainActor
     static func items(messages: [Message], slot: String, model: AppModel) -> [ChatItem] {
         var out: [ChatItem] = []
-        for m in messages {
+        for m in messages where sharedInChat(m) {
             let by = MediaAlbum.senderName(m, projectName: { model.project($0)?.name })
             let agentId = m.sender.hasPrefix("agent:") ? String(m.sender.dropFirst(6))
                 : m.sender.hasPrefix("project:") ? String(m.sender.dropFirst(8)) : nil
@@ -588,11 +618,10 @@ enum ChatMedia {
                                         subtitle: a.mime, url: url, at: m.createdAt, fromHandle: m.senderHandle, mime: a.mime,
                                         media: media, by: by, fromAvatar: m.senderAvatar, fromId: fromId, agentId: agentId))
                 case .text(let id, let text):
-                    guard let detector else { continue }
-                    let ns = text as NSString
-                    for match in detector.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
-                        guard let url = match.url, url.scheme?.hasPrefix("http") == true else { continue }
-                        out.append(ChatItem(id: "\(m.id)#\(id)#\(match.range.location)", kind: .link, title: url.host() ?? url.absoluteString,
+                    // People's typed links only (`libraryLinks`): never the agent's prose.
+                    guard m.role == .user else { continue }
+                    for (ix, url) in links(in: text).enumerated() {
+                        out.append(ChatItem(id: "\(m.id)#\(id)#\(ix)", kind: .link, title: url.host() ?? url.absoluteString,
                                             subtitle: url.absoluteString, url: url, at: m.createdAt, fromHandle: m.senderHandle, mime: "text/uri-list",
                                             by: by, fromAvatar: m.senderAvatar, fromId: fromId, agentId: agentId))
                     }
