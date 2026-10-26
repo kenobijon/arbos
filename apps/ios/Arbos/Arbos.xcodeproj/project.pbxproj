@@ -34,6 +34,7 @@
 		A1C1E00000000000000000A2 /* PresenceRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C1E00000000000000000A1 /* PresenceRow.swift */; };
 		A1C1E00000000000000000B2 /* PresenceRowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C1E00000000000000000B1 /* PresenceRowTests.swift */; };
 		A1D8800000000000000000B8 /* AvatarPickerTabsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D8800000000000000000B7 /* AvatarPickerTabsTests.swift */; };
+		A1D8800000000000000000E6 /* ProfilePictureViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D8800000000000000000E5 /* ProfilePictureViewTests.swift */; };
 		A1A9D0000000000000000002 /* AgentIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A9D0000000000000000001 /* AgentIdentity.swift */; };
 		A1A9E0000000000000000002 /* AgentPane.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A9E0000000000000000001 /* AgentPane.swift */; };
 		A1BB00000000000000000002 /* BackSwipe.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000001 /* BackSwipe.swift */; };
@@ -202,6 +203,7 @@
 		A1C1E00000000000000000A1 /* PresenceRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PresenceRow.swift; sourceTree = "<group>"; };
 		A1C1E00000000000000000B1 /* PresenceRowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PresenceRowTests.swift; sourceTree = "<group>"; };
 		A1D8800000000000000000B7 /* AvatarPickerTabsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AvatarPickerTabsTests.swift; sourceTree = "<group>"; };
+		A1D8800000000000000000E5 /* ProfilePictureViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfilePictureViewTests.swift; sourceTree = "<group>"; };
 		A1A9D0000000000000000001 /* AgentIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentIdentity.swift; sourceTree = "<group>"; };
 		A1A9E0000000000000000001 /* AgentPane.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentPane.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000001 /* BackSwipe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackSwipe.swift; sourceTree = "<group>"; };
@@ -506,6 +508,7 @@
 				A15C0000000000000000000A /* SessionRoomTests.swift */,
 				A1C1E00000000000000000B1 /* PresenceRowTests.swift */,
 				A1D8800000000000000000B7 /* AvatarPickerTabsTests.swift */,
+				A1D8800000000000000000E5 /* ProfilePictureViewTests.swift */,
 				A1DE700000000000000000D1 /* MentionDraftTests.swift */,
 				A1BC00000000000000000003 /* MessageMenuTests.swift */,
 				A1BC00000000000000000007 /* ReactionCapsuleTests.swift */,
@@ -812,6 +815,7 @@
 				A15C0000000000000000000B /* SessionRoomTests.swift in Sources */,
 				A1C1E00000000000000000B2 /* PresenceRowTests.swift in Sources */,
 				A1D8800000000000000000B8 /* AvatarPickerTabsTests.swift in Sources */,
+				A1D8800000000000000000E6 /* ProfilePictureViewTests.swift in Sources */,
 				A1DE700000000000000000D2 /* MentionDraftTests.swift in Sources */,
 				A1BC00000000000000000004 /* MessageMenuTests.swift in Sources */,
 				A1BC00000000000000000008 /* ReactionCapsuleTests.swift in Sources */,
