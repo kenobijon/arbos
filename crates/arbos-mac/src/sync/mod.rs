@@ -8,6 +8,7 @@
 //! the sources are candidates to move there later (`arbos-design.md` §7.2).
 
 pub mod agent_avatar;
+pub mod avatar_master;
 pub mod credentials;
 pub mod diagnostics;
 pub mod doc;
@@ -72,6 +73,11 @@ pub enum SyncEvent {
     Avatar {
         url: String,
         bytes: Arc<Vec<u8>>,
+    },
+    /// The picture at `url` could not be fetched (retries exhausted, or 404): the app forgets
+    /// the request so the next surface that wants it asks again.
+    AvatarMissing {
+        url: String,
     },
     /// The avatar picker's generated picture is ready to preview (`url` fetches it; `image_key`
     /// is what "Set avatar" sends), or the generation failed (`error`).
@@ -413,7 +419,7 @@ impl PictureTarget {
 /// leaf).
 #[derive(Clone, Debug, PartialEq)]
 pub enum DraftPicture {
-    /// A file the owner chose; uploaded as a 512 px JPEG into the new entity's slot.
+    /// A file the owner chose; uploaded as the picture master (≤ 1024 px PNG / JPEG) into the new entity's slot.
     File(std::path::PathBuf),
     /// A picture the relay already holds in my own slot (`users:{me}`): copied over.
     Generated { key: String },
@@ -422,7 +428,7 @@ pub enum DraftPicture {
 /// Where an agent's new picture comes from (`ClientCommand::SetProjectImage`).
 #[derive(Clone, Debug, PartialEq)]
 pub enum PictureSource {
-    /// A file the owner chose; uploaded as a 512 px JPEG.
+    /// A file the owner chose; uploaded as the picture master (≤ 1024 px PNG / JPEG).
     File(std::path::PathBuf),
     /// A blob the relay already stores under the project (a generated picture).
     Key(String),
@@ -726,7 +732,7 @@ pub enum ClientCommand {
         server_id: Id,
         pick: Option<crate::ui::avatars::LeafPick>,
     },
-    /// My own picture (`PUT /me/avatar`, JPEG ≤ 2 MB): overrides the GitHub
+    /// My own picture (`PUT /me/avatar`, PNG / JPEG master ≤ 3 MB): overrides the GitHub
     /// avatar everywhere the relay serves me.
     SetMyAvatar {
         path: std::path::PathBuf,
