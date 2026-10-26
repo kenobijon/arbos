@@ -3341,27 +3341,71 @@ fn group_invite_page_with_head(head: &str, body: &str) -> Response {
 
 // ---- room hooks ---------------------------------------------------------------------------------
 
-/// Why a row push into a people room was refused (sent back as an `error` frame).
+/// Why a row push into a people room was refused (sent back as an `error` frame). The wire
+/// code stays `rate_limited` / `not_available` — fielded clients keep a room Live only for
+/// those two (`arbos-client::room::on_error`), so a new code would make every old client drop
+/// and redial the room on each retry. A `not_available` frame says *why* in `reason`
+/// ([feedback blocked-state-relay-2026-10-26]): `blocked_by`, `blocks_member`, `silenced`,
+/// `chat_unavailable`; a block also names the other party as `byHandle` / `byName`. New clients
+/// key on `reason`; old clients behave as before.
+#[derive(Debug)]
 pub enum PushRefused {
     /// Over the message rate limit. `retry_s` is seconds until the oldest counted event leaves
     /// the 60 s window (carried as `retryS` on the error frame).
-    RateLimited {
-        retry_s: i64,
+    RateLimited { retry_s: i64 },
+    /// A block stands between the sender and someone in the chat: `blocked_by` = that person
+    /// blocked the sender; `blocks_member` = the sender blocked the other person of a DM.
+    Blocked {
+        reason: BlockReason,
+        by_handle: String,
+        by_name: Option<String>,
     },
+    /// An admin muted the sender in this chat.
+    Silenced,
+    /// No such chat (or nothing else the relay can name).
     NotAvailable,
+}
+
+/// Which way the block runs, from the sender's point of view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockReason {
+    /// Someone in the chat has blocked the sender.
+    BlockedBy,
+    /// The sender has blocked the other person (a DM: nothing to post into).
+    BlocksMember,
+}
+
+impl BlockReason {
+    pub fn code(self) -> &'static str {
+        match self {
+            BlockReason::BlockedBy => "blocked_by",
+            BlockReason::BlocksMember => "blocks_member",
+        }
+    }
 }
 
 impl PushRefused {
     pub fn code(&self) -> &'static str {
         match self {
             PushRefused::RateLimited { .. } => "rate_limited",
-            PushRefused::NotAvailable => "not_available",
+            PushRefused::Blocked { .. } | PushRefused::Silenced | PushRefused::NotAvailable => {
+                "not_available"
+            }
         }
     }
 
     pub fn message(&self) -> &'static str {
         match self {
             PushRefused::RateLimited { .. } => "slow down",
+            PushRefused::Blocked {
+                reason: BlockReason::BlockedBy,
+                ..
+            } => "someone in this chat has blocked you",
+            PushRefused::Blocked {
+                reason: BlockReason::BlocksMember,
+                ..
+            } => "you have blocked this person",
+            PushRefused::Silenced => "you are muted in this chat",
             PushRefused::NotAvailable => "this chat is not available",
         }
     }
@@ -3369,9 +3413,80 @@ impl PushRefused {
     pub fn retry_s(&self) -> Option<i64> {
         match self {
             PushRefused::RateLimited { retry_s } => Some(*retry_s),
-            PushRefused::NotAvailable => None,
+            PushRefused::Blocked { .. } | PushRefused::Silenced | PushRefused::NotAvailable => None,
         }
     }
+
+    /// The `reason` field of a `not_available` frame; `None` on `rate_limited`.
+    pub fn reason(&self) -> Option<&'static str> {
+        match self {
+            PushRefused::RateLimited { .. } => None,
+            PushRefused::Blocked { reason, .. } => Some(reason.code()),
+            PushRefused::Silenced => Some("silenced"),
+            PushRefused::NotAvailable => Some("chat_unavailable"),
+        }
+    }
+
+    /// `(byHandle, byName)` of the other party on a block.
+    pub fn other_party(&self) -> Option<(&str, Option<&str>)> {
+        match self {
+            PushRefused::Blocked {
+                by_handle, by_name, ..
+            } => Some((by_handle.as_str(), by_name.as_deref())),
+            PushRefused::RateLimited { .. } | PushRefused::Silenced | PushRefused::NotAvailable => {
+                None
+            }
+        }
+    }
+}
+
+/// The block that stops `user_id` posting into `cm`, if any: a member who blocked them (any
+/// chat), else — in a DM — the other person they blocked themselves. A group member the sender
+/// blocked does not stop the sender's own posts (they would lock themselves out of their
+/// groups); the apps show that person's Blocked state instead.
+fn block_in_the_way(state: &AppState, user_id: &str, cm: &ChatWithMembers) -> Option<PushRefused> {
+    let humans = human_user_ids(cm);
+    let other_party = |other: &str| {
+        let card = state.db.user_card(other).ok().flatten();
+        let by_handle = card
+            .as_ref()
+            .map(|c| c.handle.clone())
+            .filter(|h| !h.is_empty())
+            .unwrap_or_else(|| other.to_owned());
+        let by_name = card.and_then(|c| c.name).filter(|n| !n.trim().is_empty());
+        (by_handle, by_name)
+    };
+    for other in humans.iter().filter(|o| o.as_str() != user_id) {
+        if state
+            .db
+            .blocked_by_any(user_id, std::slice::from_ref(other))
+            .unwrap_or(false)
+        {
+            let (by_handle, by_name) = other_party(other);
+            return Some(PushRefused::Blocked {
+                reason: BlockReason::BlockedBy,
+                by_handle,
+                by_name,
+            });
+        }
+    }
+    if cm.chat.kind == "dm" {
+        for other in humans.iter().filter(|o| o.as_str() != user_id) {
+            if state
+                .db
+                .blocked_by_any(other, std::slice::from_ref(&user_id.to_owned()))
+                .unwrap_or(false)
+            {
+                let (by_handle, by_name) = other_party(other);
+                return Some(PushRefused::Blocked {
+                    reason: BlockReason::BlocksMember,
+                    by_handle,
+                    by_name,
+                });
+            }
+        }
+    }
+    None
 }
 
 /// Called on every row a device pushes into `people/<chat>`: rate limit, block check, a
@@ -3385,12 +3500,24 @@ pub fn on_room_push(
     let Principal::Device { user_id, .. } = principal else {
         return Ok(Vec::new()); // boxes (agents) are metered by their owner's credits, not here
     };
+    let refused = |r: PushRefused| {
+        // One line per refusal (#1990): who, where, why — the Arbonites outage had none.
+        tracing::warn!(
+            user = %user_id,
+            chat = %chat_id,
+            code = r.code(),
+            reason = r.reason().unwrap_or("-"),
+            by = r.other_party().map(|(h, _)| h).unwrap_or("-"),
+            "people push refused"
+        );
+        Err(r)
+    };
     let Ok(cm) = load_chat(state, chat_id) else {
-        return Err(PushRefused::NotAvailable);
+        return refused(PushRefused::NotAvailable);
     };
     let humans = human_user_ids(&cm);
-    if state.db.blocked_by_any(user_id, &humans).unwrap_or(false) {
-        return Err(PushRefused::NotAvailable);
+    if let Some(r) = block_in_the_way(state, user_id, &cm) {
+        return refused(r);
     }
     // Admin mute from posting: silenced members cannot send into the room.
     if cm
@@ -3398,7 +3525,7 @@ pub fn on_room_push(
         .iter()
         .any(|m| m.user_id() == Some(user_id.as_str()) && membership_is_silenced(m))
     {
-        return Err(PushRefused::NotAvailable);
+        return refused(PushRefused::Silenced);
     }
     let limit = if young_account(state, user_id) {
         MSGS_PER_MIN / 2
@@ -3411,10 +3538,10 @@ pub fn on_room_push(
         Ok(true) => {}
         Ok(false) => {
             let retry_s = state.db.rate_retry_s(user_id, "msg", 60_000).unwrap_or(1);
-            return Err(PushRefused::RateLimited { retry_s });
+            return refused(PushRefused::RateLimited { retry_s });
         }
         Err(_) => {
-            return Err(PushRefused::RateLimited { retry_s: 1 });
+            return refused(PushRefused::RateLimited { retry_s: 1 });
         }
     }
     let (head, _) = state.db.room_activity(&room_of(chat_id)).unwrap_or((0, 0));
@@ -3612,6 +3739,138 @@ mod push_rate_tests {
             .rate_check_and_note(&alice, "msg", 60_000, 2)
             .unwrap());
         assert_eq!(state.db.rate_count(&alice, "msg", 60_000).unwrap(), 2);
+    }
+}
+
+#[cfg(test)]
+mod block_refusal_tests {
+    //! A push stopped by a block says which way the block runs and who the other party is
+    //! ([feedback blocked-state-relay-2026-10-26]); before, an opaque `not_available`.
+
+    use arbos_core::ids::ulid;
+
+    use super::tests_support::{dm, person};
+    use super::*;
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    fn group(state: &AppState, members: &[&str]) -> String {
+        let chat = PeopleChat {
+            id: ulid(),
+            kind: "group".into(),
+            created_by: members[0].to_owned(),
+            created_at: now_ms(),
+            title: Some("Arbonites".into()),
+            image_key: None,
+            avatar_leaf: None,
+            avatar_leaf_color: None,
+            description: None,
+        };
+        state.db.insert_people_chat(&chat).expect("chat");
+        for u in members {
+            state
+                .db
+                .add_member(
+                    &chat.id,
+                    &format!("user:{u}"),
+                    "owner",
+                    members[0],
+                    &json!({}),
+                )
+                .expect("member");
+        }
+        chat.id
+    }
+
+    #[test]
+    fn a_member_who_blocked_me_refuses_my_group_post_by_name() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 1);
+        let (bob, bob_dev) = person(&state, 2);
+        let (carol, _) = person(&state, 3);
+        let chat = group(&state, &[&alice, &bob, &carol]);
+        assert!(on_room_push(&state, &alice_dev, &chat).is_ok());
+
+        state.db.block(&bob, &alice).unwrap();
+        let err = on_room_push(&state, &alice_dev, &chat).unwrap_err();
+        assert_eq!(err.code(), "not_available", "the wire code never changes");
+        assert_eq!(
+            err.reason(),
+            Some("blocked_by"),
+            "Bob blocked Alice: {err:?}"
+        );
+        assert_eq!(err.other_party(), Some(("user2", None)));
+        // Bob himself still posts. Bob blocking Carol does not stop Bob's own group posts
+        // (only Carol's would be, as blocked_by).
+        assert!(on_room_push(&state, &bob_dev, &chat).is_ok());
+        state.db.block(&bob, &carol).unwrap();
+        assert!(
+            on_room_push(&state, &bob_dev, &chat).is_ok(),
+            "a group member the sender blocked does not lock the sender out"
+        );
+    }
+
+    #[test]
+    fn in_a_dm_my_own_block_refuses_my_post_as_blocks_member() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 1);
+        let (bob, bob_dev) = person(&state, 2);
+        let chat = dm(&state, &alice, &bob);
+        state.db.block(&alice, &bob).unwrap();
+        let mine = on_room_push(&state, &alice_dev, &chat).unwrap_err();
+        assert_eq!(mine.code(), "not_available");
+        assert_eq!(
+            (mine.reason(), mine.other_party()),
+            (Some("blocks_member"), Some(("user2", None))),
+            "Alice blocked Bob and writes to him: {mine:?}"
+        );
+        let theirs = on_room_push(&state, &bob_dev, &chat).unwrap_err();
+        assert_eq!(
+            (theirs.reason(), theirs.other_party()),
+            (Some("blocked_by"), Some(("user1", None))),
+            "Bob writes to Alice, who blocked him: {theirs:?}"
+        );
+        state.db.unblock(&alice, &bob).unwrap();
+        assert!(on_room_push(&state, &alice_dev, &chat).is_ok());
+        assert!(on_room_push(&state, &bob_dev, &chat).is_ok());
+    }
+
+    #[test]
+    fn a_missing_chat_is_still_not_available() {
+        let state = test_state(AuthMode::Github);
+        let (_, alice_dev) = person(&state, 1);
+        let err = on_room_push(&state, &alice_dev, "chat_missing").unwrap_err();
+        assert_eq!(err.code(), "not_available");
+        assert_eq!(err.reason(), Some("chat_unavailable"));
+        assert!(err.other_party().is_none());
+    }
+
+    #[test]
+    fn every_refusal_keeps_a_wire_code_old_clients_know() {
+        let refused = PushRefused::Blocked {
+            reason: BlockReason::BlockedBy,
+            by_handle: "sami".into(),
+            by_name: Some("Sami Kassab".into()),
+        };
+        assert_eq!(refused.code(), "not_available");
+        assert_eq!(refused.reason(), Some("blocked_by"));
+        assert_eq!(refused.other_party(), Some(("sami", Some("Sami Kassab"))));
+        assert_eq!(refused.retry_s(), None);
+        assert_eq!(BlockReason::BlocksMember.code(), "blocks_member");
+        assert_eq!(PushRefused::Silenced.code(), "not_available");
+        assert_eq!(PushRefused::Silenced.reason(), Some("silenced"));
+        assert_eq!(PushRefused::RateLimited { retry_s: 3 }.reason(), None);
+        for r in [
+            PushRefused::RateLimited { retry_s: 1 },
+            PushRefused::Silenced,
+            PushRefused::NotAvailable,
+            refused,
+        ] {
+            assert!(
+                matches!(r.code(), "rate_limited" | "not_available"),
+                "{r:?}: fielded clients only stay Live for these two"
+            );
+        }
     }
 }
 

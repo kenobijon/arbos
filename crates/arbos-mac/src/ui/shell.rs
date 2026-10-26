@@ -2902,33 +2902,18 @@ impl Shell {
             )
     }
 
-    /// The per-room push refusal (`not_available`): "Messages in this chat aren't being
-    /// delivered right now." in the same slot, while the relay refuses; it clears itself on
-    /// the room's next ACK (`SyncEvent::PushRefused { refused: false }`).
+    /// The per-room push refusal in the same slot, while the relay refuses; it clears itself
+    /// on the room's next ACK (`SyncEvent::PushRefused { refused: false }`). A refusal with a
+    /// `reason` says so in plain words ([feedback blocked-state-relay-2026-10-26]): "<name> has
+    /// blocked you in this chat." / "Couldn't post: you've blocked <name>, who is in this chat.
+    /// Unblock to post." / the mute line; anything else keeps "Messages in this chat aren't
+    /// being delivered right now."
     fn render_delivery_note(&self, cx: &mut Context<Self>) -> Option<Div> {
         let theme = Theme::of(cx).clone();
         let state = self.state.read(cx);
         let chat = state.active_chat_id()?;
-        if !state.push_refused.contains(&chat) {
-            return None;
-        }
-        let error = UserError::of(
-            "",
-            ErrorClass::Offline {
-                device_offline: false,
-            },
-            "the relay refused the push: not_available",
-        );
-        let error = UserError {
-            verb: String::new(),
-            class: ErrorClass::Refused {
-                message: Some(
-                    "Messages in this chat aren't being delivered right now. We'll keep trying."
-                        .into(),
-                ),
-            },
-            ..error
-        };
+        let why = state.push_refused.get(&chat)?.clone();
+        let error = delivery_error(&why);
         Some(self.chat_note(
             "delivery-error",
             &error,
@@ -4914,5 +4899,33 @@ pub(crate) fn human_bytes(bytes: i64) -> String {
         format!("{:.1} MB", b / 1_000_000.0)
     } else {
         format!("{:.2} GB", b / 1_000_000_000.0)
+    }
+}
+
+/// The chat-level note's error for a push refusal: the refusal's sentence as the relay's
+/// words (`ErrorClass::Refused`), the raw code / reason behind Details.
+pub(crate) fn delivery_error(why: &crate::sync::PushRefusal) -> UserError {
+    let raw = match (&why.reason, &why.by_handle) {
+        (Some(reason), Some(handle)) => {
+            format!(
+                "the relay refused the push: {} ({reason}, @{handle})",
+                why.code
+            )
+        }
+        _ => format!("the relay refused the push: {}", why.code),
+    };
+    let error = UserError::of(
+        "",
+        ErrorClass::Offline {
+            device_offline: false,
+        },
+        raw,
+    );
+    UserError {
+        verb: String::new(),
+        class: ErrorClass::Refused {
+            message: Some(why.sentence()),
+        },
+        ..error
     }
 }

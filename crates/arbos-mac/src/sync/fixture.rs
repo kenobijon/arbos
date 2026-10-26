@@ -28,7 +28,9 @@ use crate::model::{
 
 use super::doc::ChatDoc;
 use super::user_error::{ErrorClass, UserError};
-use super::{ClientCommand, DraftPicture, PictureSource, PictureTarget, SyncEvent, SyncSource};
+use super::{
+    ClientCommand, DraftPicture, PictureSource, PictureTarget, PushRefusal, SyncEvent, SyncSource,
+};
 use crate::model::{
     new_id, now_ms, ApprovalRisk, ApprovalState, Attachment, AttachmentKind, BoxReport, BoxState,
     BoxWorkspace, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelPlatformState,
@@ -456,6 +458,24 @@ fn emit_failure_hook(shared: &Arc<Shared>) {
                     let _ = shared.events.send(SyncEvent::PushRefused {
                         chat_id,
                         refused: true,
+                        why: PushRefusal::code("not_available"),
+                    });
+                }
+            }
+            // Rig ([feedback blocked-state-mac-2026-10-26]): the relay refused the push
+            // because of a block — `blocked-by` (Sam blocked me) / `blocks-member` (I
+            // blocked Sam, a DM) — in every chat, so the open one shows the sentence.
+            "blocked-by" | "blocks-member" => {
+                for (chat_id, _) in targets {
+                    let _ = shared.events.send(SyncEvent::PushRefused {
+                        chat_id,
+                        refused: true,
+                        why: PushRefusal {
+                            code: "not_available".into(),
+                            reason: Some(spec.replace('-', "_")),
+                            by_handle: Some("sam".into()),
+                            by_name: Some("Sam Rivera".into()),
+                        },
                     });
                 }
             }
