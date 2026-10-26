@@ -133,6 +133,9 @@ pub async fn pair(State(state): State<AppState>, Json(b): Json<PairBody>) -> Api
     .into_response())
 }
 
+/// `GET /devices` — the caller's own devices (the admin token sees every account's). Until
+/// 2026-10-26 this listed every device of every user to any signed-in device, and
+/// `DELETE /devices/{id}` revoked any of them: one test account could log every other user out.
 pub async fn list_devices(State(state): State<AppState>, principal: Principal) -> ApiResult {
     if principal.is_box() {
         return Err((
@@ -140,9 +143,14 @@ pub async fn list_devices(State(state): State<AppState>, principal: Principal) -
             "box tokens cannot list devices".into(),
         ));
     }
-    Ok(Json(state.db.list_devices().map_err(internal)?).into_response())
+    let devices = match principal.user_id() {
+        Some(uid) => state.db.devices_of_user(uid).map_err(internal)?,
+        None => state.db.list_devices().map_err(internal)?,
+    };
+    Ok(Json(devices).into_response())
 }
 
+/// `DELETE /devices/{id}` — revoke one of the caller's own devices (the admin token: any device).
 pub async fn revoke_device(
     State(state): State<AppState>,
     principal: Principal,
@@ -154,7 +162,20 @@ pub async fn revoke_device(
             "box tokens cannot revoke devices".into(),
         ));
     }
-    let ok = state.db.revoke_device(&id).map_err(internal)?;
+    if let Some(uid) = principal.user_id() {
+        let owner = state.db.device_user(&id).map_err(internal)?;
+        if owner.as_deref() != Some(uid) {
+            // Another user's device looks like no device at all: no enumeration oracle either.
+            return Ok(StatusCode::NOT_FOUND.into_response());
+        }
+    }
+    // Same revocation as `DELETE /auth/devices/{id}`: the legacy path only flagged the device row
+    // and left its refresh tokens live (14 such devices since Oct 14), so a "revoked" device could
+    // still mint access tokens.
+    let ok = state.db.revoke_device_fully(&id).map_err(internal)?;
+    if ok {
+        crate::matrix::servers::revoke_device(&state, &id).await;
+    }
     Ok(if ok {
         StatusCode::NO_CONTENT
     } else {
@@ -1808,6 +1829,17 @@ pub struct BoxHelloBody {
     pub seed_sha: Option<String>,
 }
 
+/// The box's owner as the agent should know them: login, the profile name (a label) and
+/// `address_name` — the name the user set themselves, the only one agents use to address them.
+fn owner_json(state: &AppState, user_id: &str) -> Value {
+    match state.db.user_address(user_id) {
+        Ok(Some((login, name, address_name, former_names))) => {
+            json!({ "id": user_id, "login": login, "name": name, "address_name": address_name, "former_names": former_names })
+        }
+        _ => json!({ "id": user_id }),
+    }
+}
+
 /// One project as the box sees it: settings, chats, and the pushes queued for it.
 fn workspace_json(state: &AppState, p: &Project) -> Result<Value, (StatusCode, String)> {
     let chats = state.db.list_chats(&p.id).map_err(internal)?;
@@ -1874,12 +1906,16 @@ pub async fn box_hello(
         }
     }
     let projects = state.db.projects_of_user(user_id).map_err(internal)?;
+    let owner = owner_json(&state, user_id);
     let mut workspaces = Vec::new();
     for p in &projects {
-        workspaces.push(workspace_json(&state, p)?);
+        let mut w = workspace_json(&state, p)?;
+        w["owner"] = owner.clone();
+        workspaces.push(w);
     }
     Ok(Json(json!({
         "user_id": user_id,
+        "owner": owner,
         "workspaces": workspaces,
         "relay_version": env!("CARGO_PKG_VERSION"),
     }))
@@ -1894,6 +1930,7 @@ pub async fn box_projects(State(state): State<AppState>, principal: Principal) -
     };
     boxes::box_seen_http(&state, user_id).await;
     let projects = state.db.projects_of_user(user_id).map_err(internal)?;
+    let owner = owner_json(&state, user_id);
     let mut out = Vec::new();
     for p in &projects {
         let chats = state.db.list_chats(&p.id).map_err(internal)?;
@@ -1907,9 +1944,9 @@ pub async fn box_projects(State(state): State<AppState>, principal: Principal) -
             project["forked_from"] = json!(src);
         }
         let people_chats = crate::people::people_chats_of_project(&state, &p.id, user_id);
-        out.push(json!({ "project": project, "chats": chats, "people_chats": people_chats }));
+        out.push(json!({ "project": project, "chats": chats, "people_chats": people_chats, "owner": owner }));
     }
-    Ok(Json(json!({ "user_id": user_id, "workspaces": out })).into_response())
+    Ok(Json(json!({ "user_id": user_id, "owner": owner, "workspaces": out })).into_response())
 }
 
 /// `POST /box/keepalive`: box-level keep-alive (any workspace mid-turn keeps the box awake).
@@ -1974,7 +2011,13 @@ pub async fn push(
         .project(&id)
         .map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
-    let _ = principal;
+    // The write side was open to any signed-in device or box until 2026-10-26 (#1951): a push is
+    // a message into that project's agent plus a wake of its box, so the caller must be allowed on
+    // the project — its owner's devices and boxes, or an invited member. Cross-user agent traffic
+    // goes through /agent-messages and its grants, never through here.
+    if !state.allows(&principal, &p.id) {
+        return Err((StatusCode::FORBIDDEN, "not your project".into()));
+    }
     state
         .db
         .enqueue_push(&p.id, &b.kind, &b.payload)
@@ -2596,8 +2639,12 @@ mod agent_avatar_version_tests {
         let project = project_of(&state, &alice, "Hezbola");
 
         // No picture yet: 404 for everyone.
-        let r = crate::images::project_avatar(State(state.clone()), Path(format!("{project}.jpg")))
-            .await;
+        let r = crate::images::project_avatar(
+            State(state.clone()),
+            Path(format!("{project}.jpg")),
+            Query(crate::avatar_image::SizeQuery::default()),
+        )
+        .await;
         assert_eq!(r.status(), StatusCode::NOT_FOUND);
 
         // Alice uploads a PNG into the agent's slot and makes it the picture.
@@ -2631,13 +2678,18 @@ mod agent_avatar_version_tests {
             State(state.clone()),
             bob_dev.clone(),
             Path((project.clone(), "avatar-1.png".to_owned())),
+            Query(crate::avatar_image::SizeQuery::default()),
         )
         .await;
         assert_eq!(r.status(), StatusCode::FORBIDDEN);
 
         // But the picture route hands him the current picture, typed, cacheable.
-        let r = crate::images::project_avatar(State(state.clone()), Path(format!("{project}.jpg")))
-            .await;
+        let r = crate::images::project_avatar(
+            State(state.clone()),
+            Path(format!("{project}.jpg")),
+            Query(crate::avatar_image::SizeQuery::default()),
+        )
+        .await;
         assert_eq!(r.status(), StatusCode::OK);
         assert_eq!(
             r.headers()
@@ -2665,8 +2717,12 @@ mod agent_avatar_version_tests {
         )
         .await
         .unwrap();
-        let r = crate::images::project_avatar(State(state.clone()), Path(format!("{project}.jpg")))
-            .await;
+        let r = crate::images::project_avatar(
+            State(state.clone()),
+            Path(format!("{project}.jpg")),
+            Query(crate::avatar_image::SizeQuery::default()),
+        )
+        .await;
         assert_eq!(r.status(), StatusCode::NOT_FOUND);
     }
 }
