@@ -495,13 +495,34 @@ pub fn picture_svg(
     o
 }
 
-/// Render the fallback PNG (`PNG_WIDTH × PNG_HEIGHT`, light theme) — agentd only.
+/// Render the fallback PNG (`PNG_WIDTH × PNG_HEIGHT`, light theme) — what agentd attaches.
 #[cfg(feature = "chart-png")]
 pub fn picture_png(chart: &Chart, credit: &PictureCredit) -> Result<Vec<u8>, String> {
+    picture_png_with(
+        chart,
+        PNG_WIDTH,
+        PNG_HEIGHT,
+        1.0,
+        &PictureTheme::LIGHT,
+        credit,
+    )
+}
+
+/// Render a `w × h` point picture at `scale` px/pt in `theme` (the apps' "Save PNG": the
+/// current theme at the device scale).
+#[cfg(feature = "chart-png")]
+pub fn picture_png_with(
+    chart: &Chart,
+    w: u32,
+    h: u32,
+    scale: f32,
+    theme: &PictureTheme,
+    credit: &PictureCredit,
+) -> Result<Vec<u8>, String> {
     use resvg::usvg;
     static INTER_REGULAR: &[u8] = include_bytes!("../assets/Inter-Regular-subset.ttf");
     static INTER_SEMIBOLD: &[u8] = include_bytes!("../assets/Inter-SemiBold-subset.ttf");
-    let svg = picture_svg(chart, PNG_WIDTH, PNG_HEIGHT, &PictureTheme::LIGHT, credit);
+    let svg = picture_svg(chart, w, h, theme, credit);
     let mut fontdb = usvg::fontdb::Database::new();
     fontdb.load_font_data(INTER_REGULAR.to_vec());
     fontdb.load_font_data(INTER_SEMIBOLD.to_vec());
@@ -512,10 +533,19 @@ pub fn picture_png(chart: &Chart, credit: &PictureCredit) -> Result<Vec<u8>, Str
     };
     let tree =
         usvg::Tree::from_data(svg.as_bytes(), &opt).map_err(|e| format!("chart svg: {e}"))?;
-    let mut pixmap = resvg::tiny_skia::Pixmap::new(PNG_WIDTH, PNG_HEIGHT).ok_or("pixmap")?;
+    let scale = if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    };
+    let (pw, ph) = (
+        (w as f32 * scale).round() as u32,
+        (h as f32 * scale).round() as u32,
+    );
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(pw.max(1), ph.max(1)).ok_or("pixmap")?;
     resvg::render(
         &tree,
-        resvg::tiny_skia::Transform::default(),
+        resvg::tiny_skia::Transform::from_scale(scale, scale),
         &mut pixmap.as_mut(),
     );
     pixmap.encode_png().map_err(|e| format!("png: {e}"))
