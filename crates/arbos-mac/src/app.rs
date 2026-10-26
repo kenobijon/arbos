@@ -6000,6 +6000,7 @@ impl AppState {
     }
 
     /// Secret hand-off request card → Save: the value leaves this device once, to the vault.
+    #[allow(clippy::too_many_arguments)] // one call site, the card; the fields mirror the command
     pub fn secret_handoff_save(
         &mut self,
         chat_id: Id,
