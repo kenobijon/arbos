@@ -109,6 +109,26 @@ impl Handlers {
     }
 }
 
+struct HandlersWithFlags {
+    try_again: Option<Handler>,
+    sign_in: Option<Handler>,
+    toggle_details: Option<Handler>,
+    dismiss: Option<Handler>,
+    toggle_details_present: bool,
+}
+
+impl From<Handlers> for HandlersWithFlags {
+    fn from(h: Handlers) -> Self {
+        Self {
+            toggle_details_present: h.toggle_details.is_some(),
+            try_again: h.try_again,
+            sign_in: h.sign_in,
+            toggle_details: h.toggle_details,
+            dismiss: h.dismiss,
+        }
+    }
+}
+
 /// The element. `id` prefixes every control's id (`{id}-try-again`, `{id}-details`,
 /// `{id}-copy`, `{id}-close`) and names the root for the headless tests.
 pub fn render(
@@ -122,13 +142,9 @@ pub fn render(
     let root_id: SharedString = id.to_owned().into();
     let sentence: SharedString = error.sentence().into();
     let action = error.action();
+    let handlers = HandlersWithFlags::from(handlers);
 
-    let mut actions = div()
-        .flex()
-        .items_center()
-        .gap(px(12.0))
-        .flex_shrink_0()
-        .ml_auto();
+    let mut actions = div().flex().items_center().gap(px(12.0));
     let capsule = |label: &'static str, cid: String, theme: &Theme| {
         div()
             .id(SharedString::from(cid.clone()))
@@ -193,37 +209,39 @@ pub fn render(
         );
     }
 
-    // The sentence row: disc, sentence (grows), the actions at the line's end — or, when the
-    // sentence needs the width, on their own line under it (flex-wrap + margin-left auto).
+    // The sentence row (disc + sentence, wrapping), then the actions right-aligned on their own
+    // row under it — one deterministic shape at every width, so a 273 pt sheet and an 876 pt
+    // column read the same.
+    let has_actions = !matches!(action, Action::None) || handlers.toggle_details_present;
     let row = div()
         .flex()
-        .flex_wrap()
-        .items_center()
-        .gap_x(px(14.0))
-        .gap_y(px(8.0))
+        .items_start()
+        .gap(px(8.0))
+        .w_full()
+        .child(disc(theme))
         .child(
             div()
-                .flex()
-                .items_start()
-                .gap(px(8.0))
+                .id(SharedString::from(format!("{id}-sentence")))
+                .debug_selector({
+                    let s = format!("{id}-sentence");
+                    move || s.clone()
+                })
                 .flex_1()
-                .min_w(px(160.0))
-                .child(disc(theme))
-                .child(
-                    div()
-                        .id(SharedString::from(format!("{id}-sentence")))
-                        .debug_selector({
-                            let s = format!("{id}-sentence");
-                            move || s.clone()
-                        })
-                        .flex_1()
-                        .text_size(px(TEXT_SMALL))
-                        .line_height(px(LINE))
-                        .text_color(theme.text)
-                        .child(sentence),
-                ),
-        )
-        .child(actions);
+                .min_w_0()
+                .whitespace_normal()
+                .text_size(px(TEXT_SMALL))
+                .line_height(px(LINE))
+                .text_color(theme.text)
+                .child(sentence),
+        );
+    let actions_row = has_actions.then(|| {
+        div()
+            .mt(px(8.0))
+            .w_full()
+            .flex()
+            .justify_end()
+            .child(actions)
+    });
 
     let mut note = div()
         .id(root_id.clone())
@@ -239,7 +257,8 @@ pub fn render(
         .when(style == Style::Toast, |d| {
             d.pr(px(PAD_X + 18.0)).shadow_md()
         })
-        .child(row);
+        .child(row)
+        .children(actions_row);
 
     if details_open {
         note = note.child(details_block(id, error, theme));

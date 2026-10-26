@@ -402,36 +402,29 @@ fn emit_failure_hook(shared: &Arc<Shared>) {
     let shared = shared.clone();
     tokio::spawn(async move {
         sleep(Duration::from_millis(1500)).await;
-        let open_chat = shared
-            .docs
-            .lock()
-            .unwrap()
-            .keys()
-            .next()
-            .cloned()
-            .unwrap_or_default();
-        let (chat_id, last_mine) = {
-            let chats = shared.chats.lock().unwrap();
-            let chat = chats
+        // Every chat gets the note (the rig does not know which one is open).
+        let targets: Vec<(Id, Option<Id>)> = {
+            let chats: Vec<Id> = shared
+                .chats
+                .lock()
+                .unwrap()
                 .iter()
-                .find(|c| c.id == open_chat)
-                .or_else(|| chats.first())
-                .cloned();
-            drop(chats);
-            match chat {
-                Some(c) => {
-                    let docs = shared.docs.lock().unwrap();
-                    let mine = docs.get(&c.id).and_then(|d| {
+                .map(|c| c.id.clone())
+                .collect();
+            let docs = shared.docs.lock().unwrap();
+            chats
+                .into_iter()
+                .map(|id| {
+                    let mine = docs.get(&id).and_then(|d| {
                         d.read_all()
                             .into_iter()
                             .rev()
                             .find(|m| m.role == crate::model::Role::User)
                             .map(|m| m.id.clone())
                     });
-                    (c.id, mine)
-                }
-                None => (open_chat, None),
-            }
+                    (id, mine)
+                })
+                .collect()
         };
         match spec.as_str() {
             "toast" => {
@@ -448,19 +441,23 @@ fn emit_failure_hook(shared: &Arc<Shared>) {
                     .send(SyncEvent::Notice("Forwarded to Studio".into()));
             }
             "composer" => {
-                let raw = anyhow::anyhow!("dns error: failed to lookup address information")
-                    .context("POST /chats/01M5N1WSR91G8CJKNYXKJESK7X/messages");
-                let _ = shared.events.send(SyncEvent::MessageSendFailed {
-                    chat_id,
-                    message_id: last_mine.unwrap_or_default(),
-                    error: UserError::classify("send your message", &raw),
-                });
+                for (chat_id, last_mine) in targets {
+                    let raw = anyhow::anyhow!("dns error: failed to lookup address information")
+                        .context("POST /chats/01M5N1WSR91G8CJKNYXKJESK7X/messages");
+                    let _ = shared.events.send(SyncEvent::MessageSendFailed {
+                        chat_id,
+                        message_id: last_mine.unwrap_or_default(),
+                        error: UserError::classify("send your message", &raw),
+                    });
+                }
             }
             "delivery" => {
-                let _ = shared.events.send(SyncEvent::PushRefused {
-                    chat_id,
-                    refused: true,
-                });
+                for (chat_id, _) in targets {
+                    let _ = shared.events.send(SyncEvent::PushRefused {
+                        chat_id,
+                        refused: true,
+                    });
+                }
             }
             "machine" => {
                 {
