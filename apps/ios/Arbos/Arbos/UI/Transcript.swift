@@ -1387,8 +1387,8 @@ struct RowView: View, Equatable {
             }
             .padding(.horizontal, Theme.bubbleHPad)
             .padding(.vertical, Theme.bubbleVPad)
-            .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.field))
-            .overlay(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+            .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.card))
+            .overlay(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).strokeBorder(theme.separator, lineWidth: 1))
             .accessibilityLabel("\(lead)\(name)")
             .accessibilityIdentifier("secret-ghost")
             if mine {

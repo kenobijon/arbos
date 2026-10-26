@@ -45,7 +45,7 @@ final class SecretHandoffTests: XCTestCase {
         XCTAssertEqual(saved.answer, ["saved"])
     }
 
-    func testRedactedPartIsTheGhostRowAndHasNoText() {
+    func testRedactedPartIsTheGhostRowAndHasNoText() throws {
         let pm: [String: Any] = ["id": "r1", "kind": "secret_redacted", "name": "STRIPE_KEY", "env": "STRIPE_KEY",
                                  "secretId": "s1", "savedBy": "user:fx-me", "agent": "fx-comms"]
         let part = DocJSON.part(pm)
@@ -59,25 +59,28 @@ final class SecretHandoffTests: XCTestCase {
 
         let mine = message("m1", role: .user, sender: "user", parts: [part])
         XCTAssertEqual(mine.plainText, "", "nothing to copy or search")
+        // (the first row is the date stamp; the message's own row follows it)
         let rows = Transcript.rows([mine], projectId: "fx-comms")
-        XCTAssertEqual(rows.count, 1)
-        guard case .secretGhost(let n, let isMine, _, _, _) = rows[0].kind else {
-            return XCTFail("a redacted user row is the ghost, got \(rows[0].kind)")
+        let ghost = try XCTUnwrap(rows.last)
+        guard case .secretGhost(let n, let isMine, _, _, _) = ghost.kind else {
+            return XCTFail("a redacted user row is the ghost, got \(ghost.kind)")
         }
         XCTAssertEqual(n, "STRIPE_KEY")
         XCTAssertTrue(isMine)
-        XCTAssertEqual(rows[0].role, .user)
+        XCTAssertEqual(ghost.role, .user)
+        XCTAssertEqual(rows.filter { if case .user = $0.kind { return true }; return false }.count, 0, "no text bubble beside the ghost")
 
         // another member's row in a people chat: the ghost on their side, under their name
         let theirs = message("m2", role: .user, sender: "user:fx-u4", parts: [part], handle: "sam", name: "Sam Okafor")
         let groupRows = Transcript.rows([theirs], projectId: "people:g1", me: "user:fx-me", people: true, multiParty: true)
-        guard case .secretGhost(_, let theirMine, let handle, _, let named) = groupRows[0].kind else {
-            return XCTFail("the other member's redacted row is the ghost, got \(groupRows[0].kind)")
+        let theirGhost = try XCTUnwrap(groupRows.last)
+        guard case .secretGhost(_, let theirMine, let handle, _, let named) = theirGhost.kind else {
+            return XCTFail("the other member's redacted row is the ghost, got \(theirGhost.kind)")
         }
         XCTAssertFalse(theirMine)
         XCTAssertEqual(handle, "sam")
         XCTAssertTrue(named)
-        XCTAssertEqual(groupRows[0].role, .project)
+        XCTAssertEqual(theirGhost.role, .project)
     }
 
     func testAnUnknownPartStillDecodesToUnknown() {
