@@ -779,6 +779,10 @@ final class AppModel: ObservableObject {
     var isPaired: Bool { credentials != nil }
     var relayUrl: String { api.endpoint.httpUrl }
 
+    /// The model the avatar views resolve through (`AgentAvatar.shown`): the app has one; a
+    /// test's model becomes current while it exists.
+    private(set) weak static var current: AppModel?
+
     init() {
         LaunchClock.mark("app-init")
         // Drop the retired SessionRoom TestFlight switch so it does not linger.
@@ -839,6 +843,7 @@ final class AppModel: ObservableObject {
             adopt(tokens: toks, user: who, persist: false)
         }
         #endif
+        AppModel.current = self
         Task { await probeAuthMode() }
         PushManager.shared.visibleChatId = { [weak self] in
             guard let self, self.appActive else { return nil }
