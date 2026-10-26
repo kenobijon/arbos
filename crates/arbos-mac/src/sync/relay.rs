@@ -51,9 +51,9 @@ use super::dto::{
 use super::store::{self, Store};
 use super::{ClientCommand, DraftPicture, PictureSource, PictureTarget, SyncEvent, SyncSource};
 use crate::model::{
-    new_id, now_ms, AccountView, Attachment, AttachmentKind, BoxReport, BoxState, Call, CallEnded,
-    CallLeft, CallMissed, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelsView, Chat,
-    Effort, Id, Link, LinkState, Machine, MachineState, Message, Part, Person, Project,
+    new_id, now_ms, trace_rows, AccountView, Attachment, AttachmentKind, BoxReport, BoxState, Call,
+    CallEnded, CallLeft, CallMissed, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelsView,
+    Chat, Effort, Id, Link, LinkState, Machine, MachineState, Message, Part, Person, Project,
     ProjectDocView, ProjectSecrets, Reachable, ReplyRef, Role, Routine, RoutineRun, Sender,
     ServerInfo, ThreadInfo,
 };
@@ -332,6 +332,15 @@ impl Shared {
         }
         *self.creds.write().unwrap() = Some(creds.clone());
         Ok(creds)
+    }
+
+    /// The newest unreported panic of a previous run (`panic_log`), once, through the
+    /// silent-diagnostic feedback path — so a crash that only left a `.ips` behind on the
+    /// Mac still reaches the relay with its message and backtrace.
+    fn report_last_panic(self: &Arc<Self>) {
+        if let Some(entry) = crate::panic_log::take_unreported() {
+            self.diagnostic_always("panic", entry);
+        }
     }
 
     fn me_user(&self) -> Option<credentials::AccountUser> {
@@ -892,6 +901,7 @@ fn start_token_refresher(shared: &Arc<Shared>) {
 }
 
 fn start_after_pairing(shared: &Arc<Shared>) {
+    shared.report_last_panic();
     start_token_refresher(shared);
     open_store(shared);
     load_store(shared);
@@ -2641,6 +2651,17 @@ fn emit_snapshot(shared: &Shared, chat_id: &str) {
     for m in &mut messages {
         apply_pending(shared, m);
     }
+    if trace_rows() {
+        let last = messages
+            .last()
+            .map(|m| format!("{:?}/{}", m.role, m.id))
+            .unwrap_or_default();
+        eprintln!(
+            "rows: snapshot chat={chat_id} n={} last={last} at={}",
+            messages.len(),
+            now_ms()
+        );
+    }
     let _ = shared.events.send(SyncEvent::ChatSnapshot {
         chat_id: chat_id.to_string(),
         messages,
@@ -3346,6 +3367,14 @@ async fn perform_room_actions(
                     }
                 }
                 RoomAction::ApplyBytes(bytes) => {
+                    if trace_rows() {
+                        eprintln!(
+                            "rows: row-apply room={} bytes={} at={}",
+                            session.room(),
+                            bytes.len(),
+                            now_ms()
+                        );
+                    }
                     // (failed, parked): parked = Loro holds the ops until their dependencies
                     // arrive; the session keeps the persisted cursor below that row.
                     let (import_failed, parked) = {
