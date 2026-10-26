@@ -543,6 +543,10 @@ async fn main() -> anyhow::Result<()> {
             "/admin/matrix/reads/{user}",
             put(matrix::appservice::set_reads),
         )
+        .route(
+            "/admin/matrix/pushers",
+            post(matrix::appservice::backfill_pushers),
+        )
         .route("/admin/installs", get(releases::admin_installs))
         .route("/releases/current", get(releases::current))
         .route("/box/voice", get(voice::ws_box_voice))
