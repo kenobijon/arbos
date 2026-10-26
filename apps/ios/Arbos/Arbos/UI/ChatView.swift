@@ -1147,6 +1147,14 @@ struct ChatSession: View {
                             model.fixtureNYPostReply(chatId: chatId)
                         }
                         #endif
+                    case "math":
+                        // Rig: Jacob's bubble-sort turn — a Python code card, then prose
+                        // with inline `$O(n^2)$` math (fixture only).
+                        #if DEBUG
+                        if model.isFixture {
+                            model.fixtureBubbleSortReply(chatId: chatId)
+                        }
+                        #endif
                     case "agent-message", "agent-message-received":
                         // Rig: agent-to-agent messaging rows (fixture only) — the sender's
                         // hand-off + confirm + relayed reply, or the receiver's labelled row.
