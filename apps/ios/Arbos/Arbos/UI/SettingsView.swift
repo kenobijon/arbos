@@ -712,6 +712,7 @@ struct MachinePage: View {
                 }
             }
             if let r = live, !plan.agents.isEmpty {
+                // `ARBOS_SETTINGS_SCROLL=agents` lands here (rig).
                 SettingsGroup(header: "Agents") {
                     ForEach(Array(plan.agents.enumerated()), id: \.offset) { _, row in
                         switch row {
@@ -745,6 +746,7 @@ struct MachinePage: View {
                         }
                     }
                 }
+                .id("agents")
             }
             SettingsGroup(footer: m.alwaysOn
                           ? "Your one cloud computer, always on. Agents are workspaces on it. Machine time is billed separately from your credits."
