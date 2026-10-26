@@ -4383,6 +4383,8 @@ mod read_cursor_tests {
                 text: text.into(),
                 project_id: None,
                 reply_ref: None,
+                kind: None,
+                voice_text: None,
             }),
         )
         .await;
