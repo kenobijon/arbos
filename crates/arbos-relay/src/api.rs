@@ -169,7 +169,13 @@ pub async fn revoke_device(
             return Ok(StatusCode::NOT_FOUND.into_response());
         }
     }
-    let ok = state.db.revoke_device(&id).map_err(internal)?;
+    // Same revocation as `DELETE /auth/devices/{id}`: the legacy path only flagged the device row
+    // and left its refresh tokens live (14 such devices since Oct 14), so a "revoked" device could
+    // still mint access tokens.
+    let ok = state.db.revoke_device_fully(&id).map_err(internal)?;
+    if ok {
+        crate::matrix::servers::revoke_device(&state, &id).await;
+    }
     Ok(if ok {
         StatusCode::NO_CONTENT
     } else {
