@@ -424,7 +424,10 @@ mod tests {
     use axum::{Json, Router};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    const KEY: &str = concat!("sk_", "live_51HxQ9mT3vK2pLnR8wZ4eYc7bD1fG6hJ0kM9nP5qS2tU8vW3xA1");
+    const KEY: &str = concat!(
+        "sk_",
+        "live_51HxQ9mT3vK2pLnR8wZ4eYc7bD1fG6hJ0kM9nP5qS2tU8vW3xA1"
+    );
 
     /// A relay stub for the box secrets routes: records every from-message body, hands the
     /// value out once for the scrub, answers empty lists for the refreshes.

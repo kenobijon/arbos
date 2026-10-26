@@ -2054,7 +2054,10 @@ pub fn update_covered_by(update: &[u8], vv: &VersionVector) -> bool {
 mod secret_redaction_tests {
     use super::*;
 
-    const KEY: &str = concat!("sk_", "live_51HxQ9mT3vK2pLnR8wZ4eYc7bD1fG6hJ0kM9nP5qS2tU8vW3xA1");
+    const KEY: &str = concat!(
+        "sk_",
+        "live_51HxQ9mT3vK2pLnR8wZ4eYc7bD1fG6hJ0kM9nP5qS2tU8vW3xA1"
+    );
 
     fn holds(bytes: &[u8]) -> bool {
         let needle = KEY.as_bytes();
