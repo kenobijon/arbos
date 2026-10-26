@@ -1623,6 +1623,12 @@ final class AppModel: ObservableObject {
         if let data = store.get(StoreKey.unread), let counts = try? JSONDecoder().decode([String: Int].self, from: data) {
             unreadCounts = counts
         }
+        // One copy of each agent's avatar everywhere, before the first frame: the record and
+        // the roster copies came back from two caches written at different times; the
+        // newest wins and every picture URL is rebuilt on the public versioned route (a
+        // pre-#1813 cache held the owner-only blob URL — Jacob's relaunch leaf, 2026-10-26).
+        reconcileAgentAvatars()
+        AvatarImageCache.shared.warm(urls: projects.compactMap(\.imageURL))
         if !projects.isEmpty || !peopleChats.isEmpty { contentOrigin = "store" }
         LaunchClock.mark("kv-loaded", detail: "projects=\(projects.count) people=\(peopleChats.count)")
     }
@@ -2626,11 +2632,13 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Search handles (prefix) for the new-chat sheet.
+    /// The relay's people search (a handle-prefix lookup) for the new-chat sheet;
+    /// the sheet itself lists the directory through the shared matcher
+    /// (`PeoplePicker.people`) and adds these on top. The fixture answers from
+    /// the directory through the same matcher.
     func searchPeople(_ q: String) async -> [Person] {
         if isFixture {
-            let needle = q.lowercased()
-            return directory.filter { $0.handle.lowercased().contains(needle) || ($0.name ?? "").lowercased().contains(needle) }
+            return PeoplePicker.people(directory: directory, remote: [], me: nil, query: q)
         }
         return (try? await api.searchUsers(q)) ?? []
     }
