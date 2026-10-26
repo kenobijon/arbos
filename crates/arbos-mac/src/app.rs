@@ -429,6 +429,7 @@ pub struct AvatarGenerated {
     pub image_key: Option<String>,
     pub url: Option<String>,
     pub error: Option<String>,
+    pub detail: Option<String>,
 }
 
 pub struct AppState {
@@ -1636,6 +1637,7 @@ impl AppState {
                 image_key,
                 url,
                 error,
+                detail,
             } => {
                 if let Some(u) = url.clone() {
                     self.want_avatar(u);
@@ -1645,6 +1647,7 @@ impl AppState {
                     image_key,
                     url,
                     error,
+                    detail,
                 });
                 cx.notify();
             }
