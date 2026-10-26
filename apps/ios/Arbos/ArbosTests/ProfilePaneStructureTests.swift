@@ -132,6 +132,8 @@ final class BlockRowTests: XCTestCase {
         XCTAssertEqual(AgentPane.runByLabel(name: nil, handle: "sami"), "Run by @sami")
         XCTAssertEqual(ChipLinkStyle.restAlpha, 0.14)
         XCTAssertEqual(ChipLinkStyle.pressedAlpha, 0.30)
+        // The agent page pushes the owner inside the root sheet's stack, like member rows do.
+        XCTAssertTrue(ProfileTarget.agent(projectId: "p").pushesPeople)
     }
 }
 

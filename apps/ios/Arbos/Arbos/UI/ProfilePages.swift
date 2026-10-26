@@ -41,12 +41,10 @@ enum ProfileTarget: Identifiable, Equatable, Hashable {
     /// D88 (#1317): a channel's own page — what the `# general` pill opens.
     case channel(channelId: String)
 
-    /// Pages whose member rows push a person over them (back chevron returns
-    /// here). The agent page runs its own NavigationStack, so it stays a root.
-    var pushesPeople: Bool {
-        if case .agent = self { return false }
-        return true
-    }
+    /// Pages whose rows push a person over them (back chevron returns here):
+    /// every kind — the agent page's "Run by …" owner link pushes too
+    /// ([feedback agent-pane-run-by-link-ios-2026-10-25]).
+    var pushesPeople: Bool { true }
 
     var id: String {
         switch self {
