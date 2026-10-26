@@ -800,6 +800,8 @@ pub struct PeopleState {
     /// `senderName`, which is whatever one device sent): `(address_name, label_name)` —
     /// `address_name` is the name the user set (PATCH /me), `label_name` the GitHub-seeded one.
     owner_profile: Mutex<(Option<String>, Option<String>)>,
+    /// The whole owner block as last seen (for the prompt's "Your owner" section).
+    owner_full: Mutex<crate::identity::OwnerProfile>,
 }
 
 impl PeopleState {
@@ -818,6 +820,11 @@ impl PeopleState {
                 .map(str::to_owned)
         };
         *self.owner_profile.lock().expect("people") = (pick("address_name"), pick("name"));
+        *self.owner_full.lock().expect("people") = crate::identity::OwnerProfile::from_json(owner);
+    }
+
+    pub fn owner_profile(&self) -> crate::identity::OwnerProfile {
+        self.owner_full.lock().expect("people").clone()
     }
 
     /// The name the owner is addressed by: the one they set, else the profile label, else none.
