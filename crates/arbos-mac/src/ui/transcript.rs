@@ -2070,7 +2070,37 @@ impl Transcript {
             .into_any_element()
     }
 
+    /// One row of the list. Building a row's element from a message the code did not expect
+    /// must not take the app down (2026-10-26: Mac 0.6.268 aborted at every launch on the
+    /// restored transcript): a panic here is caught, logged by the panic hook, and the row
+    /// shows a short note instead.
     fn render_row(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.render_row_inner(ix, window, cx)
+        }));
+        match result {
+            Ok(element) => element,
+            Err(_) => {
+                let theme = Theme::of(cx).clone();
+                log::error!(target: "arbos_mac::diagnostic", "transcript row {ix} skipped after a panic");
+                div()
+                    .w_full()
+                    .px(px(BUBBLE_PAD_X))
+                    .py(px(6.0))
+                    .text_size(px(12.0))
+                    .text_color(theme.text_faint)
+                    .child("This message could not be shown.")
+                    .into_any_element()
+            }
+        }
+    }
+
+    fn render_row_inner(
+        &mut self,
+        ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         self.rows_laid_out += 1;
         let Some(row) = self.rows.get(ix).cloned() else {
             return div().into_any_element();
@@ -6551,6 +6581,43 @@ mod transcript_smoke_tests {
         let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
         transcript.update(cx, |t, cx| t.sync(cx));
         (rt, state, transcript)
+    }
+
+    /// 2026-10-26, Mac 0.6.268: a row the code did not expect aborted the app at every
+    /// launch (a panic on the main thread unwinds into AppKit → `abort()`). A sync event whose
+    /// apply panics is skipped with a notice, the state keeps every other row, and the
+    /// transcript still renders; the panic hook records the message to `panic.log`.
+    #[gpui::test]
+    fn a_panicking_sync_event_is_skipped_not_fatal(cx: &mut TestAppContext) {
+        crate::panic_log::install();
+        let before = std::fs::read_to_string(crate::panic_log::log_path()).unwrap_or_default();
+        let (_rt, state, transcript) = mount(cx);
+        // (The hook also prints the poison to stderr; that line is expected in this test.)
+        state.update(cx, |s, cx| {
+            s.apply(SyncEvent::Notice("panic!".into()), cx);
+        });
+        state.read_with(cx, |s, _| {
+            assert_eq!(s.messages.get("c1").map(Vec::len), Some(2), "rows kept");
+            assert!(
+                s.notices.iter().any(|n| n.text.contains("skipped")),
+                "the user is told one update was skipped: {:?}",
+                s.notices.iter().map(|n| n.text.clone()).collect::<Vec<_>>()
+            );
+        });
+        transcript.update(cx, |t, cx| t.sync(cx));
+        let (_view, vcx) = cx.add_window_view(|_, _| Host {
+            transcript: transcript.clone(),
+        });
+        vcx.run_until_parked();
+        assert!(
+            vcx.debug_bounds("chat-column").is_some(),
+            "the transcript still draws"
+        );
+        let after = std::fs::read_to_string(crate::panic_log::log_path()).unwrap_or_default();
+        assert!(
+            after.len() > before.len() && after[before.len()..].contains("test poison event"),
+            "panic.log holds the message"
+        );
     }
 
     /// The list renders the reply as block rows (no panic, every block drawn),
