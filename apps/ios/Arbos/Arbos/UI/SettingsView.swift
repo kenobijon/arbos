@@ -39,7 +39,7 @@ struct SettingsView: View {
     @State private var showTextSizePage = DebugHooks.settingsPage == "textsize"
     @State private var showConnectorsPage = DebugHooks.settingsPage == "connectors"
     // Rig: ARBOS_SETTINGS_PAGE=machine | credits | notifications | about | relay (Debug only).
-    @State private var showMachinePage = DebugHooks.settingsPage == "machine"
+    @State private var showMachinePage = DebugHooks.settingsPage == "machine" || DebugHooks.settingsPage == "machine-expanded"
     @State private var showCreditsPage = DebugHooks.settingsPage == "credits"
     @State private var showNotificationsPage = DebugHooks.settingsPage == "notifications"
     @State private var showPrivacyPage = DebugHooks.settingsPage == "privacy"
@@ -610,7 +610,8 @@ struct MachinePage: View {
     @Environment(\.theme) private var theme
     /// Settings passes this to close the sheet and land in the agent's chat ("Ask X to free space").
     var openAgent: ((Project) -> Void)? = nil
-    @State private var breakdownOpen = false
+    /// Rig: `ARBOS_SETTINGS_PAGE=machine-expanded` lands with the breakdown unfolded.
+    @State private var breakdownOpen = DebugHooks.settingsPage == "machine-expanded"
     @State private var showBiggerMachineFeedback = false
 
     private var report: BoxReport? { model.boxReport }
