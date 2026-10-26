@@ -51,9 +51,9 @@ use super::dto::{
 use super::store::{self, Store};
 use super::{ClientCommand, DraftPicture, PictureSource, PictureTarget, SyncEvent, SyncSource};
 use crate::model::{
-    new_id, now_ms, AccountView, Attachment, AttachmentKind, BoxReport, BoxState, Call, CallEnded,
-    CallLeft, CallMissed, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelsView, Chat,
-    Effort, Id, Link, LinkState, Machine, MachineState, Message, Part, Person, Project,
+    new_id, now_ms, trace_rows, AccountView, Attachment, AttachmentKind, BoxReport, BoxState, Call,
+    CallEnded, CallLeft, CallMissed, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelsView,
+    Chat, Effort, Id, Link, LinkState, Machine, MachineState, Message, Part, Person, Project,
     ProjectDocView, ProjectSecrets, Reachable, ReplyRef, Role, Routine, RoutineRun, Sender,
     ServerInfo, ThreadInfo,
 };
@@ -2578,6 +2578,17 @@ fn emit_snapshot(shared: &Shared, chat_id: &str) {
     for m in &mut messages {
         apply_pending(shared, m);
     }
+    if trace_rows() {
+        let last = messages
+            .last()
+            .map(|m| format!("{:?}/{}", m.role, m.id))
+            .unwrap_or_default();
+        eprintln!(
+            "rows: snapshot chat={chat_id} n={} last={last} at={}",
+            messages.len(),
+            now_ms()
+        );
+    }
     let _ = shared.events.send(SyncEvent::ChatSnapshot {
         chat_id: chat_id.to_string(),
         messages,
@@ -3283,6 +3294,14 @@ async fn perform_room_actions(
                     }
                 }
                 RoomAction::ApplyBytes(bytes) => {
+                    if trace_rows() {
+                        eprintln!(
+                            "rows: row-apply room={} bytes={} at={}",
+                            session.room(),
+                            bytes.len(),
+                            now_ms()
+                        );
+                    }
                     // (failed, parked): parked = Loro holds the ops until their dependencies
                     // arrive; the session keeps the persisted cursor below that row.
                     let (import_failed, parked) = {
