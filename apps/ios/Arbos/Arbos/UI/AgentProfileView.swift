@@ -254,7 +254,7 @@ struct AgentProfileView: View {
                 ScrollView {
                     if let project {
                         VStack(spacing: 18) {
-                            Color.clear.frame(height: 80)
+                            Color.clear.frame(height: PaneKit.pageTop)
                             ProfilePane(
                                 hero: hero(project),
                                 tabs: PaneKinds.agent,
@@ -277,7 +277,7 @@ struct AgentProfileView: View {
                     }
                 }
             }
-            ProfileTopBar {
+            ProfileTopBar(screen: .agentPage) {
                 if editingLabel {
                     Button("Done") { commitLabel() }
                         .font(theme.font(Theme.body, weight: .semibold))

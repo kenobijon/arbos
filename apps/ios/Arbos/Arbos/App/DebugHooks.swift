@@ -21,6 +21,9 @@ enum DebugHooks {
     /// With the agent pane open: scroll so the block with this id is in view (`permissions`,
     /// `profile`) — the Details blocks below the fold on the rig (#1544's Shell approvals).
     static var paneScroll: String? { value("ARBOS_PANE_SCROLL") }
+    /// Screenshot rig ([feedback iphone-list-top-fade-2026-10-26]): scroll a list (Home, search
+    /// results, server channels) so its row with this index sits at the top — rows under the bar.
+    static var listScroll: Int? { value("ARBOS_LIST_SCROLL").flatMap { Int($0) } }
     static var autoSend: String? { value("ARBOS_AUTO_SEND") }
     /// Rig (#1596): text put in the composer of the opened chat at appear, caret at the end —
     /// `@s` leaves the mention picker open, `@sam deck ready?` shows the resolved chip.

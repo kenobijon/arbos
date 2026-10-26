@@ -57,7 +57,7 @@ struct SettingsView: View {
                 theme.bg.ignoresSafeArea()
                 ScrollView {
                     VStack(spacing: 18) {
-                        Color.clear.frame(height: 80)
+                        Color.clear.frame(height: PaneKit.pageTop)
                         ProfilePane(
                             hero: PaneHero(
                                 picture: .image(AnyView(profilePicture)),
@@ -74,7 +74,7 @@ struct SettingsView: View {
                 }
                 .scrollIndicators(.visible)
                 // Settings is a sheet (from Home's account circle): back closes it.
-                ProfileTopBar(onBack: { dismiss() }) { EmptyView() }
+                ProfileTopBar(onBack: { dismiss() }, screen: .ownProfile) { EmptyView() }
             }
             .toolbar(.hidden, for: .navigationBar)
             .navigationBarBackButtonHidden(true)
