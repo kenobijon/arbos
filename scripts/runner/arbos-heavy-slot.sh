@@ -37,7 +37,9 @@ live_slots() {
   for d in "$SLOTS_DIR"/*.slot; do
     [[ -d "$d" ]] || continue
     pid=$(cat "$d/pid" 2>/dev/null || echo "")
-    if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; then
+    # ps, not kill -0: the gate (ec2-user) and the runner (arbosgui) check each other's slots and kill -0 on
+    # another user's pid is EPERM — the slot would read as stale and be reclaimed.
+    if [[ -z "$pid" ]] || ! ps -p "$pid" >/dev/null 2>&1; then
       rm -rf "$d" 2>/dev/null && echo "$(ts) heavy-slot: reclaimed stale slot $(basename "$d") (pid ${pid:-?} gone)" >&2
       continue
     fi
