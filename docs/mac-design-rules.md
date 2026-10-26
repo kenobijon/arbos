@@ -221,6 +221,23 @@ preference" and was reverted by Jacob ([feedback header-pill-restore-2026-10-24]
 Code: `header::bar_frame` (equal side slots, `justify_center`) and
 `header::metrics`; pinned by `header_tests::the_pill_is_centred_not_parked_at_the_left_edge`.
 
+### Material: frosted glass on both surfaces (Jacob 2026-10-25 + 2026-10-26, [feedback mac-header-glass-2026-10-25], [feedback mac-header-pill-glass-matte-2026-10-26])
+
+The pill and the folded-sidebar disc are **frosted glass whatever the
+surface** — Grok Bot's header pill over its flat black transcript is the
+reference, so Matte (no window vibrancy) is not an excuse for a flat fill.
+#1830 (v0.6.256) frosted them on Glass only; Jacob's Mac is on Matte (the D90
+default) and he saw the solid `bubble_assistant` pill on his AffineTeam group
+(v0.6.268). Recipe (`glass::header_surface` + `glass::header_frost`,
+`Theme::header_glass*`): the list blurred through the control's rounded
+bounds, a see-through fill (dark `#3b3f45` @ 56 %, light white @ 60 % — the
+same on both surfaces; the backdrop blur composites ≈ 20 % darker than its
+source on Metal and wgpu alike, so over flat `#fcfcfc` the light pill lands
+near the `#ededed` of the solid pill it replaces), a 1 pt rim (white 18 % /
+black 10 %), a top highlight (white 30 % / 90 %) and a 1 pt lift. Sizes and
+placements are untouched; the rest of the glass restyle stays paused. Pinned
+by `header::glass_tests` (every kind × surface × appearance).
+
 ## Message timestamps (Jacob 2026-10-24, [feedback timestamps-hover-only-2026-10-24])
 
 **Message timestamps are hover-only, never always-on.** A bubble never carries
