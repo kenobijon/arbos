@@ -1687,6 +1687,12 @@ private struct PreferHorizontalScroll: UIViewRepresentable {
         @objc private func pan(_ gr: UIPanGestureRecognizer) {
             switch gr.state {
             case .began, .changed:
+                // Only claim when the table is actually wider than its frame;
+                // a fitting table must still allow iMessage time reveal.
+                guard let scroll, scroll.contentSize.width > scroll.bounds.width + 1 else {
+                    NestedHorizontalScroll.claiming = false
+                    return
+                }
                 NestedHorizontalScroll.claiming = true
                 Self.cancelNonScrollPans(from: window, except: gr)
             case .ended, .cancelled, .failed:
