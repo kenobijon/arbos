@@ -54,6 +54,9 @@ enum DebugHooks {
     /// #1592 rig: the fixture group holds someone else's agent ("TestAgent", run by @sami —
     /// in the roster, not in my projects) with one bubble; with `ARBOS_FIXTURE_WORKING` it works.
     static var fixtureForeignAgent: Bool { value("ARBOS_FIXTURE_FOREIGN_AGENT") == "1" }
+    /// `ARBOS_FIXTURE_REPLY_DM=1`: rows in the fixture DM that answer messages in other chats
+    /// (Reply in DM rig, #1836).
+    static var fixtureReplyDM: Bool { value("ARBOS_FIXTURE_REPLY_DM") == "1" }
     /// Presence-row rig: `1` (the chat's other person) or comma-separated handles typing.
     static var fixtureTyping: String? { value("ARBOS_FIXTURE_TYPING").flatMap { $0.isEmpty || $0 == "0" ? nil : $0 } }
     /// Join a call seen via presence automatically (two-simulator relay tests).
@@ -76,7 +79,9 @@ enum DebugHooks {
     /// Fixture machine reports `always_on` (D73 policy screens).
     static var alwaysOn: Bool { value("ARBOS_ALWAYS_ON") == "1" }
     /// keyboard | settings | voice | threads | model | profile | member — opened on the chat screen
-    /// (`member` = the group page with its first other member pushed over it).
+    /// (`member` = the group page with its first other member pushed over it; `actions` = the
+    /// long-press overlay on the newest bubble, `keyboard-actions` = the same with the composer
+    /// keyboard up first).
     /// `onboarding` shows the D82 first-login screen frozen on `ARBOS_ONBOARDING_STAGE` (1|2|3|fail).
     static var show: String? { value("ARBOS_SHOW") }
     /// How long after the chat appears `ARBOS_SHOW` fires (ms, default 600): a loaded rig Mac
@@ -97,6 +102,9 @@ enum DebugHooks {
     /// With the avatar picker open on Generate: type this prompt and press Generate (a shot
     /// shows prompt → result).
     static var avatarPrompt: String? { value("ARBOS_AVATAR_PROMPT") }
+    /// `ARBOS_VIEW_PICTURE=1`: the first viewable hero picture on screen opens the media viewer
+    /// (the picker's View does the same with `ARBOS_SETTINGS_PAGE=avatar-view`).
+    static var viewPicture: Bool { value("ARBOS_VIEW_PICTURE") == "1" }
     /// With a Settings page open: scroll to the card with this id (e.g. `people` on a Secret page).
     static var settingsScroll: String? { value("ARBOS_SETTINGS_SCROLL") }
     /// On a Secret page: open a sheet at once — `people` (Give a person access), `person` (the

@@ -36,6 +36,7 @@ mod groups;
 mod image_sniff;
 mod images;
 mod inspect;
+mod link_icons;
 mod livekit;
 mod local;
 mod matrix;
@@ -339,6 +340,7 @@ async fn main() -> anyhow::Result<()> {
         restart: Arc::new(crate::state::RestartSignal::default()),
         voice_dispatched: Arc::new(Mutex::new(HashMap::new())),
         voice_worker: Arc::new(Mutex::new(None)),
+        voice_inbox: crate::voice::VoiceInbox::default(),
         image_health: Arc::new(Mutex::new(None)),
         client_seen: Arc::new(std::sync::Mutex::new(HashMap::new())),
         matrix: matrix::Matrix::new(matrix::Config::from_env()?),
@@ -542,6 +544,7 @@ async fn main() -> anyhow::Result<()> {
             axum::routing::put(voice::put_user_cap),
         )
         .route("/voice/worker/hello", post(voice::worker_hello))
+        .route("/voice/calls/{id}/inbox", get(voice::call_inbox))
         .route("/voices", get(voice::list_voices))
         .route("/voices/{id}/sample.mp3", get(voice::voice_sample))
         .route(
@@ -794,6 +797,7 @@ async fn main() -> anyhow::Result<()> {
             delete(moderation::delete_message),
         )
         .route("/blob/{project}/{key}", get(blobs::get).put(blobs::put))
+        .route("/link-icon", get(link_icons::get))
         .route("/feedback", post(feedback::submit))
         .route("/feedback/capture/{id}", post(feedback::device_capture))
         .route("/box/feedback/capture", post(feedback::box_capture_request))
