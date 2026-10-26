@@ -809,7 +809,10 @@ struct ChatSession: View {
                         items: MessageMenu.items(forMessage: true,
                                                 canEdit: canEditMessage(row),
                                                 canDelete: canDelete(row),
-                                                hasReplies: row.replyCount > 0),
+                                                hasReplies: row.replyCount > 0,
+                                                // Reply in DM only in people groups — not in a
+                                                // DM or 1:1 agent chat you're already in (#1871).
+                                                inPrivateChat: people?.isGroup != true),
                         onReact: { emoji in
                             closeActions()
                             model.toggleReaction(chatId: chatId, messageId: row.messageId, emoji: emoji)
