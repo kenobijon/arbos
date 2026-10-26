@@ -980,6 +980,15 @@ struct AgentMemberWire {
     model: Option<String>,
     #[serde(default)]
     owner: Option<Person>,
+    /// The picture and its stamp round-trip through the on-disk store (`Project.agents` is
+    /// persisted as JSON). Until 2026-10-26 this wire struct dropped both, so every roster
+    /// copy came back from a relaunch without its picture; with the stamps equal (agents
+    /// whose avatar predates #1813 carry 0) that lossy copy won the resolver and every
+    /// people-chat surface drew the leaf until the next registry read.
+    #[serde(default)]
+    image_url: Option<String>,
+    #[serde(default)]
+    avatar_version: i64,
 }
 
 impl From<AgentMemberWire> for AgentMember {
@@ -1001,8 +1010,8 @@ impl From<AgentMemberWire> for AgentMember {
             ),
             avatar_leaf: w.avatar_leaf_effective.or(w.avatar_leaf),
             avatar_leaf_color: w.avatar_leaf_color_effective.or(w.avatar_leaf_color),
-            image_url: None,
-            avatar_version: 0,
+            image_url: w.image_url,
+            avatar_version: w.avatar_version,
             description: w.description,
             model: w.model,
             owner: w.owner,
