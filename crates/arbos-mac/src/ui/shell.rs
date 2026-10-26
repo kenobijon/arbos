@@ -320,6 +320,9 @@ pub struct Shell {
     )>,
     /// The channel menu's Delete was clicked once: it shows "Delete #name?" with Cancel / Delete.
     pub(crate) channel_delete_armed: bool,
+    /// The pointer over the agent pane's "Run by …" owner link (the mention
+    /// chip's hover / pressed fade, [feedback agent-pane-run-by-link-mac-2026-10-25]).
+    pub(crate) run_by_chip: crate::ui::mention::ChipPointer<()>,
     /// Group pane › Members: the row whose ✕ was clicked (`user:<id>` or
     /// `agent:<project>`); it shows "Remove … ?" with Cancel / Remove.
     pub(crate) member_remove_armed: Option<String>,
@@ -929,6 +932,7 @@ impl Shell {
             row_menu: None,
             channel_menu: None,
             channel_delete_armed: false,
+            run_by_chip: Default::default(),
             member_remove_armed: None,
             device_revoke_armed: None,
             member_menu: None,

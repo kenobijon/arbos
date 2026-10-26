@@ -29,6 +29,7 @@ use crate::app::{AppState, ProfilePage};
 use crate::model::{now_ms, Attachment, AttachmentKind, Chat, Id, Message, Part};
 use crate::ui::glass;
 use crate::ui::icons::icon;
+use crate::ui::mention;
 use crate::ui::shell::Shell;
 use crate::ui::theme::{Theme, CONTROL_GAP, CONTROL_GLYPH, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
 
@@ -108,6 +109,7 @@ pub(super) fn pushed_frame(
         );
     }
     let back = glass::control_disc("profile-back", "chevron-left", CONTROL_GLYPH, theme)
+        .debug_selector(|| "profile-back".into())
         .on_click(cx.listener(|this, _, _, cx| this.back_profile(cx)));
     pane_frame(
         SHEET_WIDTH,
@@ -257,12 +259,14 @@ pub(crate) fn pane_frame(
 
 /// Big avatar, name, status line (the agent's label — clickable when
 /// `status_click` is given: Grok's "Add a label").
+#[allow(clippy::too_many_arguments)]
 pub(super) fn hero(
     avatar: AnyElement,
     name: AnyElement,
     status: &str,
     status_color: Hsla,
     status_click: Option<HeroClick>,
+    status_element: Option<AnyElement>,
     theme: &Theme,
 ) -> Div {
     let subtitle = div()
@@ -276,12 +280,14 @@ pub(super) fn hero(
         .text_color(status_color)
         .debug_selector(|| "hero-subtitle".into())
         .child(status.to_string());
-    let subtitle = match status_click {
-        Some(f) => subtitle
+    let subtitle: AnyElement = match (status_element, status_click) {
+        (Some(el), _) => el,
+        (None, Some(f)) => subtitle
             .cursor_text()
             .hover(|s| s.bg(theme.field))
-            .on_click(move |e, w, cx| f(e, w, cx)),
-        None => subtitle,
+            .on_click(move |e, w, cx| f(e, w, cx))
+            .into_any_element(),
+        (None, None) => subtitle.into_any_element(),
     };
     div()
         .flex_shrink_0()
@@ -302,6 +308,37 @@ pub(super) fn hero(
                 .child(name),
         )
         .child(subtitle)
+}
+
+/// "Run by Name" / "Run by @handle" — the owner line under a foreign agent's
+/// name: the display name when the owner has one, the handle otherwise (the
+/// no-raw-handle rule is about agents' speech, not this label).
+pub(crate) fn run_by_label(name: Option<&str>, handle: &str) -> String {
+    match name.map(str::trim).filter(|n| !n.is_empty()) {
+        Some(n) => format!("Run by {n}"),
+        None => format!("Run by @{handle}"),
+    }
+}
+
+/// The foreign agent's owner link in the hero (Jacob 2026-10-25, [feedback
+/// agent-pane-run-by-link-mac-2026-10-25]): a mention-chip pill — the accent
+/// at `alpha` (14 % at rest, 22 % under the pointer, 30 % pressed, the
+/// 120 ms ease-out of `mention::ChipPointer`), accent text, pointing hand.
+/// The caller wires the pointer events and the click (push the owner's page).
+pub(crate) fn run_by_link(label: &str, alpha: f32, theme: &Theme) -> Stateful<Div> {
+    div()
+        .id("run-by-link")
+        .debug_selector(|| "run-by-link".into())
+        .px(px(mention::PILL_PAD_X + 4.0))
+        .py(px(mention::PILL_PAD_Y + 1.0))
+        .rounded(px(mention::PILL_RADIUS))
+        .max_w(px(SHEET_WIDTH - 64.0))
+        .truncate()
+        .text_size(px(HERO_SUBTITLE))
+        .text_color(theme.accent)
+        .bg(mention::pill_color(theme.accent, alpha))
+        .cursor_pointer()
+        .child(label.to_string())
 }
 
 /// A click handler a page hands the shared hero (`cx.listener(..)`, boxed).

@@ -1934,7 +1934,37 @@ impl AppState {
                     // closed whatever the shell opened at launch), and
                     // `ARBOS_OPEN_SETTINGS=…` re-opens my pane on its Settings tab.
                     if let Ok(spec) = std::env::var("ARBOS_OPEN_PROFILE") {
-                        if let Some(rest) = spec.strip_prefix("agent") {
+                        if let Some(rest) = spec.strip_prefix("agent:foreign") {
+                            // `agent:foreign[:owner]` (rig, [feedback
+                            // agent-pane-run-by-link-mac-2026-10-25]): the pane of
+                            // the first agent in the restored group that someone
+                            // else runs; `:owner` then follows its "Run by" link.
+                            let me = self.me_handle();
+                            let foreign = self
+                                .projects
+                                .iter()
+                                .find(|p| p.id == project_id)
+                                .and_then(|p| {
+                                    p.agents.iter().find(|a| a.owner_handle != me).cloned()
+                                });
+                            if let Some(a) = foreign {
+                                self.open_profile(
+                                    ProfilePage::Agent {
+                                        project_id: a.project_id.clone(),
+                                    },
+                                    cx,
+                                );
+                                if rest == ":owner" {
+                                    self.push_profile(
+                                        ProfilePage::User {
+                                            handle: a.owner_handle.clone(),
+                                            space_id: Some(a.project_id),
+                                        },
+                                        cx,
+                                    );
+                                }
+                            }
+                        } else if let Some(rest) = spec.strip_prefix("agent") {
                             self.open_profile(
                                 ProfilePage::Agent {
                                     project_id: project_id.clone(),
@@ -6255,6 +6285,8 @@ impl AppState {
         self.projects
             .iter()
             .flat_map(|p| p.people.iter())
+            // A shared agent's owner (API §9 `owner`), who need not be in any member list.
+            .chain(self.projects.iter().filter_map(|p| p.owner_person.as_ref()))
             .chain(self.people_results.iter())
             .find(|p| p.handle == handle)
             .cloned()
