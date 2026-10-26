@@ -2011,7 +2011,13 @@ pub async fn push(
         .project(&id)
         .map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
-    let _ = principal;
+    // The write side was open to any signed-in device or box until 2026-10-26 (#1951): a push is
+    // a message into that project's agent plus a wake of its box, so the caller must be allowed on
+    // the project — its owner's devices and boxes, or an invited member. Cross-user agent traffic
+    // goes through /agent-messages and its grants, never through here.
+    if !state.allows(&principal, &p.id) {
+        return Err((StatusCode::FORBIDDEN, "not your project".into()));
+    }
     state
         .db
         .enqueue_push(&p.id, &b.kind, &b.payload)
