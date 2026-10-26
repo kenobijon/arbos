@@ -547,8 +547,8 @@ pub(crate) fn generate_body(
     } else {
         "A few words about the picture you want.".into()
     };
-    // One line, never more: the status slot sits 30 pt over the footer. An error gets a
-    // Details toggle beside the sentence; the raw words open in the preview slot above.
+    // Two lines at most, never more: the status slot is the 30 pt over the footer. An error
+    // gets a Details toggle beside the sentence; the raw words open in the preview slot above.
     let mut line = div()
         .id("avatar-generate-status")
         .debug_selector(|| "avatar-generate-status".into())
@@ -556,14 +556,14 @@ pub(crate) fn generate_body(
         .left(px(FIELD_INSET))
         .right(px(FIELD_INSET))
         .top(px(status_top))
-        .h(px(16.0))
+        .h(px(30.0))
         .overflow_hidden()
         .flex()
         .items_center()
         .justify_center()
         .gap(px(8.0))
         .text_size(px(12.0))
-        .line_height(px(16.0))
+        .line_height(px(15.0))
         .text_color(if picker.error.is_some() {
             theme.danger
         } else {
@@ -572,8 +572,8 @@ pub(crate) fn generate_body(
         .child(
             div()
                 .overflow_hidden()
-                .whitespace_nowrap()
-                .text_ellipsis()
+                .text_center()
+                .line_clamp(2)
                 .child(status),
         );
     if picker.error.is_some() {
@@ -1555,8 +1555,8 @@ mod me_picker_tests {
             "the error sits above the footer: status {status:?} cancel {cancel:?}"
         );
         assert!(
-            f32::from(status.size.height) <= 16.5,
-            "one line: {status:?}"
+            f32::from(status.size.height) <= 30.5,
+            "two lines at most: {status:?}"
         );
         assert!(
             vcx.debug_bounds("avatar-generate-details").is_some(),
