@@ -8,6 +8,7 @@
 //! the sources are candidates to move there later (`arbos-design.md` §7.2).
 
 pub mod agent_avatar;
+pub mod chat_send_queue;
 pub mod credentials;
 pub mod diagnostics;
 pub mod doc;

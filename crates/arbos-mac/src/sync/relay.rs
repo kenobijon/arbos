@@ -38,6 +38,7 @@ use tokio::time::{interval, sleep, timeout};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
+use super::chat_send_queue::ChatSendQueue;
 use super::credentials::{self, DeviceCredentials};
 use super::diagnostics;
 use super::doc::ChatDoc;
@@ -214,6 +215,8 @@ struct Shared {
     /// When the Matrix session was last (re)started: a rejected token restarts it at most
     /// once a minute.
     matrix_started_at: Mutex<Option<Instant>>,
+    /// Per-chat ordered network sends (photo then text must stay in push order).
+    send_queue: ChatSendQueue,
 }
 
 /// Blob slot prefix of a people chat (`people:<chat_id>`, people-chats API §2).
@@ -433,6 +436,7 @@ impl Shared {
 
     /// Forget the tokens and show the sign-in screen.
     fn sign_out_locally(&self) {
+        self.send_queue.clear();
         credentials::clear(&self.http_url);
         self.stop_matrix();
         self.drop_store(true);
@@ -729,6 +733,19 @@ impl SyncSource for RelaySource {
                 diagnostics: diagnostics::Diagnostics::load(),
                 matrix: Mutex::new(None),
                 matrix_started_at: Mutex::new(None),
+                send_queue: {
+                    let events = events.clone();
+                    ChatSendQueue::new(move |chat_id, message_id| {
+                        let error = "timed out".to_string();
+                        let _ =
+                            events.send(SyncEvent::Notice(format!("Message not sent: {error}")));
+                        let _ = events.send(SyncEvent::MessageSendFailed {
+                            chat_id,
+                            message_id,
+                            error,
+                        });
+                    })
+                },
             });
             let _ = events.send(SyncEvent::Link(Link::Connecting));
 
@@ -3893,6 +3910,42 @@ fn outgoing_paths(paths: Vec<PathBuf>) -> Vec<Outgoing> {
     paths.into_iter().map(Outgoing::Path).collect()
 }
 
+/// Push a network send onto this chat's ordered queue (local echo is already done).
+#[allow(clippy::too_many_arguments)]
+fn enqueue_send(
+    shared: &Arc<Shared>,
+    chat_id: Id,
+    message_id: Id,
+    text: String,
+    attachments: Vec<Outgoing>,
+    voice_wav: Option<Arc<Vec<u8>>>,
+    command: &'static str,
+    answer: Option<(String, serde_json::Value)>,
+    reply_to: Option<String>,
+    forwarded_from: Option<String>,
+    reply_ref: Option<ReplyRef>,
+    mentions: Vec<String>,
+) {
+    shared.send_queue.push(
+        chat_id.clone(),
+        message_id.clone(),
+        send_message(
+            shared.clone(),
+            chat_id,
+            message_id,
+            text,
+            attachments,
+            voice_wav,
+            command,
+            answer,
+            reply_to,
+            forwarded_from,
+            reply_ref,
+            mentions,
+        ),
+    );
+}
+
 /// NewChat POST failed (or the body did not decode): drop the mint, notify, mark queued sends failed.
 fn fail_pending_new_chat(shared: &Shared, local_id: &str, notice: String) {
     shared.chats.lock().unwrap().retain(|c| c.id != local_id);
@@ -4364,8 +4417,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             text,
             wav,
         } => {
-            tokio::spawn(send_message(
-                shared.clone(),
+            enqueue_send(
+                shared,
                 chat_id,
                 message_id,
                 text,
@@ -4377,7 +4430,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 None,
                 None,
                 Vec::new(),
-            ));
+            );
         }
         ClientCommand::Transcribe {
             project_id,
@@ -5146,8 +5199,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             reply_ref,
             mentions,
         } => {
-            tokio::spawn(send_message(
-                shared.clone(),
+            enqueue_send(
+                shared,
                 chat_id,
                 message_id,
                 text,
@@ -5159,7 +5212,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 None,
                 reply_ref,
                 mentions,
-            ));
+            );
         }
         ClientCommand::Forward {
             chat_id,
@@ -5168,8 +5221,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             attachment,
             text,
         } => {
-            tokio::spawn(send_message(
-                shared.clone(),
+            enqueue_send(
+                shared,
                 chat_id,
                 message_id,
                 text,
@@ -5184,7 +5237,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 None,
                 None,
                 Vec::new(),
-            ));
+            );
         }
         ClientCommand::ForwardText {
             chat_id,
@@ -5192,8 +5245,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             text,
             forwarded_from,
         } => {
-            tokio::spawn(send_message(
-                shared.clone(),
+            enqueue_send(
+                shared,
                 chat_id,
                 message_id,
                 text,
@@ -5205,7 +5258,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 Some(forwarded_from),
                 None,
                 Vec::new(),
-            ));
+            );
         }
         ClientCommand::Steer {
             chat_id,
@@ -5213,8 +5266,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             text,
             reply_to,
         } => {
-            tokio::spawn(send_message(
-                shared.clone(),
+            enqueue_send(
+                shared,
                 chat_id,
                 message_id,
                 text,
@@ -5226,7 +5279,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 None,
                 None,
                 Vec::new(),
-            ));
+            );
         }
         ClientCommand::Answer {
             chat_id,
@@ -5236,8 +5289,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             value,
         } => {
             let answer = question_id.map(|qid| (qid, value.unwrap_or(json!(null))));
-            tokio::spawn(send_message(
-                shared.clone(),
+            enqueue_send(
+                shared,
                 chat_id,
                 message_id,
                 text,
@@ -5249,7 +5302,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 None,
                 None,
                 Vec::new(),
-            ));
+            );
         }
         ClientCommand::Stop { chat_id } => {
             let docs = shared.docs.lock().unwrap();
@@ -5632,8 +5685,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                             chat: chat.clone(),
                         });
                         for ((real_id, _), q) in targets.into_iter().zip(queued) {
-                            tokio::spawn(send_message(
-                                shared.clone(),
+                            enqueue_send(
+                                &shared,
                                 real_id,
                                 q.message_id,
                                 q.text,
@@ -5645,7 +5698,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                                 q.forwarded_from,
                                 q.reply_ref,
                                 q.mentions,
-                            ));
+                            );
                         }
                     }
                     Err(err) => {
