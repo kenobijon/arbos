@@ -1299,6 +1299,10 @@ pub struct TurnState {
     pub unposted_text: String,
     /// The turn ended with nothing posted and `SendTool::On` posted the leftover prose once.
     pub posted_fallback: bool,
+    /// In a shared chat the model tried to post a bubble that only announced it was staying
+    /// silent ("that question is for X; nothing to add from me"); the guard dropped it, and the
+    /// turn ends as a quiet one (`silence.rs`).
+    pub silence_dropped: bool,
     /// The route's `ack` became a bubble (`new` / `wake`). An `act` ack is working-row status
     /// only, so it does not count as words the user read (duplex step 1 fallback rule).
     pub ack_posted: bool,
@@ -1486,6 +1490,7 @@ impl TurnState {
             send_tool: crate::config::SendTool::Off,
             unposted_text: String::new(),
             posted_fallback: false,
+            silence_dropped: false,
             ack_posted: false,
             web_tool_used: false,
             act_to_job: false,
@@ -4016,6 +4021,7 @@ impl Agent {
             send_tool: self.cfg.send_tool(),
             unposted_text: String::new(),
             posted_fallback: false,
+            silence_dropped: false,
             ack_posted: false,
             web_tool_used: false,
             act_to_job: false,
@@ -4240,7 +4246,11 @@ impl Agent {
                 Some(chat_id),
                 "quiet",
                 Some("system"),
-                "stayed quiet: route reply with nothing to say in a shared chat (no row)",
+                if turn.silence_dropped {
+                    "stayed quiet: the silence announcement was dropped in a shared chat (no row)"
+                } else {
+                    "stayed quiet: route reply with nothing to say in a shared chat (no row)"
+                },
                 Some(&json!({ "message_id": assistant_msg_id, "user_message_id": user_msg_id })),
             );
             tracing::info!(
@@ -6017,6 +6027,17 @@ impl Agent {
         let Some(host) = self.sync.host(&t.chat_id).await else {
             return Err("no room for this chat".into());
         };
+        // Silence is an outcome, not a message: a bubble that only says the agent is not
+        // answering never reaches a shared chat. The tool answers as if posted, so the model
+        // ends the turn instead of rephrasing the announcement.
+        let text = if self
+            .drop_silence_announcement(t, text, "send_message")
+            .await
+        {
+            ""
+        } else {
+            text
+        };
         if !text.is_empty() {
             self.maybe_split_ack(&host, t, true).await;
             // Narration the act turn held back is not the message: it stays in T3 only.
@@ -6103,7 +6124,9 @@ impl Agent {
             return;
         }
         if t.send_tool == crate::config::SendTool::Off {
-            self.write_text(host, t, &cleaned).await;
+            if !self.drop_silence_announcement(t, &cleaned, "prose").await {
+                self.write_text(host, t, &cleaned).await;
+            }
             return;
         }
         if !t.unposted_text.is_empty() {
@@ -6120,6 +6143,42 @@ impl Agent {
             Some(&json!({ "unposted": true })),
         );
         tracing::info!(chat_id = %t.chat_id, chars = cleaned.chars().count(), "prose outside send_message kept out of the chat");
+    }
+
+    /// A people chat, a project group, or the "Projects ⇄" tab: rooms where staying silent is a
+    /// legitimate outcome of a turn.
+    pub(crate) fn shared_chat(&self, chat_id: &str) -> bool {
+        self.people.is_people_chat(chat_id)
+            || matches!(
+                self.chat_kind(chat_id).as_deref(),
+                Some("group") | Some("projects")
+            )
+    }
+
+    /// Jacob's mention rule, part 2 (2026-10-26): choosing silence is a structured outcome,
+    /// never a chat message. In a shared chat a post that only announces the silence
+    /// ("Addressed to Hezbola; staying silent. Nothing to add from me.") is dropped here, logged
+    /// to T3 (kind `quiet`) and counted (relay timing `silence_announcement_dropped`), and the
+    /// turn ends as a quiet one — the row goes away. Returns true when the text was dropped.
+    async fn drop_silence_announcement(&self, t: &mut TurnState, text: &str, via: &str) -> bool {
+        if !self.shared_chat(&t.chat_id) || !crate::silence::is_silence_announcement(text) {
+            return false;
+        }
+        t.silence_dropped = true;
+        tracing::info!(chat_id = %t.chat_id, via, text = %text.chars().take(200).collect::<String>(), "silence announcement dropped: the agent stays quiet instead");
+        let _ = self.store.t3_append(
+            &t.chat_id,
+            None,
+            Some(&t.chat_id),
+            "quiet",
+            Some("system"),
+            &format!("dropped a silence announcement ({via}): {text}"),
+            Some(&json!({ "message_id": t.assistant_msg_id, "user_message_id": t.user_msg_id, "via": via, "guard": "silence_announcement" })),
+        );
+        let _ = self
+            .post_timing("silence_announcement_dropped", 1, Some(via))
+            .await;
+        true
     }
 
     /// Did this turn put an *answer* in front of the user — a `send_message` bubble or a posted
@@ -6150,6 +6209,12 @@ impl Agent {
             return;
         }
         let text = std::mem::take(&mut t.unposted_text);
+        if self
+            .drop_silence_announcement(t, &text, "fallback prose")
+            .await
+        {
+            return;
+        }
         t.posted_fallback = true;
         tracing::info!(chat_id = %t.chat_id, chars = text.chars().count(), "send tool: leftover prose posted as the fallback bubble");
         self.write_text(host, t, &text).await;
@@ -6170,6 +6235,12 @@ impl Agent {
         }
         let cleaned = ProseFilter::clean_prose(&text);
         if cleaned.trim().is_empty() {
+            return;
+        }
+        if self
+            .drop_silence_announcement(t, &cleaned, "route.reply (turn end)")
+            .await
+        {
             return;
         }
         tracing::info!(chat_id = %t.chat_id, chars = cleaned.chars().count(), "route reply text taken from the call");
@@ -6255,7 +6326,11 @@ impl Agent {
                 if let Some(ValidRoute::Reply { reply: Some(text) }) = &t.route {
                     let text = text.trim().to_owned();
                     let answered = t.route_correcting && (t.has_prose() || Self::posted_result(t));
-                    if !text.is_empty() && !answered {
+                    let dropped = !text.is_empty()
+                        && self
+                            .drop_silence_announcement(t, &text, "route.reply")
+                            .await;
+                    if !text.is_empty() && !answered && !dropped {
                         if t.send_tool == crate::config::SendTool::Off {
                             t.route_reply_text = Some(text);
                         } else {
@@ -8271,20 +8346,29 @@ pub(crate) fn quiet_in_shared_chat(
     model_ok: bool,
     no_error: bool,
 ) -> bool {
+    // A dropped silence announcement (`silence.rs`) is the same outcome: the route's words
+    // were the announcement, nothing else was posted.
+    let route_quiet = match &t.route {
+        Some(ValidRoute::Reply { reply }) => {
+            reply.as_deref().is_none_or(|r| r.trim().is_empty()) || t.silence_dropped
+        }
+        _ => false,
+    };
     shared_chat
         && model_ok
         && no_error
         && !t.stopped
         && !t.metrics.route_missing
-        && matches!(&t.route, Some(ValidRoute::Reply { reply }) if reply.as_deref().is_none_or(|r| r.trim().is_empty()))
+        && route_quiet
         && t.streamed_text.trim().is_empty()
         && t.ack_text.trim().is_empty()
         && t.unposted_text.trim().is_empty()
         && t.progress_texts.iter().all(|p| p.trim().is_empty())
-        && t.route_reply_text
-            .as_deref()
-            .is_none_or(|r| r.trim().is_empty())
-        && t.metrics.tool_calls == 0
+        && (t.silence_dropped
+            || t.route_reply_text
+                .as_deref()
+                .is_none_or(|r| r.trim().is_empty()))
+        && (t.metrics.tool_calls == 0 || t.silence_dropped)
 }
 
 /// How many of this chat's recent rows the fresh-session retry carries, and how much of each.
