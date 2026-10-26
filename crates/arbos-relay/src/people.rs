@@ -579,6 +579,12 @@ pub fn people_chat_dto(
         },
         read_seq,
         unread,
+        // Members this viewer blocked: their rows are theirs to hide (groups), as `user:<id>`.
+        blocked_senders: human_user_ids(cm)
+            .into_iter()
+            .filter(|u| u != me && state.db.blocks(me, u).unwrap_or(false))
+            .map(|u| format!("user:{u}"))
+            .collect(),
         lock_state: if has_agent {
             "visible_to_agents".into()
         } else {
@@ -3353,8 +3359,9 @@ pub enum PushRefused {
     /// Over the message rate limit. `retry_s` is seconds until the oldest counted event leaves
     /// the 60 s window (carried as `retryS` on the error frame).
     RateLimited { retry_s: i64 },
-    /// A block stands between the sender and someone in the chat: `blocked_by` = that person
-    /// blocked the sender; `blocks_member` = the sender blocked the other person of a DM.
+    /// A block stands between the two people of a DM: `blocked_by` = the other person blocked
+    /// the sender; `blocks_member` = the sender blocked them. Groups are never refused for a
+    /// block (the rows are hidden from the blocker alone).
     Blocked {
         reason: BlockReason,
         by_handle: String,
@@ -3440,11 +3447,15 @@ impl PushRefused {
     }
 }
 
-/// The block that stops `user_id` posting into `cm`, if any: a member who blocked them (any
-/// chat), else — in a DM — the other person they blocked themselves. A group member the sender
-/// blocked does not stop the sender's own posts (they would lock themselves out of their
-/// groups); the apps show that person's Blocked state instead.
+/// The block that stops `user_id` posting into `cm`, if any — **DMs only** (Jacob,
+/// 2026-10-26 17:28 CR): the other person blocked the sender (`blocked_by`) or the sender
+/// blocked them (`blocks_member`). In a group a block never refuses the room: the blocked
+/// person's rows are hidden from the blocker alone (`blocked_senders` on the chat DTO, the
+/// blocker's pushes / alerts / unread skip them) and everyone else sees them as before.
 fn block_in_the_way(state: &AppState, user_id: &str, cm: &ChatWithMembers) -> Option<PushRefused> {
+    if cm.chat.kind != "dm" {
+        return None;
+    }
     let humans = human_user_ids(cm);
     let other_party = |other: &str| {
         let card = state.db.user_card(other).ok().flatten();
@@ -3457,11 +3468,7 @@ fn block_in_the_way(state: &AppState, user_id: &str, cm: &ChatWithMembers) -> Op
         (by_handle, by_name)
     };
     for other in humans.iter().filter(|o| o.as_str() != user_id) {
-        if state
-            .db
-            .blocked_by_any(user_id, std::slice::from_ref(other))
-            .unwrap_or(false)
-        {
+        if state.db.blocks(other, user_id).unwrap_or(false) {
             let (by_handle, by_name) = other_party(other);
             return Some(PushRefused::Blocked {
                 reason: BlockReason::BlockedBy,
@@ -3469,21 +3476,13 @@ fn block_in_the_way(state: &AppState, user_id: &str, cm: &ChatWithMembers) -> Op
                 by_name,
             });
         }
-    }
-    if cm.chat.kind == "dm" {
-        for other in humans.iter().filter(|o| o.as_str() != user_id) {
-            if state
-                .db
-                .blocked_by_any(other, std::slice::from_ref(&user_id.to_owned()))
-                .unwrap_or(false)
-            {
-                let (by_handle, by_name) = other_party(other);
-                return Some(PushRefused::Blocked {
-                    reason: BlockReason::BlocksMember,
-                    by_handle,
-                    by_name,
-                });
-            }
+        if state.db.blocks(user_id, other).unwrap_or(false) {
+            let (by_handle, by_name) = other_party(other);
+            return Some(PushRefused::Blocked {
+                reason: BlockReason::BlocksMember,
+                by_handle,
+                by_name,
+            });
         }
     }
     None
@@ -3553,6 +3552,10 @@ pub fn on_room_push(
         sender: crate::notify::Sender::user(state, user_id).dto(),
     });
     for other in humans.iter().filter(|u| *u != user_id) {
+        // A member who blocked the sender hears nothing of this row (hidden for them alone).
+        if state.db.blocks(other, user_id).unwrap_or(false) {
+            continue;
+        }
         // Archived for them: hidden on purpose, no notification (D78).
         if state
             .db
@@ -3744,13 +3747,21 @@ mod push_rate_tests {
 
 #[cfg(test)]
 mod block_refusal_tests {
-    //! A push stopped by a block says which way the block runs and who the other party is
-    //! ([feedback blocked-state-relay-2026-10-26]); before, an opaque `not_available`.
+    //! Blocks and people rooms ([feedback blocked-state-relay-2026-10-26], Jacob 2026-10-26
+    //! 17:28 CR): a DM between the two is refused with a named `reason`; a group is never
+    //! refused — the blocked person's rows are hidden from the blocker alone (no push event,
+    //! no alert, no unread for them; `blocked_senders` on their chat DTO) and the other
+    //! members see and receive them as before.
+
+    use axum::extract::{Path, State};
+    use axum::http::StatusCode;
+    use axum::Json;
 
     use arbos_core::ids::ulid;
 
     use super::tests_support::{dm, person};
     use super::*;
+    use crate::notify::{notify_people_chat, NotifyBody};
     use crate::state::test_support::test_state;
     use crate::state::AuthMode;
 
@@ -3782,31 +3793,99 @@ mod block_refusal_tests {
         chat.id
     }
 
-    #[test]
-    fn a_member_who_blocked_me_refuses_my_group_post_by_name() {
+    fn pushes_of(state: &AppState, dev: &Principal) -> Vec<String> {
+        state
+            .db
+            .take_user_pushes(&device_of(dev))
+            .unwrap()
+            .into_iter()
+            .map(|(_, kind, _, _)| kind)
+            .collect()
+    }
+
+    async fn say(state: &AppState, dev: &Principal, chat: &str, text: &str) {
+        let r = notify_people_chat(
+            State(state.clone()),
+            dev.clone(),
+            Path(chat.to_owned()),
+            Json(NotifyBody {
+                message_id: ulid(),
+                text: text.into(),
+                project_id: None,
+                reply_ref: None,
+                kind: None,
+                voice_text: None,
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn a_group_is_never_refused_and_the_blocked_rows_are_hidden_from_the_blocker_alone() {
         let state = test_state(AuthMode::Github);
         let (alice, alice_dev) = person(&state, 1);
         let (bob, bob_dev) = person(&state, 2);
-        let (carol, _) = person(&state, 3);
+        let (carol, carol_dev) = person(&state, 3);
         let chat = group(&state, &[&alice, &bob, &carol]);
-        assert!(on_room_push(&state, &alice_dev, &chat).is_ok());
-
+        // Bob blocks Alice. Alice still posts; Bob is told nothing, Carol everything.
         state.db.block(&bob, &alice).unwrap();
-        let err = on_room_push(&state, &alice_dev, &chat).unwrap_err();
-        assert_eq!(err.code(), "not_available", "the wire code never changes");
-        assert_eq!(
-            err.reason(),
-            Some("blocked_by"),
-            "Bob blocked Alice: {err:?}"
-        );
-        assert_eq!(err.other_party(), Some(("user2", None)));
-        // Bob himself still posts. Bob blocking Carol does not stop Bob's own group posts
-        // (only Carol's would be, as blocked_by).
-        assert!(on_room_push(&state, &bob_dev, &chat).is_ok());
-        state.db.block(&bob, &carol).unwrap();
         assert!(
-            on_room_push(&state, &bob_dev, &chat).is_ok(),
-            "a group member the sender blocked does not lock the sender out"
+            on_room_push(&state, &alice_dev, &chat).is_ok(),
+            "a group block never refuses the room"
+        );
+        let _ = pushes_of(&state, &bob_dev);
+        let _ = pushes_of(&state, &carol_dev);
+        assert!(on_room_push(&state, &alice_dev, &chat).is_ok());
+        assert!(
+            pushes_of(&state, &bob_dev)
+                .iter()
+                .all(|k| k != "people_message"),
+            "the blocker gets no push event for the blocked sender's row"
+        );
+        assert!(
+            pushes_of(&state, &carol_dev)
+                .iter()
+                .any(|k| k == "people_message"),
+            "a third member gets it as before"
+        );
+        // Announce (the alert + unread path): Bob's unread stays 0, Carol's counts it.
+        say(&state, &alice_dev, &chat, "hello all").await;
+        assert_eq!(
+            state.db.unread_in_chat(&bob, &chat).unwrap(),
+            0,
+            "no unread for the blocker"
+        );
+        assert_eq!(state.db.unread_in_chat(&carol, &chat).unwrap(), 1);
+        assert_eq!(state.db.unread_total(&bob).unwrap(), 0);
+        // The hint on Bob's DTO names Alice; Carol's and Alice's carry none.
+        let cm = load_chat(&state, &chat).unwrap();
+        let bobs = people_chat_dto(&state, &cm, &bob, &device_of(&bob_dev));
+        assert_eq!(bobs.blocked_senders, vec![format!("user:{alice}")]);
+        assert!(people_chat_dto(&state, &cm, &carol, &device_of(&carol_dev))
+            .blocked_senders
+            .is_empty());
+        assert!(people_chat_dto(&state, &cm, &alice, &device_of(&alice_dev))
+            .blocked_senders
+            .is_empty());
+        // Bob's own posts are not refused by his block, and Alice (who blocked nobody) still
+        // receives them.
+        let _ = pushes_of(&state, &alice_dev);
+        assert!(on_room_push(&state, &bob_dev, &chat).is_ok());
+        assert!(pushes_of(&state, &alice_dev)
+            .iter()
+            .any(|k| k == "people_message"));
+        // Unblock reveals: the hint is gone and Alice's next row counts for Bob.
+        state.db.unblock(&bob, &alice).unwrap();
+        let cm = load_chat(&state, &chat).unwrap();
+        assert!(people_chat_dto(&state, &cm, &bob, &device_of(&bob_dev))
+            .blocked_senders
+            .is_empty());
+        say(&state, &alice_dev, &chat, "again").await;
+        assert_eq!(
+            state.db.unread_in_chat(&bob, &chat).unwrap(),
+            2,
+            "past rows count again too"
         );
     }
 
