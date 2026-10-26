@@ -4435,7 +4435,10 @@ mod tests {
 
     // ---- secret hand-off: "save this" (POST /box/secrets/from-message) -------------------------
 
-    const HANDOFF_KEY: &str = concat!("sk_", "live_51HxQ9mT3vK2pLnR8wZ4eYc7bD1fG6hJ0kM9nP5qS2tU8vW3xA1");
+    const HANDOFF_KEY: &str = concat!(
+        "sk_",
+        "live_51HxQ9mT3vK2pLnR8wZ4eYc7bD1fG6hJ0kM9nP5qS2tU8vW3xA1"
+    );
 
     fn holds(bytes: &[u8], needle: &str) -> bool {
         let n = needle.as_bytes();
@@ -4582,7 +4585,11 @@ mod tests {
         for name in ["relay.db", "relay.db-wal"] {
             let p = state.cfg.data_dir.join(name);
             if let Ok(bytes) = std::fs::read(&p) {
-                assert!(!holds(&bytes, HANDOFF_KEY), "{} still holds the key", p.display());
+                assert!(
+                    !holds(&bytes, HANDOFF_KEY),
+                    "{} still holds the key",
+                    p.display()
+                );
             }
         }
 
