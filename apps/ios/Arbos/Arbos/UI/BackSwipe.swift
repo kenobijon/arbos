@@ -66,7 +66,6 @@ private struct BackSwipeModifier: ViewModifier {
             .coordinateSpace(name: BackSwipe.space)
             .onPreferenceChange(ComposerTopKey.self) { composerTop = $0 }
             .toolbar(.hidden, for: .navigationBar)
-            .toolbar(.hidden, for: .tabBar)
             .navigationBarBackButtonHidden(true)
             .background(InteractivePopGestureEnabler())
             .simultaneousGesture(
