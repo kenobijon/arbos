@@ -1014,6 +1014,53 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// #1851 regression bound: a fresh project's own bytes from the seed copy stay tiny — the
+    /// 119 MB / 17 924 files behind the node_modules links must never be materialised again.
+    #[test]
+    fn fresh_project_seed_copy_stays_small() {
+        let root = std::env::temp_dir().join(format!("arbos-seed-size-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let seed = root.join("seed").join("extensions").join("ext");
+        let shared = root.join("global").join("pkg");
+        std::fs::create_dir_all(seed.join("node_modules")).unwrap();
+        std::fs::create_dir_all(&shared).unwrap();
+        for i in 0..200 {
+            std::fs::write(shared.join(format!("f{i}.js")), vec![b'x'; 16 * 1024]).unwrap();
+        }
+        std::fs::write(seed.join("index.ts"), "export {}").unwrap();
+        std::os::unix::fs::symlink(&shared, seed.join("node_modules").join("pkg")).unwrap();
+        let ws = root.join("fresh-project");
+        copy_dir(&root.join("seed"), &ws).unwrap();
+        let (bytes, files) = own(&ws);
+        assert!(bytes < 64 * 1024, "fresh project holds {bytes} own bytes");
+        assert!(files < 16, "fresh project holds {files} own files");
+        assert!(
+            ws.join("extensions/ext/node_modules/pkg/f0.js").exists(),
+            "link resolves"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+
+        /// Bytes and files really under `p` (symlinks counted as one entry, not followed).
+        fn own(p: &std::path::Path) -> (u64, u64) {
+            let (mut b, mut n) = (0, 0);
+            for e in std::fs::read_dir(p).unwrap().flatten() {
+                let m = std::fs::symlink_metadata(e.path()).unwrap();
+                n += 1;
+                if m.file_type().is_symlink() {
+                    continue;
+                }
+                if m.is_dir() {
+                    let (sb, sn) = own(&e.path());
+                    b += sb;
+                    n += sn;
+                } else {
+                    b += m.len();
+                }
+            }
+            (b, n)
+        }
+    }
+
     /// An image roll must reach existing workspaces: a seed file whose bytes changed is copied
     /// again, an unchanged one is left alone, a missing one is created.
     #[test]
