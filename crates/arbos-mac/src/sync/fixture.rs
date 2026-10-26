@@ -432,6 +432,7 @@ fn testagent_member() -> AgentMember {
         avatar_leaf: Some(3),
         avatar_leaf_color: Some(7),
         image_url: None,
+        avatar_version: 0,
         description: None,
         model: None,
         owner: None,
@@ -1756,6 +1757,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 avatar_leaf: leaf.map(|l| l.leaf),
                 avatar_leaf_color: leaf.map(|l| l.color),
                 image_url: image_url.clone(),
+                avatar_version: 0,
                 message_grants: Vec::new(),
             });
             if let Some(url) = &image_url {
@@ -4730,6 +4732,7 @@ fn seed_projects() -> Vec<Project> {
             avatar_leaf: None,
             avatar_leaf_color: None,
             image_url: None,
+            avatar_version: 0,
             message_grants: Vec::new(),
         },
         Project {
@@ -4765,6 +4768,7 @@ fn seed_projects() -> Vec<Project> {
             avatar_leaf: None,
             avatar_leaf_color: None,
             image_url: None,
+            avatar_version: 0,
             message_grants: Vec::new(),
         },
         Project {
@@ -4800,6 +4804,7 @@ fn seed_projects() -> Vec<Project> {
             avatar_leaf: None,
             avatar_leaf_color: None,
             image_url: None,
+            avatar_version: 0,
             message_grants: Vec::new(),
         },
     ]
@@ -5968,6 +5973,7 @@ fn people_space(id: &str, other: Person, agents: Vec<AgentMember>) -> Project {
         avatar_leaf: None,
         avatar_leaf_color: None,
         image_url: None,
+        avatar_version: 0,
         message_grants: Vec::new(),
     }
 }
@@ -5994,6 +6000,7 @@ fn launch_week() -> Project {
         avatar_leaf: None,
         avatar_leaf_color: None,
         image_url: None,
+        avatar_version: 0,
         description: None,
         model: None,
         owner: None,
@@ -6021,6 +6028,7 @@ fn launch_week() -> Project {
             avatar_leaf: Some(leaf),
             avatar_leaf_color: Some(color),
             image_url: None,
+            avatar_version: 0,
             description: None,
             model: None,
             owner: None,
@@ -6074,6 +6082,7 @@ fn seed_people_projects() -> Vec<Project> {
             avatar_leaf: None,
             avatar_leaf_color: None,
             image_url: None,
+            avatar_version: 0,
             message_grants: Vec::new(),
         },
     ]
@@ -6829,6 +6838,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                                 avatar_leaf: p.avatar_leaf,
                                 avatar_leaf_color: p.avatar_leaf_color,
                                 image_url: None,
+                                avatar_version: 0,
                                 description: None,
                                 model: None,
                                 owner: None,
@@ -6928,6 +6938,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                         avatar_leaf: p.avatar_leaf,
                         avatar_leaf_color: p.avatar_leaf_color,
                         image_url: None,
+                        avatar_version: 0,
                         description: None,
                         model: None,
                         owner: None,
@@ -7000,6 +7011,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                             avatar_leaf: p.avatar_leaf,
                             avatar_leaf_color: p.avatar_leaf_color,
                             image_url: None,
+                            avatar_version: 0,
                             description: None,
                             model: None,
                             owner: None,
@@ -7198,6 +7210,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                                 avatar_leaf: p.avatar_leaf,
                                 avatar_leaf_color: p.avatar_leaf_color,
                                 image_url: None,
+                                avatar_version: 0,
                                 description: None,
                                 model: None,
                                 owner: None,
