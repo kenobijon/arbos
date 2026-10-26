@@ -63,6 +63,21 @@ struct AgentPickerField: View {
                 }
             }
         }
+        .onAppear(perform: applyRig)
+    }
+
+    /// Rig (shots): `ARBOS_RIG_AGENT_PICKED` names start as chips; `ARBOS_RIG_AGENT_PICKER`
+    /// opens the sheet (its query is typed by the sheet).
+    private func applyRig() {
+        let names = DebugHooks.agentPickerPicked
+        if !names.isEmpty {
+            for p in model.projects where names.contains(where: { $0.caseInsensitiveCompare(p.name) == .orderedSame }) {
+                picked.insert(p.id)
+            }
+        }
+        if DebugHooks.agentPickerQuery != nil, !adding {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { adding = true }
+        }
     }
 
     /// The agent's current picture through the shared resolver (the newest copy the model
@@ -182,7 +197,10 @@ struct AddAgentSheet: View {
                 Button("Cancel") { dismiss() }.foregroundStyle(theme.text)
             }
         }
-        .onAppear { searching = true }
+        .onAppear {
+            if let q = DebugHooks.agentPickerQuery, !q.isEmpty, query.isEmpty { query = q }
+            searching = true
+        }
     }
 
     private func resolved(_ p: Project) -> Project {
