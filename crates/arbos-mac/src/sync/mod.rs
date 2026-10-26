@@ -75,6 +75,14 @@ impl PushRefusal {
             })
     }
 
+    /// The person to unblock, when the sentence says "Unblock to post".
+    pub fn unblock_handle(&self) -> Option<&str> {
+        (self.reason.as_deref() == Some("blocks_member"))
+            .then_some(self.by_handle.as_deref())
+            .flatten()
+            .filter(|h| !h.is_empty())
+    }
+
     /// The plain sentence the chat-level note shows (Jacob 2026-10-26): who stands in the
     /// way and what to do; the generic line for anything else.
     pub fn sentence(&self) -> String {

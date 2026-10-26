@@ -17,6 +17,7 @@ use gpui::{
 use crate::app::ProfilePage;
 use crate::model::{Chat, LinkState, Project, ServerChannel, ServerInfo};
 use crate::ui::avatars;
+use crate::ui::blocked;
 use crate::ui::composer::Composer;
 use crate::ui::glass::{self, WindowDrag};
 use crate::ui::groups;
@@ -100,9 +101,22 @@ pub fn render(
         let image = state.avatar(&person.avatar_url);
         let handle = person.handle.clone();
         let sid = space.id.clone();
+        // Blocked ([feedback blocked-state-mac-2026-10-26]): the tag after the name.
+        let label: AnyElement = if state.is_blocked(person) {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .min_w_0()
+                .child(name_label(person.display_name(), &theme))
+                .child(blocked::tag(&theme))
+                .into_any_element()
+        } else {
+            name_label(person.display_name(), &theme).into_any_element()
+        };
         name_part(
             people::avatar(image, person, AVATAR_HEADER, &theme),
-            name_label(person.display_name(), &theme).into_any_element(),
+            label,
             &theme,
         )
         .on_click(cx.listener(move |this, _, _, cx| {
