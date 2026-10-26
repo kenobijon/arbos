@@ -200,6 +200,11 @@ enum Transcript {
             // its status parts feed the presence line and the tasks sheet, never a bubble —
             // not while it runs, not the "no answer" stock line when it ends.
             if message.hidden || message.job != nil { continue }
+            // A background worker's spawn row (`worker: true`, Grok parity trait 15) draws nothing at
+            // all — no hand-off line, no legacy status line, no date separator. Its `activity` reaches
+            // the working line through `AppModel.currentActivity`. Skipping only the hand-off name
+            // (6e7261a5) left the legacy `.status(.handoff)` fallback drawing "Messaged ◉ <worker>".
+            if message.worker && message.turn?.isProgress == true { continue }
             // Build this message's visible rows first. Date separators only land when
             // something actually renders — otherwise an empty/hidden-only message leaves
             // a lone "Today 5:45 PM" in a blank chat.
