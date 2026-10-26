@@ -2612,8 +2612,12 @@ mod agent_avatar_version_tests {
         let project = project_of(&state, &alice, "Hezbola");
 
         // No picture yet: 404 for everyone.
-        let r = crate::images::project_avatar(State(state.clone()), Path(format!("{project}.jpg")))
-            .await;
+        let r = crate::images::project_avatar(
+            State(state.clone()),
+            Path(format!("{project}.jpg")),
+            Query(crate::avatar_image::SizeQuery::default()),
+        )
+        .await;
         assert_eq!(r.status(), StatusCode::NOT_FOUND);
 
         // Alice uploads a PNG into the agent's slot and makes it the picture.
@@ -2647,13 +2651,18 @@ mod agent_avatar_version_tests {
             State(state.clone()),
             bob_dev.clone(),
             Path((project.clone(), "avatar-1.png".to_owned())),
+            Query(crate::avatar_image::SizeQuery::default()),
         )
         .await;
         assert_eq!(r.status(), StatusCode::FORBIDDEN);
 
         // But the picture route hands him the current picture, typed, cacheable.
-        let r = crate::images::project_avatar(State(state.clone()), Path(format!("{project}.jpg")))
-            .await;
+        let r = crate::images::project_avatar(
+            State(state.clone()),
+            Path(format!("{project}.jpg")),
+            Query(crate::avatar_image::SizeQuery::default()),
+        )
+        .await;
         assert_eq!(r.status(), StatusCode::OK);
         assert_eq!(
             r.headers()
@@ -2681,8 +2690,12 @@ mod agent_avatar_version_tests {
         )
         .await
         .unwrap();
-        let r = crate::images::project_avatar(State(state.clone()), Path(format!("{project}.jpg")))
-            .await;
+        let r = crate::images::project_avatar(
+            State(state.clone()),
+            Path(format!("{project}.jpg")),
+            Query(crate::avatar_image::SizeQuery::default()),
+        )
+        .await;
         assert_eq!(r.status(), StatusCode::NOT_FOUND);
     }
 }
