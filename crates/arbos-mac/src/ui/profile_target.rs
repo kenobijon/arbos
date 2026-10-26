@@ -220,6 +220,9 @@ mod render_tests {
         let handle = rt.handle().clone();
         cx.update(|cx| {
             gpui_tokio::init_from_handle(cx, handle);
+            // The pane snaps instead of sliding: a click measured mid-slide lands beside its
+            // target (the gate's `--workspace` run, several binaries at once, caught this).
+            cx.set_reduce_motion(true);
             cx.set_global(Theme::dark(crate::ui::theme::Surface::Matte));
             if !cx.has_global::<PulseClock>() {
                 PulseClock::init(cx);
