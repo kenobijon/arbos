@@ -1893,6 +1893,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 image_url: image_url.clone(),
                 avatar_version: 0,
                 message_grants: Vec::new(),
+                blocked_senders: Vec::new(),
             });
             if let Some(url) = &image_url {
                 emit_avatar(shared, url);
@@ -3408,7 +3409,20 @@ fn emit_blocked_hook(shared: &Arc<Shared>) {
             }
             acc
         });
-    *shared.blocked.lock().unwrap() = people;
+    *shared.blocked.lock().unwrap() = people.clone();
+    // The relay's `blockedSenders` hint on every people group that holds them.
+    {
+        let ids: Vec<String> = people.iter().map(|p| format!("user:{}", p.id)).collect();
+        let mut projects = shared.projects.lock().unwrap();
+        for p in projects.iter_mut().filter(|p| p.is_people_group()) {
+            p.blocked_senders = ids
+                .iter()
+                .filter(|id| p.people.iter().any(|m| format!("user:{}", m.id) == **id))
+                .cloned()
+                .collect();
+        }
+    }
+    emit_projects(shared);
     emit_blocked(shared);
 }
 
@@ -4914,6 +4928,7 @@ fn seed_projects() -> Vec<Project> {
             image_url: None,
             avatar_version: 0,
             message_grants: Vec::new(),
+            blocked_senders: Vec::new(),
         },
         Project {
             id: PROJECT_COMMS.into(),
@@ -4950,6 +4965,7 @@ fn seed_projects() -> Vec<Project> {
             image_url: None,
             avatar_version: 0,
             message_grants: Vec::new(),
+            blocked_senders: Vec::new(),
         },
         Project {
             id: PROJECT_ARBOS.into(),
@@ -4986,6 +5002,7 @@ fn seed_projects() -> Vec<Project> {
             image_url: None,
             avatar_version: 0,
             message_grants: Vec::new(),
+            blocked_senders: Vec::new(),
         },
     ]
 }
@@ -6166,6 +6183,7 @@ fn people_space(id: &str, other: Person, agents: Vec<AgentMember>) -> Project {
         image_url: None,
         avatar_version: 0,
         message_grants: Vec::new(),
+        blocked_senders: Vec::new(),
     }
 }
 
@@ -6275,6 +6293,7 @@ fn seed_people_projects() -> Vec<Project> {
             image_url: None,
             avatar_version: 0,
             message_grants: Vec::new(),
+            blocked_senders: Vec::new(),
         },
     ]
 }

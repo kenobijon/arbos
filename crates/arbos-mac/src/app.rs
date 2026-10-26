@@ -2507,12 +2507,21 @@ impl AppState {
                     self.enforce_tab(&project_id);
                 }
                 for m in &arrived {
+                    if self.hides_message(&chat_id, m) {
+                        continue;
+                    }
                     self.notify_for_message(&chat_id, m, false, false, true);
                 }
                 let chat_visible = self.chat_visible_in_active_window(&chat_id);
                 let effects: Vec<ArrivalRead> = arrived
                     .iter()
-                    .map(|m| arrival_read(chat_visible, self.is_mine(m), m.role == Role::System))
+                    .map(|m| {
+                        arrival_read(
+                            chat_visible,
+                            self.is_mine(m),
+                            m.role == Role::System || self.hides_message(&chat_id, m),
+                        )
+                    })
                     .collect();
                 self.apply_arrival_read(&chat_id, &effects);
                 if effects.contains(&ArrivalRead::MarkUnread) {
@@ -2567,18 +2576,21 @@ impl AppState {
                     }
                 }
                 self.index_message(&chat_id, &message);
-                self.notify_for_message(
-                    &chat_id,
-                    &message,
-                    was_streaming,
-                    had_open_question,
-                    is_new,
-                );
+                let hidden = self.hides_message(&chat_id, &message);
+                if !hidden {
+                    self.notify_for_message(
+                        &chat_id,
+                        &message,
+                        was_streaming,
+                        had_open_question,
+                        is_new,
+                    );
+                }
                 if is_new {
                     let effect = arrival_read(
                         self.chat_visible_in_active_window(&chat_id),
                         self.is_mine(&message),
-                        message.role == Role::System,
+                        message.role == Role::System || hidden,
                     );
                     self.apply_arrival_read(&chat_id, &[effect]);
                     if effect == ArrivalRead::MarkUnread {
@@ -3491,6 +3503,15 @@ impl AppState {
         // chat is an agent / people chat (by chat id) or a channel (by room id).
         let cap = palette::SECTION_CAP * 2;
         for hit in self.search_index.messages(query, cap) {
+            // A row hidden for me (someone I blocked) is not searchable either.
+            if self
+                .messages_of(&hit.chat_id)
+                .iter()
+                .find(|m| m.id == hit.message_id)
+                .is_some_and(|m| self.hides_message(&hit.chat_id, m))
+            {
+                continue;
+            }
             let Some((title, target)) = self.palette_place(&hit.chat_id, &hit.message_id) else {
                 continue;
             };
@@ -8864,6 +8885,30 @@ impl AppState {
     /// id — with the handle as the fallback for rows that only carry a handle.
     pub fn is_blocked(&self, person: &Person) -> bool {
         blocked_entry(&self.blocked, person).is_some()
+    }
+
+    /// The senders whose rows `space` hides for me ([feedback blocked-state-mac-2026-10-26],
+    /// Jacob 2026-10-26: a group block hides the blocked person's messages from the blocker
+    /// alone): the relay's `blockedSenders` hint, plus every member on my block list (so a
+    /// block taken a moment ago hides at once, before the chat list refreshes). `user:<id>`.
+    pub fn hidden_senders_in(&self, space: &Project) -> HashSet<String> {
+        let mut out: HashSet<String> = space.blocked_senders.iter().cloned().collect();
+        for p in space.people.iter().filter(|p| self.is_blocked(p)) {
+            if !p.id.is_empty() {
+                out.insert(format!("user:{}", p.id));
+            }
+        }
+        out
+    }
+
+    /// Is this message hidden for me — from someone I blocked, in a people group?
+    pub fn hides_message(&self, chat_id: &str, m: &Message) -> bool {
+        m.role == Role::User
+            && m.sender.starts_with("user:")
+            && self
+                .project_of_chat(chat_id)
+                .filter(|p| p.is_people_group())
+                .is_some_and(|p| self.hidden_senders_in(p).contains(&m.sender))
     }
 
     /// `DELETE /blocks/{user_id}` for the block-list entry that matches `person`; a no-op

@@ -488,6 +488,16 @@ impl Shell {
                     });
                     cx.notify();
                 }
+                TranscriptEvent::Unblock { person } => {
+                    // A group: the confirm needs a place — the person's pane, opened over
+                    // the chat with the confirm already armed on its Unblock row.
+                    let page = ProfilePage::User {
+                        handle: person.handle.clone(),
+                        space_id: this.state.read(cx).selected_project.clone(),
+                    };
+                    this.state.update(cx, |s, cx| s.open_profile(page, cx));
+                    this.arm_unblock(person.clone(), cx);
+                }
             },
         )
         .detach();

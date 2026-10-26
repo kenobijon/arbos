@@ -130,6 +130,42 @@ pub fn confirm_buttons(id: &'static str, theme: &Theme) -> (Stateful<Div>, State
     )
 }
 
+/// "N messages hidden because you blocked @x" for the transcript.
+pub fn hidden_line(count: usize, who: &str) -> String {
+    let n = if count == 1 {
+        "1 message".to_string()
+    } else {
+        format!("{count} messages")
+    };
+    format!("{n} hidden because you blocked {who}")
+}
+
+/// The transcript's folded line for a run of a blocked person's messages (Jacob
+/// 2026-10-26: hidden from the blocker alone): the sentence in the stamp's muted type, then
+/// the Unblock link the caller wires (it opens the shell's confirm). `who` is the display
+/// name, else `@handle`.
+pub fn hidden_row(row_id: &str, count: usize, who: &str, theme: &Theme) -> (Div, Stateful<Div>) {
+    let line = div()
+        .debug_selector(|| "hidden-row".into())
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .text_size(px(TEXT_SMALL))
+        .text_color(theme.text_muted)
+        .child(icon("nosign", 12.0, theme.text_muted))
+        .child(hidden_line(count, who))
+        .child("·");
+    let unblock = div()
+        .id(SharedString::from(format!("{row_id}#unblock")))
+        .debug_selector(|| "hidden-row-unblock".into())
+        .text_color(theme.accent)
+        .font_weight(FontWeight::SEMIBOLD)
+        .cursor_pointer()
+        .hover(|s| s.opacity(0.8))
+        .child(UNBLOCK_LABEL);
+    (line, unblock)
+}
+
 /// The composer's stand-in for a DM with someone I blocked: "You blocked X" with an Unblock
 /// capsule at the right, the composer's height and radius.
 pub fn composer_bar(person: &Person, theme: &Theme) -> (Div, Stateful<Div>) {
@@ -193,6 +229,14 @@ mod tests {
             ..Person::default()
         };
         assert_eq!(composer_line(&bare), "You blocked sam");
+        assert_eq!(
+            hidden_line(1, "@sam"),
+            "1 message hidden because you blocked @sam"
+        );
+        assert_eq!(
+            hidden_line(3, "Sam Rivera"),
+            "3 messages hidden because you blocked Sam Rivera"
+        );
     }
 }
 
@@ -613,5 +657,349 @@ mod render_tests {
         });
         settle(&state, &shell, vcx);
         assert!(vcx.debug_bounds("delivery-error").is_none());
+    }
+}
+
+#[cfg(test)]
+mod hidden_tests {
+    //! A group block hides the blocked person's rows from the blocker alone (Jacob
+    //! 2026-10-26): the transcript folds each run into one line with Unblock, the sidebar
+    //! preview, unread dot, search and Library skip those rows, and unblocking reveals them.
+    use std::collections::{HashMap, HashSet};
+
+    use futures::future::BoxFuture;
+    use gpui::{
+        point, px, size, AppContext, Bounds, Entity, Modifiers, Pixels, TestAppContext,
+        VisualTestContext,
+    };
+    use tokio::sync::mpsc;
+
+    use crate::app::{AppState, ProfilePage};
+    use crate::model::{AccountView, Chat, Message, Person, Project, SpaceKind};
+    use crate::sync::{ClientCommand, SyncEvent, SyncSource};
+    use crate::ui::mention::Mentions;
+    use crate::ui::motion::PulseClock;
+    use crate::ui::shell::Shell;
+    use crate::ui::theme::Theme;
+    use crate::ui::transcript::{build_rows_hiding, RowKind, SpeechRows};
+
+    struct Idle;
+
+    impl SyncSource for Idle {
+        fn name(&self) -> &'static str {
+            "idle"
+        }
+
+        fn run(
+            self: Box<Self>,
+            _events: mpsc::UnboundedSender<SyncEvent>,
+            _commands: mpsc::UnboundedReceiver<ClientCommand>,
+        ) -> BoxFuture<'static, anyhow::Result<()>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    fn person(id: &str, handle: &str, name: &str) -> Person {
+        Person {
+            id: id.into(),
+            handle: handle.into(),
+            name: Some(name.into()),
+            status: "member".into(),
+            role: "member".into(),
+            ..Default::default()
+        }
+    }
+
+    fn row(id: &str, sender: &str, handle: &str, name: &str, text: &str, at: u64) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "chatId": "g1", "role": "user", "sender": sender,
+            "senderHandle": handle, "senderName": name, "status": "done",
+            "createdAt": at, "completedAt": at,
+            "parts": [{ "id": format!("{id}-t"), "kind": "text", "text": text }],
+        }))
+        .expect("message")
+    }
+
+    fn messages(now: u64) -> Vec<Message> {
+        vec![
+            row(
+                "m1",
+                "user:gh_3",
+                "priya",
+                "Priya Natarajan",
+                "morning all",
+                now - 50_000,
+            ),
+            row("m2", "user:gh_2", "sam", "Sam Rivera", "hey", now - 40_000),
+            row(
+                "m3",
+                "user:gh_2",
+                "sam",
+                "Sam Rivera",
+                "anyone around?",
+                now - 30_000,
+            ),
+            row(
+                "m4",
+                "user:gh_3",
+                "priya",
+                "Priya Natarajan",
+                "here",
+                now - 20_000,
+            ),
+            row("m5", "user:gh_2", "sam", "Sam Rivera", "cool", now - 10_000),
+        ]
+    }
+
+    /// Pure: Sam's two runs fold into two Hidden rows (2 then 1), Priya's rows stay.
+    #[test]
+    fn a_blocked_senders_runs_fold_into_hidden_rows() {
+        let (spoken, failed) = (HashSet::new(), HashMap::new());
+        let speech = SpeechRows {
+            enabled: false,
+            spoken: &spoken,
+            failed: &failed,
+            voice_mode: false,
+        };
+        let hidden: HashSet<String> = ["user:gh_2".to_string()].into_iter().collect();
+        let rows = build_rows_hiding(
+            &messages(1_700_000_000_000),
+            false,
+            speech,
+            "gh_me",
+            &HashSet::new(),
+            &Mentions::empty(),
+            true,
+            &hidden,
+        );
+        let shape: Vec<String> = rows
+            .iter()
+            .filter_map(|r| match &r.kind {
+                RowKind::User { .. } => Some(format!("user:{}", r.message_id)),
+                RowKind::Hidden { count, handle, .. } => Some(format!("hidden:{handle}x{count}")),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            vec!["user:m1", "hidden:samx2", "user:m4", "hidden:samx1"],
+            "{shape:?}"
+        );
+        // Nothing hidden: every row is a bubble.
+        let rows = build_rows_hiding(
+            &messages(1_700_000_000_000),
+            false,
+            speech,
+            "gh_me",
+            &HashSet::new(),
+            &Mentions::empty(),
+            true,
+            &HashSet::new(),
+        );
+        assert_eq!(
+            rows.iter()
+                .filter(|r| matches!(r.kind, RowKind::User { .. }))
+                .count(),
+            5
+        );
+        assert!(!rows
+            .iter()
+            .any(|r| matches!(r.kind, RowKind::Hidden { .. })));
+    }
+
+    fn mount(
+        cx: &mut TestAppContext,
+    ) -> (
+        tokio::runtime::Runtime,
+        Entity<AppState>,
+        Entity<Shell>,
+        &mut VisualTestContext,
+    ) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio");
+        let handle = rt.handle().clone();
+        cx.update(|cx| {
+            gpui_tokio::init_from_handle(cx, handle);
+            cx.set_reduce_motion(true);
+            cx.set_global(Theme::dark(crate::ui::theme::Surface::Matte));
+            if !cx.has_global::<PulseClock>() {
+                PulseClock::init(cx);
+            }
+        });
+        let state = cx.new(|cx| AppState::new(Box::new(Idle), cx));
+        let now = crate::model::now_ms();
+        state.update(cx, |s, cx| {
+            s.account = Some(AccountView {
+                id: "gh_1".into(),
+                login: "unconst".into(),
+                name: "Jacob".into(),
+                avatar_url: String::new(),
+                device_name: "test".into(),
+                balance_usd: 0.0,
+                spent_today_usd: 0.0,
+                daily_cap_usd: None,
+            });
+            s.projects.push(Project {
+                id: "g1".into(),
+                name: "Launch week".into(),
+                kind: SpaceKind::Group,
+                people: vec![
+                    person("gh_2", "sam", "Sam Rivera"),
+                    person("gh_3", "priya", "Priya Natarajan"),
+                ],
+                blocked_senders: vec!["user:gh_2".into()],
+                ..Project::default()
+            });
+            let chat: Chat = serde_json::from_value(serde_json::json!({
+                "id": "g1", "project_id": "g1", "title": "Launch week", "is_pinned": true,
+                "is_system": false, "unread": false, "last_message_at": now,
+            }))
+            .expect("chat");
+            s.chats.insert("g1".into(), vec![chat]);
+            s.active_tab.insert("g1".into(), "g1".into());
+            s.messages.insert("g1".into(), messages(now));
+            s.blocked = vec![person("gh_2", "sam", "Sam Rivera")];
+            s.selected_project = Some("g1".into());
+            cx.notify();
+        });
+        let (shell, vcx) = cx.add_window_view(|window, cx| Shell::new(state.clone(), window, cx));
+        vcx.simulate_resize(size(px(1180.0), px(780.0)));
+        vcx.run_until_parked();
+        (rt, state, shell, vcx)
+    }
+
+    fn settle(state: &Entity<AppState>, shell: &Entity<Shell>, vcx: &mut VisualTestContext) {
+        for _ in 0..4 {
+            state.update(vcx, |_, cx| cx.notify());
+            shell.update(vcx, |_, cx| cx.notify());
+            vcx.run_until_parked();
+        }
+    }
+
+    fn centre(b: Bounds<Pixels>) -> gpui::Point<Pixels> {
+        point(b.left() + b.size.width / 2.0, b.top() + b.size.height / 2.0)
+    }
+
+    /// The real shell: Sam's bubbles are folded, Priya's drawn; the sidebar preview is
+    /// Priya's last line, not Sam's; the folded line's Unblock opens Sam's pane with the
+    /// confirm armed; once the relay's list clears, Sam's bubbles are back.
+    #[gpui::test]
+    fn the_blocker_sees_folded_lines_and_unblock_reveals(cx: &mut TestAppContext) {
+        let (_rt, state, shell, vcx) = mount(cx);
+        settle(&state, &shell, vcx);
+        let bubbles = shell.read_with(vcx, |sh, cx| {
+            sh.transcript
+                .read(cx)
+                .rows
+                .iter()
+                .filter(|r| matches!(r.kind, RowKind::User { .. }))
+                .map(|r| r.message_id.clone())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            bubbles,
+            vec!["m1".to_string(), "m4".to_string()],
+            "only Priya's bubbles"
+        );
+        assert!(
+            vcx.debug_bounds("hidden-row").is_some(),
+            "a folded line is drawn"
+        );
+        let preview = state.read_with(vcx, |s, _| {
+            let space = s.projects[0].clone();
+            crate::ui::sidebar::preview_for_tests(s, &space)
+        });
+        assert_eq!(
+            preview, "@priya: here",
+            "the preview skips Sam's newest row"
+        );
+        // The folded line's Unblock: Sam's pane opens with the confirm up.
+        let link = vcx
+            .debug_bounds("hidden-row-unblock")
+            .expect("Unblock on the fold");
+        vcx.simulate_click(centre(link), Modifiers::default());
+        settle(&state, &shell, vcx);
+        state.read_with(vcx, |s, _| {
+            assert!(matches!(
+                &s.profile,
+                Some(ProfilePage::User { handle, .. }) if handle == "sam"
+            ));
+        });
+        assert!(
+            vcx.debug_bounds("profile-unblock-confirm").is_some(),
+            "the pane opens on the confirm"
+        );
+        // The relay's list comes back without Sam, and the hint is gone: all five bubbles.
+        state.update(vcx, |s, cx| {
+            s.blocked.clear();
+            s.projects[0].blocked_senders.clear();
+            cx.notify();
+        });
+        shell.update(vcx, |sh, cx| sh.cancel_unblock(cx));
+        settle(&state, &shell, vcx);
+        let bubbles = shell.read_with(vcx, |sh, cx| {
+            sh.transcript
+                .read(cx)
+                .rows
+                .iter()
+                .filter(|r| matches!(r.kind, RowKind::User { .. }))
+                .count()
+        });
+        assert_eq!(bubbles, 5, "unblocked: every row is back");
+        assert!(vcx.debug_bounds("hidden-row").is_none());
+    }
+
+    /// Arrivals from a blocked sender neither light the unread dot nor notify; a third
+    /// member's do.
+    #[gpui::test]
+    fn a_hidden_arrival_leaves_the_dot_dark(cx: &mut TestAppContext) {
+        let (_rt, state, shell, vcx) = mount(cx);
+        state.update(vcx, |s, cx| {
+            // Another chat is on screen, so arrivals here count as unread.
+            s.selected_project = None;
+            cx.notify();
+        });
+        settle(&state, &shell, vcx);
+        let now = crate::model::now_ms();
+        state.update(vcx, |s, cx| {
+            let mut m = s.messages.get("g1").cloned().unwrap();
+            m.push(row("m6", "user:gh_2", "sam", "Sam Rivera", "psst", now));
+            s.apply(
+                SyncEvent::ChatSnapshot {
+                    chat_id: "g1".into(),
+                    messages: m,
+                },
+                cx,
+            );
+        });
+        settle(&state, &shell, vcx);
+        state.read_with(vcx, |s, _| {
+            let chat = &s.chats["g1"][0];
+            assert!(!chat.unread, "Sam's row is hidden for me: no dot");
+        });
+        state.update(vcx, |s, cx| {
+            let mut m = s.messages.get("g1").cloned().unwrap();
+            m.push(row(
+                "m7",
+                "user:gh_3",
+                "priya",
+                "Priya Natarajan",
+                "hi!",
+                now + 1,
+            ));
+            s.apply(
+                SyncEvent::ChatSnapshot {
+                    chat_id: "g1".into(),
+                    messages: m,
+                },
+                cx,
+            );
+        });
+        settle(&state, &shell, vcx);
+        state.read_with(vcx, |s, _| {
+            assert!(s.chats["g1"][0].unread, "Priya's row lights it");
+        });
     }
 }
