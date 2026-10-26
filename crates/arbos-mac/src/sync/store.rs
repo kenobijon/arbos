@@ -424,6 +424,20 @@ mod secret_handoff_store_tests {
             "secret_redacted"
         );
         drop(store);
+        // `ARBOS_HANDOFF_KEEP=<dir>` (scripts/secrets/handoff-invariant-check.sh --with-mac):
+        // keep the store files for the grep that follows.
+        if let Some(keep) = std::env::var_os("ARBOS_HANDOFF_KEEP") {
+            let keep = PathBuf::from(keep);
+            let _ = std::fs::create_dir_all(&keep);
+            for suffix in ["", "-wal", "-shm"] {
+                let mut p = path.as_os_str().to_owned();
+                p.push(suffix);
+                let _ = std::fs::copy(
+                    PathBuf::from(&p),
+                    keep.join(format!("store.sqlite{suffix}")),
+                );
+            }
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
