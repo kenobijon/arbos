@@ -79,9 +79,10 @@ const OVERDRAW_PX: f32 = 320.0;
 /// width cap, so the agent bubble's left edge is the composer's left edge
 /// and my bubble's right edge is the composer's right edge, at any pane
 /// width. Grok Mac (refs 57/58, 2 px/pt): both at 16 pt from the pane. The
-/// cap is the composer pill at its widest as it has always shipped — the
-/// 820 pt input plus the two 28 pt circles — so the pill itself does not
-/// move; up to a 908 pt pane the margins bound both.
+/// cap is the composer pill at its widest — the 904 pt input plus the two
+/// 28 pt circles = Grok's 960 ([feedback mac-sidebar-rail-2026-10-26]; 876
+/// before) — so the pill itself does not move; up to a 992 pt pane the
+/// margins bound both.
 pub const COLUMN_MAX_WIDTH: f32 = COMPOSER_WIDTH + 2.0 * PLUS_BUTTON;
 /// Agent bubble cap, measured from Grok Mac on two pane widths (ref 57:
 /// 728 pt pane, 612 pt bubble; ref 58: 424 pt pane, 310 pt bubble): the
@@ -96,7 +97,7 @@ pub const ASSISTANT_RIGHT_GAP: f32 = 84.0;
 /// window): every wrapped agent bubble ends at 1120 px = **560 pt** in a
 /// 960 pt composer column (58 % of it) — the list bubble is content-sized
 /// narrower, nothing is wider. Ours filled the column minus the gap (792 at
-/// the 876 pt cap, 90 %), which is what Jacob saw as "Arbos bubbles are
+/// the then 876 pt cap, 90 %), which is what Jacob saw as "Arbos bubbles are
 /// wider" ([feedback bubble-width-2026-10-24]). The cap is the smaller of
 /// the two rules ([`assistant_cap`]): narrow panes keep Grok's fixed gap
 /// (refs 57/58: 612 in a 696 pill, 310 in 392), wide panes stop at 560.
@@ -5892,8 +5893,8 @@ mod layout_tests {
         );
         assert!(column - ASSISTANT_RIGHT_GAP > ASSISTANT_MAX_WIDTH);
         assert!((e.bubble_left - e.column_left).abs() <= 1.0);
-        // A wide pane: the column caps at the composer's 876; the bubble still
-        // stops at 560 — 64 % of the column (Grok: 560 of its 960 pt composer).
+        // A wide pane: the column caps at the composer's 960 (Grok's); the
+        // bubble still stops at 560 — 58 % of the column, as in Grok.
         let e = measure(cx, 1400.0);
         assert_eq!(e.column_width, COLUMN_MAX_WIDTH);
         assert_eq!(e.composer_width, COLUMN_MAX_WIDTH);

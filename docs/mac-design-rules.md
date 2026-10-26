@@ -48,7 +48,7 @@ window's top edge.
 | Gap / right inset | **8** (`STRIP_GAP` = `CONTROL_GAP`) / 12 (`STRIP_INSET`: the discs end 4 past the rows' card edge, as Grok's) |
 | Search | a round disc only; click, **⌘⇧F** or **⌘K** open the command palette (below). No inline field or capsule any more. **⌘F** is unbound — reserved for in-chat search (not built yet) |
 | Inside a server | no search (spacer); "+" only for owner/admin; collapse always |
-| Folded sidebar | the chat header shows the same round disc beside the lights (`header::sidebar_toggle`) |
+| Folded sidebar | collapses to the **icon rail** (section below), never away; in a plain window the chat header shows the same round disc beside the lights (`header::sidebar_toggle`), in full screen the rail's top-left slot holds it |
 
 ### One button family (Jacob 2026-10-24)
 
@@ -71,6 +71,49 @@ first chat card at row 130 px (64 pt). The before shots: v0.6.206 had 64 px
 discs 20 px apart; v0.6.212–0.6.214 had the right discs centred at 21 pt
 (top 3) in a 44 pt band with the filter capsules at 50 — 9 pt too high
 against Grok, Jacob's "the top bar on mac is now too high".
+
+## Collapsed sidebar = icon rail (Jacob 2026-10-26, [feedback mac-sidebar-rail-2026-10-26])
+
+**The sidebar toggle collapses the chat list to Grok Bot's 84 pt icon rail; it
+never closes it.** Jacob: "instead of closing the side bar all the way when
+pressing the tab button I want you to do the same as what grok does but with
+the + and search button at the top and our user icon at the bottom." Approved
+on the round-2 mock (`media/feedback/mac-sidebar-rail/mock-mac-sidebar-rail-*.png`
+in the project store, 10:47 CR).
+
+Measured on Jacob's `jacob-ref-grok-collapsed-rail-2.png` (3440 × 2158 px =
+a 1720 × 1079 pt window at 2 px/pt): hairline at x 167 px → 83.5; selected tile
+107 × 108 px → 54 square, radius ≈ 12; pictures 72 px → 36; pitch 116 px → 58;
+the user's picture centred 31 from the bottom; blue unread dot 16 px → 8 at the
+picture's bottom-right 45° point; composer 849–2766 px → 959 wide, centred in
+the chat area (not the window). Points from the window's edges.
+
+| Item | Rule (`ui/rail.rs` `metrics`) |
+|---|---|
+| Rail | **84** wide incl. the 1 pt `border` hairline (`WIDTH`), `theme.chrome()`; one column centred at **42** |
+| Toggle | **a plain window:** stays where today's lone toggle is — the chat header's left slot, 12 after the rail (x 96), top 12 on `CONTROL_LINE`. **Native full screen** (the lights are hidden): the rail's top-left slot, x 24, top 12. `rail::toggle_spot(fullscreen)`; never both (`header_toggle_shown`) |
+| + and Search | stacked under the toggle's slot, `STRIP_GAP` 8 apart: + top **56**, Search top **100** (36 pt `control_disc`s, the strip's own handlers). In a window the toggle's slot stays empty under the lights; + and Search never move between the two modes |
+| Pictures | every chat the current filter admits — agents, people, groups, servers (rounded squares, `SERVER_PICTURE_CORNER`) — in the list's order, **36** pt on a **58** pitch, first tile top **152** (16 under Search; picture top 161, centre 179); the same `ListEntry::picture` builders as the rows (one avatar resolver, #1912). Selected = **54** tile, radius **12**, `surface_2`; hover = `surface_2` at 55 % + a name tip 8 right of the rail (`pane_card`, `border_strong`, 13 pt) |
+| Badges | one spot at the picture's bottom-right corner: **typing** = the 9 pt `online` dot in a 13 ring (pulsing), else **unread** = the 8 pt `accent` dot in a 12 ring; the selected chat shows no unread dot — the rows' own `!typing && unread` rule |
+| My picture | alone at the bottom: 36 at x 24, **12** above the bottom (centre 30 = `CONTROL_LINE` mirrored; Grok 31), with the machine dot; opens Settings like the footer row |
+| Scrolling | the pictures scroll (`LIST_FADE_BAND` edge fade) when more fit than the window holds (`capacity`: 14 in a 1079 pt window) |
+| Filter | the rail follows All · Agents · People · Servers; the segment persists in `<config>/sidebar_filter` and the collapsed state in `<config>/sidebar_collapsed` (`SidebarCollapsed`), so the app reopens as it was left |
+| Servers | a server's picture opens its **newest channel** (`#general` when none has spoken) and marks the server open, so expanding shows its channel list |
+| Expanded sidebar | **unchanged** — strip, filter, rows, footer exactly as above |
+| Composer / column | the pill's cap is Grok's **960** (`COMPOSER_WIDTH` 904 + 2 × 28; was 876), the transcript column shares it (`COLUMN_MAX_WIDTH`); both centred in the chat area right of the rail / sidebar, as before |
+| Collapse / open | a **morph**, not a clip, on the pane-slide curves (170 ms ease-out quad closing, 200 ms ease-out cubic opening): the three discs glide from the strip into the rail column (the toggle to the header's slot in a window), the rows' pictures shrink into their rail slots as the text and filter fade out by half-way, the selected card shrinks into its tile, my footer picture slides to the centre, the chat column re-centres. `rail::render_morph` (the column) + `rail::render_overlay` (the travelling pieces, from the resting bounds the expanded sidebar records each frame — `Shell::morph`). Reduce Motion snaps |
+| Narrow band | below `NARROW_WINDOW` the sidebar still hides and the header toggle floats it as an overlay (Q7 b); the rail is for the docked widths |
+| iPhone | no equivalent (no sidebar; the home list + the single bottom search bar) |
+
+Rig: `ARBOS_SIDEBAR_COLLAPSED=1|0` (start collapsed), `ARBOS_SIDEBAR_FILTER=…`,
+`ARBOS_RIG_FULLSCREEN=1` (lay out as full screen where the platform cannot say),
+`ARBOS_RIG_RAIL_T=0.4` (freeze the morph at a progress for still frames).
+
+Pinned by `rail::tests` (metrics vs the measurement table, the rail's layout
+on the mock's pixels, toggle spot windowed vs full screen, header-toggle rule,
+badge priority, capacity, morph maths), `slide::tests::collapsing_slides_the_sidebar_down_to_the_rail_and_back`
+(+ reduce-motion / width-drag), `theme::sidebar_state_tests` (collapsed state
+restore) and `sidebar::strip_tests::the_filter_is_restored_from_the_config_dir`.
 
 ## Sidebar footer (Jacob 2026-10-24, [feedback footer-avatar-grok-size-2026-10-24])
 
@@ -254,9 +297,10 @@ content-sized at 531. Arbos in the same window: column 1041, composer 876
 refs (57: 612 in a 696 pill; 58: 310 in 392) show the fixed 84 pt gap governing
 below the ceiling, so the rule is the smaller of the two:
 `assistant_cap(slot) = min(slot − 84, 560)`; the crossover is a 644 pt slot.
-At our 876 pt column the bubble is 560 = 64 % of the column (Grok's composer is
-wider than ours; matching the absolute width is what reads as "the same
-bubble" side by side). Question / approval cards share the slot and the cap
+At the then 876 pt column the bubble was 560 = 64 % of it; since
+[feedback mac-sidebar-rail-2026-10-26] the column is Grok's 960 (`COMPOSER_WIDTH`
+904 + the two 28 pt circles), so the bubble is 58 % of the column as in Grok
+(matching the absolute width is what reads as "the same bubble" side by side). Question / approval cards share the slot and the cap
 (#1374 / #1440); my own bubbles keep their 72 % rule.
 
 Code: `transcript.rs` `ASSISTANT_MAX_WIDTH`, `assistant_cap()`, the inner
