@@ -12,6 +12,7 @@ pub mod redact;
 pub mod route;
 pub mod rpc;
 pub mod search;
+pub mod settings_search;
 pub mod skill;
 pub mod wav;
 pub mod widget;
