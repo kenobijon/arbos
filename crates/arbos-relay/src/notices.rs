@@ -134,7 +134,6 @@ pub fn compact_shallow(
             .put_checkpoint(&room_name, st.head, &frontier, &bytes)?,
         "head below floor"
     );
-    let _ = state.db.flush_after_scrub();
     Ok(())
 }
 

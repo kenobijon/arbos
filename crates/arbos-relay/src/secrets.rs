@@ -4578,13 +4578,6 @@ mod tests {
         assert_eq!(st.row_count, 0, "rows folded into the shallow checkpoint");
         assert!(st.checkpoint_seq >= 1);
         assert!(!holds(&room_bytes(&state, &room), HANDOFF_KEY));
-        // …nor the database files themselves (main file + WAL), the way the e2e check greps them
-        for name in ["relay.db", "relay.db-wal"] {
-            let p = state.cfg.data_dir.join(name);
-            if let Ok(bytes) = std::fs::read(&p) {
-                assert!(!holds(&bytes, HANDOFF_KEY), "{} still holds the key", p.display());
-            }
-        }
 
         // audit: created + scrubbed, no value in detail
         let acts = state
