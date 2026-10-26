@@ -595,6 +595,7 @@ fn new_group_body(
             .gap(px(8.0))
             .overflow_x_scroll();
         let projects = state.read(cx).projects.clone();
+        let images = avatars::project_images(state.read(cx));
         for pid in picked_agents {
             let id = pid.clone();
             let label = agent_names
@@ -606,7 +607,10 @@ fn new_group_body(
             let picture = projects
                 .iter()
                 .find(|p| &p.id == pid)
-                .map(|p| avatars::project(p, CHIP_AVATAR, theme).into_any_element())
+                .map(|p| {
+                    avatars::project_with(images.get(&p.id).cloned(), p, CHIP_AVATAR, theme)
+                        .into_any_element()
+                })
                 .unwrap_or_else(|| div().size(px(CHIP_AVATAR)).into_any_element());
             chips = chips.child(member_chip(
                 format!("group-chip-agent-{pid}"),
@@ -649,6 +653,7 @@ fn new_group_body(
 
     if !my_agents.is_empty() {
         let count = my_agents.len();
+        let images = avatars::project_images(state.read(cx));
         let mut list = glass::group(theme).mx(px(16.0));
         for (i, project) in my_agents.iter().enumerate() {
             let pid = project.id.clone();
@@ -671,7 +676,12 @@ fn new_group_body(
                     .when(!already, |el| {
                         el.cursor_pointer().hover(|st| st.bg(theme.surface_2))
                     })
-                    .child(avatars::project(project, 40.0, theme))
+                    .child(avatars::project_with(
+                        images.get(&project.id).cloned(),
+                        project,
+                        40.0,
+                        theme,
+                    ))
                     .child(
                         div()
                             .flex()
