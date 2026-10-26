@@ -4582,7 +4582,11 @@ mod tests {
         for name in ["relay.db", "relay.db-wal"] {
             let p = state.cfg.data_dir.join(name);
             if let Ok(bytes) = std::fs::read(&p) {
-                assert!(!holds(&bytes, HANDOFF_KEY), "{} still holds the key", p.display());
+                assert!(
+                    !holds(&bytes, HANDOFF_KEY),
+                    "{} still holds the key",
+                    p.display()
+                );
             }
         }
 

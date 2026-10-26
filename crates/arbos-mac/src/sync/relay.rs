@@ -7075,6 +7075,49 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 refresh_shell_grants(&shared, &project_id).await;
             });
         }
+        ClientCommand::SecretHandoffSave {
+            chat_id,
+            approval_id,
+            project_id,
+            name,
+            value,
+            purpose,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let body = json!({ "name": name, "kind": "key", "value": value, "note": purpose,
+                    "agents": [{ "project_id": project_id, "note": purpose }],
+                    "source": { "kind": "chat", "project_id": project_id, "chat_id": chat_id } });
+                drop(value);
+                let result = match shared.post_json("/secrets", body).await {
+                    Ok(v) => match serde_json::from_value::<SecretEnvelopeDto>(v) {
+                        Ok(e) => {
+                            // Answer the card with the reference: the box's waiting tool
+                            // gets `{ id, name, env }` and nothing else.
+                            let docs = shared.docs.lock().unwrap();
+                            if let Some(doc) = docs.get(&chat_id) {
+                                let device = shared.device_id();
+                                let payload = json!({ "approvalId": approval_id,
+                                    "secret": { "id": e.secret.id, "name": e.secret.name, "env": e.secret.env } });
+                                doc.core.transact(|d| {
+                                    d.push_command("approve", payload, &device);
+                                });
+                            }
+                            Ok(e.secret.env)
+                        }
+                        Err(_) => {
+                            Err("Couldn't save the secret. The server answered oddly.".to_owned())
+                        }
+                    },
+                    Err(err) => Err(format!("Couldn't save the secret. {}", relay_message(&err))),
+                };
+                let _ = shared.events.send(SyncEvent::SecretHandoff {
+                    approval_id,
+                    result,
+                });
+                refresh_secrets(&shared).await;
+            });
+        }
         ClientCommand::SecretAdd { item } => {
             let shared = shared.clone();
             tokio::spawn(async move {
