@@ -23,7 +23,7 @@ use tokio::time::sleep;
 
 use crate::model::{
     AgentMember, Call, CallEnded, CallKind, LinkState, Machine, MachineState, Person,
-    ProjectDocView, ReplyPolicy, Sender, SpaceKind, ThreadInfo, Voice,
+    ProjectDocView, ReplyPolicy, ReplyRef, Sender, SpaceKind, ThreadInfo, Voice,
 };
 
 use super::doc::ChatDoc;
@@ -1101,6 +1101,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             text,
             attachments,
             reply_to,
+            reply_ref,
             mentions,
         } => {
             let attachments: Vec<Attachment> = attachments
@@ -1126,6 +1127,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 attachments,
                 reply_to,
                 None,
+                reply_ref,
                 mentions,
             );
         }
@@ -1144,6 +1146,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 message_id,
                 text,
                 vec![attachment],
+                None,
                 None,
                 None,
                 Vec::new(),
@@ -1187,6 +1190,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 Vec::new(),
                 None,
                 Some(forwarded_from),
+                None,
                 Vec::new(),
             );
         }
@@ -1204,6 +1208,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 text,
                 Vec::new(),
                 reply_to,
+                None,
                 None,
                 Vec::new(),
             );
@@ -1231,6 +1236,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 message_id,
                 text,
                 attachments,
+                None,
                 None,
                 None,
                 Vec::new(),
@@ -1827,6 +1833,12 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 bytes: Arc::new(fixture_png(&key)),
                 key,
             });
+        }
+        ClientCommand::FetchLinkIcon { host } => {
+            // The real icons of the fixture replies' sites (`assets/link-icons`), so the
+            // shots show the feature; any other host has none → the placeholder.
+            let png = fixture_link_icon(&host).map(|b| Arc::new(b.to_vec()));
+            let _ = shared.events.send(SyncEvent::LinkIcon { host, png });
         }
         ClientCommand::DownloadAttachment {
             project_id,
@@ -2458,6 +2470,7 @@ fn send_user(
     attachments: Vec<Attachment>,
     reply_to: Option<String>,
     forwarded_from: Option<String>,
+    reply_ref: Option<ReplyRef>,
     tokens: Vec<String>,
 ) {
     let project_id = project_of(shared, &chat_id);
@@ -2485,6 +2498,9 @@ fn send_user(
                 if let Some(by) = forwarded_from.as_deref() {
                     d.set_message_fields(&message_id, &[("forwardedFrom", json!(by))]);
                 }
+                if let Some(r) = reply_ref.as_ref() {
+                    d.set_reply_ref(&message_id, r);
+                }
                 d.push_command("send", json!({ "messageId": message_id }), DEVICE);
             });
         });
@@ -2502,6 +2518,9 @@ fn send_user(
             let _ = d.append_user_message(&message_id, &text, DEVICE, &opts);
             if let Some(by) = forwarded_from.as_deref() {
                 d.set_message_fields(&message_id, &[("forwardedFrom", json!(by))]);
+            }
+            if let Some(r) = reply_ref.as_ref() {
+                d.set_reply_ref(&message_id, r);
             }
             if asleep {
                 set_status(d, &message_id, MessageStatus::Queued);
@@ -3436,6 +3455,10 @@ const LIMA_REPLY: &[&str] = &[
     "| Store | Area | Sunday | What they sell |\n| --- | --- | --- | --- |\n| [Librería El Virrey](https://www.elvirrey.com/) | Miraflores, Calle Bolognesi 510 | 11am–7pm | Spanish literature, essays, history, art; some English at a higher price |\n| [Communitas](https://www.communitas.pe/) | San Isidro, Av. 2 de Mayo 1690 | 10:30am–7:30pm | Humanities, literature, law, history, science, in Spanish |\n| [Vallejo Librería Café](https://www.tangol.com/blog/en/the-3-best-bookstores-in-lima/n-15210) | San Isidro, Av. Camino Real 1119 | not listed | Books plus coffee or tea |\n| [Assouline Lima](https://www.assouline.com/pages/store/lima) | Miraflores, street not listed | not listed | Luxury and design books |",
     "El Virrey’s phone is (511) 713 0505. Their own page says the shop dates to late 1973; a travel write-up said 1972. Communitas is the other store with Sunday hours on its site, but it is in San Isidro, not Miraflores, and the page does not clearly say it is a walk-in shop, so check before you go. Vallejo is a bookstore-café; I only have a travel blog for it, and hours were not listed. Assouline is a luxury boutique, not a general bookstore. La Casa de Kanu in Barranco was called a favorite on an expat guide, but I have no street address or hours.\n\nHours were not checked on a second source, and I did not confirm anyone is open right now. No used-book shop and no central Lima store made this list with an address I could verify.\n\nWant me to check whether El Virrey is open right now, or look for an English-language shop?",
 ];
+
+/// The reply to "Read the latest from the New York post" (agent Bubble, 2026-10-25, Jacob's
+/// screenshot): seven linked headlines as bullets, then one line of prose.
+const NYPOST_REPLY: &str = "- [Syringe attack: lawyer claims mistaken identity](https://nypost.com/2026/10/25/us-news/syringe-attack-lawyer-claims-mistaken-identity/)\n- [Arrest story: a second Jewish victim minutes earlier](https://nypost.com/2026/10/25/us-news/arrest-story-second-jewish-victim-minutes-earlier/)\n- [Ex-NYPD cop charged in a George Washington Bridge killing, free on $1M bail](https://nypost.com/2026/10/25/us-news/ex-nypd-cop-charged-in-gw-bridge-killing-free-on-1m-bail/)\n- [Thomas Markle home search, child pornography, Philippine official’s comment](https://nypost.com/2026/10/25/world-news/thomas-markle-home-search-philippine-official-comment/)\n- [Musk says SpaceX cut Ukraine’s Starlink access](https://nypost.com/2026/10/25/business/musk-says-spacex-cut-ukraines-starlink-access/)\n- [Giants beat the Texans in overtime in J. J. McCarthy’s first start](https://nypost.com/2026/10/25/sports/giants-beat-texans-in-overtime-mccarthy-first-start/)\n- [McCarthy’s wife after that win](https://nypost.com/2026/10/25/sports/mccarthys-wife-after-that-win/)\n\nNo times or bylines were on the page text I read. Want one of these opened?";
 
 const REPLY_CODE: &[&str] = &[
     "The transcript is a bottom-aligned list with one row per markdown block:",
@@ -5277,6 +5300,19 @@ fn attachment(name: &str, mime: &str, kind: AttachmentKind, title: &str, bytes: 
 }
 
 /// A 320×200 PNG (diagonal gradient tinted from the key) for fixture thumbnails and downloads.
+/// The 64×64 site icons the fixture's replies link to (what the relay's
+/// `/link-icon` would answer), by host.
+fn fixture_link_icon(host: &str) -> Option<&'static [u8]> {
+    Some(match host {
+        "www.elvirrey.com" => include_bytes!("../../assets/link-icons/www.elvirrey.com.png"),
+        "www.communitas.pe" => include_bytes!("../../assets/link-icons/www.communitas.pe.png"),
+        "www.tangol.com" => include_bytes!("../../assets/link-icons/www.tangol.com.png"),
+        "www.assouline.com" => include_bytes!("../../assets/link-icons/www.assouline.com.png"),
+        "nypost.com" => include_bytes!("../../assets/link-icons/nypost.com.png"),
+        _ => return None,
+    })
+}
+
 fn fixture_png(key: &str) -> Vec<u8> {
     if key.contains("Screenshot") {
         return fixture_page_png();
@@ -5404,6 +5440,16 @@ fn seed_chat_docs() -> Vec<ChatDoc> {
                 for bubble in LIMA_REPLY {
                     s.assistant(TurnKind::Reply, MessageStatus::Done, vec![text(bubble)]);
                 }
+            }
+            // `ARBOS_FIXTURE_REPLY=links`: Jacob's New York Post turn — a bullet list of
+            // linked headlines ([feedback link-icons-mac-2026-10-25]).
+            Ok("links") => {
+                s.user("Read the latest from the New York post");
+                s.assistant(
+                    TurnKind::Reply,
+                    MessageStatus::Done,
+                    vec![text(NYPOST_REPLY)],
+                );
             }
             _ => {}
         }
@@ -6126,6 +6172,7 @@ fn human_message(chat_id: &str, who: &Person, text: &str, at: u64) -> Message {
         mentions: Vec::new(),
         reply_to: None,
         forwarded_from: None,
+        reply_ref: None,
         asked_by_handle: None,
         owner_handle: None,
         usage: None,
@@ -6283,6 +6330,72 @@ fn seed_people_chat_docs() -> Vec<ChatDoc> {
         "Sending in a sec. Also: can we add your Arbos agent here so it can pull the numbers while we talk?",
         base + 150_000,
     ));
+    // The Launch week group's rows are built here so the DM can quote them
+    // (`ARBOS_FIXTURE_REPLY_DM=1`, #1835: Reply in DM carries the original).
+    let samir = person("gh_457", "samir", Some("Samir Haddad"), "member");
+    let sara = person("gh_458", "sara", Some("Sara Lind"), "member");
+    let deck = human_message(
+        GROUP_LAUNCH,
+        &samir,
+        "Deck v3 is in the shared folder. Sam, can you check the pricing slide before the run-through?",
+        base + 300_000,
+    );
+    let ask = human_message(
+        GROUP_LAUNCH,
+        &sam(),
+        "On it. @arbos pull the latest signup numbers into slide 4 while I read.",
+        base + 330_000,
+    );
+    if std::env::var("ARBOS_FIXTURE_REPLY_DM").is_ok_and(|v| v == "1") {
+        // Sam answers Samir's group line privately, here; I answer Sam's group ask.
+        let mut theirs = human_message(DM_SAM, &sam(), "Works", base + 400_000);
+        theirs.reply_ref = Some(ReplyRef {
+            chat_id: GROUP_LAUNCH.into(),
+            project_id: "people".into(),
+            message_id: deck.id.clone(),
+            chat_title: "Launch week".into(),
+            sender: deck.sender.clone(),
+            sender_name: "Samir Haddad".into(),
+            sender_handle: "samir".into(),
+            text: ReplyRef::snapshot_text(&deck.plain_text()),
+        });
+        insert_message_via_core(&doc, &theirs);
+        let mut mine = human_message(
+            DM_SAM,
+            &me(),
+            "Take your time — the numbers are in.",
+            base + 430_000,
+        );
+        mine.reply_ref = Some(ReplyRef {
+            chat_id: GROUP_LAUNCH.into(),
+            project_id: "people".into(),
+            message_id: ask.id.clone(),
+            chat_title: "Launch week".into(),
+            sender: ask.sender.clone(),
+            sender_name: "Sam Rivera".into(),
+            sender_handle: "sam".into(),
+            text: ReplyRef::snapshot_text(&ask.plain_text()),
+        });
+        insert_message_via_core(&doc, &mine);
+        // …and one from a chat I am not in: the quote without the link.
+        let mut outside = human_message(
+            DM_SAM,
+            &sam(),
+            "Same thing happened in ours.",
+            base + 460_000,
+        );
+        outside.reply_ref = Some(ReplyRef {
+            chat_id: "01J9NOTMYCHAT000000000000".into(),
+            project_id: "people".into(),
+            message_id: "01J9NOTMYMSG0000000000000".into(),
+            chat_title: "Design crit".into(),
+            sender: "user:gh_900".into(),
+            sender_name: "Mira Kaplan".into(),
+            sender_handle: "mira-k".into(),
+            text: "The pricing slide still shows last quarter's tiers.".into(),
+        });
+        insert_message_via_core(&doc, &outside);
+    }
     out.push(doc);
 
     // Sam's shared project: Sam wrote first, the agent answered with attribution.
@@ -6313,8 +6426,6 @@ fn seed_people_chat_docs() -> Vec<ChatDoc> {
 
     // The Launch week group: three people and my agent, as in the redesign mockups.
     let group = ChatDoc::new(GROUP_LAUNCH, GROUP_LAUNCH);
-    let samir = person("gh_457", "samir", Some("Samir Haddad"), "member");
-    let sara = person("gh_458", "sara", Some("Sara Lind"), "member");
     // `ARBOS_FIXTURE_LONG_ROWS=<n>`: older synthetic history first — the list
     // only; header geometry is unchanged.
     if let Some(rows) = fixture_long_rows() {
@@ -6323,18 +6434,7 @@ fn seed_people_chat_docs() -> Vec<ChatDoc> {
             insert_message_via_core(&group, &msg);
         }
     }
-    insert_message_via_core(&group, &human_message(
-        GROUP_LAUNCH,
-        &samir,
-        "Deck v3 is in the shared folder. Sam, can you check the pricing slide before the run-through?",
-        base + 300_000,
-    ));
-    let ask = human_message(
-        GROUP_LAUNCH,
-        &sam(),
-        "On it. @arbos pull the latest signup numbers into slide 4 while I read.",
-        base + 330_000,
-    );
+    insert_message_via_core(&group, &deck);
     insert_message_via_core(&group, &ask);
     let mut agent = human_message(GROUP_LAUNCH, &sam(), "", base + 360_000);
     agent.role = Role::Assistant;

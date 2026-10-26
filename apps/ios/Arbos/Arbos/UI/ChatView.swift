@@ -340,9 +340,19 @@ struct ChatSession: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { searchFocused = true }
     }
 
-    /// A result from Home's search bar opened this chat at a message: once the rows
-    /// hold it, scroll there and tint it (the quote-tap path, `revealQuoted`). The
-    /// appear settle scrolls to the end first; the jump follows a beat later.
+    /// Reply in DM landed here: arm the composer with the cross-chat reply (#1836).
+    private func takePendingDMReplyIfNeeded() {
+        guard let p = model.pendingDMReply, p.chatId == chatId else { return }
+        model.pendingDMReply = nil
+        replyTo = nil
+        replyRef = p.ref
+        composerFocused = true
+    }
+
+    /// A result from Home's search bar — or a cross-chat quote tap (Reply in DM, #1836) —
+    /// opened this chat at a message: once the rows hold it, scroll there and tint it
+    /// (the quote-tap path, `revealQuoted`). The appear settle scrolls to the end first;
+    /// the jump follows a beat later.
     private func revealPendingIfNeeded() {
         guard let reveal = model.pendingReveal, reveal.chatId == chatId,
               rows.contains(where: { $0.messageId == reveal.messageId && $0.role != .system }) else { return }
@@ -385,6 +395,9 @@ struct ChatSession: View {
         }
     }
     @State private var replyTo: Message?
+    /// Reply in DM (#1836): the message in another chat the next send here answers
+    /// (its address + snapshot, written as `replyRef`). Exclusive with `replyTo`.
+    @State private var replyRef: ReplyRef?
     /// Long-press → Edit: the own message whose text is in the composer.
     @State private var editing: Message?
     /// Drives the connection pill's dot pulse while it is reconnecting / syncing.
@@ -761,7 +774,7 @@ struct ChatSession: View {
                             .font(theme.font(Theme.small))
                             .foregroundStyle(theme.muted)
                             .frame(maxWidth: .infinity)
-                            .frame(height: Theme.fieldHeight)
+                            .frame(height: Theme.composerHeight)
                             .accessibilityIdentifier("channel-read-only")
                     } else if isPeople, people?.isSilencedNow == true {
                         // Group admin muted me from posting — one quiet line, no composer.
@@ -769,7 +782,7 @@ struct ChatSession: View {
                             .font(theme.font(Theme.small))
                             .foregroundStyle(theme.muted)
                             .frame(maxWidth: .infinity)
-                            .frame(height: Theme.fieldHeight)
+                            .frame(height: Theme.composerHeight)
                             .accessibilityIdentifier("group-silenced")
                     } else {
                         composer
@@ -780,7 +793,8 @@ struct ChatSession: View {
                 .animation(.easeOut(duration: 0.25), value: composerFocused)
             }
             .padding(.top, 8)
-            .padding(.bottom, composerFocused ? 8 : 2)
+            // Grok: 18 pt between the field and the keyboard, 2 pt above the home indicator.
+            .padding(.bottom, composerFocused ? Theme.composerBottomKeyboard : Theme.composerBottom)
             .background(alignment: .top) {
                 LinearGradient(colors: [theme.bg.opacity(0), theme.bg], startPoint: .top, endPoint: .bottom)
                     .frame(height: 24)
@@ -998,6 +1012,7 @@ struct ChatSession: View {
                 Task { await model.refreshActiveCall(chatId: chatId, projectId: isPeople ? nil : projectId) }
             }
             openPendingSearchIfNeeded()
+            takePendingDMReplyIfNeeded()
             revealPendingIfNeeded()
             // Rig: `ARBOS_SHOW=chatsearch` raises the Search-in-chat bar (header-glass shots).
             if DebugHooks.show == "chatsearch" { showSearch = true }
@@ -1041,6 +1056,21 @@ struct ChatSession: View {
                             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { model.showProfile(.user(ProfilePerson(other))) }
                         }
                     case "members", "addperson": openHeaderProfile()
+                    case "foreignagent", "foreignagent-owner":
+                        // Someone else's agent in this group (needs `ARBOS_FIXTURE_FOREIGN_AGENT=1`):
+                        // its page; `-owner` then follows its "Run by …" link
+                        // ([feedback agent-pane-run-by-link-ios-2026-10-25]).
+                        if let agent = people?.agents.first(where: { $0.ownerId != model.user?.id }), let foreign = model.foreignAgent(agent.id) {
+                            model.showProfile(.agent(projectId: foreign.id))
+                            if show == "foreignagent-owner", let owner = agent.ownerHandle {
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                                    model.showProfile(.user(ProfilePerson(id: agent.ownerId ?? owner, handle: owner, name: foreign.ownerName, avatarUrl: foreign.ownerAvatarUrl)))
+                                }
+                            }
+                        }
+                    // `agentprofile`: the first roster agent's profile hero (a foreign agent's
+                    // picture — the avatar-flip rig).
+                    case "agentprofile": if let a = people?.agents.first { model.showProfile(.agent(projectId: a.id)) }
                     case "feedback": FeedbackCenter.shared.open(screen: "chat", chatId: chatId, projectId: isPeople ? nil : projectId)
                     case "call":
                         #if DEBUG
@@ -1147,6 +1177,12 @@ struct ChatSession: View {
                         DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(1200)) {
                             if let row = rows.last(where: { isMessageRow($0) }) { openActions(row) }
                         }
+                    case "reply-dm":
+                        // Rig (#1836): the composer armed with a cross-chat reply, as Reply in DM leaves it.
+                        replyRef = ReplyRef(chatId: "fx-group-launch", projectId: "people", messageId: "g1", chatTitle: "Launch week",
+                                            sender: "user:fx-u3", senderName: "Mira Kaplan", senderHandle: "mira-k",
+                                            text: "Launch checklist is here: https://notion.so/arbos/launch-week")
+                        composerFocused = true
                     case "replied":
                         // Rig: a sent bubble quoting the newest agent message (fixture only).
                         #if DEBUG
@@ -1172,7 +1208,9 @@ struct ChatSession: View {
         // Profile "search" sets pendingSearchChat while this chat is already on screen
         // (sheet over us), so onAppear alone never sees it — watch the published flag.
         .onChange(of: model.pendingSearchChat) { _, _ in openPendingSearchIfNeeded() }
-        // A bottom-bar search result: the rows may land after appear (room backfill).
+        .onChange(of: model.pendingDMReply?.chatId) { _, _ in takePendingDMReplyIfNeeded() }
+        // A bottom-bar search result or a quote tap: the rows may land after appear (room backfill).
+        .onChange(of: model.pendingReveal) { _, _ in revealPendingIfNeeded() }
         .onChange(of: rows.count) { _, _ in revealPendingIfNeeded() }
         // The per-chat version, not the array: comparing 1 000+ messages on every
         // body (each keystroke, presence tick, publish) was a measurable share of
@@ -1856,7 +1894,17 @@ struct ChatSession: View {
         return "you"
     }
 
-    /// Tap on a reply bubble's quote: scroll to the original and tint it for a moment.
+    /// Tap on a reply bubble's quote: scroll to the original and tint it for a moment. A
+    /// cross-chat quote (Reply in DM) opens the source chat on the original instead; the
+    /// header is not tappable when the viewer is not in that chat.
+    private func revealQuoted(_ quote: Quote) {
+        if let src = quote.source {
+            if src.chatId == chatId { revealQuoted(src.messageId) } else { model.reveal(src) }
+            return
+        }
+        revealQuoted(quote.messageId)
+    }
+
     private func revealQuoted(_ messageId: Id) {
         guard let target = rows.first(where: { $0.messageId == messageId && $0.role != .system }) else { return }
         if includeInWindow(messageId: messageId) {
@@ -1949,15 +1997,11 @@ struct ChatSession: View {
         case .forward:
             beginForward(row)
         case .replyInDM:
-            // Same path as the group member "Send private message" (#1455): open
-            // (or create) the DM with that person's handle. Agents and your own
-            // messages have no peer to DM.
-            guard let m = messageById[row.messageId],
-                  let handle = m.senderHandle, !handle.isEmpty,
-                  m.sender.hasPrefix("user:"),
-                  m.sender != model.myUserId
-            else { return }
-            Task { _ = await model.openDM(handle: handle) }
+            // Open (or create) the DM with that person (#1455) with a cross-chat reply
+            // to this message armed there (#1836): the DM bubble quotes it and names
+            // this chat. Agents and your own messages have no peer to DM.
+            guard let m = messageById[row.messageId] else { return }
+            model.replyInDM(to: m, in: chatId, projectId: isPeople ? nil : projectId)
         case .edit:
             beginEdit(row)
         case .delete:
@@ -2194,7 +2238,8 @@ struct ChatSession: View {
                             onTasks: openTasks,
                             onWords: openNewest)
                     .padding(.horizontal, 16)
-                    .padding(.bottom, 4)
+                    // Grok: 68 px from the picture's bottom to the composer's top.
+                    .padding(.bottom, Theme.presenceBottomGap)
             }
         }
     }
@@ -2244,6 +2289,29 @@ struct ChatSession: View {
         .accessibilityElement(children: .combine)
     }
 
+    /// Reply in DM: the same bar, "Replying to Jacob in Arbonites" + the snapshot the row
+    /// will carry (#1836).
+    private func replyRefPreview(_ r: ReplyRef) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "arrowshape.turn.up.left").font(.system(size: 12)).foregroundStyle(theme.muted)
+            Text(r.label).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
+                .lineLimit(1).fixedSize()
+            Text(Quote.firstWords(Quote.oneLine(r.text), maxChars: Theme.replyPreviewChars))
+                .font(theme.font(Theme.tiny)).foregroundStyle(theme.text)
+                .lineLimit(1).truncationMode(.tail)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button { replyRef = nil } label: { Image(systemName: "xmark").font(.system(size: 11, weight: .bold)).foregroundStyle(theme.muted) }
+                .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 14)
+        .frame(maxWidth: .infinity)
+        .frame(height: Theme.replyPreviewHeight)
+        .clipped()
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(theme.bubbleAssistant))
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("composer-reply-ref")
+    }
+
     /// Same height/shape as the reply preview: glyph, "Editing", one truncated line, ×.
     private func editPreview(_ m: Message) -> some View {
         HStack(spacing: 8) {
@@ -2281,6 +2349,8 @@ struct ChatSession: View {
             }
             if let e = editing {
                 editPreview(e)
+            } else if let r = replyRef {
+                replyRefPreview(r)
             } else if let r = replyTo {
                 replyPreview(r)
             }
@@ -2315,11 +2385,11 @@ struct ChatSession: View {
                             .background(Capsule().fill(theme.bubbleAssistant))
                         }
                     }
-                    .padding(.leading, Theme.plusButton + 12)
+                    .padding(.leading, Theme.plusButton + Theme.plusFieldGap)
                 }
             }
             // Bottom-align the "+" with a multi-line field so growth expands upward.
-            HStack(alignment: .bottom, spacing: 12) {
+            HStack(alignment: .bottom, spacing: Theme.plusFieldGap) {
                 if !isChannel {
                     attachButton
                 }
@@ -2333,13 +2403,14 @@ struct ChatSession: View {
         Button { showAttach = true } label: {
             ZStack {
                 Circle().fill(theme.field)
-                Circle().strokeBorder(theme.fieldBorder.opacity(0.6), lineWidth: 1)
+                ComposerRim(shape: Circle())
                 Image(systemName: "plus")
-                    .font(theme.font(21, weight: .regular))
+                    .font(theme.font(Theme.plusGlyph, weight: .regular))
                     .foregroundStyle(theme.text)
             }
             .frame(width: Theme.plusButton, height: Theme.plusButton)
-            .contentShape(Circle().inset(by: -(44 - Theme.plusButton) / 2))
+            .contentShape(Circle())
+            .accessibilityIdentifier("composer-plus")
         }
         .buttonStyle(.plain)
         .sheet(isPresented: $showAttach, onDismiss: demoDismissed) {
@@ -2694,12 +2765,14 @@ struct ChatSession: View {
         let typed = composerDraft.text.trimmingCharacters(in: .whitespacesAndNewlines)
         let extras = pending
         let reply = replyTo?.id
+        let crossReply = replyRef
         let address = sendAddress(for: typed)
         let chips = chipMentions(for: typed)
         let tokens = MentionDraft.tokens(composerDraft.mentions)
         pending.removeAll()
         clearDraft()
         replyTo = nil
+        replyRef = nil
         editing = nil
         mentionQuery = nil
         pinTalkTo(afterSending: address, chipMentions: chips)
@@ -2715,7 +2788,8 @@ struct ChatSession: View {
                 if !text.isEmpty { model.sendChannel(chatId: chatId, text: text) }
             } else if isPeople {
                 model.sendPeople(chatId: chatId, text: text, replyTo: reply, address: address,
-                                 chipMentions: chips, attachments: extras, chipTokens: tokens)
+                                 chipMentions: chips, attachments: extras, chipTokens: tokens,
+                                 replyRef: crossReply)
             } else if needsAnswer && extras.isEmpty {
                 model.answer(chatId: chatId, text: text)
             } else {
@@ -2783,10 +2857,11 @@ struct ChatSession: View {
             let chips = chipMentions(for: text)
             model.sendPeople(chatId: chatId, text: text, replyTo: replyTo?.id, address: address,
                              chipMentions: chips, attachments: pending,
-                             chipTokens: MentionDraft.tokens(composerDraft.mentions))
+                             chipTokens: MentionDraft.tokens(composerDraft.mentions), replyRef: replyRef)
             pending.removeAll()
             clearDraft()
             replyTo = nil
+            replyRef = nil
             mentionQuery = nil
             pinTalkTo(afterSending: address, chipMentions: chips)
             sentOnce = true
@@ -2817,6 +2892,8 @@ struct WorkingStatusText: View {
     @Environment(\.theme) private var theme
     let text: String
     let color: Color
+    /// Point size; the presence row uses Grok's 17 pt body, the transcript's rows 15.
+    var size: CGFloat = Theme.small
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -2853,7 +2930,7 @@ struct WorkingStatusText: View {
 
     private func label<S: ShapeStyle>(_ style: S) -> some View {
         Text(text)
-            .font(theme.font(Theme.small))
+            .font(theme.font(size))
             .foregroundStyle(style)
     }
 }
@@ -3055,7 +3132,7 @@ private struct TranscriptRows: View, Equatable {
     let rowsCount: Int
     let messagesCount: Int
     let canReply: (Row) -> Bool
-    let onQuoteTap: (Id) -> Void
+    let onQuoteTap: (Quote) -> Void
     let onMenu: (MessageMenuItem, Row) -> Void
     /// The bubble whose long-press actions are open (it alone reports its frame).
     let actionsRowId: String?
@@ -3265,9 +3342,35 @@ private struct ComposerField: View {
         !draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || hasPending
     }
 
-    /// Idle round button: phone — starts a voice call (agent or people chat).
-    /// Channels have no calls (C1): the arrow stays, dimmed until there is text.
-    private var idleButtonGlyph: String { isChannel ? "arrow.up" : "phone.fill" }
+    private var fieldShape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: Theme.composerHeight / 2, style: .circular)
+    }
+
+    /// Grok's filled mic (`MicGlyph`); the armed slide-to-cancel shows the bin instead.
+    @ViewBuilder
+    private var micGlyph: some View {
+        if memoCancelArmed {
+            Image(systemName: "trash").font(theme.font(17))
+        } else {
+            MicGlyph().frame(width: Theme.micGlyphWidth, height: Theme.micGlyphHeight)
+        }
+    }
+
+    /// Inside the white pill: the send arrow with text or a recording; idle, Grok's
+    /// voice-wave bars — a tap starts a voice call (agent or people chat). Channels
+    /// have no calls (C1): the arrow stays, dimmed until there is text.
+    @ViewBuilder
+    private var actionGlyph: some View {
+        if canSend || recorder.recording || isChannel {
+            Image(systemName: "arrow.up")
+                .font(theme.font(16, weight: .bold))
+                .foregroundStyle(theme.onPrimary)
+        } else {
+            VoiceWaveGlyph()
+                .fill(theme.onPrimary)
+                .accessibilityHidden(true)
+        }
+    }
 
     /// Max height for the growing composer field.
     ///
@@ -3276,7 +3379,14 @@ private struct ComposerField: View {
     /// eight lines and covering the transcript. Hug content with `fixedSize`,
     /// and still cap at 8 lines (Grok's 22 pt body pitch) for wrap glitches.
     private var composerFieldMaxHeight: CGFloat {
-        Theme.fieldHeight + 7 * 22
+        Theme.composerHeight + 7 * 22
+    }
+
+    /// The field's rim: Grok's edge highlight, or the recording / needs-answer tint.
+    private var rimTint: Color? {
+        if recorder.recording { return theme.danger.opacity(0.5) }
+        if needsAnswer { return theme.warn.opacity(0.7) }
+        return nil
     }
 
     var body: some View {
@@ -3288,7 +3398,7 @@ private struct ComposerField: View {
                     Image(systemName: "xmark")
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(theme.danger)
-                        .frame(width: 44, height: Theme.fieldHeight)
+                        .frame(width: 44, height: Theme.composerHeight)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -3335,56 +3445,52 @@ private struct ComposerField: View {
                                 agentProject: { model.agent(member: $0, chatId: chatId) })
                     .fixedSize(horizontal: false, vertical: true)
             }
-            if draft.text.isEmpty || recorder.recording {
-                // Press/release like Mac: tap toggles recording on; hold ≥0.25s then
-                // release sends. Slide left while holding to discard (WhatsApp-style).
-                // highPriorityGesture so a focused TextField cannot steal the touch.
-                // The mic stays mounted while recording so release can finish without
-                // a second tap.
-                Image(systemName: memoCancelArmed ? "trash" : "mic")
-                    .font(theme.font(17))
-                    .foregroundStyle(recorder.recording ? theme.danger : theme.icon)
-                    .frame(width: 44, height: Theme.fieldHeight)
-                    .contentShape(Rectangle())
-                    .padding(.trailing, 2)
-                    .id("memo-mic")
-                    .highPriorityGesture(
-                        DragGesture(minimumDistance: 0)
-                            .onChanged { onMicDrag($0) }
-                            .onEnded { onMicEnd($0) }
-                    )
+            // Grok's trailing cluster: mic glyph centre 24 pt before the pill, the pill
+            // 8⅔ pt from the field's edge, both centred on the field's bottom line.
+            HStack(spacing: Theme.micPillGap) {
+                if draft.text.isEmpty || recorder.recording {
+                    // Press/release like Mac: tap toggles recording on; hold ≥0.25s then
+                    // release sends. Slide left while holding to discard (WhatsApp-style).
+                    // highPriorityGesture so a focused TextField cannot steal the touch.
+                    // The mic stays mounted while recording so release can finish without
+                    // a second tap.
+                    micGlyph
+                        .foregroundStyle(recorder.recording ? theme.danger : theme.icon)
+                        .frame(width: Theme.micHitWidth, height: Theme.composerHeight)
+                        .contentShape(Rectangle())
+                        .id("memo-mic")
+                        .accessibilityIdentifier("composer-mic")
+                        .highPriorityGesture(
+                            DragGesture(minimumDistance: 0)
+                                .onChanged { onMicDrag($0) }
+                                .onEnded { onMicEnd($0) }
+                        )
+                }
+                // While recording: tap send also finishes (same as release). Otherwise
+                // Grok keeps the composer usable while the bot works: text sends, an
+                // empty field starts a voice call with the agent (Grok's voice-wave pill).
+                Button(action: onPrimary) {
+                    Capsule()
+                        .fill(theme.primary)
+                        .frame(width: Theme.actionPillWidth, height: Theme.actionPillHeight)
+                        .overlay(actionGlyph)
+                        .frame(height: Theme.composerHeight)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .opacity(isChannel && !canSend && !recorder.recording ? 0.45 : 1)
+                .accessibilityLabel((canSend || recorder.recording) ? "Send" : (isChannel ? "Send" : "Call"))
+                .accessibilityIdentifier("composer-action")
             }
-            // While recording: tap send also finishes (same as release). Otherwise
-            // Grok keeps the composer usable while the bot works: text sends, an
-            // empty field starts a voice call with the agent (phone icon next to mic).
-            Button(action: onPrimary) {
-                Circle()
-                    .fill(theme.primary)
-                    .frame(width: Theme.voiceButton, height: Theme.voiceButton)
-                    .overlay(
-                        Image(systemName: (canSend || recorder.recording) ? "arrow.up" : idleButtonGlyph)
-                            .font(theme.font(16, weight: .bold))
-                            .foregroundStyle(theme.onPrimary)
-                    )
-                    .contentShape(Circle().inset(by: -(44 - Theme.voiceButton) / 2))
-            }
-            .buttonStyle(.plain)
-            .opacity(isChannel && !canSend && !recorder.recording ? 0.45 : 1)
-            .accessibilityLabel((canSend || recorder.recording) ? "Send" : (isChannel ? "Send" : "Call"))
-            .padding(.trailing, 3)
+            .padding(.trailing, Theme.actionPillTrailing)
         }
         // Hard max so a TextField layout glitch cannot paint over the transcript.
-        .frame(minHeight: Theme.fieldHeight, maxHeight: composerFieldMaxHeight, alignment: .bottom)
+        .frame(minHeight: Theme.composerHeight, maxHeight: composerFieldMaxHeight, alignment: .bottom)
         .fixedSize(horizontal: false, vertical: true)
-        .background(RoundedRectangle(cornerRadius: Theme.fieldHeight / 2, style: .continuous).fill(theme.field))
-        .overlay(
-            RoundedRectangle(cornerRadius: Theme.fieldHeight / 2, style: .continuous)
-                .strokeBorder(
-                    recorder.recording ? theme.danger.opacity(0.5)
-                        : (needsAnswer ? theme.warn.opacity(0.7) : theme.fieldBorder),
-                    lineWidth: 1
-                )
-        )
+        // A true capsule at one line (Grok's edge follows a circle); the radius stays
+        // 24 pt as the field grows.
+        .background(fieldShape.fill(theme.field))
+        .overlay(ComposerRim(shape: fieldShape, tint: rimTint))
         .alert("Microphone access is off", isPresented: $recorder.permissionDenied) {
             Button("OK", role: .cancel) { }
         } message: {

@@ -242,9 +242,7 @@ final class RelayAPI {
             }
             var project = Arbos.Project(dto: detail.project)
             project.archivedAt = listArchivedAt
-            if let key = project.imageKey {
-                project.imageURL = "\(endpoint.httpUrl)/blob/\(id)/\(key)?token=\(token())"
-            }
+            project.imageURL = Arbos.Project.pictureURL(httpUrl: endpoint.httpUrl, id: id, imageKey: project.imageKey, version: project.avatarVersion)
             // Prefer the detail's live box word when present (same as the old parse).
             project.state = Arbos.BoxState.from(state: detail.project.state, box: detail.box)
             project.stateSince = detail.box_since
@@ -929,19 +927,27 @@ final class RelayAPI {
 
     /// D92 `PATCH /projects/{id} {"avatar_leaf": 0–8|null, "avatar_leaf_color": 0–9|null}` (null =
     /// automatic). A leaf pick is "not a photo": the picture goes with it (`image_key: null`).
-    func setProjectAvatarLeaf(_ projectId: Id, leaf: Int?, color: Int?) async throws {
+    func setProjectAvatarLeaf(_ projectId: Id, leaf: Int?, color: Int?) async throws -> Int {
         let body: [String: Any] = [
             "avatar_leaf": leaf.map { $0 as Any } ?? NSNull(),
             "avatar_leaf_color": color.map { $0 as Any } ?? NSNull(),
             "image_key": NSNull(),
         ]
-        _ = try await json("PATCH", "/projects/\(projectId)", body: body)
+        return Self.avatarVersion(of: try await json("PATCH", "/projects/\(projectId)", body: body))
+    }
+
+    /// The relay's stamp of the avatar change a `PATCH /projects/{id}` answered with
+    /// (`avatar_version`); 0 from an older relay.
+    static func avatarVersion(of reply: Any) -> Int {
+        let d = reply as? [String: Any]
+        let v = d?["avatar_version"] ?? (d?["project"] as? [String: Any])?["avatar_version"]
+        return (v as? NSNumber)?.intValue ?? 0
     }
 
     /// D92 amendment: `PATCH /projects/{id} {"image_key": key}` — a blob already in the project's
     /// slot (uploaded with `putBlob`, or the Generate tab's answer) becomes the agent's picture.
-    func setProjectImageKey(_ projectId: Id, key: String) async throws {
-        _ = try await json("PATCH", "/projects/\(projectId)", body: ["image_key": key])
+    func setProjectImageKey(_ projectId: Id, key: String) async throws -> Int {
+        Self.avatarVersion(of: try await json("PATCH", "/projects/\(projectId)", body: ["image_key": key]))
     }
 
     /// D92 amendment: `POST /projects/{id}/avatar/generate {prompt}` → the stored picture's key
@@ -1068,8 +1074,15 @@ final class RelayAPI {
     /// Announce a message we just wrote so recipients get a real preview
     /// (§7c): people chats `POST /chats/{id}/notify`, project chats
     /// `POST /projects/{pid}/chats/{cid}/notify`. Deduped by the relay.
-    func notifyMessage(chatId: String, projectId: Id?, messageId: String, text: String) async throws {
-        let body: [String: Any] = ["message_id": messageId, "text": String(text.prefix(140))]
+    func notifyMessage(chatId: String, projectId: Id?, messageId: String, text: String,
+                       replyRef: ReplyRef? = nil) async throws {
+        var body: [String: Any] = ["message_id": messageId, "text": String(text.prefix(140))]
+        if let r = replyRef {
+            // Reply in DM (#1834): the push says what the DM answers; the relay keeps the
+            // address only for recipients who are members of the source chat.
+            body["reply_ref"] = ["chat_id": r.chatId, "project_id": r.projectId, "message_id": r.messageId,
+                                 "chat_title": r.chatTitle, "sender_name": r.who, "text": r.text]
+        }
         if let projectId, projectId != peopleSlot {
             _ = try await request("POST", "/projects/\(projectId)/chats/\(chatId)/notify", body: body)
         } else {

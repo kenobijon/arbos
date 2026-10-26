@@ -7,6 +7,7 @@
 //! constants come from `arbos-core`; the client-side mirror (`doc.rs`) and
 //! the sources are candidates to move there later (`arbos-design.md` §7.2).
 
+pub mod agent_avatar;
 pub mod credentials;
 pub mod diagnostics;
 pub mod doc;
@@ -235,6 +236,12 @@ pub enum SyncEvent {
     Thumbnail {
         key: String,
         bytes: Arc<Vec<u8>>,
+    },
+    /// The site icon for the named links to `host` (relay `GET /link-icon?domain=`): a
+    /// 64×64 PNG, or `None` when the site has none (the bubbles keep the placeholder).
+    LinkIcon {
+        host: String,
+        png: Option<Arc<Vec<u8>>>,
     },
     /// The thumbnail bytes could not be fetched; the card shows "No preview" instead of
     /// loading forever. The failure itself went to the log and the silent diagnostics path.
@@ -560,6 +567,9 @@ pub enum ClientCommand {
         attachments: Vec<PathBuf>,
         /// People-chat / hover-reply: the message this send answers (`replyTo`).
         reply_to: Option<String>,
+        /// Reply in DM: the message in another chat this send answers, with its
+        /// snapshot (`replyRef`). Exclusive with `reply_to`.
+        reply_ref: Option<crate::model::ReplyRef>,
         /// Member ids of the composer's committed mention chips (#1596); the
         /// source unions them with the `@handle`s the text names.
         mentions: Vec<String>,
@@ -836,6 +846,10 @@ pub enum ClientCommand {
     FetchThumbnail {
         project_id: Id,
         key: String,
+    },
+    /// Fetch the site icon the bubbles draw before named links to `host`.
+    FetchLinkIcon {
+        host: String,
     },
     /// Download an attachment to `~/Downloads/<name>` (F10).
     DownloadAttachment {
