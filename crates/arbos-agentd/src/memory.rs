@@ -615,7 +615,10 @@ mod tests {
         memory.set_owner_names(vec!["Jacob".into(), "Const".into()]);
         assert_eq!(memory.purge_user_name_memories(), 2);
         assert_eq!(
-            store.memory_by_ids(&[named_id.clone()]).unwrap()[0].text,
+            store
+                .memory_by_ids(std::slice::from_ref(&named_id))
+                .unwrap()[0]
+                .text,
             "the owner wants the roleplay kept up."
         );
         let live: Vec<String> = store
