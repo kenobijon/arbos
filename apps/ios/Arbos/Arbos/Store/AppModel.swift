@@ -1248,7 +1248,9 @@ final class AppModel: ObservableObject {
         credentials = DeviceCredentials(relayUrl: toks.relayUrl, deviceId: toks.deviceId, deviceToken: toks.accessToken)
         if !wasPaired {
             // A sign-in through the browser (not a token refresh): a possible first login.
-            if who != nil { beginFirstLogin() }
+            // Rig (Debug): `ARBOS_SKIP_FIRST_LOGIN=1` lands on the lists at once — a shot of an
+            // existing account on a simulator whose test box has no agentd to greet it.
+            if who != nil, !DebugHooks.skipFirstLogin { beginFirstLogin() }
             startAfterPairing()
         }
     }
