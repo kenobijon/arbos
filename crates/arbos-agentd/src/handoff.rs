@@ -491,8 +491,45 @@ mod tests {
         out
     }
 
+    /// `ARBOS_HANDOFF_KEEP=<dir>` (scripts/secrets/handoff-invariant-check.sh): keep the box's
+    /// whole state dir and a TRACE journal of the run there, for the grep that follows.
+    fn keep_dir() -> Option<std::path::PathBuf> {
+        std::env::var_os("ARBOS_HANDOFF_KEEP").map(std::path::PathBuf::from)
+    }
+
+    fn journal_guard(
+        keep: &Option<std::path::PathBuf>,
+    ) -> Option<tracing::subscriber::DefaultGuard> {
+        let dir = keep.as_ref()?;
+        std::fs::create_dir_all(dir).ok()?;
+        let file = std::fs::File::create(dir.join("agentd-journal.log")).ok()?;
+        let sub = tracing_subscriber::fmt()
+            .with_writer(Mutex::new(file))
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .finish();
+        Some(tracing::subscriber::set_default(sub))
+    }
+
+    fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+        let _ = std::fs::create_dir_all(to);
+        if let Ok(rd) = std::fs::read_dir(from) {
+            for e in rd.flatten() {
+                let p = e.path();
+                let dest = to.join(e.file_name());
+                if p.is_dir() {
+                    copy_tree(&p, &dest);
+                } else {
+                    let _ = std::fs::copy(&p, &dest);
+                }
+            }
+        }
+    }
+
     #[tokio::test]
     async fn save_this_goes_to_the_vault_before_the_model_and_leaves_no_copy_in_the_box() {
+        let keep = keep_dir();
+        let _journal = journal_guard(&keep);
         let (router, bodies, scrubs) = relay_stub();
         let (agent, root) = test_agent_with(router).await;
         let chat = "01TESTCHATHANDOFF000000000";
@@ -512,10 +549,33 @@ mod tests {
                 .unwrap();
             id
         };
-        // The key sits in the doc and in T3 the way a real turn would have left it.
+        // The key sits in the doc and in T3 the way a real turn would have left it — and in
+        // the places a harness that already saw it would have written: its session file, its
+        // log, a subagent pack, durable memory (memory_add runs the pattern redaction itself,
+        // so the memory row proves that layer too).
         let _ = agent
             .store
             .t3_append(chat, None, Some(chat), "user", Some("user"), &text, None);
+        let _ = agent.store.memory_add(
+            "durable",
+            Some(chat),
+            "note",
+            "chat",
+            &format!("the stripe key is {KEY}"),
+            None,
+            None,
+            0.9,
+            3,
+            &[],
+        );
+        for (dir, file) in [
+            (agent.cfg.pi_sessions_dir(), "20261026_main.jsonl"),
+            (agent.cfg.state_dir.join("logs"), "pi-main.log"),
+            (agent.cfg.state_dir.join("packs"), "sub1.md"),
+        ] {
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(file), format!("… {text} …\n")).unwrap();
+        }
         agent.sync.persist(&host).await.unwrap();
         assert!(
             !files_holding(&root).is_empty(),
@@ -562,8 +622,16 @@ mod tests {
             assert!(h.doc.is_shallow_mode());
         }
         agent.sync.persist(&host).await.unwrap();
+        let _ = agent.store.flush_after_scrub();
         let left = files_holding(&root);
         assert!(left.is_empty(), "files still holding the key: {left:?}");
+        if let Some(dir) = keep {
+            copy_tree(&root, &dir.join("box"));
+            let _ = std::fs::write(
+                dir.join("README.txt"),
+                "box work root after the save-this fast path (<project>/.arbos: agentd.db + wal, pi/, logs/, …) + agentd-journal.log (TRACE)\n",
+            );
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -653,6 +721,8 @@ mod tests {
 
     #[tokio::test]
     async fn the_request_card_waits_for_the_device_and_returns_the_name_only() {
+        let keep = keep_dir();
+        let _journal = journal_guard(&keep);
         let (router, _, _) = relay_stub();
         let (agent, root) = test_agent_with(router).await;
         let chat = "01TESTCHATHANDOFF000000002";
@@ -741,6 +811,9 @@ mod tests {
         let v: Value = serde_json::from_str(out["content"][0]["text"].as_str().unwrap()).unwrap();
         assert_eq!(v["saved"], false);
         assert_eq!(v["declined"], true);
+        if let Some(dir) = keep {
+            copy_tree(&root, &dir.join("box"));
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 
