@@ -4981,11 +4981,16 @@ impl Render for Shell {
         self.enforce_modal_focus(window, cx);
         // Rig: the Search-in-chat bar with its query, once a chat with rows is up.
         if self.chat_search_rig.is_some() {
-            let ready = self
-                .state
-                .read(cx)
-                .active_chat_id()
-                .is_some_and(|id| !self.state.read(cx).messages_of(&id).is_empty());
+            // With `ARBOS_OPEN_SPACE` the bar waits for that space's chat, not
+            // the first chat that happens to have rows.
+            let wanted = std::env::var("ARBOS_OPEN_SPACE").ok();
+            let state = self.state.read(cx);
+            let ready = state.active_chat_id().is_some_and(|id| {
+                !state.messages_of(&id).is_empty()
+                    && wanted
+                        .as_ref()
+                        .is_none_or(|space| state.space_of_chat(&id) == *space)
+            });
             if ready {
                 if let Some(query) = self.chat_search_rig.take() {
                     self.open_chat_search(window, cx);
