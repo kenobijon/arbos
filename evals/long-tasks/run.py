@@ -606,6 +606,7 @@ def main():
     ap.add_argument("--run-id", default=time.strftime("%Y%m%dT%H%M"))
     ap.add_argument("--out", default="")
     ap.add_argument("--dry-run", action="store_true", help="list the tasks per lane and exit")
+    ap.add_argument("--min-headroom-usd", type=float, default=float(os.environ.get("LT_MIN_HEADROOM_USD", "1.0")), help="refuse to start when the relay cap has less headroom than this (#1736 rules)")
     ap.add_argument("--skip-parity", action="store_true", help="leave the Grok-parity prompts out (the duplex owner runs their own scorecards; they are ~55 %% of a full run's cost)")
     ap.add_argument("--allow-stale-seed", action="store_true", help="run even when the box's pi-ext seed does not match its image commit (#1702)")
     ap.add_argument("--refresh-stale-seed", action="store_true", help="when the seed is stale, re-copy /etc/arbos from the image into the box's persisted /etc and restart it (test box only)")
@@ -669,6 +670,8 @@ def main():
     spent, cap = rl.spent_today()
     if cap and cap - spent < args.budget_usd:
         print(f"WARNING: daily cap headroom ${cap - spent:.2f} < budget ${args.budget_usd}; the relay will stop the agent first", flush=True)
+    if cap and cap - spent < args.min_headroom_usd:
+        raise SystemExit(f"preflight: blocked — lt-eval spent ${spent:.2f} of ${cap:.2f} today, headroom ${cap - spent:.2f} < ${args.min_headroom_usd} (--min-headroom-usd); not a result")
     out_dir = Path(args.out or (HERE / "results" / args.run_id))
     out_dir.mkdir(parents=True, exist_ok=True)
     log = (out_dir / "run.log").open("a")
@@ -706,6 +709,20 @@ def main():
         late_lane.start()
         late_lane.join()
         results += late_lane.results
+    # Nothing of the run may keep spending after it: delete every routine on the lane projects. s1 creates
+    # an every-minute ticker that s3 deletes two tasks later — in run 7 s3 was skipped on budget and the
+    # ticker fired a model turn a minute for 14 h, which emptied the day's cap (2026-10-26).
+    swept = 0
+    for ln, pid in run_state["projects"].items():
+        try:
+            for r in rl.routines(pid):
+                if r.get("id"):
+                    rl.delete_routine(pid, r["id"])
+                    swept += 1
+        except Exception as e:  # noqa: BLE001
+            print(f"routine sweep on lane {ln} failed: {e}", flush=True)
+    if swept:
+        print(f"end-of-run sweep: deleted {swept} leftover routine(s)", flush=True)
     spent_end, _ = rl.spent_today()
     meta["ended_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     meta["spent_today_at_end"] = spent_end

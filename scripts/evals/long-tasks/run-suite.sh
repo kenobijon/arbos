@@ -55,7 +55,9 @@ if [ -z "${LT_FIXTURE_BASE:-}" ]; then
 fi
 
 echo "== run $RUN_ID"
+python3 "$EVAL/sweep.py" || true   # no routine from an earlier run may still be spending
 python3 "$EVAL/run.py" --run-id "$RUN_ID" "${ARGS[@]}"
+python3 "$EVAL/sweep.py" || true   # and none from this one
 
 ISSUES_JSON="$EVAL/results/$RUN_ID/issues.json"
 if [ "$FILE_ISSUES" = 1 ]; then
