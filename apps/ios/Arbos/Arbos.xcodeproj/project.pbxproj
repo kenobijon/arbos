@@ -103,6 +103,7 @@
 		A1D100000000000000000072 /* ReplyInDMTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D100000000000000000071 /* ReplyInDMTests.swift */; };
 		A1D100000000000000000002 /* DeliveryStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D100000000000000000001 /* DeliveryStateTests.swift */; };
 		A1D100000000000000000012 /* OptimisticSendTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D100000000000000000011 /* OptimisticSendTests.swift */; };
+		A1D100000000000000000082 /* OptimisticNoticeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D100000000000000000081 /* OptimisticNoticeTests.swift */; };
 		A1D100000000000000000112 /* JumpToLatestWindowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D100000000000000000111 /* JumpToLatestWindowTests.swift */; };
 		A1F300000000000000000002 /* ImageCaptionBubbleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F300000000000000000001 /* ImageCaptionBubbleTests.swift */; };
 		A1E100000000000000000002 /* HiddenWorkerRowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E100000000000000000001 /* HiddenWorkerRowTests.swift */; };
@@ -278,6 +279,7 @@
 		A1D100000000000000000071 /* ReplyInDMTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReplyInDMTests.swift; sourceTree = "<group>"; };
 		A1D100000000000000000001 /* DeliveryStateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeliveryStateTests.swift; sourceTree = "<group>"; };
 		A1D100000000000000000011 /* OptimisticSendTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OptimisticSendTests.swift; sourceTree = "<group>"; };
+		A1D100000000000000000081 /* OptimisticNoticeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OptimisticNoticeTests.swift; sourceTree = "<group>"; };
 		A1D100000000000000000111 /* JumpToLatestWindowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JumpToLatestWindowTests.swift; sourceTree = "<group>"; };
 		A1F300000000000000000001 /* ImageCaptionBubbleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageCaptionBubbleTests.swift; sourceTree = "<group>"; };
 		A1E100000000000000000001 /* HiddenWorkerRowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HiddenWorkerRowTests.swift; sourceTree = "<group>"; };
@@ -537,6 +539,7 @@
 				A1D100000000000000000071 /* ReplyInDMTests.swift */,
 				A1D100000000000000000001 /* DeliveryStateTests.swift */,
 				A1D100000000000000000011 /* OptimisticSendTests.swift */,
+				A1D100000000000000000081 /* OptimisticNoticeTests.swift */,
 				A1D100000000000000000111 /* JumpToLatestWindowTests.swift */,
 				A1F300000000000000000001 /* ImageCaptionBubbleTests.swift */,
 				A1E100000000000000000001 /* HiddenWorkerRowTests.swift */,
@@ -850,6 +853,7 @@
 				A1D100000000000000000072 /* ReplyInDMTests.swift in Sources */,
 				A1D100000000000000000002 /* DeliveryStateTests.swift in Sources */,
 				A1D100000000000000000012 /* OptimisticSendTests.swift in Sources */,
+				A1D100000000000000000082 /* OptimisticNoticeTests.swift in Sources */,
 				A1D100000000000000000112 /* JumpToLatestWindowTests.swift in Sources */,
 				A1F300000000000000000002 /* ImageCaptionBubbleTests.swift in Sources */,
 				A1E100000000000000000002 /* HiddenWorkerRowTests.swift in Sources */,
