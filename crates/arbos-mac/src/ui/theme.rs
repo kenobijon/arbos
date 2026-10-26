@@ -468,6 +468,8 @@ pub struct Theme {
     pub code_bg: Hsla,
     pub font_sans: &'static str,
     pub font_mono: &'static str,
+    /// The serif face typeset math is painted in (KaTeX's look in Grok Bot).
+    pub font_math: &'static str,
 }
 
 impl Global for Theme {}
@@ -519,6 +521,7 @@ impl Theme {
             code_bg: hex_a(0x000000, 0.28),
             font_sans: Self::sans_family(),
             font_mono: Self::mono_family(),
+            font_math: Self::math_family(),
         }
     }
 
@@ -567,6 +570,7 @@ impl Theme {
             code_bg: hex_a(0x000000, 0.06),
             font_sans: Self::sans_family(),
             font_mono: Self::mono_family(),
+            font_math: Self::math_family(),
         }
     }
 
@@ -604,6 +608,26 @@ impl Theme {
             "Menlo"
         } else {
             "JetBrains Mono"
+        }
+    }
+
+    /// STIX Two ships with macOS (Supplemental fonts) and carries the maths
+    /// glyphs — ∑, ≤, ℝ, the small superscripts; Noto Serif is the Linux
+    /// stand-in. The renderer lists the fallbacks ([`Self::math_fallbacks`]).
+    fn math_family() -> &'static str {
+        if cfg!(target_os = "macos") {
+            "STIX Two Text"
+        } else {
+            "Noto Serif"
+        }
+    }
+
+    /// Faces tried for a glyph the math face lacks, then for the face itself.
+    pub fn math_fallbacks() -> Vec<String> {
+        if cfg!(target_os = "macos") {
+            vec!["STIX Two Math".into(), "Times New Roman".into()]
+        } else {
+            vec!["DejaVu Serif".into(), "Liberation Serif".into()]
         }
     }
 
@@ -711,10 +735,16 @@ impl Theme {
 
     /// The chat header's glass ([feedback mac-header-glass-2026-10-25], Jacob
     /// 2026-10-25; the iPhone's `HeaderGlassBackground`): what the name pill
-    /// and the header disc are filled with on Glass — white at 12 % over a
-    /// 50 % dark underlay (one composited colour: GPUI quads take one fill),
-    /// white at 60 % in light. Over the bright beach backdrop of Jacob's shots
-    /// white text measures 6.6:1 on it (`docs/glass-surface-directions.md`, B).
+    /// and the header disc are filled with — on Glass and on Matte alike
+    /// ([feedback mac-header-pill-glass-matte-2026-10-26]). Dark: white at
+    /// 12 % over a 50 % dark underlay (one composited colour: GPUI quads take
+    /// one fill); over the flat Matte `bg` that reads as a frosted plate two
+    /// steps lighter, like Grok Bot's pill over its black transcript. Light:
+    /// white at 60 % — over the bright beach backdrop of Jacob's shots white
+    /// text measures 6.6:1 on it (`docs/glass-surface-directions.md`, B), and
+    /// over the flat Matte `#fcfcfc` the blurred list under it (the backdrop
+    /// blur composites ≈ 20 % darker than its source, Metal and wgpu alike)
+    /// lands the pill near the `#ededed` of the solid pill it replaces.
     pub fn header_glass(&self) -> Hsla {
         if self.is_light() {
             hex_a(0xffffff, 0.60)

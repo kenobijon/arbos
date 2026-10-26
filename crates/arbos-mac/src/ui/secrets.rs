@@ -86,6 +86,8 @@ pub struct SecretsPanel {
     error: Option<String>,
     /// Rig: a secret env name to open as soon as the list arrives.
     pending_env: Option<String>,
+    /// Rig: with `pending_env`, open that secret's "Give a person access" sheet too.
+    pending_people: bool,
     /// Rig: open the first vault as soon as the list arrives.
     pending_vault: bool,
     /// Shown as a page inside the Settings sheet (#1086) rather than as the
@@ -144,6 +146,7 @@ impl SecretsPanel {
             token_input,
             error: None,
             pending_env: None,
+            pending_people: false,
             pending_vault: false,
             embedded: false,
             focus_handle: cx.focus_handle(),
@@ -173,6 +176,13 @@ impl SecretsPanel {
         self.page = Page::List;
         self.state.update(cx, |s, cx| s.secrets_refresh(cx));
         cx.notify();
+    }
+
+    /// Rig: one secret's page by env name with its "Give a person access" sheet
+    /// open once the relay (or fixture) has listed it.
+    pub fn show_secret_people(&mut self, env: String, cx: &mut Context<Self>) {
+        self.pending_people = true;
+        self.show_secret_env(env, cx);
     }
 
     /// Rig: the New secret form.
@@ -411,7 +421,7 @@ impl SecretsPanel {
             .min_h(px(52.0))
             .px(px(16.0))
             .py(px(8.0))
-            .child(kit::hairline_below(16.0, theme))
+            .child(kit::hairline_below(theme))
             .child(glass::icon_tile(glyph, theme).when(dim, |el| el.opacity(0.55)))
             .child(
                 div()
@@ -655,7 +665,7 @@ impl SecretsPanel {
                     .px(px(16.0))
                     .py(px(8.0))
                     .relative()
-                    .child(kit::hairline_below(16.0, theme))
+                    .child(kit::hairline_below(theme))
                     .child(
                         div()
                             .text_size(px(TEXT_SMALL))
@@ -725,7 +735,7 @@ impl SecretsPanel {
             .px(px(16.0))
             .py(px(10.0))
             .relative()
-            .child(kit::hairline_below(16.0, theme))
+            .child(kit::hairline_below(theme))
             .child(
                 div()
                     .text_size(px(TEXT_BODY))
@@ -981,7 +991,7 @@ impl SecretsPanel {
                 .px(px(16.0))
                 .py(px(10.0))
                 .relative()
-                .child(kit::hairline_below(16.0, theme));
+                .child(kit::hairline_below(theme));
             if s.kind == "login" {
                 form = form
                     .child(Self::field(
@@ -1165,7 +1175,7 @@ impl SecretsPanel {
                     .px(px(16.0))
                     .py(px(8.0))
                     .relative()
-                    .child(kit::hairline_below(16.0, theme))
+                    .child(kit::hairline_below(theme))
                     .cursor_pointer()
                     .hover(|st| st.bg(theme.surface_2))
                     .child(avatar)
@@ -1304,7 +1314,7 @@ impl SecretsPanel {
                     .px(px(16.0))
                     .py(px(8.0))
                     .relative()
-                    .child(kit::hairline_below(16.0, theme))
+                    .child(kit::hairline_below(theme))
                     .cursor_pointer()
                     .hover(|st| st.bg(theme.surface_2))
                     .child(avatars::element(
@@ -2091,7 +2101,7 @@ impl SecretsPanel {
                     .px(px(16.0))
                     .py(px(8.0))
                     .relative()
-                    .child(kit::hairline_below(16.0, theme))
+                    .child(kit::hairline_below(theme))
                     .cursor_pointer()
                     .hover(|st| st.bg(theme.surface_2))
                     .child(avatar)
@@ -2213,7 +2223,7 @@ impl SecretsPanel {
                     .px(px(16.0))
                     .py(px(8.0))
                     .relative()
-                    .child(kit::hairline_below(16.0, theme))
+                    .child(kit::hairline_below(theme))
                     .cursor_pointer()
                     .hover(|s| s.bg(theme.surface_2))
                     .child(
@@ -2438,6 +2448,11 @@ impl Render for SecretsPanel {
             if let Some(s) = view.secrets.iter().find(|s| s.env == env) {
                 self.pending_env = None;
                 self.page = Page::Secret(s.id.clone());
+                if std::mem::take(&mut self.pending_people) {
+                    let id = s.id.clone();
+                    self.state
+                        .update(cx, |st, cx| st.open_secret_people_picker(id, cx));
+                }
             }
         }
         if self.pending_vault {
