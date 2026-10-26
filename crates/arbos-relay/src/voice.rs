@@ -233,7 +233,7 @@ pub async fn voice_sample(State(state): State<AppState>, Path(id): Path<String>)
     }
 }
 
-// ---- call inbox: the chat, live, for the call (#1860) -----------------------------------------------
+// ---- call inbox: the chat, live, for the call (#1832) -----------------------------------------------
 //
 // Jacob, 2026-10-25: on a call with Bubble he asked for pizza delivery; the agent's long turn
 // posted the answer in the chat 45 s later, and the call never heard of it — the voice session

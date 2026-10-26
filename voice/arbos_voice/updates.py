@@ -1,4 +1,4 @@
-"""The chat, live, for the call (#1860). Jacob's rule (2026-10-25): the main voice agent is
+"""The chat, live, for the call (#1832). Jacob's rule (2026-10-25): the main voice agent is
 the ONLY speaker on a call. Background jobs and the full agent never speak; what they post in
 the chat streams into the voice agent's context as it arrives, and the voice agent decides
 when and how to say it — a short summary at a natural pause, never over the person.

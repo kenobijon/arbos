@@ -667,7 +667,7 @@ pub struct NotifyBody {
     /// People chats, box callers: which of the box's agents spoke.
     #[serde(default)]
     pub project_id: Option<String>,
-    /// Box callers (#1860): what kind of bubble this is for a live call in the chat —
+    /// Box callers (#1832): what kind of bubble this is for a live call in the chat —
     /// `result` (a turn's answer), `job` (a background job's outcome), `quick` (a status line
     /// while a turn runs). Devices send none (a person's message).
     #[serde(default)]

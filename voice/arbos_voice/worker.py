@@ -1040,7 +1040,7 @@ class VoiceCall:
         self.spawn(self.finish("asked"))
         return "You are leaving the call now. Do not say anything else."
 
-    # ---- the chat, live, for the call (#1860) ---------------------------------------------------------
+    # ---- the chat, live, for the call (#1832) ---------------------------------------------------------
 
     def room_quiet(self) -> bool:
         """Nobody is talking and the agent is idle: a pause the agent may use."""
