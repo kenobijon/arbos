@@ -555,6 +555,15 @@ impl Shell {
                     this.state
                         .update(cx, |s, cx| s.guide(text, reply_to, mentions, cx));
                 }
+                ComposerEvent::Edit { message_id, text } => {
+                    let message_id = message_id.clone();
+                    let text = text.clone();
+                    let Some(chat_id) = this.state.read(cx).active_chat_id() else {
+                        return;
+                    };
+                    this.state
+                        .update(cx, |s, cx| s.edit_message(chat_id, message_id, text, cx));
+                }
                 ComposerEvent::Stop => this.state.update(cx, |s, cx| s.stop(cx)),
             },
         )

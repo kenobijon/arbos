@@ -394,6 +394,9 @@ pub struct ChatUi {
     /// Reply in DM: the message in another chat the next send here answers
     /// (its address + snapshot, written as `replyRef`). Exclusive with `reply_to`.
     pub reply_ref: Option<ReplyRef>,
+    /// Own message whose text is in the composer for an in-place edit
+    /// (iPhone `ChatView.editing`). Exclusive with `reply_to` / `reply_ref`.
+    pub editing: Option<Id>,
 }
 
 /// Rows per history page the shared Matrix client fetches (`arbos_matrix::client::HISTORY_PAGE`).
@@ -3753,6 +3756,7 @@ impl AppState {
         let ui = self.chat_ui.entry(chat_id).or_default();
         ui.reply_to = Some(message_id);
         ui.reply_ref = None;
+        ui.editing = None;
         cx.notify();
     }
 
@@ -3761,6 +3765,23 @@ impl AppState {
         if let Some(ui) = self.chat_ui.get_mut(chat_id) {
             ui.reply_to = None;
             ui.reply_ref = None;
+        }
+        cx.notify();
+    }
+
+    /// Bubble menu → Edit: put this own message's text in the composer.
+    pub fn begin_edit(&mut self, chat_id: Id, message_id: Id, cx: &mut Context<Self>) {
+        let ui = self.chat_ui.entry(chat_id).or_default();
+        ui.editing = Some(message_id);
+        ui.reply_to = None;
+        ui.reply_ref = None;
+        cx.notify();
+    }
+
+    /// Clear the Editing chip above the composer.
+    pub fn clear_editing(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        if let Some(ui) = self.chat_ui.get_mut(chat_id) {
+            ui.editing = None;
         }
         cx.notify();
     }
@@ -3907,6 +3928,7 @@ impl AppState {
         self.pending_dm_reply = None;
         let ui = self.chat_ui.entry(dm_chat).or_default();
         ui.reply_to = None;
+        ui.editing = None;
         ui.reply_ref = Some(r);
         cx.notify();
     }
@@ -3974,6 +3996,7 @@ impl AppState {
                 ui.drop_started_at = Some(now_ms());
             }
             ui.reply_to = None;
+            ui.editing = None;
             // A cross-chat reply never carries an in-chat `replyTo` as well.
             ui.reply_ref.take().filter(|_| reply_to.is_none())
         };
@@ -4790,6 +4813,7 @@ impl AppState {
                 ui.drop_started_at = Some(now_ms());
             }
             ui.reply_to = None;
+            ui.editing = None;
         }
         let me = self.me_member();
         let handle = self.me_handle();
@@ -5734,6 +5758,30 @@ impl AppState {
             chat_id,
             message_id,
         });
+        cx.notify();
+    }
+
+    /// Save an in-place edit of an own message's text (no new send). Peers see
+    /// the updated body via room sync, same as the iPhone's `editMessage`.
+    pub fn edit_message(
+        &mut self,
+        chat_id: Id,
+        message_id: Id,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
+        let trimmed = text.trim().to_string();
+        if message_id.is_empty() || trimmed.is_empty() {
+            return;
+        }
+        self.command(ClientCommand::EditMessage {
+            chat_id: chat_id.clone(),
+            message_id,
+            text: trimmed,
+        });
+        if let Some(ui) = self.chat_ui.get_mut(&chat_id) {
+            ui.editing = None;
+        }
         cx.notify();
     }
 

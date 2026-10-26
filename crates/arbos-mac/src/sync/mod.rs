@@ -626,6 +626,12 @@ pub enum ClientCommand {
         chat_id: Id,
         message_id: Id,
     },
+    /// Replace an own message's text in the chat doc (`edit_message_text`).
+    EditMessage {
+        chat_id: Id,
+        message_id: Id,
+        text: String,
+    },
     /// S18: decide an approval card (`approve` / `reject` commands, `arbos_core::approval`).
     Approve {
         chat_id: Id,

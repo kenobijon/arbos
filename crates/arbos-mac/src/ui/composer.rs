@@ -191,6 +191,11 @@ pub enum ComposerEvent {
         reply_to: Option<String>,
         mentions: Vec<String>,
     },
+    /// Save an in-place edit of an own message (no new bubble).
+    Edit {
+        message_id: String,
+        text: String,
+    },
     Stop,
 }
 
@@ -2385,6 +2390,26 @@ impl Composer {
                     cx.notify();
                     return;
                 }
+                // Editing an own message: save in place — no new bubble, no Guide.
+                let editing = self.state.read(cx).active_chat_id().and_then(|cid| {
+                    self.state
+                        .read(cx)
+                        .chat_ui
+                        .get(&cid)
+                        .and_then(|ui| ui.editing.clone())
+                });
+                if let Some(message_id) = editing {
+                    if text.is_empty() {
+                        self.nudge_at = Some(crate::model::now_ms());
+                        cx.notify();
+                        return;
+                    }
+                    self.attachments.clear();
+                    self.input.update(cx, |input, cx| input.clear(cx));
+                    cx.emit(ComposerEvent::Edit { message_id, text });
+                    cx.notify();
+                    return;
+                }
                 let running = self
                     .state
                     .read(cx)
@@ -3329,39 +3354,33 @@ impl Render for Composer {
             .flex_col()
             .gap(px(8.0));
 
-        // Reply preview (iPhone parity): set by the hover reply icon / the
-        // bubble menu on a message. Always one fixed-height row, whatever
-        // the quoted message's length ([feedback reply-preview-fixed-height]).
+        // Reply / Editing preview (iPhone parity): set by the hover reply icon
+        // or the bubble menu. Always one fixed-height row, whatever the quoted
+        // message's length ([feedback reply-preview-fixed-height]). Editing
+        // takes the same slot and wins over reply (ChatView.swift).
         if let Some(chat_id) = self.state.read(cx).active_chat_id() {
-            let (reply_id, reply_ref) = {
+            let (editing_id, reply_id, reply_ref) = {
                 let state = self.state.read(cx);
                 let ui = state.chat_ui.get(&chat_id);
                 (
+                    ui.and_then(|ui| ui.editing.clone()),
                     ui.and_then(|ui| ui.reply_to.clone()),
                     ui.and_then(|ui| ui.reply_ref.clone()),
                 )
             };
-            // Reply in DM arms a cross-chat reply: "Replying to Jacob in
-            // Arbonites" + the snapshot the row will carry (#1835).
-            let preview = match (reply_id, reply_ref) {
-                (_, Some(r)) => Some(ReplyPreview::for_reply_ref(&r)),
-                (Some(reply_id), None) => {
+            if let Some(editing_id) = editing_id {
+                let line = {
                     let state = self.state.read(cx);
-                    Some(
-                        state
-                            .messages
-                            .get(&chat_id)
-                            .and_then(|list| list.iter().find(|m| m.id == reply_id))
-                            .map(|m| ReplyPreview::for_message(m, &state.thumbnails))
-                            .unwrap_or_else(ReplyPreview::missing),
-                    )
-                }
-                (None, None) => None,
-            };
-            if let Some(preview) = preview {
+                    state
+                        .messages
+                        .get(&chat_id)
+                        .and_then(|list| list.iter().find(|m| m.id == editing_id))
+                        .map(|m| transcript::message_line(m, REPLY_PREVIEW_CHARS))
+                        .unwrap_or_default()
+                };
                 let clear_chat = chat_id.clone();
                 let clear = div()
-                    .id("composer-reply-clear")
+                    .id("composer-edit-clear")
                     .size(px(18.0))
                     .flex_shrink_0()
                     .flex()
@@ -3373,9 +3392,46 @@ impl Render for Composer {
                     .child(icon("xmark", 10.0, theme.text_muted))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.state
-                            .update(cx, |s, cx| s.clear_reply_to(&clear_chat, cx));
+                            .update(cx, |s, cx| s.clear_editing(&clear_chat, cx));
                     }));
-                column = column.child(reply_preview_bar(&preview, &theme, clear));
+                column = column.child(edit_preview_bar(&line, &theme, clear));
+            } else {
+                // Reply in DM arms a cross-chat reply: "Replying to Jacob in
+                // Arbonites" + the snapshot the row will carry (#1835).
+                let preview = match (reply_id, reply_ref) {
+                    (_, Some(r)) => Some(ReplyPreview::for_reply_ref(&r)),
+                    (Some(reply_id), None) => {
+                        let state = self.state.read(cx);
+                        Some(
+                            state
+                                .messages
+                                .get(&chat_id)
+                                .and_then(|list| list.iter().find(|m| m.id == reply_id))
+                                .map(|m| ReplyPreview::for_message(m, &state.thumbnails))
+                                .unwrap_or_else(ReplyPreview::missing),
+                        )
+                    }
+                    (None, None) => None,
+                };
+                if let Some(preview) = preview {
+                    let clear_chat = chat_id.clone();
+                    let clear = div()
+                        .id("composer-reply-clear")
+                        .size(px(18.0))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_full()
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme.surface_2))
+                        .child(icon("xmark", 10.0, theme.text_muted))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.state
+                                .update(cx, |s, cx| s.clear_reply_to(&clear_chat, cx));
+                        }));
+                    column = column.child(reply_preview_bar(&preview, &theme, clear));
+                }
             }
         }
 
@@ -3559,6 +3615,49 @@ impl ReplyPreview {
             thumb: None,
         }
     }
+}
+
+/// Same height/shape as the reply preview: pencil, "Editing", one truncated
+/// line, × (iPhone `ChatView.editPreview`).
+pub fn edit_preview_bar(line: &str, theme: &Theme, clear: impl IntoElement) -> gpui::Stateful<Div> {
+    div()
+        .id("composer-edit")
+        .debug_selector(|| "composer-edit".into())
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .w_full()
+        .h(px(REPLY_PREVIEW_HEIGHT))
+        .flex_shrink_0()
+        .overflow_hidden()
+        .px(px(14.0))
+        .rounded(px(14.0))
+        .bg(theme.bubble_assistant)
+        .child(
+            div()
+                .flex_shrink_0()
+                .child(icon("pencil", 12.0, theme.text_muted)),
+        )
+        .child(
+            div()
+                .flex_shrink_0()
+                .whitespace_nowrap()
+                .text_size(px(TEXT_TINY))
+                .text_color(theme.text_muted)
+                .child("Editing"),
+        )
+        .child(
+            div()
+                .id("composer-edit-line")
+                .debug_selector(|| "composer-edit-line".into())
+                .flex_1()
+                .min_w_0()
+                .text_size(px(TEXT_TINY))
+                .text_color(theme.text)
+                .truncate()
+                .child(line.to_owned()),
+        )
+        .child(clear)
 }
 
 /// The fixed-height reply preview row above the field: full composer width
