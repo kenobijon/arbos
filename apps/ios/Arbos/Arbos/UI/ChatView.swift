@@ -1544,9 +1544,20 @@ struct ChatSession: View {
 
     /// Drag left on the transcript to peek each bubble's send time (iMessage).
     /// Locks only after the pan is clearly horizontal-left so vertical scroll stays free.
+    /// Skips (and undoes) when a nested table is scrolling sideways
+    /// ([feedback ACQD4mUCTPxH7z3Y7YO8Vjw]).
     private var timeRevealGesture: some Gesture {
         DragGesture(minimumDistance: 12, coordinateSpace: .local)
             .onChanged { value in
+                if NestedHorizontalScroll.claiming {
+                    if timeRevealLocked || timeReveal != 0 {
+                        timeRevealLocked = false
+                        var t = Transaction()
+                        t.disablesAnimations = true
+                        withTransaction(t) { timeReveal = 0 }
+                    }
+                    return
+                }
                 let dx = value.translation.width
                 let dy = value.translation.height
                 if !timeRevealLocked {
