@@ -39,6 +39,7 @@ mod status;
 mod store;
 mod sync;
 mod tree;
+mod truncate;
 mod vault;
 mod voice;
 mod web;

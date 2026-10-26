@@ -102,9 +102,11 @@ impl ResponderDecision {
     }
 }
 
+/// Whitespace-collapsed and capped, with a marker when cut (the decision model cannot fetch,
+/// so the marker only says how much is missing).
 fn clip(s: &str, max: usize) -> String {
     let s: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
-    s.chars().take(max).collect()
+    crate::truncate::clip_marked(&s, max, "", None)
 }
 
 /// A short hash of the exact inputs, so a logged decision can be matched to its state.

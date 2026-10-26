@@ -1133,13 +1133,33 @@ pub fn addressed(
 /// Recent human and agent lines before `up_to` as `[{from, text}]`, oldest first, for the
 /// responder decision and the group prelude. A human line is labelled with its author's display
 /// name (roster or row), else their handle, else `a member` — never the owner by default.
+#[cfg(test)]
 pub(crate) fn recent_people_context(
     messages: &[MessageView],
     up_to: &str,
     max: usize,
     info: &PeopleChatInfo,
 ) -> Vec<Value> {
-    let mut out = Vec::new();
+    recent_people_context_for(messages, up_to, max, info, "", &[])
+}
+
+/// `recent_people_context` with this agent's handles: a line that @mentions one of them, and
+/// the message `up_to` replies to, are passed whole (`truncate::build_window`); every other
+/// cut carries a marker naming the fetch call (`chat_messages`).
+pub(crate) fn recent_people_context_for(
+    messages: &[MessageView],
+    up_to: &str,
+    max: usize,
+    info: &PeopleChatInfo,
+    chat_id: &str,
+    my_handles: &[String],
+) -> Vec<Value> {
+    let reply_to = messages
+        .iter()
+        .find(|m| m.id == up_to)
+        .and_then(|m| m.rest.get("replyTo").and_then(Value::as_str))
+        .map(str::to_owned);
+    let mut lines = Vec::new();
     for m in messages {
         if m.id == up_to {
             break;
@@ -1147,7 +1167,7 @@ pub(crate) fn recent_people_context(
         if m.role != "user" && m.role != "assistant" {
             continue;
         }
-        let text: String = m.text().chars().take(500).collect();
+        let text = m.text();
         if text.trim().is_empty() {
             continue;
         }
@@ -1162,12 +1182,18 @@ pub(crate) fn recent_people_context(
             let author = info.author_of(m);
             author_spoken(m, info, author.as_deref())
         };
-        out.push(json!({ "from": from, "text": text }));
+        let full = reply_to.as_deref() == Some(m.id.as_str())
+            || my_handles
+                .iter()
+                .any(|h| mention_role(&text, h) != MentionRole::None);
+        lines.push(crate::truncate::WindowLine {
+            id: m.id.clone(),
+            from,
+            text,
+            full,
+        });
     }
-    if out.len() > max {
-        out.drain(0..out.len() - max);
-    }
-    out
+    crate::truncate::build_window(chat_id, lines, max).0
 }
 
 /// An active exchange: this agent answered this person moments ago, and nobody else took the
@@ -1525,7 +1551,15 @@ impl Agent {
                 // box, so another agent's row would read as mine (TestAgent / TestAgent2).
                 .is_some_and(|m| m.rest.get("sender").and_then(Value::as_str) == Some(me.as_str()));
             let all = h.doc.messages();
-            let recent = recent_people_context(&all, user_msg_id, RESPOND_RECENT_MAX, info);
+            let handles = agent_handles(info, &self.cfg.project_id, &self.identity.handle());
+            let recent = recent_people_context_for(
+                &all,
+                user_msg_id,
+                RESPOND_RECENT_MAX,
+                info,
+                chat_id,
+                &handles,
+            );
             let follow_up = follow_up_in_active_exchange(&all, user_msg_id, &me);
             (msg, replied_to_mine, recent, follow_up)
         };
@@ -1669,11 +1703,11 @@ impl Agent {
         msg: &MessageView,
         recent: &[Value],
     ) -> Option<bool> {
-        let text: String = msg.text().chars().take(4000).collect();
+        let raw_text = msg.text();
+        let text = crate::truncate::clip_marked(&raw_text, 4000, &msg.id, None);
         if text.trim().is_empty() {
             return Some(false);
         }
-        let raw_text = msg.text();
         let chips = mentioned_agent_ids(msg);
         let asker = author_spoken(msg, info, info.author_of(msg).as_deref());
         let me = self.cfg.project_id.as_str();
@@ -1811,7 +1845,15 @@ impl Agent {
             let h = host.lock().await;
             let msg = h.doc.message(user_msg_id)?;
             let recent = if info.is_group() {
-                recent_people_context(&h.doc.messages(), user_msg_id, RESPOND_RECENT_MAX, &info)
+                let handles = agent_handles(&info, &self.cfg.project_id, &self.identity.handle());
+                recent_people_context_for(
+                    &h.doc.messages(),
+                    user_msg_id,
+                    RESPOND_RECENT_MAX,
+                    &info,
+                    chat_id,
+                    &handles,
+                )
             } else {
                 Vec::new()
             };
@@ -1928,11 +1970,9 @@ impl Agent {
         );
         if !recent.is_empty() {
             prelude.push_str("Recent messages in this shared chat:\n");
-            for line in &recent {
-                let from = line["from"].as_str().unwrap_or("?");
-                let text = line["text"].as_str().unwrap_or("");
-                prelude.push_str(&format!("- {from}: {text}\n"));
-            }
+            prelude.push_str(&crate::truncate::render_window(&recent));
+            prelude.push_str(&crate::truncate::window_note(chat_id));
+            prelude.push('\n');
         }
         prelude.push('\n');
         Some(prelude)
@@ -2760,16 +2800,21 @@ mod tests {
         }
         let info = PeopleChatInfo::default();
         // Context for "m12": lines m0…m11, capped to the last 5.
+        // The 7 older lines become one marker that says how to page them.
         let ctx = recent_people_context(&lines, "m12", 5, &info);
-        assert_eq!(ctx.len(), 5);
-        assert_eq!(ctx[0]["text"], "line 7");
-        assert_eq!(ctx[4]["text"], "line 11");
-        assert_eq!(ctx[4]["from"], "@bob (agent)");
-        assert_eq!(ctx[3]["from"], "sam");
+        assert_eq!(ctx.len(), 6);
+        assert!(ctx[0]["note"]
+            .as_str()
+            .unwrap()
+            .starts_with("[7 earlier messages not shown"));
+        assert_eq!(ctx[1]["text"], "line 7");
+        assert_eq!(ctx[5]["text"], "line 11");
+        assert_eq!(ctx[5]["from"], "@bob (agent)");
+        assert_eq!(ctx[4]["from"], "sam");
         // Unknown id → everything, still capped.
         let all = recent_people_context(&lines, "missing", 3, &info);
-        assert_eq!(all.len(), 3);
-        assert_eq!(all[2]["text"], "line 14");
+        assert_eq!(all.len(), 4);
+        assert_eq!(all[3]["text"], "line 14");
     }
 }
 
@@ -2869,7 +2914,8 @@ mod attribution_tests {
             "{prelude}"
         );
         assert!(
-            prelude.contains("- a member: Note from me: the launch date is 12 November"),
+            prelude.contains("- a member (message id ")
+                && prelude.contains("): Note from me: the launch date is 12 November"),
             "{prelude}"
         );
         assert!(!prelude.contains("- Jacob: Note from me"), "{prelude}");
@@ -3273,6 +3319,60 @@ mod gate_record_tests {
         assert_eq!(
             my_mention_role(&bare, &group, "DOUG", "doug-agent"),
             MentionRole::Object
+        );
+    }
+
+    /// Jacob, 2026-10-26: Hezbola got a code post cut at `def __i` and did not know. An earlier
+    /// message that @mentions the agent, and the one being replied to, come whole; other long
+    /// ones carry the marker and the fetch call.
+    #[test]
+    fn recent_context_marks_cuts_and_passes_mentions_and_reply_targets_whole() {
+        let info = PeopleChatInfo {
+            members: vec![
+                json!({ "member": "agent:HEZ", "handle": "hezbola" }),
+                json!({ "member": "user:gh_1", "handle": "doug", "name": "Doug" }),
+            ],
+            slug: "hezbola".into(),
+            kind: "group".into(),
+            ..Default::default()
+        };
+        let code = format!(
+            "def __init__(self):\n{}    return TAIL_OK\n",
+            "    x = 1\n".repeat(350)
+        );
+        let mut m1 = msg(&code, json!({ "sender": "user:gh_1" }));
+        m1.id = "m1".into();
+        let mut m2 = msg(
+            &format!("@hezbola here is the class:\n{code}"),
+            json!({ "sender": "user:gh_1" }),
+        );
+        m2.id = "m2".into();
+        let mut m3 = msg(&code, json!({ "sender": "user:gh_1" }));
+        m3.id = "m3".into();
+        let mut cur = msg(
+            "does the tail look right?",
+            json!({ "sender": "user:gh_1", "replyTo": "m3" }),
+        );
+        cur.id = "cur".into();
+        let ctx = recent_people_context_for(
+            &[m1, m2, m3, cur],
+            "cur",
+            12,
+            &info,
+            "01CHAT",
+            &["hezbola".to_owned()],
+        );
+        assert_eq!(ctx.len(), 3);
+        let t1 = ctx[0]["text"].as_str().unwrap();
+        assert!(t1.contains("[truncated: showing 3000 of") && t1.contains("message id m1; full text: chat_messages {\"chat_id\": \"01CHAT\", \"message_id\": \"m1\"}"));
+        assert!(!t1.contains("TAIL_OK"));
+        assert!(
+            ctx[1]["text"].as_str().unwrap().contains("TAIL_OK"),
+            "the message that @mentions me is whole"
+        );
+        assert!(
+            ctx[2]["text"].as_str().unwrap().contains("TAIL_OK"),
+            "the message being replied to is whole"
         );
     }
 }

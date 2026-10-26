@@ -3203,7 +3203,12 @@ impl Agent {
             (Some(ValidRoute::Act { plan }), true) => {
                 let brief = format!(
                     "Continue this task that the project agent started and could not finish within its limits.\n\nUser request: {user_text}\n\nPlan: {plan}\n\nAct so far:\n{}\n\nFinish the task. If what remains is waiting on a background process or job (a loop, a pipeline, a long build), do not wait for it in this session: check its state once, post what is done so far with send_message, then schedule the promised check-ins with routines_create (one-shot `once` triggers with `in_seconds` at the cadence the user was promised, the last one for the final summary; each prompt tells you to check the job and tell the user the outcome) and end. Every promised note must have a routine behind it.",
-                    turn.act_transcript.join("\n").chars().take(2400).collect::<String>()
+                    crate::truncate::clip_marked(
+                        &turn.act_transcript.join("\n"),
+                        2400,
+                        "",
+                        Some(&format!("read_thread {{\"thread_id\": \"{chat_id}\"}} (tool_output entries)")),
+                    )
                 );
                 Some((
                     None,
@@ -4156,7 +4161,7 @@ impl Agent {
                         // placed after the memory block so they are the nearest context.
                         let recap = {
                             let h = host.lock().await;
-                            chat_recap(&h.doc.messages(), user_msg_id, &self.name())
+                            chat_recap(&h.doc.messages(), user_msg_id, &self.name(), chat_id)
                         };
                         let retry_prompt = with_chat_recap(prompt_text, &recap);
                         result = self.run_main_turn(chat_id, host, &retry_prompt).await;
@@ -4573,7 +4578,14 @@ impl Agent {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        let raw_trim: String = raw.chars().take(7000).collect();
+        let raw_trim = crate::truncate::clip_marked(
+            raw,
+            7000,
+            "",
+            Some(&format!(
+                "read_thread {{\"thread_id\": \"{subagent_id}\"}} (the worker's own thread)"
+            )),
+        );
         let mut prompt = match job {
             Some(j) => format!(
                 "[Arbos] Job \"{}\" ({}) finished · status {status} · {:.0} s.\n\nThe user originally asked (message id {user_msg_id}): {}\n",
@@ -5711,7 +5723,15 @@ impl Agent {
             "other"
         };
         let title = act_job_title(&turn.ack_text, turn.activity.as_deref(), kind);
-        let transcript: String = turn.act_transcript.join("\n").chars().take(2400).collect();
+        let transcript = crate::truncate::clip_marked(
+            &turn.act_transcript.join("\n"),
+            2400,
+            "",
+            Some(&format!(
+                "read_thread {{\"thread_id\": \"{}\"}} (tool_output entries)",
+                turn.chat_id
+            )),
+        );
         let brief = format!(
             "Continue this task the main agent started and could not finish quickly; the user has already seen a one-line acknowledgement.\n\nUser request: {user_text}\n\nPlan: {plan}\n\nDone so far:\n{transcript}\n\nFinish it and return the answer the user should read. For a comparison or research: each item with its page URL, the compared facts, the sources you used and what could not be checked. Do not repeat the acknowledgement."
         );
@@ -6960,7 +6980,7 @@ impl Agent {
             s.push_str(&skills_text);
             s.push_str("\n\n");
         }
-        s.push_str("## Tools\n\nMCP server `arbos`: context_search, context_open, context_around (this Project's memory tree: raw events plus index cards of episodes and threads), history_search, history_read, read_thread, memory_search, memory_read (you may search and read the entire history of this Project), peek, sub_llm, remember/recall, projects_list, send_message (message another agent by name, @handle or id: it lands in that agent's own chat and its reply comes back to you; in a group chat, no `to` = the other agents there), ask_user (optional widget: choice, multi_select, text, date, form), skills_list/skills_read/skills_save (reusable how-tos), draft_message (an outbound email or chat message shown to the user as an approval card; nothing is sent without their click), connectors_list/connector_call (the user's Gmail, Calendar, Slack, GitHub, Harness Comms through the relay; write/send actions need the user's approval), local_devices/local_run/local_read/local_list (the user's own computer through the arbos-local helper; every command and, unless the user allowed reads, every file read needs the user's approval), deliver_file (hand a file you made to the user as a card), generate_image (an image from a prompt, delivered as a card), secrets_list/secrets_request/egress/browser_fill (the owner's secrets: you only ever get a placeholder such as `arbos-secret://STRIPE_KEY/value`, `$STRIPE_KEY` in a shell, or an `op://` reference; send it through `egress` or use it as `$NAME`; never try to read, print, encode or copy a value; a secret with no access → secrets_request and wait for the owner's card; if they deny or pause, stop and say so; logins are typed by browser_fill), routines_list/routines_create/routines_update/routines_delete (cron jobs and one-shot reminders on the relay scheduler), goals_list/goals_create/goals_update/goals_log/goals_delete (long-running objectives across days: plan, status, progress log, check-ins via routines; active goals stay pinned in the working set; autonomy ask|suggest|act), web_search/web_fetch (search the web; read a public page, spec or file as text), submit_feedback (file the user's feedback or bug report for them: captures their screen from their app, or attaches a PNG/JPEG they already provided via image_path; also attaches the recent conversation, tool calls and timings scrubbed of secrets, and returns a reference id; filing is irreversible from the chat — use it when they ask to submit, send or report feedback or a bug and have said what to report; when they only ask to file with no content, ask what to include first — never point them to a menu, settings screen or another channel).\n\n");
+        s.push_str("## Tools\n\nMCP server `arbos`: context_search, context_open, context_around (this Project's memory tree: raw events plus index cards of episodes and threads), history_search, history_read, read_thread, memory_search, memory_read (you may search and read the entire history of this Project), chat_messages (any chat message in full by id, or a page of a chat's history — use it whenever your context shows a [truncated …] or [N earlier messages not shown …] marker; never guess at a cut-off message), peek, sub_llm, remember/recall, projects_list, send_message (message another agent by name, @handle or id: it lands in that agent's own chat and its reply comes back to you; in a group chat, no `to` = the other agents there), ask_user (optional widget: choice, multi_select, text, date, form), skills_list/skills_read/skills_save (reusable how-tos), draft_message (an outbound email or chat message shown to the user as an approval card; nothing is sent without their click), connectors_list/connector_call (the user's Gmail, Calendar, Slack, GitHub, Harness Comms through the relay; write/send actions need the user's approval), local_devices/local_run/local_read/local_list (the user's own computer through the arbos-local helper; every command and, unless the user allowed reads, every file read needs the user's approval), deliver_file (hand a file you made to the user as a card), generate_image (an image from a prompt, delivered as a card), secrets_list/secrets_request/egress/browser_fill (the owner's secrets: you only ever get a placeholder such as `arbos-secret://STRIPE_KEY/value`, `$STRIPE_KEY` in a shell, or an `op://` reference; send it through `egress` or use it as `$NAME`; never try to read, print, encode or copy a value; a secret with no access → secrets_request and wait for the owner's card; if they deny or pause, stop and say so; logins are typed by browser_fill), routines_list/routines_create/routines_update/routines_delete (cron jobs and one-shot reminders on the relay scheduler), goals_list/goals_create/goals_update/goals_log/goals_delete (long-running objectives across days: plan, status, progress log, check-ins via routines; active goals stay pinned in the working set; autonomy ask|suggest|act), web_search/web_fetch (search the web; read a public page, spec or file as text), submit_feedback (file the user's feedback or bug report for them: captures their screen from their app, or attaches a PNG/JPEG they already provided via image_path; also attaches the recent conversation, tool calls and timings scrubbed of secrets, and returns a reference id; filing is irreversible from the chat — use it when they ask to submit, send or report feedback or a bug and have said what to report; when they only ask to file with no content, ask what to include first — never point them to a menu, settings screen or another channel).\n\n");
         s.push_str(WORK_RULES_SECTION);
         s.push_str(RESEARCH_SECTION);
         s.push_str(&crate::media::prompt_section(&self.cfg));
@@ -8031,7 +8051,12 @@ impl Agent {
             },
             address.map(|n| format!("\n{}", n.trim())).unwrap_or_default()
         );
-        let raw_trim: String = raw.chars().take(7000).collect();
+        let raw_trim = crate::truncate::clip_marked(
+            raw,
+            7000,
+            "",
+            Some(&format!("history_search {{\"query\": \"<a phrase from the notes>\", \"thread_id\": \"{chat_id}\"}}")),
+        );
         let user = format!(
             "The user's message: {}\n\nStatus of the work: {status}{}\n\nNotes from the work (for you only):\n<<<\n{}\n>>>",
             if ask.trim().is_empty() { "(see the notes)" } else { ask.trim() },
@@ -8382,6 +8407,7 @@ pub(crate) fn chat_recap(
     rows: &[arbos_core::doc::MessageView],
     current_user_msg_id: &str,
     agent_name: &str,
+    chat_id: &str,
 ) -> String {
     let end = rows
         .iter()
@@ -8407,13 +8433,13 @@ pub(crate) fn chat_recap(
                 }
             }
         };
-        let body: String = text.chars().take(RECAP_ROW_CHARS).collect();
-        let cut = if text.chars().count() > RECAP_ROW_CHARS {
-            "…"
-        } else {
-            ""
-        };
-        lines.push(format!("- {who}: {body}{cut}"));
+        let body = crate::truncate::clip_marked(
+            &text,
+            RECAP_ROW_CHARS,
+            &m.id,
+            Some(&crate::truncate::fetch_message_hint(chat_id, &m.id)),
+        );
+        lines.push(format!("- {who}: {body}"));
     }
     if lines.is_empty() {
         return String::new();
@@ -8914,7 +8940,7 @@ pub(crate) fn job_fallback_prompt(
             brief.trim()
         ));
     }
-    let partial: String = partial.trim().chars().take(4000).collect();
+    let partial = crate::truncate::clip_marked(partial.trim(), 4000, "", None);
     if !partial.is_empty() {
         p.push_str(&format!(
             "\nWhat the last worker had written before it stopped (unverified):\n<<<\n{partial}\n>>>\n"
@@ -9732,7 +9758,7 @@ mod tests {
             ),
             row("u3", "user", "Done? What was the last number?"),
         ];
-        let recap = chat_recap(&rows, "u3", "lane-c");
+        let recap = chat_recap(&rows, "u3", "lane-c", "c1");
         assert!(recap.starts_with("[This chat so far, newest last"));
         assert!(recap.contains("- user: Write the numbers 1 to 40"));
         assert!(recap.contains("- you (lane-c): Done: the run stops at 20."));
@@ -9755,7 +9781,7 @@ mod tests {
         assert!(with_chat_recap("Done?", &recap).starts_with("[This chat so far"));
         // Nothing earlier in the chat: the prompt is unchanged.
         assert_eq!(
-            with_chat_recap("hi", &chat_recap(&rows[4..], "u3", "lane-c")),
+            with_chat_recap("hi", &chat_recap(&rows[4..], "u3", "lane-c", "c1")),
             "hi"
         );
         // The router tells the model the same precedence.
