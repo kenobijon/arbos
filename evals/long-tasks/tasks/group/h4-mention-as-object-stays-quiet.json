@@ -1,0 +1,48 @@
+{
+ "id": "h4-mention-as-object-stays-quiet",
+ "lane": "a",
+ "category": "group",
+ "title": "People chat with two agents: an @mention as the object of a request to the other agent wakes no turn; a direct ask is answered; multi-mention answers only the addressed (#1926 m01–m04 + silence guard)",
+ "regression": "#1926 (mention_role: object/referenced → no turn; silence is never a message) — m01/m02 object quiet, m03 asked replies, m04 multi-mention only the addressed; the guard: no 'staying silent' bubble ever",
+ "turns": [
+  {
+   "prompt": "Can you communicate directly with @lane-a?",
+   "chat": "dm",
+   "expect_no_reply_s": 30,
+   "expect_other_agent_reply": "lane-b",
+   "timeout_s": 45
+  },
+  {
+   "prompt": "@lane-b can you communicate directly with @lane-a?",
+   "chat": "dm",
+   "expect_no_reply_s": 30,
+   "expect_other_agent_reply": "lane-b",
+   "timeout_s": 45
+  },
+  {
+   "prompt": "@lane-a what is 9 × 9? Just the number.",
+   "chat": "dm",
+   "reply_regex": "\\b81\\b",
+   "timeout_s": 180
+  },
+  {
+   "prompt": "@lane-a and @lane-b are both here — @lane-b, what is 7 × 6? Just the number.",
+   "chat": "dm",
+   "expect_no_reply_s": 30,
+   "expect_other_agent_reply": "lane-b",
+   "timeout_s": 45
+  }
+ ],
+ "setup_actions": [
+  {
+   "kind": "people_dm",
+   "peer_handle": "lt-peer",
+   "also_agents": [
+    "lane-b"
+   ]
+  }
+ ],
+ "doc_checks": {
+  "forbid_text_regex": "(?i)(staying (silent|quiet)|that (question|one) is for|nothing to add from me|i'?ll let \\w+ take this)"
+ }
+}

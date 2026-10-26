@@ -151,6 +151,19 @@ class Lane(threading.Thread):
                 st.setdefault("action_findings", []).append("secrets still paused after machine start (#1664 not effective); the harness lifted the pause")
             rl.relay("PUT", "/me/secrets/settings", {"paused": False})
             time.sleep(act.get("settle_s", 60))
+        elif kind == "rename_owner":
+            # the owner's profile name changes mid-chat (#1908): rows before carry the old label
+            st_me = rl.me()
+            if st.get("owner_old_name") is None:
+                st["owner_old_name"] = ((st_me or {}).get("user") or {}).get("name") or "Long-task eval"
+            code, v = rl.relay("PATCH", "/me", {"name": act["name"]})
+            st["owner_renamed_to"] = act["name"] if code in (200, 204) else None
+            if code not in (200, 204):
+                self.say(f"rename_owner failed: {code} {str(v)[:120]}")
+            time.sleep(act.get("settle_s", 8))
+        elif kind == "restore_owner_name":
+            if st.get("owner_old_name"):
+                rl.relay("PATCH", "/me", {"name": st["owner_old_name"]})
         elif kind == "named_user_turn":
             # a scratch user whose profile name differs from the sending device's name: the agent must
             # address the person (profile), never the device
@@ -161,6 +174,12 @@ class Lane(threading.Thread):
         elif kind == "people_dm":
             # a DM between the eval user and a second scratch user, with this lane's agent added
             st["dm_chat"], st["dm_peer_token"] = rl.people_dm_with_agent(act["peer_handle"], self.project)
+            for other in act.get("also_agents") or []:
+                # a second agent in the same people chat (mention-as-object cases, #1926)
+                pid = self.rs["projects"].get(other)
+                if pid:
+                    rl.relay("POST", f"/chats/{st['dm_chat']}/agents", {"project_id": pid})
+                    st.setdefault("dm_other_agents", {})[other] = pid
             time.sleep(8)
         elif kind == "group_create":
             st["group_chat"] = rl.group_create(self.project, act["with"], act.get("title", "eval group"))
@@ -267,12 +286,24 @@ class Lane(threading.Thread):
             if turn.get("expect_no_reply_s"):
                 # a people-chat message not for the agent: it must stay quiet
                 t0 = time.time()
-                rl.ctl("chat", "send", "people", chat_id, prompt, "--timeout", "3", timeout=40)
+                if turn.get("peer"):
+                    rl.people_send_as(task_state["dm_peer_token"], chat_id, prompt.replace("[peer] ", ""))
+                else:
+                    rl.ctl("chat", "send", "people", chat_id, prompt, "--timeout", "3", timeout=40)
                 time.sleep(turn["expect_no_reply_s"])
                 doc = rl.chat_dump("people", chat_id)
-                late = [m for m in doc.get("messages", []) if m.get("role") == "assistant" and (m.get("createdAt") or 0) >= int(t0 * 1000) - 1000 and dr.text_of(m)]
+                mine = f"agent:{self.project}"
+                rows_late = [m for m in doc.get("messages", []) if m.get("role") == "assistant" and (m.get("createdAt") or 0) >= int(t0 * 1000) - 1000 and dr.text_of(m)]
+                late = [m for m in rows_late if (m.get("sender") or mine) == mine]
                 ok = not late
-                turns_out.append({"turn": i, "chat_id": chat_id, "prompt": prompt[:300], "ok": ok, "reasons": [] if ok else [f"the agent answered a message not addressed to it: {dr.text_of(late[0])[:80]!r}"], "ttfr_s": None, "first_status_s": None, "wall_s": turn["expect_no_reply_s"], "timed_out": False, "stalls": 0, "approvals_rejected": [], "routes": [], "tool_calls": 0, "tool_errors": 0, "model_calls": 0, "compactions": 0, "audit_denied": 0, "rubric": None, "truth": {}, "verify_out": "", "reply": "", "excerpt": f"**User (not for the agent):** {prompt}\n\n(agent stayed quiet: {ok})"})
+                reasons_q = [] if ok else [f"the agent answered a message not addressed to it: {dr.text_of(late[0])[:80]!r}"]
+                if turn.get("expect_other_agent_reply"):
+                    other_pid = (task_state.get("dm_other_agents") or {}).get(turn["expect_other_agent_reply"])
+                    others = [m for m in rows_late if m.get("sender") == f"agent:{other_pid}"]
+                    if not others:
+                        ok = False
+                        reasons_q.append(f"the addressed agent {turn['expect_other_agent_reply']} did not answer within {turn['expect_no_reply_s']} s")
+                turns_out.append({"turn": i, "chat_id": chat_id, "prompt": prompt[:300], "ok": ok, "reasons": reasons_q, "ttfr_s": None, "first_status_s": None, "wall_s": turn["expect_no_reply_s"], "timed_out": False, "stalls": 0, "approvals_rejected": [], "routes": [], "tool_calls": 0, "tool_errors": 0, "model_calls": 0, "compactions": 0, "audit_denied": 0, "rubric": None, "truth": {}, "verify_out": "", "reply": "", "excerpt": f"**User (not for the agent):** {prompt}\n\n(agent stayed quiet: {ok})"})
                 self.say(f"{tid} quiet turn {i}: {'ok' if ok else 'FAIL'}")
                 continue
             if turn.get("peer"):
