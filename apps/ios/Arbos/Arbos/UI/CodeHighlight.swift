@@ -131,7 +131,8 @@ enum CodeHighlight {
     }
 
     /// The width the code needs unwrapped: the longest line in glyph advances.
-    /// Wider than the card → the body scrolls sideways.
+    /// Wider than the card → the body scrolls sideways. (`CodeHighlightTests` checks the
+    /// bubble-sort card against the 321 pt bubble.)
     static func contentWidth(_ code: String, advance: CGFloat) -> CGFloat {
         let lines: [Substring] = code.split(omittingEmptySubsequences: false, whereSeparator: { $0 == "\n" })
         let longest = lines.map(\.count).max() ?? 0
