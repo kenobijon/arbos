@@ -228,7 +228,7 @@ private struct ToastRow: View {
                 error: error,
                 detailsOpen: Binding(get: { toast.detailsOpen }, set: { model.setToastDetails(toast.id, open: $0) }),
                 style: .toast,
-                onTryAgain: toast.retry == nil ? nil : { model.retryToast(toast.id) },
+                onTryAgain: toast.hasRetry ? { model.retryToast(toast.id) } : nil,
                 onSignIn: error.action == .signIn ? { model.dismissToast(toast.id); model.signOutForReauth() } : nil,
                 onDismiss: { model.dismissToast(toast.id) }
             )
