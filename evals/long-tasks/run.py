@@ -606,6 +606,7 @@ def main():
     ap.add_argument("--run-id", default=time.strftime("%Y%m%dT%H%M"))
     ap.add_argument("--out", default="")
     ap.add_argument("--dry-run", action="store_true", help="list the tasks per lane and exit")
+    ap.add_argument("--skip-parity", action="store_true", help="leave the Grok-parity prompts out (the duplex owner runs their own scorecards; they are ~55 %% of a full run's cost)")
     ap.add_argument("--allow-stale-seed", action="store_true", help="run even when the box's pi-ext seed does not match its image commit (#1702)")
     ap.add_argument("--refresh-stale-seed", action="store_true", help="when the seed is stale, re-copy /etc/arbos from the image into the box's persisted /etc and restart it (test box only)")
     args = ap.parse_args()
@@ -614,6 +615,8 @@ def main():
         only = (only or set()) | set(SUBSETS[args.subset])
     lanes = set(args.lanes.split(",")) if args.lanes else None
     tasks = load_tasks(only, lanes)
+    if args.skip_parity:
+        tasks = [t for t in tasks if not t.get("parity")]
     if args.dry_run:
         for ln in LANES:
             print(ln, [t["id"] for t in tasks if t["lane"] == ln])

@@ -3,7 +3,7 @@
  "lane": "c",
  "category": "background",
  "title": "A job must produce its output (or the agent falls back inline and says so); an empty completion is not 'done'",
- "regression": "P0 of 2026-10-25 (bc-a81ab86e): job workers died at start (root-owned pi subagent-sessions dir) and an empty completion was reported as done",
+ "regression": "#1804 (jobs died in 400 ms with an empty result: worker session dir root-owned; fixed 0.1.138) — verified PASS on 0.1.141 in run 7",
  "turns": [
   {
    "prompt": "Run this as a background job — start a job, do not do it in this turn: count the words in every .txt file under {D}/docs and write one line per file, '<name> <words>', to {D}/wordcount.txt. When the job is done, tell me the grand total of words.",
