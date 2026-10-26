@@ -2118,7 +2118,7 @@ struct AvatarCluster: View {
             .frame(width: size, height: size)
             .clipShape(Circle())
         } else if shown.isEmpty {
-            GlassCircle(size: size) {
+            GlassCircle(size: size) { // control-size: exception rowIconTiles (avatar cluster placeholder)
                 Image(systemName: "person.2.fill")
                     .font(theme.font(size * 0.4))
                     .foregroundStyle(theme.text)
