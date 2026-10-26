@@ -1757,6 +1757,9 @@ impl Agent {
             &self.cfg.work_dir.display().to_string(),
             &talking,
         ));
+        s.push_str(&crate::identity::owner_section(
+            &self.people.owner_profile(),
+        ));
         s.push('\n');
         s.push_str(&crate::media::prompt_section(&self.cfg));
         let instructions = self
