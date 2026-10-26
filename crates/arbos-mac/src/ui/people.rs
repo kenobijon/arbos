@@ -18,6 +18,7 @@ use crate::ui::glass;
 use crate::ui::groups::project_color;
 use crate::ui::icons::icon;
 use crate::ui::identity;
+use crate::ui::profiles::kit;
 use crate::ui::shell::Shell;
 use crate::ui::theme::{Theme, PANEL_RADIUS, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
 
@@ -34,8 +35,6 @@ pub const CARD_INSET: f32 = 16.0;
 pub const ROW_PADDING_X: f32 = 14.0;
 pub const ROW_GLYPH: f32 = 40.0;
 pub const ROW_GAP: f32 = identity::ROW_GAP;
-/// Where the text column starts inside the card; the hairlines between rows start there too.
-pub const ROW_TEXT_INSET: f32 = ROW_PADDING_X + ROW_GLYPH + ROW_GAP;
 
 /// Members of a space with their decoded avatars (list rows, headers).
 pub type PeopleWithAvatars = Vec<(Person, Option<Arc<RenderImage>>)>;
@@ -255,9 +254,7 @@ pub fn new_chat_sheet(
                 .flex_shrink_0()
                 .mx(px(CARD_INSET))
                 .child(agent_row);
-            group = group
-                .child(div().h(px(0.5)).ml(px(ROW_TEXT_INSET)).bg(theme.border))
-                .child(group_row);
+            group = group.child(kit::divider(&theme)).child(group_row);
             // D88 rule 8: servers, when this relay runs them.
             if servers_available {
                 let server_row = |id: &'static str,
@@ -306,15 +303,13 @@ pub fn new_chat_sheet(
                             this.open_server_sheet(sheet.clone(), window, cx);
                         }))
                 };
-                group = group
-                    .child(div().h(px(0.5)).ml(px(ROW_TEXT_INSET)).bg(theme.border))
-                    .child(server_row(
-                        "new-server",
-                        "hash",
-                        "New server",
-                        "Channels for a crowd, with an invite link",
-                        crate::app::ServerSheet::NewServer,
-                    ));
+                group = group.child(kit::divider(&theme)).child(server_row(
+                    "new-server",
+                    "hash",
+                    "New server",
+                    "Channels for a crowd, with an invite link",
+                    crate::app::ServerSheet::NewServer,
+                ));
                 // "Join a server" (paste a link) is gone (Jacob 2026-10-22): invite links
                 // open the app through arbos.life/s/<code>; people are added by name.
             }
@@ -375,9 +370,8 @@ pub fn new_chat_sheet(
                     .gap(px(ROW_GAP))
                     .px(px(ROW_PADDING_X))
                     .py(px(9.0))
-                    .when(i + 1 < count, |el| {
-                        el.border_b_1().border_color(theme.border)
-                    })
+                    .relative()
+                    .when(i + 1 < count, |el| el.child(kit::hairline_below(&theme)))
                     .cursor_pointer()
                     .hover(|st| st.bg(theme.surface_2))
                     .child(avatar(image, &person, ROW_GLYPH, &theme))
@@ -668,9 +662,8 @@ fn new_group_body(
                     .gap(px(identity::ROW_GAP))
                     .px(px(14.0))
                     .py(px(9.0))
-                    .when(i + 1 < count, |el| {
-                        el.border_b_1().border_color(theme.border)
-                    })
+                    .relative()
+                    .when(i + 1 < count, |el| el.child(kit::hairline_below(theme)))
                     .when(already, |el| el.opacity(0.5))
                     .when(!already, |el| {
                         el.cursor_pointer().hover(|st| st.bg(theme.surface_2))
@@ -771,9 +764,8 @@ fn new_group_body(
                 .gap(px(identity::ROW_GAP))
                 .px(px(14.0))
                 .py(px(9.0))
-                .when(i + 1 < count, |el| {
-                    el.border_b_1().border_color(theme.border)
-                })
+                .relative()
+                .when(i + 1 < count, |el| el.child(kit::hairline_below(theme)))
                 .when(already, |el| el.opacity(0.5))
                 .when(!already, |el| {
                     el.cursor_pointer().hover(|st| st.bg(theme.surface_2))
@@ -1484,8 +1476,9 @@ mod first_paint_tests {
         assert_eq!(ROW_GAP, identity::ROW_GAP, "the shared picture + name gap");
         assert_eq!(ROW_GAP, 10.0);
         assert_eq!(
-            ROW_TEXT_INSET, 64.0,
-            "text column and hairlines start 64 pt into the card"
+            ROW_PADDING_X + ROW_GLYPH + ROW_GAP,
+            64.0,
+            "text column starts 64 pt into the card (the dividers are the kit's, 16 / 16)"
         );
     }
 
