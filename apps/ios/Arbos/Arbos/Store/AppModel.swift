@@ -1527,6 +1527,7 @@ final class AppModel: ObservableObject {
             }
             projects = newProjects.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
             chats = newChats
+            reconcileAgentAvatars()
             reconcileArchivedProjects(newProjects)
             saveRegistryCache()
             setRelayLink(.live)
@@ -2587,6 +2588,7 @@ final class AppModel: ObservableObject {
             let raw = try await api.peopleChatsJSON()
             let list = raw.compactMap(PeopleChat.parse)
             peopleChats = list
+            reconcileAgentAvatars()
             reconcileArchivedPeople(list)
             for c in list where c.unread { peopleUnread.insert(c.id) }
             for c in list where !c.unread && visibleChatId != c.id {
@@ -2875,15 +2877,17 @@ final class AppModel: ObservableObject {
 
     /// D92: the owner's leaf and disc colour picks (nil = automatic). Optimistic, then PATCH.
     func pickAvatarLeaf(_ projectId: Id, leaf: Int?, color: Int?) {
-        if let i = projects.firstIndex(where: { $0.id == projectId }) {
-            projects[i].avatarLeaf = leaf
-            projects[i].avatarLeafColor = color
-            projects[i].imageKey = nil
-        }
+        // Optimistic, into every copy (header, rosters, chips) at once; the relay's stamp
+        // replaces the local one when it answers.
+        let local = (newestAgentAvatar(projectId)?.version ?? 0) + 1
+        applyAgentAvatar(projectId, AgentAvatarFacts(imageKey: nil, avatarLeaf: leaf, avatarLeafColor: color, version: local), force: true)
         guard !isFixture else { return }
         Task {
             do {
-                try await api.setProjectAvatarLeaf(projectId, leaf: leaf, color: color)
+                let stamped = try await api.setProjectAvatarLeaf(projectId, leaf: leaf, color: color)
+                if stamped > 0 {
+                    applyAgentAvatar(projectId, AgentAvatarFacts(imageKey: nil, avatarLeaf: leaf, avatarLeafColor: color, version: stamped), force: true)
+                }
             } catch {
                 notice = Notice(text: "Avatar: \(error.localizedDescription)")
                 await refreshRegistry()
@@ -2893,6 +2897,9 @@ final class AppModel: ObservableObject {
 
     /// Open (or create) the DM with a handle and navigate to it.
     func openDM(handle: String, navigate: Bool = true) async -> PeopleChat? {
+        #if DEBUG
+        if isFixture { return fixtureOpenDM(handle: handle, navigate: navigate) }
+        #endif
         do {
             let chat = try await api.openDM(handle: handle)
             if !peopleChats.contains(where: { $0.id == chat.id }) { peopleChats.insert(chat, at: 0) }
@@ -2920,7 +2927,8 @@ final class AppModel: ObservableObject {
     /// member id: an `@handle` in the text that has a chip means exactly that member.
     func sendPeople(chatId: String, text: String, replyTo: String?, address: String? = nil,
                     chipMentions: [String] = [], attachments: [PendingAttachment] = [],
-                    forwardedFrom: String? = nil, chipTokens: [String: String] = [:]) {
+                    forwardedFrom: String? = nil, chipTokens: [String: String] = [:],
+                    replyRef: ReplyRef? = nil) {
         guard let doc = docs[chatId], let chat = peopleChat(chatId), let me = user else { return }
         var mentions = AppModel.mentions(in: text, members: chat.members, senderHandle: me.login, chipTokens: chipTokens)
         // Leading bare agent names ("Bob?", "hey Bob …", "Arbos what is your name") count as
@@ -2988,9 +2996,12 @@ final class AppModel: ObservableObject {
         // Text-only: write on this turn (same as project `write`) so the push leaves
         // before we return. Deferring every send into a Task left bubbles faint when
         // the room ACK raced a still-queued commit.
+        // A cross-chat reply never carries an in-chat `replyTo` as well.
+        if replyRef != nil { reply = nil }
         if attachments.isEmpty {
             commitPeople(chatId: chatId, doc: doc, messageId: messageId, text: text, author: author,
-                         mentions: mentions, reply: reply, attachments: [], forwardedFrom: forwardedFrom)
+                         mentions: mentions, reply: reply, attachments: [], forwardedFrom: forwardedFrom,
+                         replyRef: replyRef)
             return
         }
         markUnacked(chatId: chatId, messageId: messageId)
@@ -3006,7 +3017,8 @@ final class AppModel: ObservableObject {
                 }
             }
             commitPeople(chatId: chatId, doc: doc, messageId: messageId, text: text, author: author,
-                         mentions: mentions, reply: reply, attachments: uploaded, alreadyUnacked: true)
+                         mentions: mentions, reply: reply, attachments: uploaded, alreadyUnacked: true,
+                         replyRef: replyRef)
         }
     }
 
@@ -3015,7 +3027,7 @@ final class AppModel: ObservableObject {
     private func commitPeople(chatId: String, doc: CoreChatDoc, messageId: Id, text: String,
                               author: CoreChatDoc.Author, mentions: [String], reply: String?,
                               attachments: [Attachment], alreadyUnacked: Bool = false,
-                              forwardedFrom: String? = nil) {
+                              forwardedFrom: String? = nil, replyRef: ReplyRef? = nil) {
         if !alreadyUnacked { markUnacked(chatId: chatId, messageId: messageId) }
         // Rig (#1596): `ARBOS_TRACE_SENDS=1` prints what the row carries.
         if DebugHooks.traceSends {
@@ -3023,7 +3035,8 @@ final class AppModel: ObservableObject {
         }
         do {
             try doc.insertUserMessage(id: messageId, text: text, deviceId: deviceId, attachments: attachments,
-                                      author: author, mentions: mentions, replyTo: reply, forwardedFrom: forwardedFrom)
+                                      author: author, mentions: mentions, replyTo: reply, forwardedFrom: forwardedFrom,
+                                      replyRef: replyRef)
             try doc.pushCommand("send", payload: ["messageId": messageId], device: deviceId)
         } catch {
             clearUnacked(chatId: chatId, messageId: messageId)
@@ -3037,12 +3050,12 @@ final class AppModel: ObservableObject {
         // reconciles; live coalesce + async full re-reads must not gate the send.
         paintLocalUserMessage(chatId: chatId, messageId: messageId, text: text,
                               attachments: attachments, replyTo: reply, forwardedFrom: forwardedFrom,
-                              author: author, mentions: mentions, doc: doc)
+                              author: author, mentions: mentions, doc: doc, replyRef: replyRef)
         doc.commit()
         #if DEBUG
         if SendTrace.traces(chatId) { SendTrace.mark("commit") }
         #endif
-        announce(chatId: chatId, projectId: nil, messageId: messageId, text: text)
+        announce(chatId: chatId, projectId: nil, messageId: messageId, text: text, replyRef: replyRef)
         if let i = peopleChats.firstIndex(where: { $0.id == chatId }) { peopleChats[i].lastActivityAt = nowMs() }
         peopleChats.sort { $0.lastActivityAt > $1.lastActivityAt }
     }
@@ -3504,18 +3517,17 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// D92 amendment: the agent's picture as the avatar loader fetches it.
+    /// D92 amendment: the agent's picture as the avatar loader fetches it (the newest copy's).
     func projectImageURL(_ project: Project) -> URL? {
-        guard let key = project.imageKey, !key.isEmpty else { return nil }
-        return blobURL(projectId: project.id, key: key)
+        let facts = newestAgentAvatar(project.id) ?? AgentAvatarFacts(project)
+        return agentPictureURL(id: project.id, imageKey: facts.imageKey, version: facts.version).flatMap(URL.init(string:))
     }
 
     /// D92 amendment: upload an agent picture into the project's own blob slot and set it.
     func setProjectImage(projectId: Id, jpeg: Data) async -> Bool {
         let key = "avatar-\(Int(Date().timeIntervalSince1970 * 1000)).jpg"
         if isFixture {
-            if let i = projects.firstIndex(where: { $0.id == projectId }) { projects[i].imageKey = key }
-            return true
+            return await setProjectImageKey(projectId: projectId, key: key)
         }
         do {
             _ = try await api.putBlob(projectId: projectId, key: key, mime: "image/jpeg", data: jpeg)
@@ -3528,10 +3540,18 @@ final class AppModel: ObservableObject {
 
     /// D92 amendment: a blob the relay already holds (the Generate tab's answer) becomes the picture.
     func setProjectImageKey(projectId: Id, key: String) async -> Bool {
-        if let i = projects.firstIndex(where: { $0.id == projectId }) { projects[i].imageKey = key }
+        // Optimistic, into every copy at once (the header used to keep its old URL while the
+        // working row already drew the new picture — Jacob, 2026-10-25); the relay's stamp
+        // replaces the local one when it answers.
+        let base = newestAgentAvatar(projectId)
+        let local = (base?.version ?? 0) + 1
+        applyAgentAvatar(projectId, AgentAvatarFacts(imageKey: key, avatarLeaf: base?.avatarLeaf, avatarLeafColor: base?.avatarLeafColor, version: local), force: true)
         guard !isFixture else { return true }
         do {
-            try await api.setProjectImageKey(projectId, key: key)
+            let stamped = try await api.setProjectImageKey(projectId, key: key)
+            if stamped > 0 {
+                applyAgentAvatar(projectId, AgentAvatarFacts(imageKey: key, avatarLeaf: base?.avatarLeaf, avatarLeafColor: base?.avatarLeafColor, version: stamped), force: true)
+            }
             return true
         } catch {
             notice = Notice(text: "Picture not saved: \(error.localizedDescription)")
@@ -4064,9 +4084,10 @@ final class AppModel: ObservableObject {
                 if payload.user_id == user?.id { await refreshAccount() }
                 needChats = true
                 needServers = true
-            case .agentProfileUpdated:
-                // An agent's avatar changed (the agents' `profile_updated`): re-read my
-                // projects and the rosters so every copy carries the new picture and stamp.
+            case .agentProfileUpdated(let payload):
+                // An agent's avatar changed (the agents' `profile_updated`): the new picture and
+                // stamp land in every copy now; the re-reads bring the leaf picks and the rest.
+                applyAgentAvatarPush(projectId: payload.project_id, imageKey: payload.image_key, version: Int(payload.avatar_version))
                 await refreshRegistry()
                 needChats = true
             case .chatArchived(let payload):
@@ -4115,6 +4136,9 @@ final class AppModel: ObservableObject {
     }
 
     // MARK: Lookups
+
+    /// The relay's HTTP origin (`https://relay.arbos.life`), for URLs built outside this file.
+    var relayHttpUrl: String { api.endpoint.httpUrl }
 
     /// Relay blob URL with the device token as a query parameter (the relay
     /// accepts `?token=` on every route), so AVPlayer and Safari can open it.
@@ -4764,7 +4788,8 @@ final class AppModel: ObservableObject {
     private func paintLocalUserMessage(
         chatId: Id, messageId: Id, text: String, attachments: [Attachment],
         replyTo: Id? = nil, forwardedFrom: String? = nil,
-        author: CoreChatDoc.Author? = nil, mentions: [String] = [], doc: CoreChatDoc? = nil
+        author: CoreChatDoc.Author? = nil, mentions: [String] = [], doc: CoreChatDoc? = nil,
+        replyRef: ReplyRef? = nil
     ) {
         if messages[chatId]?.contains(where: { $0.id == messageId }) == true { return }
         if let doc, doc.count > 0, var row = doc.readMessage(doc.count - 1), row.id == messageId {
@@ -4794,6 +4819,7 @@ final class AppModel: ObservableObject {
         )
         m.replyTo = replyTo
         m.forwardedFrom = forwardedFrom
+        m.replyRef = replyRef
         m.senderHandle = author?.handle
         m.senderName = author?.name
         m.senderAvatar = author?.avatar
@@ -4873,11 +4899,93 @@ final class AppModel: ObservableObject {
 
     /// §7c: tell the relay about the row we just pushed so other members'
     /// phones get a real preview instead of "New message". Best effort.
-    private func announce(chatId: Id, projectId: Id?, messageId: String, text: String) {
+    private func announce(chatId: Id, projectId: Id?, messageId: String, text: String, replyRef: ReplyRef? = nil) {
         guard !isFixture else { return }
         let api = self.api
-        Task { try? await api.notifyMessage(chatId: chatId, projectId: projectId, messageId: messageId, text: text) }
+        Task { try? await api.notifyMessage(chatId: chatId, projectId: projectId, messageId: messageId, text: text, replyRef: replyRef) }
     }
+
+    // MARK: Reply in DM (#1836)
+
+    /// The cross-chat reply to arm on the DM that `replyInDM` opens next; the ChatView of
+    /// that DM takes it on appear (Mac `pending_dm_reply`).
+    @Published var pendingDMReply: (chatId: Id, ref: ReplyRef)?
+
+    /// The cross-chat reference for `message` in `chatId`: its address plus a snapshot of
+    /// who wrote it and what it said (crdt-sync §6.2 `replyRef`).
+    func replyRef(for message: Message, in chatId: Id, projectId: Id?) -> ReplyRef {
+        let people = projectId == nil || projectId == peopleSlot
+        let mine = message.sender == "user" || message.sender == myUserId
+        let (name, handle): (String, String)
+        if mine, let me = user {
+            (name, handle) = (me.name ?? me.login, me.login)
+        } else if message.role == .user {
+            (name, handle) = (message.senderName ?? "", message.senderHandle ?? "")
+        } else {
+            let agentName = projectId.flatMap { project($0)?.name } ?? message.senderName ?? ""
+            (name, handle) = (agentName, message.senderHandle ?? "")
+        }
+        var text = message.plainText
+        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            for part in message.parts {
+                if case .attachment(_, let a) = part { text = a.name; break }
+            }
+        }
+        return ReplyRef(chatId: chatId, projectId: people ? "people" : (projectId ?? "people"),
+                        messageId: message.id, chatTitle: chatDisplayTitle(chatId, projectId: projectId),
+                        sender: message.sender, senderName: name, senderHandle: handle,
+                        text: ReplyRef.snapshot(text))
+    }
+
+    /// What a quote header calls `chatId`: the DM peer's name, the group's title, or the
+    /// project (agent) name.
+    func chatDisplayTitle(_ chatId: Id, projectId: Id?) -> String {
+        if let pc = peopleChat(chatId) {
+            if pc.kind == "dm", let peer = pc.humans.first(where: { $0.id != user?.id }) {
+                return peer.name ?? "@\(peer.handle)"
+            }
+            return pc.title
+        }
+        if let projectId, let p = project(projectId) { return p.name }
+        return chat(chatId)?.title ?? ""
+    }
+
+    /// Is `chatId` one of this user's chats (a people chat, or a chat of an own or shared
+    /// project)? Only then can a cross-chat quote open its original.
+    func isMember(ofChat chatId: Id) -> Bool {
+        if peopleChat(chatId) != nil { return true }
+        return chats.values.contains { $0.contains { $0.id == chatId } }
+    }
+
+    /// Bubble menu → Reply in DM: open (or create) the DM with the person who wrote
+    /// `message` and arm its composer with a cross-chat reply to it.
+    func replyInDM(to message: Message, in chatId: Id, projectId: Id?) {
+        guard let handle = message.senderHandle, !handle.isEmpty,
+              message.sender.hasPrefix("user:"), message.sender != myUserId
+        else { return }
+        let ref = replyRef(for: message, in: chatId, projectId: projectId)
+        Task { @MainActor in
+            guard let dm = await openDM(handle: handle) else { return }
+            pendingDMReply = (dm.id, ref)
+        }
+    }
+
+    /// Tap on a cross-chat quote: open the source chat on the original. The ChatView
+    /// scrolls to and tints `pendingReveal` on appear. `false` when not a member.
+    @discardableResult
+    func reveal(_ r: ReplyRef) -> Bool {
+        guard isMember(ofChat: r.chatId) else { return false }
+        pendingReveal = MessageReveal(chatId: r.chatId, messageId: r.messageId)
+        if peopleChat(r.chatId) != nil {
+            path = [.chat(chatId: r.chatId, projectId: peopleSlot)]
+        } else if let pid = chats.first(where: { $0.value.contains { $0.id == r.chatId } })?.key {
+            path = [.chat(chatId: r.chatId, projectId: pid)]
+        } else {
+            return false
+        }
+        return true
+    }
+
 
     func stop(chatId: Id) {
         if let jobId = JobTabs.jobId(chatId) {
@@ -5449,7 +5557,7 @@ final class AppModel: ObservableObject {
                 if let picture, let id, let jpeg = await draftJpeg(picture) {
                     let key = "avatar-\(Int(Date().timeIntervalSince1970 * 1000)).jpg"
                     if (try? await api.putBlob(projectId: id, key: key, mime: "image/jpeg", data: jpeg)) != nil {
-                        try? await api.setProjectImageKey(id, key: key)
+                        _ = try? await api.setProjectImageKey(id, key: key)
                     }
                 }
                 await refreshRegistry()

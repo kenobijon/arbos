@@ -7,6 +7,7 @@
 //! constants come from `arbos-core`; the client-side mirror (`doc.rs`) and
 //! the sources are candidates to move there later (`arbos-design.md` §7.2).
 
+pub mod agent_avatar;
 pub mod credentials;
 pub mod diagnostics;
 pub mod doc;
@@ -560,6 +561,9 @@ pub enum ClientCommand {
         attachments: Vec<PathBuf>,
         /// People-chat / hover-reply: the message this send answers (`replyTo`).
         reply_to: Option<String>,
+        /// Reply in DM: the message in another chat this send answers, with its
+        /// snapshot (`replyRef`). Exclusive with `reply_to`.
+        reply_ref: Option<crate::model::ReplyRef>,
         /// Member ids of the composer's committed mention chips (#1596); the
         /// source unions them with the `@handle`s the text names.
         mentions: Vec<String>,
