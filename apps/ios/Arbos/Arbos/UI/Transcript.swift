@@ -1640,6 +1640,89 @@ struct BlockView: View {
     }
 }
 
+/// True while a nested horizontal `ScrollView` (markdown table) is tracking a
+/// pan, so `ChatView`'s time-reveal drag does not also slide the chat
+/// ([feedback ACQD4mUCTPxH7z3Y7YO8Vjw]).
+enum NestedHorizontalScroll {
+    static var claiming = false
+}
+
+/// Finds the enclosing horizontal `UIScrollView` and, while its pan is active,
+/// cancels non-scroll pan recognizers (SwiftUI's time-reveal `DragGesture`) so
+/// the table can scroll sideways without sliding the transcript.
+private struct PreferHorizontalScroll: UIViewRepresentable {
+    func makeUIView(context: Context) -> Probe {
+        let probe = Probe()
+        probe.isUserInteractionEnabled = false
+        probe.backgroundColor = .clear
+        return probe
+    }
+
+    func updateUIView(_ uiView: Probe, context: Context) {
+        DispatchQueue.main.async { uiView.attachIfNeeded() }
+    }
+
+    final class Probe: UIView {
+        private weak var scroll: UIScrollView?
+        private var observing = false
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            attachIfNeeded()
+        }
+
+        deinit {
+            scroll?.panGestureRecognizer.removeTarget(self, action: #selector(pan(_:)))
+            if NestedHorizontalScroll.claiming { NestedHorizontalScroll.claiming = false }
+        }
+
+        func attachIfNeeded() {
+            guard window != nil, !observing else { return }
+            guard let found = Self.enclosingScrollView(from: self) else { return }
+            scroll = found
+            found.panGestureRecognizer.addTarget(self, action: #selector(pan(_:)))
+            observing = true
+        }
+
+        @objc private func pan(_ gr: UIPanGestureRecognizer) {
+            switch gr.state {
+            case .began, .changed:
+                NestedHorizontalScroll.claiming = true
+                Self.cancelNonScrollPans(from: window, except: gr)
+            case .ended, .cancelled, .failed:
+                NestedHorizontalScroll.claiming = false
+            default:
+                break
+            }
+        }
+
+        private static func enclosingScrollView(from view: UIView) -> UIScrollView? {
+            var node: UIView? = view.superview
+            while let current = node {
+                if let scroll = current as? UIScrollView { return scroll }
+                node = current.superview
+            }
+            return nil
+        }
+
+        /// Drop SwiftUI pan recognizers (time reveal) mid-gesture; leave every
+        /// `UIScrollView` pan alone so the table and the transcript still scroll.
+        private static func cancelNonScrollPans(from root: UIView?, except keep: UIGestureRecognizer) {
+            guard let root else { return }
+            for gr in root.gestureRecognizers ?? [] where gr !== keep {
+                guard gr is UIPanGestureRecognizer, !(gr.view is UIScrollView) else { continue }
+                if gr.state == .possible || gr.state == .began || gr.state == .changed {
+                    gr.isEnabled = false
+                    gr.isEnabled = true
+                }
+            }
+            for sub in root.subviews {
+                cancelNonScrollPans(from: sub, except: keep)
+            }
+        }
+    }
+}
+
 /// A GFM table as a real table (the Mac's `render_block` table): a header row on
 /// the code wash, body rows with hairlines between them, one column per header
 /// cell with the same width in every row, each cell inline markdown — so a
@@ -1696,6 +1779,9 @@ struct TableBlock: View {
                 }
             }
             .accessibilityIdentifier("table")
+            // Inside the scroll content so the probe's superview walk reaches the
+            // table's UIScrollView ([feedback ACQD4mUCTPxH7z3Y7YO8Vjw]).
+            .background(PreferHorizontalScroll())
         }
         .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.bg.opacity(0.6)))
         .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(theme.separator, lineWidth: 0.5))
