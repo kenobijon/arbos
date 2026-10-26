@@ -76,8 +76,7 @@ final class ReplyInDMTests: XCTestCase {
 
         let mine = model.replyRef(for: groupRow(model, id: "g1"), in: group, projectId: nil)
         XCTAssertTrue(model.reveal(mine), "a member's tap opens the source chat on the original")
-        XCTAssertEqual(model.pendingRevealMessage?.chatId, group)
-        XCTAssertEqual(model.pendingRevealMessage?.messageId, "g1")
+        XCTAssertEqual(model.pendingReveal, MessageReveal(chatId: group, messageId: "g1"))
         if case .chat(let chatId, let projectId)? = model.path.last {
             XCTAssertEqual(chatId, group)
             XCTAssertEqual(projectId, peopleSlot)
@@ -85,13 +84,13 @@ final class ReplyInDMTests: XCTestCase {
             XCTFail("navigation went to the group chat: \(model.path)")
         }
 
-        model.pendingRevealMessage = nil
+        model.pendingReveal = nil
         model.path = [.chat(chatId: dm, projectId: peopleSlot)]
         var outside = mine
         outside.chatId = "fx-not-my-chat"
         outside.chatTitle = "Design crit"
         XCTAssertFalse(model.reveal(outside), "a non-member sees the quote without the link")
-        XCTAssertNil(model.pendingRevealMessage)
+        XCTAssertNil(model.pendingReveal)
         if case .chat(let chatId, _)? = model.path.last { XCTAssertEqual(chatId, dm) } else { XCTFail("stayed in the DM") }
     }
 

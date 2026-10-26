@@ -116,7 +116,7 @@ private struct ChatSessionHost: View {
 /// `@EnvironmentObject`) so only `ChatSessionHost`'s filtered publishes rebuild it.
 /// Composer draft lives in `ComposerDraft` / `ComposerField` — keystrokes do not
 /// re-evaluate this view (arbonites-chat-lag + feedback app-01M5NNJ001NHHYBHXTASM5NXBZ).
-private struct ChatSession: View {
+struct ChatSession: View {
     let model: AppModel
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
@@ -349,13 +349,18 @@ private struct ChatSession: View {
         composerFocused = true
     }
 
-    /// A cross-chat quote tap landed here: scroll to and highlight the original once the
-    /// rows are in (#1836).
-    private func takePendingRevealIfNeeded() {
-        guard let p = model.pendingRevealMessage, p.chatId == chatId else { return }
-        guard rows.contains(where: { $0.messageId == p.messageId }) else { return }
-        model.pendingRevealMessage = nil
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { revealQuoted(p.messageId) }
+    /// A result from Home's search bar — or a cross-chat quote tap (Reply in DM, #1836) —
+    /// opened this chat at a message: once the rows hold it, scroll there and tint it
+    /// (the quote-tap path, `revealQuoted`). The appear settle scrolls to the end first;
+    /// the jump follows a beat later.
+    private func revealPendingIfNeeded() {
+        guard let reveal = model.pendingReveal, reveal.chatId == chatId,
+              rows.contains(where: { $0.messageId == reveal.messageId && $0.role != .system }) else { return }
+        model.pendingReveal = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+            pinnedToBottom = false
+            revealQuoted(reveal.messageId)
+        }
     }
 
     /// Tokenised blob URL for a custom group picture, if the chat has one.
@@ -1001,7 +1006,7 @@ private struct ChatSession: View {
             }
             openPendingSearchIfNeeded()
             takePendingDMReplyIfNeeded()
-            takePendingRevealIfNeeded()
+            revealPendingIfNeeded()
             if let link = DebugHooks.link {
                 model.setRoomLink(chatId, link)
                 if let ms = DebugHooks.linkClearsMs {
@@ -1155,8 +1160,9 @@ private struct ChatSession: View {
         // (sheet over us), so onAppear alone never sees it — watch the published flag.
         .onChange(of: model.pendingSearchChat) { _, _ in openPendingSearchIfNeeded() }
         .onChange(of: model.pendingDMReply?.chatId) { _, _ in takePendingDMReplyIfNeeded() }
-        .onChange(of: model.pendingRevealMessage?.messageId) { _, _ in takePendingRevealIfNeeded() }
-        .onChange(of: rows.count) { _, _ in takePendingRevealIfNeeded() }
+        // A bottom-bar search result or a quote tap: the rows may land after appear (room backfill).
+        .onChange(of: model.pendingReveal) { _, _ in revealPendingIfNeeded() }
+        .onChange(of: rows.count) { _, _ in revealPendingIfNeeded() }
         // The per-chat version, not the array: comparing 1 000+ messages on every
         // body (each keystroke, presence tick, publish) was a measurable share of
         // the Arbonites lag (arbonites-chat-lag, 2026-10-24).
