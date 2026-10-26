@@ -712,6 +712,8 @@ final class AppModel: ObservableObject {
     /// Rooms whose pushes were refused with `not_available` on the live connection.
     /// Cleared by that room's next ACK (not by another room's ACK).
     private var pushRefused: Set<Id> = []
+    /// The sentence shown for each refused room (cleared with the room's next ACK).
+    private var pushRefusalText: [Id: String] = [:]
     /// Rooms with a full re-read scheduled by `requestSnapshot` (one per coalesce window).
     private var snapshotPending: Set<Id> = []
     /// When each room's transcript was last re-read from its doc (`Date` seconds).
@@ -2020,7 +2022,8 @@ final class AppModel: ObservableObject {
             // used to leave people-chat messages stuck at pending opacity.
             guard let self, !isProjectDoc else { return }
             if self.pushRefused.remove(key) != nil {
-                if self.notice?.text == "Messages in this chat are not being delivered" {
+                let text = self.pushRefusalText.removeValue(forKey: key)
+                if let current = self.notice?.text, current == text || current == "Messages in this chat are not being delivered" {
                     self.notice = nil
                 }
             }
@@ -2042,10 +2045,18 @@ final class AppModel: ObservableObject {
         room.onUnavailable = { [weak self] in
             Task { @MainActor in self?.handleRoomUnavailable(key: key) }
         }
-        room.onPushRefused = { [weak self] in
+        room.onPushRefused = { [weak self, weak room] in
             guard let self, !isProjectDoc else { return }
-            if self.pushRefused.insert(key).inserted {
-                self.notice = Notice(text: "Messages in this chat are not being delivered")
+            // The relay's reason, in plain words ([feedback blocked-state-ios-2026-10-26]):
+            // "<name> has blocked you in this chat." / "Couldn't post: you've blocked <name>…" /
+            // the mute line / the generic delivery line. A refusal that names a reason is shown
+            // even while the room already stood refused, so the words follow the relay's.
+            let why = room?.lastRefusal
+            let fresh = self.pushRefused.insert(key).inserted
+            if fresh || why?.reason != nil {
+                let text = why?.sentence ?? BlockedState.refusalSentence(reason: nil, name: nil, handle: nil)
+                self.pushRefusalText[key] = text
+                self.notice = Notice(text: text)
             }
         }
         rooms[key] = room
@@ -2102,6 +2113,7 @@ final class AppModel: ObservableObject {
         roomLinkSince[key] = nil
         unacked[key] = nil
         pushRefused.remove(key)
+        pushRefusalText[key] = nil
         roomCreatedAt[key] = nil
         roomRestoredCursors[key] = nil
         roomUnavailableFailures[key] = nil

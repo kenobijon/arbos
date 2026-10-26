@@ -213,6 +213,8 @@ struct ChatSession: View {
     private static let memoCancelDistance: CGFloat = 56
 
     @State private var showProfile = false
+    /// Unblock asks first ([feedback blocked-state-ios-2026-10-26]).
+    @State private var confirmUnblock = false
     @State private var showSearch = false
     @State private var searchText = ""
     /// Group chats: pick members to call, or call everyone.
@@ -426,6 +428,12 @@ struct ChatSession: View {
     private var isChannel: Bool { projectId == channelSlot }
     private var channelServer: Server? { channel.flatMap { model.server($0.serverId) } }
     private var counterpart: ChatMember? { people?.counterpart(me: model.user?.id) }
+    /// The DM's other person while they are on my block list ([feedback
+    /// blocked-state-ios-2026-10-26]): the header tag and the composer bar follow it.
+    private var blockedPeer: ChatMember? {
+        guard let people, !people.isGroup || people.kind == "dm", let other = counterpart else { return nil }
+        return BlockedState.isBlocked(id: other.id, handle: other.handle, in: model.blocked) ? other : nil
+    }
     private var messages: [Message] { model.messages(of: chatId) }
     private var needsAnswer: Bool { !isChannel && model.chatNeedsAnswer(chatId) }
     /// True while a turn runs, a subagent hand-off is still open, or right
@@ -785,6 +793,10 @@ struct ChatSession: View {
                             .frame(maxWidth: .infinity)
                             .frame(height: Theme.composerHeight)
                             .accessibilityIdentifier("group-silenced")
+                    } else if let peer = blockedPeer {
+                        // A DM with someone I blocked has no input ([feedback
+                        // blocked-state-ios-2026-10-26]): "You blocked X · Unblock" in its place.
+                        BlockedComposerBar(name: peer.displayName) { confirmUnblock = true }
                     } else {
                         composer
                     }
@@ -873,6 +885,11 @@ struct ChatSession: View {
                 .environment(\.theme, theme)
             }
         }
+        .confirmationDialog(BlockedState.confirmTitle(handle: blockedPeer?.handle ?? counterpart?.handle ?? ""), isPresented: $confirmUnblock, titleVisibility: .visible) {
+            Button(BlockedState.unblock) {
+                if let peer = blockedPeer, let entry = BlockRow.entry(in: model.blocked, id: peer.id, handle: peer.handle) { model.unblock(entry) }
+            }
+        } message: { Text(BlockedState.confirmNote) }
         .sheet(isPresented: $showProfile) {
             AgentEditSheet(projectId: projectId).environmentObject(model).environment(\.theme, theme)
         }
@@ -1395,6 +1412,8 @@ struct ChatSession: View {
                                     .font(.system(size: Theme.body, weight: .semibold))
                                     .foregroundStyle(theme.text)
                                     .lineLimit(1)
+                                // Blocked ([feedback blocked-state-ios-2026-10-26]): the tag after the name.
+                                if blockedPeer != nil { BlockedTag() }
                             } else {
                                 // Named multi-human group with no picture: title initials.
                                 PersonAvatar(url: nil, handle: people.title, size: Controls.avatar, name: people.title, id: people.id)
