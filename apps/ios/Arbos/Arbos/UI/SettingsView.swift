@@ -781,10 +781,11 @@ struct MachinePage: View {
         }
     }
 
-    /// "Awake · 42 m": the uptime folded into the state (Jacob 2026-10-26).
+    /// "Awake · 42 m": the uptime folded into the state (Jacob 2026-10-26), as a duration
+    /// (the Computer tab's), not "1 hr. ago".
     private func stateText(_ m: Machine) -> String {
         if m.state == .awake, let since = m.since, since > 0 {
-            return "\(m.label) · \(SettingsView.relative(since))"
+            return "\(m.label) · \(AgentPane.durationS(max(0, (nowMs() - since) / 1000)))"
         }
         return m.label
     }
