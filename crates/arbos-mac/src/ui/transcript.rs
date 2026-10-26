@@ -8705,6 +8705,28 @@ mod crash_probe_tests {
                 { "id": "w2-a", "kind": "attachment", "attachment": { "name": "affine-favicon.svg", "mime": "image/svg+xml", "ref": "blob-svg-2", "kind": "image" } }
             ],
         })).unwrap());
+        // Mac-only shapes bc-3790a460 listed (`internal/mac-launch-crash-recovery-2026-10-26.md`
+        // §2): a user attachment whose upload failed (part without `ref`, still pending), a
+        // voice memo, and a Reply-in-DM quote (`replyRef`).
+        at += 10_000;
+        messages.push(serde_json::from_value(serde_json::json!({
+            "id": "u-noref", "chatId": "g1", "role": "user", "sender": "user:gh_1", "senderName": "Affinity",
+            "status": "done", "createdAt": at, "completedAt": at, "pending": true,
+            "parts": [{ "id": "u-noref-a", "kind": "attachment", "attachment": { "name": "Screenshot.png", "mime": "image/png", "kind": "image" } }],
+        })).unwrap());
+        at += 10_000;
+        messages.push(serde_json::from_value(serde_json::json!({
+            "id": "u-memo", "chatId": "g1", "role": "user", "sender": "user:gh_1", "senderName": "Affinity",
+            "status": "done", "createdAt": at, "completedAt": at,
+            "parts": [{ "id": "u-memo-a", "kind": "attachment", "attachment": { "name": "memo.m4a", "mime": "audio/mp4", "ref": "blob-memo", "kind": "audio", "bytes": 48213 } }],
+        })).unwrap());
+        at += 10_000;
+        messages.push(serde_json::from_value(serde_json::json!({
+            "id": "u-ref", "chatId": "g1", "role": "user", "sender": "user:gh_1", "senderName": "Affinity",
+            "status": "done", "createdAt": at, "completedAt": at,
+            "replyRef": { "chatId": "other", "projectId": "", "messageId": "m-far", "chatTitle": "Design", "sender": "user:gh_2", "senderName": "Sam", "senderHandle": "sam", "text": "" },
+            "parts": [{ "id": "u-ref-t", "kind": "text", "text": "replying across chats" }],
+        })).unwrap());
         state.update(cx, |s, cx| {
             s.projects.push(Project {
                 id: "g1".into(),
