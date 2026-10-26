@@ -3294,7 +3294,15 @@ impl Shell {
             // a relative `top` inset (GPUI has no transform).
             // The tasks chip and drawer ride on the row while the agent has
             // background jobs open in this chat (`ui::tasks`, duplex §2.4).
-            let presence_row = presence.map(|p| {
+            // The row floats over the transcript's bottom clearance instead of
+            // sitting under it ([feedback status-row-gap-mac-2026-10-26]): the
+            // last bubble keeps its 54 pt to the pill with or without the row
+            // (Grok Mac), and the list is not resized when the row comes or
+            // goes. Only while the list is pinned at its end — scrolled into
+            // history, bubbles pass through that band (and the ↓ button sits
+            // there), so the row steps aside.
+            let pinned = self.transcript.read(cx).is_pinned_to_bottom();
+            let presence_row = presence.filter(|_| pinned).map(|p| {
                 let row = match chat_id.clone() {
                     Some(id) => {
                         let (jobs, open) = crate::ui::tasks::for_chat(self.state.read(cx), &id);
@@ -3311,7 +3319,18 @@ impl Shell {
                     }
                     None => crate::ui::presence::row(p, &theme, cx),
                 };
-                column_row(row.into_any_element())
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom(px(crate::ui::presence::LIFT))
+                    .debug_selector(|| "presence-float".into())
+                    // Wheel over the row scrolls the chat, like over the pill.
+                    .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _, cx| {
+                        this.transcript
+                            .update(cx, |t, cx| t.scroll_from_wheel(event, cx));
+                    }))
+                    .child(column_row(row.into_any_element()))
             });
             let composer_row = div()
                 .w_full()
@@ -3320,7 +3339,9 @@ impl Shell {
                 .items_center()
                 .pb(px(COMPOSER_BOTTOM))
                 .pt(px(6.0))
-                .children(presence_row)
+                // A zero-height anchor at the composer block's top edge: the
+                // floating row hangs off it and adds nothing to the column.
+                .child(div().relative().w_full().h(px(0.0)).children(presence_row))
                 .child(composer_block);
             let composer_row = if animating {
                 composer_row
