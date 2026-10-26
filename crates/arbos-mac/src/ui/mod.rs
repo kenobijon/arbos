@@ -38,6 +38,7 @@ pub mod people;
 pub mod picture_fit;
 pub mod presence;
 pub mod profiles;
+pub mod rail;
 pub mod reactions;
 pub mod routines;
 pub mod secrets;
