@@ -451,6 +451,7 @@ impl Agent {
                         .unwrap_or("")
                         .to_owned(),
                     host: id == gt.host_project_id,
+                    mentioned_as: None,
                 })
             })
             .collect();

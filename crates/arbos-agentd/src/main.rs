@@ -33,6 +33,7 @@ mod routines;
 mod rpc_child;
 mod selfref;
 mod settings;
+mod silence;
 mod skills;
 mod status;
 mod store;
