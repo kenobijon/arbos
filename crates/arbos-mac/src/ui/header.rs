@@ -1376,6 +1376,59 @@ mod glass_tests {
         }
     }
 
+    /// [feedback mac-header-pill-see-through-2026-10-26]: the dark pill is
+    /// see-through — a thin fill and a light blur, so the transcript shows
+    /// through it and it is read as glass by its rim (Grok Bot's pill over a
+    /// black page is ≈ +12/255 lighter than the page) — while white text on
+    /// it keeps ≥ 4.5:1 over the brightest backdrop the pill ever sits on
+    /// (the chat column's 85 % page wash over a white desktop, ≈ `#373737`).
+    #[test]
+    fn the_dark_pill_is_see_through_and_its_text_still_reads() {
+        let theme = Theme::with(Appearance::Dark, Surface::Glass);
+        let style = glass::header_style(&theme);
+        assert!(
+            style.fill.a <= 0.35,
+            "a thin fill, the list shows through: {}",
+            style.fill.a
+        );
+        // Through a function so clippy does not fold the comparison away.
+        let blur = std::hint::black_box(glass::HEADER_BLUR);
+        assert!(blur <= 6.0, "a light blur keeps the text behind legible");
+        assert!(style.rim.a >= 0.25, "the rim carries the shape");
+        let lum = |c: gpui::Hsla| {
+            let rgb = c.to_rgb();
+            let ch = |v: f32| {
+                if v <= 0.039_28 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * ch(rgb.r) + 0.7152 * ch(rgb.g) + 0.0722 * ch(rgb.b)
+        };
+        let over = |top: gpui::Hsla, under: gpui::Hsla| {
+            let (t, u) = (top.to_rgb(), under.to_rgb());
+            gpui::Rgba {
+                r: t.a * t.r + (1.0 - t.a) * u.r,
+                g: t.a * t.g + (1.0 - t.a) * u.g,
+                b: t.a * t.b + (1.0 - t.a) * u.b,
+                a: 1.0,
+            }
+            .into()
+        };
+        for backdrop in [theme.bg, gpui::rgb(0x373737).into()] {
+            let pill = over(style.fill, backdrop);
+            let contrast = (lum(theme.text) + 0.05) / (lum(pill) + 0.05);
+            assert!(contrast >= 4.5, "white on the pill: {contrast:.2}:1");
+        }
+        // Over the flat Matte page the pill is a step above it, not a plate.
+        let lift = (over(style.fill, theme.bg).to_rgb().r - theme.bg.to_rgb().r) * 255.0;
+        assert!(
+            (6.0..=24.0).contains(&lift),
+            "pill lift over its page: {lift:.1}/255"
+        );
+    }
+
     struct GlassBar {
         folded: bool,
         pr: f32,
