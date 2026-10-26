@@ -307,6 +307,9 @@ pub struct Shell {
     /// Rig: `ARBOS_RIG_RAIL_T=0.4` freezes the collapse morph at that
     /// progress (0 expanded … 1 rail) for still frames of the transition.
     rig_rail_t: Option<f32>,
+    /// The viewport width as of the last render (the rig's timed toggle needs
+    /// it without a `Window`).
+    last_viewport_width: f32,
     /// Sidebar: the "Hidden chats" list is showing instead of the chat list
     /// (Jacob 2026-10-23; the footer opens it, ‹ back returns).
     pub(crate) hidden_open: bool,
@@ -993,6 +996,7 @@ impl Shell {
                 .ok()
                 .and_then(|v| v.trim().parse::<f32>().ok())
                 .map(|t| t.clamp(0.0, 1.0)),
+            last_viewport_width: crate::ui::theme::NARROW_WINDOW,
             hidden_open: false,
             server_input,
             channel_rename: None,
@@ -1032,6 +1036,26 @@ impl Shell {
             });
             if shell.settings_page == SettingsPage::Devices {
                 shell.state.update(cx, |s, cx| s.devices_refresh(cx));
+            }
+        }
+        // Rig: `ARBOS_RIG_TOGGLE_RAIL_MS=1500,3500` presses the sidebar toggle at those
+        // times after launch (a recording of the collapse / open where the display
+        // refuses synthetic clicks; the gate Mac, [feedback mac-sidebar-rail-2026-10-26]).
+        if let Ok(spec) = std::env::var("ARBOS_RIG_TOGGLE_RAIL_MS") {
+            for ms in spec.split(',').filter_map(|v| v.trim().parse::<u64>().ok()) {
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(ms))
+                        .await;
+                    let _ = this.update(cx, |this, cx| {
+                        let width = this.last_viewport_width;
+                        this.state.update(cx, |s, cx| {
+                            let narrow = s.window_is_narrow(width);
+                            s.toggle_rail(narrow, cx)
+                        });
+                    });
+                })
+                .detach();
             }
         }
         shell
@@ -4007,6 +4031,7 @@ impl Render for Shell {
         let theme = Theme::of(cx).clone();
         let width: f32 = window.viewport_size().width.into();
         let height: f32 = window.viewport_size().height.into();
+        self.last_viewport_width = width;
         self.fullscreen = window.is_fullscreen() || self.rig_fullscreen;
         let state = self.state.read(cx);
         let narrow = state.window_is_narrow(width);
