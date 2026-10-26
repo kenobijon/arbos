@@ -2106,7 +2106,7 @@ async fn fetch_avatar(shared: Arc<Shared>, url: String) {
                     bytes: Arc::new(master.bytes),
                 });
             }
-            Ok(Err(err)) => shared.notice(format!("Picture: {err:#}")),
+            Ok(Err(err)) => shared.fail("read the picture", &err),
             Err(_) => {}
         }
         return;
