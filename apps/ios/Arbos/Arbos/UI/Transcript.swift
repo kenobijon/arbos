@@ -1999,6 +1999,7 @@ struct CodeCard: View {
         .background(RoundedRectangle(cornerRadius: Self.radius, style: .continuous).fill(theme.bg.opacity(0.6)))
         .overlay(RoundedRectangle(cornerRadius: Self.radius, style: .continuous).stroke(theme.separator, lineWidth: 0.5))
         .clipShape(RoundedRectangle(cornerRadius: Self.radius, style: .continuous))
+        .accessibilityIdentifier("code-card")
     }
 }
 
