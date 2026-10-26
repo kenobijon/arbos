@@ -702,6 +702,15 @@ pub struct NotifyBody {
     /// "↩ Jacob in Arbonites: Testing reply in dm" and the tap can land there.
     #[serde(default)]
     pub reply_ref: Option<ReplyRefBody>,
+    /// Box callers (#1832): what kind of bubble this is for a live call in the chat —
+    /// `result` (a turn's answer), `job` (a background job's outcome), `quick` (a status line
+    /// while a turn runs). Devices send none (a person's message).
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// Box callers: the whole prose of the turn for the call's context (longer than the push
+    /// body), when it differs from `text`.
+    #[serde(default)]
+    pub voice_text: Option<String>,
 }
 
 /// The cross-chat reference a client announces with its message.
@@ -813,17 +822,19 @@ pub async fn notify_people_chat(
         Err(r) => return *r,
     };
     let chat = ChatRef::people(&id);
-    notify_response(
-        announce_with(
-            &state,
-            &chat,
-            &sender,
-            &b.message_id,
-            &b.text,
-            b.reply_ref.as_ref(),
-        )
-        .await,
+    let out = announce_with(
+        &state,
+        &chat,
+        &sender,
+        &b.message_id,
+        &b.text,
+        b.reply_ref.as_ref(),
     )
+    .await;
+    if out.is_some() {
+        crate::voice::call_update(&state, &chat, &sender, &b).await;
+    }
+    notify_response(out)
 }
 
 /// `POST /projects/{project_id}/chats/{chat_id}/notify {message_id, text}` — a whole message
@@ -848,17 +859,19 @@ pub async fn notify_project_chat(
         Err(r) => return *r,
     };
     let chat = ChatRef::project(&project.id, &chat_id);
-    notify_response(
-        announce_with(
-            &state,
-            &chat,
-            &sender,
-            &b.message_id,
-            &b.text,
-            b.reply_ref.as_ref(),
-        )
-        .await,
+    let out = announce_with(
+        &state,
+        &chat,
+        &sender,
+        &b.message_id,
+        &b.text,
+        b.reply_ref.as_ref(),
     )
+    .await;
+    if out.is_some() {
+        crate::voice::call_update(&state, &chat, &sender, &b).await;
+    }
+    notify_response(out)
 }
 
 #[cfg(test)]
