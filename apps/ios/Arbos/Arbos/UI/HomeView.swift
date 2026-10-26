@@ -143,8 +143,13 @@ struct HomeView: View {
             .sheet(isPresented: $showNewChat) {
                 NewChatSheet().environmentObject(model).environment(\.theme, theme)
             }
-            .sheet(isPresented: $showSettings) {
-                SettingsView().environmentObject(model).environment(\.theme, theme)
+            .sheet(isPresented: $showSettings, onDismiss: { model.pendingSettingsLanding = nil }) {
+                SettingsView(landing: model.pendingSettingsLanding ?? DebugHooks.settingsPage)
+                    .environmentObject(model).environment(\.theme, theme)
+            }
+            // A Settings row picked in search: the sheet opens straight on that page.
+            .onChange(of: model.pendingSettingsLanding) { _, landing in
+                if landing != nil, !showSettings { showSettings = true }
             }
         }
         .task {

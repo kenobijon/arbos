@@ -3805,6 +3805,13 @@ final class AppModel: ObservableObject {
     /// A message the next ChatView should scroll to and tint (a search result opened
     /// from the bottom bar, [feedback iphone-bottom-search-bar-2026-10-25]).
     @Published var pendingReveal: MessageReveal?
+    /// The Settings page the next Settings sheet lands on (a Settings row opened
+    /// from search, [feedback search-settings-ios-2026-10-26]): Home presents the
+    /// sheet when this is set and clears it when the sheet closes.
+    @Published var pendingSettingsLanding: String?
+    /// The agent pane's settings row to drop open once the pane shows (a search
+    /// result for "voice" / "model" / "reasoning").
+    @Published var pendingAgentSetting: GlobalSearch.AgentSetting?
     /// App-wide search: message text, attachments and links per loaded chat, kept
     /// current lazily against `messagesVersion` (`GlobalSearch`).
     var searchIndex = SearchIndex()

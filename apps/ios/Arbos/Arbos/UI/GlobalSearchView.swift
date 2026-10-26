@@ -220,6 +220,11 @@ struct GlobalSearchRow: View {
                 BlobImage(item: item)
             }
             .clipShape(RoundedRectangle(cornerRadius: LibraryList.thumbRadius, style: .continuous))
+        case .settingsTile(let name):
+            // The Settings list's own tile (PaneRow `.tile`), at the row's 36 pt.
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(theme.isDark ? Color(hex: "#5C5C60")! : Color(hex: "#6E6E73")!)
+                .overlay(Image(systemName: name).font(theme.font(17, weight: .semibold)).foregroundStyle(.white))
         case .none:
             glyphTile(glyph)
         }
@@ -237,6 +242,7 @@ struct GlobalSearchRow: View {
         case .media: return "photo"
         case .file: return "doc.fill"
         case .link: return "link"
+        case .setting: return "gearshape.fill"
         }
     }
 
