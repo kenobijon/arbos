@@ -112,7 +112,7 @@ extension AppModel {
     /// fixture, where there is no relay to serve it.
     func agentPictureURL(id: Id, imageKey: String?, version: Int) -> String? {
         guard !isFixture else { return nil }
-        return Project.pictureURL(httpUrl: api.endpoint.httpUrl, id: id, imageKey: imageKey, version: version)
+        return Project.pictureURL(httpUrl: relayHttpUrl, id: id, imageKey: imageKey, version: version)
     }
 
     /// What an agent's avatar is made of, with the relay's stamp of its last change.

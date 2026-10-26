@@ -4124,6 +4124,9 @@ final class AppModel: ObservableObject {
 
     // MARK: Lookups
 
+    /// The relay's HTTP origin (`https://relay.arbos.life`), for URLs built outside this file.
+    var relayHttpUrl: String { api.endpoint.httpUrl }
+
     /// Relay blob URL with the device token as a query parameter (the relay
     /// accepts `?token=` on every route), so AVPlayer and Safari can open it.
     func blobURL(projectId: Id, key: String) -> URL? {
