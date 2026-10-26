@@ -1612,7 +1612,10 @@ struct ChatSession: View {
                         onQuoteTap: { revealQuoted($0) },
                         onMenu: { runMessageMenu($0, row: $1) },
                         actionsRowId: actionsRow?.id,
-                        onLongPress: { row in openActions(row) }
+                        onLongPress: { row in openActions(row) },
+                        onDoubleTap: { row in
+                            model.toggleReaction(chatId: chatId, messageId: row.messageId, emoji: "❤️")
+                        }
                     )
                     .equatable()
                     // Who is working is the presence row over the composer
@@ -3059,6 +3062,8 @@ private struct TranscriptRows: View, Equatable {
     /// The bubble whose long-press actions are open (it alone reports its frame).
     let actionsRowId: String?
     let onLongPress: (Row) -> Void
+    /// Double-tap on a message bubble toggles a ❤️ reaction under it.
+    let onDoubleTap: (Row) -> Void
 
     static func == (lhs: TranscriptRows, rhs: TranscriptRows) -> Bool {
         let same = lhs.shownStamp == rhs.shownStamp
@@ -3110,12 +3115,13 @@ private struct TranscriptRows: View, Equatable {
                         #endif
                     }
                 }
-                // A message bubble: long-press → the reaction capsule + menu overlay
-                // (`MessageActionsOverlay`). Other rows keep the plain Copy menu.
+                // A message bubble: long-press → reaction capsule + menu; double-tap → ❤️.
+                // Other rows keep the plain Copy menu.
                 .anchorPreference(key: RowFrameKey.self, value: .bounds) { anchor in
                     actionsRowId == row.id ? [row.id: anchor] : [:]
                 }
                 .messageRowGestures(isMessage: reply, onLongPress: { onLongPress(row) },
+                                    onDoubleTap: { onDoubleTap(row) },
                                     onCopyMenu: { onMenu($0, row) })
         }
     }
