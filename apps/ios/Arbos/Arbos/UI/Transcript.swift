@@ -2074,8 +2074,25 @@ final class AvatarImageCache {
         url.flatMap { images[$0] }
     }
 
-    /// Pictures are kept at the largest size a row draws (128 pt hero at 3x).
+    /// Pictures are kept at the largest size a row draws (128 pt hero at 3x). The relay's
+    /// picture routes are asked for exactly this width (`?w=`), so the download is the 384 px
+    /// Lanczos copy of the 1024 px master, not the master itself.
     nonisolated static let maxPixelSize = 384
+
+    /// The relay's picture routes — `/avatars/{id}.jpg`, `/projects/{id}/avatar.jpg`,
+    /// `/blob/{slot}/{key}` — take `?w=<px>` and answer with that bucket of the master
+    /// (`avatar_image` on the relay). Other hosts' pictures (GitHub) are fetched as given.
+    nonisolated static func sizedURL(_ url: String, width: Int) -> URL? {
+        guard var comps = URLComponents(string: url) else { return URL(string: url) }
+        let path = comps.path
+        let relayPicture = path.contains("/avatars/") || path.hasSuffix("/avatar.jpg") || path.contains("/blob/")
+        guard relayPicture else { return comps.url }
+        var items = comps.queryItems ?? []
+        items.removeAll { $0.name == "w" }
+        items.append(URLQueryItem(name: "w", value: String(width)))
+        comps.queryItems = items
+        return comps.url
+    }
     /// How many of a list's pictures `warm` fetches ahead (several screens of rows;
     /// the rest load as they scroll in).
     nonisolated static let warmLimit = 48
@@ -2100,7 +2117,7 @@ final class AvatarImageCache {
                 waiters[url, default: []].append(cont)
             }
         }
-        guard url.contains("://"), let u = URL(string: url) else { return nil }
+        guard url.contains("://"), let u = AvatarImageCache.sizedURL(url, width: AvatarImageCache.maxPixelSize) else { return nil }
         requested.insert(url)
         let img: UIImage? = await Task.detached(priority: .userInitiated) {
             guard let (data, _) = try? await URLSession.shared.data(from: u) else { return nil }
