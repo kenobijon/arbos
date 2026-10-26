@@ -116,9 +116,9 @@ struct AgentPickerField: View {
     }
 }
 
-/// The "Add agent" sheet: a search field (the composer's 48 pt family height, the
-/// iPhone control-size token) focused with the keyboard up, then the agents not yet
-/// granted. A tap adds one and closes.
+/// The "Add agent" sheet: a search field of the control family (`.controlField()`, the
+/// composer's 48 pt — the iPhone control-size token) focused with the keyboard up, then
+/// the agents not yet granted. A tap adds one and closes.
 struct AddAgentSheet: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
@@ -220,12 +220,9 @@ struct AddAgentSheet: View {
                 .accessibilityLabel("Clear search")
             }
         }
-        .padding(.horizontal, Theme.composerTextInset)
-        // The iPhone control family's field height (the composer's 48), not the secrets
-        // forms' 42: Jacob's call for this new screen (2026-10-26).
-        .frame(height: Theme.composerHeight)
-        .background(Capsule().fill(theme.field))
-        .overlay(ComposerRim(shape: Capsule()))
+        // The iPhone control family's field (`Controls.height` 48, the composer's), as Jacob
+        // asked for this new screen (2026-10-26) — not the secrets forms' old 42.
+        .controlField()
         .accessibilityIdentifier("agent-picker-search")
     }
 }
