@@ -435,6 +435,32 @@ sheet for Jacob's yes). Measurement record and the before/after sheet:
 project store `docs/grokbot-design-parity.md` § "Composer and status row vs
 Jacob's 2026-10-25 Grok Bot shot" and `media/feedback/iphone-composer-parity/`.
 
+## Mac status row sits inside the last bubble's 54 pt (Jacob 2026-10-26, [feedback status-row-gap-mac-2026-10-26])
+
+Jacob: "Fix this odd spacing that arbos has between the last message and the
+chat." Grok Mac keeps the last bubble **54 pt** from the composer pill whether
+or not its status row ("Charting the weather") shows, and draws the row *in*
+that gap (Jacob's shot, 2 px/pt: bubble → pill 107 px = 53.5; icon 23 pt,
+19.5 over the pill; refs 57/58 without a row: 54). Arbos stacked the row's
+whole height under the 54 pt: bubble → disc 57 pt, bubble → pill 92.5 pt, and
+the list shrank and grew by 38 pt each time the row came and went.
+
+| Item | Rule (pt) | Code |
+| --- | --- | --- |
+| Last bubble → pill, with or without the row | **54** (one trailing list row, `BOTTOM_INSET`; never container padding) | `transcript::LAST_BUBBLE_TO_COMPOSER` |
+| The row's place | floats over that clearance from a zero-height anchor at the composer block's top; the shell draws it only while the list is pinned at its end (scrolled into history the bubbles pass through the band and ↓ sits there) | `shell::render_center`, `Transcript::is_pinned_to_bottom` |
+| Disc bottom → pill top | **20** (Grok 19.5) | `presence::COMPOSER_GAP`, `presence::LIFT` = 20 − 3 |
+| Last bubble → disc top | **6** = one same-sender bubble gap (54 − 20 − 28); Grok's smaller icon sits 11 under the bubble, centres 2.5 apart | follows from the two above |
+| Disc, words, left edge, chip | unchanged: the `+` disc (28) on the `+` column, words at the composer's text start, tasks chip / job-tab link on the row | `presence::row`, `tasks::presence_row` |
+| When the row comes or goes, or a reply lands | nothing else moves; the reply takes the next slot under the ack (the 20 pt turn gap of #1447) and the pill stands still | `presence::placement_tests` |
+
+Pinned by `presence::placement_tests` (the real `Shell`, headless: idle →
+working → reply landed; last bubble → pill 54 in every state, bubble → disc 6,
+disc → pill 20, identical bubble and composer frames across the toggle, the
+ack rises by exactly the reply's row; scrolled into history → no row). Record:
+project store `internal/feedback-loop/status-row-gap-2026-10-26.md`, shots in
+`media/feedback/status-row-gap/`.
+
 ## Full screen (Jacob 2026-10-24, [feedback fullscreen-traffic-lights-2026-10-24] → [feedback topbar-grok-parity-2026-10-24])
 
 **The traffic lights are macOS's own standard window buttons, always. The
