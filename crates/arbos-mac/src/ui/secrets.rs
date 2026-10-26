@@ -411,7 +411,7 @@ impl SecretsPanel {
             .min_h(px(52.0))
             .px(px(16.0))
             .py(px(8.0))
-            .child(kit::hairline_below(16.0, theme))
+            .child(kit::hairline_below(theme))
             .child(glass::icon_tile(glyph, theme).when(dim, |el| el.opacity(0.55)))
             .child(
                 div()
@@ -648,7 +648,7 @@ impl SecretsPanel {
                     .px(px(16.0))
                     .py(px(8.0))
                     .relative()
-                    .child(kit::hairline_below(16.0, theme))
+                    .child(kit::hairline_below(theme))
                     .child(
                         div()
                             .text_size(px(TEXT_SMALL))
@@ -718,7 +718,7 @@ impl SecretsPanel {
             .px(px(16.0))
             .py(px(10.0))
             .relative()
-            .child(kit::hairline_below(16.0, theme))
+            .child(kit::hairline_below(theme))
             .child(
                 div()
                     .text_size(px(TEXT_BODY))
@@ -973,7 +973,7 @@ impl SecretsPanel {
                 .px(px(16.0))
                 .py(px(10.0))
                 .relative()
-                .child(kit::hairline_below(16.0, theme));
+                .child(kit::hairline_below(theme));
             if s.kind == "login" {
                 form = form
                     .child(Self::field(
@@ -1157,7 +1157,7 @@ impl SecretsPanel {
                     .px(px(16.0))
                     .py(px(8.0))
                     .relative()
-                    .child(kit::hairline_below(16.0, theme))
+                    .child(kit::hairline_below(theme))
                     .cursor_pointer()
                     .hover(|st| st.bg(theme.surface_2))
                     .child(avatar)
@@ -1296,7 +1296,7 @@ impl SecretsPanel {
                     .px(px(16.0))
                     .py(px(8.0))
                     .relative()
-                    .child(kit::hairline_below(16.0, theme))
+                    .child(kit::hairline_below(theme))
                     .cursor_pointer()
                     .hover(|st| st.bg(theme.surface_2))
                     .child(avatars::element(
@@ -2082,7 +2082,7 @@ impl SecretsPanel {
                     .px(px(16.0))
                     .py(px(8.0))
                     .relative()
-                    .child(kit::hairline_below(16.0, theme))
+                    .child(kit::hairline_below(theme))
                     .cursor_pointer()
                     .hover(|st| st.bg(theme.surface_2))
                     .child(avatar)
@@ -2204,7 +2204,7 @@ impl SecretsPanel {
                     .px(px(16.0))
                     .py(px(8.0))
                     .relative()
-                    .child(kit::hairline_below(16.0, theme))
+                    .child(kit::hairline_below(theme))
                     .cursor_pointer()
                     .hover(|s| s.bg(theme.surface_2))
                     .child(

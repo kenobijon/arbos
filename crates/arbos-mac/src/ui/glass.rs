@@ -10,6 +10,7 @@ use gpui::{
 
 use crate::ui::frost::{frosted, frosted_always, MENU_BLUR, PANEL_BLUR};
 use crate::ui::icons::icon;
+use crate::ui::profiles::kit;
 use crate::ui::theme::{Theme, CONTROL, PANEL_RADIUS, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
 
 /// Drag this region to move the window.
@@ -285,30 +286,22 @@ pub fn group(theme: &Theme) -> Div {
 /// One row in a grouped card: label left, value right. Not interactive.
 pub fn row(label: impl Into<SharedString>, theme: &Theme) -> Div {
     // The pane kit's metrics (profiles::kit): 48 pt rows, 16 pt inset. The
-    // hairline hangs 1 pt below the row like `kit::row`'s: between rows it
-    // lands on the next row's first pixel, under the last row the card's clip
-    // swallows it. A bottom border inside the row drew a stray line under a
-    // one-row card (Settings › Notifications, Jacob Oct 21).
+    // hairline is the kit's one divider, hung 1 pt below the row: between
+    // rows it lands on the next row's first pixel, under the last row the
+    // card's clip swallows it. A bottom border inside the row drew a stray
+    // line under a one-row card (Settings › Notifications, Jacob Oct 21).
     div()
         .relative()
         .flex()
         .items_center()
         .gap(px(12.0))
         .min_h(px(48.0))
-        .px(px(16.0))
+        .px(px(kit::INSET))
         .py(px(6.0))
         .text_size(px(TEXT_BODY))
         .text_color(theme.text)
         .child(div().flex_1().min_w_0().child(label.into()))
-        .child(
-            div()
-                .absolute()
-                .left(px(16.0))
-                .right(px(0.0))
-                .bottom(px(-1.0))
-                .h(px(1.0))
-                .bg(theme.border),
-        )
+        .child(kit::hairline_below(theme))
 }
 
 /// Apple-style icon tile for settings rows: 30 px rounded square, muted
