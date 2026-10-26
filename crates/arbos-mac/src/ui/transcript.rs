@@ -4802,7 +4802,8 @@ pub enum CopyPillState {
 }
 
 /// The code card's mono text size, line height and glyph advance (JetBrains
-/// Mono / Menlo at 12.5 pt: 0.6 em). The advance places the indent guides.
+/// Mono / Menlo at 12.5 pt: 0.6 em). The advance places the indent guides
+/// (`docs/mac-design-rules.md` § Code cards).
 pub const CODE_TEXT: f32 = 12.5;
 pub const CODE_LINE_HEIGHT: f32 = 18.0;
 pub const CODE_GLYPH_ADVANCE: f32 = 7.5;
