@@ -261,6 +261,8 @@ final class AppModel: ObservableObject {
     @Published var messages: [Id: [Message]] = [:] {
         didSet { bumpVersions(from: oldValue, to: messages) }
     }
+    /// Membership notices this device shows ahead of the relay's row (ARB-393), per chat.
+    private(set) var optimisticNotices: [Id: [OptimisticNotice]] = [:]
     /// Bumped whenever a chat's list (`messages` or `channelRows`) is replaced; views
     /// watch this instead of comparing the whole message array on every body.
     @Published private(set) var messagesVersion: [Id: Int] = [:]
@@ -2194,6 +2196,7 @@ final class AppModel: ObservableObject {
         for i in list.indices where list[i].role == .user {
             list[i].pending = pendingIds.contains(list[i].id)
         }
+        foldOptimisticNotices(chatId: chatId, into: &list)
         // Reassign the whole dictionary so `@Published` always fires. Subscript
         // writes alone have left ChatView's `@State` rows stale for live inbound
         // agent replies in an open people chat (desktop had the line; iPhone did not).
@@ -3261,14 +3264,57 @@ final class AppModel: ObservableObject {
     }
 
     func addAgent(chatId: String, projectId: Id) {
+        showMembershipNotice(chatId: chatId, names: projects.filter { $0.id == projectId }.map(\.name))
         Task {
             do {
                 let chat = try await api.addAgent(chatId: chatId, projectId: projectId)
                 if let i = peopleChats.firstIndex(where: { $0.id == chatId }) { peopleChats[i] = chat }
             } catch {
+                withdrawOptimisticNotices(chatId: chatId)
                 notice = Notice(text: (error as? RelayError)?.type == "own_project_only" ? "You can only add your own agents." : "Add agent failed: \(error.localizedDescription)")
             }
         }
+    }
+
+    /// The adding phone's own "<me> added <names>" line, on screen the moment Add is tapped
+    /// (ARB-393). The relay writes the row of record; `foldOptimisticNotices` swaps this copy
+    /// out when that row lands.
+    func showMembershipNotice(chatId: Id, names: [String]) {
+        let name = user?.name?.trimmingCharacters(in: .whitespaces) ?? ""
+        let who = name.isEmpty ? (user?.login ?? "") : name
+        guard !who.isEmpty, let text = OptimisticNotice.addedLine(who: who, names: names) else { return }
+        let n = OptimisticNotice(text: text, now: nowMs())
+        optimisticNotices[chatId, default: []].append(n)
+        var next = messages
+        next[chatId, default: []].append(n.message(chatId: chatId))
+        messages = next
+    }
+
+    /// A fresh relay snapshot replaces the chat's list: keep the local notices it has not
+    /// confirmed yet, drop the ones it has (or that are past their TTL).
+    private func foldOptimisticNotices(chatId: Id, into list: inout [Message]) {
+        guard var notices = optimisticNotices[chatId] else { return }
+        OptimisticNotice.reconcile(&list, notices: &notices, chatId: chatId, now: nowMs())
+        if notices.isEmpty { optimisticNotices[chatId] = nil } else { optimisticNotices[chatId] = notices }
+    }
+
+    /// The add failed: nothing was added, so no local notice may claim it was.
+    private func withdrawOptimisticNotices(chatId: Id) {
+        guard optimisticNotices.removeValue(forKey: chatId) != nil else { return }
+        var next = messages
+        next[chatId]?.removeAll { $0.id.hasPrefix(OptimisticNotice.idPrefix) }
+        messages = next
+    }
+
+    /// Names the relay will use in its notice: a person by name, else @handle; an agent by its
+    /// project name.
+    private func membershipNames(handles: [String], agentIds: [Id]) -> [String] {
+        let people: [String] = handles.map { (h: String) -> String in
+            let n = personName(handle: h)?.trimmingCharacters(in: .whitespaces) ?? ""
+            return n.isEmpty ? "@\(h)" : n
+        }
+        let agents: [String] = agentIds.compactMap { (id: Id) -> String? in projects.first { $0.id == id }?.name }
+        return people + agents
     }
 
     func addPerson(chatId: String, handle: String) {
@@ -3337,6 +3383,7 @@ final class AppModel: ObservableObject {
     /// `POST /chats/{id}/members`, agents by `POST /chats/{id}/agents`. All are
     /// tried; the first failure is reported once and the call returns false.
     func addMembers(chatId: String, handles: [String], agentIds: [Id]) async -> Bool {
+        showMembershipNotice(chatId: chatId, names: membershipNames(handles: handles, agentIds: agentIds))
         // One call for the batch (#1349): the relay adds everyone and writes one
         // "<me> added A, B and C" line. A relay that only knows `{handle}` answers 4xx;
         // then every add is tried on its own as before.
@@ -3347,6 +3394,7 @@ final class AppModel: ObservableObject {
         } catch let e as RelayError where [400, 404, 415, 422].contains(e.status) {
             // fall through to the per-item adds
         } catch {
+            withdrawOptimisticNotices(chatId: chatId)
             notice = Notice(text: "Could not add members: \(error.localizedDescription)")
             return false
         }
@@ -3371,7 +3419,11 @@ final class AppModel: ObservableObject {
                                       : "Could not add the agent: \(error.localizedDescription)")
             }
         }
-        if let failure { notice = Notice(text: failure); return false }
+        if let failure {
+            withdrawOptimisticNotices(chatId: chatId)
+            notice = Notice(text: failure)
+            return false
+        }
         return true
     }
 
