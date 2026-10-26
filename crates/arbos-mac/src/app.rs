@@ -474,8 +474,8 @@ pub enum HandoffState {
     Saving,
     /// Saved; the vault name.
     Saved(String),
-    /// One plain sentence for the card.
-    Failed(String),
+    /// The shared error note's slot (sentence + Try again + Details) on the card.
+    Failed(crate::ui::error_note::Slot),
 }
 
 pub struct AppState {
@@ -1852,7 +1852,7 @@ impl AppState {
                     approval_id,
                     match result {
                         Ok(env) => HandoffState::Saved(env),
-                        Err(e) => HandoffState::Failed(e),
+                        Err(e) => HandoffState::Failed(crate::ui::error_note::Slot::new(e)),
                     },
                 );
                 cx.notify();

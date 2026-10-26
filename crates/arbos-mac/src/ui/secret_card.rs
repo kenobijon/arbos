@@ -16,6 +16,7 @@ use serde_json::Value;
 use crate::app::{AppState, HandoffState};
 use crate::model::{ApprovalState, Id, Part};
 use crate::ui::composer::ComposerInput;
+use crate::ui::error_note;
 use crate::ui::theme::{Theme, TEXT_SMALL, TEXT_TINY};
 use crate::ui::widgets::{
     card_frame, card_header, option_list, option_row, CardLook, CloseHandler, RowState, ROW_HEIGHT,
@@ -150,12 +151,21 @@ impl SecretOfferCard {
                 cx,
             )
         });
-        // The field forgets the value as soon as it has left.
-        self.value_input.update(cx, |input, cx| input.clear(cx));
+        // Hidden again while it saves (Try again re-sends it; the field empties on success).
         self.show = false;
         self.value_input
             .update(cx, |input, _| input.set_masked(true));
         cx.notify();
+    }
+
+    fn toggle_error_details(&mut self, cx: &mut Context<Self>) {
+        let id = self.approval_id.clone();
+        self.state.update(cx, |s, cx| {
+            if let Some(HandoffState::Failed(slot)) = s.handoff.get_mut(&id) {
+                slot.toggle_details();
+            }
+            cx.notify();
+        });
     }
 
     fn field(
@@ -359,8 +369,12 @@ impl Render for SecretOfferCard {
             };
             self.render_settled(&settled, &look)
         };
+        if saved_here && !self.value_input.read(cx).text().is_empty() {
+            // Saved: the local field forgets the value.
+            self.value_input.update(cx, |input, cx| input.clear(cx));
+        }
         let error = match &device {
-            Some(HandoffState::Failed(e)) if open => Some(e.clone()),
+            Some(HandoffState::Failed(slot)) if open => Some(slot.clone()),
             _ => None,
         };
         card_frame(format!("secret-offer-{}", self.approval_id), &palette)
@@ -400,14 +414,18 @@ impl Render for SecretOfferCard {
                         )),
                 )
             })
-            .when_some(error, |el, e| {
-                el.child(
-                    div()
-                        .px(px(2.0))
-                        .text_size(px(TEXT_TINY))
-                        .text_color(theme.danger)
-                        .child(format!("{e} Try again.")),
-                )
+            // The shared error note (ARB-416): sentence, Try again, Details.
+            .when_some(error, |el, slot| {
+                el.child(error_note::render(
+                    &format!("secret-offer-{}-error", self.approval_id),
+                    &slot.error,
+                    slot.details_open,
+                    error_note::Style::Inline,
+                    &theme,
+                    error_note::Handlers::new()
+                        .try_again(cx.listener(|this, _, _, cx| this.save(cx)))
+                        .toggle_details(cx.listener(|this, _, _, cx| this.toggle_error_details(cx))),
+                ))
             })
             .into_any_element()
     }

@@ -167,10 +167,10 @@ pub enum SyncEvent {
         request_id: String,
         expires_at: Option<i64>,
     },
-    /// Secret hand-off: the card's save finished — `Ok(env)` or the sentence to show.
+    /// Secret hand-off: the card's save finished — `Ok(env)` or the error for the shared note.
     SecretHandoff {
         approval_id: String,
-        result: Result<String, String>,
+        result: Result<String, super::sync::user_error::UserError>,
     },
     /// `GET /voices`: the call voices an agent can use, and the default's id.
     Voices {

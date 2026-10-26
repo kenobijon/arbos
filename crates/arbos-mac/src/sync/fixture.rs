@@ -5742,7 +5742,10 @@ fn seed_chat_docs() -> Vec<ChatDoc> {
                     MessageStatus::Done,
                     vec![text("Sure — I need the Stripe key for that.")],
                 );
-                s.user(concat!("sk_", "test_FIXTURE51HxQ9mT3vK2pLnR8wZ4eYc7bD1fG6hJ0kM9nP5qS2tU8vW3xA1"));
+                s.user(concat!(
+                    "sk_",
+                    "test_FIXTURE51HxQ9mT3vK2pLnR8wZ4eYc7bD1fG6hJ0kM9nP5qS2tU8vW3xA1"
+                ));
                 s.assistant(
                     TurnKind::Act,
                     MessageStatus::Done,

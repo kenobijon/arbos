@@ -4435,7 +4435,10 @@ mod tests {
 
     // ---- secret hand-off: "save this" (POST /box/secrets/from-message) -------------------------
 
-    const HANDOFF_KEY: &str = concat!("sk_", "live_51HxQ9mT3vK2pLnR8wZ4eYc7bD1fG6hJ0kM9nP5qS2tU8vW3xA1");
+    const HANDOFF_KEY: &str = concat!(
+        "sk_",
+        "live_51HxQ9mT3vK2pLnR8wZ4eYc7bD1fG6hJ0kM9nP5qS2tU8vW3xA1"
+    );
 
     fn holds(bytes: &[u8], needle: &str) -> bool {
         let n = needle.as_bytes();

@@ -1292,15 +1292,27 @@ fn start_store_flusher(shared: &Arc<Shared>) {
                     if doc.core.doc.oplog_frontiers().is_empty() {
                         continue;
                     }
-                    doc.core.doc.export(loro::ExportMode::Snapshot)
+                    // Through the core: once a secret redaction reached this room the
+                    // snapshot is shallow (no history), so the store never keeps the old text.
+                    let shallow = doc.core.is_shallow_mode();
+                    let bytes = doc.core.snapshot();
+                    if bytes.is_empty() {
+                        Err(shallow)
+                    } else {
+                        Ok((bytes, shallow))
+                    }
                 };
                 match snapshot {
-                    Ok(bytes) => {
+                    Ok((bytes, shallow)) => {
                         shared.with_store(|s| {
-                            s.save_doc(&key, &project_id, &room_chat, cursor, &bytes)
+                            s.save_doc(&key, &project_id, &room_chat, cursor, &bytes);
+                            if shallow {
+                                s.flush_after_redaction();
+                            }
                         });
                     }
-                    Err(err) => eprintln!("store: export {key}: {err}"),
+                    // An open transact: the export waits for the next tick.
+                    Err(_) => continue,
                 }
             }
             since_caps += 1;
@@ -7168,11 +7180,14 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                             }
                             Ok(e.secret.env)
                         }
-                        Err(_) => {
-                            Err("Couldn't save the secret. The server answered oddly.".to_owned())
-                        }
+                        Err(_) => Err(UserError::of(
+                            "save the secret",
+                            ErrorClass::Server,
+                            "bad secret reply",
+                        )),
                     },
-                    Err(err) => Err(format!("Couldn't save the secret. {}", relay_message(&err))),
+                    // The shared error note (ARB-416) draws it on the card.
+                    Err(err) => Err(UserError::classify("save the secret", &err)),
                 };
                 let _ = shared.events.send(SyncEvent::SecretHandoff {
                     approval_id,
