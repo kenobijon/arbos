@@ -35,6 +35,16 @@ impl PictureTheme {
         hair: "rgba(0,0,0,0.10)",
         palette: &PALETTE_LIGHT,
     };
+    /// The dark app's tokens, for a picture saved from a dark Mac / iPhone.
+    pub const DARK: PictureTheme = PictureTheme {
+        bg: "#141414",
+        text: "#ffffff",
+        muted: "#95959b",
+        faint: "#8a8a8e",
+        grid: "rgba(255,255,255,0.08)",
+        hair: "rgba(255,255,255,0.10)",
+        palette: &crate::chart::PALETTE_DARK,
+    };
 }
 
 fn esc(s: &str) -> String {

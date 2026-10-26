@@ -2,7 +2,7 @@
 //! draw natively — interactive on a current Mac / iPhone, a picture elsewhere. One row in the
 //! target chat (the same `Target` rules as `deliver_file`: its own visible message, never a
 //! worker's hidden row): `text` (the caption) → `attachment` (the PNG agentd renders here, what
-//! an old client shows) → `chart` (the data, `spec_version`, the markdown table, and the id of
+//! an old client shows) → `chart` (the data, `specVersion`, the markdown table, and the id of
 //! the attachment a new client hides). The data lives in the part, under the 32 KB cap; only the
 //! PNG is a blob. Honesty rule as for files (#1900): `posted: true` + the message id only after
 //! the row read back; any failure says NOT posted.
@@ -128,12 +128,12 @@ pub async fn post(
     };
     let attachment = json!({
         "name": file_name, "mime": "image/png", "ref": key, "bytes": png_len, "kind": "image",
-        "title": title, "width": PNG_WIDTH, "height": PNG_HEIGHT, "chart_part": chart_id,
+        "title": title, "width": PNG_WIDTH, "height": PNG_HEIGHT, "chartPart": chart_id,
     });
     let chart_part = json!({
         "id": chart_id,
         "kind": "chart",
-        "spec_version": chart::SPEC_VERSION,
+        "specVersion": chart::SPEC_VERSION,
         "chart": serde_json::to_value(&chart)?,
         "table": chart.table_markdown(),
         "fallback": att_id,
@@ -184,7 +184,7 @@ pub async fn post(
             });
             let has_chart = m.parts.iter().any(|p| {
                 p.get("kind").and_then(Value::as_str) == Some("chart")
-                    && p.get("spec_version").and_then(Value::as_u64)
+                    && p.get("specVersion").and_then(Value::as_u64)
                         == Some(chart::SPEC_VERSION as u64)
                     && p.pointer("/chart/kind").and_then(Value::as_str) == Some(chart.kind.as_str())
             });
@@ -351,7 +351,7 @@ mod tests {
         assert_eq!(att["attachment"]["width"], json!(1200));
         assert!(att["attachment"]["bytes"].as_u64().unwrap() > 10_000);
         let ch = &parts_of_kind(&row, "chart")[0];
-        assert_eq!(ch["spec_version"], json!(1));
+        assert_eq!(ch["specVersion"], json!(1));
         assert_eq!(ch["chart"]["kind"], json!("line"));
         assert_eq!(ch["chart"]["series"][0]["points"][3], json!([4.0, 83.4]));
         assert_eq!(ch["chart"]["y"]["unit"], json!("%"));
@@ -359,7 +359,7 @@ mod tests {
             ch["fallback"], att["id"],
             "the chart names the picture a new client hides"
         );
-        assert_eq!(att["attachment"]["chart_part"], ch["id"]);
+        assert_eq!(att["attachment"]["chartPart"], ch["id"]);
         assert!(ch["table"]
             .as_str()
             .unwrap()
