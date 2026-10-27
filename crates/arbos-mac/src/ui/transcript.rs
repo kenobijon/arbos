@@ -25,6 +25,7 @@ use crate::ui::avatars;
 use crate::ui::cards;
 use crate::ui::chat_search;
 use crate::ui::frost::edge_faded;
+use crate::ui::highlight;
 use crate::ui::icons::icon;
 use crate::ui::markdown::{
     self, has_fenced_code, inline_plain, inline_spans, polish_assistant_prose, split_blocks, Block,
@@ -40,6 +41,7 @@ use crate::ui::theme::{
     Theme, BUBBLE_PAD_X, BUBBLE_PAD_Y, BUBBLE_RADIUS, CHAT_BODY, CHAT_LINE_HEIGHT, COLUMN_MARGIN,
     COMPOSER_HEIGHT, COMPOSER_WIDTH, LINE_HEIGHT, PLUS_BUTTON, TEXT_SMALL, TEXT_TINY,
 };
+use crate::ui::urlwrap;
 use crate::ui::veil::Veil;
 use crate::ui::widgets::QuestionCard;
 use serde_json::Value;
@@ -724,6 +726,10 @@ pub struct Transcript {
     chat_id: Option<Id>,
     list: ListState,
     pub(crate) rows: Vec<Row>,
+    /// Per-message built rows (#1405 / feedback app-01M5Z3QPDA5BRE84SAPADXX05V):
+    /// a send or streaming upsert rebuilds one message, not the whole
+    /// transcript — keeps scrolling and gestures responsive after send.
+    row_cache: MessageRowCache,
     /// Who `@handle` resolves to in this chat's bubbles (mention chips),
     /// rebuilt with the rows.
     mentions: Rc<Mentions>,
@@ -817,6 +823,7 @@ impl Transcript {
             chat_id: None,
             list,
             rows: Vec::new(),
+            row_cache: MessageRowCache::default(),
             mentions: Mentions::empty(),
             link_icons: LinkIcons::empty(),
             pane_open: false,
@@ -977,7 +984,8 @@ impl Transcript {
             }
         };
         if let Some(text) = text {
-            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+            // The URLs' wrap hints stay in the app.
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(urlwrap::plain(&text)));
         }
     }
 
@@ -1370,7 +1378,12 @@ impl Transcript {
             state.active_chat(),
             state.selected_channel.is_some(),
         );
+        if chat_changed {
+            self.row_cache.clear();
+        }
         self.chat_id = chat_id;
+        // Clone the Rc so the row-cache mut borrow does not conflict.
+        let mentions = Rc::clone(&self.mentions);
         // People I blocked: their rows fold into one hidden line for me (the relay's
         // `blockedSenders` hint, else my block list by id) — groups only; a DM with them has
         // the composer bar instead ([feedback blocked-state-mac-2026-10-26]).
@@ -1379,14 +1392,15 @@ impl Transcript {
             .filter(|p| p.is_people_group())
             .map(|p| state.hidden_senders_in(p))
             .unwrap_or_default();
-        let new_rows = build_rows_hiding(
+        let new_rows = build_rows_with_cache(
             &messages,
             show_details,
             speech,
             &me_id,
             &thumb_keys,
-            &self.mentions,
+            &mentions,
             multi_party,
+            &mut self.row_cache,
             &hidden_senders,
         );
         self.multi_party = multi_party;
@@ -1790,7 +1804,7 @@ impl Transcript {
                 .rounded_full()
                 .cursor_pointer()
                 .opacity(opacity)
-                .hover(|s| s.bg(theme.surface_2))
+                .map(|el| highlight::button(el, theme))
                 .child(icon(glyph, RAIL_GLYPH, color))
         };
         div()
@@ -3167,12 +3181,11 @@ impl Render for Transcript {
                                 .items_center()
                                 .justify_center()
                                 .rounded_full()
-                                .bg(theme.card())
                                 .border_1()
                                 .border_color(theme.border_strong)
                                 .shadow_md()
                                 .cursor_pointer()
-                                .hover(|s| s.bg(theme.surface_2))
+                                .map(|el| highlight::washed(el, theme.card(), &theme))
                                 .child(icon("arrow-down", 15.0, theme.text))
                                 .on_click(cx.listener(|this, _, _, cx| this.jump_to_latest(cx)))
                                 .with_animation(
@@ -3438,6 +3451,112 @@ fn is_json_block(block: &Block) -> bool {
         && serde_json::from_str::<serde_json::Value>(t).is_ok()
 }
 
+/// Built rows for one message, keyed by a render version so a streaming
+/// upsert rebuilds only that message (#1405 /
+/// feedback app-01M5Z3QPDA5BRE84SAPADXX05V).
+#[derive(Default)]
+pub struct MessageRowCache {
+    entries: HashMap<Id, CachedMessageRows>,
+    /// How many messages were built (not served from the cache) on the
+    /// last [`build_rows_with_cache`] call. Tests assert a streaming edit
+    /// rebuilds one message, not the whole transcript.
+    pub built: usize,
+}
+
+struct CachedMessageRows {
+    version: u64,
+    rows: Vec<Row>,
+    last_stamp_at: u64,
+    prev_sender: Option<String>,
+}
+
+impl MessageRowCache {
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.built = 0;
+    }
+}
+
+/// Fingerprint of the fields that change a message's rows: text, parts,
+/// status, completed time, reactions, and the stamp / sender-run context
+/// (plus speech / details / thumbs / width-class flags).
+#[allow(clippy::too_many_arguments)]
+fn message_render_version(
+    message: &Message,
+    last_stamp_at: u64,
+    prev_sender: Option<&str>,
+    is_last_reply: bool,
+    show_details: bool,
+    speech: &SpeechRows<'_>,
+    me_id: &str,
+    thumb_keys: &HashSet<&str>,
+    names_senders: bool,
+    // Width class: multi-party layout changes who gets a name caption.
+    width_class: u8,
+) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    message.id.hash(&mut h);
+    std::mem::discriminant(&message.role).hash(&mut h);
+    message.sender.hash(&mut h);
+    std::mem::discriminant(&message.status).hash(&mut h);
+    message.pending.hash(&mut h);
+    message.created_at.hash(&mut h);
+    message.completed_at.hash(&mut h);
+    message.hidden.hash(&mut h);
+    message.worker.hash(&mut h);
+    message.greeting.hash(&mut h);
+    message.waiting_user.hash(&mut h);
+    message.waiting_approval.hash(&mut h);
+    message.plain_text().hash(&mut h);
+    for (emoji, people) in &message.reactions {
+        emoji.hash(&mut h);
+        for (who, on) in people {
+            who.hash(&mut h);
+            on.hash(&mut h);
+        }
+    }
+    // Parts: Debug covers every variant; thumb presence is mixed in so a
+    // late-decoded preview reloads the attachment row.
+    for p in &message.parts {
+        format!("{p:?}").hash(&mut h);
+        if let Part::Attachment { attachment, .. } = p {
+            attachment
+                .blob_ref
+                .as_deref()
+                .is_some_and(|k| thumb_keys.contains(k))
+                .hash(&mut h);
+        }
+    }
+    message.sender_name.hash(&mut h);
+    message.sender_handle.hash(&mut h);
+    message.sender_avatar.hash(&mut h);
+    message.sender_avatar_color.hash(&mut h);
+    message.sender_icon.hash(&mut h);
+    message.in_reply_to.hash(&mut h);
+    message.reply_to.hash(&mut h);
+    message.forwarded_from.hash(&mut h);
+    message.agent_reply_to.hash(&mut h);
+    message.asked_by_handle.hash(&mut h);
+    message.owner_handle.hash(&mut h);
+    message.routine_name.hash(&mut h);
+    message.activity.hash(&mut h);
+    format!("{:?}", message.turn).hash(&mut h);
+    format!("{:?}", message.reply_ref).hash(&mut h);
+    format!("{:?}", message.job).hash(&mut h);
+    last_stamp_at.hash(&mut h);
+    prev_sender.hash(&mut h);
+    is_last_reply.hash(&mut h);
+    show_details.hash(&mut h);
+    speech.enabled.hash(&mut h);
+    speech.voice_mode.hash(&mut h);
+    speech.spoken.contains(&message.id).hash(&mut h);
+    speech.failed.contains_key(&message.id).hash(&mut h);
+    me_id.hash(&mut h);
+    names_senders.hash(&mut h);
+    width_class.hash(&mut h);
+    h.finish()
+}
+
 /// The transcript shows only what the agent said and made: prose, files,
 /// questions, errors. Everything the agent did (tool calls, status events,
 /// JSON, usage) is hidden; the Details drawer has it. One indicator per chat
@@ -3447,8 +3566,8 @@ fn is_json_block(block: &Block) -> bool {
 /// mixed into row versions so a late thumbnail reloads the picture row.
 /// `names_senders` landed from a parallel feedback; keep it a plain arg
 /// rather than a one-off options struct.
-#[allow(clippy::too_many_arguments)]
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 pub fn build_rows(
     messages: &[Message],
     show_details: bool,
@@ -3472,6 +3591,8 @@ pub fn build_rows(
 
 /// [`build_rows`] with the senders I blocked (`user:<id>` keys): their messages fold into
 /// one [`RowKind::Hidden`] line per run instead of bubbles, and carry no date stamp.
+/// Production sync goes through [`build_rows_with_cache`] (same fold, plus the row cache).
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn build_rows_hiding(
     messages: &[Message],
@@ -3483,6 +3604,36 @@ pub fn build_rows_hiding(
     names_senders: bool,
     hidden_senders: &HashSet<String>,
 ) -> Vec<Row> {
+    let mut cache = MessageRowCache::default();
+    build_rows_with_cache(
+        messages,
+        show_details,
+        speech,
+        me_id,
+        thumb_keys,
+        mentions,
+        names_senders,
+        &mut cache,
+        hidden_senders,
+    )
+}
+
+/// Like [`build_rows`], but reuses per-message rows whose render version is
+/// unchanged. A streaming upsert then rebuilds one message, not all of them.
+/// Blocked senders fold into [`RowKind::Hidden`] the same way as [`build_rows_hiding`].
+#[allow(clippy::too_many_arguments)]
+pub fn build_rows_with_cache(
+    messages: &[Message],
+    show_details: bool,
+    speech: SpeechRows<'_>,
+    me_id: &str,
+    thumb_keys: &HashSet<&str>,
+    mentions: &Mentions,
+    names_senders: bool,
+    cache: &mut MessageRowCache,
+    hidden_senders: &HashSet<String>,
+) -> Vec<Row> {
+    cache.built = 0;
     let mine = |m: &Message| {
         m.sender == "user" || m.sender.is_empty() || m.sender == format!("user:{me_id}")
     };
@@ -3505,7 +3656,10 @@ pub fn build_rows_hiding(
     // with no words yet — takes its stamp back, so no date line hangs over
     // empty space above the status row ([feedback status-row-gap-mac-2026-10-26]).
     let mut pending_stamp: Option<(usize, u64, Option<String>)> = None;
+    let width_class = u8::from(names_senders);
+    let mut keep: HashSet<Id> = HashSet::new();
     for (mix, message) in messages.iter().enumerate() {
+        keep.insert(message.id.clone());
         retract_dangling_stamp(
             &mut rows,
             &mut pending_stamp,
@@ -3513,6 +3667,7 @@ pub fn build_rows_hiding(
             &mut prev_sender,
         );
         // Someone I blocked: fold the run into one hidden line, no bubble, no stamp.
+        // Cross-message fold — do not serve from the per-message row cache.
         if message.role == Role::User && hidden_senders.contains(&message.sender) {
             match rows.last_mut() {
                 Some(Row {
@@ -3541,6 +3696,30 @@ pub fn build_rows_hiding(
             prev_sender = None;
             continue;
         }
+        let is_last_reply = last_reply == Some(mix);
+        let version = message_render_version(
+            message,
+            last_stamp_at,
+            prev_sender.as_deref(),
+            is_last_reply,
+            show_details,
+            &speech,
+            me_id,
+            thumb_keys,
+            names_senders,
+            width_class,
+        );
+        if let Some(hit) = cache.entries.get(&message.id) {
+            if hit.version == version {
+                rows.extend(hit.rows.iter().cloned());
+                last_stamp_at = hit.last_stamp_at;
+                prev_sender = hit.prev_sender.clone();
+                pending_stamp = None;
+                continue;
+            }
+        }
+        cache.built += 1;
+        let start = rows.len();
         let streaming = message.is_streaming();
         if message.created_at > 0 && message.created_at.saturating_sub(last_stamp_at) > STAMP_GAP_MS
         {
@@ -4277,6 +4456,25 @@ pub fn build_rows_hiding(
         if rows.len() > rows_before_message {
             prev_sender = Some(message.sender.clone());
         }
+        // Finalize a no-content message's stamp now so the cached slice is
+        // complete (same outcome as retract on the next turn).
+        if rows.len() == rows_before_message {
+            retract_dangling_stamp(
+                &mut rows,
+                &mut pending_stamp,
+                &mut last_stamp_at,
+                &mut prev_sender,
+            );
+        }
+        cache.entries.insert(
+            message.id.clone(),
+            CachedMessageRows {
+                version,
+                rows: rows[start..].to_vec(),
+                last_stamp_at,
+                prev_sender: prev_sender.clone(),
+            },
+        );
     }
     retract_dangling_stamp(
         &mut rows,
@@ -4284,6 +4482,7 @@ pub fn build_rows_hiding(
         &mut last_stamp_at,
         &mut prev_sender,
     );
+    cache.entries.retain(|id, _| keep.contains(id));
     // Who is working is the presence row over the composer (`ui::presence`),
     // not a transcript row: one notice per agent, never a caption plus a line.
     let _ = (running, queued, last_stamp_at, prev_sender);
@@ -4367,7 +4566,9 @@ struct Segment {
 fn block_segments(block: &Block, literal: bool) -> Vec<Segment> {
     let inline = |t: &str| {
         if literal {
-            t.to_string()
+            // As typed, except that bare URLs carry their wrap hints (as
+            // `plain_text` draws them).
+            urlwrap::hint_bare_urls(t)
         } else {
             inline_plain(t)
         }
@@ -4434,7 +4635,7 @@ fn user_bubble_plain(text: &str) -> String {
     if has_fenced_code(text) {
         bubble_plain(&split_blocks(text), true)
     } else {
-        text.to_string()
+        urlwrap::hint_bare_urls(text)
     }
 }
 
@@ -4547,7 +4748,8 @@ fn plain_text(
             }
             let url: String = chars[i..url_end].iter().collect();
             let start = full.len();
-            links.push((start..start + url.len(), url.clone()));
+            // `text` already carries the wrap hints; the target never does.
+            links.push((start..start + url.len(), urlwrap::plain(&url)));
             runs.push(TextRun {
                 len: url.len(),
                 font: font.clone(),
@@ -4619,8 +4821,10 @@ fn user_message_body(
 ) -> AnyElement {
     let key = format!("{row_id}.u");
     if !has_fenced_code(text) {
-        let bubble = selectable.bubble(key, text.to_string());
-        return plain_text(text, color, theme, &bubble, 0);
+        // The same text in the bubble and on screen: `user_bubble_plain`.
+        let text = urlwrap::hint_bare_urls(text);
+        let bubble = selectable.bubble(key, text.clone());
+        return plain_text(&text, color, theme, &bubble, 0);
     }
     let blocks = split_blocks(text);
     let bubble = selectable.bubble(key, bubble_plain(&blocks, true));
@@ -5421,7 +5625,9 @@ fn copy_pill(row_id: &str, code: &str, theme: &Theme, copy: &CodeCopy) -> AnyEle
         .bg(base)
         .text_color(fg)
         .when(!copied, |el| {
+            // hover-fill: exception code-card
             el.hover(move |s| s.bg(hover_bg).text_color(hover_fg))
+                // hover-fill: exception code-card
                 .active(move |s| s.bg(down_bg).text_color(down_fg))
         })
         .child(if copied {
@@ -5608,6 +5814,34 @@ mod selection_tests {
         );
         let one = split_blocks("# not a heading");
         assert_eq!(bubble_plain(&one, true), "not a heading");
+    }
+
+    /// A typed bubble's plain text — what its selection reads — is the text
+    /// its elements draw: bare URLs carry their wrap hints in both, with and
+    /// without a code fence, and every block still starts at its offset.
+    #[test]
+    fn user_bubble_plain_text_hints_its_urls_like_the_elements_draw_them() {
+        let typed = "see https://a.io/x/y now";
+        assert_eq!(user_bubble_plain(typed), urlwrap::hint_bare_urls(typed));
+        assert_ne!(user_bubble_plain(typed), typed, "the hints are in");
+        assert_eq!(urlwrap::plain(&user_bubble_plain(typed)), typed);
+
+        let fenced = "see https://a.io/x/y\n\n```sh\ncurl https://a.io/x/y\n```\n\nhttps://b.io/z";
+        let blocks = split_blocks(fenced);
+        let text = bubble_plain(&blocks, true);
+        assert_eq!(user_bubble_plain(fenced), text);
+        assert!(
+            text.contains(&urlwrap::breakable("https://b.io/z")),
+            "prose URLs are hinted"
+        );
+        assert!(
+            text.contains("curl https://a.io/x/y"),
+            "code is as typed: {text:?}"
+        );
+        for (block, at) in blocks.iter().zip(block_offsets(&blocks, true)) {
+            let plain = block_plain(block, true);
+            assert_eq!(&text[at..at + plain.len()], plain, "block at {at}");
+        }
     }
 
     #[test]
@@ -7873,12 +8107,15 @@ mod link_icon_tests {
         assert_eq!(links.len(), 3);
         assert_eq!(links[0].text, format!("{cell}El Virrey"));
         assert_eq!(links[0].icon.as_deref(), Some("www.elvirrey.com"));
-        assert_eq!(links[1].text, "https://x.com/a", "a bare URL has no cell");
+        // Bare URLs (and a URL as its own label) have no cell; their text
+        // carries the wrap hints (`urlwrap`), their target never does.
+        assert_eq!(urlwrap::plain(&links[1].text), "https://x.com/a");
+        assert_eq!(links[1].text, urlwrap::breakable("https://x.com/a"));
+        assert_eq!(links[1].href.as_deref(), Some("https://x.com/a"));
         assert_eq!(links[1].icon, None);
-        assert_eq!(
-            links[2].text, "https://y.com",
-            "a URL as its own label has no cell"
-        );
+        assert_eq!(urlwrap::plain(&links[2].text), "https://y.com");
+        assert_eq!(links[2].text, urlwrap::breakable("https://y.com"));
+        assert_eq!(links[2].href.as_deref(), Some("https://y.com"));
         assert_eq!(links[2].icon, None);
         assert_eq!(
             markdown::link_host("https://user@Sub.Example.com:8443/p?q#f").as_deref(),
@@ -9285,6 +9522,94 @@ mod delivery_tests {
             vec![Some(Delivery::Delivered), None, Some(Delivery::Pending)],
             "mine: delivered / pending; Sam's bubble: no state"
         );
+    }
+
+    #[test]
+    fn row_cache_returns_cached_rows_and_rebuilds_only_the_changed_message() {
+        let t = 1_700_000_000_000u64;
+        let mut messages = vec![
+            mine("a", t),
+            mine("b", t + 1_000),
+            message("c", "assistant", "agent:x", "streaming", false, t + 2_000),
+        ];
+        // Give the streaming reply some text so it draws a bubble.
+        if let Some(Part::Text { text, .. }) = messages[2].parts.get_mut(0) {
+            *text = "hel".into();
+        }
+        let spoken = HashSet::new();
+        let failed = HashMap::new();
+        let speech = SpeechRows {
+            enabled: false,
+            spoken: &spoken,
+            failed: &failed,
+            voice_mode: false,
+        };
+        let mut cache = MessageRowCache::default();
+        let first = build_rows_with_cache(
+            &messages,
+            false,
+            speech,
+            "gh_me",
+            &HashSet::new(),
+            &Mentions::empty(),
+            false,
+            &mut cache,
+            &HashSet::new(),
+        );
+        assert_eq!(cache.built, 3, "cold build walks every message");
+
+        let speech = SpeechRows {
+            enabled: false,
+            spoken: &spoken,
+            failed: &failed,
+            voice_mode: false,
+        };
+        let again = build_rows_with_cache(
+            &messages,
+            false,
+            speech,
+            "gh_me",
+            &HashSet::new(),
+            &Mentions::empty(),
+            false,
+            &mut cache,
+            &HashSet::new(),
+        );
+        assert_eq!(
+            cache.built, 0,
+            "unchanged messages are served from the cache"
+        );
+        let ids = |rows: &[Row]| -> Vec<(String, u64)> {
+            rows.iter().map(|r| (r.id.clone(), r.version)).collect()
+        };
+        assert_eq!(ids(&first), ids(&again));
+
+        // Streaming upsert: only the last message's text changes.
+        if let Some(Part::Text { text, .. }) = messages[2].parts.get_mut(0) {
+            *text = "hello".into();
+        }
+        let speech = SpeechRows {
+            enabled: false,
+            spoken: &spoken,
+            failed: &failed,
+            voice_mode: false,
+        };
+        let updated = build_rows_with_cache(
+            &messages,
+            false,
+            speech,
+            "gh_me",
+            &HashSet::new(),
+            &Mentions::empty(),
+            false,
+            &mut cache,
+            &HashSet::new(),
+        );
+        assert_eq!(
+            cache.built, 1,
+            "a streaming upsert rebuilds only the changed message"
+        );
+        assert_ne!(ids(&again), ids(&updated));
     }
 
     /// The three states as the row draws them: one bubble per state, no
