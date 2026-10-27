@@ -724,7 +724,9 @@ mod tests {
             &dir("roundtrip"),
         );
         assert!(cx.update(|cx| write(&items, cx)));
-        let back = cx.update(|cx| read(cx)).expect("something on the clipboard");
+        let back = cx
+            .update(|cx| read(cx))
+            .expect("something on the clipboard");
         let formats: Vec<ImageFormat> = back
             .entries()
             .iter()
