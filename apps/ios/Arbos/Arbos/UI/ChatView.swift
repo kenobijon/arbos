@@ -1698,10 +1698,15 @@ struct ChatSession: View {
     private func transcript(width: CGFloat, height: CGFloat) -> some View {
         ScrollViewReader { proxy in
             ScrollView {
-                // VStack (not LazyVStack): a growing vertical TextField resizes the
-                // bottom safe-area inset, and LazyVStack can drop every visible row
-                // for a white transcript until the next layout pass.
-                VStack(alignment: .leading, spacing: 0) {
+                // Lazy: SwiftUI builds and lays out only the rows near the viewport. With a
+                // plain VStack every one of the windowed rows (80 at open, up to 360 while
+                // reading history) was laid out on every change of the row set — a 1.6–2.7 s
+                // frame at open, a 0.3–0.45 s stall per 30-row grow step, 1 s on jump-to-bottom
+                // (iphone-scroll-perf, Time Profiler: 7.7 of 10.3 busy main-thread seconds in
+                // AttributeGraph layout). An older iOS let a LazyVStack drop its visible rows
+                // when the composer's safe-area inset grew; the rig's keyboard / typing pass
+                // on iOS 27 is what guards that now.
+                LazyVStack(alignment: .leading, spacing: 0) {
                     // iOS 17 window growth: report this top edge's position in the scroll space.
                     Color.clear.frame(height: 0)
                         .background(
