@@ -3,7 +3,7 @@
  "lane": "a",
  "category": "identity",
  "title": "The user is addressed by their profile name (Jacob), never by the device's sender name (Const)",
- "regression": "address: profile name wins over the device/sender name",
+ "regression": "address: profile name wins over the device/sender name; #1803 verified on 0.1.155 with a fresh 'Const' device",
  "turns": [
   {
    "assert_state": "named",

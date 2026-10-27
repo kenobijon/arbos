@@ -176,7 +176,9 @@ class Lane(threading.Thread):
             st["dm_chat"], st["dm_peer_token"] = rl.people_dm_with_agent(act["peer_handle"], self.project)
             for other in act.get("also_agents") or []:
                 # a second agent in the same people chat (mention-as-object cases, #1926)
-                pid = self.rs["projects"].get(other)
+                pid = self.rs["projects"].get(other) or self.rs["projects"].get(other.replace("lane-", ""))
+                if not pid:
+                    self.say(f"also_agents: no project for {other!r} (lanes: {sorted(self.rs['projects'])})")
                 if pid:
                     rl.relay("POST", f"/chats/{st['dm_chat']}/agents", {"project_id": pid})
                     st.setdefault("dm_other_agents", {})[other] = pid
@@ -617,7 +619,8 @@ def doc_checks(docs, after_ms=None):
                     texts_after.append(text)
                 # a finished bubble that stops on a comma / dash / mid-word (no closing punctuation,
                 # bracket, quote or code tick) was cut off (#1411)
-                if m.get("status") == "done" and len(text) > 30 and not re.search(r"[.!?…:)\]\"'`*_\d]\s*$|\n\s*[-•*\d].*$|^[\w ,\-]+$|^(\w[\w\- ]*,\s*)+\w[\w\- ]*$", text):
+                # a bubble that ends on a markdown table row (`| … |`) or a code fence is complete
+                if m.get("status") == "done" and len(text) > 30 and not re.search(r"[.!?…:)\]\"'`*_\d|]\s*$|```\s*$|\n\s*[-•*\d].*$|^[\w ,\-]+$|^(\w[\w\- ]*,\s*)+\w[\w\- ]*$", text):
                     truncated.append(text[-60:])
                 sentences = [x.strip() for x in re.split(r"(?<=[.!?])\s+", text) if len(x.strip()) > 25]
                 for x in sentences:

@@ -3,7 +3,7 @@
  "lane": "a",
  "category": "group",
  "title": "The owner renames their profile mid-chat: the agent names ONE owner by the current name and answers the right person (#1908), tie-in to n1",
- "regression": "#1908 (authors resolved by identity, live; former_names retired) — one owner, current name, never the device/sender label",
+ "regression": "#1908 (authors resolved by identity, live; former_names retired) — one owner, current name, never the device/sender label; #1908 verified on 0.1.155 (and #2007 side effect)",
  "turns": [
   {
    "prompt": "@lane-a for the record: I prefer meetings before 10 am. Note it.",
