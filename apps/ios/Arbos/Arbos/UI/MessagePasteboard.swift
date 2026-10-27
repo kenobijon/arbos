@@ -21,6 +21,7 @@
 // are plain `[UTI: value]` dictionaries so the layout is testable without a device.
 
 import Foundation
+import ImageIO
 import UIKit
 import UniformTypeIdentifiers
 
@@ -169,6 +170,29 @@ enum MessagePasteboard {
         }
         return out
     }
+
+    #if DEBUG
+    /// Rig: every item of the general pasteboard — declared types, byte sizes, decoded pixel size.
+    static func debugDump(_ pb: UIPasteboard = .general) {
+        let perItem: [[String]] = pb.types(forItemSet: nil) ?? []
+        print("pasteboard: \(perItem.count) item(s), changeCount \(pb.changeCount)")
+        for (ix, types) in perItem.enumerated() {
+            print(" item \(ix): types \(types)")
+            for t in types {
+                guard let data = pb.data(forPasteboardType: t, inItemSet: IndexSet(integer: ix))?.first else { continue }
+                if t == text, let s = String(data: data, encoding: .utf8) {
+                    print("  \(t): \"\(s)\"")
+                } else if let image = UIImage(data: data) {
+                    let frames = (CGImageSourceCreateWithData(data as CFData, nil)).map { CGImageSourceGetCount($0) } ?? 1
+                    print("  \(t): \(data.count) bytes, \(Int(image.size.width * image.scale))x\(Int(image.size.height * image.scale)) px, \(frames) frame(s)")
+                } else {
+                    print("  \(t): \(data.count) bytes")
+                }
+            }
+        }
+        print(" UIPasteboard.string = \(pb.string.map { "\"\($0)\"" } ?? "nil"), hasImages = \(pb.hasImages), image = \(pb.image.map { "\(Int($0.size.width * $0.scale))x\(Int($0.size.height * $0.scale))" } ?? "nil")")
+    }
+    #endif
 
     private static let stamp: DateFormatter = {
         let f = DateFormatter()

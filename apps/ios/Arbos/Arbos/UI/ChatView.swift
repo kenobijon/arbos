@@ -1195,6 +1195,25 @@ struct ChatSession: View {
                         startCall(.voice)
                         #endif
                     case "recording": recorder.start()
+                    // `copy[:<n>]` (Debug, [feedback copy-image-messages-ios-2026-10-27] rig): Copy of
+                    // the n-th newest message row (0 = newest) through the menu's own path, the
+                    // pasteboard printed to the console, then the composer's paste 2 s later.
+                    case let s where s.hasPrefix("copy"):
+                        #if DEBUG
+                        let n = Int(s.split(separator: ":").dropFirst().first ?? "0") ?? 0
+                        let candidates = rows.filter { isMessageRow($0) }
+                        if n < candidates.count {
+                            let row = candidates[candidates.count - 1 - n]
+                            runMessageMenu(.copy, row: row)
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                                MessagePasteboard.debugDump()
+                                let media = MessagePasteboard.pendingAttachments()
+                                if !media.isEmpty { pending.append(contentsOf: media); composerFocused = true }
+                                if let words = UIPasteboard.general.string { composerDraft.text = words }
+                                print("rig copy: composer staged \(media.count) attachment(s), draft \"\(composerDraft.text)\"")
+                            }
+                        }
+                        #endif
                     case "scrollup":
                         if let first = windowedRows.first { withAnimation { scroller?.scrollTo(first.id, anchor: .top) } }
                     case "media", "media-forward", "media-file":
