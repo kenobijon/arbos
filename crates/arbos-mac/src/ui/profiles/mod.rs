@@ -29,6 +29,7 @@ use gpui::{
 use crate::app::{AppState, ProfilePage};
 use crate::model::{now_ms, Attachment, AttachmentKind, Chat, Id, Message, Part};
 use crate::ui::glass;
+use crate::ui::highlight;
 use crate::ui::icons::icon;
 use crate::ui::link_tile;
 use crate::ui::mention;
@@ -284,9 +285,7 @@ pub(super) fn hero(
         .child(status.to_string());
     let subtitle: AnyElement = match (status_element, status_click) {
         (Some(el), _) => el,
-        (None, Some(f)) => subtitle
-            .cursor_text()
-            .hover(|s| s.bg(theme.field))
+        (None, Some(f)) => highlight::button(subtitle.cursor_text(), theme)
             .on_click(move |e, w, cx| f(e, w, cx))
             .into_any_element(),
         (None, None) => subtitle.into_any_element(),
@@ -429,8 +428,8 @@ pub(super) fn editable_name(
         .max_w(px(SHEET_WIDTH - 64.0))
         .border_color(gpui::transparent_black())
         .when(editable, |el| {
-            el.cursor_text()
-                .hover(|s| s.bg(theme.field).border_color(theme.field_border))
+            let rim = theme.field_border;
+            highlight::button_with(el.cursor_text(), theme, move |s| s.border_color(rim))
         })
         .child(div().truncate().child(name.to_string()))
         .when_some(on_click, |el, f| el.on_click(move |e, w, cx| f(e, w, cx)))
@@ -478,13 +477,8 @@ pub(super) fn tab_bar(
                     FontWeight::NORMAL
                 })
                 .text_color(if on { theme.text } else { theme.text_muted })
-                .bg(if on {
-                    theme.surface_2
-                } else {
-                    gpui::transparent_black()
-                })
                 .cursor_pointer()
-                .hover(|s| s.bg(theme.surface_2))
+                .map(|el| highlight::segment(el, on, theme.surface_2, theme))
                 .child(name.to_string())
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.state.update(cx, |s, cx| s.set_profile_tab(i, cx));
@@ -785,7 +779,7 @@ pub(super) fn link_list(
                 theme,
             )
             .cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
+            .group(kit::HOT)
             .on_click(cx.listener(move |_, _, _, cx| cx.open_url(&url))),
         );
     }
