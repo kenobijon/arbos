@@ -456,8 +456,10 @@ pub async fn send_message(
     // The card's handle is never empty: a legacy device-token account gets its device-name
     // slug, so the row is attributable even without a GitHub login (#1580).
     let me = state.db.user_card(user_id).ok().flatten();
+    let mentions = people::resolve_mentions(&state, &cm, &text);
     let opts = UserMessageOpts {
         reply_to: b.reply_to.filter(|r| !r.trim().is_empty()),
+        mentions: mentions.clone(),
         sender: Some(format!("user:{user_id}")),
         sender_handle: me
             .as_ref()
@@ -478,7 +480,15 @@ pub async fn send_message(
     };
     let base = doc.oplog_vv();
     let message_id = ulid();
-    if let Err(e) = doc.append_user_message(&message_id, &text, device_id, &opts) {
+    // The row and its `send` command in one transaction, as the apps write them (crdt-sync
+    // §6.2). A message without the command is history to the agent, never work: until #2120
+    // this route wrote the row alone and no agent ever answered a message posted through it.
+    let written = doc.transact(|d| {
+        d.append_user_message(&message_id, &text, device_id, &opts)?;
+        d.push_command("send", json!({ "messageId": message_id }), device_id);
+        Ok::<(), arbos_core::doc::CoreError>(())
+    });
+    if let Err(e) = written {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "doc", e.to_string());
     }
     let bytes = doc.export_updates_since(&base);
@@ -510,7 +520,8 @@ pub async fn send_message(
     state.matrix.touch_rows(&state, &id, None);
     boxes::after_person_row(&state, &room, &chat, &people::serving_agents(&state, &cm)).await;
     let sender = notify::Sender::user(&state, user_id);
-    let event_id = notify::announce(&state, &chat, &sender, &message_id, &text).await;
+    let event_id =
+        notify::announce_with(&state, &chat, &sender, &message_id, &text, None, &mentions).await;
     (
         StatusCode::CREATED,
         Json(json!({ "message_id": message_id, "seq": seq, "recorded": event_id.is_some() })),
@@ -1182,6 +1193,19 @@ mod tests {
         let message_id = body["message_id"].as_str().unwrap().to_owned();
         let seq = body["seq"].as_i64().unwrap();
 
+        // The row is work for the agent: a pending `send` command names it (what agentd acts
+        // on; the route used to write the row alone) and the @mention resolved to the agent.
+        let doc = load_doc(&state, &chat, None).unwrap().unwrap();
+        let pending = doc.pending_commands();
+        assert_eq!(pending.len(), 1, "{pending:?}");
+        assert_eq!(pending[0].kind, "send");
+        assert_eq!(pending[0].payload["messageId"], json!(message_id));
+        let row = doc.message(&message_id).expect("row");
+        assert_eq!(
+            row.rest["mentions"],
+            json!([format!("agent:{project}")]),
+            "@hezbola resolves to the agent member"
+        );
         // Announced (what drives unread, pushes and the mirror) and the mirror job is queued.
         assert!(state.db.chat_event_exists(&chat, &message_id).unwrap());
         assert!(state
