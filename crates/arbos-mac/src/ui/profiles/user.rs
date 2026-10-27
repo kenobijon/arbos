@@ -95,7 +95,7 @@ pub(super) fn page(
                 if p.is_people() {
                     groups::picture(p, state, kit::AVATAR, &theme).into_any_element()
                 } else {
-                    avatars::project(p, kit::AVATAR, &theme).into_any_element()
+                    avatars::project_in(state, p, kit::AVATAR, &theme).into_any_element()
                 }
             })
             .collect();
@@ -207,7 +207,7 @@ pub(super) fn page(
                             &theme,
                         )
                         .cursor_pointer()
-                        .hover(|s| s.bg(theme.surface_2))
+                        .group(kit::HOT)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             let pid = pid.clone();
                             this.state.update(cx, |s, cx| {
