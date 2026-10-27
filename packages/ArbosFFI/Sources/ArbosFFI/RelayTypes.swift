@@ -1510,6 +1510,26 @@ public struct MessageGrantsDto: Codable {
 	}
 }
 
+/// `message_redacted` payload: a message's value moved into the vault and the row became the
+/// "Secret saved as NAME" ghost. Devices drop the old text from search and notifications and
+/// persist a shallow snapshot of the room. Names only.
+public struct MessageRedactedPayloadDto: Codable {
+	public let chat_id: String
+	/// Absent for a people chat.
+	public let project_id: String?
+	public let message_id: String
+	public let secret_id: String
+	public let name: String
+
+	public init(chat_id: String, project_id: String?, message_id: String, secret_id: String, name: String) {
+		self.chat_id = chat_id
+		self.project_id = project_id
+		self.message_id = message_id
+		self.secret_id = secret_id
+		self.name = name
+	}
+}
+
 /// One row of `GET /proxy/v1/models` `data[]` (id only; unknown upstream keys ignored).
 public struct ModelListItemDto: Codable {
 	public let id: String
@@ -1525,6 +1545,23 @@ public struct ModelListDto: Codable {
 
 	public init(data: [ModelListItemDto]) {
 		self.data = data
+	}
+}
+
+/// `notifications_cleared` payload: the user read `chat_id` on one of their devices
+/// (`PUT /chats/{id}/read`), so every other device drops the banners it still shows for that
+/// chat and sets its app badge to `badge` — the user's unread total across chats after the
+/// read (Fluxer-style clear-on-read, carried on `/me/pushes` today and as a silent push when
+/// APNs is live). `project_id` is `people` for DMs and groups, else the agent's project.
+public struct NotificationsClearedPayloadDto: Codable {
+	public let chat_id: String
+	public let project_id: String
+	public let badge: Int64
+
+	public init(chat_id: String, project_id: String, badge: Int64) {
+		self.chat_id = chat_id
+		self.project_id = project_id
+		self.badge = badge
 	}
 }
 
@@ -2128,6 +2165,24 @@ public struct SecretDirectorDto: Codable {
 	}
 }
 
+/// Where a secret came from: `settings` (the New secret form) or `chat` (handed to an agent in
+/// a chat — the request card or "save this"). Names and ids only.
+public struct SecretSourceDto: Codable {
+	/// `settings | chat`.
+	public let kind: String
+	/// The agent it was given to, when `chat`.
+	public let project_id: String?
+	public let project_name: String?
+	public let chat_id: String?
+
+	public init(kind: String, project_id: String?, project_name: String?, chat_id: String?) {
+		self.kind = kind
+		self.project_id = project_id
+		self.project_name = project_name
+		self.chat_id = chat_id
+	}
+}
+
 /// Secret as clients see it (`secret_json`). Never carries a secret value.
 public struct SecretDto: Codable {
 	public let id: String
@@ -2154,8 +2209,10 @@ public struct SecretDto: Codable {
 	public let people: [SecretDirectorDto]?
 	/// `refuse | card`: what a non-listed person's ask does (absent = refuse).
 	public let others_ask: String?
+	/// Where it came from (absent on an older relay = settings).
+	public let source: SecretSourceDto?
 
-	public init(id: String, name: String, env: String, kind: String, note: String, hosts: [String], ask_every_time: Bool, inject_env: Bool, expires_at: Int64?, version: Int64, created_at: Int64, updated_at: Int64, last_used_at: Int64?, username: String?, vault_name: String, ref: String, agents: [SecretAccessDto], directors: [SecretDirectorDto], people: [SecretDirectorDto]?, others_ask: String?) {
+	public init(id: String, name: String, env: String, kind: String, note: String, hosts: [String], ask_every_time: Bool, inject_env: Bool, expires_at: Int64?, version: Int64, created_at: Int64, updated_at: Int64, last_used_at: Int64?, username: String?, vault_name: String, ref: String, agents: [SecretAccessDto], directors: [SecretDirectorDto], people: [SecretDirectorDto]?, others_ask: String?, source: SecretSourceDto?) {
 		self.id = id
 		self.name = name
 		self.env = env
@@ -2176,6 +2233,7 @@ public struct SecretDto: Codable {
 		self.directors = directors
 		self.people = people
 		self.others_ask = others_ask
+		self.source = source
 	}
 }
 
@@ -2645,6 +2703,7 @@ public enum PushEventDto: Codable {
 	case spaceArchived(SpaceArchivedPayloadDto)
 	case peopleInviteAccepted(PeopleInviteAcceptedPayloadDto)
 	case feedbackCapture(FeedbackCapturePayloadDto)
+	case messageRedacted(MessageRedactedPayloadDto)
 	case serverMemberRemoved(ServerMemberRemovedPayloadDto)
 	case serverMemberJoined(ServerMemberJoinedPayloadDto)
 	case serverUpdated(ServerUpdatedPayloadDto)
@@ -2659,6 +2718,7 @@ public enum PushEventDto: Codable {
 	case secretExpiring(SecretExpiringPayloadDto)
 	case profileUpdated(ProfileUpdatedPayloadDto)
 	case agentProfileUpdated(AgentProfileUpdatedPayloadDto)
+	case notificationsCleared(NotificationsClearedPayloadDto)
 
 	enum CodingKeys: String, CodingKey, Codable {
 		case peopleMessage = "people_message",
@@ -2675,6 +2735,7 @@ public enum PushEventDto: Codable {
 			spaceArchived = "space_archived",
 			peopleInviteAccepted = "people_invite_accepted",
 			feedbackCapture = "feedback_capture",
+			messageRedacted = "message_redacted",
 			serverMemberRemoved = "server_member_removed",
 			serverMemberJoined = "server_member_joined",
 			serverUpdated = "server_updated",
@@ -2688,7 +2749,8 @@ public enum PushEventDto: Codable {
 			secretsPaused = "secrets_paused",
 			secretExpiring = "secret_expiring",
 			profileUpdated = "profile_updated",
-			agentProfileUpdated = "agent_profile_updated"
+			agentProfileUpdated = "agent_profile_updated",
+			notificationsCleared = "notifications_cleared"
 	}
 
 	private enum ContainerCodingKeys: String, CodingKey {
@@ -2769,6 +2831,11 @@ public enum PushEventDto: Codable {
 					self = .feedbackCapture(content)
 					return
 				}
+			case .messageRedacted:
+				if let content = try? container.decode(MessageRedactedPayloadDto.self, forKey: .payload) {
+					self = .messageRedacted(content)
+					return
+				}
 			case .serverMemberRemoved:
 				if let content = try? container.decode(ServerMemberRemovedPayloadDto.self, forKey: .payload) {
 					self = .serverMemberRemoved(content)
@@ -2839,6 +2906,11 @@ public enum PushEventDto: Codable {
 					self = .agentProfileUpdated(content)
 					return
 				}
+			case .notificationsCleared:
+				if let content = try? container.decode(NotificationsClearedPayloadDto.self, forKey: .payload) {
+					self = .notificationsCleared(content)
+					return
+				}
 			}
 		}
 		throw DecodingError.typeMismatch(PushEventDto.self, DecodingError.Context(codingPath: decoder.codingPath, debugDescription: "Wrong type for PushEventDto"))
@@ -2889,6 +2961,9 @@ public enum PushEventDto: Codable {
 		case .feedbackCapture(let content):
 			try container.encode(CodingKeys.feedbackCapture, forKey: .kind)
 			try container.encode(content, forKey: .payload)
+		case .messageRedacted(let content):
+			try container.encode(CodingKeys.messageRedacted, forKey: .kind)
+			try container.encode(content, forKey: .payload)
 		case .serverMemberRemoved(let content):
 			try container.encode(CodingKeys.serverMemberRemoved, forKey: .kind)
 			try container.encode(content, forKey: .payload)
@@ -2930,6 +3005,9 @@ public enum PushEventDto: Codable {
 			try container.encode(content, forKey: .payload)
 		case .agentProfileUpdated(let content):
 			try container.encode(CodingKeys.agentProfileUpdated, forKey: .kind)
+			try container.encode(content, forKey: .payload)
+		case .notificationsCleared(let content):
+			try container.encode(CodingKeys.notificationsCleared, forKey: .kind)
 			try container.encode(content, forKey: .payload)
 		}
 	}
