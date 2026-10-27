@@ -35,6 +35,7 @@ use crate::ui::feedback::{FeedbackSheet, SendFeedback};
 use crate::ui::frost::{frosted, MENU_BLUR, PANEL_BLUR};
 use crate::ui::glass::{self, WindowDrag};
 use crate::ui::header;
+use crate::ui::highlight;
 use crate::ui::icons::icon;
 use crate::ui::local::{LocalEvent, LocalPanel};
 use crate::ui::media_viewer;
@@ -3133,16 +3134,7 @@ impl Shell {
             sidebar::footer_disc_frame("sidebar-update")
                 .bg(fill)
                 .when(!busy, |el| {
-                    el.cursor_pointer()
-                        .hover(|s| {
-                            s.bg(Theme::lighter(theme.update_disc, sidebar::DISC_HOVER_LIFT))
-                        })
-                        .active(|s| {
-                            s.bg(Theme::lighter(
-                                theme.update_disc,
-                                sidebar::DISC_PRESSED_LIFT,
-                            ))
-                        })
+                    highlight::washed(el.cursor_pointer(), fill, &theme)
                 })
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .child(icon("cloud-download", sidebar::FOOTER_DISC_GLYPH, glyph))
@@ -3404,16 +3396,20 @@ impl Shell {
         // Cap height and clip: a stretched overlay over a long transcript would
         // otherwise centre the pill mid-pane ([feedback
         // local-relay-unarbos-20261024065516774-20261024065609]; iPhone twin
-        // APuu1qHpbKmmpqZeUusEi0Q).
+        // APuu1qHpbKmmpqZeUusEi0Q). The box is the bar plus the connection
+        // capsule's overhang, so the capsule is drawn whole ([feedback
+        // offline-chip-group-header-2026-10-27]); the bar itself stays
+        // `HEIGHT` tall inside it.
         column.child(body).children(bottom).child(
             div()
                 .absolute()
                 .top_0()
                 .left_0()
                 .right_0()
-                .h(px(header::metrics::HEIGHT))
-                .max_h(px(header::metrics::HEIGHT))
+                .h(px(header::metrics::OVERLAY_HEIGHT))
+                .max_h(px(header::metrics::OVERLAY_HEIGHT))
                 .overflow_hidden()
+                .debug_selector(|| "chat-header-overlay".into())
                 .child(header_bar),
         )
     }

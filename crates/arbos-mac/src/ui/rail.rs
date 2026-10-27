@@ -41,6 +41,7 @@ use crate::model::Id;
 use crate::ui::composer::Composer;
 use crate::ui::frost::edge_faded;
 use crate::ui::glass::{self, WindowDrag};
+use crate::ui::highlight;
 use crate::ui::shell::Shell;
 use crate::ui::sidebar::{
     self, is_control_click, ListEntry, StripControl, FOOTER_AVATAR, FOOTER_BOTTOM,
@@ -346,18 +347,19 @@ pub(crate) fn render(shell: &Shell, cx: &mut Context<Shell>) -> gpui::Stateful<D
         let selected = entry.selected();
         let is_hover = hovered.as_ref() == Some(&id);
         let badge = badge(entry.typing(), entry.unread(), selected);
+        // The highlight token's selected / hover steps (`ui::highlight`); the
+        // tile is its own pill (Grok's 54 pt, radius 12), hover tracked here
+        // because the name tip beside the rail follows it.
+        let fills = highlight::fills(&theme);
         let tile_fill = if selected {
-            theme.surface_2
+            fills.selected
         } else if is_hover {
-            Theme::with_alpha(theme.surface_2, 0.55)
+            fills.hover
         } else {
             gpui::transparent_black()
         };
-        let ring = if selected || is_hover {
-            theme.surface_2
-        } else {
-            theme.sidebar
-        };
+        // The badge's ring is the tile's colour as painted on the sidebar.
+        let ring = highlight::over(theme.sidebar, tile_fill);
         let picture = entry.picture(shell, metrics::AVATAR, &theme, cx);
         let is_server = matches!(entry, ListEntry::Server(_));
         let click_id = id.clone();
