@@ -234,72 +234,13 @@ pub async fn on_notify(state: &AppState, body: &Value) -> Vec<String> {
                 {
                     tracing::warn!(device = %device_id, error = %e, "channel push: queue failed");
                 }
-                if state.push.is_on() {
-                    channel_alert(
-                        state,
-                        &server.name,
-                        &ch.name,
-                        room_id,
-                        event_id,
-                        &sender,
-                        text.as_deref(),
-                        device_id,
-                    )
-                    .await;
-                }
+                // The APNs alert for channels follows as its own item once the outbox
+                // pipeline (push-outbox-relay-2026-10-27) is on main; the in-app path is live now.
             }
             (None, None) => {}
         }
     }
     rejected
-}
-
-/// APNs alert for a channel message to one device: "<sender> in #channel" / text, one thread
-/// per room, the same category as message alerts so the apps route the tap.
-#[allow(clippy::too_many_arguments)]
-async fn channel_alert(
-    state: &AppState,
-    server_name: &str,
-    channel_name: &str,
-    room_id: &str,
-    event_id: &str,
-    sender: &Sender,
-    text: Option<&str>,
-    device_id: &str,
-) {
-    let Some(t) = state.db.push_token(device_id).ok().flatten() else {
-        return;
-    };
-    let out = crate::apns::Outgoing {
-        device_token: t.token.clone(),
-        environment: t.environment.clone(),
-        push_type: "alert",
-        topic: None,
-        collapse_id: Some(format!("mx:{event_id}")),
-        payload: json!({
-            "aps": {
-                "alert": {
-                    "title": format!("{} in #{channel_name}", sender.title()),
-                    "subtitle": server_name,
-                    "body": text.unwrap_or("New message"),
-                },
-                "sound": "default",
-                "thread-id": room_id,
-                "category": crate::notify::CATEGORY,
-                "mutable-content": 1,
-            },
-            "room_id": room_id,
-            "event_id": event_id,
-            "channel_name": channel_name,
-            "sender": sender.json(),
-        }),
-    };
-    match state.push.send(out).await {
-        crate::apns::Delivery::TokenGone => {
-            let _ = state.db.delete_push_token_value(&t.token);
-        }
-        crate::apns::Delivery::Sent | crate::apns::Delivery::Failed(_) => {}
-    }
 }
 
 /// The relay `Sender` behind a Matrix event: `life.arbos.sender` when the relay wrote it,
