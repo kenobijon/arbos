@@ -150,6 +150,13 @@ pub enum SyncEvent {
         chat_id: Id,
         archived_at: Option<u64>,
     },
+    /// `notifications_cleared` push: I read `chat_id` on another device. This Mac drops the
+    /// chat's delivered banners, stops showing it unread and re-badges; `badge` is the relay's
+    /// unread total after that read.
+    NotificationsCleared {
+        chat_id: Id,
+        badge: u64,
+    },
     /// `space_archived` push: another device archived / unarchived a sidebar
     /// space (an agent or a server) for me.
     SpaceArchived {
@@ -381,6 +388,11 @@ pub enum SyncEvent {
     MatrixTimeline {
         room_id: String,
         rows: Vec<MessageRow>,
+    },
+    /// D88: a `ChannelLoadOlder` found nothing above — the room's history is
+    /// whole on this Mac (the Search-in-chat bar stops paging and wraps).
+    ChannelHistoryEnd {
+        room_id: String,
     },
     /// D88: homeserver connection state.
     MatrixConnection {

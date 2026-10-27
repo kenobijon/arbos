@@ -1349,7 +1349,11 @@ async fn poll_me_pushes(shared: &Arc<Shared>) {
             | PushEventDto::PeopleAgentAdded(_)
             | PushEventDto::PeopleAgentRemoved(_)
             | PushEventDto::PeopleProjectShared(_) => refresh = true,
-            PushEventDto::PeopleMessage(payload) if !shared.is_people(&payload.chat_id) => {
+            // A people chat we do not list yet: refresh. An agent's reply in a project chat
+            // (`project_id` set) is already on the doc socket; nothing to fetch.
+            PushEventDto::PeopleMessage(payload)
+                if payload.project_id.is_none() && !shared.is_people(&payload.chat_id) =>
+            {
                 refresh = true
             }
             PushEventDto::CallStarted(payload) => {
@@ -1404,6 +1408,33 @@ async fn poll_me_pushes(shared: &Arc<Shared>) {
                         version: payload.version.clone(),
                     });
                 }
+            }
+            // I read this chat on another device: not unread here either (the relay holds the
+            // one cursor), and the app drops its banners for it.
+            PushEventDto::NotificationsCleared(payload) => {
+                let chat_id = payload.chat_id.clone();
+                if chat_id.is_empty() {
+                    continue;
+                }
+                if let Some(c) = shared
+                    .chats
+                    .lock()
+                    .unwrap()
+                    .iter_mut()
+                    .find(|c| c.id == chat_id)
+                {
+                    c.unread = false;
+                    c.unread_count = 0;
+                }
+                shared
+                    .local_read_at
+                    .lock()
+                    .unwrap()
+                    .insert(chat_id.clone(), now_ms() as i64);
+                let _ = shared.events.send(SyncEvent::NotificationsCleared {
+                    chat_id,
+                    badge: payload.badge.max(0) as u64,
+                });
             }
             PushEventDto::FeedbackCapture(payload) => {
                 if !payload.request_id.is_empty() {
@@ -2012,7 +2043,9 @@ fn handle_server_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                             .events
                             .send(SyncEvent::MatrixTimeline { room_id, rows });
                     }
-                    Ok(None) => {}
+                    Ok(None) => {
+                        let _ = shared.events.send(SyncEvent::ChannelHistoryEnd { room_id });
+                    }
                     Err(MatrixError::NoRoom(_)) => {}
                     Err(err) => shared.diagnostic("channel-history", err.to_string()),
                 }
