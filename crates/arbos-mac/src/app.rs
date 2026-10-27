@@ -10759,6 +10759,24 @@ pub fn decode_image(bytes: &[u8]) -> Option<RenderImage> {
     decode_rgba(bytes).and_then(bgra_frame)
 }
 
+/// Decode `bytes` for a small tile: the longer side shrinks to `max_side`
+/// device pixels (never enlarged). The composer's staged thumbnails use it so
+/// a pasted Retina screenshot does not sit in GPU memory at full size.
+pub fn decode_thumbnail(bytes: &[u8], max_side: u32) -> Option<RenderImage> {
+    let img = decode_rgba(bytes)?;
+    let (w, h) = img.dimensions();
+    let long = w.max(h);
+    let img = if long <= max_side || long == 0 {
+        img
+    } else {
+        let scale = max_side as f32 / long as f32;
+        let nw = ((w as f32) * scale).round().max(1.0) as u32;
+        let nh = ((h as f32) * scale).round().max(1.0) as u32;
+        image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Triangle)
+    };
+    bgra_frame(img)
+}
+
 /// Longest side kept for chat-bubble (and lightbox) bitmaps.
 /// Bubbles paint at most ~360×420 pt; 2× covers Retina. Caps GPU memory so
 /// scrolling a chat full of screenshots stays smooth (feedback

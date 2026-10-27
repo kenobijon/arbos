@@ -1092,6 +1092,30 @@ Code: `message_menu::run` (Delete → `AppState::delete_message`),
 `leave_group`); pinned by `message_menu::tests::delete_is_offered_only_when_allowed`
 and `sidebar::row_menu_tests::delete_fires_at_once`.
 
+## Composer: staged attachments (Jacob 2026-10-27, [feedback composer-attachment-removal-2026-10-27]; iPhone [feedback composer-attachment-removal-ios-2026-10-27])
+
+**Every pending attachment in the composer can be removed, with the mouse or
+the keyboard, and removing one never touches the others or the typed text.**
+With files pending the pill opens into the card (redesign mock e, 2026-10-20):
+the strip above the text, "+" bottom-left, mic / send bottom-right.
+
+| Item | Value |
+|---|---|
+| Strip | one horizontal row (`Composer::staged_row`, selector `composer-staged-strip`), tiles **8** apart (`STAGED_GAP`), 12 in from the card's edges; it **scrolls sideways** past the card's width, never wraps into a second row |
+| Tile | **64** tall (`STAGED_TILE`), radius **10** (`STAGED_RADIUS`), fill `surface_2`, a **1 pt `border_strong` hairline drawn as an overlay ring** — one rounded rect per attachment, no shadow, nothing outside it. Pictures are 64 × 64 (thumbnail decoded at ≤ 256 px, `ObjectFit::Cover`); other files are the icon tile · name · size chip, at most 320 wide |
+| Remove disc | **always drawn** (trackpad and keyboard users — never hover-only), a **20 pt** circle (`STAGED_REMOVE`, the hit target) **inset 4** from the tile's top and right (`STAGED_REMOVE_INSET`), black 62 % with a white ✕ and a faint white ring so it reads on dark and light pictures alike; it sits fully inside its tile, so it never overlaps the neighbour. Role `Button`, accessible label and tooltip **"Remove attachment"**; selector `composer-remove-attachment-<i>` |
+| Click | removes that attachment only; the others, the typed text and the caret stay |
+| ⌫ / ⌦ | with an **empty draft** the field has nothing to delete and lets the key through; the composer removes the **last** staged attachment. With text in the draft the keys edit text only — even with the caret at the start, where ⌫ is a no-op — and never the strip. The rule lives on the composer (`delete_key_on_strip`), not in the field's key routing |
+| Empty strip | the card folds back to the 44 pt pill |
+
+Code: `composer::staged_tile`, `remove_attachment`, `delete_key_on_strip`;
+`ComposerInput::backspace` / `delete` propagate when there is nothing to
+delete. Pinned by `composer::staged_tests::{removing_one_attachment_keeps_the_others_and_the_text,
+backspace_on_an_empty_draft_removes_the_last_attachment, the_strip_lays_the_tiles_out_as_pinned}`.
+iPhone: the chip's ✕ has a 24 pt hit frame and the same label; ⌫ on an empty
+field removes the last pending attachment (`MentionUITextView.deleteBackward`);
+pinned by `ComposerMetricsTests` (pending attachments).
+
 ## Secrets agent picker: chips + "Add agent" (Jacob 2026-10-26, [feedback secrets-agent-picker-mac-2026-10-26], iPhone [feedback secrets-agent-picker-ios-2026-10-26])
 
 **Wherever Secrets picks agents, the agents already granted are chips (picture ·
