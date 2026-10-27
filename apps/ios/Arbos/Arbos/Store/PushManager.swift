@@ -9,7 +9,7 @@
 // into a communication notification with the sender's avatar.
 
 import Foundation
-import OSLog
+import os
 import UIKit
 import UserNotifications
 
