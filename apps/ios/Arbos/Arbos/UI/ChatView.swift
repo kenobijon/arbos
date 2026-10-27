@@ -317,19 +317,36 @@ struct ChatSession: View {
     /// Header tap: DM → the other person; group / shared project → the group page; own agent → its page;
     /// server channel → the channel's page (#1317; the server's page is the channel list's header).
     private func openHeaderProfile() {
+        model.toggleProfile(headerTarget)
+    }
+
+    /// What the header pill opens — and, tapped again while that page is up,
+    /// closes (`ProfileToggle`, [feedback profile-pane-toggle-ios-2026-10-26]).
+    private var headerTarget: ProfileTarget {
         if let channel {
-            model.showProfile(.channel(channelId: channel.id))
+            return .channel(channelId: channel.id)
         } else if let people {
             if !people.isGroup, let other = counterpart {
-                model.showProfile(.user(ProfilePerson(other)))
-            } else {
-                model.showProfile(.group(chatId: chatId, projectId: nil))
+                return .user(ProfilePerson(other))
             }
+            return .group(chatId: chatId, projectId: nil)
         } else if project?.shared == true {
-            model.showProfile(.group(chatId: chatId, projectId: projectId))
-        } else {
-            model.showProfile(.agent(projectId: projectId))
+            return .group(chatId: chatId, projectId: projectId)
         }
+        return .agent(projectId: projectId)
+    }
+
+    /// The header pill's accessible label: "Open <name>'s profile" / "Close profile".
+    private var headerLabel: String {
+        let who: String
+        switch headerTarget {
+        case .user(let p): who = p.displayName
+        case .group: who = people?.title.isEmpty == false ? (people?.title ?? name) : name
+        case .agent: who = name
+        case .channel: who = channel?.name ?? name
+        case .server: who = name
+        }
+        return ProfileToggle.label(name: who, showing: model.profileShows(headerTarget))
     }
 
     /// Hardware ⌘F ([feedback iphone-chat-search-cmd-f-2026-10-26]): open the bar, or
@@ -494,7 +511,8 @@ struct ChatSession: View {
                 name: m?.name.flatMap { $0.isEmpty ? nil : $0 } ?? "@\(handle)",
                 activity: .typing,
                 picture: AnyView(PersonAvatar(url: m?.avatarUrl, handle: handle, size: PresenceRow.avatar,
-                                              name: m?.name, id: m?.id, colorIndex: m?.avatarColorIndex))
+                                              name: m?.name, id: m?.id, colorIndex: m?.avatarColorIndex)),
+                target: model.personTarget(handle: handle, avatarUrl: m?.avatarUrl, chatId: chatId)
             ))
         }
         guard streaming else { return out }
@@ -509,14 +527,16 @@ struct ChatSession: View {
                 guard seen.insert(p.id).inserted else { continue }
                 out.append(PresenceParticipant(
                     id: "working:\(p.id)", name: p.name, activity: .working,
-                    picture: AnyView(AgentAvatar(project: p, theme: theme, size: PresenceRow.avatar, working: true))
+                    picture: AnyView(AgentAvatar(project: p, theme: theme, size: PresenceRow.avatar, working: true)),
+                    target: .agent(projectId: p.id)
                 ))
             }
         } else if let project {
             let p = model.agent(id: project.id, name: project.name)
             out.append(PresenceParticipant(
                 id: "working:\(p.id)", name: p.name, activity: .working,
-                picture: AnyView(AgentAvatar(project: p, theme: theme, size: PresenceRow.avatar, working: true))
+                picture: AnyView(AgentAvatar(project: p, theme: theme, size: PresenceRow.avatar, working: true)),
+                target: .agent(projectId: project.id)
             ))
         }
         return out
@@ -609,6 +629,16 @@ struct ChatSession: View {
             let id = m.member.hasPrefix("agent:") ? String(m.member.dropFirst(6)) : m.member
             if let name = m.project?.name ?? m.name, !name.isEmpty { agentNames[id] = name }
         }
+        // People by user id → current name (handle when unnamed); me from the live `/me`.
+        var memberNames: [String: String] = [:]
+        for m in people?.humans ?? [] {
+            let name = m.name?.trimmingCharacters(in: .whitespaces) ?? ""
+            memberNames[m.id] = name.isEmpty ? "@\(m.handle)" : name
+        }
+        if let who = model.user {
+            let name = who.name?.trimmingCharacters(in: .whitespaces) ?? ""
+            memberNames[who.id] = name.isEmpty ? "@\(who.login)" : name
+        }
         let list = messages
         #if DEBUG
         let refreshStarted = Date()
@@ -641,7 +671,7 @@ struct ChatSession: View {
                 let prev = list.count >= 2 ? list[list.count - 2] : nil
                 let slice = prev.map { [$0, last] } ?? [last]
                 let rebuilt = Transcript.rows(slice, byId: byId, projectId: slot, me: me,
-                                              people: peopleFlag, agentNames: agentNames, multiParty: multiParty)
+                                              people: peopleFlag, agentNames: agentNames, multiParty: multiParty, memberNames: memberNames)
                 let newTail: [Row]
                 if let prev {
                     let start = rebuilt.firstIndex(where: { $0.messageId == last.id }).map { ix -> Int in
@@ -668,7 +698,7 @@ struct ChatSession: View {
             let prev = list.count >= 2 ? list[list.count - 2] : nil
             let slice = prev.map { [$0, last] } ?? [last]
             let rebuilt = Transcript.rows(slice, byId: byId, projectId: slot, me: me,
-                                          people: peopleFlag, agentNames: agentNames, multiParty: multiParty)
+                                          people: peopleFlag, agentNames: agentNames, multiParty: multiParty, memberNames: memberNames)
             let newTail: [Row]
             if let prev {
                 let start = rebuilt.firstIndex(where: { $0.messageId == last.id }).map { ix -> Int in
@@ -693,7 +723,7 @@ struct ChatSession: View {
 
         let byId = Transcript.index(list)
         let next = Transcript.rows(list, byId: byId, projectId: slot, me: me,
-                                   people: peopleFlag, agentNames: agentNames, multiParty: multiParty)
+                                   people: peopleFlag, agentNames: agentNames, multiParty: multiParty, memberNames: memberNames)
         // Rows appended after the last one we had (new messages) join the window, so the
         // oldest row on screen does not fall out of the view tree when a new one lands.
         // History that arrives above it — the first snapshot, a backfill, an older
@@ -730,7 +760,9 @@ struct ChatSession: View {
                     // opens that entity's page; every other link goes to the system.
                     .environment(\.openURL, OpenURLAction { url in
                         guard let target = MentionTable.target(from: url, model: model) else { return .systemAction }
-                        model.showProfile(target)
+                        // A chip is a profile target like the sender name beside it: open,
+                        // dismiss on the same subject, swap for someone else (`ProfileToggle`).
+                        model.toggleProfile(target)
                         return .handled
                     })
             }
@@ -872,7 +904,8 @@ struct ChatSession: View {
                         },
                         onDismiss: { closeActions() },
                         bubble: {
-                            RowView(model: model, theme: theme, composerInset: composerSideInset, row: row, chatId: chatId, width: geo.size.width, timeReveal: 0,
+                            RowView(model: model, theme: theme, composerInset: composerSideInset, row: row, chatId: chatId, width: geo.size.width,
+                                    people: isPeople || isChannel, timeReveal: 0,
                                     mentions: MentionTable.Cache.shared.table(model: model, theme: theme))
                                 .padding(.horizontal, 16)
                         }
@@ -1282,9 +1315,11 @@ struct ChatSession: View {
             if isChannel, old.last?.id != new.last?.id { model.markChannelRead(chatId) }
         }
         // Adding a person or agent updates membership without a new message — rebuild so "@handle joined" appears.
-        .onChange(of: people?.members.map { "\($0.id):\($0.joinedAt)" } ?? []) { _, _ in
+        // A member's rename re-words the membership lines that name them, so the key carries names.
+        .onChange(of: people?.members.map { "\($0.id):\($0.joinedAt):\($0.name ?? "")" } ?? []) { _, _ in
             refreshRows()
         }
+        .onChange(of: model.user?.name) { _, _ in refreshRows() }
         .onChange(of: model.caughtUp.contains(chatId), initial: true) { _, ready in
             if ready, !sentOnce, !DebugHooks.liveDemo, let text = DebugHooks.autoSend, DebugHooks.openChat == chatId {
                 // Several messages separated by " ||| " go out a few seconds apart
@@ -1336,22 +1371,13 @@ struct ChatSession: View {
 
     // MARK: Header (floating glass)
 
-    /// Strip the messages scroll under (ref-02): frosted on Glass, solid fade on Matte.
+    /// Strip the messages scroll under (ref-02): the shared `ListTopFade` from the physical
+    /// top edge — frosted on Glass, solid on Matte — plus whatever the header stacks
+    /// (member chips, the Search-in-chat bar, call strips).
     private var headerBlur: some View {
-        ZStack {
-            if theme.isGlass {
-                Rectangle().fill(.ultraThinMaterial)
-            }
-            theme.bg.opacity(theme.isGlass ? 0.78 : 1)
-        }
-        .frame(height: (showsMemberChips ? 156 : 118) + (Controls.diameter - 42) + headerExtra)
-        .mask(LinearGradient(colors: [.black, .black, .clear], startPoint: .top, endPoint: .bottom))
-        .ignoresSafeArea(edges: .top)
-        .allowsHitTesting(false)
+        ListTopFade(screen: .chat, extra: (showsMemberChips ? 38 : 0) + headerExtra)
     }
 
-    /// Which kind of chat this header fronts — the spec is the same for all four
-    /// ([feedback ios-header-glass-2026-10-25]).
     private var headerKind: ChatHeaderKind {
         if channel != nil { return .channel }
         if let people { return people.isGroup ? .group : .dm }
@@ -1401,6 +1427,7 @@ struct ChatSession: View {
                         .contentShape(Rectangle())
                         .onTapGesture { openHeaderProfile() }
                         .accessibilityAddTraits(.isButton)
+                        .accessibilityLabel(headerLabel)
                         .accessibilityHint("Opens the channel details")
                     } else if let people {
                         // One pill for every chat (2026-10-20): avatar + name,
@@ -1445,6 +1472,7 @@ struct ChatSession: View {
                         .contentShape(Rectangle())
                         .onTapGesture { openHeaderProfile() }
                         .accessibilityAddTraits(.isButton)
+                        .accessibilityLabel(headerLabel)
                         .accessibilityHint(people.isGroup ? "Opens group info" : "Opens the profile")
                     } else {
                         HStack(spacing: Theme.headerPillGap) {
@@ -1459,6 +1487,7 @@ struct ChatSession: View {
                         .contentShape(Rectangle())
                         .onTapGesture { openHeaderProfile() }
                         .accessibilityAddTraits(.isButton)
+                        .accessibilityLabel(headerLabel)
                         .accessibilityHint("Opens the agent profile")
                     }
                 }
@@ -1583,6 +1612,7 @@ struct ChatSession: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("New messages")
         .accessibilityHint("Scrolls to the latest message")
+        .accessibilityIdentifier("chat-jump-to-latest")
         .accessibilityAddTraits(.isButton)
         .accessibilityAction { jumpToLatest() }
     }
@@ -1698,6 +1728,7 @@ struct ChatSession: View {
                         model: model,
                         theme: theme,
                         composerInset: composerSideInset,
+                        people: isPeople || isChannel,
                         mentions: mentions,
                         shown: shown,
                         shownStamp: Self.shownStamp(rowsVersion, windowCount, windowSkipEnd, searchText, showSearch),
@@ -1709,6 +1740,7 @@ struct ChatSession: View {
                         messagesCount: messages.count,
                         canReply: { isMessageRow($0) },
                         onQuoteTap: { revealQuoted($0) },
+                        onReply: { beginReply(to: $0) },
                         onMenu: { runMessageMenu($0, row: $1) },
                         actionsRowId: actionsRow?.id,
                         onLongPress: { row in openActions(row) }
@@ -1985,7 +2017,9 @@ struct ChatSession: View {
     private func isMessageRow(_ row: Row) -> Bool {
         if isChannel { return false }
         switch row.kind {
-        case .system, .question, .error, .forwardHint:
+        // A secret ghost row has nothing to copy, forward or quote; Delete stays off too —
+        // the row is the record that a value went to the vault.
+        case .system, .question, .error, .forwardHint, .secretGhost:
             return false
         case .user, .other, .member, .assistant, .file, .voiceMemo, .image:
             return messageById[row.messageId] != nil
@@ -2105,7 +2139,7 @@ struct ChatSession: View {
     }
 
     /// Reply to this row: composer preview + focus (people chats also address the agent).
-    /// Long-press → Reply on the bubble.
+    /// Long-press → Reply on the bubble, and the bubble's swipe right (`BubbleSwipe`).
     private func beginReply(to row: Row) {
         guard let m = messageById[row.messageId] else { return }
         editing = nil
@@ -2293,7 +2327,9 @@ struct ChatSession: View {
                             queued: false,
                             taskCount: jobs.count,
                             onTasks: openTasks,
-                            onWords: openNewest)
+                            onWords: openNewest,
+                            onPicture: { model.toggleProfile($0) },
+                            pictureShowing: { model.profileShows($0) })
                     .padding(.horizontal, 16)
                     // Grok: 68 px from the picture's bottom to the composer's top.
                     .padding(.bottom, Theme.presenceBottomGap)
@@ -2348,6 +2384,7 @@ struct ChatSession: View {
         .clipped()
         .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(theme.bubbleAssistant))
         .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("composer-reply-preview")
     }
 
     /// Reply in DM: the same bar, "Replying to Jacob in Arbonites" + the snapshot the row
@@ -3181,6 +3218,8 @@ private struct TranscriptRows: View, Equatable {
     let model: AppModel
     let theme: Theme
     let composerInset: CGFloat
+    /// People chat: the wider bubble caps (`Theme.peopleBubbleInset`).
+    let people: Bool
     let mentions: MentionTable
     let shown: [Row]
     /// Identity of `shown` (rows version + window bounds + search): compared instead of the array.
@@ -3193,6 +3232,8 @@ private struct TranscriptRows: View, Equatable {
     let messagesCount: Int
     let canReply: (Row) -> Bool
     let onQuoteTap: (Quote) -> Void
+    /// Swipe right on a message bubble (`BubbleSwipe`) → the composer's reply quote.
+    let onReply: (Row) -> Void
     let onMenu: (MessageMenuItem, Row) -> Void
     /// The bubble whose long-press actions are open (it alone reports its frame).
     let actionsRowId: String?
@@ -3202,6 +3243,7 @@ private struct TranscriptRows: View, Equatable {
         let same = lhs.shownStamp == rhs.shownStamp
             && lhs.actionsRowId == rhs.actionsRowId
             && lhs.composerInset == rhs.composerInset
+            && lhs.people == rhs.people
             && lhs.theme == rhs.theme
             && lhs.chatId == rhs.chatId
             && lhs.width == rhs.width
@@ -3227,9 +3269,11 @@ private struct TranscriptRows: View, Equatable {
         let firstId = shown.first?.id
         ForEach(shown) { row in
             let reply = canReply(row)
-            RowView(model: model, theme: theme, composerInset: composerInset, row: row, chatId: chatId, width: width, timeReveal: timeReveal,
+            RowView(model: model, theme: theme, composerInset: composerInset, row: row, chatId: chatId, width: width,
+                    people: people, timeReveal: timeReveal,
                     onQuoteTap: onQuoteTap,
                     highlighted: highlightedMessage == row.messageId,
+                    onReply: reply ? { onReply(row) } : nil,
                     mentions: mentions)
                 .equatable()
                 .padding(.top, row.id == firstId ? 0 : row.gapBefore)
