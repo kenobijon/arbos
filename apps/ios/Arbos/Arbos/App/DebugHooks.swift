@@ -65,6 +65,12 @@ enum DebugHooks {
     /// #1592 rig: the fixture group holds someone else's agent ("TestAgent", run by @sami —
     /// in the roster, not in my projects) with one bubble; with `ARBOS_FIXTURE_WORKING` it works.
     static var fixtureForeignAgent: Bool { value("ARBOS_FIXTURE_FOREIGN_AGENT") == "1" }
+    /// `ARBOS_FIXTURE_BLOCKED=<handle,…>`: these fixture people are on my block list, as
+    /// `GET /blocks` would hand it over (the Mac fixture's hook of the same name; blocked-state
+    /// rig: the DM's bar and tag, the group's folded rows, the member list's tags).
+    static var fixtureBlocked: Set<String> {
+        Set((value("ARBOS_FIXTURE_BLOCKED") ?? "").split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty })
+    }
     /// `ARBOS_FIXTURE_REPLY_DM=1`: rows in the fixture DM that answer messages in other chats
     /// (Reply in DM rig, #1836).
     static var fixtureReplyDM: Bool { value("ARBOS_FIXTURE_REPLY_DM") == "1" }

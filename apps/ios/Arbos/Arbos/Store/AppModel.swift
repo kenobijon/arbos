@@ -4140,7 +4140,8 @@ final class AppModel: ObservableObject {
         return out
     }
 
-    /// Tests: the relay's block list as `GET /blocks` would hand it over.
+    /// Tests and the fixture (`ARBOS_FIXTURE_BLOCKED`): the relay's block list as `GET /blocks`
+    /// would hand it over.
     func setBlockedForTests(_ list: [Person]) { blocked = list }
 
     /// Is this message hidden for me — from someone I blocked, in a people group?

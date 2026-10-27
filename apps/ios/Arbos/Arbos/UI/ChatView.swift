@@ -974,11 +974,9 @@ struct ChatSession: View {
                 .environment(\.theme, theme)
             }
         }
-        .confirmationDialog(BlockedState.confirmTitle(handle: blockedPeer?.handle ?? counterpart?.handle ?? ""), isPresented: $confirmUnblock, titleVisibility: .visible) {
-            Button(BlockedState.unblock) {
-                if let peer = blockedPeer, let entry = BlockRow.entry(in: model.blocked, id: peer.id, handle: peer.handle) { model.unblock(entry) }
-            }
-        } message: { Text(BlockedState.confirmNote) }
+        .confirm(BlockedState.unblockConfirm(handle: blockedPeer?.handle ?? counterpart?.handle ?? ""), isPresented: $confirmUnblock) {
+            if let peer = blockedPeer, let entry = BlockRow.entry(in: model.blocked, id: peer.id, handle: peer.handle) { model.unblock(entry) }
+        }
         .sheet(isPresented: $showProfile) {
             AgentEditSheet(projectId: projectId).environmentObject(model).environment(\.theme, theme)
         }

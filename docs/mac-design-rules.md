@@ -1125,6 +1125,27 @@ Code: `message_menu::run` (Delete → `AppState::delete_message`),
 `leave_group`); pinned by `message_menu::tests::delete_is_offered_only_when_allowed`
 and `sidebar::row_menu_tests::delete_fires_at_once`.
 
+### iPhone: a confirm is a centred alert (Jacob 2026-10-27, [feedback confirm-alerts-ios-2026-10-27])
+
+**Where the iPhone does ask first — Block / Unblock, Leave / Delete a group, server
+or channel, Remove / Ban a member, Delete / Revoke / Scrub a secret, Disconnect a
+vault, Sign out, Reset an invite link — the question is a centred alert: title, a
+one-line note, Cancel · action (red when it removes something), the Mac's two-button
+confirm. Never a sheet or dialog anchored at the screen.** On iOS 26 a
+`.confirmationDialog` presents anchored to the view it is attached to; every one of
+ours hung off a screen's root, so the Unblock question floated in the middle of the
+transcript over someone's messages with no Cancel (`media/feedback/blocked-state/
+after-iphone17-sim-6231fdd8c-2-composer-unblock-confirm-floats-3x.png`). A
+`.confirmationDialog` stays only where it is a *menu on its own control* — the
+mute-duration list on its row, a tapped member's actions on their row, a connector's
+Disconnect on its row — and says so with `// confirm: anchored`.
+
+Code: `UI/Confirm.swift` — `ConfirmSpec` (title · message · action · destructive ·
+cancel) and `View.confirm(_:isPresented:perform:)` / `confirm(item:spec:perform:)`
+over `.alert`; `BlockedState.unblockConfirm`, `BlockRow.blockConfirm`. Pinned by
+`ConfirmFormTests`: the spec's shape, no `.confirmationDialog(` outside the helper
+without the marker (count held at 3), no hand-built destructive-plus-Cancel `.alert(`.
+
 ## Secrets agent picker: chips + "Add agent" (Jacob 2026-10-26, [feedback secrets-agent-picker-mac-2026-10-26], iPhone [feedback secrets-agent-picker-ios-2026-10-26])
 
 **Wherever Secrets picks agents, the agents already granted are chips (picture ·

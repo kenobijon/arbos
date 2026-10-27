@@ -103,13 +103,13 @@ struct SettingsView: View {
             }
             .toolbar(.hidden, for: .navigationBar)
             .navigationBarBackButtonHidden(true)
-            .confirmationDialog("Sign out?", isPresented: $confirmUnpair, titleVisibility: .visible) {
-                Button("Sign out", role: .destructive) {
-                    if model.tokens != nil { model.signOut() } else { model.unpair() }
-                    dismiss()
-                }
-            } message: {
-                Text(model.tokens != nil ? "This device is signed out of the relay; sign in with GitHub to come back." : "You will need a new pairing code to connect again.")
+            .confirm(ConfirmSpec(
+                title: "Sign out?",
+                message: model.tokens != nil ? "This device is signed out of the relay; sign in with GitHub to come back." : "You will need a new pairing code to connect again.",
+                action: "Sign out"
+            ), isPresented: $confirmUnpair) {
+                if model.tokens != nil { model.signOut() } else { model.unpair() }
+                dismiss()
             }
             .onAppear {
                 model.refreshConnectors()
@@ -1053,7 +1053,8 @@ struct ConnectorsPage: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 9)
         .frame(minHeight: 56)
-        .confirmationDialog(
+        // On the connector's own row: anchored to the control, so it stays a dialog.
+        .confirmationDialog( // confirm: anchored
             "Disconnect \(disconnecting?.1 ?? "")?",
             isPresented: Binding(get: { disconnecting != nil && disconnecting?.1 == p.label },
                                  set: { if !$0 { disconnecting = nil } }),
@@ -1207,16 +1208,10 @@ struct DevicesPage: View {
             }
         }
         .task { await model.refreshDevices() }
-        .confirmationDialog(
-            AuthDevice.confirmQuestion(pending?.displayName ?? ""),
-            isPresented: Binding(get: { pending != nil }, set: { if !$0 { pending = nil } }),
-            titleVisibility: .visible
-        ) {
-            Button("Sign out", role: .destructive) {
-                if let d = pending { model.revokeDevice(d.id) }
-                pending = nil
-            }
-            Button("Cancel", role: .cancel) { pending = nil }
+        .confirm(item: $pending, spec: { d in
+            ConfirmSpec(title: AuthDevice.confirmQuestion(d.displayName), message: nil, action: "Sign out")
+        }) { d in
+            model.revokeDevice(d.id)
         }
     }
 
