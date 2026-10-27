@@ -208,6 +208,10 @@ pub struct AppState {
     pub wake_started: Arc<Mutex<HashMap<String, i64>>>,
     /// user_id → ms of the last client row; rows pushed while a box was dying must re-wake it.
     pub last_client_push: Arc<Mutex<HashMap<String, i64>>>,
+    /// `POST /proxy/decisions` answers by request hash (`proxy::DecisionsCache`): every box in
+    /// a people room asks the judge the same question about one message, and one answer for
+    /// all of them is what makes their verdicts agree.
+    pub decisions_cache: Arc<std::sync::Mutex<crate::proxy::DecisionsCache>>,
     /// user_id → wakes that produced no hello within the deadline (stale-box detector).
     pub stale_bounces: Arc<Mutex<HashMap<String, u32>>>,
     pub conn_seq: Arc<std::sync::atomic::AtomicU64>,
@@ -573,6 +577,7 @@ pub(crate) mod test_support {
             box_conns: Arc::new(Mutex::new(HashMap::new())),
             wake_started: Arc::new(Mutex::new(HashMap::new())),
             last_client_push: Arc::new(Mutex::new(HashMap::new())),
+            decisions_cache: Arc::new(std::sync::Mutex::new(Default::default())),
             conn_seq: Arc::new(AtomicU64::new(0)),
             relay_key: Arc::new(RelayKey::derive("test-key")),
             jwt_key: Arc::new(RelayKey::derive("test-key").subkey("jwt")),

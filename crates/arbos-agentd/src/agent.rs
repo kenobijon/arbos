@@ -2148,10 +2148,10 @@ impl Agent {
         let Some(host) = self.sync.host(chat_id).await else {
             return Err(anyhow!("no room for chat {chat_id}"));
         };
-        // People chats route by mention (or, in a group, the decision model): a message not
-        // for this agent is left pending for whoever it is for; humans' own sends are theirs.
-        // Shared addresses ("hey agents", several @agents) stay `taken` until each addressed
-        // agent has replied — see `people_shared_send_open` / sync `new_pending`.
+        // People chats route by the judge (`people.rs`): a message not for this agent is left
+        // pending for whoever it is for; humans' own sends are theirs. When the judge picked
+        // several agents the send stays `taken` until each has replied — see
+        // `people_shared_send_open` / sync `new_pending`.
         // Every human command carries the mention rule, not only `send`: a `steer` the Mac
         // sends while another agent's turn runs ("@gigchadagent you still borked?") is for the
         // named agent, not for whoever happens to be busy.
