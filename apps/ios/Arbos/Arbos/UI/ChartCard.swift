@@ -166,11 +166,94 @@ enum ChartPalette {
 
 // MARK: - Geometry
 
-/// When a finger last went down on a chart plot. The message row's long press is a
+/// How the plot's touch surface decides what a moving finger is (iphone-scroll-perf #2122 rule:
+/// nothing competing with the transcript scroll may be a SwiftUI drag, which cannot fail once it
+/// starts). A mostly horizontal pan is a scrub; anything else is declined at once so the list
+/// scrolls. The other way to read a value is a hold: `ChartScrubHost` begins a scrub after
+/// `holdDuration` with the finger still, and from then on the finger moves freely.
+enum ChartScrub {
+    /// Movement before `claim` is first asked (points).
+    static let minimumDistance: CGFloat = 8
+    /// A finger this long without moving starts a scrub whatever it does next.
+    static let holdDuration: TimeInterval = 0.3
+
+    static func claim(_ translation: CGSize) -> SwipeClaim {
+        abs(translation.width) > abs(translation.height) * 1.15 ? .claimed : .declined
+    }
+}
+
+/// The plot's touch surface: a `DirectionalSwipeRecognizer` (`ChartScrub.claim`), a long press
+/// that scrubs after `ChartScrub.holdDuration`, and a tap that clears the readout. All three are
+/// exclusive with the transcript's scroll pan — the first to begin wins — and each one stamps
+/// `ChartTouch.lastDown` so the row's long press stays quiet.
+struct ChartScrubHost: UIViewRepresentable {
+    var onScrub: (CGPoint) -> Void
+    var onTap: () -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(onScrub: onScrub, onTap: onTap) }
+
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView()
+        view.backgroundColor = .clear
+        view.isAccessibilityElement = false
+        context.coordinator.attach(to: view)
+        return view
+    }
+
+    func updateUIView(_ view: UIView, context: Context) {
+        context.coordinator.onScrub = onScrub
+        context.coordinator.onTap = onTap
+    }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var onScrub: (CGPoint) -> Void
+        var onTap: () -> Void
+
+        init(onScrub: @escaping (CGPoint) -> Void, onTap: @escaping () -> Void) {
+            self.onScrub = onScrub
+            self.onTap = onTap
+        }
+
+        func attach(to view: UIView) {
+            let swipe = DirectionalSwipeRecognizer(target: self, action: #selector(scrubbed(_:)))
+            swipe.minimumDistance = ChartScrub.minimumDistance
+            swipe.decide = { _, translation in ChartScrub.claim(translation) }
+            swipe.delegate = self
+            view.addGestureRecognizer(swipe)
+            let hold = UILongPressGestureRecognizer(target: self, action: #selector(scrubbed(_:)))
+            hold.minimumPressDuration = ChartScrub.holdDuration
+            hold.delegate = self
+            view.addGestureRecognizer(hold)
+            let tap = UITapGestureRecognizer(target: self, action: #selector(tapped))
+            tap.delegate = self
+            view.addGestureRecognizer(tap)
+        }
+
+        @objc private func scrubbed(_ gr: UIGestureRecognizer) {
+            switch gr.state {
+            case .began, .changed:
+                ChartTouch.lastDown = Date()
+                onScrub(gr.location(in: gr.view))
+            case .possible, .ended, .cancelled, .failed:
+                break
+            @unknown default:
+                break
+            }
+        }
+
+        @objc private func tapped() { onTap() }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+            false
+        }
+    }
+}
+
+/// When a chart scrub last reported a point. The message row's long press is a
 /// `simultaneousGesture` (so the chat still scrolls from a bubble), which means it also fires
 /// 0.35 s into a touch-and-hold on the chart; the row asks `holding` and stays quiet while the
-/// reader is holding a value (`messageRowGestures`). A timestamp, not a flag: a cancelled drag
-/// never reports `onEnded`, and a flag would stick.
+/// reader is holding a value (`messageRowGestures`). A timestamp, not a flag: a cancelled
+/// gesture never reports its end, and a flag would stick.
 enum ChartTouch {
     static var lastDown: Date = .distantPast
     static var holding: Bool { Date().timeIntervalSince(lastDown) < 0.6 }
@@ -535,20 +618,17 @@ struct ChartPlot: View {
         .chartLegend(.hidden)
         .chartOverlay { proxy in
             GeometryReader { geo in
-                Rectangle().fill(.clear).contentShape(Rectangle())
-                    .gesture(
-                        DragGesture(minimumDistance: 0)
-                            .onChanged { g in
-                                ChartTouch.lastDown = Date()
-                                guard let frame = proxy.plotFrame else { return }
-                                let xPos = g.location.x - geo[frame].origin.x
-                                guard let x: Double = proxy.value(atX: xPos) else { return }
-                                let near = model.columnNear(x)
-                                if near != selected { Haptics.pick() }
-                                selected = near
-                            }
-                    )
-                    .onTapGesture { selected = nil }
+                ChartScrubHost(
+                    onScrub: { point in
+                        guard let frame = proxy.plotFrame else { return }
+                        let xPos = point.x - geo[frame].origin.x
+                        guard let x: Double = proxy.value(atX: xPos) else { return }
+                        let near = model.columnNear(x)
+                        if near != selected { Haptics.pick() }
+                        selected = near
+                    },
+                    onTap: { selected = nil }
+                )
                 if let sel = selected, sel < model.columns.count, let frame = proxy.plotFrame {
                     let plot = geo[frame]
                     let px = proxy.position(forX: model.columns[sel].x) ?? 0
