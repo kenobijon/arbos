@@ -1620,6 +1620,23 @@ impl AppState {
                 reachable,
             } => self.on_call_ready(call, created, reachable, cx),
             SyncEvent::CallStarted { call, sender } => self.on_call_started(call, sender, cx),
+            SyncEvent::ChannelMessage {
+                server_id,
+                server_name,
+                channel_id,
+                channel_name,
+                room_id,
+                sender,
+                text,
+            } => self.notify_channel_message(
+                &server_id,
+                &server_name,
+                &channel_id,
+                &channel_name,
+                &room_id,
+                &sender,
+                text.as_deref(),
+            ),
             SyncEvent::FeedbackCapture {
                 request_id,
                 expires_at,
@@ -7879,8 +7896,75 @@ impl AppState {
         self.sync_focus();
     }
 
-    /// A click on a notification: bring the window up and show that chat.
+    /// A server channel message (relay `channel_message` push, from the homeserver's push
+    /// rules — every member but the sender): a banner "<sender> in #channel" unless that
+    /// channel is on screen in a focused window or the server is muted. The coalescer keys
+    /// it under `server:<id>` so a busy server folds into "N updates in <server>".
+    #[allow(clippy::too_many_arguments)]
+    fn notify_channel_message(
+        &mut self,
+        server_id: &str,
+        server_name: &str,
+        channel_id: &str,
+        channel_name: &str,
+        room_id: &str,
+        sender: &crate::model::Sender,
+        text: Option<&str>,
+    ) {
+        let key = format!("server:{server_id}");
+        let visible = self.window_active
+            && self
+                .selected_channel
+                .as_ref()
+                .is_some_and(|c| c.server_id == server_id && c.channel_id == channel_id);
+        let gate = Gate {
+            streaming: false,
+            visible: visible || self.is_muted(&key),
+        };
+        let title = if sender.kind == "agent" || sender.handle.is_empty() {
+            sender.name.clone()
+        } else {
+            format!("@{}", sender.handle)
+        };
+        let mut event = NotifyEvent::new(
+            key,
+            server_name.to_string(),
+            NotifyKind::DirectMessage,
+            text.filter(|t| !t.is_empty())
+                .map(|t| format!("#{channel_name}: {t}"))
+                .unwrap_or_else(|| format!("#{channel_name}: new message")),
+        );
+        event.chat_id = Some(room_id.to_string());
+        event.sender = Some(title);
+        event.image = if sender.kind == "agent" {
+            crate::ui::avatars::notification_png(
+                &sender.id,
+                &sender.name,
+                sender.avatar_color_index,
+                crate::ui::theme::system_is_dark(),
+            )
+        } else if sender.avatar_url.is_empty() {
+            None
+        } else {
+            self.person_notification_png(&sender.avatar_url)
+        };
+        self.notifier.offer(event, now_ms(), gate);
+    }
+
+    /// A click on a notification: bring the window up and show that chat — or, for a
+    /// server channel banner (its id is the room id), that channel.
     pub fn open_chat_from_notification(&mut self, chat_id: Id, cx: &mut Context<Self>) {
+        let channel = self.servers.iter().find_map(|s| {
+            s.channels
+                .iter()
+                .find(|c| c.room_id.as_deref() == Some(chat_id.as_str()))
+                .map(|c| (s.id.clone(), c.id.clone()))
+        });
+        if let Some((server_id, channel_id)) = channel {
+            self.select_channel(server_id, channel_id, cx);
+            cx.activate(true);
+            return;
+        }
         let project_id = self
             .chats
             .values()

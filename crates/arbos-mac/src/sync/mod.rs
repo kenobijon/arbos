@@ -182,6 +182,17 @@ pub enum SyncEvent {
         call: Call,
         sender: Sender,
     },
+    /// A message in a server channel (`channel_message` push from the relay's Matrix push
+    /// gateway): the banner source for servers, which never pass through the chat docs.
+    ChannelMessage {
+        server_id: String,
+        server_name: String,
+        channel_id: String,
+        channel_name: String,
+        room_id: String,
+        sender: Sender,
+        text: Option<String>,
+    },
     /// A call ended (push, or my `leave` answered `ended: true`).
     CallEnded(CallEnded),
     /// A call in one of my chats ended and I never joined (`call_missed` push).
