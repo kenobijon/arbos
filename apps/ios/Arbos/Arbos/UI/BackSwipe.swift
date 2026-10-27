@@ -39,17 +39,20 @@ enum BackSwipe {
 
     static func startsAtEdge(_ start: CGPoint) -> Bool { start.x < edgeZoneWidth }
 
-    /// An edge drag decides early (6 pt) and leans horizontal: it claims the touch as soon as
-    /// the finger moves right at least half as much as up or down, declines only when the
-    /// motion is clearly vertical (twice as much up/down as right), and otherwise waits for
-    /// the next point. The scroll view's own pan begins at ~10 pt, so a rightward edge drag
-    /// is the pop's before the transcript can take it (Jacob, 2026-10-26: the edge always pops).
+    /// An edge drag decides early (6 pt): it claims the touch as soon as the finger has moved
+    /// right at least as much as up or down (the same "more sideways than vertical" shape
+    /// `edgePops` asks for at the end), fails at once when the motion is leftward or clearly
+    /// vertical (twice as much up/down as right), and otherwise waits for the next point. The
+    /// scroll view's own pan begins at ~10 pt, so a rightward edge drag is the pop's before the
+    /// transcript can take it (Jacob, 2026-10-26: the edge always pops), while a scroll that
+    /// happens to start in the edge zone is the transcript's as before.
     static let edgeLockDistance: CGFloat = 6
 
     static func edgeLock(translation: CGSize) -> SwipeClaim {
         let dx = translation.width, dy = abs(translation.height)
-        if dx > 0, dx >= dy * 0.5 { return .claimed }
-        if dy > max(dx, 0) * 2 { return .declined }
+        if dx <= 0 { return .declined }
+        if dx >= dy { return .claimed }
+        if dy > dx * 2 { return .declined }
         return .undecided
     }
 

@@ -73,13 +73,16 @@ final class BackSwipeTests: XCTestCase {
         XCTAssertTrue(BackSwipe.isBackSwipe(translation: long, velocity: fast, start: CGPoint(x: 200, y: 759), composerTop: 760, bubbleSwipeActive: false))
     }
 
-    /// The UIKit edge recognizer (iphone-scroll-perf) decides at 6 pt and leans horizontal: a
-    /// rightward start claims the touch before the scroll view's own pan can; a clearly
-    /// vertical start fails at once; anything between waits for the next point.
+    /// The UIKit edge recognizer (iphone-scroll-perf) decides at 6 pt, before the scroll view's
+    /// own ~10 pt pan: a start that is at least as rightward as it is vertical claims the touch
+    /// (the shape `edgePops` asks for at the end, so the pop never loses to the transcript);
+    /// a leftward or clearly vertical start fails at once (a scroll from the edge zone stays the
+    /// transcript's, as under #1985); anything between waits for the next point.
     func testAnEdgeDragClaimsEarlyAndFailsFastOnVerticalMotion() {
         XCTAssertEqual(BackSwipe.edgeLockDistance, 6)
         XCTAssertEqual(BackSwipe.edgeLock(translation: CGSize(width: 6, height: 0)), .claimed)
-        XCTAssertEqual(BackSwipe.edgeLock(translation: CGSize(width: 4, height: 6)), .claimed, "right at least half as much as down")
+        XCTAssertEqual(BackSwipe.edgeLock(translation: CGSize(width: 5, height: 5)), .claimed, "as much right as down: the pop's")
+        XCTAssertEqual(BackSwipe.edgeLock(translation: CGSize(width: 4, height: 6)), .undecided, "more down than right, not yet clearly a scroll")
         XCTAssertEqual(BackSwipe.edgeLock(translation: CGSize(width: 2, height: 8)), .declined, "twice as much down as right: a scroll")
         XCTAssertEqual(BackSwipe.edgeLock(translation: CGSize(width: 0, height: -9)), .declined, "straight up")
         XCTAssertEqual(BackSwipe.edgeLock(translation: CGSize(width: -6, height: 0)), .declined, "left")
