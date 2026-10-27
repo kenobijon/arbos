@@ -1349,7 +1349,11 @@ async fn poll_me_pushes(shared: &Arc<Shared>) {
             | PushEventDto::PeopleAgentAdded(_)
             | PushEventDto::PeopleAgentRemoved(_)
             | PushEventDto::PeopleProjectShared(_) => refresh = true,
-            PushEventDto::PeopleMessage(payload) if !shared.is_people(&payload.chat_id) => {
+            // A people chat we do not list yet: refresh. An agent's reply in a project chat
+            // (`project_id` set) is already on the doc socket; nothing to fetch.
+            PushEventDto::PeopleMessage(payload)
+                if payload.project_id.is_none() && !shared.is_people(&payload.chat_id) =>
+            {
                 refresh = true
             }
             PushEventDto::CallStarted(payload) => {
@@ -2012,7 +2016,9 @@ fn handle_server_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                             .events
                             .send(SyncEvent::MatrixTimeline { room_id, rows });
                     }
-                    Ok(None) => {}
+                    Ok(None) => {
+                        let _ = shared.events.send(SyncEvent::ChannelHistoryEnd { room_id });
+                    }
                     Err(MatrixError::NoRoom(_)) => {}
                     Err(err) => shared.diagnostic("channel-history", err.to_string()),
                 }
