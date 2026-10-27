@@ -664,7 +664,7 @@ struct ForwardSheet: View {
         if attachmentNote {
             return "Sends it as a new message, “\(MediaAlbum.forwardedPrefix)\(fromName)”."
         }
-        return "Sends the text as a new message."
+        return "Opens the chat with the text ready to send."
     }
 
     var body: some View {
@@ -999,21 +999,26 @@ extension AppModel {
         }
     }
 
-    /// Bubble long-press → Forward: send the message's text to `target` as a
-    /// new message (no reply quote — it is a fresh send in that chat) carrying
-    /// `forwardedFrom: by`, so every client draws "Forwarded from <by>" on it
-    /// (feedback app-01M5MXRZ7609S70P9S9P2RZDDF).
+    /// Bubble long-press → Forward: open `target` with the message text drafted
+    /// in the composer (user taps Send). Carries `forwardedFrom: by` so the
+    /// eventual send draws "Forwarded from <by>" (feedback
+    /// app-01M5MXRZ7609S70P9S9P2RZDDF, app-01M5YF7JWEZXPD1JSKBH9TMCES).
     func forwardText(_ text: String, from by: String, to target: ForwardTarget) {
         let body = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !body.isEmpty else { return }
         let name = by.trimmingCharacters(in: .whitespacesAndNewlines)
         let forwardedFrom = name.isEmpty ? nil : name
+        let chatId: Id
         switch target.kind {
         case .people(let c):
-            sendPeople(chatId: c.id, text: body, replyTo: nil, forwardedFrom: forwardedFrom)
+            chatId = c.id
+            open(peopleChat: c)
         case .agent(let p):
             guard let chat = primaryChat(of: p.id) else { return }
-            send(chatId: chat.id, text: body, forwardedFrom: forwardedFrom)
+            chatId = chat.id
+            open(chat: chat)
         }
+        setComposerDraft(body, for: chatId)
+        pendingForwardDraft = (chatId, body, forwardedFrom)
     }
 }
