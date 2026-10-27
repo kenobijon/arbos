@@ -1043,10 +1043,8 @@ extension AppModel {
             for c in payload.charts {
                 var fallbackRef: String?
                 if let a = c.fallback, let data = await fetchForForward(a, slot: slot) {
-                    let key = AppModel.blobKey(for: a.name)
                     do {
-                        _ = try await api.putBlob(projectId: targetSlot, key: key, mime: a.mime, data: data)
-                        fallbackRef = key
+                        fallbackRef = try await uploadBlob(slot: targetSlot, name: a.name, mime: a.mime, data: data)
                     } catch {
                         notice = Notice(text: "Attachment upload failed: \(error.localizedDescription)")
                     }

@@ -4850,6 +4850,15 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Upload one attachment's bytes under `slot` (`people:<chat>` or a project id) with a
+    /// fresh relay key; returns the key the row references. Forward copies a chart's fallback
+    /// picture into the target chat's slot with it ([feedback forward-attachments-ios-2026-10-27]).
+    func uploadBlob(slot: String, name: String, mime: String, data: Data) async throws -> String {
+        let key = AppModel.blobKey(for: name)
+        _ = try await api.putBlob(projectId: slot, key: key, mime: mime, data: data)
+        return key
+    }
+
     /// Blob object name for `PUT /blob/{project}/{key}`. The relay's `safe_key` only
     /// allows ASCII alnum plus `-_.:` and caps length at 128 — match Mac/`agentd`.
     static func blobKey(for name: String) -> String {
