@@ -1537,6 +1537,11 @@ pub struct Agent {
     /// Running subagents → (chat id, progress message id), so a file a subagent delivers lands
     /// on its own card (F10 `deliver_file`).
     pub subagent_msgs: Mutex<HashMap<String, (String, String)>>,
+    /// Per chat: the message ids of files / charts that were written and READ BACK from the doc
+    /// (`media::deliver`, `chart::post`), newest last. The only ground a "posted" sentence may
+    /// stand on (#1900, #2025: a timed-out gated call was upgraded to "the chat service
+    /// confirmed it" 66 s later).
+    pub posted_ledger: Mutex<HashMap<String, Vec<(String, i64)>>>,
     /// Group-chat bookkeeping (chat kinds from the registry, this box's "Projects ⇄" tab).
     pub groups: crate::groups::GroupState,
     pub people: crate::people::PeopleState,
@@ -1657,6 +1662,7 @@ impl Agent {
             skills: SkillsIndex::new(),
             approvals: crate::approval::Approvals::default(),
             subagent_msgs: Mutex::new(HashMap::new()),
+            posted_ledger: Mutex::new(HashMap::new()),
             groups: crate::groups::GroupState::default(),
             people: crate::people::PeopleState::default(),
             turn_images: std::sync::Mutex::new(Vec::new()),
@@ -6114,6 +6120,29 @@ impl Agent {
         if text.is_empty() && activity.is_none() {
             return Err("nothing to send".into());
         }
+        // #2025: a sentence that says a file / chart / picture is posted or confirmed is sent
+        // only when a read-back row exists for this chat since the turn's ask. A timed-out or
+        // gated call never becomes "confirmed" later.
+        if claims_posted(text) {
+            let (chat_id, since) = {
+                let tl = self.turn.lock().await;
+                match tl.as_ref() {
+                    Some(t) => (
+                        t.chat_id.clone(),
+                        arbos_core::ids::now_ms() - t.started.elapsed().as_millis() as i64 - 60_000,
+                    ),
+                    None => return Err("no turn is running".into()),
+                }
+            };
+            if !self.posted_since(&chat_id, since).await {
+                tracing::warn!(chat_id = %chat_id, "send_message claimed a post with no read-back row; refused");
+                self.append_audit(
+                    "posted_claim_refused",
+                    json!({ "chat_id": chat_id, "text": text.chars().take(200).collect::<String>() }),
+                );
+                return Err(POSTED_CLAIM_REFUSAL.into());
+            }
+        }
         let mut tl = self.turn.lock().await;
         let Some(t) = tl.as_mut() else {
             return Err("no turn is running".into());
@@ -6279,6 +6308,26 @@ impl Agent {
     /// `route.reply`? The ack is not the answer: on 0.1.131 an act ack promoted to a bubble
     /// counted as "posted", the fallback stayed quiet, and the user kept only "Reading the
     /// README … now." (#1776, six eval failures; the same shape as #1355 / #1699).
+    /// Record a read-back attachment row for `chat_id` (called by `media::deliver` and
+    /// `chart::post` after the row was read back, never before).
+    pub async fn note_posted(&self, chat_id: &str, msg_id: &str) {
+        let mut l = self.posted_ledger.lock().await;
+        let v = l.entry(chat_id.to_owned()).or_default();
+        v.push((msg_id.to_owned(), arbos_core::ids::now_ms()));
+        if v.len() > 32 {
+            v.drain(..v.len() - 32);
+        }
+    }
+
+    /// Something was posted and read back in `chat_id` at or after `since_ms`.
+    pub async fn posted_since(&self, chat_id: &str, since_ms: i64) -> bool {
+        self.posted_ledger
+            .lock()
+            .await
+            .get(chat_id)
+            .is_some_and(|v| v.iter().any(|(_, at)| *at >= since_ms))
+    }
+
     fn posted_result(t: &TurnState) -> bool {
         !t.streamed_text.trim().is_empty()
             || t.progress_texts.iter().any(|p| !p.trim().is_empty())
@@ -9030,6 +9079,88 @@ pub(crate) fn is_abort_text(detail: &str) -> bool {
             && (l.contains("signal") || l.contains("cancel") || l.ends_with("aborted"))
 }
 
+/// What the model is told when it claims a post nothing backs (#2025).
+pub(crate) const POSTED_CLAIM_REFUSAL: &str = "Not sent: this message says a file, picture or chart is posted / attached / confirmed, but no deliver_file or post_chart call returned `posted: true` in this chat for this ask — a timed-out, pending or failed call did NOT post anything, and nothing confirms later. Either call deliver_file / post_chart now and wait for `posted: true`, or tell the user plainly that it is not posted yet (and what you will do). Never say \"posted\", \"attached\" or \"confirmed\" otherwise.";
+
+/// Does this bubble claim that a file / picture / chart is in the chat? Matches the shapes seen
+/// (#1900 "I've posted the logo … as an image card", #2025 "the chart is posted … the chat
+/// service then confirmed it", "attached it above", "now appears inline"); a plain future tense
+/// ("I will post", "posting … now") or a negation ("not posted", "did not confirm") is not a
+/// claim.
+pub(crate) fn claims_posted(text: &str) -> bool {
+    let t = text.to_ascii_lowercase();
+    if t.contains("not posted")
+        || t.contains("not been posted")
+        || t.contains("didn't post")
+        || t.contains("did not post")
+        || t.contains("haven't posted")
+        || t.contains("have not posted")
+        || t.contains("did not confirm")
+        || t.contains("didn't confirm")
+        || t.contains("could not post")
+        || t.contains("couldn't post")
+        || t.contains("not confirmed")
+    {
+        return false;
+    }
+    let object = [
+        "chart",
+        "image",
+        "picture",
+        "png",
+        "file",
+        "logo",
+        "photo",
+        "pdf",
+        "card",
+        "attachment",
+        "screenshot",
+        "diagram",
+        "plot",
+        "graph",
+    ];
+    let has_object = object.iter().any(|o| t.contains(o));
+    if !has_object {
+        return false;
+    }
+    let claims = [
+        "is posted",
+        "are posted",
+        "was posted",
+        "i've posted",
+        "i have posted",
+        "i posted",
+        "posted above",
+        "posted below",
+        "posted in the chat",
+        "posted it",
+        "posted the",
+        "is attached",
+        "i've attached",
+        "i have attached",
+        "attached above",
+        "attached it",
+        "attached the",
+        "now appears",
+        "appears above",
+        "appears inline",
+        "shows above",
+        "is in the chat",
+        "is in this chat",
+        "already in this chat",
+        "already in the chat",
+        "service confirmed",
+        "confirmed it",
+        "was confirmed",
+        "is confirmed",
+        "landed in the chat",
+        "delivered as an image",
+        "delivered as a card",
+        "sent it as an image",
+    ];
+    claims.iter().any(|c| t.contains(c))
+}
+
 /// The prompt of a `TurnKind::JobFallback` turn: the job is gone, do the ask here and now.
 pub(crate) fn job_fallback_prompt(
     job: &JobSpec,
@@ -9346,6 +9477,38 @@ mod tests {
         let r = ModelError::from_message(&refused).unwrap();
         assert!(r.refusal);
         assert!(r.chat_line_after_ack("Jacob").contains("declined"));
+    }
+
+    /// #2025 (chart proof, 0.1.159): after a gated post_chart timed out the agent wrote
+    /// "Correction: the chart is posted … the chat service then confirmed it" with no read-back
+    /// row. A posted/attached/confirmed sentence is a claim; negations and futures are not.
+    #[test]
+    fn posted_claims_are_recognised() {
+        assert!(claims_posted("Correction: the chart is posted. The first call timed out, but the chat service then confirmed it."));
+        assert!(claims_posted(
+            "I've posted the logo directly into the chat as an image card."
+        ));
+        assert!(claims_posted("The chart is already in this chat."));
+        assert!(claims_posted(
+            "Posy, the black-background logo (1500x1500) is posted in the chat again as a picture."
+        ));
+        assert!(claims_posted("Attached the PDF above."));
+        assert!(!claims_posted(
+            "The chart did not confirm as posted. Should I post it again?"
+        ));
+        assert!(!claims_posted(
+            "Posting the logo image directly in chat now."
+        ));
+        assert!(!claims_posted(
+            "I could not post the file: it does not exist."
+        ));
+        assert!(!claims_posted("London is 7 hours ahead of you right now."));
+        assert!(!claims_posted(
+            "The report is ready; I will post it once you approve the card."
+        ));
+        assert!(!claims_posted(
+            "It is not posted yet; the card above needs your approval."
+        ));
     }
 
     /// Proof run 1 (2026-10-26 01:0x UTC): "Here are seven well-rated San Jose restaurants,
