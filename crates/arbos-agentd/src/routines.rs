@@ -230,10 +230,13 @@ impl Agent {
                     tracing::warn!(error = %e, "channel_message push failed");
                 }
             }
-            "people_agent_added" => {
+            // `people_chat_open` (#2120): a person's row landed in a people room this box
+            // holds no socket in — open it now with the relay's joined_at as the line (never a
+            // late-join "now", which would discard the very row that triggered the push).
+            "people_agent_added" | "people_chat_open" => {
                 if let Some(chat_id) = payload.get("chat_id").and_then(Value::as_str) {
                     if let Err(e) = self.join_people_chat(chat_id).await {
-                        tracing::warn!(error = %e, chat_id, "people_agent_added push failed");
+                        tracing::warn!(error = %e, chat_id, kind, "people chat push failed");
                     }
                 }
             }
