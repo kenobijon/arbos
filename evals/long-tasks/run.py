@@ -728,6 +728,7 @@ def main():
     seed = box.pi_seed(HERE.parent.parent)
     seed_line = lambda s: f"pi-ext seed {'ok' if s['ok'] else 'MISMATCH' if s['ok'] is False else 'unverified'} — {s['reason']} (image {s['image']}, source_sha {str(s.get('source_sha'))[:12]}, tag commit {str(s.get('tag_commit'))[:12]})"  # noqa: E731
     print(f"preflight: {seed_line(seed)}", flush=True)
+    print(f"preflight: relay binary {box.relay_build()}", flush=True)
     if seed["ok"] is False and args.refresh_stale_seed:
         # the persisted /etc of a host-sandbox box keeps the seed of the image that created it (fleet.rs
         # seed_etc runs once); re-copy /etc/arbos from the current image and restart so agentd re-seeds
@@ -770,6 +771,7 @@ def main():
         "image": box.image,
         "agentd": box.agentd_sha(),
         "pi_seed": seed,
+        "relay_build": box.relay_build(),
         "provider": box.provider,
         "user": box.user,
         "projects": projects,
@@ -806,6 +808,9 @@ def main():
         print(f"end-of-run sweep: deleted {swept} leftover routine(s)", flush=True)
     spent_end, _ = rl.spent_today()
     meta["ended_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    meta["relay_build_at_end"] = box.relay_build()
+    if meta.get("relay_build") and meta["relay_build_at_end"] != meta["relay_build"]:
+        print(f"NOTE: the relay binary changed during the run: {meta['relay_build']} -> {meta['relay_build_at_end']}; every task reads rows through a client path (arbosctl), so verdicts around the change are suspect", flush=True)
     meta["spent_today_at_end"] = spent_end
     meta["run_cost_usd"] = round(spent_end - spent, 4)
     meta["judge_cost_usd"] = round(sum(r.get("judge_usd") or 0 for r in results), 4)

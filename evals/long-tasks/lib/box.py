@@ -116,6 +116,17 @@ class Box:
         code, out = self.root("cat /opt/arbos/agentd.sha 2>/dev/null || arbos-agentd --version 2>/dev/null || cat /etc/arbos-image 2>/dev/null; true")
         return out.strip()[:80]
 
+    def relay_build(self):
+        """What relay binary serves this run: the deployed file's mtime and the commit sha embedded in it
+        (the relay has no /version; a P0 rollback mid-run must be visible in the record)."""
+        if self.provider == "daytona":
+            return {}
+        cmd = "stat -c %y /usr/local/bin/arbos-relay; strings /usr/local/bin/arbos-relay | grep -oE '[0-9a-f]{40}' | sort | uniq -c | sort -rn | head -1"
+        p = subprocess.run(["ssh", "-i", SSH_KEY, "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", SSH_HOST, cmd], capture_output=True, text=True, timeout=90)
+        lines = p.stdout.strip().splitlines()
+        sha = lines[1].split()[-1] if len(lines) > 1 and lines[1].split() else None
+        return {"binary_mtime": lines[0][:19] if lines else None, "sha": sha}
+
     def refresh_etc_arbos(self):
         """Re-copy `/etc/arbos` (pi-seed, claude-seed, prime-seed, AGENTS.md) from the box's current
         image into its persisted `/etc` (fleet.rs `seed_etc` copies the image's /etc only on the
