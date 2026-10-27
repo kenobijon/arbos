@@ -3550,6 +3550,8 @@ pub fn on_room_push(
         from_handle: handle_of(state, user_id),
         seq: head + 1,
         sender: crate::notify::Sender::user(state, user_id).dto(),
+        project_id: None,
+        text: None,
     });
     for other in humans.iter().filter(|u| *u != user_id) {
         // A member who blocked the sender hears nothing of this row (hidden for them alone).
