@@ -273,13 +273,22 @@ reference, so Matte (no window vibrancy) is not an excuse for a flat fill.
 default) and he saw the solid `bubble_assistant` pill on his AffineTeam group
 (v0.6.268). Recipe (`glass::header_surface` + `glass::header_frost`,
 `Theme::header_glass*`): the list blurred through the control's rounded
-bounds, a see-through fill (dark `#3b3f45` @ 56 %, light white @ 60 % — the
-same on both surfaces; the backdrop blur composites ≈ 20 % darker than its
-source on Metal and wgpu alike, so over flat `#fcfcfc` the light pill lands
-near the `#ededed` of the solid pill it replaces), a 1 pt rim (white 18 % /
-black 10 %), a top highlight (white 30 % / 90 %) and a 1 pt lift. Sizes and
-placements are untouched; the rest of the glass restyle stays paused. Pinned
-by `header::glass_tests` (every kind × surface × appearance).
+bounds at a **light** blur (`glass::HEADER_BLUR` 5 pt — a line of transcript
+passing under the pill stays legible; the menus' 16 pt turned it to mush), a
+see-through fill (dark `#3b3f45` @ **30 %**, light white @ 60 % — the same on
+both surfaces; the backdrop blur composites ≈ 20 % darker than its source on
+Metal and wgpu alike, so over flat `#fcfcfc` the light pill lands near the
+`#ededed` of the solid pill it replaces), a 1 pt rim (white **30 %** / black
+10 %), a top highlight (white **45 %** / 90 %) and a 1 pt lift. The dark pill
+is read as glass the way Grok Bot's is over its black page: ≈ +12/255 above
+the page, its shape carried by the rim, the transcript visible through it —
+not as a plate. (v0.6.275 shipped 56 % / 18 % / 30 % / 16 pt and Jacob's
+14:15 CR shot still read "opaque dark gray"; [feedback
+mac-header-pill-see-through-2026-10-26].) White text on it keeps ≥ 4.5:1
+because the pill always lies over the chat column — the page on Matte, the
+85 % page wash on Glass. Sizes and placements are untouched; the rest of the
+glass restyle stays paused. Pinned by `header::glass_tests` (every kind ×
+surface × appearance; `the_dark_pill_is_see_through_and_its_text_still_reads`).
 
 ## Message timestamps (Jacob 2026-10-24, [feedback timestamps-hover-only-2026-10-24])
 
