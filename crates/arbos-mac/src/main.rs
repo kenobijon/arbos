@@ -262,6 +262,15 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-shift-right", composer::SelectWordRight, input),
         KeyBinding::new("alt-shift-left", composer::SelectWordLeft, input),
         KeyBinding::new("alt-shift-right", composer::SelectWordRight, input),
+        // Caret chords of NSTextView ([feedback composer-caret-shortcuts-2026-10-27],
+        // Jacob): ⌘← / ⌘→ = start / end of the *visual* (wrapped) line
+        // (`moveToLeftEndOfLine:` / `moveToRightEndOfLine:`), ⌘↑ / ⌘↓ = start /
+        // end of the whole draft (`moveToBeginningOfDocument:` /
+        // `moveToEndOfDocument:`), ⇧ extends the selection the same way
+        // (`…AndModifySelection:`), ⌘⌫ deletes to the visual line's start
+        // (`deleteToBeginningOfLine:`). All in the "ComposerInput" context only:
+        // with the composer unfocused the chords fall through to whatever else
+        // binds them (nothing today).
         KeyBinding::new("home", composer::Home, input),
         KeyBinding::new("end", composer::End, input),
         KeyBinding::new("shift-home", composer::SelectHome, input),
@@ -270,6 +279,11 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-right", composer::End, input),
         KeyBinding::new("cmd-shift-left", composer::SelectHome, input),
         KeyBinding::new("cmd-shift-right", composer::SelectEnd, input),
+        KeyBinding::new("cmd-up", composer::DocumentStart, input),
+        KeyBinding::new("cmd-down", composer::DocumentEnd, input),
+        KeyBinding::new("cmd-shift-up", composer::SelectDocumentStart, input),
+        KeyBinding::new("cmd-shift-down", composer::SelectDocumentEnd, input),
+        KeyBinding::new("cmd-backspace", composer::DeleteToLineStart, input),
         KeyBinding::new("cmd-a", composer::SelectAll, input),
         KeyBinding::new("ctrl-a", composer::SelectAll, input),
         KeyBinding::new("cmd-v", composer::Paste, input),
@@ -446,6 +460,54 @@ mod keymap_tests {
                 first("shift-enter", &[plain]).as_deref(),
                 Some("composer::Newline")
             );
+        });
+    }
+
+    /// The caret chords ([feedback composer-caret-shortcuts-2026-10-27]) are
+    /// the focused composer's; outside it nothing takes them (no chat-list or
+    /// transcript binding swallows ⌘↑ / ⌘↓ before the input).
+    #[gpui::test]
+    fn caret_chords_route_to_the_focused_composer_only(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            bind_keys(cx);
+            let mut composer = gpui::KeyContext::default();
+            composer.add("ComposerInput");
+            let root = gpui::KeyContext::default();
+            let keymap = cx.key_bindings();
+            let first = |keys: &str, stack: &[gpui::KeyContext]| {
+                let stroke = Keystroke::parse(keys).expect("keystroke");
+                keymap
+                    .borrow()
+                    .bindings_for_input(&[stroke], stack)
+                    .0
+                    .first()
+                    .map(|b| b.action().name().to_string())
+            };
+            let chords = [
+                ("cmd-up", "composer::DocumentStart"),
+                ("cmd-down", "composer::DocumentEnd"),
+                ("cmd-left", "composer::Home"),
+                ("cmd-right", "composer::End"),
+                ("cmd-shift-up", "composer::SelectDocumentStart"),
+                ("cmd-shift-down", "composer::SelectDocumentEnd"),
+                ("cmd-shift-left", "composer::SelectHome"),
+                ("cmd-shift-right", "composer::SelectEnd"),
+                ("cmd-backspace", "composer::DeleteToLineStart"),
+                ("alt-left", "composer::WordLeft"),
+                ("alt-right", "composer::WordRight"),
+            ];
+            for (keys, action) in chords {
+                assert_eq!(
+                    first(keys, std::slice::from_ref(&composer)).as_deref(),
+                    Some(action),
+                    "{keys} in the composer"
+                );
+                assert_eq!(
+                    first(keys, std::slice::from_ref(&root)),
+                    None,
+                    "{keys} outside the composer is nobody's"
+                );
+            }
         });
     }
 
