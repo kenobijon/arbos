@@ -771,6 +771,12 @@ struct ChatSession: View {
                     // A tap on a mention chip (`arbos://mention/<kind>/<id>`, MentionChips.swift)
                     // opens that entity's page; every other link goes to the system.
                     .environment(\.openURL, OpenURLAction { url in
+                        // A tap on a hidden `||spoiler||` (`arbos://spoiler/<key>`) shows it for
+                        // this viewer; nothing leaves the device.
+                        if let key = SpoilerState.key(from: url) {
+                            SpoilerState.shared.toggle(key)
+                            return .handled
+                        }
                         guard let target = MentionTable.target(from: url, model: model) else { return .systemAction }
                         // A chip is a profile target like the sender name beside it: open,
                         // dismiss on the same subject, swap for someone else (`ProfileToggle`).
