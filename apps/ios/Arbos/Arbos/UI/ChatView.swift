@@ -2517,14 +2517,21 @@ struct ChatSession: View {
                                         .font(theme.font(12))
                                 }
                                 Text(a.name).font(theme.font(Theme.tiny)).lineLimit(1)
-                                Button { pending.removeAll { $0.id == a.id } } label: {
-                                    Image(systemName: "xmark").font(.system(size: 10, weight: .bold))
+                                // The remove ✕: always drawn, a full-size hit target
+                                // (not the 10 pt glyph alone), named for VoiceOver
+                                // ([feedback composer-attachment-removal-ios-2026-10-27]).
+                                Button { removePending(a.id) } label: {
+                                    Image(systemName: "xmark").font(.system(size: Theme.pendingRemoveGlyph, weight: .bold))
+                                        .frame(width: Theme.pendingRemoveHit, height: Theme.pendingRemoveHit)
+                                        .contentShape(Rectangle())
                                 }
                                 .buttonStyle(.plain)
+                                .accessibilityLabel("Remove attachment")
+                                .accessibilityIdentifier("composer-remove-attachment")
                             }
                             .foregroundStyle(theme.text)
                             .padding(.leading, thumb != nil ? 4 : 10)
-                            .padding(.trailing, 10)
+                            .padding(.trailing, Theme.pendingChipTrailing)
                             .padding(.vertical, thumb != nil ? 3 : 6)
                             .background(Capsule().fill(theme.bubbleAssistant))
                         }
@@ -2540,6 +2547,26 @@ struct ChatSession: View {
                 textField
             }
         }
+    }
+
+    /// The chip's ✕: that one goes, the others and the draft stay.
+    private func removePending(_ id: UUID) {
+        pending = Self.removingPending(id, from: pending)
+    }
+
+    /// ⌫ on an empty draft (`MentionTextView.onDeleteBackwardEmpty`): the last
+    /// pending attachment goes; with text in the draft the key edits text only.
+    private func removeLastPending() {
+        pending = Self.removingLastPending(from: pending, draftEmpty: composerDraft.text.isEmpty)
+    }
+
+    static func removingPending(_ id: UUID, from list: [AppModel.PendingAttachment]) -> [AppModel.PendingAttachment] {
+        list.filter { $0.id != id }
+    }
+
+    static func removingLastPending(from list: [AppModel.PendingAttachment], draftEmpty: Bool) -> [AppModel.PendingAttachment] {
+        guard draftEmpty, !list.isEmpty else { return list }
+        return Array(list.dropLast())
     }
 
     /// The "+" before the field: photos and files. Channels send text only (C1), so none there.
@@ -2620,6 +2647,7 @@ struct ChatSession: View {
             memoDragX: memoDragX,
             cancelDistance: Self.memoCancelDistance,
             prompt: { composerPrompt(for: $0) },
+            onDeleteBackwardEmpty: removeLastPending,
             onCancelRecording: cancelMemoRecording,
             onMicDrag: { value in
                 if !memoHoldActive {
@@ -3483,6 +3511,8 @@ private struct ComposerField: View {
     let memoDragX: CGFloat
     let cancelDistance: CGFloat
     let prompt: (String) -> String
+    /// ⌫ on an empty field: the chat screen drops its last pending attachment.
+    let onDeleteBackwardEmpty: () -> Void
     let onCancelRecording: () -> Void
     let onMicDrag: (DragGesture.Value) -> Void
     let onMicEnd: (DragGesture.Value) -> Void
@@ -3593,7 +3623,8 @@ private struct ComposerField: View {
                 // chips as attachments; `draft.text` stays the plain `@handle` text.
                 MentionTextView(text: $draft.text, mentions: $draft.mentions, caret: $draft.caret, isFocused: $focus,
                                 placeholder: prompt(draft.text), theme: theme,
-                                agentProject: { model.agent(member: $0, chatId: chatId) })
+                                agentProject: { model.agent(member: $0, chatId: chatId) },
+                                onDeleteBackwardEmpty: onDeleteBackwardEmpty)
                     .fixedSize(horizontal: false, vertical: true)
             }
             // Grok's trailing cluster: mic glyph centre 24 pt before the pill, the pill
