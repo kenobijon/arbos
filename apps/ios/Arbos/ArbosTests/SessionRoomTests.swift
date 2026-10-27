@@ -334,7 +334,7 @@ final class SessionRoomTests: XCTestCase {
             sock.sent.contains { (try? decodeFrame(bytes: $0))?.ty == .rowsReq }
         }
         sock.deliver(try encodeFrame(ty: .rowsDone, headerJson: #"{"headSeq":0}"#, payload: Data()))
-        try await waitUntil { pushBatchIds(sock.sent) == ["batch-1"] }
+        try await waitUntil { self.pushBatchIds(sock.sent) == ["batch-1"] }
 
         // Blocked by the other person of the DM: refused, standing (no tight loop).
         let errHeader = try JSONSerialization.data(
@@ -356,7 +356,7 @@ final class SessionRoomTests: XCTestCase {
 
         // Nothing changed yet: the nudge resends once with the original id and lifts the flag.
         XCTAssertTrue(room.retryRefused())
-        try await waitUntil { pushBatchIds(sock.sent) == ["batch-1", "batch-1"] }
+        try await waitUntil { self.pushBatchIds(sock.sent) == ["batch-1", "batch-1"] }
         XCTAssertFalse(room.isPushRefused)
         XCTAssertEqual(sockets.sockets.count, 1, "a retry never redials")
         XCTAssertEqual(room.reconnects, 0)
