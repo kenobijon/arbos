@@ -135,7 +135,7 @@ pub fn tile_slot(preview: &LinkPreview, ui: Option<&Rc<LinkUi>>, theme: &Theme) 
     } else if let Some((image, tone)) = host_icon.as_ref() {
         link_tile::tile(Icon::Picture(image, *tone), TILE, theme)
     } else {
-        link_tile::tile(Icon::Initial(&host), TILE, theme)
+        link_tile::tile(Icon::Initial(host.clone()), TILE, theme)
     };
     tile.debug_selector(|| "link-tile".into())
 }
