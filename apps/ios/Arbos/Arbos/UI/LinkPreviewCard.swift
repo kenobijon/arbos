@@ -7,18 +7,23 @@ import SwiftUI
 /// **expanded** = the picture on top at 16:9 (▶ and the duration on a video), the text under
 /// it. Every card opens out: a tap is the link's tap (`openURL`, where `LinkConfirm` slots in).
 /// Remove preview lives in the long-press menu (`MessageMenu`), for everyone. The footer's
-/// small square is the **site-icon tile slot**: neutral until the shared link-icon tile
-/// component lands (bc-1ceabe13); no favicon is fetched here.
+/// small square is the shared link-icon tile (`LinkTile`): the host's bundled brand mark, else
+/// the relay's `siteIcon` picture on the part, else the relay's host icon, else the host's
+/// initial — the card itself fetches nothing from the site.
 struct LinkPreviewCard: View {
     @Environment(\.theme) private var theme
     @Environment(\.openURL) private var openURL
     @EnvironmentObject private var model: AppModel
+    /// Host icons for the tile: the card redraws when one arrives.
+    @ObservedObject private var linkIcons = LinkIcons.shared
     let preview: LinkPreview
     let chatId: Id
     let messageId: Id
     /// My own (grey) bubble: white ink, lighter muted tones.
     let own: Bool
     @State private var picture: UIImage?
+    /// The relay's `siteIcon` for the part, from the chat's blob slot.
+    @State private var siteIcon: UIImage?
 
     static let radius: CGFloat = 12
     static let pad: CGFloat = 10
@@ -112,11 +117,22 @@ struct LinkPreviewCard: View {
         .accessibilityIdentifier("link-art")
     }
 
-    /// The neutral square the shared tile component replaces.
+    /// The host the card stands for: `siteHost` from the relay, else the URL's host.
+    private var host: String {
+        if let h = preview.siteHost, !h.isEmpty { return h }
+        let h = preview.openURL?.host ?? ""
+        return h.hasPrefix("www.") ? String(h.dropFirst(4)) : h
+    }
+
+    /// The footer's tile: the shared link tile — brand mark, else the part's `siteIcon`
+    /// picture, else the relay's host icon, else the host's letter.
     private var tileSlot: some View {
-        RoundedRectangle(cornerRadius: 3, style: .continuous)
-            .fill(muted.opacity(0.28))
-            .frame(width: Self.tile, height: Self.tile)
+        let picture: (image: UIImage, tone: LinkIconTone)? = {
+            if LinkBrand.of(host: host) != nil { return nil }
+            if let siteIcon { return (image: siteIcon, tone: LinkIconTone.of(siteIcon)) }
+            return linkIcons.picture(for: host)
+        }()
+        return LinkTile(url: preview.openURL, host: host, picture: picture, size: Self.tile)
             .accessibilityIdentifier("link-tile")
     }
 
@@ -217,6 +233,13 @@ struct LinkPreviewCard: View {
     /// The preview picture is a blob in the chat's slot, loaded with the device bearer like
     /// an attachment (`MediaFetch`); nothing is fetched from the site itself.
     private func load() async {
+        if let icon = preview.siteIcon, !icon.ref.isEmpty, !preview.slot.isEmpty, LinkBrand.of(host: host) == nil {
+            let item = MediaItem(id: "\(messageId)#li", name: icon.ref, mime: icon.mime, kind: .image,
+                                 blobRef: icon.ref, slot: preview.slot, by: "", at: 0)
+            if let (data, _) = await MediaFetch.bytes(for: item, model: model), let img = UIImage(data: data) {
+                siteIcon = img
+            }
+        }
         guard let image = preview.image, !image.ref.isEmpty, !preview.slot.isEmpty else { return }
         let item = MediaItem(id: "\(messageId)#lp", name: image.ref, mime: image.mime, kind: .image,
                              blobRef: image.ref, slot: preview.slot, by: "", at: 0)
