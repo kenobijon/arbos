@@ -231,8 +231,21 @@ enum Transcript {
             if message.voice { continue }
             // A background job's row (duplex §2.3, `job` + `hidden`) is wordless by design:
             // its status parts feed the presence line and the tasks sheet, never a bubble —
-            // not while it runs, not the "no answer" stock line when it ends.
-            if message.hidden || message.job != nil { continue }
+            // not while it runs, not the "no answer" stock line when it ends. One exception:
+            // a file or picture the worker delivered onto that row (agentd ≤ 0.1.150 put
+            // `deliver_file` there — Jacob's SN120 chart, 2026-10-27, "the chart is in the
+            // card above" over nothing) still draws as its card, so a posted file is never
+            // invisible on a box that has not upgraded.
+            if message.hidden || message.job != nil {
+                for part in message.parts {
+                    if case .attachment(let id, let a) = part {
+                        rows.append(attachmentRow(id: "\(message.id)#\(id)", message: message, a: a,
+                                                  projectId: projectId, fromUser: false, agentNames: agentNames,
+                                                  lane: people && message.senderHandle != nil))
+                    }
+                }
+                continue
+            }
             // A background worker's spawn row (`worker: true`, Grok parity trait 15) draws nothing at
             // all — no hand-off line, no legacy status line, no date separator. Its `activity` reaches
             // the working line through `AppModel.currentActivity`. Skipping only the hand-off name
