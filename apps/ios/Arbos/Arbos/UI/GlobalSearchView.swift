@@ -66,8 +66,9 @@ struct GlobalSearchResults: View {
 
     var body: some View {
         let groups = self.groups
+        ScrollViewReader { proxy in
         List {
-            Color.clear.frame(height: 66)
+            Color.clear.frame(height: HomeChrome.barOnlyListTop)
                 .listRowInsets(EdgeInsets())
                 .listRowSeparator(.hidden)
                 .listRowBackground(Color.clear)
@@ -122,6 +123,8 @@ struct GlobalSearchResults: View {
             try? await Task.sleep(nanoseconds: 1_200_000_000)
             let rows = GlobalSearch.flatten(self.groups)
             if rows.indices.contains(n - 1) { open(rows[n - 1]) }
+        }
+        .rigListScroll(proxy, ids: GlobalSearch.flatten(groups).map(\.id))
         }
         .fullScreenCover(item: $viewer) { v in
             MediaViewer(album: v.items, index: v.index, onClose: { viewer = nil })
