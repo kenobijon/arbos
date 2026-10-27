@@ -266,7 +266,9 @@ pub fn card(
     };
     let open_ui = ui.cloned();
     let open_url = url.clone();
-    let mut card = div()
+    // The card is a filled control: the one hover / pressed wash composited over its
+    // `code_bg` fill (`ui::highlight::washed`), like the pills on `surface_2`.
+    let card = div()
         .id(SharedString::from(format!("{row_id}#link")))
         .relative()
         .flex()
@@ -274,15 +276,14 @@ pub fn card(
         .w_full()
         .max_w(px(CARD_MAX_WIDTH))
         .rounded(px(CARD_RADIUS))
-        .bg(theme.code_bg)
         .border_1()
         .border_color(theme.border)
         .overflow_hidden()
         .cursor_pointer()
-        .hover(|s| s.bg(Theme::with_alpha(gpui::black(), 0.36)))
         .debug_selector(|| "link-card".into())
-        .group(group.clone())
-        .on_click(move |_, window, cx| {
+        .group(group.clone());
+    let mut card =
+        super::highlight::washed(card, theme.code_bg, theme).on_click(move |_, window, cx| {
             if let Some(ui) = &open_ui {
                 (ui.on_open)(open_url.clone(), window, cx);
             }
