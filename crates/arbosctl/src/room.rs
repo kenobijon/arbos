@@ -407,9 +407,11 @@ async fn run(
                 // Import every row, whatever its seq: a Loro update is idempotent, and a row
                 // below the cursor may be one the socket had not delivered yet (the relay now
                 // orders them, but a replica must never drop data on an ordering assumption).
-                if rh.device != s.device {
-                    s.doc.import(&f.payload)?;
-                }
+                // Own rows too: on a fresh replica (after `chat reset`, or a new process) this
+                // device's earlier rows exist only on the relay, and every row that causally
+                // depends on them stays pending until they are imported. Loro drops a duplicate
+                // of a row the replica already holds, so importing unconditionally is safe. (#2069)
+                s.doc.import(&f.payload)?;
                 s.cursor = s.cursor.max(rh.seq);
                 rows_seen += 1;
                 s.persist()?;
