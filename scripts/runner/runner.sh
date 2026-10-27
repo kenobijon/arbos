@@ -28,7 +28,7 @@ busy_lanes() { local n=0 f; for f in "$LANES"/*; do [ -f "$f" ] || continue; if 
 lane_busy() { [ -f "$LANES/$1" ] && kill -0 "$(cat "$LANES/$1")" 2>/dev/null; }
 run_one() {  # run_one <cmd-X.sh.running> <base> <rig>
   local f=$1 base=$2 rig=$3 rc
-  bash "$f" > "$base.log" 2>&1 < /dev/null; rc=$?
+  ARBOS_RUNNER_CMD="/Users/Shared/arbos-run/$f" bash "$f" > "$base.log" 2>&1 < /dev/null; rc=$?   # arbos-heavy-slot reads it for the bounded wait
   echo "$rc" > "$base.rc"; mv "$f" "$base.done"; rm -f "$base.seen" "$LANES/$rig"
   echo "$(date -u +%FT%TZ) lane $rig done $base rc=$rc" >> runner.status
 }

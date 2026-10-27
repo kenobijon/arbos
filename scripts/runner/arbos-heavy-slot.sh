@@ -109,11 +109,13 @@ release_due() {  # 1 when some waiting release may preempt the next grant
 # RIG_RUNNER_WAIT_MAX_S: the command file is copied to the back of the runner's FIFO (name sorts last) and the
 # acquire exits 75, so one rig's slot wait cannot hold every other rig's shots (18:00 Oct 27: 75 min, 15 queued).
 RIG_RUNNER_WAIT_MAX_S="${ARBOS_HEAVY_RIG_RUNNER_WAIT_MAX_S:-1200}"
-runner_cmd_file() {  # the cmd-*.sh an ancestor `bash` is executing, or nothing
+runner_cmd_file() {  # the cmd-*.sh an ancestor `bash` is executing (runner v2 runs it as cmd-*.sh.running), or nothing
+  # runner v2 also exports ARBOS_RUNNER_CMD=<path>; the ancestor walk is the fallback for the old runner.
+  if [[ -n "${ARBOS_RUNNER_CMD:-}" ]]; then echo "$ARBOS_RUNNER_CMD"; return 0; fi
   local pid=$$ cmd
   while (( pid > 1 )); do
     cmd=$(ps -o command= -p "$pid" 2>/dev/null)
-    if [[ "$cmd" =~ (^|[[:space:]])bash[[:space:]]+(/Users/Shared/arbos-run/)?(cmd-[^[:space:]]+\.sh)([[:space:]]|$) ]]; then echo "/Users/Shared/arbos-run/${BASH_REMATCH[3]}"; return 0; fi
+    if [[ "$cmd" =~ (^|[[:space:]])bash[[:space:]]+(/Users/Shared/arbos-run/)?(cmd-[^[:space:]]+\.sh)(\.running)?([[:space:]]|$) ]]; then echo "/Users/Shared/arbos-run/${BASH_REMATCH[3]}${BASH_REMATCH[4]}"; return 0; fi
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' '); [[ -n "$pid" ]] || break
   done
   return 1
@@ -264,7 +266,7 @@ acquire() {
       fi
     fi
     if [[ -n "$runner_cmd" ]] && (( $(date +%s) - t0 >= RIG_RUNNER_WAIT_MAX_S )); then
-      local again; again="/Users/Shared/arbos-run/cmd-zz~requeued-$(date +%s)-$(basename "${runner_cmd%.sh}").sh"
+      local again orig; orig="${runner_cmd%.running}"; again="/Users/Shared/arbos-run/cmd-zz~requeued-$(date +%s)-$(basename "${orig%.sh}").sh"
       if [[ -f "$runner_cmd" ]] && { printf '# requeued by arbos-heavy-slot at %s: %s waited %ss for a heavy slot under the shared runner (cap %s); original %s\n' "$(ts)" "$name" "$RIG_RUNNER_WAIT_MAX_S" "$limit" "$(basename "$runner_cmd")"; cat "$runner_cmd"; } > "$again" 2>/dev/null; then
         echo "$(ts) heavy-slot: $name waited ${RIG_RUNNER_WAIT_MAX_S}s under the shared runner ($n busy); giving up — command requeued at the back as $(basename "$again")" >&2
         logger -t arbos-heavy-slot "rig $name gave up its slot wait after ${RIG_RUNNER_WAIT_MAX_S}s; requeued $(basename "$again")" 2>/dev/null || true
