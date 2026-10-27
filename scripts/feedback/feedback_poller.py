@@ -2431,6 +2431,11 @@ class Loop:
             self.rust_gate_mac_start(cur)
             return
         plan = cur.get("rust_gate_plan") or []
+        # Leading plan halves with no ready member left (merged, parked, pinned-and-landed) are stale: drop them first,
+        # or a tagged collapsed batch behind them is not seen and pool-first would run the whole pool instead.
+        ready_ids = {f for f, _ in ready}
+        while plan and not (set(plan[0]) & ready_ids):
+            plan.pop(0)
         # Pinned items (operator gate-next, owner priority) always form the next batch, on their own, ahead of the
         # pool AND ahead of bisect / conflict-retry plan halves — the pin survives a conflict → owner-merges-main
         # → re-push cycle (00:58 Oct 22: #1241 was merged third behind a retry half and hit a sibling conflict).
