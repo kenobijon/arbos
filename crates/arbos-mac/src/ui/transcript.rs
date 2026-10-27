@@ -588,6 +588,10 @@ pub enum RowKind {
         /// The sender's name above the card (first card of the message only; the
         /// message's text bubble, if any, then carries no name).
         named: bool,
+        /// Draw the disc: on the message's last row only — its text bubble when it has
+        /// one, else its last card; earlier cards keep the lane free (the agent bubble's
+        /// rule: the disc at the bottom of the run).
+        disc: bool,
         /// The message's clock label, hover-only like a bubble's.
         time: Option<String>,
         /// The message's "Forwarded from …" line, drawn on the card.
@@ -2791,6 +2795,7 @@ impl Transcript {
                 mine,
                 sender,
                 named,
+                disc,
                 time,
                 forwarded_from,
             } => {
@@ -2859,8 +2864,15 @@ impl Transcript {
                     // avatar column and, on the message's first card when the run changes
                     // sender, their name above it — the same identity, colour and profile
                     // target as their bubble ([feedback forward-attachments-mac-2026-10-27]).
-                    let (disc, name_el) =
+                    let (disc_el, name_el) =
                         self.attachment_sender(&row.id, &sender, named, &theme, cx);
+                    // Earlier cards of the message keep the lane free; the disc sits on
+                    // the last row (markdown_bubble's rule).
+                    let disc_el = if disc {
+                        disc_el
+                    } else {
+                        div().w(px(SENDER_DISC)).flex_shrink_0().into_any_element()
+                    };
                     div()
                         .w_full()
                         .py(px(4.0))
@@ -2873,7 +2885,7 @@ impl Transcript {
                                 .items_end()
                                 .pl(px(AVATAR_COLUMN_INSET))
                                 .gap(px(SENDER_DISC_GAP))
-                                .child(disc)
+                                .child(disc_el)
                                 .child(
                                     div()
                                         .flex()
@@ -3786,6 +3798,10 @@ pub fn build_rows_hiding(
                         })
                         .flatten()
                 });
+                // Skip a bare "Image"/"Photo" bubble when the attachment already shows it.
+                let show_text = !text.is_empty()
+                    && !(has_image && is_generic_media_label(&text))
+                    && legacy_hint.is_none();
                 for (ix, (part_id, attachment)) in attachment_parts.iter().enumerate() {
                     let forwarded = forwarded.clone().filter(|_| ix == 0);
                     let has_thumb = attachment
@@ -3796,6 +3812,7 @@ pub fn build_rows_hiding(
                     // their name on the first card when the run changes sender.
                     let sender = from.clone().map(AttachmentSender::Person);
                     let card_named = named && ix == 0;
+                    let disc = !show_text && ix + 1 == attachment_parts.len();
                     rows.push(Row {
                         version: hash_version(
                             &(
@@ -3808,6 +3825,7 @@ pub fn build_rows_hiding(
                                 &forwarded,
                                 from.as_ref().map(|p| &p.handle),
                                 card_named,
+                                disc,
                             ),
                             false,
                         ),
@@ -3819,15 +3837,12 @@ pub fn build_rows_hiding(
                             mine: is_mine,
                             sender,
                             named: card_named,
+                            disc,
                             time: clock_label(message.created_at),
                             forwarded_from: forwarded.clone(),
                         },
                     });
                 }
-                // Skip a bare "Image"/"Photo" bubble when the attachment already shows it.
-                let show_text = !text.is_empty()
-                    && !(has_image && is_generic_media_label(&text))
-                    && legacy_hint.is_none();
                 if show_text || attachment_parts.is_empty() {
                     // A cross-chat reply (Reply in DM) quotes its own snapshot;
                     // an in-chat reply quotes the row it points at.
@@ -4045,6 +4060,14 @@ pub fn build_rows_hiding(
                 let bubble_texts = BubbleText::for_blocks(&bubble_blocks, false);
                 let mut block_ix = 0usize;
                 let mut had_prose = false;
+                // The message's last card that draws (a chart's fallback picture does not).
+                let last_card_part = message.parts.iter().rposition(|p| match p {
+                    Part::Attachment { attachment, .. } => !attachment
+                        .chart_part
+                        .as_deref()
+                        .is_some_and(|cp| message.has_chart_part(cp)),
+                    _ => false,
+                });
                 // The sender's name goes on the message's first row — a picture that
                 // comes before the prose takes it, and the first text block then does
                 // not repeat it ([feedback forward-attachments-mac-2026-10-27]).
@@ -4160,6 +4183,9 @@ pub fn build_rows_hiding(
                             // photo in Arbonites drew as a bare picture before).
                             let card_named = sender_named && !name_taken;
                             name_taken |= card_named;
+                            // The disc goes on the message's last row: its text bubble
+                            // when it has words, else its last card.
+                            let disc = total_blocks == 0 && Some(pix) == last_card_part;
                             rows.push(Row {
                                 version: hash_version(
                                     &(
@@ -4170,6 +4196,7 @@ pub fn build_rows_hiding(
                                         has_thumb,
                                         &lane,
                                         card_named,
+                                        disc,
                                     ),
                                     false,
                                 ),
@@ -4183,6 +4210,7 @@ pub fn build_rows_hiding(
                                         .clone()
                                         .map(|seed| AttachmentSender::Agent { seed }),
                                     named: card_named,
+                                    disc,
                                     time: clock_label(message.created_at),
                                     forwarded_from: None,
                                 },
