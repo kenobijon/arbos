@@ -136,6 +136,21 @@ pub(crate) enum SettingsPage {
 }
 
 impl SettingsPage {
+    /// The pages my pane's Settings list shows today (`profiles/me.rs`, in
+    /// its order); the search index must find each of them
+    /// ([feedback search-settings-mac-2026-10-26], `palette::tests`).
+    #[cfg(test)]
+    pub(crate) const LISTED: [SettingsPage; 8] = [
+        SettingsPage::Appearance,
+        SettingsPage::Notifications,
+        SettingsPage::Secrets,
+        SettingsPage::Devices,
+        SettingsPage::ThisMac,
+        SettingsPage::Machine,
+        SettingsPage::Updates,
+        SettingsPage::About,
+    ];
+
     pub(crate) fn title(self) -> &'static str {
         match self {
             SettingsPage::Root => "Settings",
@@ -2638,8 +2653,60 @@ impl Shell {
     ) {
         self.close_palette(window, cx);
         self.hidden_open = false;
-        self.state
-            .update(cx, |s, cx| s.open_palette_target(target, cx));
+        match target {
+            crate::palette::Target::Setting(setting) => self.open_setting(setting, window, cx),
+            other => self
+                .state
+                .update(cx, |s, cx| s.open_palette_target(other, cx)),
+        }
+    }
+
+    /// A Settings row picked in the palette ([feedback
+    /// search-settings-mac-2026-10-26]): my pane straight on that page, the
+    /// Secrets panel on its form, the feedback sheet, my Profile tab, or an
+    /// owned agent's pane with the setting row dropped down.
+    pub(crate) fn open_setting(
+        &mut self,
+        setting: crate::palette::SettingTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::palette::SettingTarget;
+        match setting {
+            SettingTarget::Page(page) => self.open_settings_page(page, window, cx),
+            SettingTarget::SecretsNew => {
+                self.open_settings_page(SettingsPage::Secrets, window, cx);
+                self.secrets.update(cx, |p, cx| p.show_add(cx));
+            }
+            SettingTarget::SecretsConnect => {
+                self.open_settings_page(SettingsPage::Secrets, window, cx);
+                self.secrets.update(cx, |p, cx| p.show_connect(cx));
+            }
+            SettingTarget::Feedback => self.open_feedback(window, cx),
+            SettingTarget::Profile => {
+                self.hide_settings_page(cx);
+                self.settings_page = SettingsPage::Root;
+                self.state.update(cx, |s, cx| {
+                    if s.profile != Some(ProfilePage::Me) {
+                        s.open_profile(ProfilePage::Me, cx);
+                    }
+                    s.set_profile_tab(0, cx);
+                });
+                cx.notify();
+            }
+            SettingTarget::Agent { project_id, pick } => {
+                self.hide_settings_page(cx);
+                self.settings_page = SettingsPage::Root;
+                self.state.update(cx, |s, cx| {
+                    s.open_server = None;
+                    s.select_project(project_id.clone(), cx);
+                    s.open_profile(ProfilePage::Agent { project_id }, cx);
+                    s.set_profile_tab(0, cx);
+                    s.set_agent_pick(Some(pick), cx);
+                });
+                cx.notify();
+            }
+        }
     }
 
     /// Escape stops a recording memo (keeping its transcript), then closes
