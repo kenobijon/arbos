@@ -22,6 +22,10 @@ enum Block: Equatable, Hashable {
     /// Display math on its own line(s): `$$ … $$` or `\[ … \]`; `source` is the LaTeX between
     /// the delimiters ([feedback math-render-ios-2026-10-26]).
     case math(source: String)
+    /// A chart bubble's card ([feedback chart-bubble-ios-2026-10-26]): not markdown, but one
+    /// block of the agent's bubble like a code card. `spec` is the `chart` part's JSON, `table`
+    /// its markdown table (what a copy carries).
+    case chart(partId: String, spec: String, table: String)
 }
 
 /// Grok Bot's quote header inside a reply bubble: speech-bubble glyph, then the replied-to
@@ -86,6 +90,7 @@ struct Quote: Equatable, Hashable {
             case .code(_, let code): pieces = [code]
             case .table(let header, let rows): pieces = header + rows.flatMap { $0 }
             case .math(let source): pieces = [MathText.plain(source)]
+            case .chart(_, _, let table): pieces = [table]
             }
             for piece in pieces {
                 words.append(contentsOf: Markdown.plain(piece).split(whereSeparator: \.isWhitespace))
@@ -195,14 +200,16 @@ enum Transcript {
     /// messages in the doc (#1349); nothing is synthesised here.
     /// `agentNames`: agent project id → display name from the chat's member list, the
     /// fallback when a reply row carries no `senderName` (older boxes).
-    static func rows(_ messages: [Message], projectId: Id, subagentNames: [String: String] = [:], me: String? = nil, people: Bool = false, agentNames: [String: String] = [:], multiParty: Bool = false) -> [Row] {
-        rows(messages, byId: index(messages), projectId: projectId, subagentNames: subagentNames, me: me, people: people, agentNames: agentNames, multiParty: multiParty)
+    static func rows(_ messages: [Message], projectId: Id, subagentNames: [String: String] = [:], me: String? = nil, people: Bool = false, agentNames: [String: String] = [:], multiParty: Bool = false, memberNames: [String: String] = [:]) -> [Row] {
+        rows(messages, byId: index(messages), projectId: projectId, subagentNames: subagentNames, me: me, people: people, agentNames: agentNames, multiParty: multiParty, memberNames: memberNames)
     }
 
     /// Same, with the caller's `index(messages)` (the chat keeps it for its own lookups).
     /// `multiParty`: the chat names its senders — a group or a server channel (people and
     /// agents alike); a 1:1 chat (me ↔ person, me ↔ agent) labels nobody (Jacob, 2026-10-23).
-    static func rows(_ messages: [Message], byId: [Id: Message], projectId: Id, subagentNames: [String: String] = [:], me: String? = nil, people: Bool = false, agentNames: [String: String] = [:], multiParty: Bool = false) -> [Row] {
+    /// `memberNames`: the chat's people by user id → current display name (me included), so a
+    /// membership line names its actor as the roster does now, not as the row was written.
+    static func rows(_ messages: [Message], byId: [Id: Message], projectId: Id, subagentNames: [String: String] = [:], me: String? = nil, people: Bool = false, agentNames: [String: String] = [:], multiParty: Bool = false, memberNames: [String: String] = [:]) -> [Row] {
         var rows: [Row] = []
         rows.reserveCapacity(messages.count + messages.count / 8)
         var lastAt: Int64 = 0
@@ -306,7 +313,13 @@ enum Transcript {
             case .system:
                 // Call lines and other system notes: one muted centred line.
                 // Admin deletion audits stay out of the chat (GroupActivity screen only).
-                let text = message.plainText.trimmingCharacters(in: .whitespacesAndNewlines)
+                // A membership line is worded from its `notice` facts and the live roster;
+                // the stored words are the fallback when someone named is unknown here.
+                let live = message.notice?.text { kind, id in
+                    let n = (kind == "agent" ? agentNames[id] : memberNames[id])?.trimmingCharacters(in: .whitespaces)
+                    return (n?.isEmpty ?? true) ? nil : n
+                }
+                let text = (live ?? message.plainText).trimmingCharacters(in: .whitespacesAndNewlines)
                 if !text.isEmpty, !GroupActivity.isAuditLine(text) {
                     let icon = text.hasPrefix("Call ended") ? "phone.down.fill" : (text.contains(" call") ? "phone.fill" : nil)
                     chunk.append(Row(id: "\(message.id)#system", messageId: message.id, role: .system,
@@ -388,12 +401,32 @@ enum Transcript {
                     case .status(let id, .stopped, _):
                         chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .system,
                                          kind: .system(icon: "stop.circle", text: "Stopped", avatarProject: nil)))
+                    case .attachment(_, let a) where a.chartPart.map(message.hasChartPart) == true:
+                        // The chart's fallback picture: an older app shows it, this one draws
+                        // the chart instead ([feedback chart-bubble-ios-2026-10-26]).
+                        break
                     case .attachment(let id, let a):
                         // People-chat agent media keeps the sender lane free, like the bubble
                         // and the question card (Mac Attachment.lane / #1509).
                         chunk.append(attachmentRow(id: "\(message.id)#\(id)", message: message, a: a,
                                                    projectId: projectId, fromUser: false, agentNames: agentNames,
                                                    lane: people && message.senderHandle != nil))
+                    case .chart(let id, _, let spec, let table, _):
+                        // A chart bubble's card: one block of the bubble, like a code card. It
+                        // joins the caption's bubble when that is the row just before it.
+                        let block: Block = .chart(partId: id, spec: spec, table: table)
+                        if let last = chunk.indices.last, chunk[last].messageId == message.id,
+                           let joined = Self.appending(block, to: chunk[last].kind) {
+                            chunk[last].kind = joined
+                        } else if people, let h = message.senderHandle {
+                            chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
+                                             kind: .member(blocks: [block], live: false, handle: h, name: message.senderName,
+                                                           avatar: message.senderAvatar, named: named && firstTextPart == nil,
+                                                           agentId: agentId, quote: nil)))
+                        } else {
+                            chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
+                                             kind: .assistant(blocks: [block], live: false, caption: nil, quote: nil)))
+                        }
                     case .error(let id, let code, let text):
                         errors.append((id: id, code: code, text: text))
                     case .status, .tool, .subagentResult, .reasoning, .secretRedacted, .unknown:
@@ -412,7 +445,7 @@ enum Transcript {
                 let onlyEmpty = message.parts.allSatisfy { part in
                     switch part {
                     case .text, .status, .error: return true
-                    case .tool, .attachment, .question, .subagentResult, .reasoning, .secretRedacted, .unknown: return false
+                    case .tool, .attachment, .question, .subagentResult, .reasoning, .secretRedacted, .unknown, .chart: return false
                     }
                 }
                 let failed = !errors.isEmpty || message.status == .error
@@ -431,7 +464,7 @@ enum Transcript {
                             && (!other.plainText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                                 || other.parts.contains { part in
                                     switch part {
-                                    case .question, .attachment: return true
+                                    case .question, .attachment, .chart: return true
                                     default: return false
                                     }
                                 })
@@ -643,6 +676,20 @@ enum Transcript {
         }
         if total <= names.count { return "Messaged \(joined)" }
         return "\(total) messages with \(joined)"
+    }
+
+    /// A chart block joins the bubble row just before it (the caption's), so the card sits
+    /// under the prose like a code card; `nil` when that row is not a bubble of blocks.
+    static func appending(_ block: Block, to kind: RowKind) -> RowKind? {
+        switch kind {
+        case .assistant(let blocks, let live, let caption, let quote):
+            return .assistant(blocks: blocks + [block], live: live, caption: caption, quote: quote)
+        case .member(let blocks, let live, let handle, let name, let avatar, let named, let agentId, let quote):
+            return .member(blocks: blocks + [block], live: live, handle: handle, name: name, avatar: avatar,
+                           named: named, agentId: agentId, quote: quote)
+        default:
+            return nil
+        }
     }
 
     private static func attachmentRow(id: String, message: Message, a: Attachment, projectId: Id, fromUser: Bool,
@@ -1111,6 +1158,10 @@ struct RowView: View, Equatable {
     let row: Row
     let chatId: Id
     let width: CGFloat
+    /// A people chat (DM / group / channel): bubbles take `Theme.peopleBubbleInset`
+    /// off the screen instead of the agent chat's `Theme.bubbleInset`
+    /// ([feedback chat-density-ios-2026-10-26]).
+    var people: Bool = false
     /// How far the transcript has been dragged left to reveal iMessage-style times (0…`timeRevealWidth`).
     var timeReveal: CGFloat = 0
     /// A tap on a reply bubble's quote header: the chat scrolls to this message id.
@@ -1149,6 +1200,7 @@ struct RowView: View, Equatable {
             && lhs.highlighted == rhs.highlighted
             && lhs.mentions.stamp == rhs.mentions.stamp
             && lhs.composerInset == rhs.composerInset
+            && lhs.people == rhs.people
             && lhs.theme == rhs.theme
             && lhs.showReactionSenders == rhs.showReactionSenders
         #if DEBUG
@@ -1157,7 +1209,13 @@ struct RowView: View, Equatable {
         return same
     }
 
-    private var maxBubble: CGFloat { max(200, width - Theme.bubbleInset) }
+    /// The widest a bubble on this row may be: the screen minus the chat kind's inset
+    /// (`Theme.bubbleInset(people:)`); an incoming people-chat bubble also loses the lane.
+    private var maxBubble: CGFloat { Self.maxBubble(width: width, people: people) }
+
+    static func maxBubble(width: CGFloat, people: Bool) -> CGFloat {
+        max(200, width - Theme.bubbleInset(people: people))
+    }
 
     private var reportsGreetingFrame: Bool {
         model.firstLogin != nil && model.messages(of: chatId).first(where: { $0.greeting })?.id == row.messageId
@@ -1878,6 +1936,8 @@ struct BlockView: View {
             TableBlock(header: header, rows: rows, mentions: mentions)
         case .code(let lang, let code):
             CodeCard(lang: lang, code: code)
+        case .chart(let partId, let spec, _):
+            ChartCard(partId: partId, spec: spec)
         case .math(let source):
             // Display math: typeset, a size up, centred on its own line (KaTeX's display
             // mode in Grok Bot).
