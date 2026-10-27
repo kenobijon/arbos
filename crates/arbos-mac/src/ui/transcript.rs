@@ -724,6 +724,10 @@ pub struct Transcript {
     chat_id: Option<Id>,
     list: ListState,
     pub(crate) rows: Vec<Row>,
+    /// Per-message built rows: a send / streaming upsert rebuilds one
+    /// message, not the whole transcript — so reply/menu stay responsive
+    /// in the post-send window ([feedback app-01M5Z3T4F4KAMTWA7YKW3CP58H]).
+    row_cache: MessageRowCache,
     /// Who `@handle` resolves to in this chat's bubbles (mention chips),
     /// rebuilt with the rows.
     mentions: Rc<Mentions>,
@@ -817,6 +821,7 @@ impl Transcript {
             chat_id: None,
             list,
             rows: Vec::new(),
+            row_cache: MessageRowCache::default(),
             mentions: Mentions::empty(),
             link_icons: LinkIcons::empty(),
             pane_open: false,
@@ -1346,6 +1351,7 @@ impl Transcript {
         self.pane_open = pane_open;
         if chat_changed {
             self.drag_scroll = None;
+            self.row_cache.clear();
         }
         let messages: Vec<Message> = chat_id
             .as_deref()
@@ -1379,15 +1385,18 @@ impl Transcript {
             .filter(|p| p.is_people_group())
             .map(|p| state.hidden_senders_in(p))
             .unwrap_or_default();
+        // Clone the Rc so the row-cache mut borrow does not conflict.
+        let mentions = Rc::clone(&self.mentions);
         let new_rows = build_rows_hiding(
             &messages,
             show_details,
             speech,
             &me_id,
             &thumb_keys,
-            &self.mentions,
+            &mentions,
             multi_party,
             &hidden_senders,
+            &mut self.row_cache,
         );
         self.multi_party = multi_party;
         self.people = people;
@@ -3438,6 +3447,113 @@ fn is_json_block(block: &Block) -> bool {
         && serde_json::from_str::<serde_json::Value>(t).is_ok()
 }
 
+/// Built rows for one message, keyed by a render version so a send or
+/// streaming upsert rebuilds only that message — not the whole transcript.
+/// Keeps hover-rail reply / message-menu gestures live in the post-send
+/// window ([feedback app-01M5Z3T4F4KAMTWA7YKW3CP58H]); Mac still has no
+/// swipe-to-reply (docs/mac-design-rules.md).
+#[derive(Default)]
+pub struct MessageRowCache {
+    entries: HashMap<Id, CachedMessageRows>,
+    /// How many messages were built (not served from the cache) on the
+    /// last [`build_rows_hiding`] call. Tests assert a streaming edit
+    /// rebuilds one message, not the whole transcript.
+    pub built: usize,
+}
+
+struct CachedMessageRows {
+    version: u64,
+    rows: Vec<Row>,
+    last_stamp_at: u64,
+    prev_sender: Option<String>,
+}
+
+impl MessageRowCache {
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.built = 0;
+    }
+}
+
+/// Fingerprint of the fields that change a message's rows: text, parts,
+/// status, completed time, reactions, and the stamp / sender-run context
+/// (plus speech / details / thumbs / width-class flags).
+#[allow(clippy::too_many_arguments)]
+fn message_render_version(
+    message: &Message,
+    last_stamp_at: u64,
+    prev_sender: Option<&str>,
+    is_last_reply: bool,
+    show_details: bool,
+    speech: &SpeechRows<'_>,
+    me_id: &str,
+    thumb_keys: &HashSet<&str>,
+    names_senders: bool,
+    width_class: u8,
+) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    message.id.hash(&mut h);
+    std::mem::discriminant(&message.role).hash(&mut h);
+    message.sender.hash(&mut h);
+    std::mem::discriminant(&message.status).hash(&mut h);
+    message.pending.hash(&mut h);
+    message.created_at.hash(&mut h);
+    message.completed_at.hash(&mut h);
+    message.hidden.hash(&mut h);
+    message.worker.hash(&mut h);
+    message.greeting.hash(&mut h);
+    message.waiting_user.hash(&mut h);
+    message.waiting_approval.hash(&mut h);
+    message.plain_text().hash(&mut h);
+    for (emoji, people) in &message.reactions {
+        emoji.hash(&mut h);
+        for (who, on) in people {
+            who.hash(&mut h);
+            on.hash(&mut h);
+        }
+    }
+    // Parts: Debug covers every variant; thumb presence is mixed in so a
+    // late-decoded preview reloads the attachment row.
+    for p in &message.parts {
+        format!("{p:?}").hash(&mut h);
+        if let Part::Attachment { attachment, .. } = p {
+            attachment
+                .blob_ref
+                .as_deref()
+                .is_some_and(|k| thumb_keys.contains(k))
+                .hash(&mut h);
+        }
+    }
+    message.sender_name.hash(&mut h);
+    message.sender_handle.hash(&mut h);
+    message.sender_avatar.hash(&mut h);
+    message.sender_avatar_color.hash(&mut h);
+    message.sender_icon.hash(&mut h);
+    message.in_reply_to.hash(&mut h);
+    message.reply_to.hash(&mut h);
+    message.forwarded_from.hash(&mut h);
+    message.agent_reply_to.hash(&mut h);
+    message.asked_by_handle.hash(&mut h);
+    message.owner_handle.hash(&mut h);
+    message.routine_name.hash(&mut h);
+    message.activity.hash(&mut h);
+    format!("{:?}", message.turn).hash(&mut h);
+    format!("{:?}", message.reply_ref).hash(&mut h);
+    format!("{:?}", message.job).hash(&mut h);
+    last_stamp_at.hash(&mut h);
+    prev_sender.hash(&mut h);
+    is_last_reply.hash(&mut h);
+    show_details.hash(&mut h);
+    speech.enabled.hash(&mut h);
+    speech.voice_mode.hash(&mut h);
+    speech.spoken.contains(&message.id).hash(&mut h);
+    speech.failed.contains_key(&message.id).hash(&mut h);
+    me_id.hash(&mut h);
+    names_senders.hash(&mut h);
+    width_class.hash(&mut h);
+    h.finish()
+}
+
 /// The transcript shows only what the agent said and made: prose, files,
 /// questions, errors. Everything the agent did (tool calls, status events,
 /// JSON, usage) is hidden; the Details drawer has it. One indicator per chat
@@ -3458,6 +3574,7 @@ pub fn build_rows(
     mentions: &Mentions,
     names_senders: bool,
 ) -> Vec<Row> {
+    let mut cache = MessageRowCache::default();
     build_rows_hiding(
         messages,
         show_details,
@@ -3467,6 +3584,7 @@ pub fn build_rows(
         mentions,
         names_senders,
         &HashSet::new(),
+        &mut cache,
     )
 }
 
@@ -3482,6 +3600,7 @@ pub fn build_rows_hiding(
     mentions: &Mentions,
     names_senders: bool,
     hidden_senders: &HashSet<String>,
+    cache: &mut MessageRowCache,
 ) -> Vec<Row> {
     let mine = |m: &Message| {
         m.sender == "user" || m.sender.is_empty() || m.sender == format!("user:{me_id}")
@@ -3505,13 +3624,50 @@ pub fn build_rows_hiding(
     // with no words yet — takes its stamp back, so no date line hangs over
     // empty space above the status row ([feedback status-row-gap-mac-2026-10-26]).
     let mut pending_stamp: Option<(usize, u64, Option<String>)> = None;
+    // Blocked-sender folding merges adjacent messages into one Hidden row, so
+    // per-message cache entries would be wrong — rebuild uncached then.
+    let caching = hidden_senders.is_empty();
+    if !caching {
+        cache.clear();
+    }
+    cache.built = 0;
+    let width_class = u8::from(names_senders);
+    let mut keep: HashSet<Id> = HashSet::new();
     for (mix, message) in messages.iter().enumerate() {
+        keep.insert(message.id.clone());
         retract_dangling_stamp(
             &mut rows,
             &mut pending_stamp,
             &mut last_stamp_at,
             &mut prev_sender,
         );
+        let mut msg_version = 0u64;
+        if caching {
+            let is_last_reply = last_reply == Some(mix);
+            msg_version = message_render_version(
+                message,
+                last_stamp_at,
+                prev_sender.as_deref(),
+                is_last_reply,
+                show_details,
+                &speech,
+                me_id,
+                thumb_keys,
+                names_senders,
+                width_class,
+            );
+            if let Some(hit) = cache.entries.get(&message.id) {
+                if hit.version == msg_version {
+                    rows.extend(hit.rows.iter().cloned());
+                    last_stamp_at = hit.last_stamp_at;
+                    prev_sender = hit.prev_sender.clone();
+                    pending_stamp = None;
+                    continue;
+                }
+            }
+            cache.built += 1;
+        }
+        let cache_start = rows.len();
         // Someone I blocked: fold the run into one hidden line, no bubble, no stamp.
         if message.role == Role::User && hidden_senders.contains(&message.sender) {
             match rows.last_mut() {
@@ -4277,6 +4433,27 @@ pub fn build_rows_hiding(
         if rows.len() > rows_before_message {
             prev_sender = Some(message.sender.clone());
         }
+        if caching {
+            // Finalize a no-content message's stamp now so the cached slice is
+            // complete (same outcome as retract on the next turn).
+            if rows.len() == cache_start {
+                retract_dangling_stamp(
+                    &mut rows,
+                    &mut pending_stamp,
+                    &mut last_stamp_at,
+                    &mut prev_sender,
+                );
+            }
+            cache.entries.insert(
+                message.id.clone(),
+                CachedMessageRows {
+                    version: msg_version,
+                    rows: rows[cache_start..].to_vec(),
+                    last_stamp_at,
+                    prev_sender: prev_sender.clone(),
+                },
+            );
+        }
     }
     retract_dangling_stamp(
         &mut rows,
@@ -4284,6 +4461,9 @@ pub fn build_rows_hiding(
         &mut last_stamp_at,
         &mut prev_sender,
     );
+    if caching {
+        cache.entries.retain(|id, _| keep.contains(id));
+    }
     // Who is working is the presence row over the composer (`ui::presence`),
     // not a transcript row: one notice per agent, never a caption plus a line.
     let _ = (running, queued, last_stamp_at, prev_sender);
@@ -9207,6 +9387,97 @@ mod delivery_tests {
         assert_eq!(Delivery::Failed.opacity(), 1.0);
         assert_eq!(Delivery::Pending.opacity(), BUBBLE_ALPHA_PENDING);
         assert!(Delivery::Pending.opacity() < Delivery::Delivered.opacity());
+    }
+
+    /// A send / streaming upsert must rebuild only the changed message so the
+    /// UI thread stays free for reply/menu gestures in the post-send window
+    /// ([feedback app-01M5Z3T4F4KAMTWA7YKW3CP58H]).
+    #[test]
+    fn row_cache_returns_cached_rows_and_rebuilds_only_the_changed_message() {
+        let t = 1_700_000_000_000u64;
+        let mut messages = vec![
+            mine("a", t),
+            mine("b", t + 1_000),
+            message("c", "assistant", "agent:x", "streaming", false, t + 2_000),
+        ];
+        // Give the streaming reply some text so it draws a bubble.
+        if let Some(Part::Text { text, .. }) = messages[2].parts.get_mut(0) {
+            *text = "hel".into();
+        }
+        let spoken = HashSet::new();
+        let failed = HashMap::new();
+        let speech = SpeechRows {
+            enabled: false,
+            spoken: &spoken,
+            failed: &failed,
+            voice_mode: false,
+        };
+        let mut cache = MessageRowCache::default();
+        let first = build_rows_hiding(
+            &messages,
+            false,
+            speech,
+            "gh_me",
+            &HashSet::new(),
+            &Mentions::empty(),
+            false,
+            &HashSet::new(),
+            &mut cache,
+        );
+        assert_eq!(cache.built, 3, "cold build walks every message");
+
+        let speech = SpeechRows {
+            enabled: false,
+            spoken: &spoken,
+            failed: &failed,
+            voice_mode: false,
+        };
+        let again = build_rows_hiding(
+            &messages,
+            false,
+            speech,
+            "gh_me",
+            &HashSet::new(),
+            &Mentions::empty(),
+            false,
+            &HashSet::new(),
+            &mut cache,
+        );
+        assert_eq!(
+            cache.built, 0,
+            "unchanged messages are served from the cache"
+        );
+        let ids = |rows: &[Row]| -> Vec<(String, u64)> {
+            rows.iter().map(|r| (r.id.clone(), r.version)).collect()
+        };
+        assert_eq!(ids(&first), ids(&again));
+
+        // Streaming upsert: only the last message's text changes.
+        if let Some(Part::Text { text, .. }) = messages[2].parts.get_mut(0) {
+            *text = "hello".into();
+        }
+        let speech = SpeechRows {
+            enabled: false,
+            spoken: &spoken,
+            failed: &failed,
+            voice_mode: false,
+        };
+        let updated = build_rows_hiding(
+            &messages,
+            false,
+            speech,
+            "gh_me",
+            &HashSet::new(),
+            &Mentions::empty(),
+            false,
+            &HashSet::new(),
+            &mut cache,
+        );
+        assert_eq!(
+            cache.built, 1,
+            "a streaming upsert rebuilds only the changed message"
+        );
+        assert_ne!(ids(&again), ids(&updated));
     }
 
     #[test]
