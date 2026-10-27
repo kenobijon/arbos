@@ -9077,10 +9077,12 @@ pub const ROUTER_PROMPT: &str = include_str!("../prompts/router.md");
 /// on 2026-10-24; 25.7 KB after the Grok-parity rules — moment, naming, research delivery —
 /// the same day; 28.2 KB on 2026-10-25 with the jobs section's steer/stop rule (#1692) and the
 /// steer rule — short waits, `[Arbos steer:` is never late — of #1690; 28.7 KB after the table and
-/// link format rule of [feedback markdown-tables-agentd-2026-10-25]). The unit test fails when a
-/// prompt edit crosses it, so growth is a decision, not drift.
+/// link format rule of [feedback markdown-tables-agentd-2026-10-25]; 29.1 KB on 2026-10-26 with
+/// the `post_chart` clause of [feedback chart-post-tool-agentd-2026-10-26] — whichever of that
+/// item and [feedback secret-handoff-agentd-2026-10-26] lands second re-runs the budget test
+/// against main and sets this once). The unit test fails when a prompt edit crosses it, so
+/// growth is a decision, not drift.
 #[cfg(test)]
-// 28 900 → 29 100 for the `post_chart` clause in the router (chart bubbles, 2026-10-26).
 pub const BASE_PROMPT_MAX_BYTES: usize = 29_100;
 
 /// The byte-stable part of the main agent's system prompt: core, then routing, then code mode
