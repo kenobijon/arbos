@@ -3344,7 +3344,7 @@ final class AppModel: ObservableObject {
     /// `subjects`: who was added, by id, when every one of them is known — then the line is
     /// worded from the live roster and matched to the relay's row by facts; nil (someone is
     /// known by handle only) keeps the words-only line.
-    func showMembershipNotice(chatId: Id, names: [String], subjects: [MembershipNotice.Subject]?) {
+    func showMembershipNotice(chatId: Id, names: [String], subjects: [MembershipNotice.Subject]? = nil) {
         let name = user?.name?.trimmingCharacters(in: .whitespaces) ?? ""
         let who = name.isEmpty ? (user?.login ?? "") : name
         guard !who.isEmpty, let text = OptimisticNotice.addedLine(who: who, names: names) else { return }
