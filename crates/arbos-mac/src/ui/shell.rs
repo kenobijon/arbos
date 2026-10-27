@@ -35,6 +35,7 @@ use crate::ui::feedback::{FeedbackSheet, SendFeedback};
 use crate::ui::frost::{frosted, MENU_BLUR, PANEL_BLUR};
 use crate::ui::glass::{self, WindowDrag};
 use crate::ui::header;
+use crate::ui::highlight;
 use crate::ui::icons::icon;
 use crate::ui::local::{LocalEvent, LocalPanel};
 use crate::ui::media_viewer;
@@ -3138,16 +3139,7 @@ impl Shell {
             sidebar::footer_disc_frame("sidebar-update")
                 .bg(fill)
                 .when(!busy, |el| {
-                    el.cursor_pointer()
-                        .hover(|s| {
-                            s.bg(Theme::lighter(theme.update_disc, sidebar::DISC_HOVER_LIFT))
-                        })
-                        .active(|s| {
-                            s.bg(Theme::lighter(
-                                theme.update_disc,
-                                sidebar::DISC_PRESSED_LIFT,
-                            ))
-                        })
+                    highlight::washed(el.cursor_pointer(), fill, &theme)
                 })
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .child(icon("cloud-download", sidebar::FOOTER_DISC_GLYPH, glyph))
@@ -3716,9 +3708,8 @@ impl Shell {
                     .px(px(14.0))
                     .py(px(7.0))
                     .rounded(px(8.0))
-                    .bg(theme.surface_2)
                     .cursor_pointer()
-                    .hover(|s| s.bg(theme.bubble_assistant))
+                    .map(|el| highlight::washed(el, theme.surface_2, &theme))
                     .flex()
                     .items_center()
                     .gap(px(8.0))
