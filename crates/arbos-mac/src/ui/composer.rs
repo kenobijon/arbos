@@ -71,6 +71,9 @@ actions!(
         SelectDocumentStart,
         SelectDocumentEnd,
         DeleteToLineStart,
+        Bold,
+        Italic,
+        Strike,
         DeleteWordBackward,
         DeleteWordForward,
         Paste,
@@ -958,6 +961,70 @@ impl ComposerInput {
         self.replace_text_in_range(None, "", window, cx)
     }
 
+    /// ⌘B / ⌘I / ⌘⇧X ([feedback chat-markdown-composer-2026-10-27]): wrap the
+    /// selection in the chat-Markdown marker, or unwrap it when it is already
+    /// wrapped; with no selection, put an empty pair around the caret so the
+    /// next words are styled (a second press on the empty pair removes it).
+    fn bold(&mut self, _: &Bold, _: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_marker("**", cx);
+    }
+
+    fn italic(&mut self, _: &Italic, _: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_marker("*", cx);
+    }
+
+    fn strike(&mut self, _: &Strike, _: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_marker("~~", cx);
+    }
+
+    pub(crate) fn toggle_marker(&mut self, marker: &str, cx: &mut Context<Self>) {
+        let m = marker.len();
+        let sel = self.selected_range.clone();
+        if self.masked || self.content.get(sel.clone()).is_none() {
+            return;
+        }
+        self.record_undo();
+        self.marked_range = None;
+        self.caret_downstream = false;
+        self.selection_reversed = false;
+        // The markers sit just outside the selection (or around the caret):
+        // remove them.
+        let before = sel
+            .start
+            .checked_sub(m)
+            .and_then(|s| self.content.get(s..sel.start));
+        let after = self.content.get(sel.end..sel.end + m);
+        if before == Some(marker) && after == Some(marker) {
+            self.splice(sel.end..sel.end + m, "");
+            self.splice(sel.start - m..sel.start, "");
+            self.selected_range = sel.start - m..sel.end - m;
+            cx.notify();
+            return;
+        }
+        // The selection holds the markers at both ends: strip them.
+        let selected = &self.content[sel.clone()];
+        if selected.len() >= 2 * m && selected.starts_with(marker) && selected.ends_with(marker) {
+            let inner = selected[m..selected.len() - m].to_owned();
+            self.splice(sel.clone(), &inner);
+            self.selected_range = sel.start..sel.start + inner.len();
+            cx.notify();
+            return;
+        }
+        // Wrap: the markers hug the words, never the surrounding spaces (the
+        // grammar closes a marker only against a non-space).
+        let lead = selected.len() - selected.trim_start().len();
+        let trail = selected.len() - selected.trim_end().len();
+        let (start, end) = if lead + trail >= selected.len() {
+            (sel.start, sel.end)
+        } else {
+            (sel.start + lead, sel.end - trail)
+        };
+        self.splice(end..end, marker);
+        self.splice(start..start, marker);
+        self.selected_range = start + m..end + m;
+        cx.notify();
+    }
+
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
             let prev = self.previous_boundary(self.cursor_offset());
@@ -1672,6 +1739,9 @@ struct Prepaint {
     chip_hits: Vec<ChipHit>,
     /// Whether a pill is mid-fade (paint again next frame).
     fading: bool,
+    /// Live quote bars: one per `> ` paragraph, in the field's left padding
+    /// (painted outside the text's clip).
+    bars: Vec<PaintQuad>,
     hitbox: Hitbox,
     scroll_y: f32,
 }
@@ -1800,6 +1870,7 @@ impl Element for InputElement {
 
         // One WrappedLine per '\n'-separated paragraph.
         let mut lines = Vec::new();
+        let mut quote_paragraphs: Vec<usize> = Vec::new();
         let mut start = 0usize;
         for para in display_text.split('\n') {
             let mut runs = runs_for(para, start, marked.as_ref(), &base_run);
@@ -1820,6 +1891,15 @@ impl Element for InputElement {
                 }
                 let local = t.range.start - start..t.range.end.min(para_end) - start;
                 runs = select::chip_runs(runs, local, mention::CELL.len(), mention_accent);
+            }
+            // Live chat-Markdown styling ([feedback chat-markdown-composer-2026-10-27]):
+            // markers faint, the words between them in their style, a `> ` line
+            // muted with a bar beside it — what the bubble will show.
+            if !content.is_empty() && !input.masked {
+                let quoted = live_styles(para, &mut runs, &theme);
+                if quoted {
+                    quote_paragraphs.push(lines.len());
+                }
             }
             let shaped = window
                 .text_system()
@@ -1877,6 +1957,29 @@ impl Element for InputElement {
         }
         scroll_y = scroll_y.clamp(0.0, (total_h - visible_h).max(0.0));
         let dy = px(scroll_y);
+
+        // The quote bars: beside each `> ` paragraph, the height of its rows.
+        let mut bars = Vec::new();
+        let mut top = px(0.0);
+        for (ix, (_, line)) in lines.iter().enumerate() {
+            let h = line.size(lh).height;
+            if quote_paragraphs.contains(&ix) {
+                bars.push(
+                    fill(
+                        Bounds::new(
+                            point(
+                                bounds.left() - px(QUOTE_BAR_GAP + transcript::QUOTE_BAR),
+                                bounds.top() + top - dy + px(QUOTE_BAR_INSET),
+                            ),
+                            size(px(transcript::QUOTE_BAR), h - px(QUOTE_BAR_INSET * 2.0)),
+                        ),
+                        Theme::with_alpha(theme.text_muted, 0.55),
+                    )
+                    .corner_radii(Corners::all(px(transcript::QUOTE_BAR / 2.0))),
+                );
+            }
+            top += h;
+        }
 
         // Chip pills (one per wrapped-line fragment) and pictures, in element
         // coordinates shifted by the scroll.
@@ -2020,6 +2123,7 @@ impl Element for InputElement {
             pictures,
             chip_hits,
             fading,
+            bars,
             hitbox: window.insert_hitbox(bounds, HitboxBehavior::Normal),
             scroll_y,
         }
@@ -2044,6 +2148,22 @@ impl Element for InputElement {
         let lh = px(INPUT_LINE_HEIGHT);
         let scroll_y = prepaint.scroll_y;
         let focused = focus_handle.is_focused(window);
+        // The bars sit in the left padding, so they get a mask one gutter wider.
+        let gutter = Bounds::new(
+            point(
+                bounds.left() - px(QUOTE_BAR_GAP + transcript::QUOTE_BAR),
+                bounds.top(),
+            ),
+            size(
+                bounds.size.width + px(QUOTE_BAR_GAP + transcript::QUOTE_BAR),
+                bounds.size.height,
+            ),
+        );
+        window.with_content_mask(Some(gpui::ContentMask { bounds: gutter }), |window| {
+            for bar in prepaint.bars.drain(..) {
+                window.paint_quad(bar);
+            }
+        });
         window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
             for pill in prepaint.pills.drain(..) {
                 window.paint_quad(pill);
@@ -2222,6 +2342,97 @@ impl InputElement {
     }
 }
 
+/// The live quote bar's distance from the text and its vertical inset in the row.
+const QUOTE_BAR_GAP: f32 = 5.0;
+const QUOTE_BAR_INSET: f32 = 2.0;
+
+/// Restyle one paragraph's runs by the chat-Markdown grammar as it is typed:
+/// marker bytes (`**`, `` ` ``, `~~`, `||`, `[`, `](…)`) in the faint ink, the
+/// words between them bold / italic / struck / mono on the code wash / on the
+/// spoiler wash, a `> ` line's markers faint and its words muted. Returns
+/// whether the paragraph is a quote line (the caller draws its bar). The runs'
+/// total length never changes, so the layout is the typed text's.
+fn live_styles(para: &str, runs: &mut Vec<TextRun>, theme: &Theme) -> bool {
+    let quote = arbos_core::markdown::quote_marker_len(para);
+    let body_from = quote.unwrap_or(0);
+    if let Some(n) = quote {
+        *runs = recolor(std::mem::take(runs), 0..n, theme.text_faint);
+        *runs = recolor(std::mem::take(runs), n..para.len(), theme.text_muted);
+    }
+    let body = &para[body_from..];
+    if !body.contains(['*', '_', '~', '|', '`', '[']) {
+        return quote.is_some();
+    }
+    for range in arbos_core::markdown::inline_markers(body) {
+        let range = range.start + body_from..range.end + body_from;
+        *runs = recolor(std::mem::take(runs), range, theme.text_faint);
+    }
+    for span in arbos_core::markdown::inline_spans(body) {
+        let st = span.style;
+        if st == arbos_core::markdown::InlineStyle::default() || span.source.is_empty() {
+            continue;
+        }
+        let range = span.source.start + body_from..span.source.end + body_from;
+        *runs = restyle(std::mem::take(runs), range, |run| {
+            if st.code {
+                run.font.family = theme.font_mono.into();
+                run.background_color = Some(theme.code_bg);
+            }
+            if st.bold {
+                run.font.weight = FontWeight::BOLD;
+            }
+            if st.italic {
+                run.font.style = gpui::FontStyle::Italic;
+            }
+            if st.strike {
+                run.strikethrough = Some(gpui::StrikethroughStyle {
+                    thickness: px(1.0),
+                    color: Some(run.color),
+                });
+            }
+            if st.spoiler != 0 {
+                run.background_color = Some(transcript::spoiler_fill(theme.text, theme, true));
+            }
+        });
+    }
+    quote.is_some()
+}
+
+/// Recolour the bytes in `range`, splitting runs at its edges.
+fn recolor(runs: Vec<TextRun>, range: Range<usize>, color: gpui::Hsla) -> Vec<TextRun> {
+    restyle(runs, range, |run| run.color = color)
+}
+
+/// Apply `f` to the runs covering `range` (split at its edges); the total
+/// length is unchanged.
+fn restyle(runs: Vec<TextRun>, range: Range<usize>, f: impl Fn(&mut TextRun)) -> Vec<TextRun> {
+    if range.is_empty() {
+        return runs;
+    }
+    let mut out = Vec::with_capacity(runs.len() + 2);
+    let mut pos = 0usize;
+    for run in runs {
+        let run_end = pos + run.len;
+        let mut cursor = pos;
+        for cut in [range.start, range.end, run_end] {
+            if cut <= cursor || cut > run_end {
+                continue;
+            }
+            let mut piece = TextRun {
+                len: cut - cursor,
+                ..run.clone()
+            };
+            if cursor >= range.start && cursor < range.end {
+                f(&mut piece);
+            }
+            out.push(piece);
+            cursor = cut;
+        }
+        pos = run_end;
+    }
+    out
+}
+
 fn runs_for(
     para: &str,
     para_start: usize,
@@ -2330,6 +2541,9 @@ impl Render for ComposerInput {
             .on_action(cx.listener(Self::select_document_start))
             .on_action(cx.listener(Self::select_document_end))
             .on_action(cx.listener(Self::delete_to_line_start))
+            .on_action(cx.listener(Self::bold))
+            .on_action(cx.listener(Self::italic))
+            .on_action(cx.listener(Self::strike))
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::copy))
@@ -5208,5 +5422,227 @@ mod caret_tests {
         cx.run_until_parked();
         cx.simulate_keystrokes("cmd-up");
         assert_eq!(caret(&d, cx), 0, "focused again: ⌘↑ moves the caret");
+    }
+}
+
+#[cfg(test)]
+mod format_tests {
+    //! Chat-Markdown in the composer ([feedback chat-markdown-composer-2026-10-27],
+    //! Jacob): ⌘B / ⌘I / ⌘⇧X wrap or unwrap the selection through the real
+    //! keymap while the composer is focused, and the draft is styled as it is
+    //! typed — markers faint, the words between them styled, a `> ` line muted
+    //! with its bar.
+    use super::*;
+    use gpui::{TestAppContext, VisualTestContext};
+
+    struct Harness {
+        input: Entity<ComposerInput>,
+    }
+
+    impl Render for Harness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .w(px(480.0))
+                .h(px(300.0))
+                .flex()
+                .child(self.input.clone())
+        }
+    }
+
+    fn field<'a>(
+        cx: &'a mut TestAppContext,
+        text: &str,
+    ) -> (Entity<ComposerInput>, &'a mut VisualTestContext) {
+        cx.update(|cx| {
+            let theme = crate::ui::theme::Theme::for_pref(
+                crate::ui::theme::AppearancePref::Dark,
+                crate::ui::theme::Surface::Matte,
+                cx,
+            );
+            cx.set_global(theme);
+            crate::ui::motion::PulseClock::init(cx);
+            crate::bind_keys(cx);
+        });
+        let (view, vcx) = cx.add_window_view(|_, cx| Harness {
+            input: cx.new(ComposerInput::new),
+        });
+        let input = vcx.update(|_, cx| view.read(cx).input.clone());
+        let text = text.to_owned();
+        vcx.update(|window, cx| {
+            input.update(cx, |i, cx| i.set_text(text, cx));
+            let handle = input.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+        });
+        vcx.run_until_parked();
+        (input, vcx)
+    }
+
+    fn select(input: &Entity<ComposerInput>, range: Range<usize>, cx: &mut VisualTestContext) {
+        cx.update(|_, cx| {
+            input.update(cx, |i, cx| {
+                i.move_to(range.start, cx);
+                i.select_to(range.end, cx);
+            })
+        });
+        cx.run_until_parked();
+    }
+
+    fn state(input: &Entity<ComposerInput>, cx: &mut VisualTestContext) -> (String, Range<usize>) {
+        cx.update(|_, cx| {
+            let i = input.read(cx);
+            (i.text().to_string(), i.selected_range.clone())
+        })
+    }
+
+    /// ⌘B wraps the selected words in `**` and keeps them selected; ⌘B again
+    /// unwraps; the markers hug the words, never the spaces around them.
+    #[gpui::test]
+    fn cmd_b_wraps_and_unwraps_the_selection(cx: &mut TestAppContext) {
+        let (input, cx) = field(cx, "make this bold please");
+        select(&input, 5..9, cx);
+        cx.simulate_keystrokes("cmd-b");
+        assert_eq!(
+            state(&input, cx),
+            ("make **this** bold please".into(), 7..11)
+        );
+        cx.simulate_keystrokes("cmd-b");
+        assert_eq!(state(&input, cx), ("make this bold please".into(), 5..9));
+        // A selection that drags the spaces in: the markers still hug the word.
+        select(&input, 4..10, cx);
+        cx.simulate_keystrokes("cmd-b");
+        assert_eq!(
+            state(&input, cx),
+            ("make **this** bold please".into(), 7..11)
+        );
+        // Selecting the markers too and pressing again strips them.
+        select(&input, 5..13, cx);
+        cx.simulate_keystrokes("cmd-b");
+        assert_eq!(state(&input, cx), ("make this bold please".into(), 5..9));
+        // ⌘Z brings the last wrap back.
+        cx.simulate_keystrokes("cmd-z");
+        assert_eq!(state(&input, cx).0, "make **this** bold please");
+    }
+
+    /// ⌘I and ⌘⇧X use `*` and `~~`; the three nest.
+    #[gpui::test]
+    fn cmd_i_and_cmd_shift_x_wrap_with_their_markers(cx: &mut TestAppContext) {
+        let (input, cx) = field(cx, "gone and soft");
+        select(&input, 0..4, cx);
+        cx.simulate_keystrokes("cmd-shift-x");
+        assert_eq!(state(&input, cx), ("~~gone~~ and soft".into(), 2..6));
+        select(&input, 13..17, cx);
+        cx.simulate_keystrokes("cmd-i");
+        assert_eq!(state(&input, cx), ("~~gone~~ and *soft*".into(), 14..18));
+        cx.simulate_keystrokes("cmd-b");
+        assert_eq!(
+            state(&input, cx),
+            ("~~gone~~ and ***soft***".into(), 16..20)
+        );
+        cx.simulate_keystrokes("cmd-b");
+        assert_eq!(state(&input, cx), ("~~gone~~ and *soft*".into(), 14..18));
+    }
+
+    /// No selection: ⌘B puts an empty pair around the caret, the next words
+    /// land inside; ⌘B again on the empty pair removes it.
+    #[gpui::test]
+    fn cmd_b_with_no_selection_opens_an_empty_pair(cx: &mut TestAppContext) {
+        let (input, cx) = field(cx, "say ");
+        cx.update(|_, cx| input.update(cx, |i, cx| i.move_to(4, cx)));
+        cx.simulate_keystrokes("cmd-b");
+        assert_eq!(state(&input, cx), ("say ****".into(), 6..6));
+        cx.simulate_keystrokes("cmd-b");
+        assert_eq!(state(&input, cx), ("say ".into(), 4..4));
+        cx.simulate_keystrokes("cmd-b");
+        cx.simulate_keystrokes("h i");
+        assert_eq!(state(&input, cx).0, "say **hi**");
+    }
+
+    /// Blurred, ⌘B is the sidebar's: the draft does not change.
+    #[gpui::test]
+    fn blurred_cmd_b_leaves_the_draft_alone(cx: &mut TestAppContext) {
+        let (input, cx) = field(cx, "plain words");
+        select(&input, 0..5, cx);
+        cx.update(|window, _| window.blur());
+        cx.run_until_parked();
+        cx.simulate_keystrokes("cmd-b");
+        assert_eq!(state(&input, cx).0, "plain words");
+    }
+
+    /// Live styling: the runs of a typed line carry the grammar — markers in
+    /// the faint ink, `**bold**` bold, `~~x~~` struck, `` `c` `` mono on the
+    /// code wash, a `> ` line's words muted; plain text is one plain run.
+    #[test]
+    fn live_styles_paint_markers_faint_and_words_styled() {
+        let theme = Theme::dark(crate::ui::theme::Surface::Matte);
+        let base = TextRun {
+            len: 0,
+            font: gpui::Font {
+                family: theme.font_sans.into(),
+                features: Default::default(),
+                fallbacks: None,
+                weight: FontWeight::NORMAL,
+                style: gpui::FontStyle::Normal,
+            },
+            color: theme.text,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let runs_of = |para: &str| {
+            let mut runs = runs_for(para, 0, None, &base);
+            let quoted = live_styles(para, &mut runs, &theme);
+            assert_eq!(
+                runs.iter().map(|r| r.len).sum::<usize>(),
+                para.len(),
+                "{para}"
+            );
+            (quoted, runs)
+        };
+        let (quoted, runs) = runs_of("a **b** `c` ~~d~~");
+        assert!(!quoted);
+        let pieces: Vec<(usize, bool, bool, bool, bool)> = runs
+            .iter()
+            .map(|r| {
+                (
+                    r.len,
+                    r.color == theme.text_faint,
+                    r.font.weight == FontWeight::BOLD,
+                    r.background_color == Some(theme.code_bg),
+                    r.strikethrough.is_some(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            pieces,
+            vec![
+                (2, false, false, false, false), // "a "
+                (2, true, false, false, false),  // "**"
+                (1, false, true, false, false),  // "b"
+                (2, true, false, false, false),  // "**"
+                (1, false, false, false, false), // " "
+                (1, true, false, false, false),  // "`"
+                (1, false, false, true, false),  // "c"
+                (1, true, false, false, false),  // "`"
+                (1, false, false, false, false), // " "
+                (2, true, false, false, false),  // "~~"
+                (1, false, false, false, true),  // "d"
+                (2, true, false, false, false),  // "~~"
+            ]
+        );
+        let (quoted, runs) = runs_of("> hello *there*");
+        assert!(quoted, "a `> ` line draws its bar");
+        assert_eq!(runs[0].len, 2);
+        assert_eq!(runs[0].color, theme.text_faint, "the `> ` marker is faint");
+        assert_eq!(
+            runs[1].color, theme.text_muted,
+            "the quoted words are muted"
+        );
+        assert!(runs.iter().any(|r| r.font.style == gpui::FontStyle::Italic));
+        for plain in ["snake_case 2*3*4 a_b", ">5 not a quote", "plain words"] {
+            let (quoted, runs) = runs_of(plain);
+            assert!(!quoted, "{plain}");
+            assert_eq!(runs.len(), 1, "{plain}: one plain run, {runs:?}");
+            assert_eq!(runs[0].color, theme.text);
+        }
     }
 }

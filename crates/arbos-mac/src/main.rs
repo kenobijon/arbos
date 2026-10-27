@@ -318,6 +318,15 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-}", shell::NextTab, None),
         KeyBinding::new("ctrl-t", shell::NewTab, None),
         KeyBinding::new("cmd-b", shell::ToggleRail, None),
+        // Chat-Markdown chords ([feedback chat-markdown-composer-2026-10-27]):
+        // ⌘B / ⌘I / ⌘⇧X wrap the selection in `**` / `*` / `~~` (or unwrap it)
+        // while the composer is focused; blurred, ⌘B keeps toggling the sidebar
+        // (the binding above) — Jacob's default, vetoable. Bound after it: a
+        // later binding wins when both match, and this one matches only in the
+        // "ComposerInput" context.
+        KeyBinding::new("cmd-b", composer::Bold, input),
+        KeyBinding::new("cmd-i", composer::Italic, input),
+        KeyBinding::new("cmd-shift-x", composer::Strike, input),
         KeyBinding::new("ctrl-b", shell::ToggleRail, None),
         // App-wide search (Jacob 2026-10-24): ⌘⇧F opens the command palette,
         // ⌘K is its alias (free before this).
@@ -508,6 +517,49 @@ mod keymap_tests {
                     "{keys} outside the composer is nobody's"
                 );
             }
+        });
+    }
+
+    /// ⌘B / ⌘I / ⌘⇧X format the focused composer's selection ([feedback
+    /// chat-markdown-composer-2026-10-27]); with the composer blurred ⌘B is
+    /// still the sidebar toggle and ⌘I / ⌘⇧X are nobody's.
+    #[gpui::test]
+    fn format_chords_are_the_focused_composers_and_cmd_b_toggles_the_rail_outside(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| {
+            bind_keys(cx);
+            let mut composer = gpui::KeyContext::default();
+            composer.add("ComposerInput");
+            let root = gpui::KeyContext::default();
+            let keymap = cx.key_bindings();
+            let first = |keys: &str, stack: &[gpui::KeyContext]| {
+                let stroke = Keystroke::parse(keys).expect("keystroke");
+                keymap
+                    .borrow()
+                    .bindings_for_input(&[stroke], stack)
+                    .0
+                    .first()
+                    .map(|b| b.action().name().to_string())
+            };
+            for (keys, action) in [
+                ("cmd-b", "composer::Bold"),
+                ("cmd-i", "composer::Italic"),
+                ("cmd-shift-x", "composer::Strike"),
+            ] {
+                assert_eq!(
+                    first(keys, std::slice::from_ref(&composer)).as_deref(),
+                    Some(action),
+                    "{keys} in the composer"
+                );
+            }
+            assert_eq!(
+                first("cmd-b", std::slice::from_ref(&root)).as_deref(),
+                Some("shell::ToggleRail"),
+                "⌘B outside the composer still toggles the sidebar"
+            );
+            assert_eq!(first("cmd-i", std::slice::from_ref(&root)), None);
+            assert_eq!(first("cmd-shift-x", std::slice::from_ref(&root)), None);
         });
     }
 
