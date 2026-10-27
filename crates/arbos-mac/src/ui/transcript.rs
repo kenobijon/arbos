@@ -1619,15 +1619,37 @@ impl Transcript {
                     .read(cx)
                     .thumbnails
                     .iter()
-                    .filter(|(k, _)| k.starts_with("lp-"))
+                    .filter(|(k, _)| k.starts_with("lp-") || k.starts_with("li-"))
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect(),
             );
+            // The relay's host icons (`AppState::link_icon`), same snapshot idea.
+            let host_icons: Rc<
+                HashMap<
+                    String,
+                    (
+                        std::sync::Arc<gpui::RenderImage>,
+                        crate::ui::link_tile::Tone,
+                    ),
+                >,
+            > = Rc::new({
+                let state = self.state.read(cx);
+                state
+                    .link_icons
+                    .keys()
+                    .filter_map(|h| {
+                        state
+                            .link_icon(h)
+                            .map(|(img, tone)| (h.clone(), (img.clone(), tone)))
+                    })
+                    .collect()
+            });
             let open_state = self.state.clone();
             let remove_state = self.state.clone();
             let remove_chat = self.chat_id.clone();
             Rc::new(crate::ui::link_card::LinkUi {
                 thumbnail: Rc::new(move |key| thumbs.get(key).cloned()),
+                host_icon: Rc::new(move |host| host_icons.get(host).cloned()),
                 on_open: Rc::new(move |url, _, cx| {
                     open_state.update(cx, |s, cx| s.open_link(&url, cx));
                 }),
@@ -10646,6 +10668,7 @@ mod link_preview_tests {
             let removed = self.removed.clone();
             let ui = Rc::new(crate::ui::link_card::LinkUi {
                 thumbnail: Rc::new(|_| None),
+                host_icon: Rc::new(|_| None),
                 on_open: Rc::new(move |url, _, _| opened.borrow_mut().push(url)),
                 on_remove: Rc::new(move |mid, _, _| removed.borrow_mut().push(mid)),
             });

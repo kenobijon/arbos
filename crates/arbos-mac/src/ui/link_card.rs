@@ -5,8 +5,9 @@
 //! the picture on top at 16:9 (▶ and the duration on a video), the text under it. Every card
 //! opens out: a click is the link's click (`LinkUi::on_open` → the app's link opener, where
 //! #1522's confirm slots in). On an own message the hover shows an × top-right (Remove preview,
-//! for everyone). The footer's small square is the **site-icon tile slot**: neutral until the
-//! shared link-icon tile component lands (bc-1ceabe13); no favicon is fetched here.
+//! for everyone). The footer's small square is the shared link-icon tile (`link_tile`): the
+//! host's bundled brand mark, else the relay's `siteIcon` picture, else the relay's host icon,
+//! else the host's initial — the card itself fetches nothing from the site.
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -19,6 +20,7 @@ use gpui::{
 use crate::model::LinkPreview;
 
 use super::icons::icon;
+use super::link_tile::{self, Brand, Icon, Tone};
 use super::theme::Theme;
 
 /// Settings → Chat → Link previews: off hides every card on this Mac (plain links stay).
@@ -53,6 +55,9 @@ const FOOT: f32 = 11.0;
 pub struct LinkUi {
     #[allow(clippy::type_complexity)]
     pub thumbnail: Rc<dyn Fn(&str) -> Option<Arc<RenderImage>>>,
+    /// The relay's icon for a host (`AppState::link_icon`), for hosts with no bundled mark.
+    #[allow(clippy::type_complexity)]
+    pub host_icon: Rc<dyn Fn(&str) -> Option<(Arc<RenderImage>, Tone)>>,
     #[allow(clippy::type_complexity)]
     pub on_open: Rc<dyn Fn(String, &mut Window, &mut App)>,
     #[allow(clippy::type_complexity)]
@@ -92,14 +97,47 @@ fn ink(theme: &Theme, own: bool) -> Hsla {
     }
 }
 
-/// The neutral square the shared tile component replaces: the muted colour at low alpha.
-pub fn tile_slot(theme: &Theme, own: bool) -> Div {
-    div()
-        .flex_shrink_0()
-        .size(px(TILE))
-        .rounded(px(3.0))
-        .bg(Theme::with_alpha(muted(theme, own), 0.28))
-        .debug_selector(|| "link-tile".into())
+/// The host a card stands for: `siteHost` from the relay, else the canonical URL's host.
+fn host_of(preview: &LinkPreview) -> String {
+    preview
+        .site_host
+        .clone()
+        .filter(|h| !h.is_empty())
+        .or_else(|| {
+            let url = if preview.canonical_url.is_empty() {
+                &preview.url
+            } else {
+                &preview.canonical_url
+            };
+            url.split("://")
+                .nth(1)
+                .and_then(|r| r.split(['/', '?', '#']).next())
+                .map(|h| h.trim_start_matches("www.").to_owned())
+        })
+        .unwrap_or_default()
+}
+
+/// The footer's tile: the shared link-icon tile at [`TILE`] pt — a bundled brand mark for a
+/// known host, else the relay's `siteIcon` picture on the part, else the relay's host icon,
+/// else the host's initial.
+pub fn tile_slot(preview: &LinkPreview, ui: Option<&Rc<LinkUi>>, theme: &Theme) -> Div {
+    let host = host_of(preview);
+    let site_icon = preview
+        .site_icon
+        .as_ref()
+        .filter(|i| !i.blob_ref.is_empty())
+        .and_then(|i| ui.and_then(|ui| (ui.thumbnail)(&i.blob_ref)));
+    let host_icon = ui.and_then(|ui| (ui.host_icon)(&host));
+    let tile = if let Some(brand) = Brand::for_host(&host) {
+        link_tile::tile(Icon::Brand(brand), TILE, theme)
+    } else if let Some(image) = site_icon.as_ref() {
+        link_tile::tile(Icon::Picture(image, Tone::Neutral), TILE, theme)
+    } else if let Some((image, tone)) = host_icon.as_ref() {
+        link_tile::tile(Icon::Picture(image, *tone), TILE, theme)
+    } else {
+        link_tile::tile(Icon::Initial(&host), TILE, theme)
+    };
+    tile.debug_selector(|| "link-tile".into())
 }
 
 fn one_line(text: &str, size: f32, weight: FontWeight, color: Hsla) -> Div {
@@ -126,7 +164,7 @@ fn clamped(text: &str, size: f32, weight: FontWeight, color: Hsla, lines: usize)
 }
 
 /// "Spotify · Song · 4:03" after the tile slot.
-fn footer(preview: &LinkPreview, theme: &Theme, own: bool) -> Div {
+fn footer(preview: &LinkPreview, theme: &Theme, own: bool, ui: Option<&Rc<LinkUi>>) -> Div {
     let mut parts: Vec<String> = Vec::new();
     if !preview.provider_name.trim().is_empty() {
         parts.push(preview.provider_name.trim().to_owned());
@@ -143,7 +181,7 @@ fn footer(preview: &LinkPreview, theme: &Theme, own: bool) -> Div {
         .overflow_hidden()
         .whitespace_nowrap()
         .debug_selector(|| "link-footer".into())
-        .child(tile_slot(theme, own));
+        .child(tile_slot(preview, ui, theme));
     if let Some(diff) = &preview.diff {
         row = row
             .child(
@@ -377,7 +415,7 @@ pub fn card(
                         .text_size(px(SUB))
                         .line_height(px(SUB + 4.0))
                         .text_color(muted(theme, own))
-                        .child(tile_slot(theme, own))
+                        .child(tile_slot(preview, ui, theme))
                         .child(div().overflow_hidden().text_ellipsis().child(s.clone())),
                 );
             }
@@ -430,7 +468,7 @@ pub fn card(
             }
         }
     }
-    text = text.child(footer(preview, theme, own));
+    text = text.child(footer(preview, theme, own, ui));
 
     let mut body = div()
         .flex()
