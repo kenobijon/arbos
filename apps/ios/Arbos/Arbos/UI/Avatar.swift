@@ -118,7 +118,7 @@ struct AgentAvatar: View {
 /// be guessed per surface. Same numbers as the Mac's `ui::badge`: dot = size / 4 clamped
 /// 6–12 (12 on the 48 pt home circle, 8 on the 32 pt pill picture), ring 2 pt, the ring
 /// box 2 pt past the picture's edge. Every picture-with-dot goes through
-/// [`View.presenceBadge(_:size:)`]; `PresenceBadgeLintTests` fails the gate on a corner
+/// [`View.presenceBadge(_:size:)`]; `PresenceBadgeTests` fails the gate on a corner
 /// dot drawn by hand.
 enum PresenceBadge {
     static let ringWidth: CGFloat = 2
