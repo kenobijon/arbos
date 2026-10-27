@@ -641,37 +641,44 @@ impl Workspace {
     /// A chat forked from another (#1257) is seeded from its source first.
     pub async fn sync_chats(&self, chats: &[Value]) {
         for c in chats {
-            if let Some(id) = c.get("id").and_then(Value::as_str) {
-                let first_sight = self.store.chat(id).ok().flatten().is_none();
-                let _ = self.store.upsert_chat(
-                    id,
-                    c.get("title").and_then(Value::as_str).unwrap_or("New chat"),
-                    c.get("is_pinned").and_then(Value::as_bool).unwrap_or(false),
-                    c.get("created_at").and_then(Value::as_i64).unwrap_or(0),
-                );
-                if self.sync.host(id).await.is_none() {
-                    if first_sight {
-                        if let Some(src) = c.get("forked_from").and_then(Value::as_str) {
-                            if let Err(e) = seed_forked_chat(
-                                &self.cfg,
-                                &self.store,
-                                &self.sync,
-                                &self.project_id,
-                                id,
-                                src,
-                            )
-                            .await
-                            {
-                                tracing::warn!(error = %e, id, source = src, "fork chat seed");
-                            }
-                        }
-                    }
-                    if let Err(e) = self.sync.open_room(id).await {
-                        tracing::warn!(error = %e, id, "open room");
-                    }
-                }
+            open_listed_chat(&self.cfg, &self.store, &self.sync, &self.project_id, c).await;
+        }
+    }
+}
+
+/// One chat as the relay lists it (`{id, title, is_pinned, created_at, forked_from?}`): record
+/// it and open its room unless the room is already open. Idempotent; shared by the registry
+/// pass and the relay's `chat_open` push (#2127), so a chat reaches the agent by whichever
+/// arrives first.
+pub(crate) async fn open_listed_chat(
+    cfg: &Config,
+    store: &Store,
+    sync: &SyncHub,
+    project_id: &str,
+    c: &Value,
+) {
+    let Some(id) = c.get("id").and_then(Value::as_str) else {
+        return;
+    };
+    let first_sight = store.chat(id).ok().flatten().is_none();
+    let _ = store.upsert_chat(
+        id,
+        c.get("title").and_then(Value::as_str).unwrap_or("New chat"),
+        c.get("is_pinned").and_then(Value::as_bool).unwrap_or(false),
+        c.get("created_at").and_then(Value::as_i64).unwrap_or(0),
+    );
+    if sync.host(id).await.is_some() {
+        return;
+    }
+    if first_sight {
+        if let Some(src) = c.get("forked_from").and_then(Value::as_str) {
+            if let Err(e) = seed_forked_chat(cfg, store, sync, project_id, id, src).await {
+                tracing::warn!(error = %e, id, source = src, "fork chat seed");
             }
         }
+    }
+    if let Err(e) = sync.open_room(id).await {
+        tracing::warn!(error = %e, id, "open room");
     }
 }
 

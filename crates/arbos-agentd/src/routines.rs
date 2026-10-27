@@ -193,6 +193,26 @@ impl Agent {
                     tracing::warn!(error = %e, "routine_run push failed");
                 }
             }
+            // A chat of this project was opened (a new tab, or a person's row landed in a room
+            // this box holds no socket in): open its room now, not at the next listing (#2127,
+            // #2120). Same path as the registry pass; a room already open is left alone.
+            "chat_open" => {
+                let Some(chat_id) = payload.get("chat_id").and_then(Value::as_str) else {
+                    tracing::warn!("chat_open push without chat_id");
+                    return;
+                };
+                let mut chat = payload.clone();
+                chat["id"] = Value::String(chat_id.to_owned());
+                crate::workspace::open_listed_chat(
+                    &self.cfg,
+                    &self.store,
+                    &self.sync,
+                    &self.cfg.project_id,
+                    &chat,
+                )
+                .await;
+                tracing::info!(chat_id, reason = ?payload.get("reason"), "chat_open push: room opened");
+            }
             // F5: the library changed on the relay; refetch the index now rather than at the
             // next 60 s tick.
             "skills_changed" => self.refresh_skills().await,

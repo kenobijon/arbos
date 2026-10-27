@@ -430,11 +430,20 @@ async fn boot() -> Result<()> {
         let cfg2 = cfg.clone();
         tokio::spawn(async move {
             let mut poll_failures: u32 = 0;
+            // The client itself carries the bounds (connect and whole-request), not only the
+            // per-call wrapper: a response that hangs after its headers is what stalled the
+            // pass for 9 minutes (#2127); the pool is pinned per connection to one request.
+            let poll_client = reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(5))
+                .timeout(crate::workspace::REGISTRY_CALL_TIMEOUT)
+                .pool_max_idle_per_host(1)
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new());
             loop {
                 tokio::time::sleep(Duration::from_secs(3)).await;
                 // A failed listing names itself once per streak (#2127: a 9-minute gap with
                 // no line anywhere), and is bounded so a hang cannot hold the next pass.
-                let r = match reqwest::Client::new()
+                let r = match poll_client
                     .get(format!("{}/box/projects", cfg2.relay_url))
                     .bearer_auth(&cfg2.box_token)
                     .timeout(crate::workspace::REGISTRY_CALL_TIMEOUT)
