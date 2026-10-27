@@ -95,6 +95,7 @@ final class ErrorUILintTests: XCTestCase {
         ("sign-in-error", "SignInView.swift"),
         ("pairing-error", "SignInView.swift"),
         ("feedback-error", "FeedbackSheet.swift"),
+        ("question-card-error", "QuestionCard.swift"),
         ("connector-error", "SettingsView.swift"),
         ("devices-error", "SettingsView.swift"),
         ("privacy-error", "SettingsView.swift"),

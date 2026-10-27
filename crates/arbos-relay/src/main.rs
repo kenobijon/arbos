@@ -59,6 +59,7 @@ mod skills;
 mod smoke;
 mod state;
 mod upgrade;
+mod upgrade_carry;
 mod vault;
 mod vaults;
 mod voice;
@@ -335,6 +336,7 @@ async fn main() -> anyhow::Result<()> {
         jwt_key: Arc::new(jwt_key),
         download_cache: Arc::new(Mutex::new(None)),
         upgrading: Arc::new(Mutex::new(HashMap::new())),
+        upgrade_refused: Arc::new(Mutex::new(HashMap::new())),
         refresh_grace: Arc::new(Mutex::new(HashMap::new())),
         push: apns::from_env().unwrap_or_else(|| Arc::new(apns::Pusher::Off)),
         focus: Arc::new(Mutex::new(HashMap::new())),
@@ -941,6 +943,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/box/secrets/{id}/scrub", get(secrets::box_scrub))
         .route("/box/secrets/request", post(secrets::box_request))
+        .route("/box/secrets/from-message", post(secrets::box_from_message))
         .route(
             "/box/secrets/requests/{id}",
             get(secrets::box_request_status),
