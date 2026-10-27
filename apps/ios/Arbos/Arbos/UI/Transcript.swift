@@ -211,10 +211,10 @@ enum Transcript {
     /// Same, with the caller's `index(messages)` (the chat keeps it for its own lookups).
     /// `multiParty`: the chat names its senders — a group or a server channel (people and
     /// agents alike); a 1:1 chat (me ↔ person, me ↔ agent) labels nobody (Jacob, 2026-10-23).
-    /// `hiddenSenders`: `user:<id>` keys of people I blocked — their messages fold into one
-    /// `.hidden` row per run instead of bubbles, and carry no date separator.
     /// `memberNames`: the chat's people by user id → current display name (me included), so a
     /// membership line names its actor as the roster does now, not as the row was written.
+    /// `hiddenSenders`: `user:<id>` keys of people I blocked — their messages fold into one
+    /// `.hidden` row per run instead of bubbles, and carry no date separator.
     static func rows(_ messages: [Message], byId: [Id: Message], projectId: Id, subagentNames: [String: String] = [:], me: String? = nil, people: Bool = false, agentNames: [String: String] = [:], multiParty: Bool = false, memberNames: [String: String] = [:], hiddenSenders: Set<String> = []) -> [Row] {
         var rows: [Row] = []
         rows.reserveCapacity(messages.count + messages.count / 8)
@@ -1179,6 +1179,10 @@ struct RowView: View, Equatable {
     let row: Row
     let chatId: Id
     let width: CGFloat
+    /// A people chat (DM / group / channel): bubbles take `Theme.peopleBubbleInset`
+    /// off the screen instead of the agent chat's `Theme.bubbleInset`
+    /// ([feedback chat-density-ios-2026-10-26]).
+    var people: Bool = false
     /// How far the transcript has been dragged left to reveal iMessage-style times (0…`timeRevealWidth`).
     var timeReveal: CGFloat = 0
     /// A tap on a reply bubble's quote header: the chat scrolls to this message id.
@@ -1193,6 +1197,8 @@ struct RowView: View, Equatable {
 
     /// Which reaction chip is expanded to show who used that emoji under the bubble.
     @State private var selectedReactionEmoji: String? = nil
+    /// The agent-error note's Details disclosure.
+    @State private var errorDetailsOpen = false
     /// Reply swipe: how far the bubble has followed the finger to the right.
     @State private var replyDrag: CGFloat = 0
     /// Reply swipe: what the current drag was decided to be (once, at 12 pt).
@@ -1214,6 +1220,7 @@ struct RowView: View, Equatable {
             && lhs.highlighted == rhs.highlighted
             && lhs.mentions.stamp == rhs.mentions.stamp
             && lhs.composerInset == rhs.composerInset
+            && lhs.people == rhs.people
             && lhs.theme == rhs.theme
         #if DEBUG
         PerfCounters.bump(same ? "rowEqTrue" : "rowEqFalse")
@@ -1221,7 +1228,13 @@ struct RowView: View, Equatable {
         return same
     }
 
-    private var maxBubble: CGFloat { max(200, width - Theme.bubbleInset) }
+    /// The widest a bubble on this row may be: the screen minus the chat kind's inset
+    /// (`Theme.bubbleInset(people:)`); an incoming people-chat bubble also loses the lane.
+    private var maxBubble: CGFloat { Self.maxBubble(width: width, people: people) }
+
+    static func maxBubble(width: CGFloat, people: Bool) -> CGFloat {
+        max(200, width - Theme.bubbleInset(people: people))
+    }
 
     private var reportsGreetingFrame: Bool {
         model.firstLogin != nil && model.messages(of: chatId).first(where: { $0.greeting })?.id == row.messageId
@@ -1338,17 +1351,17 @@ struct RowView: View, Equatable {
         switch row.kind {
         case .user(let text, let delivery, let quote):
             // My bubble: delivered is the full style at once; only pending is dimmed; a
-            // failed one is full with a red "! Retry" on its outer edge. No caption, no
-            // read-receipt dimming (Jacob, 2026-10-24 / 2026-10-25; docs/mac-design-rules.md).
+            // failed one is full with the red mark on its outer edge — the words and Try again
+            // are the composer's note (Jacob, 2026-10-24 / 2026-10-26; docs/mac-design-rules.md).
             HStack(spacing: 8) {
                 Spacer(minLength: 0)
                 if delivery == .failed {
                     Button {
                         model.resendFailed(chatId: chatId, messageId: row.messageId)
                     } label: {
-                        Label("Retry", systemImage: "exclamationmark.circle.fill")
-                            .font(theme.font(Theme.tiny))
-                            .foregroundStyle(.red)
+                        Image(systemName: "exclamationmark.circle.fill")
+                            .font(.system(size: 16))
+                            .foregroundStyle(theme.danger) // error-ui: exception failed-bubble-mark
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Not sent. Retry")
@@ -1611,17 +1624,13 @@ struct RowView: View, Equatable {
                 if !fromUser { Spacer(minLength: 0) }
             }
         case .error(let code, let message):
-            HStack(spacing: 10) {
-                Image(systemName: "exclamationmark.circle").foregroundStyle(theme.danger)
-                Text(message).font(theme.font(Theme.small)).foregroundStyle(theme.text)
-                Spacer(minLength: 0)
-                Text(code).font(theme.font(11)).foregroundStyle(theme.muted)
-                Button("Retry") { model.retry(chatId: chatId, messageId: row.messageId) }
-                    .font(theme.font(13, weight: .semibold))
-                    .foregroundStyle(theme.text)
-            }
-            .padding(.horizontal, Theme.bubbleHPad).padding(.vertical, 10)
-            .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.dangerSoft))
+            // An agent turn that failed: the shared element in the transcript's flow (the agent's
+            // own sentence, the code behind Details, Try again re-runs the turn).
+            ErrorNote(id: "agent-turn-error",
+                      error: UserError(verb: "", class: message.trimmingCharacters(in: .whitespaces).isEmpty ? .unknown : .refused(message: message),
+                                       raw: code),
+                      detailsOpen: $errorDetailsOpen,
+                      onTryAgain: { model.retry(chatId: chatId, messageId: row.messageId) })
         }
     }
 

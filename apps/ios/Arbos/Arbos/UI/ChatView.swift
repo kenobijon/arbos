@@ -435,6 +435,7 @@ struct ChatSession: View {
     private var hasInCallBar: Bool {
         calls.isActive && !calls.isPresented && calls.call?.kind == .voice && calls.call?.chatId == chatId
     }
+    @State private var chatNoteDetailsOpen = false
     private var headerExtra: CGFloat { (hasCallBar ? 52 : 0) + (hasInCallBar ? 56 : 0) + (showSearch ? Controls.height + 8 : 0) }
     /// Member chips under the header — off on iPhone (feedback ABDgl8tFlqeUlwP4DihfYhk).
     private var showsMemberChips: Bool { false }
@@ -785,6 +786,9 @@ struct ChatSession: View {
             VStack(spacing: 8) {
                 header
                 linkPill.padding(.top, -5)
+                // The chat-level note (Jacob 2026-10-26): pinned under the header pill, 16 inset —
+                // the pushes refused for this chat, or the machine in error. One element.
+                chatNote.padding(.horizontal, 16)
                 if let people, showsMemberChips { memberChips(people).padding(.horizontal, 16) }
                 if showSearch {
                     HStack(spacing: 8) {
@@ -846,6 +850,17 @@ struct ChatSession: View {
         .environment(\.composerInset, composerSideInset)
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 0) {
+                // The composer's note (Jacob 2026-10-26): the last send / attachment / recording
+                // failure in this chat, directly above the composer at its width; Try again
+                // re-sends the newest failed message.
+                if let error = model.sendErrors[chatId] {
+                    ErrorNote(id: "composer-error", error: error,
+                              detailsOpen: Binding(get: { model.sendErrorDetailsOpen.contains(chatId) },
+                                                   set: { if $0 { model.sendErrorDetailsOpen.insert(chatId) } else { model.sendErrorDetailsOpen.remove(chatId) } }),
+                              onTryAgain: { model.retrySendError(chatId) })
+                        .padding(.horizontal, composerSideInset)
+                        .padding(.bottom, 10)
+                }
                 presenceRow
                     .environment(\.composerInset, composerSideInset)
                     .animation(.easeOut(duration: 0.25), value: composerFocused)
@@ -919,7 +934,8 @@ struct ChatSession: View {
                         },
                         onDismiss: { closeActions() },
                         bubble: {
-                            RowView(model: model, theme: theme, composerInset: composerSideInset, row: row, chatId: chatId, width: geo.size.width, timeReveal: 0,
+                            RowView(model: model, theme: theme, composerInset: composerSideInset, row: row, chatId: chatId, width: geo.size.width,
+                                    people: isPeople || isChannel, timeReveal: 0,
                                     mentions: MentionTable.Cache.shared.table(model: model, theme: theme))
                                 .padding(.horizontal, 16)
                         }
@@ -1700,28 +1716,14 @@ struct ChatSession: View {
                         )
                     Color.clear.frame(height: (showsMemberChips ? 104 : 64) + headerExtra).onAppear { scroller = proxy }
                     if let banner = machineBannerText {
-                        // Grok (Mac refs 69/70): a quiet notice, not a red strip — the
-                        // title in the text colour, the reason muted.
-                        // A channel's banner is about its own link, never the machine.
-                        let machineError = !isChannel && model.machine.state == .error
-                        let machineWaking = !isChannel && model.machine.state == .waking
-                        VStack(spacing: 3) {
-                            HStack(spacing: 6) {
-                                if machineWaking { ProgressView().controlSize(.mini).tint(theme.muted) }
-                                if machineError {
-                                    Image(systemName: "desktopcomputer").font(.system(size: 12))
-                                }
-                                Text(machineError ? "Can't reach your machine" : banner)
-                            }
-                            .font(theme.font(Theme.small, weight: machineError ? .semibold : .regular))
-                            .foregroundStyle(machineError ? theme.text : theme.muted)
-                            if machineError {
-                                Text(banner)
-                                    .font(theme.font(Theme.tiny))
-                                    .foregroundStyle(theme.muted)
-                                    .multilineTextAlignment(.center)
-                            }
+                        // Grok (Mac refs 69/70): a quiet line while the machine wakes. The error
+                        // state is the pinned note under the header (`chatNote`).
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.mini).tint(theme.muted)
+                            Text(banner)
                         }
+                        .font(theme.font(Theme.small))
+                        .foregroundStyle(theme.muted)
                         .frame(maxWidth: .infinity)
                         .padding(.bottom, 16)
                     }
@@ -1749,6 +1751,7 @@ struct ChatSession: View {
                         model: model,
                         theme: theme,
                         composerInset: composerSideInset,
+                        people: isPeople || isChannel,
                         mentions: mentions,
                         shown: shown,
                         shownStamp: Self.shownStamp(rowsVersion, windowCount, windowSkipEnd, searchText, showSearch),
@@ -2187,16 +2190,39 @@ struct ChatSession: View {
     /// system lines, and each new agent reply (quick ack vs main answer must not
     /// look merged — #1447). Measured on the references.
 
-    /// The machine's notice (waking / can't reach). The link has no line here:
-    /// the header's connection pill is its one place ([feedback connection-pill]).
+    /// The machine's waking line (the scroll's quiet banner). The error state is the pinned
+    /// `chatNote`; the link has no line here: the header's connection pill is its one place.
     private var machineBannerText: String? {
         // A channel lives on the servers' link, not the machine.
         if isChannel { return nil }
         switch model.machine.state {
         case .waking: return "Waking your machine…"
-        case .error: return model.machineDetail ?? (model.machine.alwaysOn ? "Your agents are safe — their machine just can't be reached right now." : "Could not wake your machine")
-        case .awake, .hibernatedLight, .hibernatedDeep, .stoppedByUser:
+        case .error, .awake, .hibernatedLight, .hibernatedDeep, .stoppedByUser:
             return nil
+        }
+    }
+
+    /// The chat-level failure, when there is one: the room's pushes refused
+    /// (`not_available`, cleared by the room's next ACK) first, else the machine in error.
+    private var chatLevelError: UserError? {
+        if model.pushRefused.contains(chatId) {
+            let why = model.pushRefusalText[chatId] ?? "Messages in this chat aren't being delivered right now. We'll keep trying."
+            return UserError(verb: "", class: .refused(message: why), raw: "the relay refused the push: not_available")
+        }
+        if !isChannel, model.machine.state == .error {
+            let detail = model.machineDetail ?? "machine state: error"
+            return UserError(verb: "", class: .refused(message: "Can't reach your machine. Your agents are safe — it just can't be reached right now."),
+                             raw: detail)
+        }
+        return nil
+    }
+
+    @ViewBuilder private var chatNote: some View {
+        if let error = chatLevelError {
+            ErrorNote(id: model.pushRefused.contains(chatId) ? "delivery-error" : "machine-error",
+                      error: error,
+                      detailsOpen: $chatNoteDetailsOpen,
+                      onTryAgain: model.pushRefused.contains(chatId) ? nil : { model.startMachine() })
         }
     }
 
@@ -2366,7 +2392,7 @@ struct ChatSession: View {
     /// that quotes the ask to that job.
     private func steerJob(_ job: Job) {
         guard let askId = job.askMessageId, let ask = messageById[askId] ?? messages.first(where: { $0.id == askId }) else {
-            model.notice = Notice(text: "That task's request is not in this chat any more.")
+            model.failRefused("steer the task", "That task's request is not in this chat any more.")
             return
         }
         showTasks = false
@@ -3238,6 +3264,8 @@ private struct TranscriptRows: View, Equatable {
     let model: AppModel
     let theme: Theme
     let composerInset: CGFloat
+    /// People chat: the wider bubble caps (`Theme.peopleBubbleInset`).
+    let people: Bool
     let mentions: MentionTable
     let shown: [Row]
     /// Identity of `shown` (rows version + window bounds + search): compared instead of the array.
@@ -3261,6 +3289,7 @@ private struct TranscriptRows: View, Equatable {
         let same = lhs.shownStamp == rhs.shownStamp
             && lhs.actionsRowId == rhs.actionsRowId
             && lhs.composerInset == rhs.composerInset
+            && lhs.people == rhs.people
             && lhs.theme == rhs.theme
             && lhs.chatId == rhs.chatId
             && lhs.width == rhs.width
@@ -3286,7 +3315,8 @@ private struct TranscriptRows: View, Equatable {
         let firstId = shown.first?.id
         ForEach(shown) { row in
             let reply = canReply(row)
-            RowView(model: model, theme: theme, composerInset: composerInset, row: row, chatId: chatId, width: width, timeReveal: timeReveal,
+            RowView(model: model, theme: theme, composerInset: composerInset, row: row, chatId: chatId, width: width,
+                    people: people, timeReveal: timeReveal,
                     onQuoteTap: onQuoteTap,
                     highlighted: highlightedMessage == row.messageId,
                     onReply: reply ? { onReply(row) } : nil,
@@ -3526,6 +3556,7 @@ private struct ComposerField: View {
                 if memoCancelArmed {
                     Text("Release to cancel")
                         .font(theme.font(Theme.small))
+                        // error-ui: exception status-mark
                         .foregroundStyle(theme.danger)
                         .frame(maxWidth: .infinity, alignment: .center)
                 } else if memoHoldActive && memoDragX < -12 {
