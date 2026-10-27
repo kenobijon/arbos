@@ -895,6 +895,7 @@ struct MachineAgentRow: View {
                 Text(MachineMetrics.agentStatus(workspace)).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted).lineLimit(1)
             }
             Spacer(minLength: 8)
+            // The numbers never wrap; the name column gives way (truncates) instead.
             VStack(alignment: .trailing, spacing: 2) {
                 if let cpu = MachineMetrics.agentCpu(workspace) {
                     Text(cpu).font(theme.font(Theme.small)).foregroundStyle(theme.muted)
@@ -903,6 +904,8 @@ struct MachineAgentRow: View {
                     Text(md).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
                 }
             }
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
         }
         .padding(.horizontal, PaneKit.inset)
         .padding(.vertical, 8)
