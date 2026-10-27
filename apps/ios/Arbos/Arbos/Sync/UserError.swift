@@ -202,7 +202,9 @@ struct UserError: Equatable, Hashable {
 
     static func classForStatus(_ status: Int, kind: String, sentence: String?) -> Class {
         if (kind.contains("refused") && (kind.contains("prompt") || kind.contains("content")))
-            || kind == "moderation" || kind == "content_policy" {
+            || kind == "moderation" || kind == "content_policy"
+            || (kind.hasSuffix("_refused") && (sentence ?? "").lowercased().contains("prompt")) {
+            // The relay's `avatar_refused` carries "That prompt was refused — …": the same class.
             return .contentRefused
         }
         if kind.contains("timeout") { return .timeout }
