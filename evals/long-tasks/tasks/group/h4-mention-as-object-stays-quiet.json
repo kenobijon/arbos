@@ -3,7 +3,7 @@
  "lane": "a",
  "category": "group",
  "title": "People chat with two agents: an @mention as the object of a request to the other agent wakes no turn; a direct ask is answered; multi-mention answers only the addressed (#1926 m01–m04 + silence guard)",
- "regression": "#1926 (mention_role: object/referenced → no turn; silence is never a message) — m01/m02 object quiet, m03 asked replies, m04 multi-mention only the addressed; the guard: no 'staying silent' bubble ever; #1926 m01–m04 (lane-a half verified on 0.1.155)",
+ "regression": "#1926 (mention_role: object/referenced → no turn; silence is never a message) — m01/m02 object quiet, m03 asked replies, m04 multi-mention only the addressed; the guard: no 'staying silent' bubble ever; #1926 m01–m04 (lane-a half verified on 0.1.155); run 9 re-graded PASS on all four turns from the full replay (#2069 artefact)",
  "turns": [
   {
    "prompt": "Can you communicate directly with @lane-a?",
