@@ -131,10 +131,31 @@ final class WorkingSpinnerTests: XCTestCase {
     }
 
     func testTheRowStatusShowsOneThingInThisOrder() {
+        // Agent rows: the spinner replaces the plain unread dot while the agent works.
         XCTAssertEqual(RowStatus.of(streaming: true, unread: true), .working)
         XCTAssertEqual(RowStatus.of(streaming: true, unread: false), .working)
         XCTAssertEqual(RowStatus.of(streaming: false, unread: true), .unread)
         XCTAssertEqual(RowStatus.of(streaming: false, unread: false), .quiet)
+    }
+
+    func testAPeopleRowsCountPillWinsTheSlotOverTheSpinner() throws {
+        // Information over animation: `PeopleRow` shows the unread count pill ahead
+        // of the spinner; the spinner replaces only the plain dot. Pinned on the
+        // source's branch order (the row is a view, not a pure function).
+        let path = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Arbos/UI/HomeView.swift").path
+        let source = try String(contentsOfFile: path, encoding: .utf8)
+        guard let peopleRow = source.range(of: "struct PeopleRow: View") else { return XCTFail("PeopleRow not found") }
+        let body = source[peopleRow.lowerBound...]
+        let pill = body.range(of: "if count > 0 {")
+        let spinner = body.range(of: "} else if streaming {")
+        let dot = body.range(of: "} else if unread {")
+        XCTAssertNotNil(pill); XCTAssertNotNil(spinner); XCTAssertNotNil(dot)
+        if let pill, let spinner, let dot {
+            XCTAssertLessThan(pill.lowerBound, spinner.lowerBound, "the count pill is tested first")
+            XCTAssertLessThan(spinner.lowerBound, dot.lowerBound, "the spinner beats the plain dot")
+        }
     }
 
     func testTheSpinnerCellLaysOutAtTheDotsSize() {

@@ -1279,7 +1279,8 @@ struct PeopleRow: View {
     let preview: String
     let time: String
     let unread: Bool
-    /// An agent in this chat is working: the spinner takes the slot.
+    /// An agent in this chat is working: the spinner takes the slot unless a
+    /// count pill is showing.
     var streaming: Bool = false
     /// Unread messages (Grok/Telegram-style count pill); 0 → the dot only.
     var count: Int = 0
@@ -1364,10 +1365,12 @@ struct PeopleRow: View {
                         .foregroundStyle(theme.muted)
                         .lineLimit(1)
                     Spacer(minLength: 0)
-                    if streaming {
-                        WorkingSpinner()
-                    } else if count > 0 {
+                    // Information over animation (coordinator, 2026-10-27): an unread
+                    // count pill wins the slot; the spinner replaces only the plain dot.
+                    if count > 0 {
                         UnreadBadge(count: count)
+                    } else if streaming {
+                        WorkingSpinner()
                     } else if unread {
                         Circle().fill(theme.unread).frame(width: Theme.unreadDot, height: Theme.unreadDot)
                     }
