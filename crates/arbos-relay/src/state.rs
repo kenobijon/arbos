@@ -221,12 +221,15 @@ pub struct AppState {
     pub download_cache: Arc<Mutex<Option<(i64, String)>>>,
     /// user_id → box upgrade in progress (`POST /machine/upgrade`).
     pub upgrading: Arc<Mutex<HashMap<String, UpgradeStatus>>>,
+    /// user_id → the last upgrade the relay refused before touching the box (ARB-339: `/work`
+    /// over the carry limit). Shown as `upgrade.last_refused`; cleared by the next success.
+    pub upgrade_refused: Arc<Mutex<HashMap<String, UpgradeRefusal>>>,
     /// Hash of a just-rotated refresh token → (when, the pair it was rotated into). Within
     /// `signin::REFRESH_GRACE_MS` the old token gets that same pair again instead of counting
     /// as a replay, so concurrent refreshers from one device converge on one rotation.
     pub refresh_grace: Arc<Mutex<HashMap<String, (i64, serde_json::Value)>>>,
     /// Message notifications transport (APNs, a capture list in tests, or off).
-    pub push: Arc<crate::apns::Pusher>,
+    pub push: Arc<crate::push::Push>,
     /// device_id → the chat its presence says is on screen (suppresses that chat's pushes).
     pub focus: crate::notify::Focus,
     /// (chat_id, sender user) → when the row-level fallback last notified for it.
@@ -312,6 +315,14 @@ pub struct UpgradeStatus {
     pub since: i64,
     pub from_snapshot: Option<String>,
     pub to_snapshot: String,
+}
+
+/// An upgrade refused at the measure step: the box kept running, nothing was stopped or copied.
+#[derive(Debug, Clone)]
+pub struct UpgradeRefusal {
+    pub reason: String,
+    pub at: i64,
+    pub work_mib: i64,
 }
 
 impl AppState {
@@ -552,7 +563,7 @@ pub(crate) mod test_support {
                 .collect(),
         };
         AppState {
-            db,
+            db: db.clone(),
             cfg: Arc::new(cfg),
             http: reqwest::Client::new(),
             daytona: None,
@@ -567,10 +578,11 @@ pub(crate) mod test_support {
             jwt_key: Arc::new(RelayKey::derive("test-key").subkey("jwt")),
             download_cache: Arc::new(Mutex::new(None)),
             upgrading: Arc::new(Mutex::new(HashMap::new())),
+            upgrade_refused: Arc::new(Mutex::new(HashMap::new())),
             stale_bounces: Arc::new(Mutex::new(HashMap::new())),
             local_conns: Arc::new(Mutex::new(HashMap::new())),
             refresh_grace: Arc::new(Mutex::new(HashMap::new())),
-            push: Arc::new(crate::apns::Pusher::Capture(Mutex::new(Vec::new()))),
+            push: Arc::new(crate::push::Push::capture(db.clone())),
             focus: Arc::new(Mutex::new(HashMap::new())),
             fallback_sent: Arc::new(Mutex::new(HashMap::new())),
             livekit: None,

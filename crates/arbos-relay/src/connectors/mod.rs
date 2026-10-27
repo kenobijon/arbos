@@ -907,7 +907,7 @@ mod tests {
             openai_route: crate::state::OpenAiRoute::Auto,
         };
         AppState {
-            db,
+            db: db.clone(),
             cfg: Arc::new(cfg),
             http: reqwest::Client::new(),
             daytona: None,
@@ -923,11 +923,10 @@ mod tests {
             jwt_key: Arc::new(crypto::RelayKey::derive("test-key").subkey("jwt")),
             download_cache: Arc::new(Mutex::new(None)),
             upgrading: Arc::new(Mutex::new(HashMap::new())),
+            upgrade_refused: Arc::new(Mutex::new(HashMap::new())),
             local_conns: Arc::new(Mutex::new(HashMap::new())),
             refresh_grace: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
-            push: Arc::new(crate::apns::Pusher::Capture(tokio::sync::Mutex::new(
-                Vec::new(),
-            ))),
+            push: Arc::new(crate::push::Push::capture(db.clone())),
             focus: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             fallback_sent: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             livekit: None,
