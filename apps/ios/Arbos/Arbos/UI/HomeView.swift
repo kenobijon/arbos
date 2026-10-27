@@ -861,7 +861,11 @@ struct HomeView: View {
     }
 
     private func peoplePreview(_ c: PeopleChat) -> String {
-        guard let m = model.messages(of: c.id).last(where: { !$0.voice && !$0.plainText.isEmpty }) else {
+        // Skip group deletion audits (hidden in the chat; Activity only) so the
+        // home row matches what you see when you open the conversation.
+        guard let m = model.messages(of: c.id).last(where: {
+            !$0.voice && !$0.plainText.isEmpty && !GroupActivity.isAuditLine($0.plainText)
+        }) else {
             return c.pending ? "Invited · opens when they sign in" : "Say hi"
         }
         let line = m.plainText.split(separator: "\n").first.map(String.init) ?? ""
@@ -1182,8 +1186,13 @@ struct HiddenChatsView: View {
     }
 
     static func peoplePreview(_ c: PeopleChat, in model: AppModel) -> String {
-        // A row hidden for me (someone I blocked) never previews.
-        guard let m = model.messages(of: c.id).last(where: { !$0.voice && !$0.plainText.isEmpty && !model.hidesMessage($0, chatId: c.id) }) else {
+        // A row hidden for me (someone I blocked) never previews. Deletion
+        // audits stay out too — same filter as the open chat (Transcript).
+        guard let m = model.messages(of: c.id).last(where: {
+            !$0.voice && !$0.plainText.isEmpty
+                && !model.hidesMessage($0, chatId: c.id)
+                && !GroupActivity.isAuditLine($0.plainText)
+        }) else {
             return c.pending ? "Invited · opens when they sign in" : "Say hi"
         }
         let line = m.plainText.split(separator: "\n").first.map(String.init) ?? ""
