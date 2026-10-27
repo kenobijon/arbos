@@ -50,6 +50,28 @@ GATE_GRANTS="$SLOTS_DIR/.gate-grants"
 RIG_CROWD_N="${ARBOS_HEAVY_RIG_CROWD_N:-3}"
 RIG_QUEUE="$SLOTS_DIR/.rig-waiting"
 rigs_waiting() { local n=0 f; for f in "$RIG_QUEUE"/*; do [[ -f "$f" ]] || continue; if ps -p "$(basename "$f")" >/dev/null 2>&1; then n=$((n+1)); else rm -f "$f" 2>/dev/null; fi; done; echo "$n"; }
+# Rig queue order (18:39 Oct 27, coordinator): FIFO by wait start — a rig that arrived later never takes a grant
+# while an earlier one is still waiting. P0 rigs (names listed one per line in P0_RIGS, operator-set; a name
+# matches exactly or as a `<name>-…` prefix) are ahead of every other rig and hold the slot for P0_RIG_LEASE_S.
+# Rig markers carry "<wait-start-epoch> <name>".
+P0_RIGS="${ARBOS_HEAVY_P0_RIGS_FILE:-$SLOTS_DIR/.p0-rigs}"
+P0_RIG_LEASE_S="${ARBOS_HEAVY_P0_RIG_LEASE_S:-1800}"
+is_p0_rig() { local n=$1 e; [[ -f "$P0_RIGS" ]] || return 1; while read -r e; do [[ -z "$e" || "$e" == \#* ]] && continue; [[ "$n" == "$e" || "$n" == "$e"-* ]] && return 0; done < "$P0_RIGS"; return 1; }
+rig_ahead_of_me() {  # rig_ahead_of_me <my-pid> <my-start> <my-name>: 0 when another waiting rig is ahead in the queue
+  local me=$1 my_t0=$2 my_name=$3 f pid t0 name my_p0=0 p0
+  is_p0_rig "$my_name" && my_p0=1
+  for f in "$RIG_QUEUE"/*; do
+    [[ -f "$f" ]] || continue
+    pid=$(basename "$f"); [[ "$pid" == "$me" ]] && continue
+    ps -p "$pid" >/dev/null 2>&1 || { rm -f "$f" 2>/dev/null; continue; }
+    read -r t0 name < "$f" 2>/dev/null || continue
+    [[ "$t0" =~ ^[0-9]+$ ]] || { name=$t0; t0=0; }   # pre-FIFO marker: name only, counts as oldest
+    p0=0; is_p0_rig "$name" && p0=1
+    (( p0 > my_p0 )) && return 0
+    (( p0 == my_p0 )) && (( t0 < my_t0 || ( t0 == my_t0 && pid < me ) )) && return 0
+  done
+  return 1
+}
 POLL_S=10
 
 ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
@@ -196,7 +218,7 @@ acquire() {
     mark="$RELEASE_QUEUE/$$"; echo "$t0 $name" > "$mark" 2>/dev/null || mark=""
   elif ! is_exempt_name "$name"; then
     mkdir -p "$RIG_QUEUE" 2>/dev/null; chmod 1777 "$RIG_QUEUE" 2>/dev/null || true
-    mark="$RIG_QUEUE/$$"; echo "$name" > "$mark" 2>/dev/null || mark=""
+    mark="$RIG_QUEUE/$$"; echo "$t0 $name" > "$mark" 2>/dev/null || mark=""
   fi
   local runner_cmd=""; ! is_exempt_name "$name" && runner_cmd=$(runner_cmd_file || true)
   local fair=0 fair_after
@@ -213,7 +235,10 @@ acquire() {
     # waits or on their fair turn. A release not yet due still yields to a queued gate half, as before.
     local self_due=0
     if is_release_name "$name" && { [[ "$name" == *hotfix* ]] || (( $(date +%s) - t0 >= RELEASE_PREEMPT_S )); }; then self_due=1; fi
-    if (( n < limit )) && { (( self_due )) || { ! release_due && { is_gate_name "$name" || ! gate_waiting || (( fair )); }; }; }; then
+    # Rigs: queue order first (P0 rigs ahead, then FIFO by wait start), then the gate / fair-share rules.
+    local my_turn=1
+    if ! is_exempt_name "$name" && rig_ahead_of_me "$$" "$t0" "$name"; then my_turn=0; fi
+    if (( n < limit )) && (( my_turn )) && { (( self_due )) || { ! release_due && { is_gate_name "$name" || ! gate_waiting || (( fair )); }; }; }; then
       slot="$SLOTS_DIR/$(date +%s)-$$-${name//\//_}.slot"
       if mkdir "$slot" 2>/dev/null; then
         echo "$owner" > "$slot/pid"; echo "$name" > "$slot/name"; date -u +%s > "$slot/since"
@@ -229,6 +254,7 @@ acquire() {
           elif ! is_exempt_name "$name"; then
             echo 0 > "$GATE_GRANTS" 2>/dev/null || true
             if (( fair )); then echo "$RIG_FAIR_LEASE_S" > "$slot/lease"; echo "$(ts) heavy-slot: $name took its fair-share turn (lease ${RIG_FAIR_LEASE_S}s, after $fair_after gate grant(s), $(rigs_waiting) rig(s) waiting) ahead of a queued gate half" >&2; fi
+            if is_p0_rig "$name"; then echo "$P0_RIG_LEASE_S" > "$slot/lease"; echo "$(ts) heavy-slot: $name is a P0 rig — first in the rig queue, lease ${P0_RIG_LEASE_S}s" >&2; fi
           fi
           echo "$slot"; return 0
         fi
