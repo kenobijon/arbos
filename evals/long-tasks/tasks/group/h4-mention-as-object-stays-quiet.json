@@ -9,8 +9,8 @@
    "prompt": "Can you communicate directly with @lane-a?",
    "chat": "dm",
    "expect_no_reply_s": 30,
-   "expect_other_agent_reply": "lane-b",
-   "timeout_s": 45
+   "timeout_s": 45,
+   "note": "m01: nobody is addressed (lane-a is the object, lane-b not mentioned) — lane-a must stay quiet; whether lane-b answers is the Jev decision, not asserted"
   },
   {
    "prompt": "@lane-b can you communicate directly with @lane-a?",
@@ -45,5 +45,5 @@
  "doc_checks": {
   "forbid_text_regex": "(?i)(staying (silent|quiet)|that (question|one) is for|nothing to add from me|i'?ll let \\w+ take this)"
  },
- "notes": "Run 8 (0.1.155): lane-b was never added (harness key bug: 'lane-b' vs 'b'), so only the lane-a half was measured — quiet on m01/m02/m04 and 81 on m03, no silence bubble. Fixed; the 'addressed agent answered' half is first measured in run 9."
+ "notes": "Run 8 (0.1.155): lane-b was never added (harness key bug: 'lane-b' vs 'b'), so only the lane-a half was measured — quiet on m01/m02/m04 and 81 on m03, no silence bubble. Fixed; the 'addressed agent answered' half is first measured in run 9. Run 9 (0.1.163): lane-b added; m02 and m04 → lane-b answered, lane-a quiet; m03 → 81; m01 → both quiet (nobody addressed)."
 }

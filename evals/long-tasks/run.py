@@ -524,7 +524,14 @@ class Lane(threading.Thread):
             if dc.get("require_part_kind"):
                 # a structured part (e.g. a `chart` from post_chart) must exist in an assistant row of this task
                 want = dc["require_part_kind"]
-                found = [p for d in all_docs for m in d.get("messages", []) if m.get("role") == "assistant" for p in m.get("parts", []) if p.get("kind") == want]
+                # the post can land a few seconds after the turn's last dump: read the chats again now
+                fresh = []
+                for c in {m.get("chat_id") for m in turns_out if m.get("chat_id")}:
+                    try:
+                        fresh.append(rl.chat_dump(self.project, c))
+                    except Exception:  # noqa: BLE001
+                        pass
+                found = [p for d in (fresh or all_docs) for m in d.get("messages", []) if m.get("role") == "assistant" for p in m.get("parts", []) if p.get("kind") == want]
                 if not found:
                     reasons.append(f"no assistant row carries a `{want}` part (the tool was not used or its post did not land)")
                 else:
