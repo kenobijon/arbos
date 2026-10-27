@@ -18,9 +18,9 @@
 # MUST be started from Terminal (the identity carries the Screen Recording grant):
 #   cd /Users/Shared/arbos-run && exec bash runner.sh
 cd /Users/Shared/arbos-run || exit 1
-MAX_PAR=${RUNNER_MAX_PAR:-4}
+MAX_PAR=${RUNNER_MAX_PAR:-8}  # a lane waiting for a heavy slot costs nothing; shot-only lanes must not queue behind four of them
 LANES=/Users/Shared/arbos-run/.lanes
-mkdir -p "$LANES"; rm -f "$LANES"/* 2>/dev/null
+mkdir -p "$LANES"; for f in "$LANES"/*; do [ -f "$f" ] && ! kill -0 "$(cat "$f")" 2>/dev/null && rm -f "$f"; done  # lanes of a previous v2 that still run stay booked
 export PATH=/Users/Shared/arbos-run/axbin:$PATH
 echo "runner v2 up pid $$ user $(id -un) $(date -u) max_par=$MAX_PAR bash=$BASH_VERSION" > runner.status
 rig_of() { local b=${1#cmd-}; b=${b%%.*}; echo "${b%%-*}"; }
