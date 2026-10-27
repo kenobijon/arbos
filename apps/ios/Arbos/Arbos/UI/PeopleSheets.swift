@@ -977,7 +977,7 @@ struct NewGroupView: View {
         }
         guard canSubmit, !creating else { return }
         // Never a silent return: a tap on a live Add always answers on this screen.
-        guard let chat = addToChat else { errorText = "This group is not loaded yet — try again."; return }
+        guard let chat = addToChat else { localError = UserError.refused("add members", "This group is not loaded yet — try again."); return }
         let plan = AddMembersPlan.make(chat: chat, meId: model.user?.id, picked: picked, pickedAgents: pickedAgents)
         guard !plan.isEmpty else { localError = UserError.refused("add members", "Pick someone who is not in the group yet."); return }
         creating = true

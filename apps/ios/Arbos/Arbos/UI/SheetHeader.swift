@@ -239,12 +239,28 @@ extension View {
         actionEnabled: Bool = true,
         onAction: @escaping () -> Void = {}
     ) -> some View {
-        safeAreaInset(edge: .top, spacing: 0) {
+        modifier(SheetHeaderModifier(leading: leading) {
             SheetHeaderBar(title: title, leading: leading, onLeading: onLeading, action: action,
                            actionStyle: actionStyle, actionEnabled: actionEnabled, onAction: onAction)
+        })
+    }
+}
+
+/// The bar as a top safe-area inset over the screen, the system bar hidden. A pushed step
+/// (`.back`) keeps its swipe-right pop through `backSwipeToPop()` — BackSwipe is the one
+/// owner of that gesture; a presented sheet only hides the bar.
+private struct SheetHeaderModifier<Bar: View>: ViewModifier {
+    let leading: SheetHeaderLeading
+    @ViewBuilder let bar: () -> Bar
+
+    func body(content: Content) -> some View {
+        switch leading {
+        case .back:
+            content.safeAreaInset(edge: .top, spacing: 0, content: bar).backSwipeToPop()
+        case .cancel, .none:
+            content.safeAreaInset(edge: .top, spacing: 0, content: bar)
+                .toolbar(.hidden, for: .navigationBar)
+                .navigationBarBackButtonHidden(true)
         }
-        .toolbar(.hidden, for: .navigationBar)
-        .navigationBarBackButtonHidden(true)
-        .background(InteractivePopGestureEnabler())
     }
 }
