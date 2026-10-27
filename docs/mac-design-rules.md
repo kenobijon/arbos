@@ -1036,3 +1036,51 @@ is gone). Rig: `ARBOS_OPEN_SETTINGS=secrets-add` (the New secret form) or
 `secrets-connect`, with `ARBOS_RIG_AGENT_PICKED=<name>,<name>` (these agents start
 as chips) and `ARBOS_RIG_AGENT_PICKER=<query>` (the dropdown starts open with that
 query typed; empty = open).
+
+## Code cards: Grok's six colours, icon-only copy, indent guides (Jacob 2026-10-26, approved mock; [feedback code-highlighting-mac-2026-10-26], iPhone [feedback code-highlighting-ios-2026-10-26])
+
+Fenced ``` blocks in a reply are Grok Bot's code card. One highlighter for both
+apps: `arbos_core::highlight` (syntect + fancy-regex, the default Sublime pack —
+one 360 KB dump loaded on first use, `warm()` off the main thread at launch;
+Swift through `arbos-ffi`'s `highlight_code`), so a block is coloured the same on
+the Mac and the iPhone. Languages: Python, JavaScript (+ TypeScript on the JS
+grammar), Swift (table lexer), Rust, Go, shell, JSON, SQL, C, C++, YAML, HTML,
+CSS, Markdown. Language = fence tag → alias map (`py`, `ts`, `sh`, `yml`, `c++` …)
+→ shebang / `<!DOCTYPE` → keyword score (two clues and a one-point lead) → plain.
+Blocks over 64 KB stay plain.
+
+| Token | Dark (sampled from Grok's card) | Light (derived, ≥ 4.5:1 on the light card) | Mac `Theme` / iPhone `CodePalette` |
+|---|---|---|---|
+| plain — identifiers, operators, brackets, and `in` / `and` / `or` / `is` / `as` | `#D6D6DD` (the body colour) | `#1F1F23` | `code_plain` / `plain` |
+| keyword, storage type, `true` / `false` / `None` / `nil` | `#95D0CD` | `#1F7F7A` | `code_keyword` / `keyword` |
+| function & macro name (definition and call), type name, tag attribute, YAML key | `#E6B387` | `#B8641A` | `code_function` / `function` |
+| string (quotes and escapes included) | `#D898D8` | `#A63FA4` | `code_string` / `string` |
+| number | `#F1C972` | `#9A6F00` | `code_number` / `number` |
+| comment — **italic** | `#626262` | `#8C8C8C` | `code_comment` / `comment` |
+| indent guide | white 7 % | black 9 % | `code_guide` / `guide` |
+
+Card rules (both platforms):
+
+- **No header row** — no language label, no "Copy" pill. The tag only drives the grammar.
+- **Copy** is a 24 pt square with a 6 pt radius and the card's hairline (`border` /
+  `separator`), the `copy` glyph 13 pt in `text_muted`, inset 8 pt from the card's
+  top-right corner, floating over the code (the body keeps a 40 pt right inset so no
+  text hides under it). Hover `surface_2`, pressed the chips' accent tint, and after a
+  click a **check in `online`** for 1.5 s (`#copy-check`; the Mac's `CodeCopy`, the
+  iPhone's `copied` state). Copies the block verbatim.
+- **Indent guides**: 1 pt lines, one per completed indent step on every non-blank
+  line, at column *k·step + 0.65·step* (Grok: col 2.6 of a 4-space step); the step is
+  the block's smallest indent (tabs = 4), at least 2. None on blank lines.
+- **Long lines scroll sideways** inside the card (`sideways_scroll` /
+  `ScrollView(.horizontal)`); no wrapping.
+- Mono 12.5 pt / 18 pt lines on the Mac (`CODE_TEXT`, `CODE_LINE_HEIGHT`, glyph
+  advance 7.5 → `CODE_GLYPH_ADVANCE`); 14 pt SF Mono on the iPhone (`CodeHighlight.fontSize`,
+  advance measured). Radius 10 (Mac) / 12 (iPhone), `code_bg` fill, `border` hairline.
+
+Pinned by `arbos_core::highlight::tests` (Jacob's bubble-sort card token by token,
+landmarks in all 15 languages, aliases and fallbacks), the Mac's
+`the_code_card_paints_grok_colours_and_indent_guides`,
+`a_code_card_with_long_lines_scrolls_sideways` and the copy-button tests, and the
+iPhone's `CodeHighlightTests`. Rig: `ARBOS_FIXTURE_REPLY=math` (Mac) /
+`ARBOS_SHOW=math` (iPhone) is Jacob's bubble-sort turn; `ARBOS_RIG_CODE_COPY=hover|pressed|copied`
+paints the copy square in that state for a capture (the check needs `copied`).

@@ -96,6 +96,9 @@ fn main() {
             }
         });
     }
+    // The code-card grammars (≈ 15 ms) load off the main thread so the first
+    // fenced block in a chat never waits for them.
+    std::thread::spawn(arbos_core::highlight::warm);
     app.run(move |cx: &mut App| {
         gpui_tokio::init_from_handle(cx, handle);
         // Matte is the default (D10, D90); the saved Settings choice wins over
