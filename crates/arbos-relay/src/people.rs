@@ -1309,7 +1309,8 @@ pub async fn chat_read(
     // Read here = cleared everywhere else: the other devices drop the chat's banners and
     // take the new badge (`/me/pushes` now; the APNs badge alert while push is on).
     let device = device_of(&principal);
-    crate::notify::clear_on_read(&state, &me, &device, &chat_ref).await;
+    let read_upto = format!("seq:{}", b.seq.max(0));
+    crate::notify::clear_on_read(&state, &me, &device, &chat_ref, &read_upto).await;
     crate::notify::badge_refresh(&state, &me, &device).await;
     StatusCode::NO_CONTENT.into_response()
 }
