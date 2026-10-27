@@ -47,6 +47,7 @@ mod notices;
 mod notify;
 mod people;
 mod proxy;
+mod push;
 mod releases;
 mod restart;
 mod room_health;
@@ -338,7 +339,7 @@ async fn main() -> anyhow::Result<()> {
         upgrading: Arc::new(Mutex::new(HashMap::new())),
         upgrade_refused: Arc::new(Mutex::new(HashMap::new())),
         refresh_grace: Arc::new(Mutex::new(HashMap::new())),
-        push: apns::from_env().unwrap_or_else(|| Arc::new(apns::Pusher::Off)),
+        push: Arc::new(push::Push::from_env(db.clone())),
         focus: Arc::new(Mutex::new(HashMap::new())),
         fallback_sent: Arc::new(Mutex::new(HashMap::new())),
         livekit: livekit::from_env(),
@@ -392,6 +393,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     db.local_devices_reset()?;
+    state.push.spawn_worker();
     rooms::spawn_sweeper(state.clone()).await;
     boxes::spawn_wake_runner(state.clone()).await;
     routines::spawn_scheduler(state.clone()).await;
@@ -433,6 +435,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/projects/{file}/avatar.jpg", get(images::project_avatar))
         .route("/me/pushes", get(people::me_pushes))
         .route("/me/unread", get(notify::me_unread))
+        .route(
+            "/me/notifications",
+            get(notify::me_notifications).put(notify::put_me_notifications),
+        )
         .route("/chats/{id}/calls", post(calls::start_people_call))
         .route("/chats/{id}/call", get(calls::people_chat_call))
         .route(
@@ -737,6 +743,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/admin/push", get(admin::push_status))
         .route("/admin/push/test", post(admin::push_test))
+        .route("/admin/push/drain", post(admin::push_drain))
         .route(
             "/admin/fleet",
             get(fleet::admin_fleet).put(fleet::admin_fleet_update),
@@ -752,6 +759,10 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/admin/users/{id}/credits",
             axum::routing::put(admin::set_credits),
+        )
+        .route(
+            "/admin/projects/{id}/spend-cap",
+            axum::routing::put(admin::set_project_cap),
         )
         .route(
             "/admin/killswitch",
@@ -947,6 +958,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/box/secrets/{id}/scrub", get(secrets::box_scrub))
         .route("/box/secrets/request", post(secrets::box_request))
+        .route("/box/secrets/from-message", post(secrets::box_from_message))
         .route(
             "/box/secrets/requests/{id}",
             get(secrets::box_request_status),
