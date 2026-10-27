@@ -4,6 +4,7 @@
 // palette, derivation and initials rule live in Shared/AvatarPalette.swift
 // so the notification extension draws the identical circle.
 
+import ArbosFFI
 import SwiftUI
 
 /// The circle with initials. Size is the diameter; text ≈ 42 % of it.
