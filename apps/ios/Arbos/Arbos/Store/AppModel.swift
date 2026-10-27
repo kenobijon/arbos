@@ -3398,15 +3398,6 @@ final class AppModel: ObservableObject {
         return out
     }
 
-    /// A person's user id by handle, from me, my chats' rosters or the directory.
-    private func personId(handle: String) -> String? {
-        if let me = user, me.login.caseInsensitiveCompare(handle) == .orderedSame { return me.id }
-        for c in peopleChats {
-            if let m = c.members.first(where: { !$0.isAgent && $0.handle.caseInsensitiveCompare(handle) == .orderedSame }) { return m.id }
-        }
-        return directory.first { $0.handle.caseInsensitiveCompare(handle) == .orderedSame }?.id
-    }
-
     func addPerson(chatId: String, handle: String) {
         Task {
             do {
