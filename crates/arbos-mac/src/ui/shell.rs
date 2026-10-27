@@ -35,6 +35,7 @@ use crate::ui::feedback::{FeedbackSheet, SendFeedback};
 use crate::ui::frost::{frosted, MENU_BLUR, PANEL_BLUR};
 use crate::ui::glass::{self, WindowDrag};
 use crate::ui::header;
+use crate::ui::highlight;
 use crate::ui::icons::icon;
 use crate::ui::local::{LocalEvent, LocalPanel};
 use crate::ui::media_viewer;
@@ -449,7 +450,6 @@ pub struct Shell {
     pub(crate) profile_edit_open: bool,
     pub(crate) name_input: Entity<ComposerInput>,
     pub(crate) handle_input: Entity<ComposerInput>,
-    pub add_agent_open: bool,
     pub members_open: bool,
     /// Double-click rename on a chat tab: the chat being edited, and its field.
     pub(crate) renaming_tab: Option<crate::model::Id>,
@@ -1183,7 +1183,6 @@ impl Shell {
             profile_edit_open: false,
             name_input,
             handle_input,
-            add_agent_open: false,
             members_open: false,
             feedback,
         };
@@ -2901,7 +2900,6 @@ impl Shell {
         }
         let floating = self.menu_open
             || self.members_open
-            || self.add_agent_open
             || self.tab_menu_open
             || self.row_menu.is_some()
             || self.chat_menu.is_some()
@@ -3076,7 +3074,6 @@ impl Shell {
         self.state.update(cx, |s, cx| s.close_tasks(cx));
         if self.menu_open
             || self.members_open
-            || self.add_agent_open
             || self.tab_menu_open
             || self.row_menu.is_some()
             || self.channel_menu.is_some()
@@ -3090,7 +3087,6 @@ impl Shell {
             self.member_menu = None;
             self.library.menu = None;
             self.members_open = false;
-            self.add_agent_open = false;
             self.tab_menu_open = false;
             self.row_menu = None;
             self.channel_menu = None;
@@ -3138,16 +3134,7 @@ impl Shell {
             sidebar::footer_disc_frame("sidebar-update")
                 .bg(fill)
                 .when(!busy, |el| {
-                    el.cursor_pointer()
-                        .hover(|s| {
-                            s.bg(Theme::lighter(theme.update_disc, sidebar::DISC_HOVER_LIFT))
-                        })
-                        .active(|s| {
-                            s.bg(Theme::lighter(
-                                theme.update_disc,
-                                sidebar::DISC_PRESSED_LIFT,
-                            ))
-                        })
+                    highlight::washed(el.cursor_pointer(), fill, &theme)
                 })
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .child(icon("cloud-download", sidebar::FOOTER_DISC_GLYPH, glyph))
@@ -3709,36 +3696,6 @@ impl Shell {
                 let state = self.state.read(cx);
                 hero = hero.child(crate::ui::groups::picture(&space, state, 88.0, &theme));
             }
-            // Empty people chat: a clear "Add agent" control so bringing your
-            // own agent in is discoverable ([feedback
-            // app-01M5WKBR85JVW1KKJH96FWZVK5]); the right pane has the same
-            // entry for chats that already have messages.
-            let add_agent = is_people.then(|| {
-                div()
-                    .id("empty-add-agent")
-                    .mt(px(4.0))
-                    .px(px(14.0))
-                    .py(px(7.0))
-                    .rounded(px(8.0))
-                    .bg(theme.surface_2)
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme.bubble_assistant))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .child(icon("sparkles", 14.0, theme.text_muted))
-                    .child(
-                        div()
-                            .text_size(px(TEXT_SMALL))
-                            .text_color(theme.text)
-                            .child("Add agent"),
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.members_open = false;
-                        this.add_agent_open = true;
-                        cx.notify();
-                    }))
-            });
             column = column.child(
                 div()
                     .flex_1()
@@ -3764,7 +3721,6 @@ impl Shell {
                             .max_w(px(460.0))
                             .child(hint),
                     )
-                    .children(add_agent)
                     .child(div().w(px(COMPOSER_WIDTH)).max_w_full().pt(px(12.0)).child(
                         match &blocked_peer {
                             Some(person) => self.blocked_composer(person, &theme, cx),
@@ -5141,14 +5097,6 @@ impl Render for Shell {
         }
         if let Some(space) = people_space {
             let right = 16.0;
-            if self.add_agent_open {
-                root = root.child(glass::popover(people::add_agent_picker(
-                    &space,
-                    &self.state,
-                    right,
-                    cx,
-                )));
-            }
             if self.members_open {
                 root = root.child(glass::popover(people::members_popover(
                     &space,

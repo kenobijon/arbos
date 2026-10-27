@@ -36,6 +36,7 @@ use crate::ui::composer::Composer;
 use crate::ui::frost::edge_faded;
 use crate::ui::glass::{self, WindowDrag};
 use crate::ui::groups;
+use crate::ui::highlight::{self, Shape};
 use crate::ui::icons::icon;
 use crate::ui::identity;
 use crate::ui::motion::PulseClock;
@@ -145,10 +146,6 @@ pub(crate) const FOOTER_DOT_OVERHANG: f32 = 2.0;
 pub(crate) const FOOTER_DISC: f32 = CONTROL;
 pub(crate) const FOOTER_DISC_INSET: f32 = STRIP_INSET;
 pub(crate) const FOOTER_DISC_GLYPH: f32 = 20.0;
-/// Hover / pressed: the solid fill lifted in lightness — brighter under the
-/// pointer, brighter still while down (the chip rule, [feedback mention-chips]).
-pub(crate) const DISC_HOVER_LIFT: f32 = 0.06;
-pub(crate) const DISC_PRESSED_LIFT: f32 = 0.12;
 /// While the disc works (download / install / relaunch) its fill pulses
 /// between this alpha and 1.
 pub(crate) const DISC_BUSY_ALPHA_MIN: f32 = 0.55;
@@ -1020,12 +1017,16 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
                 .justify_center()
                 .rounded_full()
                 .cursor_pointer()
-                .bg(if on {
-                    theme.bubble_assistant
-                } else {
-                    gpui::transparent_black()
+                // On: the bubble fill, Grok's (§ Chat-list filter); off: the
+                // highlight token's washes plus the label brightening.
+                .map(|el| {
+                    if on {
+                        highlight::washed(el, theme.bubble_assistant, &theme)
+                    } else {
+                        let text = theme.text;
+                        highlight::button_with(el, &theme, move |s| s.text_color(text))
+                    }
                 })
-                .hover(move |s| if on { s } else { s.text_color(theme.text) })
                 .text_size(px(TEXT_BODY))
                 .font_weight(if on {
                     FontWeight::SEMIBOLD
@@ -1221,7 +1222,7 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
                 .text_size(px(TEXT_SMALL))
                 .text_color(theme.text_muted)
                 .cursor_pointer()
-                .hover(|s| s.bg(theme.surface_2))
+                .map(|el| highlight::row(el, false, Shape::Own, &theme))
                 .child(format!("Hidden chats · {hidden_count}"))
                 .child(icon("chevron-right", 12.0, theme.text_faint))
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -1252,50 +1253,53 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
     // Grok Bot's footer avatar: 36 pt at x 13, 12 above the bottom edge
     // ([feedback footer-avatar-grok-size-2026-10-24]; the constants above).
     let snap_footer = snap.clone();
-    let account_row = footer_row_frame()
-        .cursor_pointer()
-        .hover(|s| s.bg(theme.surface_2))
-        .child(
-            div()
-                .flex_shrink_0()
-                .on_children_prepainted(move |bounds, _, _| {
-                    if let Some(b) = bounds.first() {
-                        snap_footer.borrow_mut().footer = Some(*b);
-                    }
-                })
-                .child(
-                    account_avatar(shell, machine, &theme, cx)
-                        .when(hide_morphing, |el| el.opacity(0.0)),
-                ),
-        )
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .truncate()
-                .text_size(px(TEXT_SMALL + 1.0))
-                .text_color(theme.text)
-                .child(who),
-        )
-        // My avatar opens my profile and every setting in the right pane
-        // (three-pane rule, mockup g); a second click folds it away.
-        .on_mouse_down(
-            gpui::MouseButton::Left,
-            cx.listener(|this, _, window, cx| {
-                cx.stop_propagation();
-                this.menu_open = false;
-                let open = this.state.read(cx).profile == Some(crate::app::ProfilePage::Me);
-                if open {
-                    this.close_profile(window, cx);
-                } else {
-                    this.state.update(cx, |s, cx| {
-                        s.open_profile(crate::app::ProfilePage::Me, cx);
-                        s.set_profile_tab(1, cx);
-                    });
+    let account_row = highlight::row(
+        footer_row_frame().cursor_pointer(),
+        false,
+        Shape::Own,
+        &theme,
+    )
+    .child(
+        div()
+            .flex_shrink_0()
+            .on_children_prepainted(move |bounds, _, _| {
+                if let Some(b) = bounds.first() {
+                    snap_footer.borrow_mut().footer = Some(*b);
                 }
-                cx.notify();
-            }),
-        );
+            })
+            .child(
+                account_avatar(shell, machine, &theme, cx)
+                    .when(hide_morphing, |el| el.opacity(0.0)),
+            ),
+    )
+    .child(
+        div()
+            .flex_1()
+            .min_w_0()
+            .truncate()
+            .text_size(px(TEXT_SMALL + 1.0))
+            .text_color(theme.text)
+            .child(who),
+    )
+    // My avatar opens my profile and every setting in the right pane
+    // (three-pane rule, mockup g); a second click folds it away.
+    .on_mouse_down(
+        gpui::MouseButton::Left,
+        cx.listener(|this, _, window, cx| {
+            cx.stop_propagation();
+            this.menu_open = false;
+            let open = this.state.read(cx).profile == Some(crate::app::ProfilePage::Me);
+            if open {
+                this.close_profile(window, cx);
+            } else {
+                this.state.update(cx, |s, cx| {
+                    s.open_profile(crate::app::ProfilePage::Me, cx);
+                    s.set_profile_tab(1, cx);
+                });
+            }
+            cx.notify();
+        }),
+    );
 
     // Drag handle on the right edge: a slim hit target (col-resize cursor) that
     // lets the user make the chat list slimmer or wider
@@ -1308,6 +1312,7 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
         .h_full()
         .w(px(SIDEBAR_RESIZE_HANDLE))
         .cursor(CursorStyle::ResizeColumn)
+        // hover-fill: exception handle
         .hover(|s| s.bg(Theme::with_alpha(theme.primary, 0.45)))
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_drag(SidebarResizeDrag, |_, _, _, cx| {
@@ -1444,18 +1449,7 @@ fn render_server_row(
         .px(px(12.0))
         .py(px(11.0))
         .rounded(px(PANEL_RADIUS - 4.0))
-        .bg(if selected && !hide_morphing {
-            theme.surface_2
-        } else {
-            gpui::transparent_black()
-        })
-        .hover(|s| {
-            s.bg(if selected {
-                theme.surface_2
-            } else {
-                Theme::with_alpha(theme.surface_2, 0.55)
-            })
-        })
+        .map(|el| highlight::row(el, selected && !hide_morphing, Shape::Own, theme))
         .cursor_pointer()
         .on_click(
             cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
@@ -1669,18 +1663,7 @@ fn server_channels(
                 .px(px(12.0))
                 .py(px(11.0))
                 .rounded(px(PANEL_RADIUS - 4.0))
-                .bg(if selected {
-                    theme.surface_2
-                } else {
-                    gpui::transparent_black()
-                })
-                .hover(|s| {
-                    s.bg(if selected {
-                        theme.surface_2
-                    } else {
-                        Theme::with_alpha(theme.surface_2, 0.55)
-                    })
-                })
+                .map(|el| highlight::row(el, selected, Shape::Own, theme))
                 .cursor_pointer()
                 .child(
                     div()
@@ -1982,20 +1965,7 @@ fn render_row(
         .px(px(12.0))
         .py(px(11.0))
         .rounded(px(PANEL_RADIUS - 4.0))
-        .bg(if selected && !hide_morphing {
-            theme.surface_2
-        } else {
-            gpui::transparent_black()
-        })
-        // Hover is a lighter tint of the selected fill in both modes (in light,
-        // the old white hover read brighter than the selected row).
-        .hover(|s| {
-            s.bg(if selected {
-                theme.surface_2
-            } else {
-                Theme::with_alpha(theme.surface_2, 0.55)
-            })
-        })
+        .map(|el| highlight::row(el, selected && !hide_morphing, Shape::Own, theme))
         .cursor_pointer()
         .on_click({
             let id = id.clone();
@@ -2387,11 +2357,13 @@ pub(crate) fn confirm_button(
                 .hover(|s| s.opacity(0.88))
         })
         .when(!danger, |el| {
-            el.bg(theme.field)
-                .border_1()
-                .border_color(theme.field_border)
-                .text_color(theme.text)
-                .hover(|s| s.bg(theme.surface_2))
+            highlight::washed(
+                el.border_1()
+                    .border_color(theme.field_border)
+                    .text_color(theme.text),
+                theme.field,
+                theme,
+            )
         })
         .child(label)
 }
@@ -2923,11 +2895,10 @@ mod footer_tests {
     use gpui::{div, prelude::*, px, TestAppContext};
 
     use super::{
-        footer_disc_frame, footer_frame, footer_row_frame, DISC_HOVER_LIFT, DISC_PRESSED_LIFT,
-        FOOTER_AVATAR, FOOTER_BOTTOM, FOOTER_DISC, FOOTER_DISC_GLYPH, FOOTER_DISC_INSET,
-        FOOTER_DOT, FOOTER_DOT_OVERHANG, FOOTER_DOT_RING, FOOTER_HEIGHT, FOOTER_INSET,
-        FOOTER_ROW_HEIGHT, FOOTER_ROW_INSET, FOOTER_ROW_PAD_X, FOOTER_ROW_PAD_Y, STRIP_BUTTON,
-        STRIP_GAP, STRIP_INSET,
+        footer_disc_frame, footer_frame, footer_row_frame, FOOTER_AVATAR, FOOTER_BOTTOM,
+        FOOTER_DISC, FOOTER_DISC_GLYPH, FOOTER_DISC_INSET, FOOTER_DOT, FOOTER_DOT_OVERHANG,
+        FOOTER_DOT_RING, FOOTER_HEIGHT, FOOTER_INSET, FOOTER_ROW_HEIGHT, FOOTER_ROW_INSET,
+        FOOTER_ROW_PAD_X, FOOTER_ROW_PAD_Y, STRIP_BUTTON, STRIP_GAP, STRIP_INSET,
     };
     use crate::ui::theme::{Theme, CONTROL, CONTROL_LINE, HEADER_HEIGHT};
 
@@ -3124,11 +3095,18 @@ mod footer_tests {
             let glyph: gpui::Rgba = theme.on_update_disc.into();
             assert_eq!(rgb_u32(fill), grok_disc::FILL, "disc fill");
             assert_eq!(rgb_u32(glyph), grok_disc::GLYPH_FILL, "glyph fill");
-            let hover = Theme::lighter(theme.update_disc, DISC_HOVER_LIFT);
-            let pressed = Theme::lighter(theme.update_disc, DISC_PRESSED_LIFT);
-            assert!(hover.l > theme.update_disc.l, "brighter under the pointer");
-            assert!(pressed.l > hover.l, "brighter still while pressed");
-            assert_eq!(hover.h, theme.update_disc.h, "same hue");
+            // Hover / pressed come from the highlight token: the text-colour
+            // wash over the blue — brighter in dark (white wash), darker in
+            // light (black wash) — one step, then one more.
+            let f = crate::ui::highlight::fills(&theme);
+            let hover = crate::ui::highlight::over(theme.update_disc, f.hover);
+            let pressed = crate::ui::highlight::over(theme.update_disc, f.pressed);
+            assert_ne!(hover, theme.update_disc, "changes under the pointer");
+            if theme.is_light() {
+                assert!(hover.l < theme.update_disc.l && pressed.l < hover.l);
+            } else {
+                assert!(hover.l > theme.update_disc.l && pressed.l > hover.l);
+            }
         }
     }
 

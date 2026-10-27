@@ -24,6 +24,7 @@ pub mod frost;
 pub mod glass;
 pub mod groups;
 pub mod header;
+pub mod highlight;
 pub mod hoverpick;
 pub mod icons;
 pub mod identity;
