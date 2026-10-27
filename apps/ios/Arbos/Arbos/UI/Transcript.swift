@@ -1404,7 +1404,6 @@ struct RowView: View, Equatable {
             .foregroundStyle(theme.muted)
             .frame(maxWidth: .infinity)
             .multilineTextAlignment(.center)
-<<<<<<< HEAD
         case .hidden(let count, _, let handle, let name):
             // The blocker's folded line ([feedback blocked-state-ios-2026-10-26]); Unblock
             // opens the person's sheet (its Unblock asks first).
@@ -1426,8 +1425,6 @@ struct RowView: View, Equatable {
             .frame(maxWidth: .infinity)
             .multilineTextAlignment(.center)
             .accessibilityIdentifier("hidden-row")
-        case .question(let questionId, let text, let options, let multi, let picked, let open, let lane, let shellCard):
-=======
         case .secretGhost(let name, let mine, let handle, let avatar, let named):
             // The ghost: surface fill with a hairline, muted ink, the key glyph; the name is
             // the only thing in text ink. Mine sits right like my bubble, another member's
@@ -1461,7 +1458,6 @@ struct RowView: View, Equatable {
                 }
             }
         case .question(let questionId, let text, let options, let multi, let picked, let open, let lane, let shellCard, let offer):
->>>>>>> origin/main
             // The card is a transcript row like a bubble: the same left edge (after the avatar
             // lane in a people chat) and the same cap width as an incoming bubble.
             HStack(spacing: 0) {
