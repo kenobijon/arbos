@@ -5,9 +5,11 @@ mod audio;
 mod auth;
 mod calls;
 mod image_picker;
+mod jobtabs;
 mod model;
 mod onboarding;
 mod palette;
+mod panic_log;
 mod search;
 mod search_index;
 mod sign_in;
@@ -38,6 +40,9 @@ use crate::ui::widgets;
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+    // Before any thread or window: a panic that would end as a bare SIGABRT leaves its
+    // message and backtrace in ~/Library/Logs/Arbos/panic.log (reported on the next launch).
+    panic_log::install();
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     let handle = runtime.handle().clone();
 

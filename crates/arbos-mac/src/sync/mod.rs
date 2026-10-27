@@ -7,6 +7,8 @@
 //! constants come from `arbos-core`; the client-side mirror (`doc.rs`) and
 //! the sources are candidates to move there later (`arbos-design.md` §7.2).
 
+pub mod agent_avatar;
+pub mod avatar_master;
 pub mod credentials;
 pub mod diagnostics;
 pub mod doc;
@@ -14,6 +16,7 @@ pub mod dto;
 pub mod fixture;
 pub mod relay;
 pub mod store;
+pub mod user_error;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -22,6 +25,8 @@ use std::sync::Arc;
 use arbos_matrix::{MessageRow, Snapshot};
 use futures::future::BoxFuture;
 use tokio::sync::mpsc;
+
+use crate::sync::user_error::UserError;
 
 use crate::model::{
     AccountView, Call, CallEnded, CallKind, CallMissed, Person, Reachable, Sender, ServerInfo,
@@ -72,16 +77,24 @@ pub enum SyncEvent {
         url: String,
         bytes: Arc<Vec<u8>>,
     },
+    /// The picture at `url` could not be fetched (retries exhausted, or 404): the app forgets
+    /// the request so the next surface that wants it asks again.
+    AvatarMissing {
+        url: String,
+    },
     /// The avatar picker's generated picture is ready to preview (`url` fetches it; `image_key`
     /// is what "Set avatar" sends), or the generation failed (`error`).
     ImageGenerated {
         target: PictureTarget,
         image_key: Option<String>,
         url: Option<String>,
-        error: Option<String>,
+        /// A short human sentence for the sheet ("Couldn't generate the image. The server took
+        /// too long."); the raw provider / transport words ride in `detail` for a Details
+        /// disclosure (Jacob, 2026-10-26: a raw reqwest error had spilled over the footer).
+        error: Option<UserError>,
     },
     /// Error from a people-chat action (search, DM, members), shown inline.
-    PeopleError(String),
+    PeopleError(UserError),
     /// The people I block (`GET /blocks`), sent on every registry refresh and after each
     /// block / unblock. The person pane derives its Block user / Unblock row from this list.
     Blocked(Vec<Person>),
@@ -114,10 +127,10 @@ pub enum SyncEvent {
         chat_id: Id,
         call_id: String,
     },
-    /// A call request failed; shown as a notice and the call UI resets.
+    /// A call request failed; shown as an error toast and the call UI resets.
     CallError {
         chat_id: Id,
-        message: String,
+        error: UserError,
     },
     /// Cold launch from the on-device store (#929): reopen what was on
     /// screen when the app last ran. Sent once, after the stored `Projects`.
@@ -173,7 +186,7 @@ pub enum SyncEvent {
     Paired {
         device_id: String,
     },
-    PairingFailed(String),
+    PairingFailed(UserError),
     /// Registry: the full project list, rail order.
     Projects(Vec<Project>),
     /// Model ids the relay proxy can serve (picker contents).
@@ -236,6 +249,12 @@ pub enum SyncEvent {
         key: String,
         bytes: Arc<Vec<u8>>,
     },
+    /// The site icon for the named links to `host` (relay `GET /link-icon?domain=`): a
+    /// 64×64 PNG, or `None` when the site has none (the bubbles keep the placeholder).
+    LinkIcon {
+        host: String,
+        png: Option<Arc<Vec<u8>>>,
+    },
     /// The thumbnail bytes could not be fetched; the card shows "No preview" instead of
     /// loading forever. The failure itself went to the log and the silent diagnostics path.
     ThumbnailFailed {
@@ -261,8 +280,16 @@ pub enum SyncEvent {
     /// What the relay's HTTP side says about reachability (the registry poll):
     /// `Offline` / `RelayDown` while it fails, `Live` as soon as a call succeeds.
     RelayLink(LinkState),
-    /// Short user-facing notice (errors from HTTP calls, etc.).
+    /// Short user-facing notice — something that worked or a plain status ("Forwarded to
+    /// Studio"). Never a failure: those are [`SyncEvent::Failure`].
     Notice(String),
+    /// Something the user asked for did not happen. Drawn by `ui::error_note` as an error
+    /// toast (or caught by the surface that owns the action); `retry` re-issues the command
+    /// behind Try again.
+    Failure {
+        error: UserError,
+        retry: Option<Box<ClientCommand>>,
+    },
     /// A room's pushes were refused (`not_available`) or an ACK cleared that refusal.
     /// `refused: true` → show one notice and keep a per-room flag; `false` → clear both.
     PushRefused {
@@ -279,7 +306,7 @@ pub enum SyncEvent {
     /// Settings → Secrets: secrets, accesses, requests, activity (never values; D83).
     Secrets(SecretsView),
     /// Settings → Devices: this account's signed-in devices, or why they could not be read.
-    Devices(Result<Vec<DeviceView>, String>),
+    Devices(Result<Vec<DeviceView>, UserError>),
     /// One agent's secrets page (`GET /projects/{id}/secrets`).
     ProjectSecrets {
         project_id: Id,
@@ -303,6 +330,13 @@ pub enum SyncEvent {
     ProjectJobs {
         project_id: Id,
         jobs: Vec<crate::model::Job>,
+    },
+    /// One job's exchange (`GET /projects/{id}/jobs/{jobId}[?after=seq]`) — the rollout
+    /// view. `rollout.unavailable` when the relay has no endpoint yet (404).
+    JobRollout {
+        project_id: Id,
+        job_id: String,
+        rollout: crate::model::JobRollout,
     },
     /// Run history of one routine, newest first.
     RoutineRuns {
@@ -338,8 +372,9 @@ pub enum SyncEvent {
     ServerDetail(ServerInfo),
     /// D88: a server was just created or joined: select it and land on `#general`.
     ServerOpened(ServerInfo),
-    /// D88: a server/channel write failed; shown inline in the open sheet and as a notice.
-    ServerError(String),
+    /// D88: a server/channel write failed; shown inline in the open sheet (or as an error
+    /// toast when no sheet is up).
+    ServerError(UserError),
     /// D88: the room list of servers and channels changed.
     MatrixRooms(Snapshot),
     /// D88: rows of a channel after it was opened, and the whole list after every new row.
@@ -356,13 +391,13 @@ pub enum SyncEvent {
     ChannelSendFailed {
         room_id: String,
         local_id: String,
-        error: String,
+        error: UserError,
     },
     /// A chat send never reached the doc (no room yet, or NewChat failed); mark it failed.
     MessageSendFailed {
         chat_id: Id,
         message_id: Id,
-        error: String,
+        error: UserError,
     },
 }
 
@@ -372,20 +407,43 @@ pub enum PictureTarget {
     Agent(Id),
     Group(Id),
     Server(Id),
+    /// The Create sheet's not-yet-created agent / group / server (Jacob, 2026-10-25): a picture
+    /// generated before the entity exists lands in my own slot (`POST /me/avatar/generate` →
+    /// `users:{me}`) and is copied into the new entity's slot on Create.
+    Draft,
+    /// My own profile picture (the id is my user id; `/me/avatar…` routes).
+    Me(Id),
 }
 
 impl PictureTarget {
-    pub fn id(&self) -> &Id {
+    /// The entity's id; the draft has none yet.
+    pub fn id(&self) -> Option<&Id> {
         match self {
-            PictureTarget::Agent(id) | PictureTarget::Group(id) | PictureTarget::Server(id) => id,
+            PictureTarget::Agent(id)
+            | PictureTarget::Group(id)
+            | PictureTarget::Server(id)
+            | PictureTarget::Me(id) => Some(id),
+            PictureTarget::Draft => None,
         }
     }
+}
+
+/// The Create sheet's pending picture, applied once the entity exists (Jacob, 2026-10-25: the
+/// sheet offers Upload and Generate only; with neither the entity is stored neutral —
+/// `avatar_leaf` = `leaf::NEUTRAL`, the name's initial on a grey disc — never an automatic
+/// leaf).
+#[derive(Clone, Debug, PartialEq)]
+pub enum DraftPicture {
+    /// A file the owner chose; uploaded as the picture master (≤ 1024 px PNG / JPEG) into the new entity's slot.
+    File(std::path::PathBuf),
+    /// A picture the relay already holds in my own slot (`users:{me}`): copied over.
+    Generated { key: String },
 }
 
 /// Where an agent's new picture comes from (`ClientCommand::SetProjectImage`).
 #[derive(Clone, Debug, PartialEq)]
 pub enum PictureSource {
-    /// A file the owner chose; uploaded as a 512 px JPEG.
+    /// A file the owner chose; uploaded as the picture master (≤ 1024 px PNG / JPEG).
     File(std::path::PathBuf),
     /// A blob the relay already stores under the project (a generated picture).
     Key(String),
@@ -417,9 +475,11 @@ pub enum ClientCommand {
     CreatePeopleGroup {
         handles: Vec<String>,
         agent_ids: Vec<Id>,
-        /// D93 Create screen: the group's name and leaf picture, when it came through it.
+        /// D93 Create screen: the group's name and leaf pair, when it came through it.
         title: Option<String>,
         leaf: Option<crate::ui::avatars::LeafPick>,
+        /// The Create screen's uploaded / generated picture, applied right after the create.
+        picture: Option<DraftPicture>,
     },
     /// Presence `typing` for a people chat.
     SetTyping {
@@ -528,6 +588,9 @@ pub enum ClientCommand {
         attachments: Vec<PathBuf>,
         /// People-chat / hover-reply: the message this send answers (`replyTo`).
         reply_to: Option<String>,
+        /// Reply in DM: the message in another chat this send answers, with its
+        /// snapshot (`replyRef`). Exclusive with `reply_to`.
+        reply_ref: Option<crate::model::ReplyRef>,
         /// Member ids of the composer's committed mention chips (#1596); the
         /// source unions them with the `@handle`s the text names.
         mentions: Vec<String>,
@@ -565,6 +628,13 @@ pub enum ClientCommand {
     /// Poll the agent's open jobs (`GET /projects/{id}` → `activity.jobs[]`).
     JobsRefresh {
         project_id: Id,
+    },
+    /// Poll one job's exchange for the open rollout view; `after` asks for the entries
+    /// past that `seq` only.
+    RolloutRefresh {
+        project_id: Id,
+        job_id: String,
+        after: Option<u64>,
     },
     /// Toggle my emoji reaction on a message (written into the chat doc).
     React {
@@ -671,10 +741,15 @@ pub enum ClientCommand {
         server_id: Id,
         pick: Option<crate::ui::avatars::LeafPick>,
     },
-    /// My own picture (`PUT /me/avatar`, JPEG ≤ 2 MB): overrides the GitHub
+    /// My own picture (`PUT /me/avatar`, PNG / JPEG master ≤ 3 MB): overrides the GitHub
     /// avatar everywhere the relay serves me.
     SetMyAvatar {
         path: std::path::PathBuf,
+    },
+    /// My own picture from a key the relay already holds in my `users:{id}` slot (the avatar
+    /// picker's Generate tab): `PUT /me/avatar {image_key}`.
+    SetMyAvatarKey {
+        key: String,
     },
     /// Back to the GitHub picture (`DELETE /me/avatar`).
     RemoveMyAvatar,
@@ -704,8 +779,11 @@ pub enum ClientCommand {
         name: String,
         /// D79: the owner's swatch pick at creation; `None` = automatic (the id's colour).
         avatar_color_index: Option<u8>,
-        /// D92: the leaf + colour the Create sheet previewed (forks copy the source's); `None` = automatic.
+        /// D92: the leaf + colour (forks copy the source's; the Create sheet sends the neutral
+        /// pair); `None` = automatic.
         leaf: Option<crate::ui::avatars::LeafPick>,
+        /// The Create sheet's uploaded / generated picture, applied right after the create.
+        picture: Option<DraftPicture>,
         /// Fork: copy this agent's workspace (files + memory) into the new one.
         source_project_id: Option<Id>,
         /// Optional profile blurb for the new agent (forks copy the source's).
@@ -789,6 +867,10 @@ pub enum ClientCommand {
     FetchThumbnail {
         project_id: Id,
         key: String,
+    },
+    /// Fetch the site icon the bubbles draw before named links to `host`.
+    FetchLinkIcon {
+        host: String,
     },
     /// Download an attachment to `~/Downloads/<name>` (F10).
     DownloadAttachment {
@@ -1019,8 +1101,10 @@ pub enum ClientCommand {
     /// D88: `POST /servers {name}`; answered by `ServerOpened`.
     ServerCreate {
         name: String,
-        /// D93 Create screen: the server's leaf picture.
+        /// D93 Create screen: the server's leaf pair (the neutral pair since 2026-10-25).
         leaf: Option<crate::ui::avatars::LeafPick>,
+        /// The Create screen's uploaded / generated picture, applied right after the create.
+        picture: Option<DraftPicture>,
     },
     /// D88: `POST /servers/join {code}` with a code or a full invite link; `ServerOpened`.
     ServerJoin {

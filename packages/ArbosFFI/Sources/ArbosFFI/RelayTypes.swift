@@ -31,6 +31,23 @@ public struct AccountUserDto: Codable {
 	}
 }
 
+/// `agent_profile_updated` payload: an agent's avatar changed (`PATCH /projects/{id}` with
+/// `image_key`, a leaf pick or a colour pick) — the agents' `profile_updated`. Sent to the
+/// owner's other devices, the project's members and everyone who shares a people chat with the
+/// agent. `image_key` is the picture now in effect (`null` = the leaf / initials; the leaf
+/// picks come with the registry re-read), `avatar_version` the stamp every copy must reach.
+public struct AgentProfileUpdatedPayloadDto: Codable {
+	public let project_id: String
+	public let avatar_version: Int64
+	public let image_key: String?
+
+	public init(project_id: String, avatar_version: Int64, image_key: String?) {
+		self.project_id = project_id
+		self.avatar_version = avatar_version
+		self.image_key = image_key
+	}
+}
+
 /// Inner `error` object on every relay error body.
 /// 
 /// `type` strings in use (from `signin::api_error` and `secrets::ApiErr` call sites):
@@ -480,11 +497,14 @@ public struct ChatMemberProjectDto: Codable {
 	public let avatar_leaf_color_effective: Int64?
 	/// D92 amendment: the agent's uploaded / generated picture (blob name in `/blob/{id}/…`).
 	public let image_key: String?
+	/// Stamp (ms) of the last avatar change — the same value `ProjectDto.avatar_version`
+	/// carries, so a roster copy and the owner's record can be ordered.
+	public let avatar_version: Int64?
 	public let description: String
 	public let model: String?
 	public let owner: ProjectOwnerDto
 
-	public init(id: String, name: String, icon: String, color: String, avatar: String, avatar_color: String, avatar_color_index: Int64?, avatar_color_index_effective: Int64, avatar_leaf: Int64?, avatar_leaf_color: Int64?, avatar_leaf_effective: Int64?, avatar_leaf_color_effective: Int64?, image_key: String?, description: String, model: String?, owner: ProjectOwnerDto) {
+	public init(id: String, name: String, icon: String, color: String, avatar: String, avatar_color: String, avatar_color_index: Int64?, avatar_color_index_effective: Int64, avatar_leaf: Int64?, avatar_leaf_color: Int64?, avatar_leaf_effective: Int64?, avatar_leaf_color_effective: Int64?, image_key: String?, avatar_version: Int64?, description: String, model: String?, owner: ProjectOwnerDto) {
 		self.id = id
 		self.name = name
 		self.icon = icon
@@ -498,6 +518,7 @@ public struct ChatMemberProjectDto: Codable {
 		self.avatar_leaf_effective = avatar_leaf_effective
 		self.avatar_leaf_color_effective = avatar_leaf_color_effective
 		self.image_key = image_key
+		self.avatar_version = avatar_version
 		self.description = description
 		self.model = model
 		self.owner = owner
@@ -766,6 +787,10 @@ public struct ProjectDto: Codable {
 	/// D92 amendment: the agent's uploaded / generated picture, a blob name in the project's own
 	/// slot (`GET /blob/{project}/{key}`); wins over the leaf. Absent on older relays.
 	public let image_key: String?
+	/// Stamp (ms) of the agent's last avatar change (picture, leaf or colour pick). Clients
+	/// hold several copies of one agent (project record, each roster); the highest stamp is
+	/// the one drawn, so a change never flips back to the old picture. Absent on older relays.
+	public let avatar_version: Int64?
 	public let primary_chat_id: String?
 	public let owner: ProjectOwnerDto
 	public let model: String?
@@ -783,7 +808,7 @@ public struct ProjectDto: Codable {
 	/// owner allowed; empty for everyone but the owner's own clients.
 	public let message_grants: [MessageGrantDto]?
 
-	public init(id: String, name: String, icon: String, color: String, instructions: String, avatar: String, avatar_color: String, state: String, box: String, box_since: Int64, spend_today_usd: Double, spend_cap_usd: Double, created_at: Int64, last_active_at: Int64, description: String, voice: String?, vision_enabled: Bool, avatar_color_index: Int64?, avatar_color_index_effective: Int64, avatar_leaf: Int64?, avatar_leaf_color: Int64?, avatar_leaf_effective: Int64?, avatar_leaf_color_effective: Int64?, image_key: String?, primary_chat_id: String?, owner: ProjectOwnerDto, model: String?, machine: MachineDto, shared: Bool?, my_role: String?, owner_handle: String??, archived_at: Int64??, message_grants: [MessageGrantDto]?) {
+	public init(id: String, name: String, icon: String, color: String, instructions: String, avatar: String, avatar_color: String, state: String, box: String, box_since: Int64, spend_today_usd: Double, spend_cap_usd: Double, created_at: Int64, last_active_at: Int64, description: String, voice: String?, vision_enabled: Bool, avatar_color_index: Int64?, avatar_color_index_effective: Int64, avatar_leaf: Int64?, avatar_leaf_color: Int64?, avatar_leaf_effective: Int64?, avatar_leaf_color_effective: Int64?, image_key: String?, avatar_version: Int64?, primary_chat_id: String?, owner: ProjectOwnerDto, model: String?, machine: MachineDto, shared: Bool?, my_role: String?, owner_handle: String??, archived_at: Int64??, message_grants: [MessageGrantDto]?) {
 		self.id = id
 		self.name = name
 		self.icon = icon
@@ -808,6 +833,7 @@ public struct ProjectDto: Codable {
 		self.avatar_leaf_effective = avatar_leaf_effective
 		self.avatar_leaf_color_effective = avatar_leaf_color_effective
 		self.image_key = image_key
+		self.avatar_version = avatar_version
 		self.primary_chat_id = primary_chat_id
 		self.owner = owner
 		self.model = model
@@ -1680,13 +1706,22 @@ public struct PeopleMessagePayloadDto: Codable {
 	public let from_handle: String
 	public let seq: Int64
 	public let sender: SenderDto
+	/// The project id for an agent's reply in a project chat; absent (`people`) for DMs and
+	/// people groups. Agents' announcements queue this push since 2026-10-26 (before, only a
+	/// device's own row did, so an agent reply never showed an in-app banner).
+	public let project_id: String?
+	/// The announced message's first line, when the sender announced one (agents do; a
+	/// device's row-level push has none and the banner says "New message").
+	public let text: String?
 
-	public init(chat_id: String, from: String, from_handle: String, seq: Int64, sender: SenderDto) {
+	public init(chat_id: String, from: String, from_handle: String, seq: Int64, sender: SenderDto, project_id: String?, text: String?) {
 		self.chat_id = chat_id
 		self.from = from
 		self.from_handle = from_handle
 		self.seq = seq
 		self.sender = sender
+		self.project_id = project_id
+		self.text = text
 	}
 }
 
@@ -1698,6 +1733,19 @@ public struct PeopleProjectSharedPayloadDto: Codable {
 	public init(project_id: String, by_handle: String) {
 		self.project_id = project_id
 		self.by_handle = by_handle
+	}
+}
+
+/// `profile_updated` payload: a person changed their picture (`PUT` / `DELETE /me/avatar`).
+/// Sent to their own other devices and to everyone who shares a people chat or a server with
+/// them; `avatar_url` is the new picture (`null` = none, the coloured initials show).
+public struct ProfileUpdatedPayloadDto: Codable {
+	public let user_id: String
+	public let avatar_url: String?
+
+	public init(user_id: String, avatar_url: String?) {
+		self.user_id = user_id
+		self.avatar_url = avatar_url
 	}
 }
 
@@ -2604,6 +2652,8 @@ public enum PushEventDto: Codable {
 	case secretRequest(SecretRequestPushPayloadDto)
 	case secretsPaused(SecretsPausedPayloadDto)
 	case secretExpiring(SecretExpiringPayloadDto)
+	case profileUpdated(ProfileUpdatedPayloadDto)
+	case agentProfileUpdated(AgentProfileUpdatedPayloadDto)
 
 	enum CodingKeys: String, CodingKey, Codable {
 		case peopleMessage = "people_message",
@@ -2631,7 +2681,9 @@ public enum PushEventDto: Codable {
 			releasePublished = "release_published",
 			secretRequest = "secret_request",
 			secretsPaused = "secrets_paused",
-			secretExpiring = "secret_expiring"
+			secretExpiring = "secret_expiring",
+			profileUpdated = "profile_updated",
+			agentProfileUpdated = "agent_profile_updated"
 	}
 
 	private enum ContainerCodingKeys: String, CodingKey {
@@ -2772,6 +2824,16 @@ public enum PushEventDto: Codable {
 					self = .secretExpiring(content)
 					return
 				}
+			case .profileUpdated:
+				if let content = try? container.decode(ProfileUpdatedPayloadDto.self, forKey: .payload) {
+					self = .profileUpdated(content)
+					return
+				}
+			case .agentProfileUpdated:
+				if let content = try? container.decode(AgentProfileUpdatedPayloadDto.self, forKey: .payload) {
+					self = .agentProfileUpdated(content)
+					return
+				}
 			}
 		}
 		throw DecodingError.typeMismatch(PushEventDto.self, DecodingError.Context(codingPath: decoder.codingPath, debugDescription: "Wrong type for PushEventDto"))
@@ -2857,6 +2919,12 @@ public enum PushEventDto: Codable {
 			try container.encode(content, forKey: .payload)
 		case .secretExpiring(let content):
 			try container.encode(CodingKeys.secretExpiring, forKey: .kind)
+			try container.encode(content, forKey: .payload)
+		case .profileUpdated(let content):
+			try container.encode(CodingKeys.profileUpdated, forKey: .kind)
+			try container.encode(content, forKey: .payload)
+		case .agentProfileUpdated(let content):
+			try container.encode(CodingKeys.agentProfileUpdated, forKey: .kind)
 			try container.encode(content, forKey: .payload)
 		}
 	}

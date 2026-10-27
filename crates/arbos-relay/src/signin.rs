@@ -15,7 +15,7 @@
 
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
@@ -753,8 +753,9 @@ pub async fn device_revoke(
     }
 }
 
-/// Max JPEG for `PUT /me/avatar` (512×512 at high quality is well under this).
-const MAX_AVATAR_BYTES: usize = 2 * 1024 * 1024;
+/// Max picture for `PUT /me/avatar` (a 1024 px master — PNG mark or JPEG q92 photo — is well
+/// under this; see `avatar_image`).
+const MAX_AVATAR_BYTES: usize = crate::avatar_image::MAX_MASTER_BYTES;
 
 fn safe_avatar_user_id(id: &str) -> bool {
     !id.is_empty()
@@ -908,15 +909,27 @@ pub async fn patch_me(
     .into_response()
 }
 
-/// `PUT /me/avatar`: raw JPEG body → public `{public_url}/avatars/{user_id}.jpg?v=…`.
+/// `PUT /me/avatar {image_key}` (JSON body): make a picture the relay already holds in my
+/// `users:{id}` slot — the Generate tab's preview — my profile picture.
+#[derive(Deserialize)]
+struct PutAvatarKeyBody {
+    image_key: String,
+}
+
+/// `PUT /me/avatar`: raw JPEG or PNG body → public `{public_url}/avatars/{user_id}.jpg?v=…`
+/// (the `.jpg` name is historical — the route serves the stored type; PNG keeps a flat mark's
+/// edges lossless, see `avatar_image`). With a JSON body `{image_key}` the bytes come from my
+/// `users:{id}` blob slot instead (the avatar picker's generated preview). A picture larger than
+/// the 1024 px master is brought down to it on the way in. Either way the new picture fans out
+/// (`profile_updated`).
 pub async fn put_avatar(
     State(state): State<AppState>,
     principal: Principal,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let user_id = match &principal {
-        Principal::Device { user_id, .. } => user_id.clone(),
+    let (user_id, device_id) = match &principal {
+        Principal::Device { id, user_id, .. } => (user_id.clone(), id.clone()),
         Principal::Box { .. } | Principal::Admin => {
             return api_error(StatusCode::FORBIDDEN, "forbidden", "device token required")
         }
@@ -924,25 +937,66 @@ pub async fn put_avatar(
     if !safe_avatar_user_id(&user_id) {
         return api_error(StatusCode::BAD_REQUEST, "bad_user", "bad user id");
     }
-    // Header and bytes must both say "image" (the shared gate); the file is then served as
-    // `{user}.jpg`, so of the image types only a JPEG is stored here — the apps re-encode.
     let content_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok());
-    match check_avatar(content_type, &body) {
-        Ok(ImageKind::Jpeg) => {}
-        Ok(other) => {
-            return api_error(
-                StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                "not_jpeg",
-                format!(
-                    "Profile pictures are stored as JPEG; this is a {other}. Re-encode it first"
-                ),
-            );
+    let (kind, bytes): (ImageKind, Vec<u8>) = if content_type
+        .is_some_and(|t| t.starts_with("application/json"))
+    {
+        let Ok(key) = serde_json::from_slice::<PutAvatarKeyBody>(&body) else {
+            return api_error(StatusCode::BAD_REQUEST, "bad_request", "provide image_key");
+        };
+        let slot = format!("{}{user_id}", crate::images::USER_BLOB_PREFIX);
+        let kind = match crate::blobs::stored_image(&state, &slot, &key.image_key).await {
+            crate::blobs::StoredImage::Image(kind @ (ImageKind::Jpeg | ImageKind::Png)) => kind,
+            crate::blobs::StoredImage::Image(other) => {
+                return api_error(
+                    StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                    "not_jpeg",
+                    format!("Profile pictures are stored as JPEG or PNG; this is a {other}"),
+                );
+            }
+            crate::blobs::StoredImage::Missing => return crate::blobs::no_such_image(),
+            crate::blobs::StoredImage::NotAnImage(why) => return not_an_image(&why),
+        };
+        match crate::blobs::read(&state, &slot, &key.image_key).await {
+            Some(bytes) => (kind, bytes),
+            None => return crate::blobs::no_such_image(),
         }
-        Err(why) => return not_an_image(&why),
+    } else {
+        // Header and bytes must both say "image" (the shared gate); the file is served with
+        // the type it is, and of the image types JPEG and PNG are stored here — the apps
+        // re-encode anything else (HEIC, GIF, WebP) into one of the two.
+        let kind = match check_avatar(content_type, &body) {
+            Ok(kind @ (ImageKind::Jpeg | ImageKind::Png)) => kind,
+            Ok(other) => {
+                return api_error(
+                    StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                    "not_jpeg",
+                    format!(
+                        "Profile pictures are stored as JPEG or PNG; this is a {other}. Re-encode it first"
+                    ),
+                );
+            }
+            Err(why) => return not_an_image(&why),
+        };
+        (kind, body.to_vec())
+    };
+    // An over-size upload (a 4000 px export, an older client's 1536 px JPEG) is brought down to
+    // the 1024 px master; anything already within it is stored byte for byte.
+    let jpeg = tokio::task::spawn_blocking(move || {
+        crate::avatar_image::normalize_upload(kind, &bytes).bytes
+    })
+    .await
+    .unwrap_or_default();
+    if jpeg.is_empty() {
+        return api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "io",
+            "picture not processed",
+        );
     }
-    if body.len() > MAX_AVATAR_BYTES {
+    if jpeg.len() > MAX_AVATAR_BYTES {
         return api_error(
             StatusCode::PAYLOAD_TOO_LARGE,
             "too_large",
@@ -955,7 +1009,7 @@ pub async fn put_avatar(
             return api_error(StatusCode::INTERNAL_SERVER_ERROR, "io", e.to_string());
         }
     }
-    if let Err(e) = tokio::fs::write(&path, &body).await {
+    if let Err(e) = tokio::fs::write(&path, &jpeg).await {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "io", e.to_string());
     }
     let v = now_ms();
@@ -966,6 +1020,7 @@ pub async fn put_avatar(
     if let Err(e) = state.db.set_user_avatar_url(&user_id, &avatar_url) {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
     }
+    fan_out_profile(&state, &user_id, &device_id, Some(avatar_url.clone()));
     Json(MeUserResponseDto {
         user: user_dto(&state, &user_id),
         avatar_url: Some(Some(avatar_url)),
@@ -976,8 +1031,8 @@ pub async fn put_avatar(
 /// `DELETE /me/avatar`: drop the uploaded picture; the GitHub avatar (by github_id, GitHub's
 /// stable URL) shows again, or the D79 coloured initials when there is none.
 pub async fn delete_avatar(State(state): State<AppState>, principal: Principal) -> Response {
-    let user_id = match &principal {
-        Principal::Device { user_id, .. } => user_id.clone(),
+    let (user_id, device_id) = match &principal {
+        Principal::Device { id, user_id, .. } => (user_id.clone(), id.clone()),
         Principal::Box { .. } | Principal::Admin => {
             return api_error(StatusCode::FORBIDDEN, "forbidden", "device token required")
         }
@@ -994,11 +1049,14 @@ pub async fn delete_avatar(State(state): State<AppState>, principal: Principal) 
         .and_then(|u| u.github_id)
         .map(|id| format!("https://avatars.githubusercontent.com/u/{id}?v=4"));
     match state.db.clear_user_avatar_url(&user_id, github.as_deref()) {
-        Ok(()) => Json(MeUserResponseDto {
-            user: user_dto(&state, &user_id),
-            avatar_url: Some(github),
-        })
-        .into_response(),
+        Ok(()) => {
+            fan_out_profile(&state, &user_id, &device_id, github.clone());
+            Json(MeUserResponseDto {
+                user: user_dto(&state, &user_id),
+                avatar_url: Some(github),
+            })
+            .into_response()
+        }
         Err(e) if e.to_string() == "no such user" => {
             api_error(StatusCode::NOT_FOUND, "not_found", "no such user")
         }
@@ -1006,25 +1064,80 @@ pub async fn delete_avatar(State(state): State<AppState>, principal: Principal) 
     }
 }
 
-/// `GET /avatars/{user_id}.jpg` — public (same role as a GitHub CDN avatar URL).
-pub async fn get_avatar(State(state): State<AppState>, Path(file): Path<String>) -> Response {
+/// Upper bound on the people told about one picture change (a member of very large servers
+/// would otherwise write thousands of push rows per change).
+const PROFILE_FAN_OUT_MAX: usize = 2000;
+
+/// A changed profile picture reaches every device that shows it: my own other devices (the one
+/// that made the change already has the answer) and everyone who shares a people chat or a
+/// server with me, as one `profile_updated` push each. Clients re-read `/me` for themselves and
+/// the people / server lists for others; `avatar_url` carries the new picture for a cheap
+/// in-place update.
+fn fan_out_profile(state: &AppState, user_id: &str, device_id: &str, avatar_url: Option<String>) {
+    let event = PushEventDto::ProfileUpdated(arbos_core::api::ProfileUpdatedPayloadDto {
+        user_id: user_id.to_owned(),
+        avatar_url,
+    });
+    let _ = state.db.push_user_except_event(user_id, device_id, &event);
+    for uid in profile_audience(state, user_id) {
+        let _ = state.db.push_user_event(&uid, &event, None);
+    }
+}
+
+/// Who else sees my picture: the humans in my people chats and the members of my servers, each
+/// once, never me, capped at `PROFILE_FAN_OUT_MAX`.
+pub fn profile_audience(state: &AppState, user_id: &str) -> Vec<String> {
+    let mut audience: Vec<String> = Vec::new();
+    for cm in state
+        .db
+        .chats_of_member(&format!("user:{user_id}"))
+        .unwrap_or_default()
+    {
+        audience.extend(crate::people::human_user_ids(&cm));
+    }
+    for (server, _) in state.db.servers_of_user(user_id).unwrap_or_default() {
+        audience.extend(
+            state
+                .db
+                .server_members(&server.id)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|m| m.banned_at.is_none())
+                .map(|m| m.user_id),
+        );
+    }
+    audience.sort();
+    audience.dedup();
+    audience.retain(|u| u != user_id);
+    audience.truncate(PROFILE_FAN_OUT_MAX);
+    audience
+}
+
+/// `GET /avatars/{user_id}.jpg[?w=<px>]` — public (same role as a GitHub CDN avatar URL). The
+/// stored master (JPEG or PNG; the Content-Type follows the bytes, not the `.jpg` name), or with
+/// `w=` a Lanczos downscale at that bucket — the pixels a surface draws, so no client has to
+/// shrink a large texture on the GPU (`avatar_image`).
+pub async fn get_avatar(
+    State(state): State<AppState>,
+    Path(file): Path<String>,
+    Query(size): Query<crate::avatar_image::SizeQuery>,
+) -> Response {
     let user_id = file.strip_suffix(".jpg").unwrap_or(file.as_str());
     if !safe_avatar_user_id(user_id) {
         return api_error(StatusCode::NOT_FOUND, "not_found", "no such avatar");
     }
     let path = avatar_file(&state, user_id);
     match tokio::fs::read(&path).await {
-        Ok(bytes) => (
-            [
-                (header::CONTENT_TYPE, HeaderValue::from_static("image/jpeg")),
-                (
-                    header::CACHE_CONTROL,
-                    HeaderValue::from_static("public, max-age=86400"),
-                ),
-            ],
-            bytes,
-        )
-            .into_response(),
+        Ok(bytes) => {
+            let kind = crate::image_sniff::sniff(&bytes).unwrap_or(ImageKind::Jpeg);
+            crate::avatar_image::respond(
+                &state,
+                crate::avatar_image::Master { kind, bytes },
+                size.w,
+                Some("public, max-age=86400"),
+            )
+            .await
+        }
         Err(_) => api_error(StatusCode::NOT_FOUND, "not_found", "no such avatar"),
     }
 }
@@ -1400,11 +1513,11 @@ mod avatar_tests {
         let r = put(&state, &alice_dev, None, samples::JPEG).await;
         assert_eq!(r.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
 
-        // A real PNG: an image, but this endpoint stores JPEG only (the apps re-encode).
-        let r = put(&state, &alice_dev, Some("image/png"), samples::PNG).await;
+        // A GIF: an image, but this endpoint stores JPEG and PNG only (the apps re-encode).
+        let r = put(&state, &alice_dev, Some("image/gif"), samples::GIF).await;
         assert_eq!(r.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
         let msg = error_message(r).await;
-        assert!(msg.contains("JPEG"), "{msg}");
+        assert!(msg.contains("JPEG or PNG"), "{msg}");
 
         assert!(
             !avatar_file(&state, &alice).exists(),
@@ -1431,5 +1544,66 @@ mod avatar_tests {
             .avatar_url
             .unwrap_or_default();
         assert!(url.contains(&format!("/avatars/{alice}.jpg")), "{url}");
+    }
+
+    /// Jacob's 4000 px mark, end to end on the relay: a PNG upload is accepted, stored as a
+    /// 1024 px PNG master (lossless edges), served as `image/png` from the `.jpg` route, and
+    /// `?w=` hands back the bucketed size with shaded (not stair-stepped) edges.
+    #[tokio::test]
+    async fn a_large_png_mark_is_stored_as_a_png_master_and_served_by_size() {
+        use crate::avatar_image::synth::{edge_softness, gray_of, mark};
+        use image::GenericImageView as _;
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 43);
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(mark(2048))
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+
+        let r = put(&state, &alice_dev, Some("image/png"), &png).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let stored = std::fs::read(avatar_file(&state, &alice)).unwrap();
+        assert_eq!(crate::image_sniff::sniff(&stored), Some(ImageKind::Png));
+        assert_eq!(
+            image::load_from_memory(&stored).unwrap().dimensions(),
+            (1024, 1024),
+            "brought down to the master size, kept PNG"
+        );
+
+        async fn get(state: &AppState, alice: &str, w: Option<u32>) -> (String, Vec<u8>) {
+            let r = get_avatar(
+                State(state.clone()),
+                Path(format!("{alice}.jpg")),
+                Query(crate::avatar_image::SizeQuery { w }),
+            )
+            .await;
+            assert_eq!(r.status(), StatusCode::OK);
+            let mime = r
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_owned();
+            let body = axum::body::to_bytes(r.into_body(), 1 << 24).await.unwrap();
+            (mime, body.to_vec())
+        }
+        let (mime, body) = get(&state, &alice, None).await;
+        assert_eq!(
+            mime, "image/png",
+            "the type follows the bytes, not the .jpg name"
+        );
+        assert_eq!(body, stored);
+
+        let (mime, body) = get(&state, &alice, Some(70)).await;
+        assert_eq!(mime, "image/png");
+        let img = image::load_from_memory(&body).unwrap();
+        assert_eq!(img.dimensions(), (96, 96), "70 rounds up to the 96 bucket");
+        assert!(edge_softness(&gray_of(&img), 96) > 0.8);
+
+        let (_, again) = get(&state, &alice, Some(96)).await;
+        assert_eq!(again, body, "the cached variant is the same bytes");
+        let (_, big) = get(&state, &alice, Some(4000)).await;
+        assert_eq!(big, stored, "above the largest bucket the master is served");
     }
 }

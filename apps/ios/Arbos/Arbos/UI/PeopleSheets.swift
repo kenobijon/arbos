@@ -57,23 +57,22 @@ struct NewChatSheet: View {
         query.trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "@"))
     }
 
-    /// Own + shared agents (home list order by name). Empty query hides archived;
-    /// a search finds them again, same as the home list.
+    /// Own + shared agents (home list order by name) through the shared matcher
+    /// (name, @slug, description), best first. Empty query hides archived; a
+    /// search finds them again, same as the home list.
     private var agents: [Project] {
-        let q = trimmed.lowercased()
-        let base = model.projects.filter { q.isEmpty ? !model.isArchived($0.id) : true }
-        let filtered = q.isEmpty ? base : base.filter {
-            $0.name.lowercased().contains(q) || mentionSlug($0.name).contains(q)
-        }
-        return filtered.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        let base = model.projects.filter { trimmed.isEmpty ? !model.isArchived($0.id) : true }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        return PeoplePicker.agents(base, query: trimmed)
     }
 
-    /// Servers I am in that match the query, then open servers from search I am not in.
+    /// Servers I am in that match the query (shared matcher, best first), then
+    /// open servers from search I am not in.
     private var servers: [Server] {
-        let q = trimmed.lowercased()
-        guard !q.isEmpty, model.serversAvailable else { return [] }
-        let mine = model.servers.filter { $0.name.lowercased().contains(q) }
-            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        guard !trimmed.isEmpty, model.serversAvailable else { return [] }
+        let mine = PeoplePicker.servers(
+            model.servers.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending },
+            query: trimmed)
         var seen = Set(mine.map(\.id))
         var out = mine
         for s in remoteServers where !seen.contains(s.id) {
@@ -83,19 +82,10 @@ struct NewChatSheet: View {
         return out
     }
 
-    /// Directory hits first (alphabetical), then remote hits not already listed.
+    /// Directory + remote hits through the shared matcher (display name and
+    /// @handle, best first), one row per person, never me.
     private var people: [Person] {
-        let q = trimmed.lowercased()
-        let local = q.isEmpty ? model.directory : model.directory.filter {
-            $0.handle.lowercased().contains(q) || ($0.name ?? "").lowercased().contains(q)
-        }
-        var seen = Set(local.map(\.id))
-        var out = local
-        for p in remote where !seen.contains(p.id) && p.id != model.user?.id {
-            seen.insert(p.id)
-            out.append(p)
-        }
-        return out
+        PeoplePicker.people(directory: model.directory, remote: remote, me: model.user?.id, query: trimmed)
     }
 
     var body: some View {
@@ -261,7 +251,7 @@ struct NewChatSheet: View {
 
     private func actionRow(icon: String, title: String, subtitle: String) -> some View {
         HStack(spacing: SheetRow.gap) {
-            GlassCircle(size: SheetRow.avatar) {
+            GlassCircle(size: SheetRow.avatar) { // control-size: exception rowIconTiles
                 Image(systemName: icon).font(.system(size: 17, weight: .semibold)).foregroundStyle(theme.text)
             }
             VStack(alignment: .leading, spacing: 2) {
@@ -381,7 +371,7 @@ struct ServerPickRow: View {
                     .font(theme.font(11, weight: .medium))
                     .foregroundStyle(theme.online)
                     .padding(.horizontal, 9).padding(.vertical, 4)
-                    .background(Capsule().fill(theme.field))
+                    .background(Capsule().fill(theme.field)) // control-size: exception inlineChips
             }
         }
         .padding(.horizontal, SheetRow.paddingX)
@@ -433,7 +423,7 @@ struct PersonRow: View {
                     .font(theme.font(11, weight: .medium))
                     .foregroundStyle(person.status == "member" ? theme.online : theme.muted)
                     .padding(.horizontal, 9).padding(.vertical, 4)
-                    .background(Capsule().fill(theme.field))
+                    .background(Capsule().fill(theme.field)) // control-size: exception inlineChips
             }
         }
         .padding(.horizontal, SheetRow.paddingX)
@@ -490,13 +480,21 @@ enum CreateKind {
 }
 
 /// The one Create screen (D93) for a new agent, group or server — Grok Bot's "Create New Bot"
-/// layout: title + close ×, the swaying preview of the chosen leaf, a centred name field, the nine
-/// leaves in a 5 / 4 grid, the ten colours in two rows of five, Cancel + the action pinned above the
-/// home indicator. Grok's sizes in points (measured on the 2x reference) inside the shipped
-/// bottom-sheet frame; the 44 pt footer pills are the one deliberate deviation (touch minimum).
-/// Agents create here; a group goes on to the member picker (`NewGroupView`) as step two with the
-/// name + leaf as its draft; a server keeps its one-line explainer under the field. Pushed from New
-/// Message with its own header; × and Cancel close the whole sheet.
+/// layout: title + close ×, the preview, a centred name field, the picture options, Cancel + the
+/// action pinned above the home indicator. Grok's sizes in points (measured on the 2x reference)
+/// inside the shipped bottom-sheet frame; the 44 pt footer pills are the one deliberate deviation
+/// (touch minimum). Agents create here; a group goes on to the member picker (`NewGroupView`) as
+/// step two with the name + picture as its draft; a server keeps its one-line explainer under
+/// the field. Pushed from New Message with its own header; × and Cancel close the whole sheet.
+///
+/// **Picture (Jacob, 2026-10-25, [feedback create-sheet-avatar-upload-generate-ios-2026-10-25]):
+/// the sixteen-leaf grid and the ten pastel swatches are gone. Under the name field sit the
+/// agent avatar picker's own two options — `Upload | Generate` (`AvatarTabPill` +
+/// `AvatarSourceBody` on an `AvatarSourceState`) — and the preview above the field shows the
+/// chosen photo, the generated picture, or, when neither was picked, the fallback every new
+/// agent / group / server gets: the name's first letter on a neutral grey disc (`NeutralAvatar`).
+/// The entity is stored with the neutral pair (`LeafArt.neutral`), never an automatic leaf;
+/// existing agents keep theirs.**
 struct CreateEntityView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
@@ -504,35 +502,33 @@ struct CreateEntityView: View {
     /// Closes the whole sheet (a pushed view's own dismiss only pops).
     let onDone: () -> Void
     @State private var name = DebugHooks.newAgentName ?? ""
-    @State private var pickedLeaf: Int? = nil
-    @State private var pickedColor: Int? = nil
+    @State private var option: AvatarPickerTab = CreateEntityView.initialOption
+    @StateObject private var source = AvatarSourceState()
     @State private var creating = false
     @State private var errorText: String?
     @State private var next = false
     @FocusState private var focused: Bool
 
     private var clean: String { name.trimmingCharacters(in: .whitespaces) }
-    /// A stable default for this sheet (seeded by how many of that entity exist) so successive new
-    /// ones start on different leaves without the preview jumping while typing; clicks override it.
-    private var pick: LeafPick {
-        let n: Int
-        switch kind {
-        case .agent: n = model.projects.filter { !$0.shared }.count
-        case .group: n = model.peopleChats.filter(\.isGroup).count
-        case .server: n = model.servers.count
-        }
-        return LeafArt.pick(seed: "new-\(kind)-\(n)", leaf: pickedLeaf, color: pickedColor)
+    private var canGo: Bool { !clean.isEmpty && !creating && !source.generating }
+
+    /// The two options every Create sheet offers, in order — the draft picker's tabs.
+    static let options: [AvatarPickerTab] = [.upload, .generate]
+    /// The leaf pair a new entity is stored with: the neutral one, whatever else was picked, so
+    /// no leaf is ever auto-assigned (a later Reset lands on the initial, not on a leaf).
+    static var storedLeaf: LeafPick { LeafArt.neutralPick }
+    /// Rig: `ARBOS_CREATE_PICTURE=generate[:<prompt>]` opens the sheet on Generate.
+    private static var initialOption: AvatarPickerTab {
+        (DebugHooks.createPicture ?? "").hasPrefix("generate") ? .generate : .upload
     }
-    private var canGo: Bool { !clean.isEmpty && !creating }
 
     // Grok's palette, approved as is.
-    private let sheetBg = Color(red: 0x1F / 255, green: 0x1F / 255, blue: 0x1F / 255)
-    private let line = Color(red: 0x35 / 255, green: 0x35 / 255, blue: 0x35 / 255)
-    private let ring = Color(red: 0x50 / 255, green: 0x50 / 255, blue: 0x50 / 255)
-    private let placeholder = Color(red: 0x93 / 255, green: 0x93 / 255, blue: 0x93 / 255)
-    private let cancelBg = Color(red: 0x27 / 255, green: 0x27 / 255, blue: 0x27 / 255)
-    private let createBg = Color(red: 0x3B / 255, green: 0x3B / 255, blue: 0x3B / 255)
-    private let createText = Color(red: 0x73 / 255, green: 0x73 / 255, blue: 0x73 / 255)
+    private let sheetBg = AvatarSheetPalette.sheetBg
+    private let line = AvatarSheetPalette.line
+    private let placeholder = AvatarSheetPalette.placeholder
+    private let cancelBg = AvatarSheetPalette.pillBg
+    private let createBg = AvatarSheetPalette.disabledBg
+    private let createText = AvatarSheetPalette.disabledText
 
     var body: some View {
         VStack(spacing: 0) {
@@ -541,12 +537,12 @@ struct CreateEntityView: View {
             // so the action is always reachable); at rest it is Grok's fixed layout.
             ScrollView(showsIndicators: false) {
                 ZStack(alignment: .top) {
-                    LeafAvatar(pick: pick, size: 114, idle: true)
+                    preview
                         .padding(.top, 62 - 54.5)
-                        .animation(.snappy, value: "\(pick.leaf)-\(pick.color)")
-                    // Grok's vertical rhythm from the sheet top (header 54.5): field 183…218, leaf
-                    // row centres 264 / 320 (40 pt rings → 244…340), swatch row centres 386 / 426
-                    // (32 pt rings → 370…442). The server explainer (two lines) adds 40 under the field.
+                        .animation(.snappy, value: source.generatedKey)
+                    // Grok's vertical rhythm from the sheet top (header 54.5): field 183…218; the
+                    // option capsules start where Grok's first icon row began (246); the chosen
+                    // option's body 16 under them. The server explainer adds 40 under the field.
                     VStack(spacing: 0) {
                         field.padding(.top, 183 - 54.5)
                         if let explainer = kind.explainer {
@@ -567,8 +563,13 @@ struct CreateEntityView: View {
                                 .font(.system(size: 13)).foregroundStyle(theme.danger)
                                 .multilineTextAlignment(.center).padding(.horizontal, 24).padding(.top, 8)
                         }
-                        leafGrid.padding(.top, 246 - 218)
-                        colourGrid.padding(.top, 450 - 426)
+                        AvatarTabPill(tabs: Self.options, tab: $option) { source.errorText = nil }
+                            .padding(.top, 246 - 218)
+                            .accessibilityIdentifier("create-entity-options")
+                        AvatarSourceBody(state: source, tab: option, keepsLine: "Create keeps this one.", uploadsLine: "Create uploads it.", generate: generate) {
+                            EmptyView()
+                        }
+                        .padding(.top, 16)
                     }
                 }
                 .padding(.bottom, 24)
@@ -579,10 +580,15 @@ struct CreateEntityView: View {
         .background(sheetBg.ignoresSafeArea())
         .toolbar(.hidden, for: .navigationBar)
         .navigationDestination(isPresented: $next) {
-            NewGroupView(onDone: onDone, draft: GroupDraft(title: clean, leaf: pick))
+            NewGroupView(onDone: onDone, draft: GroupDraft(title: clean, leaf: Self.storedLeaf, picture: source.draftPicture(for: option)))
         }
         // The rig shoots the sheet without the keyboard (`ARBOS_SHOW=new…`); users get the caret.
-        .onAppear { if !(DebugHooks.show ?? "").hasPrefix("new") { focused = true } }
+        .onAppear {
+            if !(DebugHooks.show ?? "").hasPrefix("new") { focused = true }
+            if let spec = DebugHooks.createPicture, let colon = spec.firstIndex(of: ":") {
+                source.prompt = String(spec[spec.index(after: colon)...])
+            }
+        }
     }
 
     private var header: some View {
@@ -607,6 +613,31 @@ struct CreateEntityView: View {
         .overlay(alignment: .bottom) { Rectangle().fill(line).frame(height: 1) }
     }
 
+    /// The 114 pt preview: the chosen photo, the generated picture (fetched from my own slot),
+    /// else the neutral initial of the typed name — an empty disc until something is typed.
+    @ViewBuilder
+    private var preview: some View {
+        if option == .upload, let image = source.uploadPreview {
+            Image(uiImage: image).resizable().scaledToFill()
+                .frame(width: 114, height: 114).clipShape(Circle())
+        } else if option == .generate, let key = source.generatedKey, let url = model.draftPictureURL(key: key) {
+            AsyncImage(url: url) { phase in
+                if let image = phase.image {
+                    image.resizable().scaledToFill()
+                } else {
+                    ZStack {
+                        NeutralAvatar(name: clean, size: 114)
+                        if phase.error == nil { ProgressView().tint(placeholder) }
+                    }
+                }
+            }
+            .frame(width: 114, height: 114)
+            .clipShape(Circle())
+        } else {
+            NeutralAvatar(name: clean, size: 114)
+        }
+    }
+
     private var field: some View {
         TextField("", text: $name, prompt: Text(kind.placeholder).foregroundStyle(placeholder))
             .font(.system(size: 15.5))
@@ -620,47 +651,6 @@ struct CreateEntityView: View {
             .frame(height: 35)
             .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(line, lineWidth: 1))
             .padding(.horizontal, 16.5)
-    }
-
-    /// The sixteen leaves (v2) as their 4 × 4 sheet on a 48 pt pitch: 30 pt discs on the chosen
-    /// hue, a 36 pt ring on the pick.
-    private var leafGrid: some View {
-        VStack(spacing: 48 - 36) {
-            ForEach(0..<4, id: \.self) { r in
-                HStack(spacing: 48 - 36) {
-                    ForEach(r * 4..<r * 4 + 4, id: \.self) { i in
-                        Button { pickedLeaf = i } label: {
-                            LeafAvatar(pick: LeafPick(leaf: UInt8(i), color: pick.color), size: 30)
-                                .frame(width: 36, height: 36)
-                                .overlay(Circle().strokeBorder(Int(pick.leaf) == i ? ring : .clear, lineWidth: 1))
-                                .contentShape(Circle())
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel(LeafArt.names[i] + (Int(pick.leaf) == i ? ", selected" : ""))
-                    }
-                }
-            }
-        }
-    }
-
-    /// Ten colours in two rows of five on a 40 pt pitch: 24 pt discs, a 32 pt ring on the pick.
-    private var colourGrid: some View {
-        VStack(spacing: 40 - 32) {
-            ForEach([Array(0..<5), Array(5..<10)], id: \.self) { row in
-                HStack(spacing: 40 - 32) {
-                    ForEach(row, id: \.self) { i in
-                        Button { pickedColor = i } label: {
-                            Circle().fill(LeafArt.colors[i]).frame(width: 24, height: 24)
-                                .frame(width: 32, height: 32)
-                                .overlay(Circle().strokeBorder(Int(pick.color) == i ? ring : .clear, lineWidth: 1))
-                                .contentShape(Circle())
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel(LeafArt.colorNames[i] + (Int(pick.color) == i ? ", selected" : ""))
-                    }
-                }
-            }
-        }
     }
 
     private var footer: some View {
@@ -685,11 +675,20 @@ struct CreateEntityView: View {
         .overlay(alignment: .top) { Rectangle().fill(line).frame(height: 1) }
     }
 
+    /// Generate into my own slot (`POST /me/avatar/generate`): the entity does not exist yet.
+    private func generate() {
+        let text = source.prompt.trimmingCharacters(in: .whitespaces)
+        guard !text.isEmpty, !source.generating else { return }
+        let model = model
+        source.run { try await model.generateDraftAvatar(prompt: text) }
+    }
+
     private func go() {
         guard canGo else { return }
+        let picture = source.draftPicture(for: option)
         switch kind {
         case .agent:
-            model.createProject(name: clean, leaf: pick)
+            model.createProject(name: clean, leaf: Self.storedLeaf, picture: picture)
             onDone()
         case .group:
             next = true
@@ -697,7 +696,7 @@ struct CreateEntityView: View {
             creating = true
             errorText = nil
             Task {
-                if await model.createServer(name: clean, leaf: pick) {
+                if await model.createServer(name: clean, leaf: Self.storedLeaf, picture: picture) {
                     onDone()
                 } else {
                     errorText = model.notice?.text ?? "Could not create the server."
@@ -713,6 +712,8 @@ struct CreateEntityView: View {
 struct GroupDraft: Equatable {
     var title: String
     var leaf: LeafPick
+    /// The Create screen's uploaded / generated picture, applied once the group exists.
+    var picture: DraftPicture? = nil
 }
 
 /// New group: pick people (and your own agents), then create. With `addTo`
@@ -746,19 +747,16 @@ struct NewGroupView: View {
     /// exist and can join groups unless deleted (home archive is hide-only).
     private var agentCandidates: [Project] {
         if addToServer != nil || addToSecret != nil { return [] }
-        let q = trimmed.lowercased()
-        let base = model.projects.filter { !$0.shared && (q.isEmpty ? !model.isArchived($0.id) : true) }
+        let base = model.projects.filter { !$0.shared && (trimmed.isEmpty ? !model.isArchived($0.id) : true) }
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-        if q.isEmpty { return base }
-        return base.filter { $0.name.lowercased().contains(q) || mentionSlug($0.name).contains(q) }
+        return PeoplePicker.agents(base, query: trimmed)
     }
 
+    /// Directory + remote hits through the shared matcher (display name and @handle):
+    /// "aff" lists Affine and AffineTeam next to Andreas F @aff, not @aff alone
+    /// ([feedback shared-search-matcher-ios-2026-10-26]).
     private var candidates: [Person] {
-        let q = trimmed.lowercased()
-        var out = q.isEmpty ? model.directory : model.directory.filter { $0.handle.lowercased().contains(q) || ($0.name ?? "").lowercased().contains(q) }
-        var seen = Set(out.map(\.id))
-        for p in remote where !seen.contains(p.id) && p.id != model.user?.id { seen.insert(p.id); out.append(p) }
-        return out
+        PeoplePicker.people(directory: model.directory, remote: remote, me: model.user?.id, query: trimmed)
     }
 
     private var addToChat: PeopleChat? { addTo.flatMap { model.peopleChat($0) } }
@@ -996,7 +994,7 @@ struct NewGroupView: View {
         errorText = nil
         let agentIds = pickedAgents.map(\.id)
         Task {
-            if await model.createGroup(handles: picked.map(\.handle), agentIds: agentIds, title: draft?.title, leaf: draft?.leaf) {
+            if await model.createGroup(handles: picked.map(\.handle), agentIds: agentIds, title: draft?.title, leaf: draft?.leaf, picture: draft?.picture) {
                 onDone()
             } else {
                 // Copy onto this screen: RootView's alert is behind the sheet.
@@ -1026,20 +1024,12 @@ struct ProjectMembersSheet: View {
 
     private var memberIds: Set<String> { Set(members.map(\.id)) }
 
-    /// Directory + remote matches for the typed handle (excludes current members).
+    /// Directory + remote matches for what was typed (shared matcher on display
+    /// name and @handle), current members and me left out.
     private var suggestions: [Person] {
-        let q = trimmed.lowercased()
-        guard !q.isEmpty else { return [] }
-        let local = model.directory.filter {
-            $0.handle.lowercased().contains(q) || ($0.name ?? "").lowercased().contains(q)
-        }.filter { !memberIds.contains($0.id) && $0.id != model.user?.id }
-        var seen = Set(local.map(\.id))
-        var out = local
-        for p in remote where !seen.contains(p.id) && !memberIds.contains(p.id) && p.id != model.user?.id {
-            seen.insert(p.id)
-            out.append(p)
-        }
-        return out
+        guard !trimmed.isEmpty else { return [] }
+        return PeoplePicker.people(directory: model.directory, remote: remote, me: model.user?.id, query: trimmed)
+            .filter { !memberIds.contains($0.id) }
     }
 
     var body: some View {
@@ -1156,24 +1146,20 @@ struct ProjectMembersSheet: View {
 
 // MARK: - Shared sheet pieces
 
-/// The search field of the New Message / New group / Add person sheets. Grok's
-/// sheet field (iOS Plugins sheet; Mac ref 57): a 40 pt capsule with a hairline
-/// rim, a 16 pt magnifier 14 pt in, body-size placeholder, and side edges that
-/// line up with the row content below it (card inset 16 + row padding 14).
+/// The search field of the New Message / New group / Add person sheets: the
+/// control family's field ([feedback iphone-header-composer-sizing-2026-10-26]; was
+/// Grok's 40 pt sheet field), side edges lined up with the row content below it
+/// (card inset 16 + row padding 14).
 enum SheetSearchField {
-    static let height: CGFloat = 40
+    static let height: CGFloat = Controls.height
     static let inset: CGFloat = 30
-    static let iconSize: CGFloat = 16
+    static let iconSize: CGFloat = Controls.glyph
 }
 
 private struct SheetSearchFieldChrome: ViewModifier {
     let theme: Theme
     func body(content: Content) -> some View {
-        content
-            .padding(.horizontal, 14)
-            .frame(height: SheetSearchField.height)
-            .background(Capsule().fill(theme.field))
-            .overlay(Capsule().strokeBorder(theme.fieldBorder, lineWidth: 1))
+        content.controlField()
     }
 }
 
@@ -1205,7 +1191,7 @@ struct GroupCallPickerSheet: View {
                     dismiss()
                 } label: {
                     HStack(spacing: SheetRow.gap) {
-                        GlassCircle(size: SheetRow.avatar) {
+                        GlassCircle(size: SheetRow.avatar) { // control-size: exception rowIconTiles
                             Image(systemName: "person.3.fill")
                                 .font(.system(size: 16, weight: .semibold))
                                 .foregroundStyle(theme.text)
@@ -1349,6 +1335,6 @@ struct MemberChip<Picture: View>: View {
                 .buttonStyle(.plain)
         }
         .padding(.leading, 4).padding(.trailing, 10).frame(height: 32)
-        .background(Capsule().fill(theme.field))
+        .background(Capsule().fill(theme.field)) // control-size: exception inlineChips
     }
 }

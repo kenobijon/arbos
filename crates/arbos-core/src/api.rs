@@ -95,6 +95,12 @@ pub struct ProjectDto {
     /// slot (`GET /blob/{project}/{key}`); wins over the leaf. Absent on older relays.
     #[serde(default)]
     pub image_key: Option<String>,
+    /// Stamp (ms) of the agent's last avatar change (picture, leaf or colour pick). Clients
+    /// hold several copies of one agent (project record, each roster); the highest stamp is
+    /// the one drawn, so a change never flips back to the old picture. Absent on older relays.
+    #[serde(default)]
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub avatar_version: Option<i64>,
     pub primary_chat_id: Option<String>,
     pub owner: ProjectOwnerDto,
     pub model: Option<String>,
@@ -196,6 +202,11 @@ pub struct ChatMemberProjectDto {
     /// D92 amendment: the agent's uploaded / generated picture (blob name in `/blob/{id}/…`).
     #[serde(default)]
     pub image_key: Option<String>,
+    /// Stamp (ms) of the last avatar change — the same value `ProjectDto.avatar_version`
+    /// carries, so a roster copy and the owner's record can be ordered.
+    #[serde(default)]
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub avatar_version: Option<i64>,
     pub description: String,
     pub model: Option<String>,
     pub owner: ProjectOwnerDto,
@@ -1539,6 +1550,15 @@ pub struct PeopleMessagePayloadDto {
     #[typeshare(serialized_as = "I54")]
     pub seq: i64,
     pub sender: SenderDto,
+    /// The project id for an agent's reply in a project chat; absent (`people`) for DMs and
+    /// people groups. Agents' announcements queue this push since 2026-10-26 (before, only a
+    /// device's own row did, so an agent reply never showed an in-app banner).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    /// The announced message's first line, when the sender announced one (agents do; a
+    /// device's row-level push has none and the banner says "New message").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
 }
 
 /// `people_chat_updated` payload.
@@ -1764,6 +1784,32 @@ pub struct SecretExpiringPayloadDto {
     pub expired: bool,
 }
 
+/// `profile_updated` payload: a person changed their picture (`PUT` / `DELETE /me/avatar`).
+/// Sent to their own other devices and to everyone who shares a people chat or a server with
+/// them; `avatar_url` is the new picture (`null` = none, the coloured initials show).
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProfileUpdatedPayloadDto {
+    pub user_id: String,
+    #[serde(default)]
+    pub avatar_url: Option<String>,
+}
+
+/// `agent_profile_updated` payload: an agent's avatar changed (`PATCH /projects/{id}` with
+/// `image_key`, a leaf pick or a colour pick) — the agents' `profile_updated`. Sent to the
+/// owner's other devices, the project's members and everyone who shares a people chat with the
+/// agent. `image_key` is the picture now in effect (`null` = the leaf / initials; the leaf
+/// picks come with the registry re-read), `avatar_version` the stamp every copy must reach.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentProfileUpdatedPayloadDto {
+    pub project_id: String,
+    #[typeshare(serialized_as = "I54")]
+    pub avatar_version: i64,
+    #[serde(default)]
+    pub image_key: Option<String>,
+}
+
 /// One kind the relay queues on `/me/pushes` via `push_user` / `push_user_except` /
 /// `push_everyone`. Adjacent tagging matches the stored `{ kind, payload }` row.
 ///
@@ -1826,6 +1872,10 @@ pub enum PushEventDto {
     SecretsPaused(SecretsPausedPayloadDto),
     #[serde(rename = "secret_expiring")]
     SecretExpiring(SecretExpiringPayloadDto),
+    #[serde(rename = "profile_updated")]
+    ProfileUpdated(ProfileUpdatedPayloadDto),
+    #[serde(rename = "agent_profile_updated")]
+    AgentProfileUpdated(AgentProfileUpdatedPayloadDto),
 }
 
 impl PushEventDto {

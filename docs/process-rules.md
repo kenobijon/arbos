@@ -49,6 +49,63 @@ Decided by Jacob; kept in the repo so the loop, its agents and every worker read
   always the live head, so the two compose: a stale gated head is never merged, and a live head whose merge
   commit reverts main's files is sent back before integration.
 
+## iOS unit tests on the shared EC2 Mac (2026-10-25 19:30 UTC)
+
+The EC2 Mac is the only Mac the iOS workers have, so running the iPhone unit tests there is allowed — under
+these rules, because the box also runs the Rust/iOS gate and the Mac release + TestFlight runner on 8 cores
+and a 250 GB volume (five leftover 13 GB test-simulator clones took it from 60 to 14 GB free on 2026-10-25):
+
+- `xcodebuild test` with `-destination` naming **one** existing simulator (`-destination 'platform=iOS
+  Simulator,name=iPhone 17'` or `id=<udid>`), never a generic destination that makes Xcode clone a device.
+- `-parallel-testing-enabled NO` — parallel testing is what creates the "Clone N of iPhone 17" devices
+  under `~/Library/Developer/XCTestDevices`.
+- Leave nothing behind: delete any clone your run made (`xcrun simctl --set ~/Library/Developer/XCTestDevices
+  delete <udid>`) and shut down the simulators you booted (`xcrun simctl shutdown <udid>`). Do not erase or
+  delete the shared named simulators (`Arbos *`, `iPhone 17`).
+- Build in your own checkout and derived-data path (`-derivedDataPath ~/<your-id>-dd`); the gate's trees
+  (`~/arbos-gate`, `~/arbos-gate-dd-*`, `~/arbos-rust-gate-target`) and the runner's are not yours.
+- The clean script's sweep (idle clones > 30 min, idle rig checkouts > 30 min, stale `Deleting-*` dirs) is the
+  backstop, not the plan; a run that leaves the box under 20 GB free is a regression to raise on your issue.
+
+## Rigs take a heavy slot on the shared EC2 Mac (2026-10-26 20:30 UTC)
+
+The Mac's heavy-job cap (`/usr/local/bin/arbos-heavy-slot.sh`, versioned at `scripts/runner/arbos-heavy-slot.sh`;
+2 slots + 1 priority slot for hotfix pins) already covers the gate's Mac and iOS halves, the TestFlight archive
+and the Mac release job. Rigs did not take part: at 20:23 UTC on 2026-10-26 one rig's simulator boot
+(`launchd_sim` + healthd/healthappd/STExtraction/diagnosticd, ~490 % CPU for 90 s) on top of the two capped
+builds took the 8-core box to load 263 and ssh timed out for every worker (same at 20:0x and at 13:00,
+load 66–167). Rule, for every rig script under `/Users/Shared/arbos-*/` and every ad-hoc run on the box:
+
+- Before `xcrun simctl boot`, `xcodebuild`, `cargo build`/`cargo run`, `swift build` or launching the Mac app
+  from a rig: `slot=$(/usr/local/bin/arbos-heavy-slot.sh acquire <rig-name> --pid $$)`; after the heavy step
+  (the simulator is up and the app is running, or the build finished): `/usr/local/bin/arbos-heavy-slot.sh
+  release "$slot"`. Screenshots, clicks and `screencapture` on an already-running app need no slot — hold
+  the GUI lock (`gui-lock.sh`) for those as before. A slot is for the burst, not the whole session.
+- Builds in a rig run `nice -n 12` with `CARGO_BUILD_JOBS=4` (the gate does the same); a rig never needs the
+  `--priority` slot — that is for a pinned hotfix.
+- A rig that is refused for `WAIT_MAX_S` proceeds, as the gate does, and says so in its issue; a rig that
+  holds a slot with no heavy process alive is stale and gets reclaimed.
+- Shared simulators stay shut down when the rig is done (`xcrun simctl shutdown <udid>`): a booted idle
+  simulator keeps a dozen daemons runnable.
+
+## ssh to the gate Mac goes through the relay host (2026-10-26 23:40 UTC)
+
+Port 22 on the EC2 Mac (13.217.52.163) is not open to the internet: its security group (`arbos-mobile`) allows ssh
+only from a short list of fixed /32 addresses — the mobile-loop VM and its NAT set, a few named worker VMs, and the
+relay host (204.12.171.6, "arboslife-jump"). Port 443 is public, which is why "443 answers but 22 times out" is the
+symptom. Cloud agent VMs egress from rotating AWS addresses (eight different ones reached the relay host in six
+hours on 2026-10-26), so adding your VM's address is pointless by the next session and opening 22 to all would be
+the wrong fix. pf on the Mac is off and sshd listens on every interface — nothing on the Mac is in the way.
+
+Rule: do not ssh to the Mac directly. Hop through the relay host, which every worker can already reach:
+
+    ssh -o ProxyCommand="ssh -i <relay key> -W %h:%p const@204.12.171.6" -i <mac key> ec2-user@13.217.52.163
+
+(or an equivalent `ProxyJump const@204.12.171.6` in a per-task ssh config under `/tmp`, never `~/.ssh`). The same
+goes for `scp` and for VNC (:5900 is allowlisted the same way): tunnel it over the jump. A worker that needs the
+list widened for a fixed address (a self-hosted machine, not a VM) asks the coordinator; the security group is
+Jacob's and is not edited by workers.
+
 ## Standing rules that this does not change
 
 - One issue per release; a hotfix marker (`[hotfix]`) is for P0s only.

@@ -131,6 +131,7 @@ fn insert_project(
         avatar_leaf: None,
         avatar_leaf_color: None,
         image_key: None,
+        avatar_version: 0,
     };
     state.db.insert_project(&p).unwrap();
     state
@@ -768,6 +769,8 @@ fn push_fixture_events() -> Vec<(&'static str, PushEventDto)> {
                 from_handle: "user201".into(),
                 seq: 42,
                 sender: sender.clone(),
+                project_id: None,
+                text: None,
             }),
         ),
         (
@@ -951,6 +954,21 @@ fn push_fixture_events() -> Vec<(&'static str, PushEventDto)> {
                 name: "STRIPE_KEY".into(),
                 expires_at: Some(FIXED_AT),
                 expired: false,
+            }),
+        ),
+        (
+            "push_profile_updated.json",
+            PushEventDto::ProfileUpdated(arbos_core::api::ProfileUpdatedPayloadDto {
+                user_id: "gh_201".into(),
+                avatar_url: Some("https://relay.example/avatars/gh_201.jpg?v=1700000000000".into()),
+            }),
+        ),
+        (
+            "push_agent_profile_updated.json",
+            PushEventDto::AgentProfileUpdated(arbos_core::api::AgentProfileUpdatedPayloadDto {
+                project_id: "01FIXTUREAGENT".into(),
+                avatar_version: FIXED_AT,
+                image_key: Some("avatar-1700000000000.jpg".into()),
             }),
         ),
     ]

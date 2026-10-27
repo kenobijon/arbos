@@ -66,21 +66,27 @@ struct PresenceRow: View {
     /// line (the chip says the count), and a tap on the row opens the tasks sheet.
     var taskCount: Int = 0
     var onTasks: (() -> Void)? = nil
+    /// Job tabs: a tap on the words opens the newest job's tab (the chip keeps the list).
+    var onWords: (() -> Void)? = nil
 
-    /// Round picture size: the avatar column's disc — the sender's picture beside a
-    /// people-chat bubble, centred on the composer's `+` (`Theme.memberAvatar`).
-    static let avatar: CGFloat = Theme.memberAvatar
-    /// Where the first picture starts inside the 16 pt chat edge (= the `+` column,
-    /// which moves with the keyboard — read from the environment).
+    /// Round picture size: Grok's status-row picture ([feedback
+    /// iphone-composer-grok-parity-2026-10-25]: 76 px — smaller than the `+` disc, no
+    /// longer the bubble's 42 pt disc).
+    static let avatar: CGFloat = Theme.presenceAvatar
+    /// Where the first picture starts inside the 16 pt chat edge: 6 pt inside the `+`
+    /// disc's left edge, which moves with the keyboard — read from the environment.
     @Environment(\.composerInset) private var composerInset
-    var inset: CGFloat { Theme.avatarColumnInset(composerInset: composerInset) }
+    var inset: CGFloat { Theme.presenceInset(composerInset: composerInset) }
     /// How far each further picture tucks under the one before it.
     static let overlap: CGFloat = 8
-    /// Pictures → text: the picture → bubble gap, so the text starts where the bubble body starts.
-    static let gap: CGFloat = Theme.memberAvatarGap
+    /// Pictures → text: Grok's 42 px.
+    static let gap: CGFloat = Theme.presenceGap
     /// Pictures shown before "+N".
     static let maxPictures = 3
-    static let height: CGFloat = avatar + 6
+    /// The row is exactly the picture tall; ChatView adds Grok's 68 px below it.
+    static let height: CGFloat = avatar
+    /// The words: Grok's 17 pt body, muted.
+    static let textSize: CGFloat = Theme.body
 
     /// One line. Alone, a participant keeps the full display name; from two on,
     /// first names ("Mira and Sam are typing…"), so the line stays one line.
@@ -137,21 +143,23 @@ struct PresenceRow: View {
                 }
             }
             .frame(height: Self.avatar)
-            WorkingStatusText(text: shownText, color: queued ? theme.warn : theme.muted)
+            WorkingStatusText(text: shownText, color: queued ? theme.warn : theme.muted, size: Self.textSize)
                 .lineLimit(1)
                 .id(shownText)
+                .contentShape(Rectangle())
+                .onTapGesture { (onWords ?? onTasks)?() }
+                .accessibilityIdentifier(onWords != nil ? "presence-link" : "presence-text")
             if hasChip {
                 tasksChip
+                    .contentShape(Capsule())
+                    .onTapGesture { onTasks?() }
             }
             Spacer(minLength: 0)
         }
         .padding(.leading, inset)
         .frame(height: Self.height)
-        .contentShape(Rectangle())
-        .onTapGesture { onTasks?() }
-        .accessibilityElement(children: .ignore)
+        .accessibilityElement(children: .contain)
         .accessibilityLabel(text)
-        .accessibilityAddTraits(hasChip ? .isButton : [])
         .accessibilityHint(hasChip ? "Opens the tasks" : "")
         .accessibilityIdentifier("presence-row")
         .animation(.easeInOut(duration: 0.25), value: shownText)
@@ -186,6 +194,8 @@ struct TasksSheet: View {
     let onSteer: (Job) -> Void
     let onStop: (Job) -> Void
     let onStopAll: () -> Void
+    /// A tap on the row (not its buttons) opens the job's tab (`JobTabs`).
+    var onOpen: ((Job) -> Void)? = nil
 
     /// A running row's spinner (the agent pane's Coding row, 15 pt) / a queued row's pause mark.
     static let glyph: CGFloat = 15
@@ -246,10 +256,17 @@ struct TasksSheet: View {
             VStack(alignment: .leading, spacing: 2) {
                 // The title may take two lines on a phone; the step truncates but the
                 // elapsed clock never does.
-                Text(job.title)
-                    .font(theme.font(Theme.small, weight: .medium))
-                    .foregroundStyle(theme.text)
-                    .lineLimit(2)
+                HStack(spacing: 4) {
+                    Text(job.title)
+                        .font(theme.font(Theme.small, weight: .medium))
+                        .foregroundStyle(theme.text)
+                        .lineLimit(2)
+                    if onOpen != nil {
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(theme.placeholder)
+                    }
+                }
                 HStack(spacing: 0) {
                     Text(job.statusLine)
                         .lineLimit(1)
@@ -272,8 +289,11 @@ struct TasksSheet: View {
         }
         .padding(.horizontal, SheetRow.paddingX)
         .padding(.vertical, Self.rowPadY)
+        .contentShape(Rectangle())
+        .onTapGesture { onOpen?(job) }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(job.title), \(job.statusLine), \(job.elapsedLabel)")
+        .accessibilityIdentifier("tasks-row")
     }
 
     private func capsule(_ label: String, color: Color, action: @escaping () -> Void) -> some View {

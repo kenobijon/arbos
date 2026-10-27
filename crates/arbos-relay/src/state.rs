@@ -50,6 +50,17 @@ pub struct Config {
     pub channels_mock: bool,
     /// `ARBOS_IMAGE_MOCK=1`: image generation answers with a labelled placeholder PNG (F10).
     pub image_mock: bool,
+    /// Waits before the avatar generator's retries of a transient provider failure (timeout,
+    /// 429, 5xx) on one model — 2 s then 5 s by default (`ARBOS_AVATAR_RETRY_MS=2000,5000`);
+    /// tests set it empty or to zeros.
+    pub avatar_retry_backoff_ms: Vec<u64>,
+    /// How long one provider call for an avatar may take before it counts as a transient failure
+    /// (`ARBOS_AVATAR_ATTEMPT_TIMEOUT_S`, default 40), and the whole generate's budget before a
+    /// clean 504 (`ARBOS_AVATAR_TOTAL_TIMEOUT_S`, default 75). Jacob's "nuke vampire"
+    /// (2026-10-26 17:4x UTC) hung on the provider past the apps' 30 s; the relay had no
+    /// timeout at all, the client gave up, the dropped handler logged nothing.
+    pub avatar_attempt_timeout: std::time::Duration,
+    pub avatar_total_timeout: std::time::Duration,
     /// `ARBOS_VOICE_MOCK=1`: `/proxy/v1/audio/*` answer locally (F11).
     pub voice_mock: bool,
     /// OpenAI-compatible base for audio (STT/TTS); api.openai.com by default
@@ -210,6 +221,9 @@ pub struct AppState {
     pub download_cache: Arc<Mutex<Option<(i64, String)>>>,
     /// user_id → box upgrade in progress (`POST /machine/upgrade`).
     pub upgrading: Arc<Mutex<HashMap<String, UpgradeStatus>>>,
+    /// user_id → the last upgrade the relay refused before touching the box (ARB-339: `/work`
+    /// over the carry limit). Shown as `upgrade.last_refused`; cleared by the next success.
+    pub upgrade_refused: Arc<Mutex<HashMap<String, UpgradeRefusal>>>,
     /// Hash of a just-rotated refresh token → (when, the pair it was rotated into). Within
     /// `signin::REFRESH_GRACE_MS` the old token gets that same pair again instead of counting
     /// as a replay, so concurrent refreshers from one device converge on one rotation.
@@ -251,6 +265,12 @@ pub struct AppState {
     pub voice_dispatched: Arc<Mutex<HashMap<String, i64>>>,
     /// What the voice worker last reported about itself (`POST /voice/worker/hello`).
     pub voice_worker: Arc<Mutex<Option<serde_json::Value>>>,
+    /// What landed in a chat while an agent call is live there (#1832): per (call, agent), the
+    /// finished bubbles and human messages the voice worker long-polls into the call's context.
+    pub voice_inbox: crate::voice::VoiceInbox,
+    /// The image provider's last health probe (`images::probe_provider`, every 5 min and on
+    /// `GET /admin/images/health?probe=1`); `healthz.images` reads it.
+    pub image_health: Arc<Mutex<Option<crate::images::ImageHealth>>>,
     /// device_id → the app version it last reported (`X-Arbos-Client`), see `releases.rs`.
     pub client_seen: Arc<crate::releases::ClientSeen>,
     /// Chats on Matrix (D88): mode, homeserver tokens and the outbox wake-up.
@@ -297,6 +317,14 @@ pub struct UpgradeStatus {
     pub to_snapshot: String,
 }
 
+/// An upgrade refused at the measure step: the box kept running, nothing was stopped or copied.
+#[derive(Debug, Clone)]
+pub struct UpgradeRefusal {
+    pub reason: String,
+    pub at: i64,
+    pub work_mib: i64,
+}
+
 impl AppState {
     pub async fn room(&self, name: &str) -> Arc<Room> {
         if let Some(r) = self.rooms.read().await.get(name) {
@@ -341,6 +369,16 @@ impl AppState {
                     .ok()
                     .flatten()
                     .is_some_and(|m| m.banned_at.is_none()),
+                crate::auth::Principal::Admin => true,
+                crate::auth::Principal::Box { .. } => false,
+            };
+        }
+        // A person's own picture slot (`users:{id}`): the generated previews of the avatar
+        // picker's Generate tab. Only that person's devices (and the admin) read it; `PUT
+        // /me/avatar {image_key}` is what makes one of them the profile picture.
+        if let Some(user_id) = project_id.strip_prefix(crate::images::USER_BLOB_PREFIX) {
+            return match principal {
+                crate::auth::Principal::Device { user_id: me, .. } => me == user_id,
                 crate::auth::Principal::Admin => true,
                 crate::auth::Principal::Box { .. } => false,
             };
@@ -495,6 +533,9 @@ pub(crate) mod test_support {
             openai_direct_base: "https://api.openai.com/v1".into(),
             openai_route: super::OpenAiRoute::Auto,
             image_mock: false,
+            avatar_retry_backoff_ms: Vec::new(),
+            avatar_attempt_timeout: std::time::Duration::from_secs(40),
+            avatar_total_timeout: std::time::Duration::from_secs(75),
             voice_mock: true,
             openai_audio_base: String::new(),
             vault_mock: false,
@@ -537,6 +578,7 @@ pub(crate) mod test_support {
             jwt_key: Arc::new(RelayKey::derive("test-key").subkey("jwt")),
             download_cache: Arc::new(Mutex::new(None)),
             upgrading: Arc::new(Mutex::new(HashMap::new())),
+            upgrade_refused: Arc::new(Mutex::new(HashMap::new())),
             stale_bounces: Arc::new(Mutex::new(HashMap::new())),
             local_conns: Arc::new(Mutex::new(HashMap::new())),
             refresh_grace: Arc::new(Mutex::new(HashMap::new())),
@@ -557,6 +599,8 @@ pub(crate) mod test_support {
             restart: Arc::new(RestartSignal::default()),
             voice_dispatched: Arc::new(Mutex::new(HashMap::new())),
             voice_worker: Arc::new(Mutex::new(None)),
+            voice_inbox: crate::voice::VoiceInbox::default(),
+            image_health: Arc::new(Mutex::new(None)),
             client_seen: Arc::new(std::sync::Mutex::new(HashMap::new())),
             matrix: crate::matrix::Matrix::new(crate::matrix::Config::off()),
         }

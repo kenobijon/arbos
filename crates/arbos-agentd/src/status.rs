@@ -712,7 +712,7 @@ impl Agent {
                 model_call = used_model,
                 "quick reply written"
             );
-            self.announce_reply(&room, &row_id, &text);
+            self.announce_reply_kind(&room, &row_id, &text, "quick", None);
             let _ = self.store.t3_append(
                 chat_id,
                 None,
@@ -942,6 +942,11 @@ pub(crate) mod tests {
             .route(
                 "/projects/{id}/activity",
                 axum::routing::post(mock_activity),
+            )
+            // deliver_file's upload (media.rs): the stub accepts any blob.
+            .route(
+                "/blob/{slot}/{key}",
+                axum::routing::put(|| async { axum::http::StatusCode::CREATED }),
             );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -1349,6 +1354,76 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Feedback app-01M5WGH5…: in a people chat an empty `route reply` plus leftover prose
+    /// ("Addressed to @hezbola; staying silent…") must not post a fallback bubble. Quiet means
+    /// no row — the notes are discarded, not announced.
+    #[tokio::test]
+    async fn empty_reply_in_people_chat_discards_staying_silent_fallback() {
+        use crate::config::SendTool;
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUIETFALLBACK0001";
+        let me = format!("agent:{}", agent.cfg.project_id);
+        agent.people.test_insert(
+            chat,
+            crate::people::PeopleChatInfo {
+                members: vec![
+                    serde_json::json!({
+                        "member": me,
+                        "handle": "doug-agent",
+                        "project": { "name": "Doug agent" },
+                    }),
+                    serde_json::json!({
+                        "member": "agent:HEZ",
+                        "handle": "hezbola",
+                        "project": { "name": "Hezbola" },
+                    }),
+                ],
+                slug: "doug-agent".into(),
+                kind: "group".into(),
+                ..Default::default()
+            },
+        );
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            t.ack_text.clear();
+            t.activity = None;
+            t.send_tool = SendTool::On;
+            t.route = Some(arbos_core::route::ValidRoute::Reply { reply: None });
+            agent.test_open_row(&host, t).await;
+            agent
+                .test_prose_then_finish(
+                    &host,
+                    t,
+                    "Addressed to @hezbola; staying silent. That question is for Hezbola; nothing to add from me.",
+                )
+                .await;
+            assert!(
+                !t.posted_fallback,
+                "empty reply in a people chat must not fall back"
+            );
+            assert!(
+                t.streamed_text.trim().is_empty(),
+                "silence notes must stay out of the bubble"
+            );
+            assert!(
+                t.unposted_text.trim().is_empty(),
+                "leftover prose is discarded so quiet_in_shared_chat can remove the row"
+            );
+            assert!(crate::agent::quiet_in_shared_chat(t, true, true, true));
+        }
+        let rows = reply_rows(&host, "m-busy");
+        let posted: Vec<String> = rows
+            .iter()
+            .map(|r| r.text().trim().to_owned())
+            .filter(|s| !s.is_empty())
+            .collect();
+        assert!(posted.is_empty(), "no 'staying silent' bubble: {posted:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// Duplex step 2: `start_job` returns at once with a job row the working set and `list_jobs`
     /// show; the per-chat cap refuses the fourth job with a reason the model can relay.
     #[tokio::test]
@@ -1413,18 +1488,21 @@ pub(crate) mod tests {
             title: "Fixing the tests".into(),
             kind: "code".into(),
             touches: vec!["path:/work/p/src".into()],
+            attempt: 0,
         };
         let b = JobSpec {
             id: "job-b".into(),
             title: "Renaming a symbol".into(),
             kind: "code".into(),
             touches: vec!["path:/work/p".into()],
+            attempt: 0,
         };
         let c = JobSpec {
             id: "job-c".into(),
             title: "Searching the web".into(),
             kind: "research".into(),
             touches: vec![],
+            attempt: 0,
         };
         agent
             .store
@@ -1672,25 +1750,27 @@ pub(crate) mod tests {
         std::env::set_var("ARBOS_ACT_TO_JOB", "off");
         assert!(
             !agent
-                .maybe_convert_act_to_job(&host, Duration::from_secs(9))
+                .maybe_convert_act_to_job(&host, Duration::from_secs(13))
                 .await,
             "kill switch"
         );
         std::env::remove_var("ARBOS_ACT_TO_JOB");
+        // Cost knob 2 (2026-10-26): the threshold is 12 s by default; a 9 s one-search turn stays
+        // inline. The project file lowers it for this test's second half.
         assert!(
             !agent
-                .maybe_convert_act_to_job(&host, Duration::from_secs(5))
+                .maybe_convert_act_to_job(&host, Duration::from_secs(9))
                 .await,
-            "not yet at the threshold"
+            "not yet at the 12 s threshold"
         );
         assert!(
             agent
-                .maybe_convert_act_to_job(&host, Duration::from_secs(9))
+                .maybe_convert_act_to_job(&host, Duration::from_secs(13))
                 .await
         );
         assert!(
             !agent
-                .maybe_convert_act_to_job(&host, Duration::from_secs(12))
+                .maybe_convert_act_to_job(&host, Duration::from_secs(20))
                 .await,
             "converts once"
         );
@@ -1827,6 +1907,96 @@ pub(crate) mod tests {
             Some("ack")
         );
         std::env::remove_var("ARBOS_ACT_ACK_BUBBLE_SECS");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Jacob, "run bubble sort" (Mac, 2026-10-25 18:08 UTC, image 0.1.132): the answer went out as
+    /// a `send_message` bubble, the fresh result row it opened ended wordless, and the Mac drew
+    /// "The agent didn't answer. Ask again." under the answer. The trailing wordless row is
+    /// deleted when it holds nothing, hidden when it carries tool detail.
+    #[tokio::test]
+    async fn wordless_row_after_a_bubble_is_removed_or_hidden() {
+        use crate::agent::trim_wordless_result_row;
+        use crate::config::SendTool;
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUICKREPLY000014";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            t.ack_text.clear();
+            t.activity = None;
+            t.send_tool = SendTool::On;
+            agent.test_open_row(&host, t).await;
+        }
+        agent
+            .hook_send_message("Sorted: 1, 2, 3, 5, 8.", None, None)
+            .await
+            .unwrap();
+        let trailing = agent
+            .turn
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .assistant_msg_id
+            .clone();
+        assert_eq!(
+            reply_rows(&host, "m-busy").len(),
+            2,
+            "bubble + the fresh result row"
+        );
+        {
+            let h = host.lock().await;
+            h.doc.finish_message(&trailing, MessageStatus::Done);
+            assert_eq!(trim_wordless_result_row(&h.doc, &trailing), "deleted");
+        }
+        let rows = reply_rows(&host, "m-busy");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].text().trim(), "Sorted: 1, 2, 3, 5, 8.");
+        // with hidden tool detail on the trailing row: kept, but hidden
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            agent.test_open_row(&host, t).await;
+        }
+        let trailing = agent
+            .turn
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .assistant_msg_id
+            .clone();
+        {
+            let h = host.lock().await;
+            h.doc.add_tool_part(
+                &trailing,
+                "c1",
+                "bash",
+                &json!({"command": "ls"}),
+                "a b",
+                None,
+                Some(3),
+                false,
+            );
+            h.doc.finish_message(&trailing, MessageStatus::Done);
+            assert_eq!(trim_wordless_result_row(&h.doc, &trailing), "hidden");
+            let m = h.doc.message(&trailing).unwrap();
+            assert_eq!(m.rest.get("hidden").and_then(Value::as_bool), Some(true));
+        }
+        // a row with words is never touched
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            agent.test_open_row(&host, t).await;
+            let id = t.assistant_msg_id.clone();
+            let h = host.lock().await;
+            h.doc.append_text(&id, &t.text_part_id, "Done.");
+            h.doc.finish_message(&id, MessageStatus::Done);
+            assert_eq!(trim_wordless_result_row(&h.doc, &id), "kept");
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 

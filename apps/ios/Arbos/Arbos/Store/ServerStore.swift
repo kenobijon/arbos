@@ -218,9 +218,17 @@ extension AppModel {
     }
 
     /// Rule 8: "Server" in the `+` menu → `POST /servers {name}`, then its channel list.
-    func createServer(name: String, leaf: LeafPick? = nil) async -> Bool {
+    func createServer(name: String, leaf: LeafPick? = nil, picture: DraftPicture? = nil) async -> Bool {
         do {
-            let s = try await relay.createServer(name: name, leaf: leaf)
+            var s = try await relay.createServer(name: name, leaf: leaf)
+            if let picture, let jpeg = await draftJpeg(picture) {
+                let key = "server-\(Int(Date().timeIntervalSince1970 * 1000)).\(PictureMaster.ext(jpeg))"
+                if (try? await relay.putBlob(projectId: "servers:\(s.id)", key: key, mime: PictureMaster.mime(jpeg), data: jpeg)) != nil,
+                   (try? await relay.patchServer(s.id, imageKey: key)) != nil,
+                   let fresh = try? await relay.server(s.id) {
+                    s = fresh
+                }
+            }
             upsert(server: s)
             open(server: s)
             await startMatrixIfNeeded()
@@ -291,15 +299,15 @@ extension AppModel {
         }
     }
 
-    /// D92 amendment: a server picture — upload a JPEG into `servers:{id}` and set it.
+    /// D92 amendment: a server picture — upload the master (PNG / JPEG) into `servers:{id}` and set it.
     func setServerImage(_ id: Id, jpeg: Data) async -> Bool {
-        let key = "server-\(Int(Date().timeIntervalSince1970 * 1000)).jpg"
+        let key = "server-\(Int(Date().timeIntervalSince1970 * 1000)).\(PictureMaster.ext(jpeg))"
         if isFixture {
             if let i = servers.firstIndex(where: { $0.id == id }) { servers[i].imageKey = key }
             return true
         }
         do {
-            _ = try await relay.putBlob(projectId: "servers:\(id)", key: key, mime: "image/jpeg", data: jpeg)
+            _ = try await relay.putBlob(projectId: "servers:\(id)", key: key, mime: PictureMaster.mime(jpeg), data: jpeg)
             return await setServerImageKey(id, key: key)
         } catch {
             notice = Notice(text: "Could not upload the picture: \(error.localizedDescription)")

@@ -432,6 +432,18 @@ impl Store {
         })
     }
 
+    /// The model a session was started with (`upsert_session`), for a resume on the same model.
+    pub fn session_model(&self, id: &str) -> Result<Option<String>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT model FROM sessions WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .optional()
+        })
+    }
+
     pub fn session_cursor(&self, id: &str) -> Result<Option<String>> {
         self.with(|c| {
             c.query_row(
@@ -866,6 +878,40 @@ impl Store {
         })
     }
 
+    /// Every row of one thread in insertion order (rowid), oldest first, with its source meta —
+    /// the rollout view's feed (`jobs_view.rs`). Insertion order, not `at`, because a worker
+    /// writes several rows within one millisecond and their ids are not ordered within it.
+    pub fn t3_thread_in_order(
+        &self,
+        thread_id: &str,
+        limit: i64,
+    ) -> Result<Vec<(T3Row, Option<Value>)>> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT id, thread_id, subagent_id, session_id, kind, role, at, text, size, source FROM t3
+                 WHERE thread_id = ?1 ORDER BY rowid ASC LIMIT ?2",
+            )?;
+            let rows = st.query_map(params![thread_id, limit], |r| {
+                let source: Option<String> = r.get(9)?;
+                Ok((
+                    T3Row {
+                        id: r.get(0)?,
+                        thread_id: r.get(1)?,
+                        subagent_id: r.get(2)?,
+                        session_id: r.get(3)?,
+                        kind: r.get(4)?,
+                        role: r.get(5)?,
+                        at: r.get(6)?,
+                        text: r.get(7)?,
+                        size: r.get(8)?,
+                    },
+                    source.and_then(|s| serde_json::from_str::<Value>(&s).ok()),
+                ))
+            })?;
+            rows.collect()
+        })
+    }
+
     /// Rows written after `after_ms` (exclusive), every thread or one chat, oldest first, at
     /// most `limit` — the inspect window (`inspect.rs`). Both shapes hit an index
     /// (`t3_at`, `t3_thread_at`), so a call never scans the table.
@@ -1008,6 +1054,23 @@ impl Store {
             Ok(())
         })?;
         Ok(id)
+    }
+
+    /// Rewrite a record's text in place (FTS kept in step); the id, tier and provenance stay.
+    pub fn memory_set_text(&self, id: &str, text: &str) -> Result<()> {
+        let text = redact(text);
+        self.with(|c| {
+            c.execute(
+                "UPDATE memory SET text = ?2 WHERE id = ?1",
+                params![id, text],
+            )?;
+            c.execute("DELETE FROM memory_fts WHERE id = ?1", params![id])?;
+            c.execute(
+                "INSERT INTO memory_fts(text, id, tier) SELECT text, id, tier FROM memory WHERE id = ?1",
+                params![id],
+            )?;
+            Ok(())
+        })
     }
 
     /// INVALIDATE: set `invalid_at` and `expired_at`; the row stays (D7).
