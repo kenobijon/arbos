@@ -228,6 +228,9 @@ struct GlobalSearchRow: View {
             RoundedRectangle(cornerRadius: 9, style: .continuous)
                 .fill(theme.isDark ? Color(hex: "#5C5C60")! : Color(hex: "#6E6E73")!)
                 .overlay(Image(systemName: name).font(theme.font(17, weight: .semibold)).foregroundStyle(.white))
+        case .link(let url):
+            // The one link tile ([feedback link-icons-ios-adopt-2026-10-27]), at the row's 36 pt.
+            LinkRowTile(url: url, size: PaneKit.avatar)
         case .none:
             glyphTile(glyph)
         }
