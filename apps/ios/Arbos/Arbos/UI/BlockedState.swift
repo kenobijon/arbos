@@ -131,8 +131,7 @@ struct BlockedComposerBar: View {
         .padding(.trailing, 8)
         .frame(maxWidth: .infinity)
         .frame(height: Controls.height)
-        .background(Capsule().fill(theme.field))
-        .overlay(ComposerRim(shape: Capsule()))
+        .background(ControlSurface(shape: Capsule()))
         .accessibilityIdentifier("composer-blocked")
     }
 }
