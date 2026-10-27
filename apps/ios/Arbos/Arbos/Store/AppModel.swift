@@ -4258,6 +4258,9 @@ final class AppModel: ObservableObject {
                 }
             case .spaceArchived(let payload):
                 applyRemoteArchive(spaceId: payload.space_id, kind: payload.kind, archived: payload.archived_at != nil)
+            case .channelMessage:
+                // Server channel banner: push-server-channels-ios-2026-10-26 (next item).
+                break
             case .peopleChatDeleted, .peopleInviteAccepted, .machineReady:
                 break
             case .notificationsCleared(let payload):
