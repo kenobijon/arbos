@@ -902,6 +902,22 @@ struct NewGroupView: View {
                      actionEnabled: canSubmit && !creating,
                      onAction: { if adding { add() } else { create() } })
         .task { await model.loadDirectory() }
+        .onAppear {
+            // Rig: `ARBOS_RIG_PICK=<agent name>,@<handle>,…` pre-picks rows; `ARBOS_RIG_AUTO_ADD=<ms>`
+            // then taps Add — the same `add()` the pill runs ([feedback iphone-add-members-2026-10-26] proof).
+            guard adding, let picks = DebugHooks.rigPick else { return }
+            Task {
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                for pick in picks {
+                    if pick.hasPrefix("@"), let p = candidates.first(where: { "@\($0.handle)".caseInsensitiveCompare(pick) == .orderedSame }) { toggle(p) }
+                    else if let a = agentCandidates.first(where: { $0.name.caseInsensitiveCompare(pick) == .orderedSame }) { toggleAgent(a) }
+                }
+                if let ms = DebugHooks.rigAutoAddMs {
+                    try? await Task.sleep(nanoseconds: UInt64(ms) * 1_000_000)
+                    add()
+                }
+            }
+        }
     }
 
     /// Add · Create, with their busy forms; counts the picks so "Add (2)" says what happens.
