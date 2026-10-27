@@ -1987,6 +1987,7 @@ impl Transcript {
                 );
         }
         avatars::agent(
+            // avatar-lint: allow (the resolver's identity, decoded above)
             &a.seed,
             &a.name,
             a.color_index,
