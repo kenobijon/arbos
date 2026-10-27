@@ -19,6 +19,7 @@ use crate::model::{Person, Project};
 use crate::ui::avatars;
 use crate::ui::blocked;
 use crate::ui::groups;
+use crate::ui::highlight;
 use crate::ui::icons::icon;
 use crate::ui::people;
 use crate::ui::shell::Shell;
@@ -77,6 +78,9 @@ pub(super) fn page(
     let state = shell.state.read(cx);
     let space = state.project(space_id)?.clone();
     let tab = state.profile_tab;
+    // Agent pictures through the resolver, read while `state` is borrowed (the rows below
+    // take `cx` mutably for their listeners).
+    let agent_images = avatars::project_images(state);
     let me_handle = state.me_handle();
     let people = members(state, &space);
     let images: Vec<Option<Arc<RenderImage>>> =
@@ -194,7 +198,7 @@ pub(super) fn page(
                         &theme,
                     )
                     .cursor_pointer()
-                    .hover(|s| s.bg(theme.surface_2))
+                    .group(kit::HOT)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         let id = sid_members.clone();
                         // A people group gets the New group picker aimed at
@@ -293,10 +297,10 @@ pub(super) fn page(
                         &theme,
                     )
                     .debug_selector(|| format!("profile-member-{}", p.handle))
-                    // One group per row: `group_hover` looks a group up by name.
-                    .group(SharedString::from(format!("member-row-{key}")))
+                    // The row's group lights its pill and shows its ✕ (`group_hover`
+                    // resolves the innermost group of that name).
+                    .group(kit::HOT)
                     .cursor_pointer()
-                    .hover(|s| s.bg(theme.surface_2))
                     // Right-click (control-click) or Shift-click: the row's menu
                     // (View profile · Remove from group), `ui/member_menu.rs`.
                     .on_mouse_down(gpui::MouseButton::Right, {
@@ -368,9 +372,8 @@ pub(super) fn page(
                             mine.then(|| remove_x(key.clone(), &theme, cx).into_any_element()),
                             &theme,
                         )
-                        .group(SharedString::from(format!("member-row-{key}")))
+                        .group(kit::HOT)
                         .cursor_pointer()
-                        .hover(|s| s.bg(theme.surface_2))
                         .on_mouse_down(gpui::MouseButton::Right, {
                             let (sid, key) = (space.id.clone(), key.clone());
                             cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
@@ -410,7 +413,13 @@ pub(super) fn page(
                 list.push(
                     list_row(
                         "profile-agent-self",
-                        avatars::project(&space, kit::AVATAR, &theme).into_any_element(),
+                        avatars::project_with(
+                            agent_images.get(&space.id).cloned(),
+                            &space,
+                            kit::AVATAR,
+                            &theme,
+                        )
+                        .into_any_element(),
                         space.name.clone(),
                         sub,
                         theme.text_muted,
@@ -418,7 +427,7 @@ pub(super) fn page(
                         &theme,
                     )
                     .cursor_pointer()
-                    .hover(|s| s.bg(theme.surface_2))
+                    .group(kit::HOT)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         let pid = pid.clone();
                         this.push_profile(ProfilePage::Agent { project_id: pid }, cx);
@@ -477,7 +486,7 @@ pub(super) fn page(
 
 /// The hover-only ✕ at a member row's trailing edge; click arms the confirm.
 fn remove_x(key: String, theme: &Theme, cx: &mut Context<Shell>) -> Stateful<Div> {
-    div()
+    let x = div()
         .id(ElementId::Name(SharedString::from(format!("remove-{key}"))))
         .size(px(24.0))
         .flex_shrink_0()
@@ -486,10 +495,8 @@ fn remove_x(key: String, theme: &Theme, cx: &mut Context<Shell>) -> Stateful<Div
         .items_center()
         .justify_center()
         .opacity(0.0)
-        .group_hover(SharedString::from(format!("member-row-{key}")), |s| {
-            s.opacity(1.0)
-        })
-        .hover(|s| s.bg(theme.surface_2))
+        .group_hover(kit::HOT, |s| s.opacity(1.0));
+    highlight::button(x, theme)
         .child(icon("xmark", 11.0, theme.text_muted))
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(cx.listener(move |this, _, _, cx| {
