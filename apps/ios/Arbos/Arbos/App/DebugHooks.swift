@@ -93,6 +93,9 @@ enum DebugHooks {
     /// keyboard up first).
     /// `onboarding` shows the D82 first-login screen frozen on `ARBOS_ONBOARDING_STAGE` (1|2|3|fail).
     static var show: String? { value("ARBOS_SHOW") }
+    /// With the long-press overlay open: stroke every menu row's and capsule cell's hit rect
+    /// (iphone-bubble-menu-hit-area rig — the shot shows what a tap reaches).
+    static var hitRects: Bool { value("ARBOS_HIT_RECTS") == "1" }
     /// How long after the chat appears `ARBOS_SHOW` fires (ms, default 600): a loaded rig Mac
     /// needs more before a sheet can be presented.
     static var showDelayMs: Int { value("ARBOS_SHOW_DELAY_MS").flatMap(Int.init) ?? 600 }

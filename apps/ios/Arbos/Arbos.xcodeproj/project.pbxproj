@@ -105,6 +105,7 @@
 		A1BC00000000000000000006 /* MessageActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BC00000000000000000005 /* MessageActions.swift */; };
 		A1BC00000000000000000012 /* MessageActionsLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BC00000000000000000011 /* MessageActionsLayout.swift */; };
 		A1BC00000000000000000014 /* MessageActionsLayoutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BC00000000000000000013 /* MessageActionsLayoutTests.swift */; };
+		A1BC00000000000000000016 /* MessageActionsHitAreaTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BC00000000000000000015 /* MessageActionsHitAreaTests.swift */; };
 		A1BC00000000000000000008 /* ReactionCapsuleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BC00000000000000000007 /* ReactionCapsuleTests.swift */; };
 		A1BE00000000000000000002 /* LongTranscriptPerfTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BE00000000000000000001 /* LongTranscriptPerfTests.swift */; };
 		A15E00000000000000000002 /* HomeSearch.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15E00000000000000000001 /* HomeSearch.swift */; };
@@ -299,6 +300,7 @@
 		A1BC00000000000000000005 /* MessageActions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageActions.swift; sourceTree = "<group>"; };
 		A1BC00000000000000000011 /* MessageActionsLayout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageActionsLayout.swift; sourceTree = "<group>"; };
 		A1BC00000000000000000013 /* MessageActionsLayoutTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageActionsLayoutTests.swift; sourceTree = "<group>"; };
+		A1BC00000000000000000015 /* MessageActionsHitAreaTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageActionsHitAreaTests.swift; sourceTree = "<group>"; };
 		A1BC00000000000000000007 /* ReactionCapsuleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReactionCapsuleTests.swift; sourceTree = "<group>"; };
 		A1BE00000000000000000001 /* LongTranscriptPerfTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LongTranscriptPerfTests.swift; sourceTree = "<group>"; };
 		A15E00000000000000000001 /* HomeSearch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeSearch.swift; sourceTree = "<group>"; };
@@ -578,6 +580,7 @@
 				A1BC00000000000000000003 /* MessageMenuTests.swift */,
 				A1BC00000000000000000007 /* ReactionCapsuleTests.swift */,
 				A1BC00000000000000000013 /* MessageActionsLayoutTests.swift */,
+				A1BC00000000000000000015 /* MessageActionsHitAreaTests.swift */,
 				A1BD00000000000000000001 /* NewMessageSheetTests.swift */,
 				A1BE00000000000000000001 /* LongTranscriptPerfTests.swift */,
 				A15E00000000000000000003 /* HomeSearchTests.swift */,
@@ -910,6 +913,7 @@
 				A1BC00000000000000000004 /* MessageMenuTests.swift in Sources */,
 				A1BC00000000000000000008 /* ReactionCapsuleTests.swift in Sources */,
 				A1BC00000000000000000014 /* MessageActionsLayoutTests.swift in Sources */,
+				A1BC00000000000000000016 /* MessageActionsHitAreaTests.swift in Sources */,
 				A1BD00000000000000000002 /* NewMessageSheetTests.swift in Sources */,
 				A1BE00000000000000000002 /* LongTranscriptPerfTests.swift in Sources */,
 				A15E00000000000000000004 /* HomeSearchTests.swift in Sources */,
