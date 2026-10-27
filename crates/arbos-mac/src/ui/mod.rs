@@ -30,6 +30,7 @@ pub mod identity;
 pub mod local;
 pub mod lottie;
 pub mod markdown;
+pub mod marks;
 pub mod math;
 pub mod media_viewer;
 pub mod member_menu;

@@ -485,22 +485,13 @@ pub fn stamp_label(ms: u64) -> String {
     }
 }
 
-pub fn machine_dot(state: MachineState, theme: &Theme) -> gpui::Hsla {
-    match state {
-        MachineState::Awake => theme.online,
-        MachineState::Waking => theme.warn,
-        MachineState::Error => theme.danger,
-        MachineState::Asleep | MachineState::Stopped | MachineState::Unknown => theme.text_faint,
-    }
-}
-
 /// My picture with the machine dot — the footer's 36 pt disc, drawn the same
 /// at the foot of the expanded list and of the collapsed rail.
 pub(crate) fn account_avatar(
     shell: &Shell,
     machine: MachineState,
     theme: &Theme,
-    cx: &Context<Shell>,
+    cx: &mut Context<Shell>,
 ) -> Div {
     let state = shell.state.read(cx);
     let picture = match state.account.as_ref() {
@@ -537,30 +528,24 @@ pub(crate) fn account_avatar(
         .flex_shrink_0()
         .debug_selector(|| "sidebar-account-avatar".into())
         .child(picture)
-        .child(
-            div()
-                .absolute()
-                .right(px(-FOOTER_DOT_OVERHANG))
-                .bottom(px(-FOOTER_DOT_OVERHANG))
-                .size(px(FOOTER_DOT_RING))
-                .rounded_full()
-                .bg(theme.sidebar)
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(
-                    div()
-                        .size(px(FOOTER_DOT))
-                        .rounded_full()
-                        .bg(Theme::with_alpha(
-                            machine_dot(machine, theme),
-                            if machine == MachineState::Waking {
-                                0.4 + 0.6 * PulseClock::phase(cx, 1100)
-                            } else {
-                                1.0
-                            },
-                        )),
-                ),
+        // The machine mark at the picture's corner (Jacob, 2026-10-27: never a
+        // coloured dot): the spinner while the machine wakes, the red `!` on a
+        // fault, nothing at rest — the ring collapses with it.
+        .children(
+            crate::ui::marks::machine_mark_element(machine, FOOTER_DOT, theme, cx).map(|mark| {
+                div()
+                    .absolute()
+                    .right(px(-FOOTER_DOT_OVERHANG))
+                    .bottom(px(-FOOTER_DOT_OVERHANG))
+                    .size(px(FOOTER_DOT_RING))
+                    .rounded_full()
+                    .bg(theme.sidebar)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .debug_selector(|| "dot-ring".into())
+                    .child(mark)
+            }),
         )
 }
 
@@ -569,6 +554,8 @@ pub(crate) struct RowView {
     pub(crate) selected: bool,
     pub(crate) streaming: bool,
     pub(crate) unread: bool,
+    /// Missed messages across the space's tabs (≥ 1 whenever `unread`).
+    pub(crate) unread_count: usize,
     pub(crate) typing: bool,
     pub(crate) preview: String,
     pub(crate) time: String,
@@ -582,6 +569,7 @@ pub(crate) struct ServerRowView {
     pub(crate) server: ServerInfo,
     pub(crate) selected: bool,
     pub(crate) unread: bool,
+    pub(crate) unread_count: usize,
     pub(crate) preview: String,
     pub(crate) time: String,
 }
@@ -615,9 +603,17 @@ impl ListEntry {
         }
     }
 
-    pub(crate) fn typing(&self) -> bool {
+    pub(crate) fn unread_count(&self) -> usize {
         match self {
-            ListEntry::Chat(r) => r.typing,
+            ListEntry::Chat(r) => r.unread_count,
+            ListEntry::Server(r) => r.unread_count,
+        }
+    }
+
+    /// The space's agent is working (the rail's spinner badge).
+    pub(crate) fn working(&self) -> bool {
+        match self {
+            ListEntry::Chat(r) => r.streaming,
             ListEntry::Server(_) => false,
         }
     }
@@ -679,6 +675,7 @@ pub(crate) fn list_entries(shell: &Shell, cx: &Context<Shell>) -> Vec<ListEntry>
             ListEntry::Server(Box::new(ServerRowView {
                 selected,
                 unread: state.space_row(s).is_some_and(|r| r.unread > 0),
+                unread_count: state.space_row(s).map_or(0, |r| r.unread as usize),
                 preview: hit.reason.unwrap_or_else(|| server_preview(state, s)),
                 time: time_label(at),
                 server: s.clone(),
@@ -709,6 +706,11 @@ pub(crate) fn list_entries(shell: &Shell, cx: &Context<Shell>) -> Vec<ListEntry>
             selected: selected.as_deref() == Some(p.id.as_str()),
             streaming,
             unread: state.project_unread(&p.id) > 0,
+            unread_count: state
+                .visible_tabs(&p.id)
+                .iter()
+                .map(|c| c.missed_count())
+                .sum(),
             typing: !state.typing_in(&p.id).is_empty(),
             preview: hit.reason.unwrap_or_else(|| preview(state, p)),
             time: time_label(last_activity(state, p)),
@@ -1416,6 +1418,7 @@ fn render_server_row(
             server: row.server.clone(),
             selected: row.selected,
             unread: row.unread,
+            unread_count: row.unread_count,
             preview: String::new(),
             time: String::new(),
         }))
@@ -1425,6 +1428,7 @@ fn render_server_row(
         server,
         selected,
         unread,
+        unread_count,
         preview,
         time,
     } = row;
@@ -1542,8 +1546,9 @@ fn render_server_row(
                                 .text_color(theme.text_muted)
                                 .child(preview),
                         )
+                        // Unread = the count pill, never a dot (Jacob, 2026-10-27).
                         .when(unread, |el| {
-                            el.child(div().size(px(8.0)).rounded_full().bg(theme.accent))
+                            el.child(crate::ui::marks::unread_pill(unread_count, theme))
                         }),
                 ),
         )
@@ -1741,7 +1746,10 @@ fn server_channels(
                                         .child(preview),
                                 )
                                 .when(unread, |el| {
-                                    el.child(div().size(px(8.0)).rounded_full().bg(theme.accent))
+                                    el.child(crate::ui::marks::unread_pill(
+                                        room.as_ref().map_or(1, |r| r.unread as usize),
+                                        theme,
+                                    ))
                                 }),
                         ),
                 )
@@ -1933,6 +1941,7 @@ fn render_row(
         selected,
         streaming,
         unread,
+        unread_count,
         typing,
         preview,
         time,
@@ -1949,15 +1958,10 @@ fn render_row(
         .renaming_project
         .as_ref()
         .is_some_and(|p| p == &space.id);
-    // The typing pulse rides the 30 fps pulse clock as before. A *working* row
-    // asks for nothing here any more: nothing in the row read `avatar_state`
-    // (the tree animation is retired, D79), and that request made every working
-    // row redraw the window at 30 fps for nothing — the spinner has its own
-    // shared 11 fps ticker (`ui::working`).
-    if typing {
-        PulseClock::request(cx);
-    }
-    let phase = PulseClock::phase(cx, 900);
+    // No pulse-clock request from a row any more: the typing pulse is gone
+    // (never a coloured dot — Jacob, 2026-10-27; "typing…" is the preview), and
+    // the old working-row request made the window redraw at 30 fps for nothing.
+    // The spinner has its own shared 11 fps ticker (`ui::working`).
 
     // Groups: the chat title (custom or member handles from the relay),
     // matching iOS PeopleRow. DMs: the other person's display name.
@@ -2133,14 +2137,15 @@ fn render_row(
                                 .text_color(theme.text_muted)
                                 .child(preview),
                         )
-                        // The status cell under the time (Jacob, 2026-10-27): a
-                        // person typing keeps the green pulse; the braille spinner
-                        // while the chat's agent works (one shared ticker); else the
-                        // unread accent dot; else nothing.
+                        // The status cell under the time (Jacob, 2026-10-27): the
+                        // braille spinner while the chat's agent works (one shared
+                        // ticker); the unread count pill; nothing for a person typing
+                        // (the preview says "typing…") or a quiet read chat. Never a
+                        // coloured dot.
                         .children(row_status_cell(
                             RowStatus::of(streaming, typing, unread),
+                            unread_count,
                             &id,
-                            phase,
                             theme,
                             cx,
                         )),
@@ -2149,18 +2154,19 @@ fn render_row(
 }
 
 /// What the status cell under a row's time shows (Jacob, 2026-10-27,
-/// [feedback working-braille-spinner-mac-2026-10-27]). One cell, one glyph:
-/// a person typing keeps today's green pulse (the spinner is the *agent's*
-/// working sign, never a human's — coordinator veto 2026-10-27); the spinner
-/// while the chat's agent works; the unread dot otherwise; a quiet read chat
-/// shows nothing.
+/// [feedback working-braille-spinner-mac-2026-10-27] + [feedback
+/// neon-dots-mac-2026-10-27]). One cell, one mark, never a coloured dot: a
+/// person typing shows nothing in the cell (the spinner is the *agent's*
+/// working sign, never a human's; the preview reads "typing…"); the spinner
+/// while the chat's agent works; the unread **count pill** otherwise; a quiet
+/// read chat shows nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RowStatus {
-    /// A person is typing: the 7 pt `online` pulse, as before.
+    /// A person is typing: no mark in the cell (the preview carries it).
     Typing,
     /// The chat's agent is working: the braille spinner.
     Working,
-    /// Unread messages: the accent dot.
+    /// Unread messages: the count pill.
     Unread,
     /// Nothing.
     Quiet,
@@ -2180,42 +2186,25 @@ impl RowStatus {
     }
 }
 
-/// The unread dot's diameter — and the spinner cell's width, so both end
-/// flush under the time.
-pub const UNREAD_DOT: f32 = 8.0;
-/// The typing pulse's diameter (unchanged from before the spinner).
-pub const TYPING_DOT: f32 = 7.0;
-
 fn row_status_cell(
     status: RowStatus,
+    unread_count: usize,
     id: &Id,
-    phase: f32,
     theme: &Theme,
     cx: &mut App,
 ) -> Option<AnyElement> {
     match status {
-        RowStatus::Typing => Some(
-            div()
-                .size(px(TYPING_DOT))
-                .rounded_full()
-                .bg(Theme::with_alpha(theme.online, 0.35 + 0.65 * phase))
-                .debug_selector(|| format!("row-status-typing-{id}"))
-                .into_any_element(),
-        ),
+        RowStatus::Typing | RowStatus::Quiet => None,
         RowStatus::Working => Some(
             crate::ui::working::glyph(theme, cx)
                 .debug_selector(|| format!("row-status-working-{id}"))
                 .into_any_element(),
         ),
         RowStatus::Unread => Some(
-            div()
-                .size(px(UNREAD_DOT))
-                .rounded_full()
-                .bg(theme.accent)
+            crate::ui::marks::unread_pill(unread_count, theme)
                 .debug_selector(|| format!("row-status-unread-{id}"))
                 .into_any_element(),
         ),
-        RowStatus::Quiet => None,
     }
 }
 
@@ -3403,10 +3392,11 @@ mod status_cell_tests {
     use gpui::{AppContext as _, Bounds, Entity, Pixels, TestAppContext, VisualTestContext};
     use tokio::sync::mpsc;
 
-    use super::{RowStatus, UNREAD_DOT};
+    use super::RowStatus;
     use crate::app::AppState;
     use crate::model::{Chat, Message, Person, Project, SpaceKind};
     use crate::sync::{ClientCommand, SyncEvent, SyncSource};
+    use crate::ui::marks::UNREAD_PILL_H;
     use crate::ui::motion::PulseClock;
     use crate::ui::shell::Shell;
     use crate::ui::theme::{Surface, Theme};
@@ -3438,7 +3428,7 @@ mod status_cell_tests {
         assert_eq!(RowStatus::of(true, false, true), RowStatus::Working);
         assert_eq!(RowStatus::of(false, false, true), RowStatus::Unread);
         assert_eq!(RowStatus::of(false, false, false), RowStatus::Quiet);
-        assert_eq!(CELL_W, UNREAD_DOT, "the cell is the dot's width");
+        assert_eq!(CELL_W, 8.0, "the cell is the old dot's width");
     }
 
     fn message(id: &str, chat: &str, role: &str, status: &str, text: &str, at: u64) -> Message {
@@ -3600,20 +3590,24 @@ mod status_cell_tests {
             "under the time, not beside it"
         );
 
-        let dot = vcx
+        let pill = vcx
             .debug_bounds("row-status-unread-unread")
-            .expect("the unread agent's row keeps its dot");
-        assert_eq!(f32::from(dot.size.width), UNREAD_DOT);
+            .expect("the unread agent's row shows the count pill (never a dot)");
+        assert_eq!(f32::from(pill.size.height), UNREAD_PILL_H);
         assert!(
-            close(
-                right(dot),
-                right(vcx.debug_bounds("row-time-unread").expect("time"))
-            ),
-            "the dot ends under its time too"
+            f32::from(pill.size.width) >= UNREAD_PILL_H,
+            "at least as wide as tall"
         );
         assert!(
-            close(right(dot), right(spinner)),
-            "dot and spinner share the right edge under the time"
+            close(
+                right(pill),
+                right(vcx.debug_bounds("row-time-unread").expect("time"))
+            ),
+            "the pill ends under its time too"
+        );
+        assert!(
+            close(right(pill), right(spinner)),
+            "pill and spinner share the right edge under the time"
         );
         assert!(
             vcx.debug_bounds("row-status-working-unread").is_none(),
@@ -3627,10 +3621,10 @@ mod status_cell_tests {
             vcx.debug_bounds("row-status-working-dm").is_none(),
             "a person typing never shows the agent's spinner"
         );
-        let pulse = vcx
-            .debug_bounds("row-status-typing-dm")
-            .expect("a person typing keeps the green pulse");
-        assert_eq!(f32::from(pulse.size.width), super::TYPING_DOT);
+        assert!(
+            vcx.debug_bounds("row-status-unread-dm").is_none(),
+            "a person typing shows no mark in the cell (the preview says typing…)"
+        );
     }
 
     /// One spinning row (the typing DM pulses, it does not spin), one ticker;

@@ -4703,7 +4703,7 @@ pub(crate) fn fmt_uptime(ms: u64) -> String {
     }
 }
 
-fn cards_spinner(theme: &Theme, cx: &App) -> Div {
+fn cards_spinner(theme: &Theme, cx: &mut App) -> Div {
     crate::ui::cards::spinner(theme, cx)
 }
 
