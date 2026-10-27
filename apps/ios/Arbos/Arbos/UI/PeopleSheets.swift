@@ -746,6 +746,12 @@ struct NewGroupView: View {
     @State private var creating = false
     /// Shown on this screen — the root notice alert sits under the sheet and looks like a silent fail.
     @State private var localError: UserError?
+    /// The old string form of that state, kept so a sibling branch written against it
+    /// (`iphone-add-members-2026-10-26`) still compiles in the same integration tree; drawn as a refusal.
+    private var errorText: String? {
+        get { localError?.sentence }
+        nonmutating set { localError = newValue.map { UserError.refused("add members", $0) } }
+    }
 
     private var trimmed: String { query.trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "@")) }
 
