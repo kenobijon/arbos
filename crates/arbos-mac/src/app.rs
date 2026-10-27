@@ -10764,6 +10764,14 @@ pub fn decode_image(bytes: &[u8]) -> Option<RenderImage> {
 /// a pasted Retina screenshot does not sit in GPU memory at full size.
 pub fn decode_thumbnail(bytes: &[u8], max_side: u32) -> Option<RenderImage> {
     let img = decode_rgba(bytes)?;
+    // A macOS window capture (⌘⇧4 + space, "Copy") is the window plus its
+    // drop shadow on transparent padding; drawn Cover into a square tile the
+    // shadow reads as a second, darker tile behind the picture. The tile shows
+    // the opaque content only ([feedback composer-attachment-removal-2026-10-27]).
+    let img = match opaque_rect(&img) {
+        Some((x, y, w, h)) => image::imageops::crop_imm(&img, x, y, w, h).to_image(),
+        None => img,
+    };
     let (w, h) = img.dimensions();
     let long = w.max(h);
     let img = if long <= max_side || long == 0 {
@@ -10775,6 +10783,34 @@ pub fn decode_thumbnail(bytes: &[u8], max_side: u32) -> Option<RenderImage> {
         image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Triangle)
     };
     bgra_frame(img)
+}
+
+/// Where the opaque content of `img` sits: the bounding box of pixels with
+/// alpha ≥ `OPAQUE_ALPHA` (a drop shadow is fainter than that), or `None`
+/// when the picture has no transparent margin worth cropping.
+pub fn opaque_rect(img: &image::RgbaImage) -> Option<(u32, u32, u32, u32)> {
+    const OPAQUE_ALPHA: u8 = 128;
+    let (w, h) = img.dimensions();
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0u32, 0u32);
+    for (x, y, p) in img.enumerate_pixels() {
+        if p.0[3] >= OPAQUE_ALPHA {
+            x0 = x0.min(x);
+            y0 = y0.min(y);
+            x1 = x1.max(x);
+            y1 = y1.max(y);
+        }
+    }
+    if x0 > x1 || y0 > y1 {
+        return None;
+    }
+    let (cw, ch) = (x1 - x0 + 1, y1 - y0 + 1);
+    if (cw, ch) == (w, h) {
+        return None;
+    }
+    Some((x0, y0, cw, ch))
 }
 
 /// Longest side kept for chat-bubble (and lightbox) bitmaps.
@@ -11394,7 +11430,7 @@ mod fork_tests {
 
 #[cfg(test)]
 mod trim_tests {
-    use super::trim_rect;
+    use super::{decode_thumbnail, opaque_rect, trim_rect};
     use image::{Rgba, RgbaImage};
 
     fn page(w: u32, h: u32, top: u32, left: u32) -> RgbaImage {
@@ -11444,6 +11480,37 @@ mod trim_tests {
             }
         });
         assert!(trim_rect(&img).is_none());
+    }
+
+    /// A macOS window capture: the window at (100, 100)–(600, 560) on
+    /// transparent padding, a faint shadow below it. The staged thumbnail
+    /// keeps the window only ([feedback composer-attachment-removal-2026-10-27]).
+    #[test]
+    fn a_window_captures_shadow_and_padding_are_cropped_from_the_thumbnail() {
+        let img = RgbaImage::from_fn(700, 700, |x, y| {
+            if (100..600).contains(&x) && (100..560).contains(&y) {
+                Rgba([30, 30, 33, 255])
+            } else if (80..620).contains(&x) && (120..620).contains(&y) {
+                Rgba([0, 0, 0, 90])
+            } else {
+                Rgba([0, 0, 0, 0])
+            }
+        });
+        assert_eq!(opaque_rect(&img), Some((100, 100, 500, 460)));
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .expect("png");
+        let thumb = decode_thumbnail(&png, 256).expect("decodes");
+        let size = thumb.size(0);
+        assert_eq!(
+            (size.width.0, size.height.0),
+            (256, 236),
+            "500 × 460 → 256 wide"
+        );
+        // A fully opaque picture is left alone (only shrunk).
+        let opaque = RgbaImage::from_pixel(640, 360, Rgba([20, 120, 220, 255]));
+        assert!(opaque_rect(&opaque).is_none());
     }
 }
 
