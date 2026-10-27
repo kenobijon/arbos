@@ -154,6 +154,7 @@
 		A1B5EA00000000000000A00A /* BottomSearchBarTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B5EA00000000000000A009 /* BottomSearchBarTests.swift */; };
 		A1B5EA00000000000000A00C /* SearchIndexTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B5EA00000000000000A00B /* SearchIndexTests.swift */; };
 		A1B5EA00000000000000A0F2 /* SearchSettingsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B5EA00000000000000A0F1 /* SearchSettingsTests.swift */; };
+		A1B5EA00000000000000C7A2 /* GroupTitlePushTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B5EA00000000000000C7A1 /* GroupTitlePushTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -354,6 +355,7 @@
 		A1B5EA00000000000000A009 /* BottomSearchBarTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BottomSearchBarTests.swift; sourceTree = "<group>"; };
 		A1B5EA00000000000000A00B /* SearchIndexTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchIndexTests.swift; sourceTree = "<group>"; };
 		A1B5EA00000000000000A0F1 /* SearchSettingsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchSettingsTests.swift; sourceTree = "<group>"; };
+		A1B5EA00000000000000C7A1 /* GroupTitlePushTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GroupTitlePushTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -607,6 +609,7 @@
 				A15E00000000000000000003 /* HomeSearchTests.swift */,
 				A1B5EA00000000000000A00B /* SearchIndexTests.swift */,
 				A1B5EA00000000000000A0F1 /* SearchSettingsTests.swift */,
+				A1B5EA00000000000000C7A1 /* GroupTitlePushTests.swift */,
 				A1B5EA00000000000000A009 /* BottomSearchBarTests.swift */,
 				A1C100000000000000000001 /* SenderNameRowTests.swift */,
 				A1D100000000000000000071 /* ReplyInDMTests.swift */,
@@ -947,6 +950,7 @@
 				A15E00000000000000000004 /* HomeSearchTests.swift in Sources */,
 				A1B5EA00000000000000A00C /* SearchIndexTests.swift in Sources */,
 				A1B5EA00000000000000A0F2 /* SearchSettingsTests.swift in Sources */,
+				A1B5EA00000000000000C7A2 /* GroupTitlePushTests.swift in Sources */,
 				A1B5EA00000000000000A00A /* BottomSearchBarTests.swift in Sources */,
 				A1C100000000000000000002 /* SenderNameRowTests.swift in Sources */,
 				A1D100000000000000000072 /* ReplyInDMTests.swift in Sources */,

@@ -4401,15 +4401,31 @@ final class AppModel: ObservableObject {
                         let member = peopleChat(cid)?.members.first { $0.handle == from }
                         let agent = member?.isAgent == true ? member?.project : nil
                         let kind = sender.kind.isEmpty ? (agent != nil ? "agent" : "user") : sender.kind
-                        let body = (payload.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                        let text = (payload.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                        let senderName = sender.name.isEmpty ? (member?.displayName ?? from) : sender.name
+                        let who = kind == "agent" || from.isEmpty || from == "someone" ? senderName : "@\(from)"
+                        // Group / shared project chat (relay chat_kind since 2026-10-27; an older
+                        // relay sends none → the chat list's kind): title = the chat's name,
+                        // body = "Sender: text". A DM is titled with the sender.
+                        let chatKind = payload.chat_kind ?? (peopleChat(cid)?.kind == "group" ? "group" : "dm")
+                        let groupTitle = (payload.chat_title ?? peopleChat(cid)?.title ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                        let titled = chatKind != "dm" && !groupTitle.isEmpty
+                        let imageKey = payload.chat_image_key ?? peopleChat(cid)?.imageKey
+                        let groupImage = titled && inPeople ? imageKey.flatMap { blobURL(projectId: "\(peopleSlot):\(cid)", key: $0)?.absoluteString } : nil
+                        let shown = text.isEmpty ? "New message" : text
                         let info = MessagePush.userInfo(
-                            chatId: cid, projectId: projectId, title: sender.name.isEmpty ? (member?.displayName ?? "@\(from)") : sender.name,
-                            body: body.isEmpty ? "New message" : body,
+                            chatId: cid, projectId: projectId,
+                            title: titled ? groupTitle : who,
+                            body: titled ? "\(who): \(shown)" : shown,
                             senderKind: kind, senderId: sender.id.isEmpty ? (member?.id ?? from) : sender.id,
-                            senderName: sender.name.isEmpty ? (member?.displayName ?? from) : sender.name, senderHandle: from,
+                            senderName: senderName, senderHandle: from,
                             avatar: sender.avatar,
                             avatarColor: sender.avatar_color,
-                            avatarUrl: sender.avatar_url ?? member?.avatarUrl)
+                            avatarUrl: sender.avatar_url ?? member?.avatarUrl,
+                            chatTitle: titled ? groupTitle : nil,
+                            chatKind: chatKind,
+                            text: text.isEmpty ? nil : text,
+                            chatImageUrl: groupImage)
                         Task { await PushManager.shared.postMessage(id: p.id, info: info) }
                     }
                     applyBadge()
@@ -4502,8 +4518,9 @@ final class AppModel: ObservableObject {
                     let sender = payload.sender
                     let who = sender.kind == "agent" || sender.handle.isEmpty ? sender.name : "@\(sender.handle)"
                     let text = (payload.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-                    PushManager.post(id: p.id, title: "\(who) in #\(payload.channel_name)",
-                                     body: text.isEmpty ? "New message" : text,
+// Same shape as a group: title = where ("Server › #channel"), body = "Sender: text".
+                    PushManager.post(id: p.id, title: "\(payload.server_name) › #\(payload.channel_name)",
+                                     body: "\(who): \(text.isEmpty ? "New message" : text)",
                                      chatId: payload.channel_id, projectId: channelSlot)
                 }
             case .peopleChatDeleted, .peopleInviteAccepted, .machineReady:
