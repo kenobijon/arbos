@@ -2913,6 +2913,14 @@ impl Agent {
                 user_text = rendered.clone();
             }
         }
+        // Secret hand-off: a pasted key with "save this" goes into the vault before the model
+        // ever sees it; a key without those words gets the offer card and the turn goes on.
+        match crate::handoff::on_user_message(self, chat_id, &user_msg_id, &user_text).await {
+            crate::handoff::Handled::Nothing => {}
+            crate::handoff::Handled::Saved(t) | crate::handoff::Handled::Offered(t) => {
+                user_text = t;
+            }
+        }
         // Memory tree (D77): the walk starts as soon as the words are known and runs beside the
         // rest of the setup; `drive_turn` joins it before the prompt goes to pi.
         let mut memory = if user_text.trim().is_empty() {
@@ -6039,7 +6047,8 @@ impl Agent {
         activity: Option<&str>,
         reply_to: Option<&str>,
     ) -> Result<(), String> {
-        let text = ProseFilter::clean_prose(text.trim());
+        // Output redaction backstop (D19, secret hand-off) before anything else sees it.
+        let text = crate::store::redact(&ProseFilter::clean_prose(text.trim()));
         let text = text.trim();
         if text.is_empty() && activity.is_none() {
             return Err("nothing to send".into());
@@ -6301,9 +6310,12 @@ impl Agent {
             }
             t.text_part_dirty = false;
         }
+        // Output redaction backstop (D19, secret hand-off): a vault value or a known key
+        // shape in the model's prose never reaches the room doc.
+        let delta = crate::store::redact(delta);
         h.doc
-            .append_text(&t.assistant_msg_id, &t.text_part_id, delta);
-        t.streamed_text.push_str(delta);
+            .append_text(&t.assistant_msg_id, &t.text_part_id, &delta);
+        t.streamed_text.push_str(&delta);
     }
 
     // ---- hooks called by arbos-pi-ext ---------------------------------------------------------
@@ -9077,11 +9089,11 @@ pub const ROUTER_PROMPT: &str = include_str!("../prompts/router.md");
 /// on 2026-10-24; 25.7 KB after the Grok-parity rules — moment, naming, research delivery —
 /// the same day; 28.2 KB on 2026-10-25 with the jobs section's steer/stop rule (#1692) and the
 /// steer rule — short waits, `[Arbos steer:` is never late — of #1690; 28.7 KB after the table and
-/// link format rule of [feedback markdown-tables-agentd-2026-10-25]; 29.1 KB on 2026-10-26 with
-/// the `post_chart` clause of [feedback chart-post-tool-agentd-2026-10-26] — whichever of that
-/// item and [feedback secret-handoff-agentd-2026-10-26] lands second re-runs the budget test
-/// against main and sets this once). The unit test fails when a prompt edit crosses it, so
-/// growth is a decision, not drift.
+/// link format rule of [feedback markdown-tables-agentd-2026-10-25]; 29.1 KB on 2026-10-27
+/// with the `post_chart` clause of [feedback chart-post-tool-agentd-2026-10-26] on top of the
+/// secrets rewrite of [feedback secret-handoff-agentd-2026-10-26] — measured together at
+/// 29 062 bytes, set once). The unit test fails when a prompt edit crosses it, so growth is a
+/// decision, not drift.
 #[cfg(test)]
 pub const BASE_PROMPT_MAX_BYTES: usize = 29_100;
 
