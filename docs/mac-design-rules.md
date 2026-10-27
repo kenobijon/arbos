@@ -453,6 +453,70 @@ Code: `transcript.rs` `render_block` (lists, headings), `inline_runs`,
 `markdown_tests` (rhythm constants, bold runs, a headless render of a bullet
 list: disc size / place, indent, 26 pt pitch, dot on the first line's centre).
 
+## Message formatting — the chat Markdown grammar (Jacob 2026-10-27, [feedback chat-markdown-core-2026-10-27], Mac [feedback chat-markdown-mac-2026-10-27], iPhone [feedback chat-markdown-ios-2026-10-27])
+
+**One parser, every bubble.** `arbos_core::markdown` splits a message into
+blocks and inline runs; the Mac (`ui/markdown.rs` is a thin adapter) and the
+iPhone (`markdownBlocks` / `markdownSpans` over the FFI, `Markdown.blocks` /
+`Markdown.inline`) render the same tree. Typed messages and agent replies go
+through the same grammar: what Jacob types as `> hello` is the quote block Grok
+Bot shows, in his own bubble and in the agent's. Plain text is never changed.
+
+### Blocks (a line decides at its start; up to three leading spaces are fine)
+
+| Typed | Block | Rule |
+|---|---|---|
+| `> text` | **Quote** — 3 pt bar in the muted ink at 55 %, 10 pt gap, the quoted blocks in the muted ink | A line is a quote line when it starts with `>` followed by **a space**, another `>` (nesting, up to four deep) or nothing. The quote is the run of such lines; it ends at the first line without `>`. The first line must have text after its markers: a lone `>` is prose, `>>` alone is prose, `>5 means more than five` (no space) is prose; `> 5 means five` is a quote. A `>` line with nothing after it inside the run is a paragraph break. Any block may be quoted (headings, lists, fences, tables, another quote). |
+| `# text` · `## text` · `### text` | **Heading** — bold, 20 / 17 / 15 pt on the Mac, 24 / 21 / 19 pt on the iPhone; never an anchor | `#` × 1–6 then **a space** then text; four or more `#` render like three. `#hashtag`, `#1 fan` and a lone `#` are prose. |
+| `- a` · `* a` · `+ a` · `• a` | **Bullets** (the disc from "Markdown inside bubbles") | marker + space + text; `-5 degrees` and `*bold* start` are prose. |
+| `1. a` · `1) a` | **Numbered** — renumbered from 1 | 1–9 digits + `.` or `)` + space + text; `3.14 is pi` is prose. |
+| ```` ```lang ```` … ```` ``` ```` | **Code card** (the existing card: mono, copyable, highlighted by the tag) | contents verbatim, markers inside it never apply; an unclosed fence runs to the end (streaming). |
+| `\| a \| b \|` + `\|---\|---\|` | **Table** | unchanged (two pipe rows without the separator degrade to one mono block). |
+| `$$ … $$` · `\[ … \]` | **Display math** | unchanged ([feedback math-render-mac-2026-10-26]). |
+| anything else | **Paragraph** | a single Enter is a line break (soft newlines are kept), a blank line is a paragraph break. |
+
+### Inline (inside paragraphs, headings, list items and table cells)
+
+| Typed | Renders | Rule |
+|---|---|---|
+| `**bold**` | bold (700) | A marker **opens** only at a word start — after a space, punctuation or the line start — and never when glued to the same marker; it **closes** only at a word end (before a space, punctuation or the end), with a non-space just before it. The run must be exactly the marker: `****` is prose. |
+| `*italic*` · `_italic_` | italic | same rule, so `snake_case`, `__init__`, `2*3*4`, `a*b`, `trailing*` and `*leading` are prose. `__bold__` is not a marker (Python dunders stay). |
+| `***both***` | bold italic | same rule. |
+| `~~gone~~` | strikethrough | same rule; a single `~` is never a marker. |
+| `\|\|spoiler\|\|` | **Spoiler** — a solid pill in the muted ink at 90 % with the glyphs invisible; one click / tap opens it for **this viewer only** (a faint 16 % wash stays); nothing is stored or sent | same rule, so `a \|\| b` and `x\|\|y` are prose. A spoiler may span lines; copies carry the words. A link inside a hidden spoiler opens on the next click, once it can be read. |
+| `` `code` `` | mono chip (the existing chip) | a backtick run closes with a run of the same length; `` `` a`b `` `` holds a backtick; one space of padding each side is dropped; an unmatched backtick is prose. Markers inside code never apply. |
+| `[text](https://…)` | link in the accent, underlined, with its site icon ([feedback link-icons-mac-2026-10-25]); opens through the same click path as every link (`select.rs` → `open_url` / the iPhone's `OpenURLAction`, so the link-open confirm of #1522 applies when it ships) | the target must be `http(s)://`, `mailto:` with an `@`, `arbos://` or `www.`; `javascript:`, `data:` and relative targets leave the text as typed. Balanced parentheses inside the target are kept (Wikipedia), an optional `"title"` is dropped. The label may carry styles. |
+| `https://…` · `http://…` · `www.…` | link (no icon) | up to whitespace or `<` `>` `"`; trailing `.,;:!?` and an unbalanced `)` stay prose. E-mail addresses are **not** linked and never styled. |
+| `$…$` · `\(…\)` | typeset math | unchanged (Pandoc's rule: `$5 and $10` are prices). |
+| `\*` `\_` `\~` `\|` `` \` `` `\[` `\#` `\>` `\\` … | the character itself | a backslash before any ASCII punctuation escapes it (`\> not a quote` at a line start is prose); before a letter or a space it is a backslash. |
+| `<b>html</b>`, `<script>` | the text as typed | HTML is never interpreted. |
+| `@name`, emoji, `:shortcode:` | unchanged | mentions are resolved after parsing as before (chips); emoji pass through. |
+
+Emphasis stays on one line of a paragraph (a `*` on one line and a `*` on the
+next are prose); an unterminated marker is literal, so a half-streamed
+`**bold` never flickers.
+
+### Never mangled — pinned by `arbos_core::markdown::tests`
+
+`snake_case_word`, `__init__`, `2*3*4 = 24`, `5 * 3 = 15`, `a_b`, `a*b`, `a~b`,
+`a|b`, `x||y`, `a || b`, URLs with `_` or `*` in the path, `jacob_s@example.com`,
+`5 > 3`, a lone `>` / `*` / `_` / `` ` `` / `#`, `** spaced **`, `*leading`,
+`trailing*`, `#hashtag`, `#1`, `C++`, `C#`, `100%`, `3.14`, `$5 and $10`,
+`<b>html</b>`, `[not a link]`, `[x](y`, emoji and skin tones — each renders as
+typed. Two property tests back the list: 4 000 random texts built from such
+words (plus at most one marker word) round-trip through the parser unchanged,
+and 20 000 random marker-heavy strings parse without a panic and never show a
+character that was not typed.
+
+Code: `crates/arbos-core/src/markdown.rs` (grammar), `crates/arbos-ffi/src/markdown.rs`
+(Swift surface, quotes flattened to `quote_depth`), Mac `ui/markdown.rs`
+(adapter: typeset math runs, icon cells, URL wrap hints) + `transcript.rs`
+`render_block_in` (quote bar, ink colour per bubble) + `inline_runs`
+(strike, spoiler pill) + `select.rs` (spoiler click, per-viewer reveal set),
+iPhone `Transcript.swift` `Markdown` / `BlockView` / `TypedBody` / `SpoilerState`.
+Rig: `ARBOS_FIXTURE_REPLY=markdown` (the sample sheet), `=quote` (Jacob's
+"> hello").
+
 ## Bubble hover rail (Jacob 2026-10-24, [feedback bubble-hover-rail-2026-10-24])
 
 **The ☺ ↩ ⋯ rail is vertically centred beside the bubble and shows while the
