@@ -906,7 +906,12 @@ struct MachineAgentRow: View {
             }
             VStack(alignment: .leading, spacing: 2) {
                 Text(workspace.name).font(theme.font(Theme.body, weight: .medium)).foregroundStyle(theme.text).lineLimit(1)
-                Text(MachineMetrics.agentStatus(workspace)).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted).lineLimit(1)
+                // A running workspace leads its status with the working spinner (the
+                // home rows' one, [feedback working-braille-spinner-ios-2026-10-27]).
+                HStack(spacing: 4) {
+                    if workspace.running { WorkingSpinner() }
+                    Text(MachineMetrics.agentStatus(workspace)).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted).lineLimit(1)
+                }
             }
             Spacer(minLength: 8)
             // The numbers never wrap; the name column gives way (truncates) instead.

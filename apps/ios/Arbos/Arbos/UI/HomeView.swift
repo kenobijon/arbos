@@ -385,6 +385,7 @@ struct HomeView: View {
                                 Button { model.open(peopleChat: chat) } label: {
                                     PeopleRow(chat: chat, preview: entry.hit.reason ?? peoplePreview(chat), time: timeLabel(ms: peopleActivity(chat)),
                                               unread: model.peopleUnread.contains(chat.id) || model.unreadCount(for: chat) > 0,
+                                              streaming: model.isStreaming(chat.id),
                                               count: model.unreadCount(for: chat), me: model.user?.id,
                                               pinned: pinned)
                                 }
@@ -1202,9 +1203,9 @@ struct AgentRow: View {
         // semibold over a 15 pt grey preview, time right, 10 pt unread dot at the far
         // right of the preview line, 80 pt row pitch.
         HStack(spacing: 15) {
-            // No "agent is working" indicator on rows (Jacob, 2026-10-22): the working
-            // state lives in the chat header / activity line. The right edge keeps the
-            // unread dot.
+            // The status slot at the right end of the preview line, under the time
+            // (Jacob, 2026-10-27): the braille spinner while the agent works (one
+            // shared ticker, `WorkingSpinner`), else the unread dot, else nothing.
             AgentAvatar(project: project, theme: theme, size: Theme.rowAvatar)
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline) {
@@ -1237,14 +1238,35 @@ struct AgentRow: View {
                         .foregroundStyle(theme.muted)
                         .lineLimit(1)
                     Spacer(minLength: 0)
-                    if unread {
+                    switch RowStatus.of(streaming: streaming, unread: unread) {
+                    case .working:
+                        WorkingSpinner()
+                    case .unread:
                         Circle().fill(theme.unread).frame(width: Theme.unreadDot, height: Theme.unreadDot)
+                    case .quiet:
+                        EmptyView()
                     }
                 }
             }
         }
         .padding(.vertical, Theme.rowVPad)
         .contentShape(Rectangle())
+    }
+}
+
+/// What the status slot under a row's time shows ([feedback
+/// working-braille-spinner-ios-2026-10-27]; the Mac's `sidebar::RowStatus`): one
+/// thing — the spinner while the chat's agent works, else the unread mark,
+/// else nothing.
+enum RowStatus: Equatable {
+    case working
+    case unread
+    case quiet
+
+    static func of(streaming: Bool, unread: Bool) -> RowStatus {
+        if streaming { return .working }
+        if unread { return .unread }
+        return .quiet
     }
 }
 
@@ -1257,6 +1279,8 @@ struct PeopleRow: View {
     let preview: String
     let time: String
     let unread: Bool
+    /// An agent in this chat is working: the spinner takes the slot.
+    var streaming: Bool = false
     /// Unread messages (Grok/Telegram-style count pill); 0 → the dot only.
     var count: Int = 0
     let me: String?
@@ -1340,7 +1364,9 @@ struct PeopleRow: View {
                         .foregroundStyle(theme.muted)
                         .lineLimit(1)
                     Spacer(minLength: 0)
-                    if count > 0 {
+                    if streaming {
+                        WorkingSpinner()
+                    } else if count > 0 {
                         UnreadBadge(count: count)
                     } else if unread {
                         Circle().fill(theme.unread).frame(width: Theme.unreadDot, height: Theme.unreadDot)
