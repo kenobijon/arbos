@@ -827,6 +827,8 @@ struct UserProfileView: View {
     @State private var tab = "Links"
     @State private var sharedProjects: [Project] = []
     @State private var confirmBlock = false
+    /// Unblock asks first ([feedback blocked-state-ios-2026-10-26]).
+    @State private var confirmUnblock = false
 
     /// Stable user id: prefer a fresh card, then a handle lookup (agent-owner rows
     /// sometimes open this page with `id == handle`), then the value we were given.
@@ -869,7 +871,12 @@ struct UserProfileView: View {
                             })),
                             name: person.displayName,
                             subtitle: "@\(person.handle)",
-                            action: MessageButton.shows(isMe: isMe, blocked: blockedEntry != nil) ? AnyView(messageButton) : nil
+                            // Blocked ([feedback blocked-state-ios-2026-10-26]): the chip under
+                            // the @handle, and Unblock as the one action instead of Message.
+                            subtitleBelow: blockedEntry != nil && !isMe ? AnyView(BlockedChip()) : nil,
+                            action: blockedEntry != nil && !isMe
+                                ? AnyView(unblockButton)
+                                : (MessageButton.shows(isMe: isMe, blocked: blockedEntry != nil) ? AnyView(messageButton) : nil)
                         ),
                         tabs: PaneKinds.person,
                         selected: $tab,
@@ -890,6 +897,12 @@ struct UserProfileView: View {
                 if let m = dm?.humans.first(where: isPeer) { model.block(m) } else { model.block(handle: peerHandle) }
             }
         } message: { Text("They cannot message you or add you to chats.") }
+        .confirmationDialog(BlockedState.confirmTitle(handle: person.handle), isPresented: $confirmUnblock, titleVisibility: .visible) {
+            Button(BlockedState.unblock) {
+                // The pane stays open: the chip and the row go once the relay's list comes back.
+                if let entry = blockedEntry { model.unblock(entry) }
+            }
+        } message: { Text(BlockedState.confirmNote) }
         .task {
             await model.refreshBlocks()
             await model.refreshPeople()
@@ -922,10 +935,16 @@ struct UserProfileView: View {
         }
     }
 
-    /// Block user (red) or Unblock (accent), from the relay's block list.
+    /// The hero's Unblock once I blocked them ([feedback blocked-state-ios-2026-10-26]).
+    private var unblockButton: some View {
+        PanePillButton(glyph: "nosign", title: BlockedState.unblock) { confirmUnblock = true }
+            .accessibilityIdentifier("profile-unblock-pill")
+    }
+
+    /// Block user (red) or Unblock (accent), from the relay's block list; both ask first.
     @ViewBuilder private var blockRow: some View {
-        if let entry = blockedEntry {
-            PaneActionRow(title: BlockRow.title(blocked: true), color: theme.accent) { model.unblock(entry) }
+        if blockedEntry != nil {
+            PaneActionRow(title: BlockRow.title(blocked: true), color: theme.accent) { confirmUnblock = true }
         } else {
             PaneDangerRow(title: BlockRow.title(blocked: false)) { confirmBlock = true }
         }
@@ -1661,6 +1680,15 @@ struct GroupProfileView: View {
         ) : nil
         // borderless (not .plain): .plain steals long-press on recent iOS,
         // so the remove context menu never appears (same as HomeView rows).
+        // Blocked ([feedback blocked-state-ios-2026-10-26]): the tag on the row, before the menu.
+        let isBlocked = r.agent == nil && !isMe && BlockedState.isBlocked(id: r.person.id, handle: r.person.handle, in: model.blocked)
+        let trailing: AnyView? = {
+            switch (isBlocked, manage) {
+            case (true, let manage?): return AnyView(HStack(spacing: 6) { BlockedTag(); manage })
+            case (true, nil): return AnyView(BlockedTag())
+            case (false, let manage): return manage
+            }
+        }()
         return Button {
             if let a = r.agent {
                 model.showProfile(.agent(projectId: a.id))
@@ -1675,7 +1703,7 @@ struct GroupProfileView: View {
                 leading: .avatar(avatar),
                 title: title,
                 subtitle: memberRowSubtitle(r, member: member, isSilenced: isSilenced),
-                trailing: manage
+                trailing: trailing
             )
         }
         .buttonStyle(.borderless)
