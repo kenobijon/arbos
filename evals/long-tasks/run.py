@@ -194,6 +194,7 @@ class Lane(threading.Thread):
             # the named lanes' agents; `chat: "dm"` turns, peer rows and quiet checks run against it
             agents = [self.project] + [rl.ensure_project(n) for n in act.get("with", [])]
             st["dm_chat"], st["dm_peer_token"] = rl.people_group_with_agents(act["peer_handle"], agents, act.get("title", "eval people group"))
+            st["dm_group"] = True  # quiet checks cover every agent in the group, not only this lane's
             time.sleep(8)
         else:
             raise RuntimeError(f"unknown driver action {kind}")
@@ -305,9 +306,11 @@ class Lane(threading.Thread):
                 doc = rl.chat_dump("people", chat_id)
                 mine = f"agent:{self.project}"
                 rows_late = [m for m in doc.get("messages", []) if m.get("role") == "assistant" and (m.get("createdAt") or 0) >= int(t0 * 1000) - 1000 and dr.text_of(m)]
-                late = [m for m in rows_late if (m.get("sender") or mine) == mine]
+                # in a people group every agent must stay quiet (respond-gate tasks); in a DM with a second
+                # agent added, only this lane's agent is judged here (the other may be the one addressed)
+                late = rows_late if task_state.get("dm_group") else [m for m in rows_late if (m.get("sender") or mine) == mine]
                 ok = not late
-                reasons_q = [] if ok else [f"the agent answered a message not addressed to it: {dr.text_of(late[0])[:80]!r}"]
+                reasons_q = [] if ok else [f"{(late[0].get('senderName') or 'the agent')} answered a message not addressed to it: {dr.text_of(late[0])[:80]!r}"]
                 if turn.get("expect_other_agent_reply"):
                     other_pid = (task_state.get("dm_other_agents") or {}).get(turn["expect_other_agent_reply"])
                     others = [m for m in rows_late if m.get("sender") == f"agent:{other_pid}"]
@@ -397,7 +400,7 @@ class Lane(threading.Thread):
             if turn.get("reply_from") or turn.get("silent_agents"):
                 # who answered in a shared chat: assistant rows after the send, by sender handle
                 rows = [m for m in (res.get("doc") or {}).get("messages", []) if m.get("role") == "assistant" and (m.get("createdAt") or 0) >= t0_ms - 2000 and dr.text_of(m)]
-                repliers = sorted({(m.get("senderHandle") or "").lower() for m in rows})
+                repliers = sorted({(m.get("senderHandle") or m.get("senderName") or (m.get("sender") or "").split(":")[-1]).lower() for m in rows})
                 g["truth"]["repliers"] = repliers
                 want = (turn.get("reply_from") or "").lower()
                 if want and want not in repliers:
