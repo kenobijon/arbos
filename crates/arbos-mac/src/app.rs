@@ -277,18 +277,27 @@ pub struct FailureClaim {
     pub verbs: &'static [&'static str],
 }
 
-/// A toast in the top-right stack: an info notice (`error` none: "Forwarded to Studio") or a
-/// failure drawn by `ui::error_note` (Jacob, 2026-10-26). Info notices live 6 s, errors 10 s;
-/// the pointer on a toast holds it (`held`), a click on × or an info toast dismisses it.
+/// A toast in the one slot under the header pill: an info notice (`error` none: "Forwarded to
+/// Studio") or a failure drawn by `ui::error_note` (Jacob, 2026-10-26 / 2026-10-27). Info
+/// notices live 6 s, errors 10 s; the pointer on a toast holds it (`held`, at most
+/// [`NOTICE_HOLD_MAX_MS`] unless Details is open), × or a click on an info toast dismisses it.
+/// The same failure again while its toast stands does not add a toast: `count` goes up and the
+/// clock restarts (eight "Couldn't load your secrets" in a row were eight toasts on
+/// 2026-10-27 — never again). `id` is stable for the toast's life; `at` is its clock.
 #[derive(Clone, Debug)]
 pub struct Notice {
+    pub id: u64,
     pub text: String,
     pub at: u64,
     pub error: Option<UserError>,
     pub details_open: bool,
     pub held: bool,
+    /// Since when the pointer holds it (the hold has a cap).
+    pub held_since: u64,
     /// Try again re-issues this command.
     pub retry: Option<Box<ClientCommand>>,
+    /// How many times this same failure arrived while the toast stood (1 = once).
+    pub count: u32,
 }
 
 impl Notice {
@@ -299,10 +308,42 @@ impl Notice {
             NOTICE_TTL_MS
         }
     }
+
+    /// Still on screen at `now`: within its TTL, or held — a hold without Details open
+    /// lasts at most [`NOTICE_HOLD_MAX_MS`], so a pointer parked over the slot (or a hover
+    /// whose leave never arrived) cannot pin a toast forever.
+    pub fn live_at(&self, now: u64) -> bool {
+        if self.held
+            && (self.details_open || now.saturating_sub(self.held_since) < NOTICE_HOLD_MAX_MS)
+        {
+            return true;
+        }
+        now.saturating_sub(self.at) < self.ttl_ms()
+    }
+
+    /// Two toasts are the same failure when they would read the same sentence.
+    fn same_failure(&self, error: &UserError) -> bool {
+        self.error
+            .as_ref()
+            .is_some_and(|e| e.sentence() == error.sentence())
+    }
 }
 
 pub const NOTICE_TTL_MS: u64 = 6_000;
 pub const ERROR_NOTICE_TTL_MS: u64 = 10_000;
+/// A held toast (pointer on it, Details closed) is let go after this long.
+pub const NOTICE_HOLD_MAX_MS: u64 = 60_000;
+/// How many toasts the slot shows at once; older ones fold into one "N more" line
+/// (Jacob 2026-10-27: "max 2–3 visible, oldest collapses into a count").
+pub const NOTICE_VISIBLE_MAX: usize = 3;
+
+/// What the slot draws: the newest toasts, oldest first, and how many older ones are folded
+/// away behind them.
+#[derive(Clone, Debug, Default)]
+pub struct NoticeStack {
+    pub visible: Vec<Notice>,
+    pub folded: usize,
+}
 
 #[derive(Clone, Debug)]
 pub enum AppEvent {
@@ -8012,55 +8053,98 @@ impl AppState {
     }
 
     /// An info toast: something that worked or a plain status. Never a failure — that is
-    /// [`Self::push_failure`] (`error_ui_lint` keeps raw error strings out of here).
+    /// [`Self::push_failure`] (`error_ui_lint` keeps raw error strings out of here). The same
+    /// text again while its toast stands restarts that toast instead of adding one.
     pub fn push_notice(&mut self, text: impl Into<String>) {
-        let now = self.next_notice_at();
+        let text = text.into();
+        let now = self.prune_notices();
+        if let Some(n) = self
+            .notices
+            .iter_mut()
+            .find(|n| n.error.is_none() && n.text == text)
+        {
+            n.at = now;
+            n.count += 1;
+            return;
+        }
+        let id = self.next_notice_id(now);
         self.notices.push(Notice {
-            text: text.into(),
+            id,
+            text,
             at: now,
             error: None,
             details_open: false,
             held: false,
+            held_since: 0,
             retry: None,
+            count: 1,
         });
     }
 
     /// An error toast (the shared error element, 10 s, hover holds, Details + Copy, Try again
     /// re-issues `retry`). The surface that owns the action catches most failures first
-    /// (sheets, pane pages, the composer); this is for the rest.
+    /// (sheets, pane pages, the composer); this is for the rest. The same failure again while
+    /// its toast stands (same sentence) bumps the toast's count and restarts its clock — one
+    /// note per failure, however often it repeats.
     pub fn push_failure(&mut self, error: UserError, retry: Option<Box<ClientCommand>>) {
-        let now = self.next_notice_at();
+        let now = self.prune_notices();
+        if let Some(n) = self.notices.iter_mut().find(|n| n.same_failure(&error)) {
+            n.at = now;
+            n.count = n.count.saturating_add(1);
+            n.error = Some(error);
+            if retry.is_some() {
+                n.retry = retry;
+            }
+            return;
+        }
+        let id = self.next_notice_id(now);
         self.notices.push(Notice {
+            id,
             text: error.sentence(),
             at: now,
             error: Some(error),
             details_open: false,
             held: false,
+            held_since: 0,
             retry,
+            count: 1,
         });
     }
 
-    /// Drops the expired toasts and returns a unique `at` for the next one (`at` is its id:
-    /// two toasts pushed in the same millisecond must not share it).
-    fn next_notice_at(&mut self) -> u64 {
+    /// Drops the expired toasts; returns `now`.
+    fn prune_notices(&mut self) -> u64 {
         let now = now_ms();
-        self.notices
-            .retain(|n| n.held || now.saturating_sub(n.at) < n.ttl_ms());
-        let last = self.notices.iter().map(|n| n.at).max().unwrap_or(0);
+        self.notices.retain(|n| n.live_at(now));
+        now
+    }
+
+    /// A unique id for the next toast (`now`, or one past the newest id when two arrive in
+    /// the same millisecond).
+    fn next_notice_id(&self, now: u64) -> u64 {
+        let last = self.notices.iter().map(|n| n.id).max().unwrap_or(0);
         now.max(last + 1)
     }
 
     /// Click on × (or an info toast) removes it (download status / errors must not sit forever).
-    pub fn dismiss_notice(&mut self, at: u64) {
-        self.notices.retain(|n| n.at != at);
+    pub fn dismiss_notice(&mut self, id: u64) {
+        self.notices.retain(|n| n.id != id);
+    }
+
+    /// Clears the whole slot (the "N more" line's ×).
+    pub fn dismiss_all_notices(&mut self) {
+        self.notices.clear();
     }
 
     /// The pointer on a toast holds it; leaving restarts its clock.
-    pub fn hold_notice(&mut self, at: u64, held: bool) {
-        if let Some(n) = self.notices.iter_mut().find(|n| n.at == at) {
+    pub fn hold_notice(&mut self, id: u64, held: bool) {
+        let now = now_ms();
+        if let Some(n) = self.notices.iter_mut().find(|n| n.id == id) {
+            if held && !n.held {
+                n.held_since = now;
+            }
             n.held = held;
             if !held {
-                n.at = now_ms();
+                n.at = now;
             }
         }
     }
@@ -8090,33 +8174,49 @@ impl AppState {
         }
     }
 
-    pub fn toggle_notice_details(&mut self, at: u64) {
-        if let Some(n) = self.notices.iter_mut().find(|n| n.at == at) {
+    pub fn toggle_notice_details(&mut self, id: u64) {
+        let now = now_ms();
+        if let Some(n) = self.notices.iter_mut().find(|n| n.id == id) {
             n.details_open = !n.details_open;
+            if !n.held {
+                n.held_since = now;
+            }
             n.held = true;
         }
     }
 
     /// Try again on an error toast: re-issue its command and drop the toast.
-    pub fn retry_notice(&mut self, at: u64) {
+    pub fn retry_notice(&mut self, id: u64) {
         let retry = self
             .notices
             .iter()
-            .find(|n| n.at == at)
+            .find(|n| n.id == id)
             .and_then(|n| n.retry.clone());
-        self.dismiss_notice(at);
+        self.dismiss_notice(id);
         if let Some(cmd) = retry {
             self.command(*cmd);
         }
     }
 
+    /// Every toast still on screen, oldest first.
     pub fn live_notices(&self) -> Vec<Notice> {
         let now = now_ms();
         self.notices
             .iter()
-            .filter(|n| n.held || now.saturating_sub(n.at) < n.ttl_ms())
+            .filter(|n| n.live_at(now))
             .cloned()
             .collect()
+    }
+
+    /// What the slot draws: the newest [`NOTICE_VISIBLE_MAX`] toasts (oldest first) and the
+    /// number folded away above them.
+    pub fn notice_stack(&self) -> NoticeStack {
+        let live = self.live_notices();
+        let folded = live.len().saturating_sub(NOTICE_VISIBLE_MAX);
+        NoticeStack {
+            visible: live[folded..].to_vec(),
+            folded,
+        }
     }
 
     /// The composer's note for `chat`, if a send / attachment / recording failed there.

@@ -436,6 +436,10 @@ pub mod metrics {
     /// child of the pill slot and takes no room in the bar.
     pub const LINK_PILL_HEIGHT: f32 = 22.0;
     pub const LINK_PILL_GAP: f32 = 3.0;
+    /// The toast slot (`shell::render_notices`): just below the pill — under the connection
+    /// pill when it hangs there — centred on the chat column (Jacob 2026-10-27, [feedback
+    /// toast-stack-mac-2026-10-27]).
+    pub const TOAST_SLOT_TOP: f32 = PILL_TOP + PILL_HEIGHT + LINK_PILL_GAP + LINK_PILL_HEIGHT + 8.0;
 }
 
 /// The frame of every chat header — agent, DM, group, server channel: the top
