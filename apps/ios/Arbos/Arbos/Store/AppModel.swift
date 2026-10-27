@@ -964,6 +964,11 @@ final class AppModel: ObservableObject {
             }
             path = [.chat(chatId: chatId, projectId: projectId)]
             pendingOpen = deferRoom ? (chatId, projectId) : nil
+        } else if projectId == channelSlot,
+                  let server = servers.first(where: { $0.channels.contains { $0.id == chatId } }) {
+            // A server channel banner: land in the server, then the channel.
+            path = [.server(serverId: server.id), .chat(chatId: chatId, projectId: channelSlot)]
+            pendingOpen = nil
         } else {
             pendingOpen = (chatId, projectId)
         }
@@ -4490,9 +4495,17 @@ final class AppModel: ObservableObject {
                 }
             case .spaceArchived(let payload):
                 applyRemoteArchive(spaceId: payload.space_id, kind: payload.kind, archived: payload.archived_at != nil)
-            case .channelMessage:
-                // Server channel banner: push-server-channels-ios-2026-10-26 (next item).
-                break
+            case .channelMessage(let payload):
+                // A server channel message (relay push gateway; every member but the sender).
+                // No banner while that channel is on screen; a tap opens it (openFromNotification).
+                if !isWatching(payload.channel_id) {
+                    let sender = payload.sender
+                    let who = sender.kind == "agent" || sender.handle.isEmpty ? sender.name : "@\(sender.handle)"
+                    let text = (payload.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                    PushManager.post(id: p.id, title: "\(who) in #\(payload.channel_name)",
+                                     body: text.isEmpty ? "New message" : text,
+                                     chatId: payload.channel_id, projectId: channelSlot)
+                }
             case .peopleChatDeleted, .peopleInviteAccepted, .machineReady:
                 break
             case .notificationsCleared(let payload):
