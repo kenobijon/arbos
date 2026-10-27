@@ -950,10 +950,17 @@ struct UserProfileView: View {
         if groups.isEmpty && sharedProjects.isEmpty {
             return [.empty("No groups in common yet.")]
         }
+        // The group's own picture through the resolver, like the home row and search —
+        // the placeholder only when it has none ([feedback group-row-avatar-ios-2026-10-27]).
         var rows: [AnyView] = groups.map { g in
             AnyView(
                 Button { dismiss(); model.open(peopleChat: g) } label: {
-                    PaneRow(leading: .glyph("person.2.fill"), title: g.title, subtitle: "\(g.humans.count) members", chevron: true)
+                    PaneRow(
+                        leading: .avatar(AnyView(GroupAvatar(chat: g, model: model, size: PaneKit.avatar))),
+                        title: g.title,
+                        subtitle: "\(g.humans.count) members",
+                        chevron: true
+                    )
                 }
                 .buttonStyle(.plain)
             )

@@ -1284,31 +1284,13 @@ struct PeopleRow: View {
         return other?.handle ?? chat.title
     }
 
-    /// Tokenised blob URL for the group's custom picture, when one is set.
-    private var groupImageURL: String? {
-        guard chat.isGroup, let key = chat.imageKey, !key.isEmpty else { return nil }
-        return model.blobURL(projectId: "\(peopleSlot):\(chat.id)", key: key)?.absoluteString
-    }
-
     var body: some View {
         HStack(spacing: 15) {
             ZStack(alignment: .bottomTrailing) {
                 if chat.isGroup {
-                    if let groupImageURL {
-                        AvatarCluster(members: [], size: Theme.rowAvatar, imageUrl: groupImageURL)
-                    } else if chat.isNeutralAvatar {
-                        NeutralAvatar(name: chat.title, size: Theme.rowAvatar)
-                    } else if let leaf = chat.leafPick, LeafAvatarsFlag.shared.on {
-                        // D92 amendment: the leaf picked on the Create screen.
-                        LeafAvatar(pick: leaf, size: Theme.rowAvatar)
-                    } else {
-                        ZStack {
-                            Circle().fill(theme.card).frame(width: Theme.rowAvatar, height: Theme.rowAvatar)
-                            Image(systemName: "person.2.fill")
-                                .font(theme.font(17, weight: .medium))
-                                .foregroundStyle(theme.accent)
-                        }
-                    }
+                    // The group's picture through the resolver (its upload, else the leaf or
+                    // neutral initial from the Create screen, else the two-person disc).
+                    GroupAvatar(chat: chat, model: model, size: Theme.rowAvatar)
                 } else {
                     PersonAvatar(url: other?.avatarUrl, handle: other?.handle ?? "?", size: Theme.rowAvatar, name: other?.name, id: other?.id, colorIndex: other?.avatarColorIndex)
                 }
