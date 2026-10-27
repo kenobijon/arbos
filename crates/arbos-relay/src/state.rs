@@ -165,6 +165,36 @@ pub struct Room {
     /// Rebuilt chat doc for covered-push checks and ROWS_DONE's version vector. Dropped when the
     /// room has no sockets left.
     pub doc_cache: std::sync::Mutex<Option<RoomDocCache>>,
+    /// Box users (owners) with a live socket on this room: a row from a person reaches their
+    /// agent live only through such a socket; without one the box is told to open the room
+    /// (`boxes::after_person_row`, #2120).
+    pub boxes: std::sync::Mutex<HashMap<String, u32>>,
+}
+
+impl Room {
+    pub fn box_joined(&self, user_id: &str) {
+        *self
+            .boxes
+            .lock()
+            .unwrap()
+            .entry(user_id.to_owned())
+            .or_insert(0) += 1;
+    }
+
+    pub fn box_left(&self, user_id: &str) {
+        let mut b = self.boxes.lock().unwrap();
+        if let Some(n) = b.get_mut(user_id) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                b.remove(user_id);
+            }
+        }
+    }
+
+    /// Does `user_id`'s box have a socket open on this room right now?
+    pub fn has_box(&self, user_id: &str) -> bool {
+        self.boxes.lock().unwrap().contains_key(user_id)
+    }
 }
 
 /// How the relay tells its room sockets that it is about to go down on purpose (a deploy, an
@@ -339,6 +369,7 @@ impl AppState {
                     replicas: Default::default(),
                     health_cache: std::sync::Mutex::new(None),
                     doc_cache: std::sync::Mutex::new(None),
+                    boxes: std::sync::Mutex::new(HashMap::new()),
                 })
             })
             .clone()
