@@ -429,22 +429,48 @@ async fn boot() -> Result<()> {
         let sup2 = sup.clone();
         let cfg2 = cfg.clone();
         tokio::spawn(async move {
+            let mut poll_failures: u32 = 0;
             loop {
                 tokio::time::sleep(Duration::from_secs(3)).await;
-                let Ok(r) = reqwest::Client::new()
+                // A failed listing names itself once per streak (#2127: a 9-minute gap with
+                // no line anywhere), and is bounded so a hang cannot hold the next pass.
+                let r = match reqwest::Client::new()
                     .get(format!("{}/box/projects", cfg2.relay_url))
                     .bearer_auth(&cfg2.box_token)
+                    .timeout(crate::workspace::REGISTRY_CALL_TIMEOUT)
                     .send()
                     .await
-                else {
-                    continue;
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        poll_failures += 1;
+                        if poll_failures == 1 {
+                            tracing::warn!(error = %e, "registry poll: request failed");
+                        }
+                        continue;
+                    }
                 };
                 if !r.status().is_success() {
+                    poll_failures += 1;
+                    if poll_failures == 1 {
+                        tracing::warn!(status = %r.status(), "registry poll: relay refused the listing");
+                    }
                     continue;
                 }
-                let Ok(v) = r.json::<Value>().await else {
-                    continue;
+                let v = match r.json::<Value>().await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        poll_failures += 1;
+                        if poll_failures == 1 {
+                            tracing::warn!(error = %e, "registry poll: bad listing");
+                        }
+                        continue;
+                    }
                 };
+                if poll_failures > 0 {
+                    tracing::info!(failures = poll_failures, "registry poll: listing back");
+                    poll_failures = 0;
+                }
                 sup2.apply_listing(&v).await;
             }
         });
