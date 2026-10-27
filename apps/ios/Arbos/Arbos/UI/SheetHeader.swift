@@ -50,7 +50,7 @@ struct SheetHeaderLayout: Equatable {
                                      trailing: trailing, titleScale: 1, titleTruncated: false)
         }
         let room = betweenControls(width: width, leadingWidth: leadingWidth, trailingWidth: trailingWidth)
-        let scale = max(minimumTitleScale, room / titleWidth)
+        let scale = min(1, max(minimumTitleScale, room / titleWidth))
         let drawn = min(room, titleWidth * scale)
         let roomStart = leading.maxX + gap
         return SheetHeaderLayout(leading: leading,
