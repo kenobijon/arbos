@@ -786,6 +786,14 @@ struct ChatSession: View {
             VStack(spacing: 8) {
                 header
                 linkPill.padding(.top, -5)
+                // The toast slot (Jacob 2026-10-27, [feedback toast-stack-ios-2026-10-27]): just
+                // below the pill (and the connection pill), hanging over the transcript without
+                // taking space — a zero-height anchor with the host as its overlay.
+                Color.clear.frame(height: 0)
+                    .overlay(alignment: .top) {
+                        ToastHost().environmentObject(model)
+                    }
+                    .zIndex(2)
                 // The chat-level note (Jacob 2026-10-26): pinned under the header pill, 16 inset —
                 // the pushes refused for this chat, or the machine in error. One element.
                 chatNote.padding(.horizontal, 16)

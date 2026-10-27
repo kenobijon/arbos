@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		A1EE00000000000000000008 /* ErrorUILintTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1EE00000000000000000007 /* ErrorUILintTests.swift */; };
+		A1EE0000000000000000000A /* ToastStackTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1EE00000000000000000009 /* ToastStackTests.swift */; };
 		A1EE00000000000000000006 /* UserErrorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1EE00000000000000000005 /* UserErrorTests.swift */; };
 		A1EE00000000000000000004 /* ErrorNote.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1EE00000000000000000003 /* ErrorNote.swift */; };
 		A1EE00000000000000000002 /* UserError.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1EE00000000000000000001 /* UserError.swift */; };
@@ -208,6 +209,7 @@
 
 /* Begin PBXFileReference section */
 		A1EE00000000000000000007 /* ErrorUILintTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ErrorUILintTests.swift; sourceTree = "<group>"; };
+		A1EE00000000000000000009 /* ToastStackTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToastStackTests.swift; sourceTree = "<group>"; };
 		A1EE00000000000000000005 /* UserErrorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UserErrorTests.swift; sourceTree = "<group>"; };
 		A1EE00000000000000000003 /* ErrorNote.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ErrorNote.swift; sourceTree = "<group>"; };
 		A1EE00000000000000000001 /* UserError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UserError.swift; sourceTree = "<group>"; };
@@ -576,6 +578,7 @@
 			isa = PBXGroup;
 			children = (
 				A1EE00000000000000000007 /* ErrorUILintTests.swift */,
+				A1EE00000000000000000009 /* ToastStackTests.swift */,
 				A1EE00000000000000000005 /* UserErrorTests.swift */,
 				A15A00000000000000000003 /* CoreFixturesTests.swift */,
 				A15A00000000000000000020 /* AddMembersPlanTests.swift */,
@@ -916,6 +919,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A1EE00000000000000000008 /* ErrorUILintTests.swift in Sources */,
+				A1EE0000000000000000000A /* ToastStackTests.swift in Sources */,
 				A1EE00000000000000000006 /* UserErrorTests.swift in Sources */,
 				A15A00000000000000000004 /* CoreFixturesTests.swift in Sources */,
 				A15A00000000000000000013 /* ReactionToggleTests.swift in Sources */,
