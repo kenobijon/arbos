@@ -27,6 +27,7 @@ pub mod header;
 pub mod hoverpick;
 pub mod icons;
 pub mod identity;
+pub mod link_card;
 pub mod local;
 pub mod lottie;
 pub mod markdown;

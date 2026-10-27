@@ -4,6 +4,7 @@
 //! replies; swap for pulldown-cmark when more is needed.
 
 use super::math;
+use crate::model::LinkPreview;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Block {
@@ -35,6 +36,12 @@ pub enum Block {
         part_id: String,
         spec: String,
         table: String,
+    },
+    /// A link preview card ([feedback link-embeds-mac-2026-10-27]): the relay's
+    /// `link_preview` part as one block of the bubble, under the prose that held the link.
+    LinkPreview {
+        part_id: String,
+        preview: Box<LinkPreview>,
     },
 }
 
@@ -333,7 +340,10 @@ pub fn link_hosts(text: &str) -> Vec<String> {
                 header.iter().for_each(|c| push(c));
                 rows.iter().flatten().for_each(|c| push(c));
             }
-            Block::Code { .. } | Block::Math { .. } | Block::Chart { .. } => {}
+            Block::Code { .. }
+            | Block::Math { .. }
+            | Block::Chart { .. }
+            | Block::LinkPreview { .. } => {}
         }
     }
     out
