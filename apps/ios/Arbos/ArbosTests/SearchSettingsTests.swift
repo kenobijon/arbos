@@ -24,7 +24,16 @@ final class SearchSettingsTests: XCTestCase {
     }
 
     private func titles(_ groups: [GlobalSearch.Group], _ section: GlobalSearch.Section) -> [String] {
-        groups.first { $0.section == section }?.rows.map(\.title) ?? []
+        groups.first { $0.section == section }?.rows.map { $0.title } ?? []
+    }
+
+    private func sections(_ groups: [GlobalSearch.Group]) -> [GlobalSearch.Section] {
+        groups.map { $0.section }
+    }
+
+    /// The targets of the Settings rows the typed query finds (no agents).
+    private func targets(_ typed: String) -> [GlobalSearch.Target] {
+        GlobalSearch.settingsEntries(query: typed, agents: []).map { $0.target }
     }
 
     // MARK: Ranking
@@ -40,12 +49,13 @@ final class SearchSettingsTests: XCTestCase {
         ]
         rows += GlobalSearch.settingsEntries(query: q, agents: agents)
         let groups = GlobalSearch.arrange(rows, queryIsEmpty: false)
-        XCTAssertEqual(groups.map(\.section), [.people, .servers, .settings, .messages])
+        let expected: [GlobalSearch.Section] = [.people, .servers, .settings, .messages]
+        XCTAssertEqual(sections(groups), expected)
         XCTAssertEqual(titles(groups, .settings), ["Devices"])
-        let devices = groups[2].rows[0]
+        let devices: GlobalSearch.Entry = groups[2].rows[0]
         XCTAssertEqual(devices.subtitle, "Settings")
-        XCTAssertEqual(devices.target, .setting(.page(.devices)))
-        XCTAssertEqual(devices.picture, .settingsTile("laptopcomputer"))
+        XCTAssertEqual(devices.target, GlobalSearch.Target.setting(.page(.devices)))
+        XCTAssertEqual(devices.picture, GlobalSearch.Picture.settingsTile("laptopcomputer"))
     }
 
     /// "opacity": no page is called that; Appearance's keyword is an exact hit, so
@@ -55,39 +65,39 @@ final class SearchSettingsTests: XCTestCase {
         var rows = [entry(.message, "Affine", when: 99, rank: .indirect, target: .message(chatId: "c", projectId: "p", messageId: "m"))]
         rows += GlobalSearch.settingsEntries(query: q, agents: agents)
         let groups = GlobalSearch.arrange(rows, queryIsEmpty: false)
-        XCTAssertEqual(groups.map(\.section), [.settings, .messages])
-        let appearance = groups[0].rows[0]
+        let expected: [GlobalSearch.Section] = [.settings, .messages]
+        XCTAssertEqual(sections(groups), expected)
+        let appearance: GlobalSearch.Entry = groups[0].rows[0]
         XCTAssertEqual(appearance.title, "Appearance")
         XCTAssertEqual(appearance.subtitle, "Opacity · Settings")
-        XCTAssertEqual(appearance.target, .setting(.page(.appearance)))
+        XCTAssertEqual(appearance.target, GlobalSearch.Target.setting(.page(.appearance)))
         // Jacob's other examples.
-        XCTAssertEqual(GlobalSearch.settingsEntries(query: "theme", agents: []).first?.target, .setting(.page(.appearance)))
-        XCTAssertEqual(GlobalSearch.settingsEntries(query: "token", agents: []).first?.target, .setting(.page(.secrets)))
-        XCTAssertEqual(GlobalSearch.settingsEntries(query: "1Password", agents: []).first?.target, .setting(.page(.secrets)))
+        XCTAssertEqual(targets("theme").first, GlobalSearch.Target.setting(.page(.appearance)))
+        XCTAssertEqual(targets("token").first, GlobalSearch.Target.setting(.page(.secrets)))
+        XCTAssertEqual(targets("1Password").first, GlobalSearch.Target.setting(.page(.secrets)))
     }
 
     /// "voice": one row per owned agent in the order given (open chat's agent
     /// first), each with its current value; the title is exact, so first.
     func testAgentSettingsComeOncePerOwnedAgent() {
         let groups = GlobalSearch.arrange(GlobalSearch.settingsEntries(query: "voice", agents: agents), queryIsEmpty: false)
-        XCTAssertEqual(groups.first?.section, .settings)
-        let voice = groups[0].rows
+        XCTAssertEqual(groups.first?.section, GlobalSearch.Section.settings)
+        let voice: [GlobalSearch.Entry] = groups[0].rows
         XCTAssertEqual(voice.count, 3)
         XCTAssertTrue(voice.allSatisfy { $0.title == "Voice" })
-        XCTAssertEqual(voice.map(\.subtitle), ["Arbos · Settings · Default", "Comms · Settings · Rex", "Affine · Settings · Ara"])
-        XCTAssertEqual(voice[0].target, .setting(.agent(projectId: "p-arbos", setting: .voice)))
-        XCTAssertEqual(voice[0].picture, .project("p-arbos"))
-        let model = GlobalSearch.settingsEntries(query: "model", agents: agents)
-        XCTAssertEqual(model.first?.target, .setting(.agent(projectId: "p-arbos", setting: .model)))
-        XCTAssertEqual(GlobalSearch.settingsEntries(query: "reasoning", agents: agents).first?.target,
-                       .setting(.agent(projectId: "p-arbos", setting: .reasoning)))
+        XCTAssertEqual(voice.map { $0.subtitle }, ["Arbos · Settings · Default", "Comms · Settings · Rex", "Affine · Settings · Ara"])
+        XCTAssertEqual(voice[0].target, GlobalSearch.Target.setting(.agent(projectId: "p-arbos", setting: .voice)))
+        XCTAssertEqual(voice[0].picture, GlobalSearch.Picture.project("p-arbos"))
+        let model: [GlobalSearch.Entry] = GlobalSearch.settingsEntries(query: "model", agents: agents)
+        XCTAssertEqual(model.first?.target, GlobalSearch.Target.setting(.agent(projectId: "p-arbos", setting: .model)))
+        let reasoning: [GlobalSearch.Entry] = GlobalSearch.settingsEntries(query: "reasoning", agents: agents)
+        XCTAssertEqual(reasoning.first?.target, GlobalSearch.Target.setting(.agent(projectId: "p-arbos", setting: .reasoning)))
         XCTAssertTrue(GlobalSearch.settingsEntries(query: "voice", agents: []).isEmpty, "no owned agents, no rows")
     }
 
     /// Title hits before keyword hits; a section caps at eight like every other.
     func testTitleHitsOutrankKeywordHitsAndNothingShowsWithoutAQuery() {
-        let about = GlobalSearch.settingsEntries(query: "about", agents: [])
-        XCTAssertEqual(about.first?.target, .setting(.page(.about)))
+        XCTAssertEqual(targets("about").first, GlobalSearch.Target.setting(.page(.about)))
         XCTAssertTrue(GlobalSearch.settingsEntries(query: "", agents: agents).isEmpty)
         let recent = GlobalSearch.arrange(GlobalSearch.settingsEntries(query: "", agents: agents), queryIsEmpty: true)
         XCTAssertTrue(recent.isEmpty, "Settings never show in Recent")
@@ -103,33 +113,34 @@ final class SearchSettingsTests: XCTestCase {
     /// Every page the Settings list shows is reachable from search with its own
     /// route — and so are the Secrets forms, the feedback sheet and Profile.
     func testEveryListedSettingsPageIsIndexedWithARoute() {
-        let index = settingsIndex()
+        let index: [SettingsIndexEntry] = settingsIndex()
         for page in SettingsView.listedPages {
-            let routed = index.filter { GlobalSearch.settingsRoute(for: $0.item) == .page(page) }
+            let want: GlobalSearch.Target = .setting(.page(page))
+            let routed: [SettingsIndexEntry] = index.filter { entry in
+                GlobalSearch.settingsRoute(for: entry.item) == GlobalSearch.SettingsRoute.page(page)
+            }
             XCTAssertFalse(routed.isEmpty, "\(page) has no index entry")
             for e in routed {
-                let found = GlobalSearch.settingsEntries(query: e.title, agents: [])
-                XCTAssertTrue(found.contains { $0.target == .setting(.page(page)) }, "\(page) is not found by its title \(e.title)")
+                XCTAssertTrue(targets(e.title).contains(want), "\(page) is not found by its title \(e.title)")
             }
         }
-        let find = { (typed: String) in GlobalSearch.settingsEntries(query: typed, agents: []).map(\.target) }
-        XCTAssertTrue(find("new secret").contains(.setting(.page(.newSecret))))
-        XCTAssertTrue(find("connect 1password").contains(.setting(.page(.connectOnePassword))))
-        XCTAssertTrue(find("feedback").contains(.setting(.feedback)))
-        XCTAssertTrue(find("profile").contains(.setting(.profile)))
-        XCTAssertTrue(find("on this iphone").contains(.setting(.page(.root))))
-        XCTAssertTrue(find("text size").contains(.setting(.page(.textSize))))
+        XCTAssertTrue(targets("new secret").contains(GlobalSearch.Target.setting(.page(.newSecret))))
+        XCTAssertTrue(targets("connect 1password").contains(GlobalSearch.Target.setting(.page(.connectOnePassword))))
+        XCTAssertTrue(targets("feedback").contains(GlobalSearch.Target.setting(.feedback)))
+        XCTAssertTrue(targets("profile").contains(GlobalSearch.Target.setting(.profile)))
+        XCTAssertTrue(targets("on this iphone").contains(GlobalSearch.Target.setting(.page(.root))))
+        XCTAssertTrue(targets("text size").contains(GlobalSearch.Target.setting(.page(.textSize))))
         // Every iPhone entry of the shared index maps to an iPhone route (the
         // per-agent rows map through the agent); the Mac-only Updates page is absent.
         for e in index where !e.perAgent {
             XCTAssertNotNil(GlobalSearch.settingsRoute(for: e.item), "\(e.item) has no iPhone route")
             XCTAssertGreaterThanOrEqual(e.keywords.count, 3, "\(e.item) has too few keywords")
         }
-        XCTAssertFalse(index.contains { $0.item == .updates })
-        XCTAssertTrue(find("updates").contains(.setting(.page(.about))), "the iPhone's updates live on About")
+        XCTAssertFalse(index.contains { $0.item == SettingsItem.updates })
+        XCTAssertTrue(targets("updates").contains(GlobalSearch.Target.setting(.page(.about))), "the iPhone's updates live on About")
         // Not indexed on purpose: Sign out, Pause all secrets.
-        XCTAssertTrue(find("sign out").isEmpty)
-        XCTAssertTrue(find("pause").isEmpty)
+        XCTAssertTrue(targets("sign out").isEmpty)
+        XCTAssertTrue(targets("pause").isEmpty)
         // Every route lands on a page word `SettingsView(landing:)` understands.
         for page in GlobalSearch.SettingsPageRoute.allCases {
             XCTAssertFalse(page.rawValue.isEmpty)
@@ -139,7 +150,8 @@ final class SearchSettingsTests: XCTestCase {
 
     /// The section sits between Servers & channels and Messages, and the label is the Mac's.
     func testSectionOrderAndLabel() {
-        XCTAssertEqual(GlobalSearch.Section.withQuery, [.people, .chats, .servers, .settings, .messages, .content])
+        let expected: [GlobalSearch.Section] = [.people, .chats, .servers, .settings, .messages, .content]
+        XCTAssertEqual(GlobalSearch.Section.withQuery, expected)
         XCTAssertEqual(GlobalSearch.Section.settings.label, "Settings")
         XCTAssertEqual(GlobalSearch.keywordLabel("opacity"), "Opacity")
     }

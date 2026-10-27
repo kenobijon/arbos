@@ -365,7 +365,7 @@ enum GlobalSearch {
             if rows.count > sectionCap { rows.removeLast(rows.count - sectionCap) }
             out.append(Group(section: section, rows: rows))
         }
-        if let i = out.firstIndex(where: { $0.section == .settings && $0.rows.contains { $0.isExactSetting } }) {
+        if let i = out.firstIndex(where: { group in group.section == .settings && group.rows.contains { row in row.isExactSetting } }) {
             out.insert(out.remove(at: i), at: 0)
         }
         return out
