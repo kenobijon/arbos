@@ -356,6 +356,7 @@ impl ViewerItem {
                 bytes: None,
                 kind: Some(AttachmentKind::Image),
                 title: None,
+                chart_part: None,
             },
             by: name.to_owned(),
             when: 0,
@@ -483,6 +484,16 @@ pub struct AvatarGenerated {
     pub image_key: Option<String>,
     pub url: Option<String>,
     pub error: Option<UserError>,
+}
+
+/// Where a secret hand-off card's save stands on this device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HandoffState {
+    Saving,
+    /// Saved; the vault name.
+    Saved(String),
+    /// The shared error note's slot (sentence + Try again + Details) on the card.
+    Failed(crate::ui::error_note::Slot),
 }
 
 pub struct AppState {
@@ -640,6 +651,9 @@ pub struct AppState {
     /// The media viewer (feedback media-viewer-2026-10-23): a chat's media as
     /// an album, opened from an attachment card or the Library grid.
     pub media_viewer: Option<MediaViewer>,
+    /// The expanded chart overlay ([feedback chart-bubble-mac-2026-10-26]).
+    pub chart_viewer: Option<crate::ui::chart_viewer::ChartViewer>,
+    pub chart_viewer_generation: u64,
     /// Bumped on every open so the shell focuses the viewer once per opening.
     pub media_viewer_generation: u64,
     /// Bubble menu → Forward: the message the "Forward to" picker is open for.
@@ -659,6 +673,8 @@ pub struct AppState {
     pub project_secrets: std::collections::HashMap<Id, ProjectSecrets>,
     /// Standing shell approvals per agent (#1544), loaded when the agent pane opens.
     pub shell_grants: std::collections::HashMap<Id, Vec<crate::model::ShellGrant>>,
+    /// Secret hand-off request cards: approval id → saving / saved (env) / the error sentence.
+    pub handoff: std::collections::HashMap<String, HandoffState>,
     /// Settings → Routines, per project (F3).
     pub routines: HashMap<Id, Vec<Routine>>,
     /// The box as `GET /machine/debug` last reported it — the agent pane's
@@ -1094,6 +1110,8 @@ impl AppState {
             details_open: None,
             media_viewer: None,
             media_viewer_generation: 0,
+            chart_viewer: None,
+            chart_viewer_generation: 0,
             forward_message: None,
             new_project_open: false,
             show_details: false,
@@ -1103,6 +1121,7 @@ impl AppState {
             devices: DevicesView::default(),
             project_secrets: std::collections::HashMap::new(),
             shell_grants: std::collections::HashMap::new(),
+            handoff: std::collections::HashMap::new(),
             routines: HashMap::new(),
             box_report: None,
             jobs: HashMap::new(),
@@ -1852,6 +1871,19 @@ impl AppState {
                 }
                 cx.notify();
             }
+            SyncEvent::SecretHandoff {
+                approval_id,
+                result,
+            } => {
+                self.handoff.insert(
+                    approval_id,
+                    match result {
+                        Ok(env) => HandoffState::Saved(env),
+                        Err(e) => HandoffState::Failed(crate::ui::error_note::Slot::new(e)),
+                    },
+                );
+                cx.notify();
+            }
             SyncEvent::Notice(text) => {
                 self.push_notice(text);
                 cx.notify();
@@ -2481,6 +2513,29 @@ impl AppState {
                 if let Some(project_id) = self.project_of_chat(&chat_id).map(|p| p.id.clone()) {
                     self.enforce_tab(&project_id);
                 }
+                cx.notify();
+            }
+            SyncEvent::NotificationsCleared { chat_id, badge } => {
+                // I read it on another device: its banners go, the dot clears, the Dock
+                // badge follows. The relay's total is the truth for what this Mac cannot
+                // see yet (`/me/unread` confirms on the next refresh).
+                notify::withdraw_chat(&chat_id);
+                if let Some(c) = self
+                    .chats
+                    .values_mut()
+                    .flat_map(|v| v.iter_mut())
+                    .find(|c| c.id == chat_id)
+                {
+                    c.unread = false;
+                    c.unread_count = 0;
+                }
+                let local: usize = self
+                    .chats
+                    .values()
+                    .flat_map(|v| v.iter())
+                    .map(Chat::missed_count)
+                    .sum();
+                notify::set_badge(local.min(badge as usize));
                 cx.notify();
             }
             SyncEvent::ChatSnapshot {
@@ -3798,6 +3853,8 @@ impl AppState {
             chat.unread_count = 0;
         }
         self.sync_badge();
+        // Reading it here clears its banners here too (the relay tells the other devices).
+        notify::withdraw_chat(&chat_id);
         // A job tab is client-side (`jobtabs`): nothing for the relay to open or mark.
         if !crate::jobtabs::is_job_chat(&chat_id) {
             self.command(ClientCommand::MarkRead {
@@ -4217,6 +4274,7 @@ impl AppState {
                     bytes: Some(data.len() as u64),
                     kind: None,
                     title: None,
+                    chart_part: None,
                 };
                 if probe.is_image() {
                     if let Some((image, trimmed)) = decode_image_pair(&data) {
@@ -4242,6 +4300,7 @@ impl AppState {
                     bytes,
                     kind: None,
                     title: None,
+                    chart_part: None,
                 },
             });
         }
@@ -4255,6 +4314,7 @@ impl AppState {
                     bytes: None,
                     kind: Some(AttachmentKind::Audio),
                     title: None,
+                    chart_part: None,
                 },
             });
         }
@@ -6031,6 +6091,31 @@ impl AppState {
                 grant,
             });
         }
+        cx.notify();
+    }
+
+    /// Secret hand-off request card → Save: the value leaves this device once, to the vault.
+    #[allow(clippy::too_many_arguments)] // one call site, the card; the fields mirror the command
+    pub fn secret_handoff_save(
+        &mut self,
+        chat_id: Id,
+        approval_id: String,
+        project_id: Id,
+        name: String,
+        value: String,
+        purpose: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.handoff
+            .insert(approval_id.clone(), HandoffState::Saving);
+        self.command(ClientCommand::SecretHandoffSave {
+            chat_id,
+            approval_id,
+            project_id,
+            name,
+            value,
+            purpose,
+        });
         cx.notify();
     }
 

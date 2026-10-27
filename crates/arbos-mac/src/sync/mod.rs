@@ -150,6 +150,13 @@ pub enum SyncEvent {
         chat_id: Id,
         archived_at: Option<u64>,
     },
+    /// `notifications_cleared` push: I read `chat_id` on another device. This Mac drops the
+    /// chat's delivered banners, stops showing it unread and re-badges; `badge` is the relay's
+    /// unread total after that read.
+    NotificationsCleared {
+        chat_id: Id,
+        badge: u64,
+    },
     /// `space_archived` push: another device archived / unarchived a sidebar
     /// space (an agent or a server) for me.
     SpaceArchived {
@@ -166,6 +173,11 @@ pub enum SyncEvent {
     FeedbackCapture {
         request_id: String,
         expires_at: Option<i64>,
+    },
+    /// Secret hand-off: the card's save finished — `Ok(env)` or the error for the shared note.
+    SecretHandoff {
+        approval_id: String,
+        result: Result<String, super::sync::user_error::UserError>,
     },
     /// `GET /voices`: the call voices an agent can use, and the default's id.
     Voices {
@@ -940,6 +952,17 @@ pub enum ClientCommand {
     ShellGrantRevoke {
         project_id: Id,
         grant_id: String,
+    },
+    /// Secret hand-off request card: the value goes from this device to `POST /secrets`
+    /// (source `chat`, the agent granted), then the card is answered with the saved secret's
+    /// name and id — never the value — so the agent learns only the name.
+    SecretHandoffSave {
+        chat_id: Id,
+        approval_id: String,
+        project_id: Id,
+        name: String,
+        value: String,
+        purpose: String,
     },
     /// Add a secret; the value goes to the relay once.
     SecretAdd {

@@ -1292,15 +1292,27 @@ fn start_store_flusher(shared: &Arc<Shared>) {
                     if doc.core.doc.oplog_frontiers().is_empty() {
                         continue;
                     }
-                    doc.core.doc.export(loro::ExportMode::Snapshot)
+                    // Through the core: once a secret redaction reached this room the
+                    // snapshot is shallow (no history), so the store never keeps the old text.
+                    let shallow = doc.core.is_shallow_mode();
+                    let bytes = doc.core.snapshot();
+                    if bytes.is_empty() {
+                        Err(shallow)
+                    } else {
+                        Ok((bytes, shallow))
+                    }
                 };
                 match snapshot {
-                    Ok(bytes) => {
+                    Ok((bytes, shallow)) => {
                         shared.with_store(|s| {
-                            s.save_doc(&key, &project_id, &room_chat, cursor, &bytes)
+                            s.save_doc(&key, &project_id, &room_chat, cursor, &bytes);
+                            if shallow {
+                                s.flush_after_redaction();
+                            }
                         });
                     }
-                    Err(err) => eprintln!("store: export {key}: {err}"),
+                    // An open transact: the export waits for the next tick.
+                    Err(_) => continue,
                 }
             }
             since_caps += 1;
@@ -1409,6 +1421,33 @@ async fn poll_me_pushes(shared: &Arc<Shared>) {
                     });
                 }
             }
+            // I read this chat on another device: not unread here either (the relay holds the
+            // one cursor), and the app drops its banners for it.
+            PushEventDto::NotificationsCleared(payload) => {
+                let chat_id = payload.chat_id.clone();
+                if chat_id.is_empty() {
+                    continue;
+                }
+                if let Some(c) = shared
+                    .chats
+                    .lock()
+                    .unwrap()
+                    .iter_mut()
+                    .find(|c| c.id == chat_id)
+                {
+                    c.unread = false;
+                    c.unread_count = 0;
+                }
+                shared
+                    .local_read_at
+                    .lock()
+                    .unwrap()
+                    .insert(chat_id.clone(), now_ms() as i64);
+                let _ = shared.events.send(SyncEvent::NotificationsCleared {
+                    chat_id,
+                    badge: payload.badge.max(0) as u64,
+                });
+            }
             PushEventDto::FeedbackCapture(payload) => {
                 if !payload.request_id.is_empty() {
                     let _ = shared.events.send(SyncEvent::FeedbackCapture {
@@ -1484,6 +1523,7 @@ async fn poll_me_pushes(shared: &Arc<Shared>) {
             | PushEventDto::SecretRequest(_)
             | PushEventDto::SecretsPaused(_)
             | PushEventDto::SecretExpiring(_)
+            | PushEventDto::MessageRedacted(_)
             | PushEventDto::CallMissed(_) => {}
         }
     }
@@ -4395,6 +4435,7 @@ async fn upload_voice_memo(shared: &Shared, blob_slot: &str, wav: Arc<Vec<u8>>) 
             bytes: None,
             kind: Some(AttachmentKind::Audio),
             title: None,
+            chart_part: None,
         },
     }
 }
@@ -7141,6 +7182,52 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     shared.fail("change the shell approvals", &err);
                 }
                 refresh_shell_grants(&shared, &project_id).await;
+            });
+        }
+        ClientCommand::SecretHandoffSave {
+            chat_id,
+            approval_id,
+            project_id,
+            name,
+            value,
+            purpose,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let body = json!({ "name": name, "kind": "key", "value": value, "note": purpose,
+                    "agents": [{ "project_id": project_id, "note": purpose }],
+                    "source": { "kind": "chat", "project_id": project_id, "chat_id": chat_id } });
+                drop(value);
+                let result = match shared.post_json("/secrets", body).await {
+                    Ok(v) => match serde_json::from_value::<SecretEnvelopeDto>(v) {
+                        Ok(e) => {
+                            // Answer the card with the reference: the box's waiting tool
+                            // gets `{ id, name, env }` and nothing else.
+                            let docs = shared.docs.lock().unwrap();
+                            if let Some(doc) = docs.get(&chat_id) {
+                                let device = shared.device_id();
+                                let payload = json!({ "approvalId": approval_id,
+                                    "secret": { "id": e.secret.id, "name": e.secret.name, "env": e.secret.env } });
+                                doc.core.transact(|d| {
+                                    d.push_command("approve", payload, &device);
+                                });
+                            }
+                            Ok(e.secret.env)
+                        }
+                        Err(_) => Err(UserError::of(
+                            "save the secret",
+                            ErrorClass::Server,
+                            "bad secret reply",
+                        )),
+                    },
+                    // The shared error note (ARB-416) draws it on the card.
+                    Err(err) => Err(UserError::classify("save the secret", &err)),
+                };
+                let _ = shared.events.send(SyncEvent::SecretHandoff {
+                    approval_id,
+                    result,
+                });
+                refresh_secrets(&shared).await;
             });
         }
         ClientCommand::SecretAdd { item } => {
