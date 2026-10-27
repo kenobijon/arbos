@@ -7470,7 +7470,15 @@ impl AppState {
             cx.notify();
             return;
         }
-        let by = self.forward_sender_name(message);
+        // Forwarding a forwarded message keeps the original author (Telegram), not
+        // whoever forwarded it last.
+        let by = message
+            .forwarded_from
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| self.forward_sender_name(message));
         self.forward_message = Some(ForwardMessage {
             chat_id,
             message_id,
