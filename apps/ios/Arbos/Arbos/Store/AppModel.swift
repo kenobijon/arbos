@@ -2980,10 +2980,12 @@ final class AppModel: ObservableObject {
     /// selector (any combination of agents that should all reply).
     /// `chipTokens` (#1596) are the composer's committed mention chips, lower-case handle →
     /// member id: an `@handle` in the text that has a chip means exactly that member.
+    /// `extraParts` (#forward-attachments): doc parts written after the text and attachment
+    /// parts — a forwarded chart and its fallback picture, already uploaded.
     func sendPeople(chatId: String, text: String, replyTo: String?, address: String? = nil,
                     chipMentions: [String] = [], attachments: [PendingAttachment] = [],
                     forwardedFrom: String? = nil, chipTokens: [String: String] = [:],
-                    replyRef: ReplyRef? = nil) {
+                    replyRef: ReplyRef? = nil, extraParts: [[String: Any]] = []) {
         guard let doc = docs[chatId], let chat = peopleChat(chatId), let me = user else { return }
         var mentions = AppModel.mentions(in: text, members: chat.members, senderHandle: me.login, chipTokens: chipTokens)
         // Leading bare agent names ("Bob?", "hey Bob …", "Arbos what is your name") count as
@@ -3056,7 +3058,7 @@ final class AppModel: ObservableObject {
         if attachments.isEmpty {
             commitPeople(chatId: chatId, doc: doc, messageId: messageId, text: text, author: author,
                          mentions: mentions, reply: reply, attachments: [], forwardedFrom: forwardedFrom,
-                         replyRef: replyRef)
+                         replyRef: replyRef, extraParts: extraParts)
             return
         }
         markUnacked(chatId: chatId, messageId: messageId)
@@ -3071,9 +3073,11 @@ final class AppModel: ObservableObject {
                     notice = Notice(text: "Attachment upload failed: \(error.localizedDescription)")
                 }
             }
+            // The forward header rides along with the pictures ([feedback
+            // forward-attachments-ios-2026-10-27]: it was dropped on this path).
             commitPeople(chatId: chatId, doc: doc, messageId: messageId, text: text, author: author,
                          mentions: mentions, reply: reply, attachments: uploaded, alreadyUnacked: true,
-                         replyRef: replyRef)
+                         forwardedFrom: forwardedFrom, replyRef: replyRef, extraParts: extraParts)
         }
     }
 
@@ -3082,7 +3086,8 @@ final class AppModel: ObservableObject {
     private func commitPeople(chatId: String, doc: CoreChatDoc, messageId: Id, text: String,
                               author: CoreChatDoc.Author, mentions: [String], reply: String?,
                               attachments: [Attachment], alreadyUnacked: Bool = false,
-                              forwardedFrom: String? = nil, replyRef: ReplyRef? = nil) {
+                              forwardedFrom: String? = nil, replyRef: ReplyRef? = nil,
+                              extraParts: [[String: Any]] = []) {
         if !alreadyUnacked { markUnacked(chatId: chatId, messageId: messageId) }
         // Rig (#1596): `ARBOS_TRACE_SENDS=1` prints what the row carries.
         if DebugHooks.traceSends {
@@ -3092,6 +3097,7 @@ final class AppModel: ObservableObject {
             try doc.insertUserMessage(id: messageId, text: text, deviceId: deviceId, attachments: attachments,
                                       author: author, mentions: mentions, replyTo: reply, forwardedFrom: forwardedFrom,
                                       replyRef: replyRef)
+            for part in extraParts { try doc.insertPart(messageId: messageId, part: part) }
             try doc.pushCommand("send", payload: ["messageId": messageId], device: deviceId)
         } catch {
             clearUnacked(chatId: chatId, messageId: messageId)
@@ -4781,15 +4787,17 @@ final class AppModel: ObservableObject {
 
     /// `replyTo` = the message this send answers (reply-to); it lands on the row as `replyTo`
     /// so every client draws the quote header and agentd puts the quoted message in the turn.
+    /// `extraParts` (#forward-attachments): doc parts written after the text and attachment
+    /// parts — a forwarded chart and its fallback picture, already uploaded.
     func send(chatId: Id, text: String, attachments: [PendingAttachment] = [], replyTo: Id? = nil,
-              forwardedFrom: String? = nil) {
+              forwardedFrom: String? = nil, extraParts: [[String: Any]] = []) {
         if JobTabs.isJobChat(chatId) {
             steerFromJobTab(chatId: chatId, text: text)
             return
         }
         if attachments.isEmpty {
             write(chatId: chatId, text: text, command: "send", attachments: [], replyTo: replyTo,
-                  forwardedFrom: forwardedFrom)
+                  forwardedFrom: forwardedFrom, extraParts: extraParts)
             return
         }
         guard let chat = chat(chatId) else { return }
@@ -4812,7 +4820,10 @@ final class AppModel: ObservableObject {
                     uploaded.append(Attachment(name: a.name, mime: a.mime, blobRef: nil, kind: kind))
                 }
             }
-            write(chatId: chatId, text: text, command: "send", attachments: uploaded, replyTo: replyTo)
+            // The forward header rides along with the pictures ([feedback
+            // forward-attachments-ios-2026-10-27]: it was dropped on this path).
+            write(chatId: chatId, text: text, command: "send", attachments: uploaded, replyTo: replyTo,
+                  forwardedFrom: forwardedFrom, extraParts: extraParts)
         }
     }
 
@@ -4993,7 +5004,7 @@ final class AppModel: ObservableObject {
 
     private func write(chatId: Id, text: String, command: String, attachments: [Attachment],
                        extra: [String: Any] = [:], messageId presetId: Id? = nil, replyTo: Id? = nil,
-                       forwardedFrom: String? = nil) {
+                       forwardedFrom: String? = nil, extraParts: [[String: Any]] = []) {
         guard let chat = chat(chatId) else {
             #if DEBUG
             if isFixture { fixtureAppend(chatId: chatId, text: text, attachments: attachments, replyTo: replyTo) }
@@ -5015,6 +5026,7 @@ final class AppModel: ObservableObject {
             try doc.insertUserMessage(id: messageId, text: text, deviceId: deviceId, attachments: attachments,
                                       author: author, replyTo: replyTo,
                                       forwardedFrom: forwardedFrom)
+            for part in extraParts { try doc.insertPart(messageId: messageId, part: part) }
             try doc.pushCommand(command, payload: extra.merging(["messageId": messageId]) { _, new in new }, device: deviceId)
             if !chat.isPinned && chat.title == "New chat" {
                 let title = AppModel.title(from: text)
