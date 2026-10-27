@@ -409,13 +409,27 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("NOT posted"));
+        // A misspelt key (`serie` for `series`): serde reports whichever it meets first — the
+        // unknown `serie` or the missing `series` (the order depends on the map the JSON is
+        // read into: `serde_json`'s `preserve_order` is a workspace-unified feature) — and
+        // both name the problem; the tool answer is NOT posted either way.
         let mut typo = eval_chart();
-        typo["serie"] = typo["series"].take();
+        let series = typo.as_object_mut().unwrap().remove("series").unwrap();
+        typo["serie"] = series;
         let v = post_chart(&agent, &json!({ "chart": typo, "caption": "x" })).await;
-        assert!(v["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("unknown field"));
+        let text = v["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("NOT posted")
+                && (text.contains("unknown field `serie`")
+                    || text.contains("missing field `series`")),
+            "{text}"
+        );
+        // A typo next to a complete chart is always "unknown field".
+        let mut extra = eval_chart();
+        extra["colour"] = json!("#ff0000");
+        let v = post_chart(&agent, &json!({ "chart": extra, "caption": "x" })).await;
+        let text = v["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("unknown field `colour`"), "{text}");
 
         assert_eq!(
             host.lock().await.doc.messages().len(),
