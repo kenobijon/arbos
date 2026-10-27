@@ -114,7 +114,7 @@ final class LoopbackRelay {
     private var _requests: [Request] = []
     var requests: [Request] { lock.lock(); defer { lock.unlock() }; return _requests }
     var respond: (Request) -> (Int, Data) = { _ in (404, Data("{}".utf8)) }
-    let port: UInt16
+    private(set) var port: UInt16 = 0
 
     init() throws {
         let params = NWParameters.tcp
