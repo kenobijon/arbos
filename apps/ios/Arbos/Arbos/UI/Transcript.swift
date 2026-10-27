@@ -163,7 +163,11 @@ enum RowKind: Equatable {
     /// `forwardedFrom`: the "Forwarded from <name>" header at the top of the card when
     /// this is the first media of a forwarded message
     /// ([feedback forward-attachments-ios-2026-10-27]).
-    case file(item: MediaItem, subtitle: String, caption: String?, forwardedFrom: String? = nil)
+    /// `sender` / `named`: someone else's card in a people chat carries their avatar beside it
+    /// and, on the message's first card when the run changes sender, their name above it —
+    /// a picture is a message like any other (Jacob's Scout case).
+    case file(item: MediaItem, subtitle: String, caption: String?, forwardedFrom: String? = nil,
+              sender: MediaSender? = nil, named: Bool = false)
     case voiceMemo(name: String, projectId: Id, ref: String?, fromUser: Bool)
     /// A picture; tap opens the media viewer at its place in the chat's album.
     /// `caption` is the description bar under the picture when the send carried text.
@@ -171,10 +175,20 @@ enum RowKind: Equatable {
     /// sender's avatar lane, like their bubble (Mac `RowKind::Attachment.lane`).
     /// `forwardedFrom`: the "Forwarded from <name>" header above the picture when this is
     /// the first media of a forwarded message ([feedback forward-attachments-ios-2026-10-27]).
-    case image(item: MediaItem, fromUser: Bool, caption: String?, lane: Bool, forwardedFrom: String? = nil)
+    case image(item: MediaItem, fromUser: Bool, caption: String?, lane: Bool, forwardedFrom: String? = nil,
+               sender: MediaSender? = nil, named: Bool = false)
     /// "Forwarded from <name>" under a forwarded attachment (media-viewer-2026-10-23).
     case forwardHint(text: String, fromUser: Bool)
     case error(code: String, message: String)
+}
+
+/// Who sent a picture / file row that is not mine in a people chat — the same identity its
+/// text bubble resolves ([feedback forward-attachments-ios-2026-10-27]).
+enum MediaSender: Equatable {
+    /// Another person: their handle and picture URL (`.other` bubble fields).
+    case person(handle: String, avatar: String?)
+    /// An agent (`.member` bubble fields): project id when known, handle, name, picture.
+    case agent(id: String?, handle: String, name: String?, avatar: String?)
 }
 
 struct Row: Identifiable, Equatable {
@@ -309,12 +323,16 @@ enum Transcript {
                 }()
                 for (i, part) in mediaParts.enumerated() {
                     let cap = (i == lastCaptionable) ? mediaCaption : nil
-                    // Another person's picture / file sits left like their bubble —
-                    // after the avatar lane in a people chat (Mac Attachment.lane).
+                    // Another person's picture / file sits left like their bubble, with their
+                    // avatar beside it and their name on the first card when the run changes
+                    // sender ([feedback forward-attachments-ios-2026-10-27]).
                     chunk.append(attachmentRow(id: "\(message.id)#\(part.id)", message: message, a: part.a,
                                                projectId: projectId, fromUser: mine, agentNames: agentNames,
                                                caption: cap, lane: !mine,
-                                               forwardedFrom: i == 0 && forwarded == nil ? forwardedBy : nil))
+                                               forwardedFrom: i == 0 && forwarded == nil ? forwardedBy : nil,
+                                               sender: mine ? nil : .person(handle: message.senderHandle ?? "someone",
+                                                                            avatar: message.senderAvatar),
+                                               named: named && i == 0))
                 }
                 if let forwarded {
                     chunk.append(Row(id: "\(message.id)#forwarded", messageId: message.id, role: mine ? .user : .project,
@@ -339,8 +357,10 @@ enum Transcript {
                         chunk.append(Row(id: "\(message.id)#user", messageId: message.id, role: .user,
                                          kind: .user(text: text, delivery: Delivery.of(message), quote: quote)))
                     } else {
+                        // The first card already names the sender.
                         chunk.append(Row(id: "\(message.id)#other", messageId: message.id, role: .project,
-                                         kind: .other(text: text, handle: message.senderHandle ?? "someone", avatar: message.senderAvatar, named: named, quote: quote)))
+                                         kind: .other(text: text, handle: message.senderHandle ?? "someone", avatar: message.senderAvatar,
+                                                      named: named && mediaParts.isEmpty, quote: quote)))
                     }
                 }
             case .system:
@@ -386,6 +406,10 @@ enum Transcript {
                 // chip with Retry; on an answer with no words they become the words.
                 var errors: [(id: Id, code: String, text: String)] = []
                 let rowsBeforeParts = chunk.count
+                // The sender's name goes on the message's first row: a picture before the
+                // prose takes it, and the first text block then does not repeat it
+                // ([feedback forward-attachments-ios-2026-10-27]).
+                var nameTaken = false
                 for (pix, part) in message.parts.enumerated() {
                     switch part {
                     case .text(let id, let text):
@@ -395,9 +419,11 @@ enum Transcript {
                         if blocks.isEmpty { continue }
                         let live = streaming && pix == lastTextPart
                         if people, let h = message.senderHandle {
+                            let names = named && pix == firstTextPart && !nameTaken
+                            nameTaken = nameTaken || names
                             chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
                                              kind: .member(blocks: blocks, live: live, handle: h, name: message.senderName,
-                                                           avatar: message.senderAvatar, named: named && pix == firstTextPart,
+                                                           avatar: message.senderAvatar, named: names,
                                                            agentId: agentId,
                                                            quote: pix == firstTextPart ? replyQuote : nil)))
                         } else if message.role == .project, let from = Self.projectSender(message) {
@@ -439,11 +465,18 @@ enum Transcript {
                         // the chart instead ([feedback chart-bubble-ios-2026-10-26]).
                         break
                     case .attachment(let id, let a):
-                        // People-chat agent media keeps the sender lane free, like the bubble
-                        // and the question card (Mac Attachment.lane / #1509).
+                        // A people-chat agent's picture / file sits in its lane with its avatar
+                        // and names it when it is the message's first row (Scout's photo in
+                        // Arbonites drew as a bare picture before).
+                        let inLane = people && message.senderHandle != nil
+                        let names = inLane && named && !nameTaken
+                        nameTaken = nameTaken || names
                         chunk.append(attachmentRow(id: "\(message.id)#\(id)", message: message, a: a,
                                                    projectId: projectId, fromUser: false, agentNames: agentNames,
-                                                   lane: people && message.senderHandle != nil))
+                                                   lane: inLane,
+                                                   sender: inLane ? .agent(id: agentId, handle: message.senderHandle ?? "",
+                                                                           name: message.senderName, avatar: message.senderAvatar) : nil,
+                                                   named: names))
                     case .chart(let id, _, let spec, let table, _):
                         // A chart bubble's card: one block of the bubble, like a code card. It
                         // joins the caption's bubble when that is the row just before it.
@@ -452,9 +485,11 @@ enum Transcript {
                            let joined = Self.appending(block, to: chunk[last].kind) {
                             chunk[last].kind = joined
                         } else if people, let h = message.senderHandle {
+                            let names = named && !nameTaken
+                            nameTaken = nameTaken || names
                             chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
                                              kind: .member(blocks: [block], live: false, handle: h, name: message.senderName,
-                                                           avatar: message.senderAvatar, named: named && firstTextPart == nil,
+                                                           avatar: message.senderAvatar, named: names,
                                                            agentId: agentId, quote: nil)))
                         } else {
                             chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
@@ -727,7 +762,8 @@ enum Transcript {
 
     private static func attachmentRow(id: String, message: Message, a: Attachment, projectId: Id, fromUser: Bool,
                                       agentNames: [String: String], caption: String? = nil,
-                                      lane: Bool = false, forwardedFrom: String? = nil) -> Row {
+                                      lane: Bool = false, forwardedFrom: String? = nil,
+                                      sender: MediaSender? = nil, named: Bool = false) -> Row {
         guard let kind = MediaAlbum.kind(of: a) else {
             return Row(id: id, messageId: message.id, role: fromUser ? .user : .assistant,
                        kind: .voiceMemo(name: a.name, projectId: projectId, ref: a.blobRef, fromUser: fromUser))
@@ -737,13 +773,14 @@ enum Transcript {
         if kind == .image {
             return Row(id: id, messageId: message.id, role: fromUser ? .user : .assistant,
                        kind: .image(item: item, fromUser: fromUser, caption: caption, lane: lane,
-                                    forwardedFrom: forwardedFrom))
+                                    forwardedFrom: forwardedFrom, sender: sender, named: named))
         }
         // Video shows as a file card in the bubble (poster + Play live in the viewer).
         // A typed description rides the card as a caption bar (pictures/videos only).
         return Row(id: id, messageId: message.id, role: fromUser ? .user : .assistant,
                    kind: .file(item: item, subtitle: subtitle(for: a),
-                               caption: kind == .video ? caption : nil, forwardedFrom: forwardedFrom))
+                               caption: kind == .video ? caption : nil, forwardedFrom: forwardedFrom,
+                               sender: sender, named: named))
     }
 
     /// Picture or video — the kinds that take a description bar with the send.
@@ -1599,14 +1636,23 @@ struct RowView: View, Equatable {
                     .frame(maxWidth: lane ? maxBubble - Theme.memberLane(composerInset: composerInset) : maxBubble, alignment: .leading)
                 Spacer(minLength: 0)
             }
-        case .file(let item, let subtitle, let caption, let forwardedFrom):
-            HStack {
-                if row.role == .user { Spacer(minLength: 0) }
-                FileCard(item: item, subtitle: subtitle, chatId: chatId, fromUser: row.role == .user, caption: caption,
-                         forwardedFrom: forwardedFrom)
-                    .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: row.role == .user) }
-                    .frame(maxWidth: maxBubble, alignment: row.role == .user ? .trailing : .leading)
-                if row.role != .user { Spacer(minLength: 0) }
+        case .file(let item, let subtitle, let caption, let forwardedFrom, let sender, let named):
+            if let sender {
+                mediaRow(sender: sender, named: named) {
+                    FileCard(item: item, subtitle: subtitle, chatId: chatId, fromUser: false, caption: caption,
+                             forwardedFrom: forwardedFrom)
+                        .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: false) }
+                        .frame(maxWidth: maxBubble - Theme.memberLane(composerInset: composerInset), alignment: .leading)
+                }
+            } else {
+                HStack {
+                    if row.role == .user { Spacer(minLength: 0) }
+                    FileCard(item: item, subtitle: subtitle, chatId: chatId, fromUser: row.role == .user, caption: caption,
+                             forwardedFrom: forwardedFrom)
+                        .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: row.role == .user) }
+                        .frame(maxWidth: maxBubble, alignment: row.role == .user ? .trailing : .leading)
+                    if row.role != .user { Spacer(minLength: 0) }
+                }
             }
         case .forwardHint(let text, let fromUser):
             HStack {
@@ -1623,17 +1669,27 @@ struct RowView: View, Equatable {
                     .frame(maxWidth: maxBubble, alignment: fromUser ? .trailing : .leading)
                 if !fromUser { Spacer(minLength: 0) }
             }
-        case .image(let item, let fromUser, let caption, let lane, let forwardedFrom):
+        case .image(let item, let fromUser, let caption, let lane, let forwardedFrom, let sender, let named):
             // Same left edge and cap as an incoming bubble: after the avatar lane in a
-            // people chat ([feedback ADUIX9xlGQxCSzeXke7JVBw], Mac Attachment.lane).
-            HStack(spacing: 0) {
-                if fromUser { Spacer(minLength: 0) }
-                if lane { Color.clear.frame(width: Theme.memberLane(composerInset: composerInset), height: 1) }
-                ImageBubble(item: item, chatId: chatId, fromUser: fromUser,
-                            maxWidth: lane ? maxBubble - Theme.memberLane(composerInset: composerInset) : maxBubble,
-                            caption: caption, mentions: mentions, forwardedFrom: forwardedFrom)
-                    .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: fromUser) }
-                if !fromUser { Spacer(minLength: 0) }
+            // people chat ([feedback ADUIX9xlGQxCSzeXke7JVBw], Mac Attachment.lane) — with
+            // the sender's avatar in that lane and the name above the first card.
+            if let sender {
+                mediaRow(sender: sender, named: named) {
+                    ImageBubble(item: item, chatId: chatId, fromUser: false,
+                                maxWidth: maxBubble - Theme.memberLane(composerInset: composerInset),
+                                caption: caption, mentions: mentions, forwardedFrom: forwardedFrom)
+                        .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: false) }
+                }
+            } else {
+                HStack(spacing: 0) {
+                    if fromUser { Spacer(minLength: 0) }
+                    if lane { Color.clear.frame(width: Theme.memberLane(composerInset: composerInset), height: 1) }
+                    ImageBubble(item: item, chatId: chatId, fromUser: fromUser,
+                                maxWidth: lane ? maxBubble - Theme.memberLane(composerInset: composerInset) : maxBubble,
+                                caption: caption, mentions: mentions, forwardedFrom: forwardedFrom)
+                        .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: fromUser) }
+                    if !fromUser { Spacer(minLength: 0) }
+                }
             }
         case .error(let code, let message):
             HStack(spacing: 10) {
@@ -1753,7 +1809,7 @@ struct RowView: View, Equatable {
         case .other, .member: return Theme.memberLane(composerInset: composerInset)
         case .question(_, _, _, _, _, _, let lane, _, _): return lane ? Theme.memberLane(composerInset: composerInset) : 0
         case .secretGhost(_, let mine, _, _, _): return mine ? 0 : Theme.memberLane(composerInset: composerInset)
-        case .image(_, _, _, let lane, _): return lane ? Theme.memberLane(composerInset: composerInset) : 0
+        case .image(_, _, _, let lane, _, _, _): return lane ? Theme.memberLane(composerInset: composerInset) : 0
         default: return 0
         }
     }
@@ -1763,6 +1819,68 @@ struct RowView: View, Equatable {
     /// the handle (#1592).
     private func memberAvatar(_ agent: Project) -> some View {
         AgentAvatar(project: agent, theme: theme, size: Theme.memberAvatar, still: true)
+    }
+
+    /// Someone else's picture / file row in a people chat: their avatar on the lane (the
+    /// same profile target as their bubble's), the name above the card when `named`, then
+    /// the card — a picture is a message like any other
+    /// ([feedback forward-attachments-ios-2026-10-27], Jacob's Scout case).
+    @ViewBuilder
+    private func mediaRow<Card: View>(sender: MediaSender, named: Bool, @ViewBuilder card: () -> Card) -> some View {
+        switch sender {
+        case .person(let handle, let avatar):
+            let personTarget = model.personTarget(handle: handle, avatarUrl: avatar, chatId: chatId)
+            let personName = model.personName(handle: handle) ?? "@\(handle)"
+            let personLabel = ProfileToggle.label(name: personName, showing: model.profileShows(personTarget))
+            let openPerson = { model.toggleProfile(personTarget) }
+            HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
+                Button(action: openPerson) {
+                    PersonAvatar(url: avatar, handle: handle, size: Theme.memberAvatar, name: model.personName(handle: handle), id: model.personId(handle: handle))
+                }
+                .buttonStyle(.plain)
+                .padding(.leading, Theme.avatarColumnInset(composerInset: composerInset))
+                .accessibilityLabel(personLabel)
+                .accessibilityIdentifier("sender-avatar")
+                VStack(alignment: .leading, spacing: 4) {
+                    if named {
+                        Button(action: openPerson) {
+                            LiveSenderName(name: personName, url: avatar, seed: model.personId(handle: handle) ?? handle, agent: false)
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.leading, 6)
+                        .accessibilityLabel(personLabel)
+                        .accessibilityIdentifier("bubble-name")
+                    }
+                    card()
+                }
+                Spacer(minLength: 0)
+            }
+            .task(id: avatar) { SenderAccents.shared.load(url: avatar) }
+        case .agent(let id, let handle, let name, let avatar):
+            let agent = model.agent(sender: id ?? "", handle: handle, name: name, chatId: chatId)
+            let memberTarget: ProfileTarget = id.map { ProfileTarget.agent(projectId: $0) }
+                ?? model.personTarget(handle: handle, avatarUrl: avatar, chatId: chatId)
+            let memberLabel = ProfileToggle.label(name: agent.name, showing: model.profileShows(memberTarget))
+            let openMember = { model.toggleProfile(memberTarget) }
+            HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
+                Button(action: openMember) { memberAvatar(agent) }
+                    .padding(.leading, Theme.avatarColumnInset(composerInset: composerInset))
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(memberLabel)
+                    .accessibilityIdentifier("sender-avatar")
+                VStack(alignment: .leading, spacing: 4) {
+                    if named {
+                        Button(action: openMember) { memberName(agent) }
+                            .buttonStyle(.plain)
+                            .padding(.leading, 6)
+                            .accessibilityLabel(memberLabel)
+                            .accessibilityIdentifier("bubble-name")
+                    }
+                    card()
+                }
+                Spacer(minLength: 0)
+            }
+        }
     }
 
     /// Jacob's Discord-style reference (2026-10-23): 2 pt from the name to what follows,
