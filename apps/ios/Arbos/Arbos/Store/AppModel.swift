@@ -4195,6 +4195,9 @@ final class AppModel: ObservableObject {
                 applyRemoteArchive(spaceId: payload.space_id, kind: payload.kind, archived: payload.archived_at != nil)
             case .peopleChatDeleted, .peopleInviteAccepted, .machineReady:
                 break
+            case .notificationsCleared:
+                // Clear-on-read: own item (drop the thread's delivered banners, sync the badge).
+                break
             }
         }
         if needChats { await refreshPeople() }

@@ -1476,7 +1476,10 @@ async fn poll_me_pushes(shared: &Arc<Shared>) {
                 let _ = shared.events.send(SyncEvent::Projects(snapshot));
                 refresh = true;
             }
-            PushEventDto::PeopleMessage(_)
+            // Clear-on-read banners: own item (the Mac drops the chat's delivered
+            // notifications and re-badges when this lands).
+            PushEventDto::NotificationsCleared(_)
+            | PushEventDto::PeopleMessage(_)
             | PushEventDto::PeopleChatDeleted(_)
             | PushEventDto::ProjectMemberRemoved(_)
             | PushEventDto::PeopleInviteAccepted(_)
