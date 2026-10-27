@@ -4512,10 +4512,48 @@ mod tests {
         ))
     }
 
+    /// `ARBOS_HANDOFF_KEEP=<dir>` (scripts/secrets/handoff-invariant-check.sh): keep the relay's
+    /// data dir and a TRACE journal of the run there, for the grep that follows.
+    fn keep_dir() -> Option<std::path::PathBuf> {
+        std::env::var_os("ARBOS_HANDOFF_KEEP").map(std::path::PathBuf::from)
+    }
+
+    fn journal_guard(
+        keep: &Option<std::path::PathBuf>,
+    ) -> Option<tracing::subscriber::DefaultGuard> {
+        let dir = keep.as_ref()?;
+        std::fs::create_dir_all(dir).ok()?;
+        let file = std::fs::File::create(dir.join("relay-journal.log")).ok()?;
+        let sub = tracing_subscriber::fmt()
+            .with_writer(std::sync::Mutex::new(file))
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .finish();
+        Some(tracing::subscriber::set_default(sub))
+    }
+
+    fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+        let _ = std::fs::create_dir_all(to);
+        if let Ok(rd) = std::fs::read_dir(from) {
+            for e in rd.flatten() {
+                let p = e.path();
+                let dest = to.join(e.file_name());
+                if p.is_dir() {
+                    copy_tree(&p, &dest);
+                } else {
+                    let _ = std::fs::copy(&p, &dest);
+                }
+            }
+        }
+    }
+
     #[tokio::test]
     async fn save_this_moves_the_value_into_the_vault_and_out_of_every_relay_byte() {
+        let keep = keep_dir();
+        let _journal = journal_guard(&keep);
         let text = format!("here is the stripe key {HANDOFF_KEY} save this");
         let (state, owner, project, chat, room) = handoff_setup(&text).await;
+        tracing::debug!(chat = %chat, "handoff check: message with the key written");
         assert!(
             holds(&room_bytes(&state, &room), HANDOFF_KEY),
             "setup: the row holds the key"
@@ -4639,6 +4677,14 @@ mod tests {
             user_pushes.contains(&"message_redacted".to_owned()),
             "{user_pushes:?}"
         );
+        if let Some(dir) = keep {
+            let _ = state.db.flush_after_scrub();
+            copy_tree(&state.cfg.data_dir, &dir.join("data"));
+            let _ = std::fs::write(
+                dir.join("README.txt"),
+                "relay data dir after the save-this path (relay.db, -wal, blobs/…) + relay-journal.log (TRACE)\n",
+            );
+        }
     }
 
     #[tokio::test]
