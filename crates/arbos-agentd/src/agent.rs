@@ -1549,9 +1549,20 @@ pub struct Agent {
     /// Live name / handle / rename history from the relay's project record (#1431); the system
     /// prompt, the per-turn notes and the group preludes read this, never `cfg.project_name`.
     pub identity: crate::identity::IdentityState,
-    /// A rename (or instructions change) landed while a turn was running: the pi session must
-    /// re-read the system prompt before the next turn (the supervisor loop does it).
+    /// The system prompt changed (rename, instructions, owner profile): the pi session must
+    /// re-read it. The supervisor loop restarts the session at the next turn boundary, never
+    /// mid-turn, and not before `prompt_refresh_due_ms` — several changes close together
+    /// (a rename and its undo, #2007) cost one restart.
     pub(crate) prompt_refresh_pending: AtomicBool,
+    pub(crate) prompt_refresh_due_ms: std::sync::atomic::AtomicU64,
+    /// Held by a turn from its session switch to its end, and by the supervisor's restarts,
+    /// so a restart never lands under a turn that is starting (#2007: a `switch_session`
+    /// died with "child pi-main timed out on sw-1" when the owner's rename restarted the
+    /// session between the turn's claim and `turn_running`).
+    pub(crate) pi_lease: Mutex<()>,
+    /// A respawn is replacing the child right now: the supervisor must not spawn a second one
+    /// because `pi` is momentarily empty.
+    pub(crate) pi_respawning: AtomicBool,
     /// D91 soft-compaction hysteresis per chat: `None` right after a compaction (the floor is
     /// not known yet), then the window observed on the first turn after it.
     compaction_floor: std::sync::Mutex<HashMap<String, Option<i64>>>,
@@ -1653,6 +1664,9 @@ impl Agent {
             prompt_memory: std::sync::Mutex::new(None),
             identity: crate::identity::IdentityState::load(&cfg_for_settings),
             prompt_refresh_pending: AtomicBool::new(false),
+            prompt_refresh_due_ms: std::sync::atomic::AtomicU64::new(0),
+            pi_lease: Mutex::new(()),
+            pi_respawning: AtomicBool::new(false),
             compaction_floor: std::sync::Mutex::new(HashMap::new()),
             pending_sends: std::sync::atomic::AtomicUsize::new(0),
             side_notes: std::sync::Mutex::new(HashMap::new()),
@@ -1926,6 +1940,9 @@ impl Agent {
                 if me.shutting_down.load(Ordering::SeqCst) {
                     return;
                 }
+                if me.pi_respawning.load(Ordering::SeqCst) {
+                    continue;
+                }
                 if !alive && !me.turn_running.load(Ordering::SeqCst) {
                     me.pi_ready.store(false, Ordering::SeqCst);
                     let chat = me.current_chat.lock().await.clone().unwrap_or_default();
@@ -1934,16 +1951,22 @@ impl Agent {
                         tracing::error!(error = %e, "pi respawn failed");
                         tokio::time::sleep(Duration::from_secs(5)).await;
                     }
-                } else if alive
-                    && me.prompt_refresh_pending.load(Ordering::SeqCst)
-                    && !me.turn_running.load(Ordering::SeqCst)
-                {
-                    // A rename landed mid-turn (#1431): pi reads the system prompt at spawn, so
-                    // the session restarts now that the turn is over.
+                } else if alive && me.prompt_refresh_ready() {
+                    // The system prompt changed (#1431, #1908): pi reads it at spawn, so the
+                    // session restarts — at a turn boundary only (the lease is free), once the
+                    // change has settled (#2007).
+                    let Ok(_lease) = me.pi_lease.try_lock() else {
+                        continue;
+                    };
                     me.prompt_refresh_pending.store(false, Ordering::SeqCst);
-                    if let Err(e) = me.respawn_pi_current().await {
-                        tracing::warn!(error = %e, "pi respawn for the identity refresh failed");
-                        me.prompt_refresh_pending.store(true, Ordering::SeqCst);
+                    match me.respawn_pi_current().await {
+                        Ok(()) => {
+                            tracing::info!("pi session restarted on the refreshed system prompt")
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "pi respawn for the prompt refresh failed");
+                            me.prompt_refresh_pending.store(true, Ordering::SeqCst);
+                        }
                     }
                 }
             }
@@ -1959,7 +1982,38 @@ impl Agent {
         self.respawn_pi(&chat).await
     }
 
+    /// How long a prompt change settles before the session restarts on it: a rename and its
+    /// undo, or a profile that moves twice in a row, cost one restart (#2007).
+    pub(crate) const PROMPT_REFRESH_QUIET_MS: u64 = 5_000;
+
+    /// Ask for the session to restart on the rewritten system prompt at the next turn
+    /// boundary, no sooner than [`Self::PROMPT_REFRESH_QUIET_MS`] from now. Never restarts here.
+    pub(crate) fn schedule_prompt_refresh(&self, why: &str) {
+        let due = arbos_core::ids::now_ms() as u64 + Self::PROMPT_REFRESH_QUIET_MS;
+        self.prompt_refresh_due_ms.store(due, Ordering::SeqCst);
+        self.prompt_refresh_pending.store(true, Ordering::SeqCst);
+        tracing::info!(
+            why,
+            "system prompt refresh scheduled for the next turn boundary"
+        );
+    }
+
+    /// A scheduled refresh whose quiet window has passed, with no turn running.
+    fn prompt_refresh_ready(&self) -> bool {
+        self.prompt_refresh_pending.load(Ordering::SeqCst)
+            && !self.turn_running.load(Ordering::SeqCst)
+            && arbos_core::ids::now_ms() as u64 >= self.prompt_refresh_due_ms.load(Ordering::SeqCst)
+    }
+
     async fn respawn_pi(self: &Arc<Self>, chat_id: &str) -> Result<()> {
+        struct Respawning<'a>(&'a AtomicBool);
+        impl Drop for Respawning<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::SeqCst);
+            }
+        }
+        self.pi_respawning.store(true, Ordering::SeqCst);
+        let _respawning = Respawning(&self.pi_respawning);
         if let Some(old) = self.pi.lock().await.take() {
             old.shutdown().await;
         }
@@ -2291,11 +2345,8 @@ impl Agent {
                             h.doc
                                 .start_assistant_message(&id, user_msg, &self.cfg.device_id);
                             h.doc.add_status_part(&id, "failed", "Failed");
-                            h.doc.add_error_part(
-                                &id,
-                                "send_failed",
-                                &crate::disk::friendly(&e.to_string(), &self.work_root()),
-                            );
+                            h.doc
+                                .add_error_part(&id, "send_failed", &self.user_error_line(e));
                             h.doc.finish_message(&id, MessageStatus::Error);
                         }
                     }
@@ -3747,6 +3798,17 @@ impl Agent {
     }
 
     /// `/work`: the parent of this workspace's folder (box-level state lives in `/work/.arbos`).
+    /// The error line a person reads on a failed turn: a full disk as the disk module words
+    /// it, a pi child that died or restarted under the turn as one plain sentence (never
+    /// `child pi-main timed out on sw-1`, #2007), anything else as is.
+    pub(crate) fn user_error_line(&self, e: &anyhow::Error) -> String {
+        let text = e.to_string();
+        if is_child_error(&text) {
+            return CHILD_ERROR_LINE.to_owned();
+        }
+        crate::disk::friendly(&text, &self.work_root())
+    }
+
     pub fn work_root(&self) -> PathBuf {
         self.cfg
             .work_dir
@@ -3945,15 +4007,14 @@ impl Agent {
         };
         let prompt_text = prompt_text.as_str();
 
+        // The session is this turn's until it ends: no prompt-refresh restart lands under it.
+        let _pi_lease = self.pi_lease.lock().await;
         if let Err(e) = self.ensure_chat_session(chat_id).await {
             {
                 let h = host.lock().await;
                 h.doc.add_status_part(&assistant_msg_id, "failed", "Failed");
-                h.doc.add_error_part(
-                    &assistant_msg_id,
-                    "session",
-                    &crate::disk::friendly(&e.to_string(), &work_root),
-                );
+                h.doc
+                    .add_error_part(&assistant_msg_id, "session", &self.user_error_line(&e));
                 h.doc
                     .finish_message(&assistant_msg_id, MessageStatus::Error);
             }
@@ -8439,6 +8500,21 @@ const RECAP_ROW_CHARS: usize = 500;
 /// This chat's recent turns as a short labelled block for a retry on a fresh pi session (#1722).
 /// Rows before `current_user_msg_id` only (the question itself follows), newest last; empty when
 /// the chat has no earlier words.
+/// What a person reads when the agent's model process died or restarted under their turn.
+pub(crate) const CHILD_ERROR_LINE: &str =
+    "The agent restarted while it was working on this. Send the message again.";
+
+/// An error from the pi child's plumbing (`RpcChild`): a call that timed out, a child that
+/// exited before answering, closed stdin, or no child at all.
+pub(crate) fn is_child_error(text: &str) -> bool {
+    text.starts_with("child ")
+        && (text.contains(" timed out on ")
+            || text.contains(" exited before answering ")
+            || text.contains(" dropped response ")
+            || text.contains(" stdin closed"))
+        || text.contains("pi main agent not running")
+}
+
 pub(crate) fn chat_recap(
     rows: &[arbos_core::doc::MessageView],
     current_user_msg_id: &str,
@@ -9177,6 +9253,22 @@ impl Agent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn child_plumbing_errors_read_as_one_plain_line() {
+        for raw in [
+            "child pi-main timed out on sw-1",
+            "child pi-main exited before answering sw-1",
+            "child pi-main dropped response p-3",
+            "child pi-main stdin closed",
+            "pi main agent not running",
+        ] {
+            assert!(is_child_error(raw), "{raw}");
+        }
+        assert!(!is_child_error("workspace disk full (2 MB free)"));
+        assert!(!is_child_error("provider refused: context too long"));
+        assert!(!CHILD_ERROR_LINE.contains("pi-main"));
+    }
 
     /// 2026-10-25 (Jacob's San José ask): a worker that settles with no words, no tool call and
     /// no error did no work — a failure that gets a fresh worker, never an empty "done". A
