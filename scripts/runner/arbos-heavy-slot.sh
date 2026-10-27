@@ -56,18 +56,21 @@ rigs_waiting() { local n=0 f; for f in "$RIG_QUEUE"/*; do [[ -f "$f" ]] || conti
 # Rig markers carry "<wait-start-epoch> <name>".
 P0_RIGS="${ARBOS_HEAVY_P0_RIGS_FILE:-$SLOTS_DIR/.p0-rigs}"
 P0_RIG_LEASE_S="${ARBOS_HEAVY_P0_RIG_LEASE_S:-1800}"
-is_p0_rig() { local n=$1 e; [[ -f "$P0_RIGS" ]] || return 1; while read -r e; do [[ -z "$e" || "$e" == \#* ]] && continue; [[ "$n" == "$e" || "$n" == "$e"-* ]] && return 0; done < "$P0_RIGS"; return 1; }
+# p0_rank <name>: the rig's line number in P0_RIGS (1 = first; the file's order is the priority order — a
+# live-measurement P0 stays ahead of a recording P0), or 999 when the rig is not listed.
+p0_rank() { local n=$1 e i=0; [[ -f "$P0_RIGS" ]] || { echo 999; return; }; while read -r e; do [[ -z "$e" || "$e" == \#* ]] && continue; i=$((i+1)); [[ "$n" == "$e" || "$n" == "$e"-* ]] && { echo "$i"; return; }; done < "$P0_RIGS"; echo 999; }
+is_p0_rig() { [[ "$(p0_rank "$1")" != 999 ]]; }
 rig_ahead_of_me() {  # rig_ahead_of_me <my-pid> <my-start> <my-name>: 0 when another waiting rig is ahead in the queue
-  local me=$1 my_t0=$2 my_name=$3 f pid t0 name my_p0=0 p0
-  is_p0_rig "$my_name" && my_p0=1
+  local me=$1 my_t0=$2 my_name=$3 f pid t0 name my_p0 p0
+  my_p0=$(p0_rank "$my_name")
   for f in "$RIG_QUEUE"/*; do
     [[ -f "$f" ]] || continue
     pid=$(basename "$f"); [[ "$pid" == "$me" ]] && continue
     ps -p "$pid" >/dev/null 2>&1 || { rm -f "$f" 2>/dev/null; continue; }
     read -r t0 name < "$f" 2>/dev/null || continue
     [[ "$t0" =~ ^[0-9]+$ ]] || { name=$t0; t0=0; }   # pre-FIFO marker: name only, counts as oldest
-    p0=0; is_p0_rig "$name" && p0=1
-    (( p0 > my_p0 )) && return 0
+    p0=$(p0_rank "$name")
+    (( p0 < my_p0 )) && return 0
     (( p0 == my_p0 )) && (( t0 < my_t0 || ( t0 == my_t0 && pid < me ) )) && return 0
   done
   return 1
