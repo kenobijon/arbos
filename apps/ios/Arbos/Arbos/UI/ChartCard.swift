@@ -406,11 +406,14 @@ struct ChartPlot: View {
     /// the leading axis column to the title's width, which on a 260-pt card pushed the plot ~90 pt
     /// right (the Mac card draws it the same way).
     private var xy: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        // The top tick label is centred on the plot's top gridline, so half of it rises above the
+        // chart's frame; the gap below the title leaves it room.
+        VStack(alignment: .leading, spacing: 0) {
             if let l = yAxisTitle {
                 Text(l)
                     .font(theme.font(font - 0.5))
                     .foregroundStyle(theme.placeholder)
+                    .padding(.bottom, font * 0.75)
                     .accessibilityIdentifier("chart-y-label")
             }
             xyChart
