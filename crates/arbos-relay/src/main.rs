@@ -47,6 +47,7 @@ mod notices;
 mod notify;
 mod people;
 mod proxy;
+mod push;
 mod releases;
 mod restart;
 mod room_health;
@@ -338,7 +339,7 @@ async fn main() -> anyhow::Result<()> {
         upgrading: Arc::new(Mutex::new(HashMap::new())),
         upgrade_refused: Arc::new(Mutex::new(HashMap::new())),
         refresh_grace: Arc::new(Mutex::new(HashMap::new())),
-        push: apns::from_env().unwrap_or_else(|| Arc::new(apns::Pusher::Off)),
+        push: Arc::new(push::Push::from_env(db.clone())),
         focus: Arc::new(Mutex::new(HashMap::new())),
         fallback_sent: Arc::new(Mutex::new(HashMap::new())),
         livekit: livekit::from_env(),
@@ -392,6 +393,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     db.local_devices_reset()?;
+    state.push.spawn_worker();
     rooms::spawn_sweeper(state.clone()).await;
     boxes::spawn_wake_runner(state.clone()).await;
     routines::spawn_scheduler(state.clone()).await;
@@ -733,6 +735,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/admin/push", get(admin::push_status))
         .route("/admin/push/test", post(admin::push_test))
+        .route("/admin/push/drain", post(admin::push_drain))
         .route(
             "/admin/fleet",
             get(fleet::admin_fleet).put(fleet::admin_fleet_update),

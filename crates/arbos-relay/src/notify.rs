@@ -26,11 +26,11 @@ use tokio::sync::Mutex;
 use arbos_core::api::{PushRegisterResponseDto, SenderDto, UnreadChatDto, UnreadDto};
 use arbos_core::ids::now_ms;
 
-use crate::apns::{Delivery, Outgoing};
 use crate::auth::Principal;
 use crate::db::Project;
 use crate::db_push::PushToken;
 use crate::people;
+use crate::push::{payload, NewPush, PushKind, BADGE_TTL_MS, MESSAGE_TTL_MS};
 use crate::signin::api_error;
 use crate::state::AppState;
 
@@ -261,34 +261,6 @@ pub async fn clear_focus(state: &AppState, device_id: &str, chat_id: &str) {
     }
 }
 
-fn alert_payload(
-    chat: &ChatRef,
-    sender: &Sender,
-    message_id: &str,
-    body: &str,
-    badge: i64,
-    chat_title: Option<&str>,
-) -> Value {
-    let mut v = json!({
-        "aps": {
-            "alert": { "title": sender.title(), "body": body },
-            "badge": badge,
-            "sound": "default",
-            "thread-id": chat.chat_id,
-            "category": CATEGORY,
-            "mutable-content": 1,
-        },
-        "chat_id": chat.chat_id,
-        "project_id": chat.project_label(),
-        "message_id": message_id,
-        "sender": sender.json(),
-    });
-    if let Some(t) = chat_title {
-        v["chat_title"] = json!(t);
-    }
-    v
-}
-
 /// Group-style chats carry the room's name so the banner reads "sender in <chat>": a shared
 /// project (owner plus guests) uses the project name; DMs carry none.
 fn chat_title(state: &AppState, chat: &ChatRef) -> Option<String> {
@@ -304,16 +276,19 @@ fn chat_title(state: &AppState, chat: &ChatRef) -> Option<String> {
     state.db.project(pid).ok().flatten().map(|p| p.name)
 }
 
-async fn deliver(state: &AppState, token: &PushToken, out: Outgoing) {
-    match state.push.send(out).await {
-        Delivery::Sent => {}
-        Delivery::TokenGone => {
-            tracing::info!(device = %token.device_id, "APNs token gone; forgotten");
-            let _ = state.db.delete_push_token_value(&token.token);
-        }
-        Delivery::Failed(e) => {
-            tracing::warn!(device = %token.device_id, error = %e, "APNs send failed");
-        }
+/// One outbox entry for a message alert to one device.
+fn message_push(token: &PushToken, chat: &ChatRef, message_id: &str, payload: Value) -> NewPush {
+    let kind = PushKind::Message {
+        chat_id: chat.chat_id.clone(),
+        message_id: message_id.to_owned(),
+    };
+    NewPush {
+        user_id: token.user_id.clone(),
+        device_id: token.device_id.clone(),
+        collapse_id: Some(kind.collapse_id(&token.user_id)),
+        kind,
+        payload,
+        ttl_ms: MESSAGE_TTL_MS,
     }
 }
 
@@ -383,6 +358,7 @@ pub async fn announce_with(
         _ => brief(text),
     };
     let title = chat_title(state, chat);
+    let mut pushes = Vec::new();
     for user in recipients(state, chat) {
         if sender.user_id.as_deref() == Some(user.as_str()) {
             continue;
@@ -428,22 +404,15 @@ pub async fn announce_with(
             if device_focused(state, &t.device_id, &chat.chat_id).await {
                 continue;
             }
-            let mut payload =
-                alert_payload(chat, sender, message_id, &body, badge, title.as_deref());
+            let mut p =
+                payload::message_alert(chat, sender, message_id, &body, badge, title.as_deref());
             if let Some(r) = &reply_ref_json {
-                payload["reply_ref"] = r.clone();
+                p["reply_ref"] = r.clone();
             }
-            let out = Outgoing {
-                device_token: t.token.clone(),
-                environment: t.environment.clone(),
-                push_type: "alert",
-                topic: None,
-                collapse_id: Some(format!("msg:{}", message_id)),
-                payload,
-            };
-            deliver(state, &t, out).await;
+            pushes.push(message_push(&t, chat, message_id, p));
         }
     }
+    state.push.enqueue(pushes);
     Some(event_id)
 }
 
@@ -482,22 +451,17 @@ pub async fn alert_device(
     {
         return;
     }
-    let out = Outgoing {
-        device_token: t.token.clone(),
-        environment: t.environment.clone(),
-        push_type: "alert",
-        topic: None,
-        collapse_id: Some(format!("msg:{}", message_id)),
-        payload: alert_payload(
-            chat,
-            sender,
-            message_id,
-            &brief(text),
-            badge,
-            chat_title(state, chat).as_deref(),
-        ),
-    };
-    deliver(state, &t, out).await;
+    let p = payload::message_alert(
+        chat,
+        sender,
+        message_id,
+        &brief(text),
+        badge,
+        chat_title(state, chat).as_deref(),
+    );
+    state
+        .push
+        .enqueue(vec![message_push(&t, chat, message_id, p)]);
 }
 
 /// The user read something somewhere: every other device gets the new badge count.
@@ -506,20 +470,23 @@ pub async fn badge_refresh(state: &AppState, user_id: &str, except_device: &str)
         return;
     }
     let total = crate::matrix::reads::unread_total(state, user_id).await;
-    for t in state.db.push_tokens_of_user(user_id).unwrap_or_default() {
-        if t.device_id == except_device {
-            continue;
-        }
-        let out = Outgoing {
-            device_token: t.token.clone(),
-            environment: t.environment.clone(),
-            push_type: "alert",
-            topic: None,
-            collapse_id: Some(format!("badge:{user_id}")),
-            payload: json!({ "aps": { "badge": total } }),
-        };
-        deliver(state, &t, out).await;
-    }
+    let kind = PushKind::Badge { total };
+    let pushes: Vec<NewPush> = state
+        .db
+        .push_tokens_of_user(user_id)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|t| t.device_id != except_device)
+        .map(|t| NewPush {
+            user_id: t.user_id.clone(),
+            device_id: t.device_id.clone(),
+            collapse_id: Some(kind.collapse_id(user_id)),
+            kind: kind.clone(),
+            payload: payload::badge_only(total),
+            ttl_ms: BADGE_TTL_MS,
+        })
+        .collect();
+    state.push.enqueue(pushes);
 }
 
 /// A device pushed a row into a chat without announcing a message (older apps). Wait a moment
@@ -903,6 +870,12 @@ mod tests {
         }
     }
 
+    /// Work the outbox, then everything the provider was handed so far.
+    async fn pushed(state: &AppState) -> Vec<crate::push::Outgoing> {
+        state.push.drain().await;
+        state.push.captured().await
+    }
+
     fn register(state: &AppState, p: &Principal, user: &str) -> String {
         let tok: String = ulid()
             .to_ascii_lowercase()
@@ -954,7 +927,7 @@ mod tests {
         let sender = Sender::user(&state, &alice);
         let ev = announce(&state, &ChatRef::people(&chat), &sender, "m1", "hello bob").await;
         assert!(ev.is_some());
-        let sent = state.push.captured().await;
+        let sent = pushed(&state).await;
         let tokens: Vec<&str> = sent.iter().map(|o| o.device_token.as_str()).collect();
         assert!(
             !tokens.contains(&alice_tok.as_str()),
@@ -980,7 +953,7 @@ mod tests {
                 .await
                 .is_none()
         );
-        assert_eq!(state.push.captured().await.len(), 2);
+        assert_eq!(pushed(&state).await.len(), 2);
 
         // Bob's phone is looking at the chat: only his other device hears the next one,
         // and the event is marked read (he is seeing it) so the badge does not stick.
@@ -993,7 +966,7 @@ mod tests {
             "still there?",
         )
         .await;
-        let sent = state.push.captured().await;
+        let sent = pushed(&state).await;
         assert_eq!(sent.len(), 3);
         assert_eq!(sent[2].device_token, bob_tok2);
         assert_eq!(sent[2].payload["aps"]["badge"], 0);
@@ -1002,7 +975,7 @@ mod tests {
         // Focus on a different chat does not suppress.
         set_focus(&state, &device_id(&bob_dev), Some("other-chat")).await;
         announce(&state, &ChatRef::people(&chat), &sender, "m3", "?").await;
-        assert_eq!(state.push.captured().await.len(), 5);
+        assert_eq!(pushed(&state).await.len(), 5);
     }
 
     /// Reply in DM (reply-in-dm-context-2026-10-25): the DM's push carries the quoted
@@ -1053,7 +1026,7 @@ mod tests {
         .await
         .expect("recorded");
 
-        let sent = state.push.captured().await;
+        let sent = pushed(&state).await;
         let to_bob = sent
             .iter()
             .find(|o| o.device_token == bob_tok)
@@ -1077,7 +1050,7 @@ mod tests {
         assert!(to_carol.payload["reply_ref"].get("message_id").is_none());
         // A plain announcement carries no reply_ref at all.
         announce(&state, &ChatRef::people(&dm_bob), &sender, "r3", "plain").await;
-        let last = state.push.captured().await.into_iter().last().unwrap();
+        let last = pushed(&state).await.into_iter().last().unwrap();
         assert!(last.payload.get("reply_ref").is_none());
         assert_eq!(last.payload["aps"]["alert"]["body"], "plain");
     }
@@ -1148,7 +1121,7 @@ mod tests {
         // but the agent's reply counts (it is not her message).
         assert_eq!(state.db.unread_total(&alice).expect("alice"), 1);
 
-        let sent = state.push.captured().await;
+        let sent = pushed(&state).await;
         let last = sent.last().expect("agent push");
         assert_eq!(last.payload["aps"]["badge"], 3);
         assert_eq!(last.payload["aps"]["alert"]["title"], "Research");
@@ -1162,7 +1135,7 @@ mod tests {
         let before = sent.len();
         state.db.mark_chat_read(&bob, &dm_chat).expect("read");
         badge_refresh(&state, &bob, &device_id(&bob_dev)).await;
-        let sent = state.push.captured().await;
+        let sent = pushed(&state).await;
         assert_eq!(sent.len(), before + 1);
         let badge = sent.last().expect("badge push");
         assert_eq!(badge.device_token, bob_tok2);
@@ -1203,6 +1176,11 @@ mod archive_tests {
             Principal::Device { id, .. } => id.clone(),
             Principal::Box { .. } | Principal::Admin => unreachable!(),
         }
+    }
+
+    async fn pushed(state: &AppState) -> Vec<crate::push::Outgoing> {
+        state.push.drain().await;
+        state.push.captured().await
     }
 
     fn second_device(state: &AppState, user: &str) -> Principal {
@@ -1328,7 +1306,7 @@ mod archive_tests {
         )
         .await;
         assert!(
-            state.push.captured().await.is_empty(),
+            pushed(&state).await.is_empty(),
             "archived chats do not alert"
         );
         assert_eq!(
@@ -1410,7 +1388,7 @@ mod archive_tests {
         )
         .await;
         assert_eq!(
-            state.push.captured().await.len(),
+            pushed(&state).await.len(),
             2,
             "both of Bob's devices alert again"
         );
