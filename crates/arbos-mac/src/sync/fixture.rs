@@ -6489,6 +6489,19 @@ fn launch_week() -> Project {
     space.people = members;
     space.owner_handle = Some(ME_HANDLE.into());
     space.my_role = Some("owner".into());
+    // `ARBOS_FIXTURE_GROUP_ROLE=member|admin` (screenshot rig, [feedback
+    // group-settings-mac-2026-10-27]): I am that in "Launch week" and Sam owns it, so the
+    // pane can be shot as a plain member (no crayon, no name field) without a second account.
+    if let Ok(role) = std::env::var("ARBOS_FIXTURE_GROUP_ROLE") {
+        let role = role.trim().to_lowercase();
+        if role == "member" || role == "admin" {
+            if let Some(sam) = space.people.first_mut() {
+                sam.role = "owner".into();
+                space.owner_handle = Some(sam.handle.clone());
+            }
+            space.my_role = Some(role);
+        }
+    }
     space
 }
 
