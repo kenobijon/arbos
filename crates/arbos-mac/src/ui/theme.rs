@@ -131,6 +131,25 @@ impl SidebarWidth {
 /// left edge 15, centre 22. We were at 14 / 21 ([feedback
 /// topbar-grok-parity-2026-10-24]).
 pub const TRAFFIC_LIGHT_POSITION: f32 = 15.0;
+/// The standard window buttons' frame on macOS 26: a 14 pt disc each, on a
+/// 23 pt pitch (AppKit's `standardWindowButton` frames; the app never draws
+/// them). Three of them span x 15–75.
+pub const TRAFFIC_LIGHT_BUTTON: f32 = 14.0;
+pub const TRAFFIC_LIGHT_PITCH: f32 = 23.0;
+/// The lights' centre line from the window's top edge (Grok Bot: 22;
+/// measured on the v0.6.213 build: position 14 → centre 21).
+#[cfg_attr(not(test), allow(dead_code))]
+pub const TRAFFIC_LIGHT_LINE: f32 = TRAFFIC_LIGHT_POSITION + TRAFFIC_LIGHT_BUTTON / 2.0;
+/// The lights' slot: GPUI sizes AppKit's title-bar container view to
+/// `button + 2 × position.y` = **44** pt (`gpui_macos::window::move_traffic_light`,
+/// re-run on resize, full-screen exit, activation and screen change), so the
+/// buttons sit vertically centred in it and their hover tracking areas live
+/// there. Our controls stay out of that band wherever they share its column
+/// (the collapsed rail, `ui::rail::metrics`); the expanded strip clears it
+/// horizontally instead (`shell::TRAFFIC_LIGHTS_INSET`). In native full screen
+/// macOS hides the buttons (GPUI restores their stock frames); the slot stays,
+/// nothing moves ([feedback sidebar-toggle-in-rail-2026-10-27]).
+pub const TRAFFIC_LIGHT_SLOT: f32 = TRAFFIC_LIGHT_BUTTON + 2.0 * TRAFFIC_LIGHT_POSITION;
 /// The button family's centre line, from the window's top edge: Grok Bot's
 /// round discs are centred 60 px = **30 pt** under it (same shot: disc rows
 /// 24–96 px → top 12, bottom 48), 8 pt below the lights' line. Jacob

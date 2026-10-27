@@ -2587,13 +2587,8 @@ mod strip_tests {
     use crate::ui::shell::TRAFFIC_LIGHTS_INSET;
     use crate::ui::theme::{
         CONTROL, CONTROL_GAP, CONTROL_GLYPH, CONTROL_GLYPH_WIDE, CONTROL_LINE, HEADER_HEIGHT,
-        TRAFFIC_LIGHT_POSITION,
+        TRAFFIC_LIGHT_LINE, TRAFFIC_LIGHT_POSITION,
     };
-
-    /// The real lights' centre line: macOS 26 draws a 14 pt disc in the frame
-    /// GPUI places at `TRAFFIC_LIGHT_POSITION` (measured on the v0.6.213
-    /// build: position 14 → centre 21).
-    const TRAFFIC_LIGHT_LINE: f32 = TRAFFIC_LIGHT_POSITION + 7.0;
 
     /// Grok Bot's strip, measured on `ref-grok-round-search-plus.png` (project
     /// store, 2 px/pt, window top at image row 2) — Jacob 2026-10-24: "the
