@@ -2099,7 +2099,8 @@ struct ChatSession: View {
         return MessageDeleteRule.mayDelete(sender: m.sender, meId: meId, moderates: moderates, agentOwnerIds: agentOwners)
     }
 
-    /// The long-press menu's actions (`MessageMenu`): Copy the text, Reply
+    /// The long-press menu's actions (`MessageMenu`): Copy the message (text and
+    /// pictures), Reply
     /// (in a people chat the agent that wrote it becomes the recipient),
     /// View thread (when the message has replies), Forward to another chat,
     /// Reply in DM (open a private chat with the human who wrote it), Edit
@@ -2107,7 +2108,12 @@ struct ChatSession: View {
     private func runMessageMenu(_ item: MessageMenuItem, row: Row) {
         switch item {
         case .copy:
-            UIPasteboard.general.string = m_text(row)
+            // The whole message — words and pictures / files — through the one copy path
+            // ([feedback copy-image-messages-ios-2026-10-27]: the text alone went out before,
+            // and a picture message copied nothing).
+            guard let m = messageById[row.messageId] else { return }
+            let slot = isPeople ? "\(peopleSlot):\(chatId)" : isChannel ? "\(channelSlot):\(chatId)" : projectId
+            Task { await model.copyMessage(m, slot: slot) }
         case .reply:
             beginReply(to: row)
         case .viewThread:
@@ -2700,6 +2706,12 @@ struct ChatSession: View {
                 } else if !isChannel {
                     requestCall(.voice)
                 }
+            },
+            onPasteMedia: { media in
+                // A copied picture / file pastes back as an attachment chip
+                // ([feedback copy-image-messages-ios-2026-10-27]).
+                pending.append(contentsOf: media)
+                composerFocused = true
             }
         )
         // Hold released before permission returned: finish once recording starts.
@@ -3498,6 +3510,8 @@ private struct ComposerField: View {
     let onMicDrag: (DragGesture.Value) -> Void
     let onMicEnd: (DragGesture.Value) -> Void
     let onPrimary: () -> Void
+    /// Pictures / files pasted into the field ([feedback copy-image-messages-ios-2026-10-27]).
+    var onPasteMedia: (([AppModel.PendingAttachment]) -> Void)? = nil
 
     private var canSend: Bool {
         !draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || hasPending
@@ -3604,7 +3618,8 @@ private struct ComposerField: View {
                 // chips as attachments; `draft.text` stays the plain `@handle` text.
                 MentionTextView(text: $draft.text, mentions: $draft.mentions, caret: $draft.caret, isFocused: $focus,
                                 placeholder: prompt(draft.text), theme: theme,
-                                agentProject: { model.agent(member: $0, chatId: chatId) })
+                                agentProject: { model.agent(member: $0, chatId: chatId) },
+                                onPasteMedia: onPasteMedia)
                     .fixedSize(horizontal: false, vertical: true)
             }
             // Grok's trailing cluster: mic glyph centre 24 pt before the pill, the pill

@@ -88,6 +88,8 @@
 		A1DE700000000000000000A2 /* DevicesStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1DE700000000000000000A1 /* DevicesStore.swift */; };
 		A1DE700000000000000000B2 /* MentionChips.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1DE700000000000000000B1 /* MentionChips.swift */; };
 		A1F7B0000000000000000002 /* BlockedState.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F7B0000000000000000001 /* BlockedState.swift */; };
+		A1C0B10000000000000000A2 /* MessagePasteboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C0B10000000000000000A1 /* MessagePasteboard.swift */; };
+		A1C0B10000000000000000B2 /* MessagePasteboardTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C0B10000000000000000B1 /* MessagePasteboardTests.swift */; };
 		A1F100000000000000000006 /* LinkIcons.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F100000000000000000005 /* LinkIcons.swift */; };
 		A1F10000000000000000000A /* MathText.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F100000000000000000009 /* MathText.swift */; };
 		A1F10000000000000000000E /* CodeHighlight.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F10000000000000000000D /* CodeHighlight.swift */; };
@@ -289,6 +291,8 @@
 		A1DE700000000000000000A1 /* DevicesStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DevicesStore.swift; sourceTree = "<group>"; };
 		A1DE700000000000000000B1 /* MentionChips.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MentionChips.swift; sourceTree = "<group>"; };
 		A1F7B0000000000000000001 /* BlockedState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BlockedState.swift; sourceTree = "<group>"; };
+		A1C0B10000000000000000A1 /* MessagePasteboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessagePasteboard.swift; sourceTree = "<group>"; };
+		A1C0B10000000000000000B1 /* MessagePasteboardTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessagePasteboardTests.swift; sourceTree = "<group>"; };
 		A1F100000000000000000005 /* LinkIcons.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkIcons.swift; sourceTree = "<group>"; };
 		A1F100000000000000000009 /* MathText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MathText.swift; sourceTree = "<group>"; };
 		A1F10000000000000000000D /* CodeHighlight.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeHighlight.swift; sourceTree = "<group>"; };
@@ -549,6 +553,7 @@
 				A1C1E00000000000000000A1 /* PresenceRow.swift */,
 				A1DE700000000000000000B1 /* MentionChips.swift */,
 				A1F7B0000000000000000001 /* BlockedState.swift */,
+				A1C0B10000000000000000A1 /* MessagePasteboard.swift */,
 				A1F100000000000000000005 /* LinkIcons.swift */,
 				A1F100000000000000000009 /* MathText.swift */,
 				A1F10000000000000000000D /* CodeHighlight.swift */,
@@ -589,6 +594,7 @@
 				A1680000000000000000A060 /* ListTopFadeTests.swift */,
 				A1670000000000000000A040 /* ControlMetricsTests.swift */,
 				A1CD0000000000000000D040 /* ChatDensityMetricsTests.swift */,
+				A1C0B10000000000000000B1 /* MessagePasteboardTests.swift */,
 				A11B0000000000000000A003 /* LibraryListTests.swift */,
 				A1AC0E00000000000000A003 /* MachineMetricsTests.swift */,
 				A15A00000000000000000012 /* ReactionToggleTests.swift */,
@@ -846,6 +852,7 @@
 				A1DE700000000000000000A2 /* DevicesStore.swift in Sources */,
 				A1DE700000000000000000B2 /* MentionChips.swift in Sources */,
 				A1F7B0000000000000000002 /* BlockedState.swift in Sources */,
+				A1C0B10000000000000000A2 /* MessagePasteboard.swift in Sources */,
 				A1F100000000000000000006 /* LinkIcons.swift in Sources */,
 				A1F10000000000000000000A /* MathText.swift in Sources */,
 				A1F10000000000000000000E /* CodeHighlight.swift in Sources */,
@@ -930,6 +937,7 @@
 				A1680000000000000000A061 /* ListTopFadeTests.swift in Sources */,
 				A1670000000000000000A041 /* ControlMetricsTests.swift in Sources */,
 				A1CD0000000000000000D041 /* ChatDensityMetricsTests.swift in Sources */,
+				A1C0B10000000000000000B2 /* MessagePasteboardTests.swift in Sources */,
 				A11B0000000000000000A004 /* LibraryListTests.swift in Sources */,
 				A1AC0E00000000000000A004 /* MachineMetricsTests.swift in Sources */,
 				A15C0000000000000000000B /* SessionRoomTests.swift in Sources */,

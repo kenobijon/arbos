@@ -292,6 +292,8 @@ struct MentionTextView: UIViewRepresentable {
     /// matches the bubbles.
     var agentProject: (ChatMember) -> Project? = { $0.project }
     var maxLines: Int = 8
+    /// Pictures / files pasted into the field, for the owner to stage as attachments.
+    var onPasteMedia: (([AppModel.PendingAttachment]) -> Void)? = nil
 
     /// Grok: the caret 17 pt in from the field's edge, one 22 pt line centred in 48.
     static let insets = UIEdgeInsets(top: Theme.composerTextPadY, left: Theme.composerTextInset, bottom: Theme.composerTextPadY, right: 0)
@@ -317,12 +319,14 @@ struct MentionTextView: UIViewRepresentable {
         }
         coordinator.apply(theme: theme, to: view)
         coordinator.rebuild(view, text: text, mentions: mentions, caret: caret)
+        view.onPasteMedia = onPasteMedia
         return view
     }
 
     func updateUIView(_ view: MentionUITextView, context: Context) {
         let c = context.coordinator
         c.parent = self
+        view.onPasteMedia = onPasteMedia
         c.apply(theme: theme, to: view)
         view.placeholderLabel.text = placeholder
         view.placeholderLabel.isHidden = !text.isEmpty
@@ -605,6 +609,28 @@ struct MentionTextView: UIViewRepresentable {
 final class MentionUITextView: UITextView {
     let placeholderLabel = UILabel()
     var onMoveToWindow: (() -> Void)?
+    /// Paste with pictures or files on the pasteboard: the owner stages them as
+    /// attachments ([feedback copy-image-messages-ios-2026-10-27]); the words, when the
+    /// same items carry any, still land at the caret.
+    var onPasteMedia: (([AppModel.PendingAttachment]) -> Void)?
+
+    override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+        if action == #selector(paste(_:)), onPasteMedia != nil, MessagePasteboard.hasMedia() {
+            return true
+        }
+        return super.canPerformAction(action, withSender: sender)
+    }
+
+    override func paste(_ sender: Any?) {
+        let pasteboard = UIPasteboard.general
+        if let onPasteMedia {
+            let media = MessagePasteboard.pendingAttachments(from: pasteboard)
+            if !media.isEmpty { onPasteMedia(media) }
+        }
+        if pasteboard.hasStrings {
+            super.paste(sender)
+        }
+    }
 
     override init(frame: CGRect, textContainer: NSTextContainer?) {
         super.init(frame: frame, textContainer: textContainer)
