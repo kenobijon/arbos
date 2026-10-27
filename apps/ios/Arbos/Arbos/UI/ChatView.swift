@@ -6,6 +6,7 @@
 
 import ArbosFFI
 import PhotosUI
+import QuickLook
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
@@ -175,6 +176,8 @@ struct ChatSession: View {
     @State private var sentOnce = false
     @State private var transcribing = false
     @State private var pending: [AppModel.PendingAttachment] = []
+    /// Quick Look URL for a staged picture/video (tap the chip while writing a description).
+    @State private var pendingPreviewURL: URL?
     @State private var photoItem: PhotosPickerItem?
     @State private var showPhotos = false
     @State private var showFiles = false
@@ -2458,23 +2461,36 @@ struct ChatSession: View {
                         ForEach(pending) { a in
                             // Images show a real thumbnail (same 28 pt chip as Mac);
                             // other files keep the SF Symbol + name pill.
+                            // Tap the chip (not ×) to open a picture/video while the
+                            // description bar is focused ([feedback app-01M5Z01FAES7QFEDGC1RKGS9DK]).
                             let thumb = a.mime.hasPrefix("image/") ? UIImage(data: a.data) : nil
+                            let canPreview = Self.isCaptionablePending(a)
                             HStack(spacing: 6) {
-                                if let thumb {
-                                    Image(uiImage: thumb)
-                                        .resizable()
-                                        .scaledToFill()
-                                        .frame(width: 28, height: 28)
-                                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                                } else {
-                                    Image(systemName: a.mime.hasPrefix("image/") ? "photo" : (a.mime.hasPrefix("audio/") ? "waveform" : "doc"))
-                                        .font(theme.font(12))
+                                Button {
+                                    openPendingPreview(a)
+                                } label: {
+                                    HStack(spacing: 6) {
+                                        if let thumb {
+                                            Image(uiImage: thumb)
+                                                .resizable()
+                                                .scaledToFill()
+                                                .frame(width: 28, height: 28)
+                                                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                                        } else {
+                                            Image(systemName: a.mime.hasPrefix("image/") ? "photo" : (a.mime.hasPrefix("audio/") ? "waveform" : (a.mime.hasPrefix("video/") ? "film" : "doc")))
+                                                .font(theme.font(12))
+                                        }
+                                        Text(a.name).font(theme.font(Theme.tiny)).lineLimit(1)
+                                    }
                                 }
-                                Text(a.name).font(theme.font(Theme.tiny)).lineLimit(1)
+                                .buttonStyle(.plain)
+                                .disabled(!canPreview)
+                                .accessibilityLabel(canPreview ? "\(a.name), tap to open" : a.name)
                                 Button { pending.removeAll { $0.id == a.id } } label: {
                                     Image(systemName: "xmark").font(.system(size: 10, weight: .bold))
                                 }
                                 .buttonStyle(.plain)
+                                .accessibilityLabel("Remove \(a.name)")
                             }
                             .foregroundStyle(theme.text)
                             .padding(.leading, thumb != nil ? 4 : 10)
@@ -2494,6 +2510,7 @@ struct ChatSession: View {
                 textField
             }
         }
+        .quickLookPreview($pendingPreviewURL)
     }
 
     /// The "+" before the field: photos and files. Channels send text only (C1), so none there.
@@ -2554,6 +2571,18 @@ struct ChatSession: View {
     private static func isCaptionablePending(_ a: AppModel.PendingAttachment) -> Bool {
         let mime = a.mime.lowercased()
         return mime.hasPrefix("image/") || mime.hasPrefix("video/")
+    }
+
+    /// Open a staged picture/video in Quick Look so the description can still be written after.
+    private func openPendingPreview(_ a: AppModel.PendingAttachment) {
+        guard Self.isCaptionablePending(a), let file = MediaFetch.tempFile(a.data, name: a.name) else { return }
+        // `.quickLookPreview` only presents when the binding becomes non-nil.
+        if pendingPreviewURL == file {
+            pendingPreviewURL = nil
+            Task { @MainActor in pendingPreviewURL = file }
+            return
+        }
+        pendingPreviewURL = file
     }
 
 
