@@ -861,8 +861,8 @@ impl MenuItem {
     pub fn glyph(self) -> &'static str {
         match self {
             MenuItem::Open => "photo",
-            MenuItem::Forward => "forward",
-            MenuItem::Download => "arrow-down",
+            MenuItem::Forward => "arrowshape.turn.up.right",
+            MenuItem::Download => "arrow.down.to.line",
             MenuItem::OpenLink => "globe",
             MenuItem::CopyLink => "link",
         }

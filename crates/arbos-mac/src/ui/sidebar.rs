@@ -1867,7 +1867,11 @@ pub fn channel_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
     let mut body = div().flex().flex_col().gap(px(1.0)).child(
         glass::menu_row(
             "channel-menu-archive",
-            if archived { "tray-up" } else { "archive" },
+            if archived {
+                "tray.and.arrow.up"
+            } else {
+                "archivebox"
+            },
             if archived { "Unarchive" } else { "Archive" },
             false,
             &theme,
@@ -2196,7 +2200,11 @@ pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
         let id = space_id.clone();
         glass::menu_row(
             "row-menu-archive",
-            if archived { "tray-up" } else { "archive" },
+            if archived {
+                "tray.and.arrow.up"
+            } else {
+                "archivebox"
+            },
             if archived { "Unarchive" } else { "Archive" },
             false,
             theme,
@@ -2294,22 +2302,27 @@ pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
     // on the agent pane. A people row keeps Profile.
     if is_people {
         body = body.child(
-            glass::menu_row("row-menu-profile", "person", "Profile", false, &theme).on_click(
-                cx.listener(move |this, _, _, cx| {
-                    this.row_menu = None;
-                    let (page, id) = (profile_page.clone(), profile_id.clone());
-                    this.state.update(cx, |s, cx| {
-                        s.select_project(id, cx);
-                        s.open_profile(page, cx);
-                    });
-                }),
-            ),
+            glass::menu_row(
+                "row-menu-profile",
+                "person.crop.circle",
+                "Profile",
+                false,
+                &theme,
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.row_menu = None;
+                let (page, id) = (profile_page.clone(), profile_id.clone());
+                this.state.update(cx, |s, cx| {
+                    s.select_project(id, cx);
+                    s.open_profile(page, cx);
+                });
+            })),
         );
     }
     body = body.child(
         glass::menu_row(
             "row-menu-mute",
-            if muted { "bell" } else { "bell-slash" },
+            if muted { "bell" } else { "bell.slash" },
             if muted { "Unmute" } else { "Mute" },
             false,
             &theme,
@@ -2322,13 +2335,18 @@ pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
     );
     if can_fork {
         body = body.child(
-            glass::menu_row("row-menu-fork", "branch", "Fork", false, &theme).on_click(
-                cx.listener(move |this, _, _, cx| {
-                    this.row_menu = None;
-                    let id = fork_id.clone();
-                    this.state.update(cx, |s, cx| s.duplicate_project(id, cx));
-                }),
-            ),
+            glass::menu_row(
+                "row-menu-fork",
+                "arrow.triangle.branch",
+                "Fork",
+                false,
+                &theme,
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.row_menu = None;
+                let id = fork_id.clone();
+                this.state.update(cx, |s, cx| s.duplicate_project(id, cx));
+            })),
         );
     }
     body = body.child(archive_row(&theme, cx));
@@ -2493,7 +2511,7 @@ pub fn chat_menu(
         let rename_id = chat.id.clone();
         let rename_label = title.clone();
         body = body.child(
-            glass::menu_row("chat-menu-rename", "square-pencil", "Rename", false, &theme).on_click(
+            glass::menu_row("chat-menu-rename", "pencil", "Rename", false, &theme).on_click(
                 cx.listener(move |this, _, window, cx| {
                     this.chat_menu = None;
                     this.tab_menu_open = true;
@@ -2504,15 +2522,20 @@ pub fn chat_menu(
     }
     if can_fork {
         body = body.child(
-            glass::menu_row("chat-menu-fork", "branch", "Fork", false, &theme).on_click(
-                cx.listener(move |this, _, window, cx| {
-                    this.chat_menu = None;
-                    this.tab_menu_open = false;
-                    let id = fork_id.clone();
-                    this.state.update(cx, |s, cx| s.fork_chat(id, cx));
-                    Composer::focus(&this.composer, window, cx);
-                }),
-            ),
+            glass::menu_row(
+                "chat-menu-fork",
+                "arrow.triangle.branch",
+                "Fork",
+                false,
+                &theme,
+            )
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.chat_menu = None;
+                this.tab_menu_open = false;
+                let id = fork_id.clone();
+                this.state.update(cx, |s, cx| s.fork_chat(id, cx));
+                Composer::focus(&this.composer, window, cx);
+            })),
         );
     }
     if can_delete {

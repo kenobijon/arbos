@@ -23,6 +23,7 @@ use gpui::{
 use crate::ui::glass;
 use crate::ui::icons::icon;
 use crate::ui::identity;
+use crate::ui::sf_symbols;
 use crate::ui::sidebar::{DISC_HOVER_LIFT, DISC_PRESSED_LIFT};
 use crate::ui::theme::{Theme, CONTROL, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
 
@@ -335,16 +336,18 @@ pub fn action_row(
 /// The hero's action pill ("Message" on a person's pane,
 /// [feedback profile-message-button-mac-2026-10-25]): one of the Grok button
 /// family — [`CONTROL`] 36 tall, a capsule on the discs' `surface_2` fill,
-/// glyph and 13 pt semibold label in `text`; hover and pressed lift the fill
-/// in lightness like the footer disc (the chip rule: brighter under the
-/// pointer, brighter still while down).
+/// SF Symbol (the iPhone's `PanePillButton(glyph:)` name, semibold at the
+/// label's size) and 13 pt semibold label in `text`; hover and pressed lift
+/// the fill in lightness like the footer disc (the chip rule: brighter under
+/// the pointer, brighter still while down).
 pub const PILL_PAD_X: f32 = 18.0;
-pub const PILL_GLYPH: f32 = 17.0;
+pub const PILL_GLYPH: f32 = TEXT_SMALL;
+pub const PILL_GLYPH_SLOT: f32 = 18.0;
 pub const PILL_GAP: f32 = 7.0;
 
 pub fn pill_button(
     id: &'static str,
-    glyph: &'static str,
+    symbol: &'static str,
     label: &str,
     theme: &Theme,
 ) -> Stateful<Div> {
@@ -368,7 +371,13 @@ pub fn pill_button(
         .cursor_pointer()
         .hover(move |s| s.bg(hover))
         .active(move |s| s.bg(pressed))
-        .child(icon(glyph, PILL_GLYPH, theme.text))
+        .child(sf_symbols::symbol(
+            symbol,
+            PILL_GLYPH,
+            sf_symbols::Weight::Semibold,
+            PILL_GLYPH_SLOT,
+            theme.text,
+        ))
         .child(label.to_string())
 }
 
