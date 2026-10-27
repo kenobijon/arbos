@@ -207,7 +207,7 @@ class Lane(threading.Thread):
         proj_dir = f"/work/{self.project}"
         d_rel = f"lt-{tid}-{tag}"
         D = f"{proj_dir}/{d_rel}"
-        env = {"D": D, "P": proj_dir}
+        env = {"D": D, "P": proj_dir, "WS": self.project, "RUN": tag}
         self.say(f"{tid}: start ({D})")
         t_task0 = time.time()
         usage0 = rl.usage_all(self.project)
@@ -232,7 +232,7 @@ class Lane(threading.Thread):
                 base_prompt = turn["prompt_variants"][sum(map(ord, tag)) % len(turn["prompt_variants"])]
             prompt = base_prompt.replace("{D}", D).replace("{FIXTURES}", FIXTURES).replace("{TAG}", tag_up)
             if turn.get("seed"):
-                code, out = self.box.run_as_ws(self.project, turn["seed"].replace("{D}", D).replace("{P}", proj_dir), env=env, timeout=180)
+                code, out = self.box.run_as_ws(self.project, turn["seed"].replace("{D}", D).replace("{P}", proj_dir).replace("{RUN}", tag), env=env, timeout=180)
                 if "fatal" in out.lower() or (code not in (0, None)):
                     self.say(f"{tid}: seed rc={code}: {out[-200:]}")
             if turn.get("generate"):
@@ -340,7 +340,7 @@ class Lane(threading.Thread):
                 turn_spec = dict(turn, prompt=prompt)
                 for k in ("verify", "show"):
                     if turn_spec.get(k):
-                        turn_spec[k] = turn_spec[k].replace("{D}", D).replace("{P}", proj_dir)
+                        turn_spec[k] = turn_spec[k].replace("{D}", D).replace("{P}", proj_dir).replace("{RUN}", tag)
                 ctx = {"reply": reply, "all_text": reply, "dm": {"reply": reply, "all_text": reply, "tool_parts": 0, "routes": []}, "res": {"ttfr_s": ttfr, "wall_s": round(time.time() - t0, 1), "timed_out": not reply}, "gen_truth": gen_truth, "state": task_state}
                 g = gr.grade_turn(turn_spec, ctx, self.box, self.project, env)
                 turns_out.append({"turn": i, "chat_id": chat_id, "prompt": prompt[:300], "ok": g["ok"], "reasons": g["reasons"], "ttfr_s": ttfr, "first_status_s": None, "wall_s": round(time.time() - t0, 1), "timed_out": not reply, "stalls": 0, "approvals_rejected": [], "routes": [], "tool_calls": 0, "tool_errors": 0, "model_calls": 0, "compactions": 0, "audit_denied": 0, "rubric": g["rubric"], "truth": g["truth"], "verify_out": g["verify_out"], "reply": reply[:1500], "excerpt": f"**Peer:** {text}\n\n**Assistant:** {reply[:900]}"})
@@ -391,7 +391,7 @@ class Lane(threading.Thread):
             turn_spec["prompt"] = prompt
             for k in ("verify", "show"):
                 if turn_spec.get(k):
-                    turn_spec[k] = turn_spec[k].replace("{D}", D).replace("{P}", proj_dir)
+                    turn_spec[k] = turn_spec[k].replace("{D}", D).replace("{P}", proj_dir).replace("{RUN}", tag)
             ctx = {"reply": dm.get("reply") or dm.get("all_text") or "", "all_text": dm.get("all_text"), "dm": dm, "res": res, "gen_truth": gen_truth, "state": task_state}
             for k in ("reply_regex", "reply_regex_not"):
                 if turn_spec.get(k) and task_state.get("old_name"):
@@ -596,7 +596,7 @@ class Lane(threading.Thread):
             # and anything the agent installed into the workspace home for it go after grading
             self.box.run_as_ws(self.project, f"rm -rf {D} 2>/dev/null; rm -rf {proj_dir}/.arbos/home/.rustup {proj_dir}/.arbos/home/.cargo 2>/dev/null; true", timeout=120)
         if task.get("cleanup"):
-            self.box.run_as_ws(self.project, task["cleanup"].replace("{D}", D).replace("{P}", proj_dir), env=env, timeout=120)
+            self.box.run_as_ws(self.project, task["cleanup"].replace("{D}", D).replace("{P}", proj_dir).replace("{RUN}", tag), env=env, timeout=120)
         if task.get("cleanup_routines"):
             for r in rl.routines(self.project):
                 if r.get("id"):
