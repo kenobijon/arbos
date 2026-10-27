@@ -311,7 +311,7 @@ enum Transcript {
                 // A bubble-menu forward carries `forwardedFrom`; with media the header sits
                 // once, on the first card, and the caption / note under it stays plain
                 // ([feedback forward-attachments-ios-2026-10-27]).
-                let forwardedBy = message.forwardedFrom?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let forwardedBy = (message.forwardedFrom?.trimmingCharacters(in: .whitespacesAndNewlines))
                     .flatMap { $0.isEmpty ? nil : $0 }
                 // Only pictures and videos take a description bar; a PDF + note
                 // still uses a normal text bubble.
