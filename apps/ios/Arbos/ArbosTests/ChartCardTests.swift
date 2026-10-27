@@ -1,5 +1,6 @@
 import XCTest
 import SwiftUI
+import ArbosFFI
 @testable import Arbos
 
 /// Chart bubbles ([feedback chart-bubble-ios-2026-10-26]): the `chart` part parses with its
@@ -98,7 +99,7 @@ final class ChartCardTests: XCTestCase {
         XCTAssertEqual(model.series.count, 2)
         XCTAssertEqual(model.y.min, 60)
         XCTAssertEqual(model.y.max, 90)
-        XCTAssertEqual(model.y.ticks.map(\.label), ["60%", "70%", "80%", "90%"])
+        XCTAssertEqual(model.y.ticks.map { $0.label }, ["60%", "70%", "80%", "90%"])
         XCTAssertEqual(model.x.ticks.first?.label, "1")
         XCTAssertTrue(model.showLegend)
         XCTAssertEqual(model.columns.count, 4)
