@@ -23,15 +23,22 @@ rig_of() { local b=${1#cmd-}; b=${b%%.*}; echo "${b%%-*}"; }
 run_one() {  # run_one <cmd-X.sh.running> <base>
   local f=$1 base=$2 rc
   bash "$f" > "$base.log" 2>&1 < /dev/null; rc=$?
-  echo "$rc" > "$base.rc"; mv "$f" "$base.done"
+  echo "$rc" > "$base.rc"; mv "$f" "$base.done"; rm -f "$base.seen"
 }
 while true; do
   for rig in "${!lane_pid[@]}"; do
     kill -0 "${lane_pid[$rig]}" 2>/dev/null || unset "lane_pid[$rig]"
   done
-  for f in $(ls cmd-*.sh 2>/dev/null | sort); do
+  # FIFO by enqueue time (file birth time), not by name: a rig that names its command cmd-00… does not jump
+  # the queue; the rename is logged once for visibility (18:00 Oct 27), nothing else happens to it.
+  for f in $(stat -f '%B %N' cmd-*.sh 2>/dev/null | sort -n | awk '{print $2}'); do
     [ -f "$f" ] || continue
     rig=$(rig_of "$f"); base=${f%.sh}
+    if [ ! -f "$base.seen" ]; then
+      : > "$base.seen"
+      older=$(stat -f '%B %N' cmd-*.sh 2>/dev/null | awk -v b="$(stat -f %B "$f")" -v me="$f" '$1 < b && $2 > me' | wc -l | tr -d ' ')
+      [ "$older" -gt 0 ] && echo "$(date -u +%FT%TZ) note: $f (rig $rig) sorts before $older older command(s) by name — FIFO is by enqueue time, it waits its turn" >> runner.status
+    fi
     [ -n "${lane_pid[$rig]}" ] && continue                     # this rig's lane is busy: keep its order
     [ "${#lane_pid[@]}" -ge "$MAX_PAR" ] && break              # enough lanes running
     pgrep -f "bash $f\$" >/dev/null 2>&1 && continue           # an older runner is on it

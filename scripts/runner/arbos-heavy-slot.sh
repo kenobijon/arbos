@@ -61,7 +61,38 @@ ensure_dir() {
 }
 
 is_gate_name() { [[ "$1" == gate-* ]]; }
-is_exempt_name() { [[ "$1" == mac-release* || "$1" == tf-archive* || "$1" == gate-* ]]; }
+is_release_name() { [[ "$1" == mac-release* || "$1" == tf-archive* ]]; }
+is_exempt_name() { is_release_name "$1" || [[ "$1" == gate-* ]]; }
+# Release / TestFlight lanes (18:00 Oct 27, coordinator: the Mac release jobs for v0.6.299 — carrying P0 #2075 —
+# sat 55 min while gate halves and rigs took the slot in turn): a release waiting RELEASE_PREEMPT_S takes the
+# NEXT grant ahead of gate halves and rigs; a hotfix release (name *hotfix*) takes it at once. Release waiters
+# leave "<start-epoch> <name>" in RELEASE_QUEUE/<pid>.
+RELEASE_PREEMPT_S="${ARBOS_HEAVY_RELEASE_PREEMPT_S:-600}"
+RELEASE_QUEUE="$SLOTS_DIR/.release-waiting"
+release_due() {  # 1 when some waiting release may preempt the next grant
+  local f pid start name now; now=$(date +%s)
+  for f in "$RELEASE_QUEUE"/*; do
+    [[ -f "$f" ]] || continue
+    pid=$(basename "$f"); ps -p "$pid" >/dev/null 2>&1 || { rm -f "$f" 2>/dev/null; continue; }
+    read -r start name < "$f" 2>/dev/null || continue
+    [[ "$name" == *hotfix* ]] && return 0
+    (( now - start >= RELEASE_PREEMPT_S )) && return 0
+  done
+  return 1
+}
+# A rig acquirer running under the shared GUI runner (a `bash cmd-*.sh` ancestor) gives up after
+# RIG_RUNNER_WAIT_MAX_S: the command file is copied to the back of the runner's FIFO (name sorts last) and the
+# acquire exits 75, so one rig's slot wait cannot hold every other rig's shots (18:00 Oct 27: 75 min, 15 queued).
+RIG_RUNNER_WAIT_MAX_S="${ARBOS_HEAVY_RIG_RUNNER_WAIT_MAX_S:-1200}"
+runner_cmd_file() {  # the cmd-*.sh an ancestor `bash` is executing, or nothing
+  local pid=$$ cmd
+  while (( pid > 1 )); do
+    cmd=$(ps -o command= -p "$pid" 2>/dev/null)
+    if [[ "$cmd" =~ (^|[[:space:]])bash[[:space:]]+(/Users/Shared/arbos-run/)?(cmd-[^[:space:]]+\.sh)([[:space:]]|$) ]]; then echo "/Users/Shared/arbos-run/${BASH_REMATCH[3]}"; return 0; fi
+    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' '); [[ -n "$pid" ]] || break
+  done
+  return 1
+}
 
 # live_slots: drop slots whose owner pid is dead or (rigs only) whose lease is over RIG_LEASE_MAX_S, print the
 # number that remain.
@@ -160,10 +191,14 @@ acquire() {
   if is_gate_name "$name"; then
     mkdir -p "$GATE_QUEUE" 2>/dev/null; chmod 1777 "$GATE_QUEUE" 2>/dev/null || true
     mark="$GATE_QUEUE/$$"; echo "$owner" > "$mark" 2>/dev/null || mark=""
+  elif is_release_name "$name"; then
+    mkdir -p "$RELEASE_QUEUE" 2>/dev/null; chmod 1777 "$RELEASE_QUEUE" 2>/dev/null || true
+    mark="$RELEASE_QUEUE/$$"; echo "$t0 $name" > "$mark" 2>/dev/null || mark=""
   elif ! is_exempt_name "$name"; then
     mkdir -p "$RIG_QUEUE" 2>/dev/null; chmod 1777 "$RIG_QUEUE" 2>/dev/null || true
     mark="$RIG_QUEUE/$$"; echo "$name" > "$mark" 2>/dev/null || mark=""
   fi
+  local runner_cmd=""; ! is_exempt_name "$name" && runner_cmd=$(runner_cmd_file || true)
   local fair=0 fair_after
   while :; do
     n=$(live_slots)
@@ -174,7 +209,11 @@ acquire() {
       (( $(rigs_waiting) >= RIG_CROWD_N )) && fair_after=1
       (( $(cat "$GATE_GRANTS" 2>/dev/null || echo 0) >= fair_after )) && fair=1
     fi
-    if (( n < limit )) && { is_gate_name "$name" || ! gate_waiting || (( fair )); }; then
+    # Grant order: a due release first (it preempts gate halves and rigs); then gate halves; rigs when no gate half
+    # waits or on their fair turn. A release not yet due still yields to a queued gate half, as before.
+    local self_due=0
+    if is_release_name "$name" && { [[ "$name" == *hotfix* ]] || (( $(date +%s) - t0 >= RELEASE_PREEMPT_S )); }; then self_due=1; fi
+    if (( n < limit )) && { (( self_due )) || { ! release_due && { is_gate_name "$name" || ! gate_waiting || (( fair )); }; }; }; then
       slot="$SLOTS_DIR/$(date +%s)-$$-${name//\//_}.slot"
       if mkdir "$slot" 2>/dev/null; then
         echo "$owner" > "$slot/pid"; echo "$name" > "$slot/name"; date -u +%s > "$slot/since"
@@ -194,6 +233,17 @@ acquire() {
           echo "$slot"; return 0
         fi
       fi
+    fi
+    if [[ -n "$runner_cmd" ]] && (( $(date +%s) - t0 >= RIG_RUNNER_WAIT_MAX_S )); then
+      local again; again="/Users/Shared/arbos-run/cmd-zz~requeued-$(date +%s)-$(basename "${runner_cmd%.sh}").sh"
+      if [[ -f "$runner_cmd" ]] && { printf '# requeued by arbos-heavy-slot at %s: %s waited %ss for a heavy slot under the shared runner (cap %s); original %s\n' "$(ts)" "$name" "$RIG_RUNNER_WAIT_MAX_S" "$limit" "$(basename "$runner_cmd")"; cat "$runner_cmd"; } > "$again" 2>/dev/null; then
+        echo "$(ts) heavy-slot: $name waited ${RIG_RUNNER_WAIT_MAX_S}s under the shared runner ($n busy); giving up — command requeued at the back as $(basename "$again")" >&2
+        logger -t arbos-heavy-slot "rig $name gave up its slot wait after ${RIG_RUNNER_WAIT_MAX_S}s; requeued $(basename "$again")" 2>/dev/null || true
+      else
+        echo "$(ts) heavy-slot: $name waited ${RIG_RUNNER_WAIT_MAX_S}s under the shared runner ($n busy); giving up (could not requeue $runner_cmd)" >&2
+      fi
+      [[ -n "$mark" ]] && rm -f "$mark" 2>/dev/null
+      echo none; return 75
     fi
     if (( $(date +%s) - t0 >= WAIT_MAX_S )); then
       # A real slot over the cap, so the boot guard and the reclaim rules still see this job.
