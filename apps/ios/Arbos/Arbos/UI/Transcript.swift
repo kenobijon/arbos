@@ -143,6 +143,10 @@ enum RowKind: Equatable {
     case member(blocks: [Block], live: Bool, handle: String, name: String?, avatar: String?, named: Bool, agentId: String?, quote: Quote?)
     /// Centred muted line: hand-offs ("Messaged ◉ Affine"), stops, dates.
     case system(icon: String?, text: String, avatarProject: Id?)
+    /// A run of messages from someone I blocked, folded into one muted line ("3 messages
+    /// hidden because you blocked @sam · Unblock") — the blocker alone sees this
+    /// ([feedback blocked-state-ios-2026-10-26], Jacob 2026-10-26).
+    case hidden(count: Int, sender: String, handle: String, name: String?)
     /// Grok Bot question card: bold question, × top-right, lettered answer rows.
     /// `questionId` is nil for a legacy `waiting_user` status line (no `question` part).
     /// `lane`: in a people chat the card sits after the sender's avatar lane, like the bubble it
@@ -200,8 +204,8 @@ enum Transcript {
     /// messages in the doc (#1349); nothing is synthesised here.
     /// `agentNames`: agent project id → display name from the chat's member list, the
     /// fallback when a reply row carries no `senderName` (older boxes).
-    static func rows(_ messages: [Message], projectId: Id, subagentNames: [String: String] = [:], me: String? = nil, people: Bool = false, agentNames: [String: String] = [:], multiParty: Bool = false, memberNames: [String: String] = [:]) -> [Row] {
-        rows(messages, byId: index(messages), projectId: projectId, subagentNames: subagentNames, me: me, people: people, agentNames: agentNames, multiParty: multiParty, memberNames: memberNames)
+    static func rows(_ messages: [Message], projectId: Id, subagentNames: [String: String] = [:], me: String? = nil, people: Bool = false, agentNames: [String: String] = [:], multiParty: Bool = false, memberNames: [String: String] = [:], hiddenSenders: Set<String> = []) -> [Row] {
+        rows(messages, byId: index(messages), projectId: projectId, subagentNames: subagentNames, me: me, people: people, agentNames: agentNames, multiParty: multiParty, memberNames: memberNames, hiddenSenders: hiddenSenders)
     }
 
     /// Same, with the caller's `index(messages)` (the chat keeps it for its own lookups).
@@ -209,7 +213,9 @@ enum Transcript {
     /// agents alike); a 1:1 chat (me ↔ person, me ↔ agent) labels nobody (Jacob, 2026-10-23).
     /// `memberNames`: the chat's people by user id → current display name (me included), so a
     /// membership line names its actor as the roster does now, not as the row was written.
-    static func rows(_ messages: [Message], byId: [Id: Message], projectId: Id, subagentNames: [String: String] = [:], me: String? = nil, people: Bool = false, agentNames: [String: String] = [:], multiParty: Bool = false, memberNames: [String: String] = [:]) -> [Row] {
+    /// `hiddenSenders`: `user:<id>` keys of people I blocked — their messages fold into one
+    /// `.hidden` row per run instead of bubbles, and carry no date separator.
+    static func rows(_ messages: [Message], byId: [Id: Message], projectId: Id, subagentNames: [String: String] = [:], me: String? = nil, people: Bool = false, agentNames: [String: String] = [:], multiParty: Bool = false, memberNames: [String: String] = [:], hiddenSenders: Set<String> = []) -> [Row] {
         var rows: [Row] = []
         rows.reserveCapacity(messages.count + messages.count / 8)
         var lastAt: Int64 = 0
@@ -232,6 +238,21 @@ enum Transcript {
             // the working line through `AppModel.currentActivity`. Skipping only the hand-off name
             // (6e7261a5) left the legacy `.status(.handoff)` fallback drawing "Messaged ◉ <worker>".
             if message.worker && message.turn?.isProgress == true { continue }
+            // Someone I blocked: fold the run into one hidden line, no bubble, no date line.
+            if message.role == .user, hiddenSenders.contains(message.sender) {
+                if let last = rows.indices.last,
+                   case .hidden(let count, let sender, let handle, let name) = rows[last].kind,
+                   sender == message.sender {
+                    rows[last].kind = .hidden(count: count + 1, sender: sender, handle: handle, name: name)
+                } else {
+                    rows.append(Row(id: "\(message.id)#hidden", messageId: message.id, role: .system,
+                                    kind: .hidden(count: 1, sender: message.sender,
+                                                  handle: message.senderHandle ?? "someone", name: message.senderName),
+                                    createdAt: message.createdAt))
+                }
+                prevSender = nil
+                continue
+            }
             // Build this message's visible rows first. Date separators only land when
             // something actually renders — otherwise an empty/hidden-only message leaves
             // a lone "Today 5:45 PM" in a blank chat.
@@ -1168,20 +1189,20 @@ struct RowView: View, Equatable {
     var onQuoteTap: ((Quote) -> Void)? = nil
     /// Briefly tinted after a quote tap landed on this row's message.
     var highlighted: Bool = false
-    /// Swipe right on this bubble → reply (the long-press Reply item's twin; `BubbleSwipe`).
-    /// Nil on system / channel / non-message rows.
-    var onReply: (() -> Void)? = nil
+    /// A message row: swipe right on it replies (the long-press Reply item's twin;
+    /// `BubbleSwipe`). False on system / channel / non-message rows.
+    var canReply: Bool = false
+    /// Reply swipe (owned by the transcript's one recognizer, `TranscriptSwipeHost`): how far
+    /// this bubble follows the finger to the right, and whether releasing now replies.
+    var replyDrag: CGFloat = 0
+    var replyArmed: Bool = false
     /// Shared mention table from ChatView (built once per directory sync).
     let mentions: MentionTable
 
     /// Which reaction chip is expanded to show who used that emoji under the bubble.
     @State private var selectedReactionEmoji: String? = nil
-    /// Reply swipe: how far the bubble has followed the finger to the right.
-    @State private var replyDrag: CGFloat = 0
-    /// Reply swipe: what the current drag was decided to be (once, at 12 pt).
-    @State private var replyLock: BubbleSwipe.Lock = .undecided
-    /// Reply swipe: the threshold haptic fired for this drag.
-    @State private var replyArmed = false
+    /// The agent-error note's Details disclosure.
+    @State private var errorDetailsOpen = false
 
     /// Trailing column width for swipe-revealed times (fits "12:59 PM").
     static let timeRevealWidth: CGFloat = 56
@@ -1198,6 +1219,9 @@ struct RowView: View, Equatable {
             && lhs.mentions.stamp == rhs.mentions.stamp
             && lhs.composerInset == rhs.composerInset
             && lhs.people == rhs.people
+            && lhs.canReply == rhs.canReply
+            && lhs.replyDrag == rhs.replyDrag
+            && lhs.replyArmed == rhs.replyArmed
             && lhs.theme == rhs.theme
         #if DEBUG
         PerfCounters.bump(same ? "rowEqTrue" : "rowEqFalse")
@@ -1220,7 +1244,7 @@ struct RowView: View, Equatable {
     /// Bubbles get a swipe time; centred system / card / error rows do not.
     private var showsSwipeTime: Bool {
         switch row.kind {
-        case .system, .question, .error, .forwardHint, .secretGhost:
+        case .system, .question, .error, .forwardHint, .secretGhost, .hidden:
             return false
         case .user, .other, .member, .assistant, .file, .voiceMemo, .image:
             return true
@@ -1271,7 +1295,7 @@ struct RowView: View, Equatable {
         }
         .overlay(alignment: .leading) {
             // The reply arrow slides out from behind the bubble's leading edge.
-            if onReply != nil, replyDrag > 0.5 {
+            if canReply, replyDrag > 0.5 {
                 Image(systemName: "arrowshape.turn.up.left")
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(replyArmed ? theme.accent : theme.muted)
@@ -1282,45 +1306,8 @@ struct RowView: View, Equatable {
                     .accessibilityHidden(true)
             }
         }
-        .simultaneousGesture(replySwipeGesture, including: onReply == nil ? .subviews : .all)
         .accessibilityElement(children: .contain)
-        .accessibilityIdentifier(onReply == nil ? "row:\(row.id)" : "bubble:\(row.messageId)")
-    }
-
-    /// Swipe right on a message → reply (`BubbleSwipe`). Decides once at 12 pt: a
-    /// horizontal-right pan outside the edge zone follows the finger, taps at the
-    /// threshold and replies on release; anything else is left to the scroll view, the
-    /// time reveal or the system edge pop. The start point is read in the screen's space
-    /// (`BackSwipe.space`) so the edge zone is the screen's, not the bubble's.
-    private var replySwipeGesture: some Gesture {
-        DragGesture(minimumDistance: BubbleSwipe.lockDistance, coordinateSpace: .named(BackSwipe.space))
-            .onChanged { value in
-                guard onReply != nil else { return }
-                if replyLock == .undecided {
-                    replyLock = BubbleSwipe.lock(translation: value.translation, startX: value.startLocation.x)
-                    if replyLock == .reply { BackSwipe.bubbleSwipeActive = true }
-                }
-                guard replyLock == .reply else { return }
-                let reveal = BubbleSwipe.reveal(for: value.translation.width)
-                let armed = BubbleSwipe.triggers(reveal: reveal)
-                if armed != replyArmed {
-                    replyArmed = armed
-                    if armed { Haptics.pick() }
-                }
-                var t = Transaction()
-                t.disablesAnimations = true
-                withTransaction(t) { replyDrag = reveal }
-            }
-            .onEnded { _ in
-                let fire = replyLock == .reply && replyArmed
-                replyLock = .undecided
-                replyArmed = false
-                withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) { replyDrag = 0 }
-                if fire { onReply?() }
-                // The screen's full-screen back swipe sees the same drag end; let it read
-                // the flag first.
-                DispatchQueue.main.async { BackSwipe.bubbleSwipeActive = false }
-            }
+        .accessibilityIdentifier(canReply ? "bubble:\(row.messageId)" : "row:\(row.id)")
     }
 
     @ViewBuilder
@@ -1328,17 +1315,17 @@ struct RowView: View, Equatable {
         switch row.kind {
         case .user(let text, let delivery, let quote):
             // My bubble: delivered is the full style at once; only pending is dimmed; a
-            // failed one is full with a red "! Retry" on its outer edge. No caption, no
-            // read-receipt dimming (Jacob, 2026-10-24 / 2026-10-25; docs/mac-design-rules.md).
+            // failed one is full with the red mark on its outer edge — the words and Try again
+            // are the composer's note (Jacob, 2026-10-24 / 2026-10-26; docs/mac-design-rules.md).
             HStack(spacing: 8) {
                 Spacer(minLength: 0)
                 if delivery == .failed {
                     Button {
                         model.resendFailed(chatId: chatId, messageId: row.messageId)
                     } label: {
-                        Label("Retry", systemImage: "exclamationmark.circle.fill")
-                            .font(theme.font(Theme.tiny))
-                            .foregroundStyle(.red)
+                        Image(systemName: "exclamationmark.circle.fill")
+                            .font(.system(size: 16))
+                            .foregroundStyle(theme.danger) // error-ui: exception failed-bubble-mark
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Not sent. Retry")
@@ -1502,6 +1489,27 @@ struct RowView: View, Equatable {
             .foregroundStyle(theme.muted)
             .frame(maxWidth: .infinity)
             .multilineTextAlignment(.center)
+        case .hidden(let count, _, let handle, let name):
+            // The blocker's folded line ([feedback blocked-state-ios-2026-10-26]); Unblock
+            // opens the person's sheet (its Unblock asks first).
+            let who = (name?.trimmingCharacters(in: .whitespaces)).flatMap { $0.isEmpty ? nil : $0 } ?? "@\(handle)"
+            HStack(spacing: 5) {
+                Image(systemName: "nosign").font(.system(size: 12, weight: .regular))
+                Text(BlockedState.hiddenLine(count: count, who: who))
+                Text("·")
+                Button(BlockedState.unblock) {
+                    model.openPersonProfile(handle: handle, avatarUrl: nil, chatId: chatId)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(theme.accent)
+                .fontWeight(.semibold)
+                .accessibilityIdentifier("hidden-row-unblock")
+            }
+            .font(theme.font(Theme.small))
+            .foregroundStyle(theme.muted)
+            .frame(maxWidth: .infinity)
+            .multilineTextAlignment(.center)
+            .accessibilityIdentifier("hidden-row")
         case .secretGhost(let name, let mine, let handle, let avatar, let named):
             // The ghost: surface fill with a hairline, muted ink, the key glyph; the name is
             // the only thing in text ink. Mine sits right like my bubble, another member's
@@ -1580,17 +1588,13 @@ struct RowView: View, Equatable {
                 if !fromUser { Spacer(minLength: 0) }
             }
         case .error(let code, let message):
-            HStack(spacing: 10) {
-                Image(systemName: "exclamationmark.circle").foregroundStyle(theme.danger)
-                Text(message).font(theme.font(Theme.small)).foregroundStyle(theme.text)
-                Spacer(minLength: 0)
-                Text(code).font(theme.font(11)).foregroundStyle(theme.muted)
-                Button("Retry") { model.retry(chatId: chatId, messageId: row.messageId) }
-                    .font(theme.font(13, weight: .semibold))
-                    .foregroundStyle(theme.text)
-            }
-            .padding(.horizontal, Theme.bubbleHPad).padding(.vertical, 10)
-            .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.dangerSoft))
+            // An agent turn that failed: the shared element in the transcript's flow (the agent's
+            // own sentence, the code behind Details, Try again re-runs the turn).
+            ErrorNote(id: "agent-turn-error",
+                      error: UserError(verb: "", class: message.trimmingCharacters(in: .whitespaces).isEmpty ? .unknown : .refused(message: message),
+                                       raw: code),
+                      detailsOpen: $errorDetailsOpen,
+                      onTryAgain: { model.retry(chatId: chatId, messageId: row.messageId) })
         }
     }
 

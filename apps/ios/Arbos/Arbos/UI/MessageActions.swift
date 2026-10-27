@@ -368,7 +368,8 @@ extension View {
             // A hold on a chart plot reads a value instead (`ChartTouch`).
             simultaneousGesture(
                 LongPressGesture(minimumDuration: 0.35)
-                    .onEnded { _ in if !ChartTouch.holding { onLongPress() } }
+                    .onEnded { _ in if !ChartTouch.holding { onLongPress() } },
+                enabled: ChatGestures.longPress
             )
         } else {
             contextMenu { MessageMenuContent(items: MessageMenu.copyOnly, action: onCopyMenu) }
