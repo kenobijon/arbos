@@ -987,7 +987,7 @@ struct ChatSession: View {
             AgentEditSheet(projectId: projectId).environmentObject(model).environment(\.theme, theme)
         }
         .sheet(item: $pendingForward) { pending in
-            ForwardSheet(fromName: pending.from, attachmentNote: ForwardPayload.of(pending.message)?.hasMedia == true) { target in
+            ForwardSheet(fromName: pending.from, attachmentNote: pending.message.body?.hasMedia == true) { target in
                 pendingForward = nil
                 model.forwardMessage(pending.message, from: pending.from, slot: pending.slot, to: target)
                 model.notice = Notice(text: "Forwarded to \(target.title)")
@@ -2158,8 +2158,8 @@ struct ChatSession: View {
     /// ([feedback forward-attachments-ios-2026-10-27]: only the words used to travel).
     private func beginForward(_ row: Row) {
         guard let m = messageById[row.messageId] else { return }
-        guard ForwardPayload.of(m) != nil else {
-            if ForwardPayload.hasUploadingAttachment(m) {
+        guard m.body != nil else {
+            if m.hasUploadingAttachment {
                 model.notice = Notice(text: "Still uploading — try again in a moment")
             }
             return
