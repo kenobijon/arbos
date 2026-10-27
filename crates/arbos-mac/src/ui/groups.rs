@@ -45,19 +45,6 @@ pub fn project_color(hex: &str, fallback: Hsla) -> Hsla {
     }
 }
 
-/// A stable accent for a sender id when its Project is not in the registry (e.g. in a
-/// participant's "Projects ⇄" tab): a hue from the id, the theme's saturation.
-pub fn sender_color(seed: &str, theme: &Theme) -> Hsla {
-    let mut h: u32 = 2166136261;
-    for b in seed.bytes() {
-        h = (h ^ b as u32).wrapping_mul(16777619);
-    }
-    let mut c = theme.accent;
-    c.h = (h % 360) as f32 / 360.0;
-    c.s = c.s.max(0.45);
-    c
-}
-
 /// Group tab: the participants' glyphs stacked, host first. The "Projects ⇄" tab shows `⇄`.
 pub fn tab_glyphs(
     chat: &Chat,
