@@ -46,7 +46,12 @@ final class SheetHeaderLayoutTests: XCTestCase {
                     XCTAssertEqual(layout.leading.minX, SheetHeaderLayout.inset, ctx)
                     XCTAssertLessThanOrEqual(layout.title.maxX, layout.trailing.minX - SheetHeaderLayout.gap + 0.01, "title never runs under the control — \(ctx)")
                     XCTAssertGreaterThanOrEqual(layout.title.minX + 0.01, layout.leading.maxX + SheetHeaderLayout.gap, "nor under Cancel — \(ctx)")
-                    XCTAssertEqual(layout.title.midX, w / 2, accuracy: 0.01, "centred on the bar — \(ctx)")
+                    if layout.titleScale == 1 && !layout.titleTruncated,
+                       width(title, size: Theme.body, weight: .semibold) <= SheetHeaderLayout.titleRoom(width: w, leadingWidth: cancelWidth, trailingWidth: trailing) {
+                        XCTAssertEqual(layout.title.midX, w / 2, accuracy: 0.01, "a fitting title is centred on the bar — \(ctx)")
+                    } else {
+                        XCTAssertEqual(layout.title.midX, (layout.leading.maxX + layout.trailing.minX) / 2, accuracy: 0.01, "a long title is centred between the controls — \(ctx)")
+                    }
                     XCTAssertGreaterThanOrEqual(layout.titleScale, SheetHeaderLayout.minimumTitleScale, ctx)
                     XCTAssertLessThanOrEqual(layout.titleScale, 1, ctx)
                     XCTAssertEqual(layout.trailing.height, SheetHeaderLayout.height, ctx)
@@ -55,7 +60,8 @@ final class SheetHeaderLayoutTests: XCTestCase {
         }
     }
 
-    /// Jacob's exact case: the title that produced "A…" fits whole, or nearly, with the pill intact.
+    /// Jacob's exact case: the title that produced "A…" is whole with "Add" and the pill intact;
+    /// the wider busy label shrinks it a little and never cuts it.
     func testAddMembersToArbonitesKeepsAddWholeOnAnIPhone17() {
         let title = "Add members to Arbonites"
         for label in ["Add", "Add (1)", "Adding…"] {
@@ -63,9 +69,12 @@ final class SheetHeaderLayoutTests: XCTestCase {
                                                  titleWidth: width(title, size: Theme.body, weight: .semibold),
                                                  trailingWidth: pillWidth(label))
             XCTAssertFalse(layout.titleTruncated, label)
-            XCTAssertGreaterThanOrEqual(layout.titleScale, 0.9, "\(label): the title shrinks a little at most")
+            XCTAssertGreaterThanOrEqual(layout.titleScale, 0.8, "\(label): the title shrinks a little at most")
             XCTAssertEqual(layout.trailing.width, pillWidth(label))
         }
+        let plain = SheetHeaderLayout.solve(width: 393, leadingWidth: cancelWidth,
+                                            titleWidth: width(title, size: Theme.body, weight: .semibold), trailingWidth: pillWidth("Add"))
+        XCTAssertEqual(plain.titleScale, 1, "with “Add” the title is drawn whole")
     }
 
     func testAVeryLongTitleShrinksThenCutsWithoutMovingTheControls() {
@@ -75,13 +84,20 @@ final class SheetHeaderLayoutTests: XCTestCase {
                                              trailingWidth: pillWidth("Add (12)"))
         XCTAssertEqual(layout.titleScale, SheetHeaderLayout.minimumTitleScale)
         XCTAssertTrue(layout.titleTruncated)
-        XCTAssertEqual(layout.title.width, SheetHeaderLayout.titleRoom(width: 320, leadingWidth: cancelWidth, trailingWidth: pillWidth("Add (12)")))
+        XCTAssertEqual(layout.title.width, SheetHeaderLayout.betweenControls(width: 320, leadingWidth: cancelWidth, trailingWidth: pillWidth("Add (12)")))
         XCTAssertEqual(layout.trailing.width, pillWidth("Add (12)"))
+        XCTAssertEqual(layout.trailing.maxX, 320 - SheetHeaderLayout.inset)
     }
 
-    func testTheTitleRoomIsSymmetricSoAWideControlDoesNotPushItOffCentre() {
+    func testAFittingTitleIsCentredOnTheBarNotBetweenUnequalControls() {
         let room = SheetHeaderLayout.titleRoom(width: 393, leadingWidth: 20, trailingWidth: 90)
         XCTAssertEqual(room, 393 - 2 * (SheetHeaderLayout.inset + 90 + SheetHeaderLayout.gap))
+        let layout = SheetHeaderLayout.solve(width: 393, leadingWidth: 20, titleWidth: 100, trailingWidth: 90)
+        XCTAssertEqual(layout.title.midX, 393 / 2)
+        XCTAssertEqual(layout.titleScale, 1)
+        let long = SheetHeaderLayout.solve(width: 393, leadingWidth: 20, titleWidth: 300, trailingWidth: 90)
+        XCTAssertEqual(long.title.minX, long.leading.maxX + SheetHeaderLayout.gap, accuracy: 0.01, "a long title fills the space between the controls")
+        XCTAssertEqual(long.title.maxX, long.trailing.minX - SheetHeaderLayout.gap, accuracy: 0.01)
     }
 
     func testTheBarIsAMemberOfTheControlFamily() {

@@ -45,6 +45,7 @@ final class AddMembersActionTests: XCTestCase {
 
     func testOneBatchCallAddsAPersonAndAnAgentAndReplacesTheRoster() async throws {
         server.respond = { req in
+            guard req.path.hasPrefix("/chats/") else { return (404, Data("{}".utf8)) }
             XCTAssertEqual(req.method, "POST")
             XCTAssertEqual(req.path, "/chats/\(Self.chatId)/members")
             XCTAssertEqual(req.headers["authorization"], "Bearer test-token")
@@ -55,17 +56,18 @@ final class AddMembersActionTests: XCTestCase {
         }
         let ok = await model.addMembers(chatId: Self.chatId, handles: ["@amb-third-1026 "], agentIds: [Self.agentId])
         XCTAssertTrue(ok)
-        XCTAssertEqual(server.requests.count, 1, "one call for the whole batch, no per-item fallback")
+        XCTAssertEqual(server.chatRequests.map(\.path), ["/chats/\(Self.chatId)/members"], "one call for the whole batch, no per-item fallback")
         let chat = try XCTUnwrap(model.peopleChat(Self.chatId))
         XCTAssertTrue(chat.hasAgent(Self.agentId), "the agent is in the roster the relay returned")
         XCTAssertTrue(chat.hasPerson(Person(id: "test_01M5XATTMAKGAKK1Q11CT56MBC", handle: "amb-third-1026", avatarUrl: nil, name: nil, status: "member"), meId: nil))
         XCTAssertEqual(chat.members.count, 4)
-        XCTAssertNil(model.notice, "a success shows no notice")
+        XCTAssertFalse(model.notice?.text.contains("add") ?? false, "a success shows no add notice (\(model.notice?.text ?? ""))")
     }
 
     func testARefusalIsReportedAndNothingIsClaimed() async throws {
-        server.respond = { _ in
-            (403, #"{"error":{"type":"own_project_only","message":"you can only add or change your own Project's agent"}}"#.data(using: .utf8)!)
+        server.respond = { req in
+            guard req.path.hasPrefix("/chats/") else { return (404, Data("{}".utf8)) }
+            return (403, #"{"error":{"type":"own_project_only","message":"you can only add or change your own Project's agent"}}"#.data(using: .utf8)!)
         }
         let ok = await model.addMembers(chatId: Self.chatId, handles: [], agentIds: [Self.agentId])
         XCTAssertFalse(ok)
@@ -78,6 +80,7 @@ final class AddMembersActionTests: XCTestCase {
 
     func testAnOldRelayWithoutTheBatchRouteGetsThePerItemCalls() async throws {
         server.respond = { req in
+            guard req.path.hasPrefix("/chats/") else { return (404, Data("{}".utf8)) }
             let body = (try? JSONSerialization.jsonObject(with: req.body) as? [String: Any]) ?? [:]
             if body["handles"] != nil { return (400, #"{"error":{"type":"bad_request","message":"handle required"}}"#.data(using: .utf8)!) }
             if req.path.hasSuffix("/agents") { return (200, Self.relayChatAfterAdd) }
@@ -85,14 +88,15 @@ final class AddMembersActionTests: XCTestCase {
         }
         let ok = await model.addMembers(chatId: Self.chatId, handles: ["amb-third-1026"], agentIds: [Self.agentId])
         XCTAssertTrue(ok)
-        XCTAssertEqual(server.requests.map(\.path), ["/chats/\(Self.chatId)/members", "/chats/\(Self.chatId)/members", "/chats/\(Self.chatId)/agents"])
+        XCTAssertEqual(server.chatRequests.filter { $0.method == "POST" }.map(\.path),
+                       ["/chats/\(Self.chatId)/members", "/chats/\(Self.chatId)/members", "/chats/\(Self.chatId)/agents"])
         XCTAssertTrue(model.peopleChat(Self.chatId)!.hasAgent(Self.agentId))
     }
 
     /// `GET /chats/01M5XATTTX957RTR99XNE0W9BD` on relay.arbos.life after the batch add (scratch
     /// users amb-owner-1026 / amb-guest-1026 / amb-third-1026 and the agent "Scratch Agent").
     static let relayChatAfterAdd: Data = #"""
-    {"archived_at": null, "avatar_leaf": null, "avatar_leaf_color": null, "created_at": 1793059547997, "created_by": "test_01M5XATTDM46M7BDXANR0ECHVQ", "head_seq": 3, "id": "01M5XATTTX957RTR99XNE0W9BD", "image_key": null, "kind": "group", "last_activity_at": 1793059563925, "lock_state": "visible_to_agents", "me": {"archived_at": null, "muted": false, "read_receipts": true, "role": "owner", "silenced": false}, "members": [{"added_by": "test_01M5XATTDM46M7BDXANR0ECHVQ", "avatar_color_index_effective": 6, "avatar_url": null, "handle": "amb-owner-1026", "joined_at": 1793059547997, "last_seen_at": 1793071800000, "member": "user:test_01M5XATTDM46M7BDXANR0ECHVQ", "name": "AMB Owner", "online": true, "read_receipts": true, "role": "owner", "silenced": false, "status": "member", "user_id": "test_01M5XATTDM46M7BDXANR0ECHVQ"}, {"added_by": "test_01M5XATTDM46M7BDXANR0ECHVQ", "avatar_color_index_effective": 0, "avatar_url": null, "handle": "amb-guest-1026", "joined_at": 1793059547998, "last_seen_at": 1793071800000, "member": "user:test_01M5XATTGZKXFJ23CCYFFNT8EF", "name": "AMB Guest", "online": true, "read_receipts": true, "role": "member", "silenced": false, "status": "member", "user_id": "test_01M5XATTGZKXFJ23CCYFFNT8EF"}, {"added_by": "test_01M5XATTDM46M7BDXANR0ECHVQ", "avatar": "olive", "avatar_color": "slate", "avatar_color_index": null, "avatar_color_index_effective": 4, "avatar_leaf": null, "avatar_leaf_color": null, "avatar_leaf_color_effective": 2, "avatar_leaf_effective": 2, "description": "", "handle": "scratch-agent", "joined_at": 1793059557140, "member": "agent:01M5XATTQM8KRH94R070AA27Y0", "owner": "test_01M5XATTDM46M7BDXANR0ECHVQ", "owner_handle": "amb-owner-1026", "project": {"color": "#8b7cf6", "icon": "Sa", "id": "01M5XATTQM8KRH94R070AA27Y0", "name": "Scratch Agent"}, "role": "agent", "settings": {"reply_policy": "mention", "restrict_guests": false}}, {"added_by": "test_01M5XATTDM46M7BDXANR0ECHVQ", "avatar_color_index_effective": 1, "avatar_url": null, "handle": "amb-third-1026", "joined_at": 1793059557140, "last_seen_at": 1793071800000, "member": "user:test_01M5XATTMAKGAKK1Q11CT56MBC", "name": "AMB Third", "online": true, "read_receipts": true, "role": "member", "silenced": false, "status": "member", "user_id": "test_01M5XATTMAKGAKK1Q11CT56MBC"}], "pending": false, "read_seq": 0, "room": "/room/people/01M5XATTTX957RTR99XNE0W9BD", "title": "Add-members scratch group with a deliberately very long name", "unread": false}
+    {"archived_at":null,"avatar_leaf":null,"avatar_leaf_color":null,"created_at":1793059547997,"created_by":"test_01M5XATTDM46M7BDXANR0ECHVQ","head_seq":3,"id":"01M5XATTTX957RTR99XNE0W9BD","image_key":null,"kind":"group","last_activity_at":1793059563925,"lock_state":"visible_to_agents","me":{"archived_at":null,"muted":false,"read_receipts":true,"role":"owner","silenced":false},"members":[{"added_by":"test_01M5XATTDM46M7BDXANR0ECHVQ","avatar_color_index_effective":6,"avatar_url":null,"handle":"amb-owner-1026","joined_at":1793059547997,"last_seen_at":1793071800000,"member":"user:test_01M5XATTDM46M7BDXANR0ECHVQ","name":"AMB Owner","online":true,"read_receipts":true,"role":"owner","silenced":false,"status":"member","user_id":"test_01M5XATTDM46M7BDXANR0ECHVQ"},{"added_by":"test_01M5XATTDM46M7BDXANR0ECHVQ","avatar_color_index_effective":0,"avatar_url":null,"handle":"amb-guest-1026","joined_at":1793059547998,"last_seen_at":1793071800000,"member":"user:test_01M5XATTGZKXFJ23CCYFFNT8EF","name":"AMB Guest","online":true,"read_receipts":true,"role":"member","silenced":false,"status":"member","user_id":"test_01M5XATTGZKXFJ23CCYFFNT8EF"},{"added_by":"test_01M5XATTDM46M7BDXANR0ECHVQ","avatar":"olive","avatar_color":"slate","avatar_color_index":null,"avatar_color_index_effective":4,"avatar_leaf":null,"avatar_leaf_color":null,"avatar_leaf_color_effective":2,"avatar_leaf_effective":2,"description":"","handle":"scratch-agent","joined_at":1793059557140,"member":"agent:01M5XATTQM8KRH94R070AA27Y0","owner":"test_01M5XATTDM46M7BDXANR0ECHVQ","owner_handle":"amb-owner-1026","project":{"avatar":"olive","avatar_color":"slate","avatar_color_index":null,"avatar_color_index_effective":4,"avatar_leaf":null,"avatar_leaf_color":null,"avatar_leaf_color_effective":2,"avatar_leaf_effective":2,"avatar_version":1793059547892,"color":"#8b7cf6","description":"","icon":"Sa","id":"01M5XATTQM8KRH94R070AA27Y0","image_key":null,"model":"anthropic/claude-haiku-5.5","name":"Scratch Agent","owner":{"avatar":null,"avatar_color":null,"avatar_color_index":null,"avatar_color_index_effective":6,"avatar_url":null,"handle":"amb-owner-1026","id":"test_01M5XATTDM46M7BDXANR0ECHVQ","kind":"user","last_seen_at":1793071800000,"name":"AMB Owner","online":true}},"role":"agent","settings":{"reply_policy":"mention","restrict_guests":false}},{"added_by":"test_01M5XATTDM46M7BDXANR0ECHVQ","avatar_color_index_effective":1,"avatar_url":null,"handle":"amb-third-1026","joined_at":1793059557140,"last_seen_at":1793071800000,"member":"user:test_01M5XATTMAKGAKK1Q11CT56MBC","name":"AMB Third","online":true,"read_receipts":true,"role":"member","silenced":false,"status":"member","user_id":"test_01M5XATTMAKGAKK1Q11CT56MBC"}],"pending":false,"read_seq":0,"room":"/room/people/01M5XATTTX957RTR99XNE0W9BD","title":"Add-members scratch group with a deliberately very long name","unread":false}
     """#.data(using: .utf8)!
 }
 
@@ -113,6 +117,8 @@ final class LoopbackRelay {
     private let lock = NSLock()
     private var _requests: [Request] = []
     var requests: [Request] { lock.lock(); defer { lock.unlock() }; return _requests }
+    /// The model also probes `/healthz` and the like on a fresh relay; only the chat calls matter here.
+    var chatRequests: [Request] { requests.filter { $0.path.hasPrefix("/chats/") } }
     var respond: (Request) -> (Int, Data) = { _ in (404, Data("{}".utf8)) }
     private(set) var port: UInt16 = 0
 

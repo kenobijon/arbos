@@ -28,24 +28,34 @@ struct SheetHeaderLayout: Equatable {
     /// True when even the smallest scale does not fit: the title ends in an ellipsis.
     var titleTruncated: Bool
 
-    /// The room the title may use — symmetric around the bar's centre, so a short
-    /// Cancel next to a wide "Creating…" never pushes the title off centre.
+    /// The room a title centred on the bar may use — symmetric around the centre, so a short
+    /// Cancel next to a wide "Creating…" never pushes a fitting title off centre.
     static func titleRoom(width: CGFloat, leadingWidth: CGFloat, trailingWidth: CGFloat) -> CGFloat {
         let side = inset + max(leadingWidth, trailingWidth) + gap
         return max(0, width - 2 * side)
     }
 
+    /// Everything between the two controls — what a long title gets (centred in it, like the
+    /// system bar does when a title no longer fits around the centre).
+    static func betweenControls(width: CGFloat, leadingWidth: CGFloat, trailingWidth: CGFloat) -> CGFloat {
+        max(0, width - 2 * inset - leadingWidth - trailingWidth - 2 * gap)
+    }
+
     static func solve(width: CGFloat, leadingWidth: CGFloat, titleWidth: CGFloat, trailingWidth: CGFloat) -> SheetHeaderLayout {
-        let room = titleRoom(width: width, leadingWidth: leadingWidth, trailingWidth: trailingWidth)
-        let scale: CGFloat = titleWidth <= room || titleWidth == 0 ? 1 : max(minimumTitleScale, room / titleWidth)
+        let centred = titleRoom(width: width, leadingWidth: leadingWidth, trailingWidth: trailingWidth)
+        let leading = CGRect(x: inset, y: 0, width: leadingWidth, height: height)
+        let trailing = CGRect(x: width - inset - trailingWidth, y: 0, width: trailingWidth, height: height)
+        if titleWidth <= centred {
+            return SheetHeaderLayout(leading: leading, title: CGRect(x: (width - titleWidth) / 2, y: 0, width: titleWidth, height: height),
+                                     trailing: trailing, titleScale: 1, titleTruncated: false)
+        }
+        let room = betweenControls(width: width, leadingWidth: leadingWidth, trailingWidth: trailingWidth)
+        let scale = max(minimumTitleScale, room / titleWidth)
         let drawn = min(room, titleWidth * scale)
-        return SheetHeaderLayout(
-            leading: CGRect(x: inset, y: 0, width: leadingWidth, height: height),
-            title: CGRect(x: (width - drawn) / 2, y: 0, width: drawn, height: height),
-            trailing: CGRect(x: width - inset - trailingWidth, y: 0, width: trailingWidth, height: height),
-            titleScale: scale,
-            titleTruncated: titleWidth * minimumTitleScale > room
-        )
+        let roomStart = leading.maxX + gap
+        return SheetHeaderLayout(leading: leading,
+                                 title: CGRect(x: roomStart + (room - drawn) / 2, y: 0, width: drawn, height: height),
+                                 trailing: trailing, titleScale: scale, titleTruncated: titleWidth * minimumTitleScale > room)
     }
 }
 
@@ -115,33 +125,42 @@ struct SheetHeaderBar: View {
     var onAction: () -> Void = {}
     @State private var widths: [String: CGFloat] = [:]
 
+    private var titleText: some View {
+        Text(title)
+            .font(theme.font(Theme.body, weight: .semibold))
+            .foregroundStyle(theme.text)
+            .lineLimit(1)
+    }
+
     var body: some View {
         GeometryReader { geo in
-            let room = SheetHeaderLayout.titleRoom(width: geo.size.width,
-                                                   leadingWidth: widths["leading"] ?? 0,
-                                                   trailingWidth: widths["trailing"] ?? 0)
-            ZStack {
-                Text(title)
-                    .font(theme.font(Theme.body, weight: .semibold))
-                    .foregroundStyle(theme.text)
-                    .lineLimit(1)
+            let leadingW = widths["leading"] ?? 0
+            let trailingW = widths["trailing"] ?? 0
+            let titleW = widths["title"] ?? 0
+            // A title that fits around the bar's centre is centred there: both control slots take
+            // the wider control's width. A longer one gets everything between the controls.
+            let centred = titleW <= SheetHeaderLayout.titleRoom(width: geo.size.width, leadingWidth: leadingW, trailingWidth: trailingW)
+            let slot = centred ? max(leadingW, trailingW) : 0
+            HStack(spacing: SheetHeaderLayout.gap) {
+                leadingControl
+                    .fixedSize()
+                    .layoutPriority(1)
+                    .reportSheetHeaderWidth("leading")
+                    .frame(minWidth: slot, alignment: .leading)
+                titleText
                     .minimumScaleFactor(SheetHeaderLayout.minimumTitleScale)
                     .truncationMode(.tail)
-                    .frame(maxWidth: room)
+                    .frame(maxWidth: .infinity)
+                    .background(titleText.fixedSize().hidden().reportSheetHeaderWidth("title"))
                     .accessibilityIdentifier("sheet-title")
                     .accessibilityAddTraits(.isHeader)
-                HStack(spacing: 0) {
-                    leadingControl
-                        .fixedSize()
-                        .reportSheetHeaderWidth("leading")
-                    Spacer(minLength: SheetHeaderLayout.gap)
-                    trailingControl
-                        .fixedSize()
-                        .layoutPriority(1)
-                        .reportSheetHeaderWidth("trailing")
-                }
-                .padding(.horizontal, SheetHeaderLayout.inset)
+                trailingControl
+                    .fixedSize()
+                    .layoutPriority(1)
+                    .reportSheetHeaderWidth("trailing")
+                    .frame(minWidth: slot, alignment: .trailing)
             }
+            .padding(.horizontal, SheetHeaderLayout.inset)
             .frame(width: geo.size.width, height: SheetHeaderLayout.height)
         }
         .frame(height: SheetHeaderLayout.height)
