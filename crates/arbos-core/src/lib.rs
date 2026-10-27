@@ -7,6 +7,7 @@ pub mod auth;
 pub mod avatar;
 pub mod chart;
 pub mod doc;
+pub mod highlight;
 pub mod ids;
 pub mod local;
 pub mod redact;
