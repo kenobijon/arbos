@@ -109,6 +109,35 @@ pub async fn write_doc(
     Ok(seq)
 }
 
+/// Replace the room's stored history with a snapshot that starts **now**: the live state plus
+/// nothing older. After a secret redaction the rows and the old checkpoint still hold the
+/// removed text as past ops; this writes a shallow checkpoint at the current head and deletes
+/// every row it covers, so the relay keeps no copy. Devices that were offline across the
+/// redaction and push an update depending on history before this point are the one residual
+/// (documented) risk: Loro cannot merge an op whose dependencies were trimmed.
+pub fn compact_shallow(
+    state: &AppState,
+    project_id: Option<&str>,
+    chat_id: &str,
+) -> anyhow::Result<()> {
+    let room_name = wire::room_name(project_id.unwrap_or(PEOPLE_PROJECT), chat_id);
+    let Some(doc) = load_doc(state, chat_id, project_id)? else {
+        return Ok(());
+    };
+    let st = state.db.room_state(&room_name)?;
+    let bytes = doc.shallow_snapshot();
+    anyhow::ensure!(!bytes.is_empty(), "empty shallow snapshot");
+    let frontier = arbos_core::doc::encode_vv(&doc.oplog_vv());
+    anyhow::ensure!(
+        state
+            .db
+            .put_checkpoint(&room_name, st.head, &frontier, &bytes)?,
+        "head below floor"
+    );
+    let _ = state.db.flush_after_scrub();
+    Ok(())
+}
+
 /// The facts behind a membership line, so a client renders it from the live roster: the actor
 /// by user id (never the name of the moment — "Const added Aureum", 2026-10-26, when the
 /// profile had been renamed Jacob), the subjects by id. `text` stays on the row as the
