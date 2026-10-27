@@ -1,0 +1,25 @@
+{
+ "id": "f6-chart-from-csv",
+ "lane": "a",
+ "category": "data",
+ "title": "A chart request on a small CSV uses post_chart (a native chart part lands in the chat) and the caption states the right numbers",
+ "regression": "post_chart (chart-post-tool-agentd-2026-10-26): the chat carries a `chart` part; the caption/summary matches the data; no 'picture is attached' without a real post",
+ "turns": [
+  {
+   "prompt": "{D}/signups.csv has weekly signups for the last 8 weeks. Chart it for me here in the chat, and tell me the best and worst week.",
+   "seed": "mkdir -p {D} && printf 'week,signups\\n2026-W35,120\\n2026-W36,135\\n2026-W37,98\\n2026-W38,160\\n2026-W39,172\\n2026-W40,151\\n2026-W41,205\\n2026-W42,188\\n' > {D}/signups.csv",
+   "timeout_s": 300,
+   "reply_regex": "(?i)W41|week 41|2026-W41",
+   "reply_regex_not": "(?i)W37.*(best|highest)|(best|highest)[^.]*W37",
+   "rubric": {
+    "criteria": "Pass if a chart was posted to the chat (checked programmatically) and the words name W41 (205) as the best week and W37 (98) as the worst; fail if the text claims a picture/chart is attached while no chart part exists, if the extremes are wrong, or if the agent only describes numbers and says it cannot draw.",
+    "min": 3
+   }
+  }
+ ],
+ "doc_checks": {
+  "require_part_kind": "chart",
+  "no_truncated_reply": true,
+  "no_repeated_sentence": true
+ }
+}

@@ -521,6 +521,14 @@ class Lane(threading.Thread):
                 reasons.append(f"a sentence appears twice in one bubble: {checks['repeated_sentences'][:2]}")
             if dc.get("no_truncated_reply") and checks["truncated"]:
                 reasons.append(f"a done bubble ends mid-sentence: {checks['truncated'][:2]}")
+            if dc.get("require_part_kind"):
+                # a structured part (e.g. a `chart` from post_chart) must exist in an assistant row of this task
+                want = dc["require_part_kind"]
+                found = [p for d in all_docs for m in d.get("messages", []) if m.get("role") == "assistant" for p in m.get("parts", []) if p.get("kind") == want]
+                if not found:
+                    reasons.append(f"no assistant row carries a `{want}` part (the tool was not used or its post did not land)")
+                else:
+                    task_state[f"parts_{want}"] = [{k: v for k, v in p.items() if k != "chart"} | ({"series": len((p.get("chart") or {}).get("series") or [])} if want == "chart" else {}) for p in found]
             if dc.get("no_wrong_self_identity"):
                 # a bubble from the renamed agent must never introduce itself by the old name
                 old_name = task_state.get("old_name") or dc.get("old_name")
