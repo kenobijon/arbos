@@ -75,6 +75,14 @@ impl PushRefusal {
             })
     }
 
+    /// The person to unblock, when the sentence says "Unblock to post".
+    pub fn unblock_handle(&self) -> Option<&str> {
+        (self.reason.as_deref() == Some("blocks_member"))
+            .then_some(self.by_handle.as_deref())
+            .flatten()
+            .filter(|h| !h.is_empty())
+    }
+
     /// The plain sentence the chat-level note shows (Jacob 2026-10-26): who stands in the
     /// way and what to do; the generic line for anything else.
     pub fn sentence(&self) -> String {
@@ -231,6 +239,11 @@ pub enum SyncEvent {
     FeedbackCapture {
         request_id: String,
         expires_at: Option<i64>,
+    },
+    /// Secret hand-off: the card's save finished — `Ok(env)` or the error for the shared note.
+    SecretHandoff {
+        approval_id: String,
+        result: Result<String, super::sync::user_error::UserError>,
     },
     /// `GET /voices`: the call voices an agent can use, and the default's id.
     Voices {
@@ -1006,6 +1019,17 @@ pub enum ClientCommand {
     ShellGrantRevoke {
         project_id: Id,
         grant_id: String,
+    },
+    /// Secret hand-off request card: the value goes from this device to `POST /secrets`
+    /// (source `chat`, the agent granted), then the card is answered with the saved secret's
+    /// name and id — never the value — so the agent learns only the name.
+    SecretHandoffSave {
+        chat_id: Id,
+        approval_id: String,
+        project_id: Id,
+        name: String,
+        value: String,
+        purpose: String,
     },
     /// Add a secret; the value goes to the relay once.
     SecretAdd {
