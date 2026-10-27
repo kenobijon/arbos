@@ -402,7 +402,27 @@ struct ChartPlot: View {
 
     // ----- line / area / scatter / bar -----
 
+    /// The y-axis title sits above the plot as its own row: Swift Charts' `chartYAxisLabel` widens
+    /// the leading axis column to the title's width, which on a 260-pt card pushed the plot ~90 pt
+    /// right (the Mac card draws it the same way).
     private var xy: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            if let l = yAxisTitle {
+                Text(l)
+                    .font(theme.font(font - 0.5))
+                    .foregroundStyle(theme.placeholder)
+                    .accessibilityIdentifier("chart-y-label")
+            }
+            xyChart
+        }
+    }
+
+    private var yAxisTitle: String? {
+        guard let l = model.y.label else { return nil }
+        return model.y.unit.isEmpty ? l : "\(l) (\(model.y.unit))"
+    }
+
+    private var xyChart: some View {
         Chart {
             ForEach(Array(model.annotations.enumerated()), id: \.offset) { _, a in
                 switch a.kind {
@@ -516,11 +536,6 @@ struct ChartPlot: View {
         }
         .chartXAxisLabel(position: .bottom, alignment: .center) {
             if let l = model.x.label { Text(l).font(theme.font(font - 0.5)).foregroundStyle(theme.placeholder) }
-        }
-        .chartYAxisLabel(position: .topLeading) {
-            if let l = model.y.label {
-                Text(model.y.unit.isEmpty ? l : "\(l) (\(model.y.unit))").font(theme.font(font - 0.5)).foregroundStyle(theme.placeholder)
-            }
         }
         .chartLegend(.hidden)
         .chartOverlay { proxy in
