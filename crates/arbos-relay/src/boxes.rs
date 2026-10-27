@@ -771,22 +771,28 @@ pub struct ServingAgent {
 pub const CHAT_OPEN_PUSH: &str = "chat_open";
 pub const PEOPLE_CHAT_OPEN_PUSH: &str = "people_chat_open";
 
-/// A new project chat exists: its box opens the room without waiting for the 3 s listing.
-/// Returns whether a push was queued (false when one is already waiting).
-pub fn chat_created(state: &AppState, chat: &crate::db::Chat) -> bool {
-    let payload = json!({
+/// The `chat_open` payload: the chat row rides along because agentd's `open_listed_chat`
+/// upserts title / pin / created_at from it (a bare id would reset them).
+fn chat_open_payload(chat: &crate::db::Chat, reason: &str) -> Value {
+    json!({
         "chat_id": chat.id,
         "project_id": chat.project_id,
-        "reason": "created",
+        "reason": reason,
         "title": chat.title,
         "is_pinned": chat.is_pinned,
         "created_at": chat.created_at,
         "forked_from": chat.forked_from,
-    });
-    match state
-        .db
-        .enqueue_push_once(&chat.project_id, CHAT_OPEN_PUSH, &payload)
-    {
+    })
+}
+
+/// A new project chat exists: its box opens the room without waiting for the 3 s listing.
+/// Returns whether a push was queued (false when one is already waiting).
+pub fn chat_created(state: &AppState, chat: &crate::db::Chat) -> bool {
+    match state.db.enqueue_push_once(
+        &chat.project_id,
+        CHAT_OPEN_PUSH,
+        &chat_open_payload(chat, "created"),
+    ) {
         Ok(added) => added,
         Err(e) => {
             tracing::warn!(chat = %chat.id, project = %chat.project_id, error = %e, "chat_open push not queued");
@@ -823,10 +829,13 @@ pub async fn after_person_row(
                 PEOPLE_CHAT_OPEN_PUSH,
                 json!({ "chat_id": chat.chat_id, "reason": "rows_pending" }),
             ),
-            Some(pid) => (
-                CHAT_OPEN_PUSH,
-                json!({ "chat_id": chat.chat_id, "project_id": pid, "reason": "rows_pending" }),
-            ),
+            Some(pid) => {
+                // A row into a chat the relay has no row for (gone meanwhile): nothing to open.
+                let Ok(Some(row)) = state.db.chat(pid, &chat.chat_id) else {
+                    continue;
+                };
+                (CHAT_OPEN_PUSH, chat_open_payload(&row, "rows_pending"))
+            }
         };
         match state.db.enqueue_push_once(&a.project_id, kind, &payload) {
             Ok(true) => {

@@ -2439,6 +2439,11 @@ mod primary_chat_tests {
         assert_eq!(pushes[0].1, boxes::CHAT_OPEN_PUSH);
         assert_eq!(pushes[0].2["reason"], "rows_pending");
         assert_eq!(pushes[0].2["chat_id"], json!(chat_id));
+        assert_eq!(
+            pushes[0].2["title"], "New chat",
+            "the chat row rides along so the box does not reset it"
+        );
+        assert!(pushes[0].2["created_at"].as_i64().unwrap() > 0);
         room.box_joined(&alice);
         assert_eq!(
             boxes::after_person_row(&state, &room, &chat, &agents).await,
