@@ -380,8 +380,8 @@ pub enum Icon<'a> {
     Brand(Brand),
     /// The relay's icon for the host, with its tone.
     Picture(&'a Arc<RenderImage>, Tone),
-    /// Nothing yet (loading) or nothing at all: the host's first letter.
-    Initial(&'a str),
+    /// Nothing yet (loading) or nothing at all: the host's first letter (the host, as shown).
+    Initial(String),
 }
 
 /// The tile's fill for an icon on this theme: the chip grey, flipped when a transparent mark
@@ -408,7 +408,7 @@ fn dark_fill() -> Hsla {
 /// arrived, else the host's initial.
 pub fn icon_for<'a>(
     url: &str,
-    host: &'a str,
+    host: &str,
     picture: Option<(&'a Arc<RenderImage>, Tone)>,
 ) -> Icon<'a> {
     if let Some(brand) = Brand::for_url(url) {
@@ -416,7 +416,7 @@ pub fn icon_for<'a>(
     }
     match picture {
         Some((image, tone)) => Icon::Picture(image, tone),
-        None => Icon::Initial(host),
+        None => Icon::Initial(host.to_owned()),
     }
 }
 
@@ -450,7 +450,7 @@ pub fn tile(icon: Icon<'_>, size: f32, theme: &Theme) -> Div {
             .text_size(px((size * LETTER_RATIO).round()))
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(theme.text_muted)
-            .child(SharedString::from(initial(host))),
+            .child(SharedString::from(initial(&host))),
     }
 }
 
@@ -766,7 +766,7 @@ mod tests {
                         .debug_selector(|| "tile-brand".into()),
                 )
                 .child(
-                    tile(Icon::Initial("nypost.com"), self.0, &theme)
+                    tile(Icon::Initial("nypost.com".into()), self.0, &theme)
                         .debug_selector(|| "tile-initial".into()),
                 )
         }
@@ -842,7 +842,7 @@ mod tests {
         ));
         assert!(matches!(
             icon_for("https://nypost.com/a", "nypost.com", None),
-            Icon::Initial("nypost.com")
+            Icon::Initial(h) if h == "nypost.com"
         ));
     }
 }
