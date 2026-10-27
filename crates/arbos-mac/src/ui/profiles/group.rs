@@ -97,9 +97,11 @@ pub(super) fn page(
         .collect();
     let is_people = space.is_people();
     let renaming = state.profile_editing_name && is_people;
-    // A people group: any member names it or gives it a picture (relay
-    // `PATCH /chats/{id}`); a shared project keeps its owner's name.
-    let editable = space.is_people_group();
+    // A people group: its owner and admins name it or give it a picture (relay
+    // `PATCH /chats/{id}`, owner/admin only since 2026-10-27 — members had renamed
+    // Arbonites); plain members see the pane read-only. A shared project keeps its
+    // owner's name.
+    let editable = space.may_edit_group_settings(&me_handle);
     // Owners remove members (relay: chat owner for people, the agent's own
     // owner for agents); the row's ✕ shows on hover, then asks once.
     let i_own_group = if is_people {

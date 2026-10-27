@@ -1896,6 +1896,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 avatar_version: 0,
                 message_grants: Vec::new(),
                 blocked_senders: Vec::new(),
+                my_role: None,
             });
             if let Some(url) = &image_url {
                 emit_avatar(shared, url);
@@ -5045,6 +5046,7 @@ fn seed_projects() -> Vec<Project> {
             avatar_version: 0,
             message_grants: Vec::new(),
             blocked_senders: Vec::new(),
+            my_role: None,
         },
         Project {
             id: PROJECT_COMMS.into(),
@@ -5082,6 +5084,7 @@ fn seed_projects() -> Vec<Project> {
             avatar_version: 0,
             message_grants: Vec::new(),
             blocked_senders: Vec::new(),
+            my_role: None,
         },
         Project {
             id: PROJECT_ARBOS.into(),
@@ -5119,6 +5122,7 @@ fn seed_projects() -> Vec<Project> {
             avatar_version: 0,
             message_grants: Vec::new(),
             blocked_senders: Vec::new(),
+            my_role: None,
         },
     ]
 }
@@ -6418,6 +6422,7 @@ fn people_space(id: &str, other: Person, agents: Vec<AgentMember>) -> Project {
         avatar_version: 0,
         message_grants: Vec::new(),
         blocked_senders: Vec::new(),
+        my_role: None,
     }
 }
 
@@ -6483,6 +6488,7 @@ fn launch_week() -> Project {
     space.icon = "L".into();
     space.people = members;
     space.owner_handle = Some(ME_HANDLE.into());
+    space.my_role = Some("owner".into());
     space
 }
 
@@ -6528,6 +6534,7 @@ fn seed_people_projects() -> Vec<Project> {
             avatar_version: 0,
             message_grants: Vec::new(),
             blocked_senders: Vec::new(),
+            my_role: None,
         },
     ]
 }
@@ -7426,6 +7433,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             space.people = members;
             space.pending = space.people.iter().any(|p| p.status == "invited");
             space.owner_handle = Some(ME_HANDLE.into());
+            space.my_role = Some("owner".into());
             shared.projects.lock().unwrap().push(space);
             shared.chats.lock().unwrap().push(Chat {
                 id: id.clone(),
