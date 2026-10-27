@@ -30,6 +30,7 @@ use crate::auth::Principal;
 use crate::db::Project;
 use crate::db_push::PushToken;
 use crate::people;
+use crate::push::eligibility::{self, Recipient, Skip, Verdict};
 use crate::push::{payload, NewPush, PushKind, BADGE_TTL_MS, MESSAGE_TTL_MS};
 use crate::signin::api_error;
 use crate::state::AppState;
@@ -305,7 +306,7 @@ pub async fn announce(
     message_id: &str,
     text: &str,
 ) -> Option<i64> {
-    announce_with(state, chat, sender, message_id, text, None).await
+    announce_with(state, chat, sender, message_id, text, None, &[]).await
 }
 
 /// [`announce`] with an optional cross-chat reply reference (Reply in DM): the
@@ -318,6 +319,7 @@ pub async fn announce_with(
     message_id: &str,
     text: &str,
     reply_ref: Option<&ReplyRefBody>,
+    mentions: &[String],
 ) -> Option<i64> {
     let event_id = state
         .db
@@ -376,18 +378,15 @@ pub async fn announce_with(
             text: Some(body.clone()),
         })
     });
+    let shape = eligibility::chat_shape(state, chat);
+    let large_group_min = eligibility::large_group_min();
     let mut pushes = Vec::new();
     for user in recipients(state, chat) {
-        if sender.user_id.as_deref() == Some(user.as_str()) {
-            continue;
-        }
-        // A recipient who blocked the sender gets no alert and no badge for this row
-        // (hidden for them alone, [feedback blocked-state-relay-2026-10-26]).
-        if sender
-            .user_id
-            .as_deref()
-            .is_some_and(|from| state.db.blocks(&user, from).unwrap_or(false))
-        {
+        let recipient = Recipient::load(state, chat, sender, &user, text, mentions);
+        let verdict = eligibility::decide(&recipient, shape, large_group_min);
+        // The sender's own account, and a recipient who blocked the sender (the row is hidden
+        // for them alone, [feedback blocked-state-relay-2026-10-26]): not even a read mark.
+        if matches!(verdict, Verdict::Skip(Skip::Sender | Skip::BlockedSender)) {
             continue;
         }
         if user_focused_on_chat(state, &user, &chat.chat_id).await {
@@ -395,17 +394,19 @@ pub async fn announce_with(
             // Queued after the message job for this chat, so the receipt lands on it.
             state.matrix.read(state, &chat.chat_id, &user);
         }
-        // Archived = hidden on purpose: no banner, no badge (unread excludes it too).
-        let archived = state
-            .db
-            .chat_archived_at(&user, &chat.chat_id)
-            .ok()
-            .flatten()
-            .is_some();
-        if let (Some(event), false) = (&inapp, archived) {
+        // Archived, level `none`, or mentions-only without a mention: no banner (in-app or
+        // APNs) and no badge; the unread count excludes archived chats on its own.
+        if let Verdict::Skip(why) = verdict {
+            tracing::debug!(
+                user = %user, chat = %chat.chat_id, message = %message_id, why = why.label(),
+                "push: recipient skipped"
+            );
+            continue;
+        }
+        if let Some(event) = &inapp {
             let _ = state.db.push_user_event(&user, event, Some(&chat.chat_id));
         }
-        if !state.push.is_on() || archived {
+        if !state.push.is_on() {
             continue;
         }
         // Stage B: a flipped user's alerts come from the Matrix push gateway instead.
@@ -684,6 +685,54 @@ pub async fn me_unread(State(state): State<AppState>, principal: Principal) -> R
 }
 
 #[derive(Deserialize)]
+pub struct NotificationsBody {
+    /// `all` | `mentions` | `none` — the level every chat without its own setting uses.
+    pub level: String,
+}
+
+fn notifications_json(state: &AppState, user_id: &str) -> Response {
+    let level = state
+        .db
+        .user_notify_default(user_id)
+        .unwrap_or(eligibility::Level::All);
+    Json(json!({
+        "level": level.as_str(),
+        "large_group_min": eligibility::large_group_min(),
+    }))
+    .into_response()
+}
+
+/// `GET /me/notifications` → `{level, large_group_min}`: the account-wide default.
+pub async fn me_notifications(State(state): State<AppState>, principal: Principal) -> Response {
+    let Principal::Device { user_id, .. } = &principal else {
+        return api_error(StatusCode::FORBIDDEN, "forbidden", "devices only");
+    };
+    notifications_json(&state, user_id)
+}
+
+/// `PUT /me/notifications {level}` — set the account-wide default (`inherit` = back to `all`).
+pub async fn put_me_notifications(
+    State(state): State<AppState>,
+    principal: Principal,
+    Json(b): Json<NotificationsBody>,
+) -> Response {
+    let Principal::Device { user_id, .. } = &principal else {
+        return api_error(StatusCode::FORBIDDEN, "forbidden", "devices only");
+    };
+    let Some(level) = eligibility::Level::parse(&b.level) else {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "level must be all, mentions or none",
+        );
+    };
+    if let Err(e) = state.db.set_user_notify_default(user_id, level) {
+        return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
+    }
+    notifications_json(&state, user_id)
+}
+
+#[derive(Deserialize)]
 pub struct NotifyBody {
     pub message_id: String,
     #[serde(default)]
@@ -705,6 +754,10 @@ pub struct NotifyBody {
     /// body), when it differs from `text`.
     #[serde(default)]
     pub voice_text: Option<String>,
+    /// Who the message addresses (`user:<id>` or `@handle`), for mentions-only recipients.
+    /// `@handle` in `text` counts too, so older writers need not send it.
+    #[serde(default)]
+    pub mentions: Vec<String>,
 }
 
 /// The cross-chat reference a client announces with its message.
@@ -811,6 +864,11 @@ pub async fn notify_people_chat(
     if !state.allows(&principal, &format!("{}{id}", people::PEOPLE_ACL_PREFIX)) {
         return api_error(StatusCode::FORBIDDEN, "not_member", "not in this chat");
     }
+    // The same gate the room push runs (#2012): a person a DM partner blocks, or an admin
+    // silenced, announces nothing — no fan-out, no Matrix mirror. Boxes (agents) pass.
+    if let Err(r) = people::sender_gate(&state, &principal, &id) {
+        return api_error(StatusCode::FORBIDDEN, r.code(), r.message());
+    }
     let sender = match sender_for(&state, &principal, b.project_id.as_deref()) {
         Ok(s) => s,
         Err(r) => return *r,
@@ -823,6 +881,7 @@ pub async fn notify_people_chat(
         &b.message_id,
         &b.text,
         b.reply_ref.as_ref(),
+        &b.mentions,
     )
     .await;
     if out.is_some() {
@@ -860,6 +919,7 @@ pub async fn notify_project_chat(
         &b.message_id,
         &b.text,
         b.reply_ref.as_ref(),
+        &b.mentions,
     )
     .await;
     if out.is_some() {
@@ -1030,6 +1090,7 @@ mod tests {
             "r1",
             "Works",
             Some(&reply_ref),
+            &[],
         )
         .await
         .expect("recorded");
@@ -1040,6 +1101,7 @@ mod tests {
             "r2",
             "Works",
             Some(&reply_ref),
+            &[],
         )
         .await
         .expect("recorded");
@@ -1275,6 +1337,7 @@ mod archive_tests {
                 read_receipts: None,
                 muted: None,
                 archived: Some(true),
+                notifications: None,
             }),
         )
         .await;
@@ -1350,6 +1413,7 @@ mod archive_tests {
                 read_receipts: None,
                 muted: None,
                 archived: Some(true),
+                notifications: None,
             }),
         )
         .await;
@@ -1378,6 +1442,7 @@ mod archive_tests {
                 read_receipts: None,
                 muted: None,
                 archived: Some(true),
+                notifications: None,
             }),
         )
         .await;
@@ -1392,6 +1457,7 @@ mod archive_tests {
                 read_receipts: None,
                 muted: None,
                 archived: Some(false),
+                notifications: None,
             }),
         )
         .await;
@@ -1410,5 +1476,481 @@ mod archive_tests {
             2,
             "both of Bob's devices alert again"
         );
+    }
+}
+
+#[cfg(test)]
+mod eligibility_tests {
+    //! The eligibility matrix end to end: agent and group messages reach every device (the
+    //! 2026-10-26 root cause), blocks hide for the blocker alone in groups and refuse the DM
+    //! announcement (#2012), the per-chat level and the account default decide, and a large
+    //! group is mentions-only until someone picks `all`.
+
+    use axum::extract::{Path, State};
+    use axum::http::StatusCode;
+    use axum::Json;
+
+    use arbos_core::ids::ulid;
+
+    use super::*;
+    use crate::db::Project;
+    use crate::people::tests_support::{dm, group, person, project_of};
+    use crate::people::{chat_settings, ChatSettingsBody};
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    fn dev_id(p: &Principal) -> String {
+        match p {
+            Principal::Device { id, .. } => id.clone(),
+            Principal::Box { .. } | Principal::Admin => unreachable!(),
+        }
+    }
+
+    fn register(state: &AppState, p: &Principal, user: &str) -> String {
+        let tok = format!(
+            "{:0<64}",
+            ulid()
+                .to_ascii_lowercase()
+                .chars()
+                .filter(|c| c.is_ascii_hexdigit())
+                .collect::<String>()
+        );
+        state
+            .db
+            .upsert_push_token(&PushToken {
+                device_id: dev_id(p),
+                user_id: user.to_owned(),
+                platform: "ios".into(),
+                token: tok.clone(),
+                environment: "development".into(),
+                bundle_id: crate::apns::DEFAULT_TOPIC.into(),
+                app_version: "1".into(),
+                updated_at: now_ms(),
+            })
+            .expect("token");
+        tok
+    }
+
+    /// Drain the outbox and return the tokens pushed since the last call.
+    async fn pushed_since(state: &AppState, seen: &mut usize) -> Vec<String> {
+        state.push.drain().await;
+        let all = state.push.captured().await;
+        let fresh = all[*seen..]
+            .iter()
+            .map(|o| o.device_token.clone())
+            .collect();
+        *seen = all.len();
+        fresh
+    }
+
+    fn inapp_kinds(state: &AppState, p: &Principal) -> Vec<String> {
+        state
+            .db
+            .take_user_pushes(&dev_id(p))
+            .unwrap()
+            .into_iter()
+            .map(|(_, k, _, _)| k)
+            .collect()
+    }
+
+    async fn notify(state: &AppState, p: &Principal, chat: &str, text: &str) -> StatusCode {
+        notify_people_chat(
+            State(state.clone()),
+            p.clone(),
+            Path(chat.to_owned()),
+            Json(NotifyBody {
+                message_id: ulid(),
+                text: text.into(),
+                project_id: None,
+                reply_ref: None,
+                kind: None,
+                voice_text: None,
+                mentions: Vec::new(),
+            }),
+        )
+        .await
+        .status()
+    }
+
+    async fn set_level(state: &AppState, p: &Principal, chat: &str, level: &str) -> Value {
+        let r = chat_settings(
+            State(state.clone()),
+            p.clone(),
+            Path(chat.to_owned()),
+            Json(ChatSettingsBody {
+                read_receipts: None,
+                muted: None,
+                archived: None,
+                notifications: Some(level.into()),
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK, "level {level}");
+        let b = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
+        serde_json::from_slice(&b).unwrap()
+    }
+
+    #[tokio::test]
+    async fn agent_and_group_messages_reach_every_member_device() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 1);
+        let (bob, bob_dev) = person(&state, 2);
+        let (carol, carol_dev) = person(&state, 3);
+        let g = group(&state, &[&alice, &bob, &carol]);
+        let alice_tok = register(&state, &alice_dev, &alice);
+        let bob_tok = register(&state, &bob_dev, &bob);
+        let carol_tok = register(&state, &carol_dev, &carol);
+        let mut seen = 0;
+
+        // A person's group message: both other members, never the sender.
+        assert_eq!(
+            notify(&state, &alice_dev, &g, "morning all").await,
+            StatusCode::OK
+        );
+        let mut got = pushed_since(&state, &mut seen).await;
+        got.sort();
+        let mut want = vec![bob_tok.clone(), carol_tok.clone()];
+        want.sort();
+        assert_eq!(got, want);
+
+        // An agent's reply in a group (the Arbonites case): every human member, APNs and the
+        // in-app people_message both.
+        let project_id = project_of(&state, &alice, "Doug");
+        let project: Project = state.db.project(&project_id).unwrap().unwrap();
+        state
+            .db
+            .add_member(
+                &g,
+                &format!("agent:{project_id}"),
+                "agent",
+                &alice,
+                &json!({}),
+            )
+            .unwrap();
+        let agent = Sender::agent(&state, &project);
+        announce(
+            &state,
+            &ChatRef::people(&g),
+            &agent,
+            "a1",
+            "Here you go @user2",
+        )
+        .await;
+        let mut got = pushed_since(&state, &mut seen).await;
+        got.sort();
+        let mut want = vec![alice_tok.clone(), bob_tok.clone(), carol_tok.clone()];
+        want.sort();
+        assert_eq!(
+            got, want,
+            "the agent's owner hears it too: she did not write it"
+        );
+        for d in [&alice_dev, &bob_dev, &carol_dev] {
+            assert!(inapp_kinds(&state, d).contains(&"people_message".to_owned()));
+        }
+        let last = state.push.captured().await.last().unwrap().payload.clone();
+        assert_eq!(last["sender"]["kind"], "agent");
+        assert_eq!(last["aps"]["thread-id"], g);
+        assert_eq!(last["aps"]["mutable-content"], 1);
+
+        // An agent in its own project chat with a guest: owner and guest.
+        state
+            .db
+            .add_project_member(&project_id, &bob, &alice)
+            .unwrap();
+        let pchat = ulid();
+        state
+            .db
+            .insert_chat(&crate::db::Chat {
+                id: pchat.clone(),
+                project_id: project_id.clone(),
+                title: "Plan".into(),
+                is_pinned: false,
+                position: 0,
+                created_at: now_ms(),
+                doc_epoch: 1,
+                kind: "chat".into(),
+                participants: Vec::new(),
+                forked_from: None,
+            })
+            .unwrap();
+        announce(
+            &state,
+            &ChatRef::project(&project_id, &pchat),
+            &agent,
+            "a2",
+            "Plan is ready",
+        )
+        .await;
+        let mut got = pushed_since(&state, &mut seen).await;
+        got.sort();
+        let mut want = vec![alice_tok.clone(), bob_tok.clone()];
+        want.sort();
+        assert_eq!(got, want);
+    }
+
+    #[tokio::test]
+    async fn blocks_hide_for_the_blocker_in_groups_and_refuse_the_dm_announcement() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 1);
+        let (bob, bob_dev) = person(&state, 2);
+        let (carol, carol_dev) = person(&state, 3);
+        let g = group(&state, &[&alice, &bob, &carol]);
+        let alice_tok = register(&state, &alice_dev, &alice);
+        let bob_tok = register(&state, &bob_dev, &bob);
+        let carol_tok = register(&state, &carol_dev, &carol);
+        let mut seen = 0;
+        // Bob blocks Alice.
+        state.db.block(&bob, &alice).unwrap();
+
+        // Group: Alice's announcement is accepted; Carol hears it, Bob does not (no APNs, no
+        // in-app event, no unread), and Bob's own posts still reach Alice.
+        assert_eq!(notify(&state, &alice_dev, &g, "hi").await, StatusCode::OK);
+        assert_eq!(
+            pushed_since(&state, &mut seen).await,
+            vec![carol_tok.clone()]
+        );
+        assert!(inapp_kinds(&state, &bob_dev).is_empty());
+        assert_eq!(state.db.unread_in_chat(&bob, &g).unwrap(), 0);
+        assert_eq!(state.db.unread_in_chat(&carol, &g).unwrap(), 1);
+        assert_eq!(
+            notify(&state, &bob_dev, &g, "ignoring you").await,
+            StatusCode::OK
+        );
+        let mut got = pushed_since(&state, &mut seen).await;
+        got.sort();
+        let mut want = vec![alice_tok.clone(), carol_tok.clone()];
+        want.sort();
+        assert_eq!(got, want);
+
+        // DM (#2012): the announcement is refused like the row — not_available, no event, no
+        // push, no Matrix mirror — in both directions; Carol's DM with Alice is untouched.
+        let d = dm(&state, &alice, &bob);
+        let r = notify_people_chat(
+            State(state.clone()),
+            alice_dev.clone(),
+            Path(d.clone()),
+            Json(NotifyBody {
+                message_id: "blocked-1".into(),
+                text: "hello?".into(),
+                project_id: None,
+                reply_ref: None,
+                kind: None,
+                voice_text: None,
+                mentions: Vec::new(),
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        let b = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
+        let v: Value = serde_json::from_slice(&b).unwrap();
+        assert_eq!(v["error"]["type"], "not_available");
+        assert!(pushed_since(&state, &mut seen).await.is_empty());
+        assert_eq!(state.db.unread_in_chat(&bob, &d).unwrap(), 0);
+        assert!(
+            !state.db.chat_event_since(&d, &alice, 0).unwrap(),
+            "no chat_events row: the announcement never landed"
+        );
+        assert_eq!(
+            notify(&state, &bob_dev, &d, "nor you").await,
+            StatusCode::FORBIDDEN,
+            "the blocker cannot announce into the DM either"
+        );
+        let d2 = dm(&state, &alice, &carol);
+        assert_eq!(
+            notify(&state, &alice_dev, &d2, "hi carol").await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            pushed_since(&state, &mut seen).await,
+            vec![carol_tok.clone()]
+        );
+
+        // Silenced in a group (#2012): the announcement is refused too; a box is never gated.
+        state
+            .db
+            .set_member_silenced(&g, &format!("user:{carol}"), true, None)
+            .unwrap();
+        assert_eq!(
+            notify(&state, &carol_dev, &g, "psst").await,
+            StatusCode::FORBIDDEN
+        );
+        assert!(pushed_since(&state, &mut seen).await.is_empty());
+        let _ = bob_tok;
+    }
+
+    #[tokio::test]
+    async fn chat_level_and_account_default_decide() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 1);
+        let (bob, bob_dev) = person(&state, 2);
+        let (carol, carol_dev) = person(&state, 3);
+        let g = group(&state, &[&alice, &bob, &carol]);
+        register(&state, &alice_dev, &alice);
+        let bob_tok = register(&state, &bob_dev, &bob);
+        let carol_tok = register(&state, &carol_dev, &carol);
+        let mut seen = 0;
+
+        // Bob: none. Carol: mentions.
+        let v = set_level(&state, &bob_dev, &g, "none").await;
+        assert_eq!(v["notifications"], "none");
+        let v = set_level(&state, &carol_dev, &g, "mentions").await;
+        assert_eq!(v["notifications"], "mentions");
+        assert_eq!(
+            notify(&state, &alice_dev, &g, "plain words").await,
+            StatusCode::OK
+        );
+        assert!(pushed_since(&state, &mut seen).await.is_empty());
+        assert!(
+            inapp_kinds(&state, &bob_dev).is_empty(),
+            "none = no in-app banner either"
+        );
+        assert_eq!(
+            notify(&state, &alice_dev, &g, "@user3 look at this").await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            pushed_since(&state, &mut seen).await,
+            vec![carol_tok.clone()],
+            "a mention reaches Carol; Bob's none stays none"
+        );
+        // Declared mentions count without the text.
+        notify_people_chat(
+            State(state.clone()),
+            alice_dev.clone(),
+            Path(g.clone()),
+            Json(NotifyBody {
+                message_id: ulid(),
+                text: "see attachment".into(),
+                project_id: None,
+                reply_ref: None,
+                kind: None,
+                voice_text: None,
+                mentions: vec![format!("user:{carol}")],
+            }),
+        )
+        .await;
+        assert_eq!(
+            pushed_since(&state, &mut seen).await,
+            vec![carol_tok.clone()]
+        );
+
+        // Back to inherit: the account default (all) applies; then the default is set to none.
+        let v = set_level(&state, &bob_dev, &g, "inherit").await;
+        assert_eq!(v["notifications"], "inherit");
+        assert_eq!(
+            notify(&state, &alice_dev, &g, "again").await,
+            StatusCode::OK
+        );
+        assert_eq!(pushed_since(&state, &mut seen).await, vec![bob_tok.clone()]);
+        let r = put_me_notifications(
+            State(state.clone()),
+            bob_dev.clone(),
+            Json(NotificationsBody {
+                level: "none".into(),
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(
+            notify(&state, &alice_dev, &g, "and again").await,
+            StatusCode::OK
+        );
+        assert!(pushed_since(&state, &mut seen).await.is_empty());
+        // An explicit `all` on the chat beats the account default.
+        set_level(&state, &bob_dev, &g, "all").await;
+        assert_eq!(
+            notify(&state, &alice_dev, &g, "once more").await,
+            StatusCode::OK
+        );
+        assert_eq!(pushed_since(&state, &mut seen).await, vec![bob_tok.clone()]);
+
+        // The old mute flag is `none` while no level is chosen.
+        set_level(&state, &bob_dev, &g, "inherit").await;
+        let r = put_me_notifications(
+            State(state.clone()),
+            bob_dev.clone(),
+            Json(NotificationsBody {
+                level: "all".into(),
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        state
+            .db
+            .set_member_muted(&g, &format!("user:{bob}"), true)
+            .unwrap();
+        assert_eq!(
+            notify(&state, &alice_dev, &g, "muted?").await,
+            StatusCode::OK
+        );
+        assert!(pushed_since(&state, &mut seen).await.is_empty());
+        // A bad word is refused.
+        let r = chat_settings(
+            State(state.clone()),
+            bob_dev.clone(),
+            Path(g.clone()),
+            Json(ChatSettingsBody {
+                read_receipts: None,
+                muted: None,
+                archived: None,
+                notifications: Some("loud".into()),
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn a_large_group_is_mentions_only_unless_all_is_chosen() {
+        let state = test_state(AuthMode::Github);
+        let n = eligibility::large_group_min();
+        let people: Vec<(String, Principal)> = (1..=n as i64).map(|i| person(&state, i)).collect();
+        let ids: Vec<&str> = people.iter().map(|(u, _)| u.as_str()).collect();
+        let g = group(&state, &ids);
+        let (alice, alice_dev) = &people[0];
+        let (bob, bob_dev) = &people[1];
+        let (_carol, carol_dev) = &people[2];
+        let bob_tok = register(&state, bob_dev, bob);
+        let carol_tok = register(&state, carol_dev, &people[2].0);
+        let mut seen = 0;
+
+        assert_eq!(
+            notify(&state, alice_dev, &g, "hello crowd").await,
+            StatusCode::OK
+        );
+        assert!(
+            pushed_since(&state, &mut seen).await.is_empty(),
+            "{n} humans: nobody is pushed without a mention"
+        );
+        assert_eq!(
+            notify(&state, alice_dev, &g, "@user2 ping").await,
+            StatusCode::OK
+        );
+        assert_eq!(pushed_since(&state, &mut seen).await, vec![bob_tok.clone()]);
+        // Carol picks `all` for this chat: she hears everything again.
+        set_level(&state, carol_dev, &g, "all").await;
+        assert_eq!(
+            notify(&state, alice_dev, &g, "hello again").await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            pushed_since(&state, &mut seen).await,
+            vec![carol_tok.clone()]
+        );
+        // One member leaves: below the threshold the group is an ordinary one.
+        state
+            .db
+            .remove_member(&g, &format!("user:{}", people[n - 1].0), false)
+            .unwrap();
+        assert_eq!(
+            notify(&state, alice_dev, &g, "smaller now").await,
+            StatusCode::OK
+        );
+        let mut got = pushed_since(&state, &mut seen).await;
+        got.sort();
+        let mut want = vec![bob_tok, carol_tok];
+        want.sort();
+        assert_eq!(got, want);
+        let _ = alice;
     }
 }

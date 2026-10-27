@@ -435,6 +435,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/projects/{file}/avatar.jpg", get(images::project_avatar))
         .route("/me/pushes", get(people::me_pushes))
         .route("/me/unread", get(notify::me_unread))
+        .route(
+            "/me/notifications",
+            get(notify::me_notifications).put(notify::put_me_notifications),
+        )
         .route("/chats/{id}/calls", post(calls::start_people_call))
         .route("/chats/{id}/call", get(calls::people_chat_call))
         .route(
